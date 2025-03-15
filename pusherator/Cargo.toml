@@ -1,7 +1,7 @@
 [package]
 name = "pusherator"
 publish = true
-version = "0.0.11"
+version = "0.0.12"
 documentation = "https://docs.rs/pusherator/"
 description = "Push-based version of Rust iterators"
 edition = { workspace = true }
