@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## 0.12.1 (2025-03-15)
 
+<csr-id-260902b210378af5291ec71a574256d7a5bcb463/>
+<csr-id-056ac62611319b7bd10a751d7e231423a1b8dc4e/>
+<csr-id-7dd71d67da162d2e4f3043b271a52037a3c983c0/>
+
 ### Chore
 
  - <csr-id-260902b210378af5291ec71a574256d7a5bcb463/> set `hydro_deploy_integration` to release as `0.12.1`
@@ -52,7 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <csr-read-only-do-not-edit/>
 
- - 6 commits contributed to the release over the course of 2 calendar days.
+ - 7 commits contributed to the release over the course of 2 calendar days.
  - 6 commits were understood as [conventional](https://www.conventionalcommits.org).
  - 5 unique issues were worked on: [#1773](https://github.com/hydro-project/hydro/issues/1773), [#1777](https://github.com/hydro-project/hydro/issues/1777), [#1779](https://github.com/hydro-project/hydro/issues/1779), [#1785](https://github.com/hydro-project/hydro/issues/1785), [#1787](https://github.com/hydro-project/hydro/issues/1787)
 
@@ -73,6 +77,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
  * **[#1787](https://github.com/hydro-project/hydro/issues/1787)**
     - Demote python deploy docs, fix docsrs configs, fix #1392, fix #1629 ([`b235a42`](https://github.com/hydro-project/hydro/commit/b235a42a3071e55da7b09bdc8bc710b18e0fe053))
  * **Uncategorized**
+    - Release dfir_lang v0.12.1, dfir_datalog_core v0.12.1, dfir_datalog v0.12.1, dfir_macro v0.12.1, hydro_deploy_integration v0.12.1, lattices v0.6.1, pusherator v0.0.12, dfir_rs v0.12.1, hydro_deploy v0.12.1, hydro_lang v0.12.1, hydro_std v0.12.1, hydro_cli v0.12.1 ([`23221b5`](https://github.com/hydro-project/hydro/commit/23221b53b30918707ddaa85529d04cd7919166b4))
     - Set `hydro_deploy_integration` to release as `0.12.1` ([`260902b`](https://github.com/hydro-project/hydro/commit/260902b210378af5291ec71a574256d7a5bcb463))
 </details>
 
@@ -85,6 +90,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <csr-id-c293cca6855695107e9cef5c5df99fb04a571934/>
 <csr-id-8b3b60812d9f561cb7f59120993fbf2e23191e2b/>
 <csr-id-44fb2806cf2d165d86695910f4755e0944c11832/>
+<csr-id-3966d9063dae52e65b077321e0bd1150f2b0c3f1/>
+<csr-id-3f76e91766a0bd9e61f11f9013d76f688467fb5e/>
+<csr-id-81a1d3afc3bdfbfd4daea0f46025c020edc8625b/>
+<csr-id-2681b9b8bb65b67146f3f5b33810045657186425/>
+<csr-id-5cd0a9625822620dcc99b99356edfecbf0549497/>
+<csr-id-ec3795a678d261a38085405b6e9bfea943dafefb/>
+<csr-id-9ce31f65a5d400f8116ab536dc7a8cca848a4a93/>
 
 ### Chore
 
@@ -287,6 +299,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <csr-id-d5677604e93c07a5392f4229af94a0b736eca382/>
 <csr-id-8442d1b524621a9f8b43372a9c25991efb33c25e/>
+<csr-id-159c2dc39d41cb82ecd2f562c3c27a3c64dc4bfc/>
+<csr-id-014ebb2628b5b80ea1b6426b58c4d62706edb9ef/>
 
 ### Chore
 
@@ -397,6 +411,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <csr-id-bb081d3b0af6dbce9630e23dfe8b7d1363751c2b/>
 <csr-id-a2147864b24110c9ae2c1553e9e8b55bd5065f15/>
 <csr-id-8856c8596d5ad9d5f24a46467690bfac1549fae2/>
+<csr-id-25989c7d938a0e93355a670f8d78a5aea900fce0/>
+<csr-id-ac8dcbf7c6dbe018907a3012b71b0e4fcf4d2cb6/>
+<csr-id-9a503cf85225ff1fcfe7a815fda3a4ac34a75c42/>
+<csr-id-8bcd86c15bc4d9d2e3b564061be879bfe8820e25/>
+<csr-id-5545c8b3329902b6b2418476d00191228f5f3e8d/>
+<csr-id-36300cfe3879e5fed04a8f0806762626612ca9f7/>
+<csr-id-a5d649b5a5cc54c7bc56011db33d509a5cb370a2/>
+<csr-id-3508f5aeda3e18a6857df4ceb77e5e1015c02a17/>
+<csr-id-2c04f51f1ec44f7898307b6610371dcb490ea686/>
 
 ### Chore
 
@@ -408,8 +431,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Refactor (BREAKING)
 
+ - <csr-id-10bd978793ccde8fc287aedd77729c0c6e5f1784/> simplify process/cluster specs
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1394).
+   * #1395
+   * __->__ #1394
+
+### Refactor (BREAKING)
+
  - <csr-id-25989c7d938a0e93355a670f8d78a5aea900fce0/> rename integration crates to drop CLI references
  - <csr-id-10bd978793ccde8fc287aedd77729c0c6e5f1784/> simplify process/cluster specs
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1394).
+   * #1395
+   * __->__ #1394
+ - <csr-id-ac8dcbf7c6dbe018907a3012b71b0e4fcf4d2cb6/> end-to-end flamegraph generation, fix #1365
+   Depends on #1370
+ - <csr-id-9a503cf85225ff1fcfe7a815fda3a4ac34a75c42/> `Deployment.stop()` for graceful shutdown including updated `perf` profile downloading
+   * `perf` profile downloading moved from the `drop()` impl to `async fn
+   stop()`
+   * download perf data via stdout
+   * update async-ssh2-lite to 0.5 to cleanup tokio compat issues
+   
+   WIP for #1365
+ - <csr-id-8bcd86c15bc4d9d2e3b564061be879bfe8820e25/> use `buildstructor` to handle excessive `Deployment` method arguments, fix #1364
+   Adds new method `Deployment::AzureHost`
+
+<csr-id-10bd978793ccde8fc287aedd77729c0c6e5f1784/> simplify process/cluster specs
    ---
    [//]: # (BEGIN SAPLING FOOTER)
    Stack created with [Sapling](https://sapling-scm.com). Best reviewed
@@ -468,26 +522,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    * #1395
    * __->__ #1394
 
-### Refactor (BREAKING)
-
- - <csr-id-128aaecd40edce57dc254afdcd61ecd5b9948d71/> simplify process/cluster specs
-   ---
-   [//]: # (BEGIN SAPLING FOOTER)
-   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
-   with
-   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1394).
-   * #1395
-   * __->__ #1394
-
-<csr-id-128aaecd40edce57dc254afdcd61ecd5b9948d71/> simplify process/cluster specs
-   ---
-   [//]: # (BEGIN SAPLING FOOTER)
-   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
-   with
-   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1394).
-   * #1395
-   * __->__ #1394
-
 <csr-id-128aaecd40edce57dc254afdcd61ecd5b9948d71/> simplify process/cluster specs
    ---
    [//]: # (BEGIN SAPLING FOOTER)
@@ -538,6 +572,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Refactor (BREAKING)
 
  - <csr-id-128aaecd40edce57dc254afdcd61ecd5b9948d71/> simplify process/cluster specs
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1394).
+   * #1395
+   * __->__ #1394
+
+<csr-id-128aaecd40edce57dc254afdcd61ecd5b9948d71/> simplify process/cluster specs
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1394).
+   * #1395
+   * __->__ #1394
+
+<csr-id-128aaecd40edce57dc254afdcd61ecd5b9948d71/> simplify process/cluster specs
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1394).
+   * #1395
+   * __->__ #1394
+
+<csr-id-128aaecd40edce57dc254afdcd61ecd5b9948d71/> simplify process/cluster specs
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1394).
+   * #1395
+   * __->__ #1394
+
+<csr-id-128aaecd40edce57dc254afdcd61ecd5b9948d71/> simplify process/cluster specs
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1394).
+   * #1395
+   * __->__ #1394
+
+### Refactor (BREAKING)
+
+ - <csr-id-128aaecd40edce57dc254afdcd61ecd5b9948d71/> simplify process/cluster specs
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1394).
+   * #1395
+   * __->__ #1394
+
+<csr-id-128aaecd40edce57dc254afdcd61ecd5b9948d71/> simplify process/cluster specs
    ---
    [//]: # (BEGIN SAPLING FOOTER)
    Stack created with [Sapling](https://sapling-scm.com). Best reviewed
@@ -764,6 +854,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
  - <csr-id-8856c8596d5ad9d5f24a46467690bfac1549fae2/> use `buildstructor` to handle excessive `Deployment` method arguments, fix #1364
    Adds new method `Deployment::AzureHost`
 
+<csr-id-128aaecd40edce57dc254afdcd61ecd5b9948d71/> simplify process/cluster specs
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1394).
+   * #1395
+   * __->__ #1394
+ - <csr-id-bb081d3b0af6dbce9630e23dfe8b7d1363751c2b/> end-to-end flamegraph generation, fix #1365
+   Depends on #1370
+ - <csr-id-a2147864b24110c9ae2c1553e9e8b55bd5065f15/> `Deployment.stop()` for graceful shutdown including updated `perf` profile downloading
+   * `perf` profile downloading moved from the `drop()` impl to `async fn
+   stop()`
+   * download perf data via stdout
+   * update async-ssh2-lite to 0.5 to cleanup tokio compat issues
+   
+   WIP for #1365
+ - <csr-id-8856c8596d5ad9d5f24a46467690bfac1549fae2/> use `buildstructor` to handle excessive `Deployment` method arguments, fix #1364
+   Adds new method `Deployment::AzureHost`
+
 ### Commit Statistics
 
 <csr-read-only-do-not-edit/>
@@ -831,6 +941,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <csr-id-60390782dd7dcec18d193c800af716843a944dba/>
 <csr-id-141eae1c3a1869fa42756250618a21ea2a2c7e34/>
 <csr-id-12b8ba53f28eb9de1318b41cdf1e23282f6f0eb6/>
+<csr-id-fbd7fb9bed9fd8d2afdfb5ad0edf076c3ad0f83f/>
+<csr-id-bb98c570fd41bd4c4b2566ff0388ce0323ab0867/>
+<csr-id-a97480ab834293bcc81d81fcd10d8944eb312417/>
+<csr-id-be590007152c9439bfb1a0e153ff89e514265877/>
+<csr-id-453fbce73423815752667c560318efe8b78014f8/>
+<csr-id-0983248beab176debc602f92fa617f9beb02dad3/>
+<csr-id-dd759aea1ac225654501e836b890dd8d144868b4/>
+<csr-id-d56c731482e25f3ab397c4912df35a6375fcb23a/>
+<csr-id-bd0a4cdae3a14862b28df6a2eea8521ffdf16070/>
+<csr-id-dfe7a0938c302353db05d9889eb8d88640887443/>
 
 ### Refactor
 
@@ -1003,6 +1123,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## v0.6.1 (2024-04-09)
 
 <csr-id-7958fb0d900be8fe7359326abfa11dcb8fb35e8a/>
+<csr-id-864ea856ecbabfe6786990924021a70fb4252765/>
 
 ### Style
 
@@ -1039,6 +1160,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <csr-id-39ab8b0278e9e3fe96552ace0a4ae768a6bc10d8/>
 <csr-id-e9639f608f8dafd3f384837067800a66951b25df/>
+<csr-id-d8203407a97c2ccbcb5ce0cc739d8ae5a89a40c7/>
+<csr-id-65c7ebe3d64c478e7a4f0d8eb12e2bb3c1b267a3/>
 
 ### Chore
 
@@ -1092,6 +1215,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## v0.5.1 (2024-01-29)
 
 <csr-id-1b555e57c8c812bed4d6495d2960cbf77fb0b3ef/>
+<csr-id-7c48faf0d8301b498fa59e5eee5cddf5fa341229/>
 
 ### Chore
 

@@ -2,6 +2,8 @@
 
 ## v0.12.1 (2025-03-15)
 
+<csr-id-38e6721be69f6a41aa47a01a9d06d56a01be1355/>
+
 ### Chore
 
  - <csr-id-38e6721be69f6a41aa47a01a9d06d56a01be1355/> remove stageleft from repo, fix #1764
@@ -29,7 +31,7 @@
 
 <csr-read-only-do-not-edit/>
 
- - 3 commits contributed to the release over the course of 3 calendar days.
+ - 4 commits contributed to the release over the course of 3 calendar days.
  - 3 commits were understood as [conventional](https://www.conventionalcommits.org).
  - 3 unique issues were worked on: [#1765](https://github.com/hydro-project/hydro/issues/1765), [#1774](https://github.com/hydro-project/hydro/issues/1774), [#1787](https://github.com/hydro-project/hydro/issues/1787)
 
@@ -45,6 +47,8 @@
     - Remove stageleft from repo, fix #1764 ([`38e6721`](https://github.com/hydro-project/hydro/commit/38e6721be69f6a41aa47a01a9d06d56a01be1355))
  * **[#1787](https://github.com/hydro-project/hydro/issues/1787)**
     - Demote python deploy docs, fix docsrs configs, fix #1392, fix #1629 ([`b235a42`](https://github.com/hydro-project/hydro/commit/b235a42a3071e55da7b09bdc8bc710b18e0fe053))
+ * **Uncategorized**
+    - Release dfir_lang v0.12.1, dfir_datalog_core v0.12.1, dfir_datalog v0.12.1, dfir_macro v0.12.1, hydro_deploy_integration v0.12.1, lattices v0.6.1, pusherator v0.0.12, dfir_rs v0.12.1, hydro_deploy v0.12.1, hydro_lang v0.12.1, hydro_std v0.12.1, hydro_cli v0.12.1 ([`23221b5`](https://github.com/hydro-project/hydro/commit/23221b53b30918707ddaa85529d04cd7919166b4))
 </details>
 
 ## v0.12.0 (2025-03-08)
@@ -52,6 +56,9 @@
 <csr-id-49a387d4a21f0763df8ec94de73fb953c9cd333a/>
 <csr-id-41e5bb93eb9c19a88167a63bce0ceb800f8f300d/>
 <csr-id-80407a2f0fdaa8b8a81688d181166a0da8aa7b52/>
+<csr-id-2fd6119afed850a0c50ecc69e5c4d8de61a2f4cb/>
+<csr-id-524fa67232b54f5faeb797b43070f2f197c558dd/>
+<csr-id-ec3795a678d261a38085405b6e9bfea943dafefb/>
 
 ### Chore
 
@@ -172,6 +179,8 @@
 
 <csr-id-03b3a349013a71b324276bca5329c33d400a73ff/>
 <csr-id-162e49cf8a8cf944cded7f775d6f78afe4a89837/>
+<csr-id-a6f60c92ae7168eb86eb311ca7b7afb10025c7de/>
+<csr-id-54f461acfce091276b8ce7574c0690e6d648546d/>
 
 ### Chore
 

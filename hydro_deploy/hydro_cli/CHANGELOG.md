@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## 0.12.1 (2025-03-15)
 
+<csr-id-260902b210378af5291ec71a574256d7a5bcb463/>
+<csr-id-7dd71d67da162d2e4f3043b271a52037a3c983c0/>
+
 ### Chore
 
  - <csr-id-260902b210378af5291ec71a574256d7a5bcb463/> set `hydro_deploy_integration` to release as `0.12.1`
@@ -21,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <csr-read-only-do-not-edit/>
 
- - 2 commits contributed to the release over the course of 2 calendar days.
+ - 3 commits contributed to the release over the course of 2 calendar days.
  - 2 commits were understood as [conventional](https://www.conventionalcommits.org).
  - 1 unique issue was worked on: [#1773](https://github.com/hydro-project/hydro/issues/1773)
 
@@ -34,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
  * **[#1773](https://github.com/hydro-project/hydro/issues/1773)**
     - Remove "hydroflow" for `hydro_deploy_integration`, `hydro_deploy::rust_crate`, fix #1712 ([`7dd71d6`](https://github.com/hydro-project/hydro/commit/7dd71d67da162d2e4f3043b271a52037a3c983c0))
  * **Uncategorized**
+    - Release dfir_lang v0.12.1, dfir_datalog_core v0.12.1, dfir_datalog v0.12.1, dfir_macro v0.12.1, hydro_deploy_integration v0.12.1, lattices v0.6.1, pusherator v0.0.12, dfir_rs v0.12.1, hydro_deploy v0.12.1, hydro_lang v0.12.1, hydro_std v0.12.1, hydro_cli v0.12.1 ([`23221b5`](https://github.com/hydro-project/hydro/commit/23221b53b30918707ddaa85529d04cd7919166b4))
     - Set `hydro_deploy_integration` to release as `0.12.1` ([`260902b`](https://github.com/hydro-project/hydro/commit/260902b210378af5291ec71a574256d7a5bcb463))
 </details>
 
@@ -42,6 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <csr-id-49a387d4a21f0763df8ec94de73fb953c9cd333a/>
 <csr-id-e5e6b75c79028990799a2c0def9fa3c5263788a8/>
 <csr-id-2e4f6b828e3d54ee6b1753c1a814006a3d0b3e34/>
+<csr-id-41ef00719671b087062628462a947c211d0d765c/>
+<csr-id-a3202888433f5eae7d45b0814e090ff6a8600d02/>
+<csr-id-ec3795a678d261a38085405b6e9bfea943dafefb/>
 
 ### Chore
 
@@ -221,6 +228,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## 0.10.0 (2024-11-08)
 
 <csr-id-d5677604e93c07a5392f4229af94a0b736eca382/>
+<csr-id-014ebb2628b5b80ea1b6426b58c4d62706edb9ef/>
 
 ### Chore
 
@@ -258,6 +266,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <csr-id-0a465e55dd39c76bc1aefb020460a639d792fe87/>
 <csr-id-a2147864b24110c9ae2c1553e9e8b55bd5065f15/>
 <csr-id-8856c8596d5ad9d5f24a46467690bfac1549fae2/>
+<csr-id-25989c7d938a0e93355a670f8d78a5aea900fce0/>
+<csr-id-9a503cf85225ff1fcfe7a815fda3a4ac34a75c42/>
+<csr-id-8bcd86c15bc4d9d2e3b564061be879bfe8820e25/>
+<csr-id-3508f5aeda3e18a6857df4ceb77e5e1015c02a17/>
+<csr-id-2c04f51f1ec44f7898307b6610371dcb490ea686/>
 
 ### Chore
 
@@ -364,6 +377,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <csr-id-60390782dd7dcec18d193c800af716843a944dba/>
 <csr-id-141eae1c3a1869fa42756250618a21ea2a2c7e34/>
 <csr-id-12b8ba53f28eb9de1318b41cdf1e23282f6f0eb6/>
+<csr-id-fbd7fb9bed9fd8d2afdfb5ad0edf076c3ad0f83f/>
+<csr-id-a97480ab834293bcc81d81fcd10d8944eb312417/>
+<csr-id-453fbce73423815752667c560318efe8b78014f8/>
+<csr-id-0983248beab176debc602f92fa617f9beb02dad3/>
+<csr-id-dd759aea1ac225654501e836b890dd8d144868b4/>
+<csr-id-d56c731482e25f3ab397c4912df35a6375fcb23a/>
+<csr-id-dfe7a0938c302353db05d9889eb8d88640887443/>
+<csr-id-45091d413f6da32927b640df781ce671a6e17c15/>
 
 ### Chore
 
@@ -483,6 +504,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## 0.7.0 (2024-05-24)
 
 <csr-id-18015029a725b068696ed9edefd1097583c858a6/>
+<csr-id-8c2a230afbc965d86339b7e9d71bc99c28d2fe41/>
 
 ### Chore
 
@@ -523,6 +545,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## 0.6.1 (2024-04-09)
 
 <csr-id-7958fb0d900be8fe7359326abfa11dcb8fb35e8a/>
+<csr-id-864ea856ecbabfe6786990924021a70fb4252765/>
 
 ### Style
 
@@ -558,6 +581,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## 0.6.0 (2024-03-02)
 
 <csr-id-e9639f608f8dafd3f384837067800a66951b25df/>
+<csr-id-d8203407a97c2ccbcb5ce0cc739d8ae5a89a40c7/>
 
 ### New Features
 
@@ -604,6 +628,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <csr-id-ba6afab8416ad66eee4fdb9d0c73e62d45752617/>
 <csr-id-1b555e57c8c812bed4d6495d2960cbf77fb0b3ef/>
 <csr-id-69e04167f4774cf1ca3351e7ac34d15cfa83362b/>
+<csr-id-7c48faf0d8301b498fa59e5eee5cddf5fa341229/>
+<csr-id-5fa4168ea9d0ca07fb6fc46149aefbdc32ed7d61/>
 
 ### Chore
 

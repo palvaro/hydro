@@ -7,10 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## 0.12.1 (2025-03-15)
 
+<csr-id-260902b210378af5291ec71a574256d7a5bcb463/>
+<csr-id-f14174e92875b3264ef811effd954ed76cb3c948/>
+<csr-id-8058d2d6fe45e0286feb8ad48a44b1228f56d9bc/>
+<csr-id-056ac62611319b7bd10a751d7e231423a1b8dc4e/>
+<csr-id-7dd71d67da162d2e4f3043b271a52037a3c983c0/>
+
 ### Chore
 
  - <csr-id-260902b210378af5291ec71a574256d7a5bcb463/> set `hydro_deploy_integration` to release as `0.12.1`
  - <csr-id-f14174e92875b3264ef811effd954ed76cb3c948/> update pinned nightly to 2025-03-10, clippy cleanups
+
+### Chore
+
+ - <csr-id-fb8393ae61091b04c0d29692aab097573b8db5e8/> attempt to fix releasing of `include_mdtests`, `dfir_rs`
 
 ### Documentation
 
@@ -44,8 +54,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <csr-read-only-do-not-edit/>
 
- - 6 commits contributed to the release over the course of 4 calendar days.
- - 6 commits were understood as [conventional](https://www.conventionalcommits.org).
+ - 8 commits contributed to the release over the course of 4 calendar days.
+ - 7 commits were understood as [conventional](https://www.conventionalcommits.org).
  - 5 unique issues were worked on: [#1768](https://github.com/hydro-project/hydro/issues/1768), [#1769](https://github.com/hydro-project/hydro/issues/1769), [#1773](https://github.com/hydro-project/hydro/issues/1773), [#1785](https://github.com/hydro-project/hydro/issues/1785), [#1787](https://github.com/hydro-project/hydro/issues/1787)
 
 ### Commit Details
@@ -65,6 +75,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
  * **[#1787](https://github.com/hydro-project/hydro/issues/1787)**
     - Demote python deploy docs, fix docsrs configs, fix #1392, fix #1629 ([`b235a42`](https://github.com/hydro-project/hydro/commit/b235a42a3071e55da7b09bdc8bc710b18e0fe053))
  * **Uncategorized**
+    - Attempt to fix releasing of `include_mdtests`, `dfir_rs` ([`fb8393a`](https://github.com/hydro-project/hydro/commit/fb8393ae61091b04c0d29692aab097573b8db5e8))
+    - Release dfir_lang v0.12.1, dfir_datalog_core v0.12.1, dfir_datalog v0.12.1, dfir_macro v0.12.1, hydro_deploy_integration v0.12.1, lattices v0.6.1, pusherator v0.0.12, dfir_rs v0.12.1, hydro_deploy v0.12.1, hydro_lang v0.12.1, hydro_std v0.12.1, hydro_cli v0.12.1 ([`23221b5`](https://github.com/hydro-project/hydro/commit/23221b53b30918707ddaa85529d04cd7919166b4))
     - Set `hydro_deploy_integration` to release as `0.12.1` ([`260902b`](https://github.com/hydro-project/hydro/commit/260902b210378af5291ec71a574256d7a5bcb463))
 </details>
 
@@ -83,6 +95,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <csr-id-44fb2806cf2d165d86695910f4755e0944c11832/>
 <csr-id-dc51d94d390672bd687a7fdc9c826a778bdf0256/>
 <csr-id-3c5bb05487a25345ea2f70b5a1ffbe74a216c684/>
+<csr-id-e0d9b26709011a2d5d56cc3f86a3ee640983e75a/>
+<csr-id-3966d9063dae52e65b077321e0bd1150f2b0c3f1/>
+<csr-id-bf4b40151f98439570ac81ee6d23440a629b972f/>
+<csr-id-8fc582d54ebc7dc974d2fd849b9de59134c1428d/>
+<csr-id-3f76e91766a0bd9e61f11f9013d76f688467fb5e/>
+<csr-id-fd85262930c678601a80c080fb79778675124964/>
+<csr-id-e5c2e23359055f41492344edf19efbe3f2afd7ce/>
+<csr-id-5cd0a9625822620dcc99b99356edfecbf0549497/>
+<csr-id-41ef00719671b087062628462a947c211d0d765c/>
+<csr-id-df804ec1ec2a9370c8e6e5f7db9ee1e316677a35/>
+<csr-id-ec3795a678d261a38085405b6e9bfea943dafefb/>
+<csr-id-8f4426089dcbbe5d1098f89e367c7be49a03e401/>
+<csr-id-c3eedc6b44367519b6055bcdf7366b0a15efb17d/>
 
 ### Chore
 
@@ -287,6 +312,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <csr-id-03b3a349013a71b324276bca5329c33d400a73ff/>
 <csr-id-accb13cad718c99d350e4bafe82e0ca38bf94c62/>
 <csr-id-3291c07b37c9f9031837a2a32953e8f8854ec298/>
+<csr-id-84ee06755a0ed7cabf32b334f1696bb600797c92/>
+<csr-id-a6f60c92ae7168eb86eb311ca7b7afb10025c7de/>
+<csr-id-2a22d50285ae1be1a5f888d5d15321cc1bb13c82/>
+<csr-id-5e58e346612a094c7e637919c84ab1e78b59be27/>
 
 ### Documentation
 
@@ -463,9 +492,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Fix some broken github tree/main links ([`a652ead`](https://github.com/hydro-project/hydro/commit/a652ead6a51ffae9f835124dcd40aec58dd15ff4))
     - Update `CHANGELOG.md`s for big rename ([`27c40e2`](https://github.com/hydro-project/hydro/commit/27c40e2ca5a822f6ebd31c7f01213aa6d407418a))
 </details>
-
-<csr-unknown>
-Implement un-windowing operators<csr-unknown/>
 
 ## 0.10.0 (2024-11-08)
 
