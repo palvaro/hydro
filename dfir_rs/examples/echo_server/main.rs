@@ -12,8 +12,8 @@ mod helpers;
 mod protocol;
 mod server;
 
-#[dfir_rs::main]
 /// This is the main entry-point for both `Client` and `Server`.
+#[dfir_rs::main]
 async fn main() {
     // Parse command line arguments
     let opts = Opts::parse();
@@ -61,7 +61,7 @@ struct Opts {
 
 /// The default server address & port on which the server listens for incoming messages. Clients
 /// send message to this address & port.
-pub const DEFAULT_SERVER_ADDRESS: &str = "localhost:54399";
+pub const DEFAULT_SERVER_ADDRESS: &str = "localhost:52048";
 
 /// A running application can assume one of these roles. The launched application process assumes
 /// one of these roles, based on the `--role` parameter passed in as a command line argument.
@@ -78,10 +78,10 @@ fn test() {
     use dfir_rs::util::{run_cargo_example, wait_for_process_output};
 
     let (_server, _, mut server_output) =
-        run_cargo_example("echo_serde_json", "--role server --address 127.0.0.1:2049");
+        run_cargo_example("echo_server", "--role server --address 127.0.0.1:2048");
 
     let (_client, mut client_input, mut client_output) =
-        run_cargo_example("echo_serde_json", "--role client --address 127.0.0.1:2049");
+        run_cargo_example("echo_server", "--role client --address 127.0.0.1:2048");
 
     let mut server_output_so_far = String::new();
     let mut client_output_so_far = String::new();
@@ -89,12 +89,12 @@ fn test() {
     wait_for_process_output(
         &mut server_output_so_far,
         &mut server_output,
-        "Server is live! Listening on 127.0.0.1:2049\n",
+        "Server is live! Listening on 127\\.0\\.0\\.1:2048\n",
     );
     wait_for_process_output(
         &mut client_output_so_far,
         &mut client_output,
-        "Client is live! Listening on 127.0.0.1:\\d+ and talking to server on 127.0.0.1:2049\n",
+        "Client is live! Listening on 127\\.0\\.0\\.1:\\d+ and talking to server on 127\\.0\\.0\\.1:2048\n",
     );
 
     client_input.write_all(b"Hello\n").unwrap();
@@ -102,6 +102,6 @@ fn test() {
     wait_for_process_output(
         &mut client_output_so_far,
         &mut client_output,
-        "EchoMsg \\{ payload: \"Hello\", ts: .* \\}",
+        "UTC: Got EchoMsg \\{ payload: \"Hello\",",
     );
 }
