@@ -145,7 +145,8 @@ jobs:
             arch: x64
         exclude:
           # aarch64 doesn't compile due to ring dependency
-          - platform: aarch64-pc-windows-msvc
+          - platform:
+              target: aarch64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
