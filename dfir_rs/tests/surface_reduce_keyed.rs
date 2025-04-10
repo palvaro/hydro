@@ -6,7 +6,7 @@ use dfir_rs::util::collect_ready;
 use multiplatform_test::multiplatform_test;
 
 #[multiplatform_test]
-pub fn test_fold_keyed_infer_basic() {
+pub fn test_reduce_keyed_infer_basic() {
     pub struct SubordResponse {
         pub xid: &'static str,
         pub mtype: u32,
@@ -22,7 +22,7 @@ pub fn test_fold_keyed_infer_basic() {
             SubordResponse { xid: "123", mtype: 78 },
         ])
             -> map(|m: SubordResponse| (m.xid, m.mtype))
-            -> fold_keyed::<'static>(|| 0, |old: &mut u32, val: u32| *old += val)
+            -> reduce_keyed::<'static>(|old: &mut u32, val: u32| *old += val)
             -> for_each(|kv| result_send.send(kv).unwrap());
     };
     assert_graphvis_snapshots!(df);
@@ -45,13 +45,13 @@ pub fn test_fold_keyed_infer_basic() {
 }
 
 #[multiplatform_test]
-pub fn test_fold_keyed_tick() {
+pub fn test_reduce_keyed_tick() {
     let (items_send, items_recv) = dfir_rs::util::unbounded_channel::<(u32, Vec<u32>)>();
     let (result_send, mut result_recv) = dfir_rs::util::unbounded_channel::<(u32, Vec<u32>)>();
 
     let mut df = dfir_rs::dfir_syntax! {
         source_stream(items_recv)
-            -> fold_keyed::<'tick>(Vec::new, |old: &mut Vec<u32>, mut x: Vec<u32>| old.append(&mut x))
+            -> reduce_keyed::<'tick>(|old: &mut Vec<u32>, mut x: Vec<u32>| old.append(&mut x))
             -> for_each(|v| result_send.send(v).unwrap());
     };
     assert_graphvis_snapshots!(df);
@@ -103,13 +103,13 @@ pub fn test_fold_keyed_tick() {
 }
 
 #[multiplatform_test]
-pub fn test_fold_keyed_static() {
+pub fn test_reduce_keyed_static() {
     let (items_send, items_recv) = dfir_rs::util::unbounded_channel::<(u32, Vec<u32>)>();
     let (result_send, mut result_recv) = dfir_rs::util::unbounded_channel::<(u32, Vec<u32>)>();
 
     let mut df = dfir_rs::dfir_syntax! {
         source_stream(items_recv)
-            -> fold_keyed::<'static>(Vec::new, |old: &mut Vec<u32>, mut x: Vec<u32>| old.append(&mut x))
+            -> reduce_keyed::<'static>(|old: &mut Vec<u32>, mut x: Vec<u32>| old.append(&mut x))
             -> for_each(|v| result_send.send(v).unwrap());
     };
     assert_graphvis_snapshots!(df);
@@ -164,7 +164,7 @@ pub fn test_fold_keyed_static() {
 }
 
 #[multiplatform_test]
-pub fn test_fold_keyed_loop_lifetime() {
+pub fn test_reduce_keyed_loop_lifetime() {
     let (result1_send, mut result1_recv) = dfir_rs::util::unbounded_channel::<_>();
     let (result2_send, mut result2_recv) = dfir_rs::util::unbounded_channel::<_>();
 
@@ -196,11 +196,11 @@ pub fn test_fold_keyed_loop_lifetime() {
             b = a -> batch() -> tee();
             loop {
                 b -> repeat_n(5)
-                    -> fold_keyed::<'none>(|| 10000, |old: &mut u32, val: u32| *old += val)
+                    -> reduce_keyed::<'none>(|old: &mut u32, val: u32| *old += val)
                     -> for_each(|v| result1_send.send(v).unwrap());
 
                 b -> repeat_n(5)
-                    -> fold_keyed::<'loop>(|| 10000, |old: &mut u32, val: u32| *old += val)
+                    -> reduce_keyed::<'loop>(|old: &mut u32, val: u32| *old += val)
                     -> for_each(|v| result2_send.send(v).unwrap());
             };
         };
@@ -210,32 +210,32 @@ pub fn test_fold_keyed_loop_lifetime() {
     // `'none` resets each iteration.
     assert_eq!(
         BTreeSet::from_iter([
-            ("bar", 10045),
-            ("foo", 10045),
-            ("bar", 10045),
-            ("foo", 10045),
-            ("bar", 10045),
-            ("foo", 10045),
-            ("bar", 10045),
-            ("foo", 10045),
-            ("bar", 10045),
-            ("foo", 10045),
+            ("bar", 45),
+            ("foo", 45),
+            ("bar", 45),
+            ("foo", 45),
+            ("bar", 45),
+            ("foo", 45),
+            ("bar", 45),
+            ("foo", 45),
+            ("bar", 45),
+            ("foo", 45),
         ]),
         collect_ready::<BTreeSet<_>, _>(&mut result1_recv)
     );
     // `'loop` accumulates across iterations.
     assert_eq!(
         BTreeSet::from_iter([
-            ("bar", 10045),
-            ("foo", 10045),
-            ("bar", 10090),
-            ("foo", 10090),
-            ("bar", 10135),
-            ("foo", 10135),
-            ("bar", 10180),
-            ("foo", 10180),
-            ("bar", 10225),
-            ("foo", 10225),
+            ("bar", 45),
+            ("foo", 45),
+            ("bar", 90),
+            ("foo", 90),
+            ("bar", 135),
+            ("foo", 135),
+            ("bar", 180),
+            ("foo", 180),
+            ("bar", 225),
+            ("foo", 225),
         ]),
         collect_ready::<BTreeSet<_>, _>(&mut result2_recv)
     );
