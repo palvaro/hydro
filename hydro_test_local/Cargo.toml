@@ -12,7 +12,7 @@ stageleft_devel = []
 
 [dependencies]
 dfir_rs = { path = "../dfir_rs", version = "^0.13.0", default-features = false }
-hydro_lang = { path = "../hydro_lang", version = "^0.13.0", features = [
+hydro_lang = { path = "../hydro_lang", version = "^0.13.1", features = [
     "build",
     "staged_macro",
     "runtime_support",

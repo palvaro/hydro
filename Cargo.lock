@@ -1982,7 +1982,7 @@ dependencies = [
 
 [[package]]
 name = "hydro_lang"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "async-ssh2-lite",
  "bincode",
