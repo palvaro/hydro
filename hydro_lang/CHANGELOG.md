@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.13.2 (2025-04-17)
+
+### Chore
+
+ - <csr-id-b7b040817eb3b5f601989592465a3829f93ef7b7/> update pinned nightly to 2025-04-05, clippy fixes
+   Not going past 2024-04-05 due to rustc linker regression on windows:
+   https://github.com/rust-lang/rust/issues/139821
+
+### Style
+
+ - <csr-id-fe91f37ec43b20c1652560aebb15ac8d1596c0a4/> use where clauses to increase readability
+   A minor issue in the grand scheme of things, but I caught myself
+   squinting when trying to tease apart different trait implementations
+   specially when following the "implementations" popup navigation. In
+   addition, some of the generic variable naming was not consistent and a
+   bit confusing to the uninitiated. For example, `Order` was a generic
+   variable, but `TotalOrder` and `NoOrder` were a type. Not a big deal
+   when you already know the API, but just adds friction someone new to the
+   project.
+   
+   Here are some of the items that guided the PR:
+   * Single capital letter for generic variables following a loose
+   standard: T for types, O for ordering, B for boundedness, L for
+   location, P for process or external process, C for cluster, etc.
+   * Use `where` clauses to keep the head of traits and functions lean and
+   more easily comparable.
+
+### Commit Statistics
+
+<csr-read-only-do-not-edit/>
+
+ - 2 commits contributed to the release over the course of 1 calendar day.
+ - 2 commits were understood as [conventional](https://www.conventionalcommits.org).
+ - 2 unique issues were worked on: [#1827](https://github.com/hydro-project/hydro/issues/1827), [#1840](https://github.com/hydro-project/hydro/issues/1840)
+
+### Commit Details
+
+<csr-read-only-do-not-edit/>
+
+<details><summary>view details</summary>
+
+ * **[#1827](https://github.com/hydro-project/hydro/issues/1827)**
+    - Use where clauses to increase readability ([`fe91f37`](https://github.com/hydro-project/hydro/commit/fe91f37ec43b20c1652560aebb15ac8d1596c0a4))
+ * **[#1840](https://github.com/hydro-project/hydro/issues/1840)**
+    - Update pinned nightly to 2025-04-05, clippy fixes ([`b7b0408`](https://github.com/hydro-project/hydro/commit/b7b040817eb3b5f601989592465a3829f93ef7b7))
+</details>
+
 ## 0.13.1 (2025-04-12)
 
 ### Bug Fixes
@@ -19,7 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <csr-read-only-do-not-edit/>
 
- - 1 commit contributed to the release.
+ - 2 commits contributed to the release.
  - 1 commit was understood as [conventional](https://www.conventionalcommits.org).
  - 1 unique issue was worked on: [#1839](https://github.com/hydro-project/hydro/issues/1839)
 
@@ -31,6 +78,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
  * **[#1839](https://github.com/hydro-project/hydro/issues/1839)**
     - Enable file_lock feature in nightly builds ([`e41388e`](https://github.com/hydro-project/hydro/commit/e41388edeaeffec689d46503bfdea467a53be797))
+ * **Uncategorized**
+    - Release hydro_lang v0.13.1 ([`2cb6ee8`](https://github.com/hydro-project/hydro/commit/2cb6ee81665eb24ce76959fc977287e7fc9d3cdf))
 </details>
 
 ## 0.13.0 (2025-04-11)
@@ -62,9 +111,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    samply by updating tracing filenames and refactoring related error and
    type handling. Key changes include:
    - Better error messages when `dtrace` or `samply` are not instaled.
-- Fix integer rollover in `_counter()` by using `u64` instead of
-   inferred `i32`.
-- Refactor samply profile conversion for asynchronous frame lookup.
 
 ### Refactor
 
@@ -124,10 +170,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 </details>
 
 <csr-unknown>
-<details>
-<summary>Show a summary per file</summary>
-FileDescriptionhydro_lang/src/rewrites/analyze_counter.rsAdds custom panic withmeasurement details if regex matching fails. (Used to diagnose_counter() i32 rollover)hydro_deploy/core/src/localhost/samply.rsUpdates type foraddresses/resources, refactors frame lookup to use asynchronousjoin_all, and adjusts string output for missing symbols.hydro_deploy/core/src/localhost/mod.rsImproves error handlingduring command spawning with conditional context messages for whensamply or dtrace executables are not found.hydro_deploy/core/src/localhost/launched_binary.rsUsesserde_path_to_error for improved deserialization error context.dfir_lang/src/graph/ops/dest_sink.rsStandardizes error messages byremoving extraneous punctuation.dfir_lang/src/graph/ops/_counter.rsAdds explicit type annotationfor a cell initialization to prevent i32 rollover.</details>
- decrease size of IR enums to prevent stack overflow on windows, fix #1801 fix doctests without feature unification and improve atomic trybuild logic avoid Cargo.toml corruption when concurrently opened in a single process<csr-unknown/>
+Fix integer rollover in _counter() by using u64 instead ofinferred i32.Refactor samply profile conversion for asynchronous frame lookup.<csr-unknown/>
 
 ## 0.12.1 (2025-03-15)
 
@@ -877,6 +920,20 @@ FileDescriptionhydro_lang/src/rewrites/analyze_counter.rsAdds custom panic withm
    * #1486
    * __->__ #1485
 
+<csr-id-dff2a40669736014349cf12744d6a057a7992e11/> start splitting out leader election into a separate module
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1485).
+   * #1493
+   * #1492
+   * #1489
+   * #1488
+   * #1487
+   * #1486
+   * __->__ #1485
+
 ### New Features
 
  - <csr-id-baedf23eaa056bc0dad8331d116bb71176764206/> improve quickstart ergonomics
@@ -938,6 +995,24 @@ FileDescriptionhydro_lang/src/rewrites/analyze_counter.rsAdds custom panic withm
  - <csr-id-38b17cd977fb6c00ddc37e7a5b30e45dba17329e/> simplify latency calculations
  - <csr-id-8b7b1c60fd33b78f9a4b0873bbbd150260ae2ad5/> complete split into leader election and sequencing phases
  - <csr-id-dff2a40669736014349cf12744d6a057a7992e11/> start splitting out leader election into a separate module
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1485).
+   * #1493
+   * #1492
+   * #1489
+   * #1488
+   * #1487
+   * #1486
+   * __->__ #1485
+ - <csr-id-1b18b358c87caa37a6519612131c8674653a2407/> simplify `persist_pullup` code
+   Instead of matching on `&mut` and juggling ownership, instead match on
+   the owned node and always replaced `*node = new_node` (sometimes itself)
+ - <csr-id-c752affc2ee2c5d82d19dd992f6a89b7070b8773/> use max and min in Paxos and make client generic over ballots
+
+<csr-id-dff2a40669736014349cf12744d6a057a7992e11/> start splitting out leader election into a separate module
    ---
    [//]: # (BEGIN SAPLING FOOTER)
    Stack created with [Sapling](https://sapling-scm.com). Best reviewed
@@ -1680,6 +1755,104 @@ FileDescriptionhydro_lang/src/rewrites/analyze_counter.rsAdds custom panic withm
    * #1394
    * __->__ #1377
 
+<csr-id-128aaecd40edce57dc254afdcd61ecd5b9948d71/> simplify process/cluster specs
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1394).
+   * #1395
+   * __->__ #1394
+ - <csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
 ### Refactor (BREAKING)
 
  - <csr-id-128aaecd40edce57dc254afdcd61ecd5b9948d71/> simplify process/cluster specs
@@ -2204,6 +2377,114 @@ FileDescriptionhydro_lang/src/rewrites/analyze_counter.rsAdds custom panic withm
    * #1394
    * __->__ #1377
 
+<csr-id-128aaecd40edce57dc254afdcd61ecd5b9948d71/> simplify process/cluster specs
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1394).
+   * #1395
+   * __->__ #1394
+ - <csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
 ### Documentation
 
  - <csr-id-f5f1eb0c612f5c0c1752360d972ef6853c5e12f0/> cleanup doc comments for clippy latest
@@ -2252,31 +2533,6 @@ FileDescriptionhydro_lang/src/rewrites/analyze_counter.rsAdds custom panic withm
 * __->__ #1404
 * #1398
 * __->__ #1404
- - <csr-id-1aeacb212227f654e8f0cdc8a59816a68f059177/> rewrite IR in place to avoid stack overflow and disable cloning
-   Cloning was unsafe because values behind a `Rc<RefCell<...>>` in the
-   case of tee would be entangled with the old IR.
-   ---
-   [//]: # (BEGIN SAPLING FOOTER)
-   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
-   with
-   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1404).
-   * #1405
-   * #1398
-   * __->__ #1404
-* #1398
-* __->__ #1404
-* #1398
-* __->__ #1404
-* #1398
-* __->__ #1404
-* #1398
-* __->__ #1404
-* #1398
-* __->__ #1404
-* #1398
-* __->__ #1404
-* #1398
-* __->__ #1404
 * #1398
 * __->__ #1404
  - <csr-id-1aeacb212227f654e8f0cdc8a59816a68f059177/> rewrite IR in place to avoid stack overflow and disable cloning
@@ -2290,6 +2546,37 @@ FileDescriptionhydro_lang/src/rewrites/analyze_counter.rsAdds custom panic withm
    * #1405
    * #1398
    * __->__ #1404
+* #1398
+* __->__ #1404
+* #1398
+* __->__ #1404
+* #1398
+* __->__ #1404
+* #1398
+* __->__ #1404
+* #1398
+* __->__ #1404
+* #1398
+* __->__ #1404
+* #1398
+* __->__ #1404
+* #1398
+* __->__ #1404
+* #1398
+* __->__ #1404
+ - <csr-id-1aeacb212227f654e8f0cdc8a59816a68f059177/> rewrite IR in place to avoid stack overflow and disable cloning
+   Cloning was unsafe because values behind a `Rc<RefCell<...>>` in the
+   case of tee would be entangled with the old IR.
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1404).
+   * #1405
+   * #1398
+   * __->__ #1404
+* #1398
+* __->__ #1404
 * #1398
 * __->__ #1404
 * #1398
@@ -2858,6 +3145,125 @@ FileDescriptionhydro_lang/src/rewrites/analyze_counter.rsAdds custom panic withm
    * #1395
    * __->__ #1394
  - <csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+ - <csr-id-09d6d44eafc866881e73719813fe9edeb49ca2a6/> start rearranging stages of flow compilation to prepare for trybuild approach
+
+<csr-id-128aaecd40edce57dc254afdcd61ecd5b9948d71/> simplify process/cluster specs
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1394).
+   * #1395
+   * __->__ #1394
+ - <csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
+   ---
+   [//]: # (BEGIN SAPLING FOOTER)
+   Stack created with [Sapling](https://sapling-scm.com). Best reviewed
+   with
+   [ReviewStack](https://reviewstack.dev/hydro-project/hydroflow/pull/1377).
+   * #1395
+   * #1394
+   * __->__ #1377
+
+<csr-id-0eba702f62e7a6816cf931b01a2ea5643bd7321d/> defer network instantiation until after finalizing IR
    ---
    [//]: # (BEGIN SAPLING FOOTER)
    Stack created with [Sapling](https://sapling-scm.com). Best reviewed
