@@ -91,6 +91,11 @@ pub struct DfirOutput {
 }
 
 #[wasm_bindgen]
+#[allow(
+    clippy::allow_attributes,
+    clippy::too_many_arguments,
+    reason = "Easier to expose `bool` to JS than a config struct. TODO(mingwei):"
+)]
 pub fn compile_dfir(
     program: String,
     no_subgraphs: bool,
@@ -98,6 +103,7 @@ pub fn compile_dfir(
     no_pull_push: bool,
     no_handoffs: bool,
     no_references: bool,
+    no_loops: bool,
     op_short_text: bool,
 ) -> JsValue {
     let write_config = WriteConfig {
@@ -106,6 +112,7 @@ pub fn compile_dfir(
         no_pull_push,
         no_handoffs,
         no_references,
+        no_loops,
         op_short_text,
         op_text_no_imports: false,
     };
