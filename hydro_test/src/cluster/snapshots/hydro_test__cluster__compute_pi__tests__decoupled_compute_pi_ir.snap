@@ -68,6 +68,10 @@ expression: built.ir()
                                                                         ),
                                                                         cardinality: None,
                                                                         cpu_usage: None,
+                                                                        network_recv_cpu_usage: None,
+                                                                        id: Some(
+                                                                            0,
+                                                                        ),
                                                                     },
                                                                 },
                                                                 metadata: HydroIrMetadata {
@@ -79,6 +83,10 @@ expression: built.ir()
                                                                     ),
                                                                     cardinality: None,
                                                                     cpu_usage: None,
+                                                                    network_recv_cpu_usage: None,
+                                                                    id: Some(
+                                                                        1,
+                                                                    ),
                                                                 },
                                                             },
                                                             metadata: HydroIrMetadata {
@@ -90,28 +98,46 @@ expression: built.ir()
                                                                 ),
                                                                 cardinality: None,
                                                                 cpu_usage: None,
+                                                                network_recv_cpu_usage: None,
+                                                                id: Some(
+                                                                    2,
+                                                                ),
                                                             },
                                                         },
                                                         metadata: HydroIrMetadata {
-                                                            location_kind: Cluster(
+                                                            location_kind: Tick(
                                                                 0,
+                                                                Cluster(
+                                                                    0,
+                                                                ),
                                                             ),
                                                             output_type: Some(
                                                                 (f64 , f64),
                                                             ),
                                                             cardinality: None,
                                                             cpu_usage: None,
+                                                            network_recv_cpu_usage: None,
+                                                            id: Some(
+                                                                3,
+                                                            ),
                                                         },
                                                     },
                                                     metadata: HydroIrMetadata {
-                                                        location_kind: Cluster(
+                                                        location_kind: Tick(
                                                             0,
+                                                            Cluster(
+                                                                0,
+                                                            ),
                                                         ),
                                                         output_type: Some(
                                                             bool,
                                                         ),
                                                         cardinality: None,
                                                         cpu_usage: None,
+                                                        network_recv_cpu_usage: None,
+                                                        id: Some(
+                                                            4,
+                                                        ),
                                                     },
                                                 },
                                                 metadata: HydroIrMetadata {
@@ -119,10 +145,14 @@ expression: built.ir()
                                                         0,
                                                     ),
                                                     output_type: Some(
-                                                        bool,
+                                                        (hydro_test :: __staged :: __deps :: hydro_lang :: location :: cluster :: cluster_id :: ClusterId < () > , bool),
                                                     ),
                                                     cardinality: None,
                                                     cpu_usage: None,
+                                                    network_recv_cpu_usage: None,
+                                                    id: Some(
+                                                        5,
+                                                    ),
                                                 },
                                             },
                                             metadata: HydroIrMetadata {
@@ -130,10 +160,14 @@ expression: built.ir()
                                                     2,
                                                 ),
                                                 output_type: Some(
-                                                    bool,
+                                                    (hydro_test :: __staged :: __deps :: hydro_lang :: location :: cluster :: cluster_id :: ClusterId < () > , bool),
                                                 ),
                                                 cardinality: None,
                                                 cpu_usage: None,
+                                                network_recv_cpu_usage: None,
+                                                id: Some(
+                                                    6,
+                                                ),
                                             },
                                         },
                                         metadata: HydroIrMetadata {
@@ -145,17 +179,28 @@ expression: built.ir()
                                             ),
                                             cardinality: None,
                                             cpu_usage: None,
+                                            network_recv_cpu_usage: None,
+                                            id: Some(
+                                                7,
+                                            ),
                                         },
                                     },
                                     metadata: HydroIrMetadata {
-                                        location_kind: Cluster(
+                                        location_kind: Tick(
                                             0,
+                                            Cluster(
+                                                2,
+                                            ),
                                         ),
                                         output_type: Some(
                                             (u64 , u64),
                                         ),
                                         cardinality: None,
                                         cpu_usage: None,
+                                        network_recv_cpu_usage: None,
+                                        id: Some(
+                                            8,
+                                        ),
                                     },
                                 },
                                 metadata: HydroIrMetadata {
@@ -167,6 +212,10 @@ expression: built.ir()
                                     ),
                                     cardinality: None,
                                     cpu_usage: None,
+                                    network_recv_cpu_usage: None,
+                                    id: Some(
+                                        9,
+                                    ),
                                 },
                             },
                             metadata: HydroIrMetadata {
@@ -178,6 +227,10 @@ expression: built.ir()
                                 ),
                                 cardinality: None,
                                 cpu_usage: None,
+                                network_recv_cpu_usage: None,
+                                id: Some(
+                                    10,
+                                ),
                             },
                         },
                         metadata: HydroIrMetadata {
@@ -189,6 +242,8 @@ expression: built.ir()
                             ),
                             cardinality: None,
                             cpu_usage: None,
+                            network_recv_cpu_usage: None,
+                            id: None,
                         },
                     },
                     metadata: HydroIrMetadata {
@@ -200,6 +255,10 @@ expression: built.ir()
                         ),
                         cardinality: None,
                         cpu_usage: None,
+                        network_recv_cpu_usage: None,
+                        id: Some(
+                            11,
+                        ),
                     },
                 },
                 right: Map {
@@ -220,39 +279,64 @@ expression: built.ir()
                             ),
                             cardinality: None,
                             cpu_usage: None,
+                            network_recv_cpu_usage: None,
+                            id: Some(
+                                12,
+                            ),
                         },
                     },
                     metadata: HydroIrMetadata {
-                        location_kind: Process(
+                        location_kind: Tick(
                             1,
+                            Process(
+                                1,
+                            ),
                         ),
                         output_type: Some(
                             (),
                         ),
                         cardinality: None,
                         cpu_usage: None,
+                        network_recv_cpu_usage: None,
+                        id: Some(
+                            13,
+                        ),
                     },
                 },
                 metadata: HydroIrMetadata {
-                    location_kind: Process(
+                    location_kind: Tick(
                         1,
+                        Process(
+                            1,
+                        ),
                     ),
                     output_type: Some(
                         ((u64 , u64) , ()),
                     ),
                     cardinality: None,
                     cpu_usage: None,
+                    network_recv_cpu_usage: None,
+                    id: Some(
+                        14,
+                    ),
                 },
             },
             metadata: HydroIrMetadata {
-                location_kind: Process(
+                location_kind: Tick(
                     1,
+                    Process(
+                        1,
+                    ),
                 ),
                 output_type: Some(
                     (u64 , u64),
                 ),
                 cardinality: None,
                 cpu_usage: None,
+                network_recv_cpu_usage: None,
+                id: Some(
+                    15,
+                ),
             },
         },
         metadata: HydroIrMetadata {
@@ -264,6 +348,10 @@ expression: built.ir()
             ),
             cardinality: None,
             cpu_usage: None,
+            network_recv_cpu_usage: None,
+            id: Some(
+                16,
+            ),
         },
     },
 ]

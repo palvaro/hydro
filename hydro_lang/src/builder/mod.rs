@@ -56,6 +56,21 @@ pub type FlowState = Rc<RefCell<FlowStateInner>>;
 
 pub const FLOW_USED_MESSAGE: &str = "Attempted to add a leaf to a flow that has already been finalized. No leaves can be added after the flow has been compiled.";
 
+pub struct RewriteIrFlowBuilder<'a> {
+    builder: FlowBuilder<'a>,
+}
+
+impl<'a> RewriteIrFlowBuilder<'a> {
+    pub fn build_with(
+        self,
+        thunk: impl FnOnce(&FlowBuilder<'a>) -> Vec<HydroLeaf>,
+    ) -> FlowBuilder<'a> {
+        let leaves = thunk(&self.builder);
+        self.builder.flow_state().borrow_mut().leaves = Some(leaves);
+        self.builder
+    }
+}
+
 pub struct FlowBuilder<'a> {
     flow_state: FlowState,
     processes: RefCell<Vec<(usize, String)>>,
@@ -111,6 +126,30 @@ impl<'a> FlowBuilder<'a> {
             next_location_id: RefCell::new(0),
             finalized: false,
             _phantom: PhantomData,
+        }
+    }
+
+    pub fn rewritten_ir_builder<'b>(&self) -> RewriteIrFlowBuilder<'b> {
+        let processes = self.processes.borrow().clone();
+        let clusters = self.clusters.borrow().clone();
+        let externals = self.externals.borrow().clone();
+        let next_location_id = *self.next_location_id.borrow();
+        RewriteIrFlowBuilder {
+            builder: FlowBuilder {
+                flow_state: Rc::new(RefCell::new(FlowStateInner {
+                    leaves: None,
+                    next_external_out: 0,
+                    cycle_counts: 0,
+                    next_clock_id: 0,
+                    next_node_id: 0,
+                })),
+                processes: RefCell::new(processes),
+                clusters: RefCell::new(clusters),
+                externals: RefCell::new(externals),
+                next_location_id: RefCell::new(next_location_id),
+                finalized: false,
+                _phantom: PhantomData,
+            },
         }
     }
 
