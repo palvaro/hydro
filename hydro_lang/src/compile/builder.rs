@@ -18,6 +18,7 @@ use crate::location::{Cluster, External, LocationKey, LocationType, Process};
 use crate::sim::flow::SimFlow;
 use crate::staging_util::Invariant;
 
+#[stageleft::export(ExternalPortId, CycleId, ClockId)]
 crate::newtype_counter! {
     /// ID for an external output.
     pub struct ExternalPortId(usize);
