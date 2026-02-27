@@ -43,6 +43,7 @@ pub struct BenchResult<L> {
 
 /// Benchmarks transactional workloads by concurrently submitting workloads
 /// (up to `num_clients_per_node` per machine)
+/// * `num_clients_per_node`: Number of virtual clients per machine
 /// * `workload_generator`: Converts previous output (or None, for new virtual clients) into the next input payload
 /// * `protocol`: The protocol to benchmark
 ///
@@ -50,7 +51,7 @@ pub struct BenchResult<L> {
 /// A stream of latencies per completed client request
 pub fn bench_client<'a, Client, Input, Output>(
     clients: &Cluster<'a, Client>,
-    num_clients_per_node: usize,
+    num_clients_per_node: Singleton<usize, Cluster<'a, Client>, Bounded>,
     workload_generator: impl FnOnce(
         KeyedStream<u32, Option<Output>, Cluster<'a, Client>, Unbounded, NoOrder>,
     )
@@ -63,15 +64,16 @@ where
     Input: Clone,
     Output: Clone,
 {
-    let dummy = clients.singleton(q!(0));
     let new_payload_ids = sliced! {
-        let _dummy_batched = use(dummy, nondet!(/** temp */));
+        let num_clients_per_node = use(num_clients_per_node, nondet!(/** This is a constant */));
         let mut next_virtual_client = use::state(|l| Optional::from(l.singleton(q!((0u32, None)))));
 
         // Set up virtual clients - spawn new ones each tick until we reach the limit
         let new_virtual_client = next_virtual_client.clone();
-        next_virtual_client = new_virtual_client.clone().filter_map(
-            q!(move |(virtual_id, _)| {
+        next_virtual_client = new_virtual_client
+            .clone()
+            .zip(num_clients_per_node)
+            .filter_map(q!(move |((virtual_id, _), num_clients_per_node)| {
                 if virtual_id < num_clients_per_node as u32 {
                     Some((virtual_id + 1, None))
                 } else {
