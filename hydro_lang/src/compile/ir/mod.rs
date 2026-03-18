@@ -813,7 +813,7 @@ impl HydroRoot {
                                         )
                                     }
                                 }
-                                LocationId::Cluster(_) => todo!(),
+                                LocationId::Cluster(_) => todo!("SendExternal from a cluster location is not yet supported"),
                                 _ => panic!()
                             }
                         },
@@ -934,7 +934,7 @@ impl HydroRoot {
                                         D::e2o_connect(&from_node, &sink_port, &to_node, &source_port, *from_many, *port_hint),
                                     )
                                 }
-                                LocationId::Cluster(_) => todo!(),
+                                LocationId::Cluster(_) => todo!("ExternalInput to a cluster location is not yet supported"),
                                 _ => panic!()
                             }
                         },
