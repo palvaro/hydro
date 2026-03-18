@@ -4,12 +4,14 @@ set -euo pipefail
 HELP="Usage: $0 [TARGET]...
 Run pre-check tests for the given targets.
 
-  --all         Run all tests
-  --dfir        Run DFIR tests
-  --hydro       Run Hydro tests
-  --docker      Run Docker tests (requires --hydro)
-  --ecs         Run ECS tests (requires --hydro)
-  --help        Display this help message
+  --all           Run all tests
+  --dfir          Run DFIR tests
+    --wasm        Run WASM tests (requires --dfir)
+  --hydro         Run Hydro tests
+    --docker      Run Docker tests (requires --hydro)
+    --ecs         Run ECS tests (requires --hydro)
+  --website       Run Website tests
+  --help          Display this help message
 "
 
 TEST_DFIR=false
@@ -17,6 +19,7 @@ TEST_HYDRO=false
 TEST_DOCKER=false
 TEST_ECS=false
 TEST_WEBSITE=false
+TEST_WASM=false
 TEST_ALL=false
 
 while (( $# )); do
@@ -36,10 +39,16 @@ while (( $# )); do
         --website)
             TEST_WEBSITE=true
         ;;
+        --wasm)
+            TEST_WASM=true
+        ;;
         --all)
             TEST_DFIR=true
             TEST_HYDRO=true
+            TEST_DOCKER=true
+            TEST_ECS=true
             TEST_WEBSITE=true
+            TEST_WASM=true
             TEST_ALL=true
         ;;
         --help)
@@ -62,6 +71,13 @@ if ( [ "$TEST_DOCKER" = true ] || [ "$TEST_ECS" = true ] ) && [ "$TEST_HYDRO" = 
 Try '$0 --help' for more information.
 "
     exit 3
+fi
+# If `--wasm`, ensure `--dfir` was also included.
+if [ "$TEST_WASM" = true ] && [ "$TEST_DFIR" = false ]; then
+    echo "$0: --wasm requires --dfir.
+Try '$0 --help' for more information.
+"
+    exit 4
 fi
 
 TARGETS=""
@@ -112,7 +128,7 @@ if [ "$TEST_WEBSITE" = true ]; then
     popd
 fi
 
-if [ "$TEST_DFIR" = true ]; then
+if [ "$TEST_DFIR" = true ] && [ "$TEST_WASM" = true ]; then
     rustup toolchain install nightly
     RUSTUP_TOOLCHAIN="nightly" CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner cargo test -p dfir_rs --target wasm32-unknown-unknown --tests --no-fail-fast
 fi
