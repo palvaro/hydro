@@ -12,6 +12,7 @@ mod fanout;
 mod filter;
 mod filter_map;
 mod flat_map;
+mod flat_map_stream;
 mod flatten;
 mod flatten_stream;
 mod for_each;
@@ -42,6 +43,7 @@ pub use fanout::Fanout;
 pub use filter::Filter;
 pub use filter_map::FilterMap;
 pub use flat_map::FlatMap;
+pub use flat_map_stream::FlatMapStream;
 pub use flatten::Flatten;
 pub use flatten_stream::FlattenStream;
 pub use for_each::ForEach;
@@ -250,6 +252,20 @@ where
     Next: Push<IntoIter::Item, Meta>,
 {
     FlatMap::new(func, next)
+}
+
+/// Creates a [`FlatMapStream`] push that maps each item to a stream and flattens the results.
+pub const fn flat_map_stream<Func, In, St, Meta, Next>(
+    func: Func,
+    next: Next,
+) -> FlatMapStream<Next, Func, St, Meta>
+where
+    Func: FnMut(In) -> St,
+    St: futures_core::Stream,
+    Meta: Copy,
+    Next: Push<St::Item, Meta>,
+{
+    FlatMapStream::new(func, next)
 }
 
 /// Creates a [`Flatten`] push that flattens items that are iterators.
