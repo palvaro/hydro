@@ -19,6 +19,7 @@ mod enumerate;
 mod filter;
 mod filter_map;
 mod flat_map;
+mod flat_map_stream;
 mod flatten;
 mod flatten_stream;
 mod for_each;
@@ -62,6 +63,7 @@ pub use enumerate::Enumerate;
 pub use filter::Filter;
 pub use filter_map::FilterMap;
 pub use flat_map::FlatMap;
+pub use flat_map_stream::FlatMapStream;
 pub use flatten::Flatten;
 pub use flatten_stream::FlattenStream;
 pub use for_each::ForEach;
@@ -318,6 +320,20 @@ pub trait Pull {
         Self::Item: futures_core::Stream,
     {
         FlattenStream::new(self)
+    }
+
+    /// Creates a pull that maps each item to a stream via a closure and flattens the results.
+    ///
+    /// This is like [`flat_map`](Pull::flat_map), but the closure returns a
+    /// [`Stream`](futures_core::Stream) instead of an [`IntoIterator`]. Requires
+    /// an async context since inner streams are polled.
+    fn flat_map_stream<St, F>(self, f: F) -> FlatMapStream<Self, F, St, Self::Meta>
+    where
+        Self: Sized,
+        F: FnMut(Self::Item) -> St,
+        St: futures_core::Stream,
+    {
+        FlatMapStream::new(self, f)
     }
 
     /// Creates a future which runs the given function on each element of a pull.
