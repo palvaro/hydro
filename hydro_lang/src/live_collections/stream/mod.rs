@@ -1398,6 +1398,7 @@ where
     {
         self.make_totally_ordered()
             .assume_retries_trusted::<ExactlyOnce>(nondet!(/** first is idempotent */))
+            .generator(q!(|| ()), q!(|_, item| Generate::Return(item)))
             .reduce(q!(|_, _| {}))
     }
 
@@ -2504,8 +2505,8 @@ where
             .assume_ordering_trusted::<TotalOrder>(
                 nondet!(/** is_empty intermediates unaffected by order */),
             )
-            .assume_retries_trusted::<ExactlyOnce>(nondet!(/** is_empty is idempotent */))
-            .fold(q!(|| true), q!(|empty, _| { *empty = false },))
+            .first()
+            .is_none()
     }
 }
 
