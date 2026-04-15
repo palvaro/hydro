@@ -123,7 +123,15 @@ fn dfir_syntax_inline_internal(
             code,
             diagnostics,
         }) => (code, diagnostics),
-        Err(diagnostics) => (quote! { async move || {} }, diagnostics),
+        Err(diagnostics) => (
+            quote! {
+                #root::scheduled::context::InlineDfir::new(
+                    async move || { false },
+                    ::std::sync::Arc::new(#root::scheduled::context::InlineWakeState::default()),
+                )
+            },
+            diagnostics,
+        ),
     };
 
     let diagnostic_tokens = retain_diagnostic_level.and_then(|level| {

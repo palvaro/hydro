@@ -1456,12 +1456,15 @@ impl DfirGraph {
                     })
                     .collect();
 
-                // Recv port code: drain from buffer into iterator.
+                // Recv port code: drain from buffer into iterator, tracking if non-empty.
                 let recv_port_code: Vec<TokenStream> = recv_port_idents
                     .iter()
                     .zip(recv_buf_idents.iter())
                     .map(|(port_ident, buf_ident)| {
                         quote_spanned! {port_ident.span()=>
+                            if !#buf_ident.is_empty() {
+                                __dfir_work_done = true;
+                            }
                             let #port_ident = #root::dfir_pipes::pull::iter(#buf_ident.drain(..));
                         }
                     })
@@ -1883,20 +1886,35 @@ impl DfirGraph {
 
                 use #root::{var_expr, var_args};
 
+                let __dfir_wake_state = ::std::sync::Arc::new(
+                    #root::scheduled::context::InlineWakeState::default()
+                );
+
                 #[allow(unused_mut)]
-                let mut #df = #root::scheduled::context::InlineContext::new();
+                let mut #df = #root::scheduled::context::InlineContext::new(
+                    ::std::clone::Clone::clone(&__dfir_wake_state)
+                );
 
                 #( #buffer_code )*
                 #( #op_prologue_code )*
                 #( #op_prologue_after_code )*
 
+                // Pre-set to true so the first tick always returns true
+                // (matching Dfir pre-scheduling behavior). Subsequent ticks
+                // start false (from take()) and are set true by recv port code
+                // if any handoff buffer has data.
+                let mut __dfir_work_done = true;
                 #[allow(unused_qualifications, unused_mut, unused_variables, clippy::await_holding_refcell_ref)]
-                let mut __dfir_inline_closure = async move || {
+                let __dfir_inline_tick = async move || {
                     #( #subgraph_blocks )*
 
                     #df.__end_tick();
+                    ::std::mem::take(&mut __dfir_work_done)
                 };
-                __dfir_inline_closure
+                #root::scheduled::context::InlineDfir::new(
+                    __dfir_inline_tick,
+                    __dfir_wake_state,
+                )
             }
         })
     }
