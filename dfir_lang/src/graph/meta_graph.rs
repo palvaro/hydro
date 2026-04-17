@@ -1425,20 +1425,30 @@ impl DfirGraph {
         // 2. Collect subgraph handoffs (same as as_code).
         let subgraph_handoffs = self.helper_collect_subgraph_handoffs();
 
-        // 3. Sort subgraphs topologically (excluding `defer_tick_lazy()` edges). This bypasses
-        // existing stratum logic (except to detect `defer_tick_lazy()`). Without this, or if we
-        // only use strata, deferred data can arrive one tick late. See
+        // 3. Sort subgraphs topologically and collect non-lazy defer_tick buffer idents.
+        //
+        // The topo sort excludes `defer_tick`/`defer_tick_lazy` back-edges (where
+        // succ_stratum < pred_stratum). This bypasses existing stratum logic. Without this,
+        // or if we only use strata, deferred data can arrive one tick late. See
         // https://github.com/hydro-project/hydro/issues/2747
         //
-        // TODO(cleanup): Once scheduled Dfir is removed, move this topological ordering to replace
-        // the subgraph stratification pass directly, rather than doing it as a post-hoc sort in
-        // codegen.
+        // While iterating handoffs, we also collect buffer idents for non-lazy tick-boundary
+        // edges (defer_tick). When these buffers are non-empty at end of tick, we set
+        // can_start_tick so that run_available continues ticking.
+        //
+        // TODO(cleanup): Once scheduled Dfir is removed, move this topological ordering to
+        // replace the subgraph stratification pass directly, rather than doing it as a
+        // post-hoc sort in codegen. Also replace the `subgraph_laziness` flag with a more
+        // direct representation (e.g., a `DelayType` on the handoff edge itself) — currently
+        // we piggyback on the laziness bit of the intermediate identity subgraph that
+        // `flat_to_partitioned` injects for `defer_tick` vs `defer_tick_lazy`.
+        let mut defer_tick_buf_idents: Vec<Ident> = Vec::new();
         let all_subgraphs = {
             // Build predecessor map for subgraphs.
             let mut sg_preds = SecondaryMap::<_, Vec<_>>::with_capacity(self.subgraph_nodes.len());
             for (hoff_id, node) in self.nodes() {
                 if !matches!(node, GraphNode::Handoff { .. }) {
-                    // Not between handoffs
+                    // Not a handoff; skip.
                     continue;
                 }
                 assert_eq!(1, self.node_successors(hoff_id).len());
@@ -1459,6 +1469,14 @@ impl DfirGraph {
                     // order unconstrained and can collapse a tick delay to zero when inline
                     // handoff buffers persist across ticks.
                     sg_preds.entry(pred_sg).unwrap().or_default().push(succ_sg);
+
+                    // Non-lazy tick-boundary: defer_tick (not defer_tick_lazy).
+                    if !self.subgraph_laziness(pred_sg) {
+                        defer_tick_buf_idents.push(Ident::new(
+                            &format!("hoff_{:?}_buf", hoff_id.data()),
+                            node.span(),
+                        ));
+                    }
                 } else {
                     sg_preds.entry(succ_sg).unwrap().or_default().push(pred_sg);
                 }
@@ -2033,6 +2051,18 @@ impl DfirGraph {
                 #[allow(unused_qualifications, unused_mut, unused_variables, clippy::await_holding_refcell_ref)]
                 let __dfir_inline_tick = async move || {
                     #( #subgraph_blocks )*
+
+                    // For non-lazy defer_tick: if any deferred buffer has data,
+                    // signal that another tick should run (sets can_start_tick).
+                    // Inline DFIR doesn't dynamically schedule subgraph IDs, so the
+                    // subgraph ID here is a meaningless placeholder.
+                    // TODO(cleanup): remove the subgraph ID parameter once scheduled DFIR is gone.
+                    if false #( || !#defer_tick_buf_idents.is_empty() )* {
+                        #df.schedule_subgraph(
+                            #root::scheduled::SubgraphId::from_raw(0),
+                            true,
+                        );
+                    }
 
                     #df.__end_tick();
                     ::std::mem::take(&mut __dfir_work_done)
