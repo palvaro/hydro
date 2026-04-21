@@ -497,19 +497,7 @@ where
         let mut hierarchy_choices = Vec::new();
         let mut node_assignments_choices = serde_json::Map::new();
 
-        // Always add location-based hierarchy
-        let (location_hierarchy, location_assignments) = self.create_location_hierarchy();
-        hierarchy_choices.push(serde_json::json!({
-            "id": "location",
-            "name": "Location",
-            "children": location_hierarchy
-        }));
-        node_assignments_choices.insert(
-            "location".to_owned(),
-            serde_json::Value::Object(location_assignments),
-        );
-
-        // Add backtrace-based hierarchy if available
+        // Add backtrace-based hierarchy first (default)
         if self.has_backtrace_data() {
             let (backtrace_hierarchy, backtrace_assignments) = self.create_backtrace_hierarchy();
             hierarchy_choices.push(serde_json::json!({
@@ -522,6 +510,18 @@ where
                 serde_json::Value::Object(backtrace_assignments),
             );
         }
+
+        // Add location-based hierarchy
+        let (location_hierarchy, location_assignments) = self.create_location_hierarchy();
+        hierarchy_choices.push(serde_json::json!({
+            "id": "location",
+            "name": "Location",
+            "children": location_hierarchy
+        }));
+        node_assignments_choices.insert(
+            "location".to_owned(),
+            serde_json::Value::Object(location_assignments),
+        );
 
         // Before serialization, enforce deterministic ordering for nodes and edges
         let mut nodes_sorted = self.nodes.clone();
@@ -679,24 +679,49 @@ impl<W> HydroJson<'_, W> {
                     continue;
                 }
 
-                // Do not filter frames for now
-                let user_frames = elements;
+                // Filter to user-relevant frames (skip runtime/allocator/tokio internals)
+                let user_frames: Vec<_> = elements
+                    .into_iter()
+                    .filter(|elem| {
+                        let fn_name = &elem.fn_name;
+                        let file = elem.filename.as_deref().unwrap_or("");
+                        // Skip allocator, tokio runtime, std internals
+                        !(fn_name.starts_with("alloc")
+                            || fn_name.contains("call_once")
+                            || fn_name.contains("{async_block")
+                            || fn_name == "main"
+                            || file.contains("/runtime/")
+                            || file.contains("/future/")
+                            || file.contains("/task/"))
+                    })
+                    .collect();
                 if user_frames.is_empty() {
                     continue;
                 }
 
                 // Build hierarchy path from backtrace frames (reverse order for call stack)
                 let mut hierarchy_path = Vec::new();
-                for (i, elem) in user_frames.iter().rev().enumerate() {
-                    let label = if i == 0 {
-                        if let Some(filename) = &elem.filename {
-                            Self::extract_file_path(filename)
+                let mut prev_fn = String::new();
+                for elem in user_frames.iter().rev() {
+                    let fn_short = Self::truncate_function_name(&elem.fn_name);
+                    let label = if let Some(filename) = &elem.filename {
+                        let file_short = Self::truncate_path(filename);
+                        // Only show function name when it changes from the parent
+                        if fn_short != prev_fn {
+                            if let Some(line) = elem.lineno {
+                                format!("{} — {}:{}", fn_short, file_short, line)
+                            } else {
+                                format!("{} — {}", fn_short, file_short)
+                            }
+                        } else if let Some(line) = elem.lineno {
+                            format!("{}:{}", file_short, line)
                         } else {
-                            format!("fn_{}", Self::truncate_function_name(&elem.fn_name))
+                            file_short
                         }
                     } else {
-                        Self::truncate_function_name(&elem.fn_name).to_owned()
+                        fn_short.to_owned()
                     };
+                    prev_fn = fn_short.to_owned();
                     hierarchy_path.push(label);
                 }
 
@@ -1008,25 +1033,6 @@ impl<W> HydroJson<'_, W> {
 
         serde_json::Value::Object(node_obj)
     }
-
-    /// Extract meaningful file path
-    fn extract_file_path(filename: &str) -> String {
-        if filename.is_empty() {
-            return "unknown".to_owned();
-        }
-
-        // Extract the most relevant part of the file path
-        let parts: Vec<&str> = filename.split('/').collect();
-        let file_name = parts.last().unwrap_or(&"unknown");
-
-        // If it's a source file, include the parent directory for context
-        if file_name.ends_with(".rs") && parts.len() > 1 {
-            let parent_dir = parts[parts.len() - 2];
-            format!("{}/{}", parent_dir, file_name)
-        } else {
-            file_name.to_string()
-        }
-    }
 }
 
 /// Create JSON from Hydro IR with type names
@@ -1048,20 +1054,6 @@ pub fn hydro_ir_to_json(
     Ok(output)
 }
 
-/// Open JSON visualization in browser using the docs visualizer with URL-encoded data
-pub fn open_json_browser(
-    ir: &[HydroRoot],
-    location_names: &SecondaryMap<LocationKey, String>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let config = HydroWriteConfig {
-        location_names,
-        ..Default::default()
-    };
-
-    super::debug::open_json_visualizer(ir, Some(config))
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
-}
-
 /// Save JSON to file using the consolidated debug utilities
 pub fn save_json(
     ir: &[HydroRoot],
@@ -1075,12 +1067,4 @@ pub fn save_json(
 
     super::debug::save_json(ir, Some(filename), Some(config))
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
-}
-
-/// Open JSON visualization in browser for a BuiltFlow
-#[cfg(feature = "build")]
-pub fn open_browser(
-    built_flow: &crate::compile::built::BuiltFlow,
-) -> Result<(), Box<dyn std::error::Error>> {
-    open_json_browser(built_flow.ir(), built_flow.location_names())
 }

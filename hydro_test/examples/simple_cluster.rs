@@ -77,14 +77,13 @@ async fn main() {
     // Extract the IR for graph visualization
     let built = builder.finalize();
 
-    // Generate graph visualizations based on command line arguments
-    if let Err(e) = built.generate_graph_with_config(&args.graph, None) {
-        eprintln!("Error generating graph: {}", e);
-    }
-
-    // If we're just generating a graph file, exit early
-    if args.graph.should_exit_after_graph_generation() {
-        return;
+    match built.generate_graph(&args.graph) {
+        Ok(Some(_)) => return,
+        Ok(None) => {}
+        Err(err) => {
+            eprintln!("failed to generate graph: {err}");
+            std::process::exit(1);
+        }
     }
 
     let _nodes = built
