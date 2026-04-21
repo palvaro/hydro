@@ -10,7 +10,7 @@ use multiplatform_test::multiplatform_test;
 pub fn test_persist_basic() {
     let (result_send, mut result_recv) = dfir_rs::util::unbounded_channel::<u32>();
 
-    let mut hf = dfir_syntax! {
+    let mut hf = dfir_rs::dfir_syntax_inline! {
         source_iter([1])
             -> persist::<'static>()
             -> persist::<'static>()
@@ -33,7 +33,7 @@ pub fn test_persist_basic() {
 pub fn test_persist_pull() {
     let (result_send, mut result_recv) = dfir_rs::util::unbounded_channel::<u32>();
 
-    let mut hf = dfir_syntax! {
+    let mut hf = dfir_rs::dfir_syntax_inline! {
         // Structured to ensure `persist::<'static>()` is pull-based.
         source_iter([1]) -> persist::<'static>() -> m0;
         null() -> m0;
@@ -59,7 +59,7 @@ pub fn test_persist_pull() {
 pub fn test_persist_push() {
     let (result_send, mut result_recv) = dfir_rs::util::unbounded_channel::<u32>();
 
-    let mut hf = dfir_syntax! {
+    let mut hf = dfir_rs::dfir_syntax_inline! {
         t0 = source_iter([1]) -> persist::<'static>() -> tee();
         t0 -> null();
         t1 = t0 -> persist::<'static>() -> tee();
@@ -81,7 +81,7 @@ pub fn test_persist_push() {
 #[multiplatform_test]
 pub fn test_persist_join() {
     let (input_send, input_recv) = dfir_rs::util::unbounded_channel::<(&str, &str)>();
-    let mut flow = dfir_rs::dfir_syntax! {
+    let mut flow = dfir_rs::dfir_syntax_inline! {
         source_iter([("hello", "world")]) -> persist::<'static>() -> [0]my_join;
         source_stream(input_recv) -> persist::<'static>() -> [1]my_join;
         my_join = join::<'tick>() -> for_each(|(k, (v1, v2))| println!("({}, ({}, {}))", k, v1, v2));
@@ -131,27 +131,27 @@ pub fn test_persist_double_handoff() {
     let (input_send, input_recv) = dfir_rs::util::unbounded_channel::<usize>();
     let (input_2_send, input_2_recv) = dfir_rs::util::unbounded_channel::<usize>();
     let (output_send, mut output_recv) = dfir_rs::util::unbounded_channel::<(usize, usize)>();
-    let mut flow = dfir_rs::dfir_syntax! {
+    let mut flow = dfir_rs::dfir_syntax_inline! {
         teed_first_sg = source_stream(input_2_recv) -> tee();
         teed_first_sg -> [0] joined_second_sg;
         teed_first_sg -> [1] joined_second_sg;
 
         source_stream(input_recv) -> persist::<'static>()
-            -> inspect(|x| println!("LHS {} {}:{}", x, context.current_tick(), context.current_stratum())) -> [0] cross;
+            -> inspect(|x| println!("LHS {} {}", x, context.current_tick())) -> [0] cross;
         joined_second_sg = cross_join::<'tick, 'tick>() -> map(|t| t.0)
-            -> inspect(|x| println!("RHS {} {}:{}", x, context.current_tick(), context.current_stratum())) -> [1] cross;
+            -> inspect(|x| println!("RHS {} {}", x, context.current_tick())) -> [1] cross;
         cross = cross_join::<'tick, 'tick, HalfMultisetJoinState>() -> for_each(|x| output_send.send(x).unwrap());
     };
-    println!("A {}:{}", flow.current_tick(), flow.current_stratum());
+    println!("A {}", flow.current_tick());
 
     input_send.send(0).unwrap();
     flow.run_tick_sync();
-    println!("B {}:{}", flow.current_tick(), flow.current_stratum());
+    println!("B {}", flow.current_tick());
     assert!(collect_ready::<Vec<_>, _>(&mut output_recv).is_empty());
 
     input_2_send.send(1).unwrap();
     flow.run_tick_sync();
-    println!("C {}:{}", flow.current_tick(), flow.current_stratum());
+    println!("C {}", flow.current_tick());
     assert_eq!(&[(0, 1)], &*collect_ready::<Vec<_>, _>(&mut output_recv));
 }
 
@@ -160,28 +160,28 @@ pub fn test_persist_single_handoff() {
     let (input_send, input_recv) = dfir_rs::util::unbounded_channel::<usize>();
     let (input_2_send, input_2_recv) = dfir_rs::util::unbounded_channel::<usize>();
     let (output_send, mut output_recv) = dfir_rs::util::unbounded_channel::<(usize, usize)>();
-    let mut flow = dfir_rs::dfir_syntax! {
+    let mut flow = dfir_rs::dfir_syntax_inline! {
         teed_first_sg = source_stream(input_2_recv) -> tee();
         teed_first_sg [0] -> null();
         teed_first_sg [1] -> joined_second_sg;
         null() -> joined_second_sg;
 
         source_stream(input_recv) -> persist::<'static>()
-            -> inspect(|x| println!("LHS {} {}:{}", x, context.current_tick(), context.current_stratum())) -> [0] cross;
+            -> inspect(|x| println!("LHS {} {}", x, context.current_tick())) -> [0] cross;
         joined_second_sg = union()
-            -> inspect(|x| println!("RHS {} {}:{}", x, context.current_tick(), context.current_stratum())) -> [1] cross;
+            -> inspect(|x| println!("RHS {} {}", x, context.current_tick())) -> [1] cross;
         cross = cross_join::<'tick, 'tick, HalfMultisetJoinState>() -> for_each(|x| output_send.send(x).unwrap());
     };
-    println!("A {}:{}", flow.current_tick(), flow.current_stratum());
+    println!("A {}", flow.current_tick());
 
     input_send.send(0).unwrap();
     flow.run_tick_sync();
-    println!("B {}:{}", flow.current_tick(), flow.current_stratum());
+    println!("B {}", flow.current_tick());
     assert!(collect_ready::<Vec<_>, _>(&mut output_recv).is_empty());
 
     input_2_send.send(1).unwrap();
     flow.run_tick_sync();
-    println!("C {}:{}", flow.current_tick(), flow.current_stratum());
+    println!("C {}", flow.current_tick());
     assert_eq!(&[(0, 1)], &*collect_ready::<Vec<_>, _>(&mut output_recv));
 }
 
@@ -190,24 +190,24 @@ pub fn test_persist_single_subgraph() {
     let (input_send, input_recv) = dfir_rs::util::unbounded_channel::<usize>();
     let (input_2_send, input_2_recv) = dfir_rs::util::unbounded_channel::<usize>();
     let (output_send, mut output_recv) = dfir_rs::util::unbounded_channel::<(usize, usize)>();
-    let mut flow = dfir_rs::dfir_syntax! {
+    let mut flow = dfir_rs::dfir_syntax_inline! {
         source_stream(input_2_recv) -> joined_second_sg;
 
         source_stream(input_recv) -> persist::<'static>()
-            -> inspect(|x| println!("LHS {} {}:{}", x, context.current_tick(), context.current_stratum())) -> [0] cross;
-        joined_second_sg = inspect(|x| println!("RHS {} {}:{}", x, context.current_tick(), context.current_stratum())) -> [1] cross;
+            -> inspect(|x| println!("LHS {} {}", x, context.current_tick())) -> [0] cross;
+        joined_second_sg = inspect(|x| println!("RHS {} {}", x, context.current_tick())) -> [1] cross;
         cross = cross_join::<'tick, 'tick, HalfMultisetJoinState>() -> for_each(|x| output_send.send(x).unwrap());
     };
-    println!("A {}:{}", flow.current_tick(), flow.current_stratum());
+    println!("A {}", flow.current_tick());
 
     input_send.send(0).unwrap();
     flow.run_tick_sync();
-    println!("B {}:{}", flow.current_tick(), flow.current_stratum());
+    println!("B {}", flow.current_tick());
     assert!(collect_ready::<Vec<_>, _>(&mut output_recv).is_empty());
 
     input_2_send.send(1).unwrap();
     flow.run_tick_sync();
-    println!("C {}:{}", flow.current_tick(), flow.current_stratum());
+    println!("C {}", flow.current_tick());
     assert_eq!(&[(0, 1)], &*collect_ready::<Vec<_>, _>(&mut output_recv));
 }
 
@@ -216,7 +216,7 @@ pub fn test_persist() {
     let (pull_tx, mut pull_rx) = dfir_rs::util::unbounded_channel::<usize>();
     let (push_tx, mut push_rx) = dfir_rs::util::unbounded_channel::<usize>();
 
-    let mut df = dfir_syntax! {
+    let mut df = dfir_rs::dfir_syntax_inline! {
 
         my_tee = source_iter([1, 2, 3])
             -> persist::<'static>() // pull
@@ -230,6 +230,7 @@ pub fn test_persist() {
             -> for_each(|v| push_tx.send(v).unwrap());
     };
     assert_graphvis_snapshots!(df);
+
     df.run_available_sync();
 
     assert_eq!(&[1, 2, 3], &*collect_ready::<Vec<_>, _>(&mut pull_rx));
@@ -243,7 +244,7 @@ pub fn test_persist_mut() {
     let (pull_tx, mut pull_rx) = dfir_rs::util::unbounded_channel::<usize>();
     let (push_tx, mut push_rx) = dfir_rs::util::unbounded_channel::<usize>();
 
-    let mut df = dfir_syntax! {
+    let mut df = dfir_rs::dfir_syntax_inline! {
 
         my_tee = source_iter([Persist(1), Persist(2), Persist(3), Persist(4), Delete(2)])
             -> persist_mut::<'mutable>() // pull
@@ -258,6 +259,7 @@ pub fn test_persist_mut() {
             -> for_each(|v| push_tx.send(v).unwrap());
     };
     assert_graphvis_snapshots!(df);
+
     df.run_available_sync();
 
     assert_eq!(&[1, 3, 4], &*collect_ready::<Vec<_>, _>(&mut pull_rx));
@@ -271,7 +273,7 @@ pub fn test_persist_mut_keyed() {
     let (pull_tx, mut pull_rx) = dfir_rs::util::unbounded_channel::<usize>();
     let (push_tx, mut push_rx) = dfir_rs::util::unbounded_channel::<usize>();
 
-    let mut df = dfir_syntax! {
+    let mut df = dfir_rs::dfir_syntax_inline! {
 
         my_tee = source_iter([Persist(1, 1), Persist(2, 2), Persist(3, 3), Persist(4, 4), Delete(2)])
             -> persist_mut_keyed::<'mutable>() // pull
@@ -286,6 +288,7 @@ pub fn test_persist_mut_keyed() {
             -> for_each(|(_k, v)| push_tx.send(v).unwrap());
     };
     assert_graphvis_snapshots!(df);
+
     df.run_available_sync();
 
     assert_eq!(

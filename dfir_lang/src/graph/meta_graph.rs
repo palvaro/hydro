@@ -1482,6 +1482,27 @@ impl DfirGraph {
                 }
             }
 
+            // Include singleton reference edges: if node A references the
+            // singleton output of node B, then A's subgraph must run after B's.
+            for dst_id in self.node_ids() {
+                for src_ref_id in self
+                    .node_singleton_references(dst_id)
+                    .iter()
+                    .copied()
+                    .flatten()
+                {
+                    let src_sg = self
+                        .node_subgraph(src_ref_id)
+                        .expect("bug: singleton ref node must belong to a subgraph");
+                    let dst_sg = self
+                        .node_subgraph(dst_id)
+                        .expect("bug: singleton ref consumer must belong to a subgraph");
+                    if src_sg != dst_sg {
+                        sg_preds.entry(dst_sg).unwrap().or_default().push(src_sg);
+                    }
+                }
+            }
+
             let topo_sort = super::graph_algorithms::topo_sort(self.subgraph_ids(), |sg_id| {
                 sg_preds.get(sg_id).into_iter().flatten().copied()
             })
@@ -2027,6 +2048,10 @@ impl DfirGraph {
                     #root::scheduled::context::InlineWakeState::default()
                 );
 
+                let __dfir_current_tick = ::std::rc::Rc::new(
+                    ::std::cell::Cell::new(#root::scheduled::ticks::TickInstant::default())
+                );
+
                 let __dfir_metrics = {
                     let mut dfir_metrics = #root::scheduled::metrics::DfirMetrics::default();
                     #( #metrics_init_code )*
@@ -2036,6 +2061,7 @@ impl DfirGraph {
                 #[allow(unused_mut)]
                 let mut #df = #root::scheduled::context::InlineContext::new(
                     ::std::clone::Clone::clone(&__dfir_wake_state),
+                    ::std::clone::Clone::clone(&__dfir_current_tick),
                 );
 
                 #( #buffer_code )*
@@ -2070,6 +2096,7 @@ impl DfirGraph {
                 #root::scheduled::context::InlineDfir::new(
                     __dfir_inline_tick,
                     __dfir_wake_state,
+                    __dfir_current_tick,
                     __dfir_metrics_outer,
                     Some(#meta_graph_json),
                     Some(#diagnostics_json),

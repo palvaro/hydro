@@ -28,7 +28,7 @@ pub fn tick_tick() {
     let results = Rc::new(RefCell::new(HashMap::<TickInstant, Vec<_>>::new()));
     let results_inner = Rc::clone(&results);
 
-    let mut df = dfir_syntax! {
+    let mut df = dfir_rs::dfir_syntax_inline! {
         source_iter([(7, 1), (7, 2)])
             -> [0]my_join;
 
@@ -42,6 +42,7 @@ pub fn tick_tick() {
             -> for_each(|x| results_inner.borrow_mut().entry(context.current_tick()).or_default().push(x));
     };
     assert_graphvis_snapshots!(df);
+
     df.run_available_sync();
 
     assert_contains_each_by_tick!(results, TickInstant::new(0), &[(7, (1, 0)), (7, (2, 0))]);
@@ -53,7 +54,7 @@ pub fn tick_static() {
     let results = Rc::new(RefCell::new(HashMap::<TickInstant, Vec<_>>::new()));
     let results_inner = Rc::clone(&results);
 
-    let mut df = dfir_syntax! {
+    let mut df = dfir_rs::dfir_syntax_inline! {
         source_iter([(7, 1), (7, 2)])
             -> [0]my_join;
 
@@ -67,6 +68,7 @@ pub fn tick_static() {
             -> for_each(|x| results_inner.borrow_mut().entry(context.current_tick()).or_default().push(x));
     };
     assert_graphvis_snapshots!(df);
+
     df.run_available_sync();
 
     assert_contains_each_by_tick!(results, TickInstant::new(0), &[(7, (1, 0)), (7, (2, 0))]);
@@ -78,7 +80,7 @@ pub fn static_tick() {
     let results = Rc::new(RefCell::new(HashMap::<TickInstant, Vec<_>>::new()));
     let results_inner = Rc::clone(&results);
 
-    let mut df = dfir_syntax! {
+    let mut df = dfir_rs::dfir_syntax_inline! {
         source_iter([(7, 1), (7, 2)])
             -> [0]my_join;
 
@@ -92,6 +94,7 @@ pub fn static_tick() {
             -> for_each(|x| results_inner.borrow_mut().entry(context.current_tick()).or_default().push(x));
     };
     assert_graphvis_snapshots!(df);
+
     df.run_available_sync();
 
     assert_contains_each_by_tick!(results, TickInstant::new(0), &[(7, (1, 0)), (7, (2, 0))]);
@@ -105,7 +108,7 @@ pub fn static_static() {
     let results = Rc::new(RefCell::new(HashMap::<TickInstant, Vec<_>>::new()));
     let results_inner = Rc::clone(&results);
 
-    let mut df = dfir_syntax! {
+    let mut df = dfir_rs::dfir_syntax_inline! {
         source_iter([(7, 1), (7, 2)])
             -> [0]my_join;
 
@@ -119,6 +122,7 @@ pub fn static_static() {
             -> for_each(|x| results_inner.borrow_mut().entry(context.current_tick()).or_default().push(x));
     };
     assert_graphvis_snapshots!(df);
+
     df.run_available_sync();
 
     #[rustfmt::skip]
@@ -135,7 +139,7 @@ pub fn replay_static() {
     let results = Rc::new(RefCell::new(HashMap::<TickInstant, Vec<_>>::new()));
     let results_inner = Rc::clone(&results);
 
-    let mut df = dfir_syntax! {
+    let mut df = dfir_rs::dfir_syntax_inline! {
         source_iter([(7, 1), (7, 2)]) -> [0]my_join;
         source_iter([(7, 3), (7, 4)]) -> [1]my_join;
         my_join = join::<'static, 'static>()
