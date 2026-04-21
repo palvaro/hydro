@@ -2,8 +2,8 @@
 //! See https://github.com/hydro-project/hydro/issues/2334
 use std::time::Duration;
 
-use dfir_rs::dfir_syntax_inline;
 use dfir_rs::util::collect_ready_async;
+use dfir_rs::{assert_graphvis_snapshots, dfir_syntax_inline};
 use multiplatform_test::multiplatform_test;
 
 #[multiplatform_test(dfir)]
@@ -27,6 +27,8 @@ async fn test_resolve_futures_cross_singleton() {
         source_stream(singleton_recv) -> [single]cs;
         cs = cross_singleton() -> map(|(millis, ())| millis) -> for_each(|millis| output_send.send(millis).unwrap());
     };
+
+    assert_graphvis_snapshots!(df);
 
     items_send.send(500).unwrap();
     items_send.send(510).unwrap();

@@ -1,5 +1,5 @@
-use dfir_rs::dfir_syntax_inline;
 use dfir_rs::util::collect_ready;
+use dfir_rs::{assert_graphvis_snapshots, dfir_syntax_inline};
 use multiplatform_test::multiplatform_test;
 
 #[multiplatform_test]
@@ -10,6 +10,7 @@ pub fn test_forwardref_basic_forward() {
         source_iter(0..10) -> forward_ref;
         forward_ref = for_each(|v| out_send.send(v).unwrap());
     };
+    assert_graphvis_snapshots!(df);
     df.run_available_sync();
 
     assert_eq!(
@@ -26,6 +27,7 @@ pub fn test_forwardref_basic_backward() {
         forward_ref -> for_each(|v| out_send.send(v).unwrap());
         forward_ref = source_iter(0..10);
     };
+    assert_graphvis_snapshots!(df);
     df.run_available_sync();
 
     assert_eq!(
@@ -43,6 +45,7 @@ pub fn test_forwardref_basic_middle() {
         forward_ref -> for_each(|v| out_send.send(v).unwrap());
         forward_ref = identity();
     };
+    assert_graphvis_snapshots!(df);
     df.run_available_sync();
 
     assert_eq!(

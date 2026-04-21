@@ -1,5 +1,5 @@
-use dfir_rs::dfir_syntax_inline;
 use dfir_rs::util::collect_ready;
+use dfir_rs::{assert_graphvis_snapshots, dfir_syntax_inline};
 use multiplatform_test::multiplatform_test;
 
 #[multiplatform_test]
@@ -11,6 +11,7 @@ pub fn test_sort() {
             -> sort()
             -> for_each(|v| print!("{:?}, ", v));
     };
+    assert_graphvis_snapshots!(df);
     df.run_available_sync();
 
     print!("\nA: ");
@@ -39,6 +40,7 @@ pub fn test_sort_by_key() {
             -> sort_by_key(|(k, _v)| k)
             -> for_each(|v| println!("{:?}", v));
     };
+    assert_graphvis_snapshots!(df);
     df.run_available_sync();
     println!();
 }
