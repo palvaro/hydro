@@ -432,7 +432,7 @@ impl Display for PortIndexValue {
     }
 }
 
-/// Output of [`build_dfir_code`].
+/// Output of [`build_dfir_code_inline`].
 pub struct BuildDfirCodeOutput {
     /// The now-partitioned graph.
     pub partitioned_graph: DfirGraph,
@@ -442,50 +442,8 @@ pub struct BuildDfirCodeOutput {
     pub diagnostics: Diagnostics,
 }
 
-/// The main function of this module. Compiles a [`DfirCode`] AST into a [`DfirGraph`] and
-/// source code, or [`Diagnostic`] errors.
-pub fn build_dfir_code(
-    dfir_code: DfirCode,
-    root: &TokenStream,
-) -> Result<BuildDfirCodeOutput, Diagnostics> {
-    let flat_graph_builder = FlatGraphBuilder::from_dfir(dfir_code);
-
-    let FlatGraphBuilderOutput {
-        mut flat_graph,
-        uses,
-        mut diagnostics,
-    } = flat_graph_builder.build()?;
-
-    let () = match flat_graph.merge_modules() {
-        Ok(()) => (),
-        Err(d) => {
-            diagnostics.push(d);
-            return Err(diagnostics);
-        }
-    };
-
-    eliminate_extra_unions_tees(&mut flat_graph);
-    let partitioned_graph = match partition_graph(flat_graph) {
-        Ok(partitioned_graph) => partitioned_graph,
-        Err(d) => {
-            diagnostics.push(d);
-            return Err(diagnostics);
-        }
-    };
-
-    let code =
-        partitioned_graph.as_code(root, true, quote::quote! { #( #uses )* }, &mut diagnostics)?;
-
-    // Success
-    Ok(BuildDfirCodeOutput {
-        partitioned_graph,
-        code,
-        diagnostics,
-    })
-}
-
 /// Compiles a [`DfirCode`] AST into inline source code that runs the dataflow
-/// without the `Dfir` runtime scheduler. Experimental S3+Ref3 codegen path.
+/// without the `Dfir` runtime scheduler.
 pub fn build_dfir_code_inline(
     dfir_code: DfirCode,
     root: &TokenStream,
@@ -546,7 +504,7 @@ fn validate_inline(graph: &DfirGraph, diagnostics: &mut Diagnostics) {
         diagnostics.push(Diagnostic::spanned(
             span,
             Level::Error,
-            "`loop { }` blocks are not (yet) supported in `dfir_syntax_inline!`.",
+            "`loop { }` blocks are not (yet) supported in `dfir_syntax!`.",
         ));
     }
 
@@ -599,7 +557,7 @@ fn validate_inline(graph: &DfirGraph, diagnostics: &mut Diagnostics) {
             diagnostics.push(Diagnostic::spanned(
                 span,
                 Level::Error,
-                "Cyclical dataflow within a tick is not supported in `dfir_syntax_inline!`. Use `defer_tick()` or `defer_tick_lazy()` to break the cycle across ticks.",
+                "Cyclical dataflow within a tick is not supported in `dfir_syntax!`. Use `defer_tick()` or `defer_tick_lazy()` to break the cycle across ticks.",
             ));
         }
     }

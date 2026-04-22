@@ -1,5 +1,3 @@
-use dfir_rs::dfir_syntax;
-use dfir_rs::scheduled::graph::Dfir;
 use dfir_rs::util::collect_ready_async;
 use multiplatform_test::multiplatform_test;
 use web_time::Duration;
@@ -9,14 +7,14 @@ use web_time::Duration;
 async fn test_initial() {
     let (output_send, _output_recv) = dfir_rs::util::unbounded_channel::<i32>();
 
-    let df: Dfir = dfir_syntax! {
+    let flow = dfir_rs::dfir_syntax! {
         source_iter(0..5)
             -> map(|x| x * 2)
             -> for_each(|x| output_send.send(x).unwrap());
     };
 
     // Test that we can access metrics before running
-    let metrics = df.metrics();
+    let metrics = flow.metrics();
 
     println!(
         "Subgraph count: {}, Handoff count: {}",
@@ -45,14 +43,16 @@ async fn test_initial() {
 
 #[multiplatform_test(dfir)]
 async fn test_subgraph_metrics() {
-    let mut df: Dfir = dfir_syntax! {
-        source_iter(0..3) -> for_each(|x| println!("Processing: {}", x));
+    let (output_send, _output_recv) = dfir_rs::util::unbounded_channel::<i32>();
+
+    let mut flow = dfir_rs::dfir_syntax! {
+        source_iter(0..3) -> for_each(|x| output_send.send(x).unwrap());
     };
 
     // Run the dataflow
-    df.run_available().await;
+    flow.run_tick().await;
 
-    let metrics = df.metrics();
+    let metrics = flow.metrics();
 
     // After running, metrics should be updated
     assert_eq!(1, metrics.subgraphs.len());
@@ -80,16 +80,16 @@ async fn test_subgraph_metrics() {
 async fn test_handoff_metrics() {
     let (output_send, mut output_recv) = dfir_rs::util::unbounded_channel::<i32>();
 
-    let mut df: Dfir = dfir_syntax! {
+    let mut flow = dfir_rs::dfir_syntax! {
         source_iter(0..5)
             -> map(|x| x * 2)
-            -> fold(|| 0, |acc, x| { *acc += x; })
+            -> fold(|| 0, |acc: &mut _, x| { *acc += x; })
             -> for_each(|x| { output_send.send(x).unwrap(); });
     };
 
-    df.run_available().await;
+    flow.run_available().await;
 
-    let metrics = df.metrics();
+    let metrics = flow.metrics();
 
     assert_eq!(1, metrics.handoffs.len());
     let handoff_id = metrics.handoffs.keys().next().unwrap();
@@ -107,7 +107,7 @@ async fn test_multiple_ticks() {
     let (input_send, input_recv) = dfir_rs::util::unbounded_channel::<i32>();
     let (output_send, mut output_recv) = dfir_rs::util::unbounded_channel::<i32>();
 
-    let mut df: Dfir = dfir_syntax! {
+    let mut flow = dfir_rs::dfir_syntax! {
         source_stream(input_recv)
             -> map(|x| x + 1)
             -> for_each(|x| output_send.send(x).unwrap());
@@ -116,24 +116,24 @@ async fn test_multiple_ticks() {
     // Send some data and run first tick
     input_send.send(1).unwrap();
     input_send.send(2).unwrap();
-    df.run_tick().await;
+    flow.run_tick().await;
 
-    let metrics_after_tick1 = df.metrics();
+    let metrics_after_tick1 = flow.metrics();
     assert_eq!(1, metrics_after_tick1.subgraphs.len());
     let sg_id = metrics_after_tick1.subgraphs.keys().next().unwrap();
 
     let sg_metrics = &metrics_after_tick1.subgraphs[sg_id];
     assert_eq!(1, sg_metrics.total_run_count());
-    assert_eq!(1, df.current_tick().0);
+    assert_eq!(1, flow.current_tick().0);
 
     // Send more data and run second tick
     input_send.send(3).unwrap();
     input_send.send(4).unwrap();
-    df.run_tick().await;
+    flow.run_tick().await;
 
-    let metrics_after_tick2 = df.metrics();
+    let metrics_after_tick2 = flow.metrics();
     assert_eq!(2, metrics_after_tick2.subgraphs[sg_id].total_run_count());
-    assert_eq!(2, df.current_tick().0);
+    assert_eq!(2, flow.current_tick().0);
 
     let output: Vec<_> = collect_ready_async(&mut output_recv).await;
     assert_eq!(output, vec![2, 3, 4, 5]);
@@ -144,12 +144,12 @@ async fn test_metrics_intervals() {
     let (input_send, input_recv) = dfir_rs::util::unbounded_channel::<i32>();
     let (output_send, mut output_recv) = dfir_rs::util::unbounded_channel::<i32>();
 
-    let mut df: Dfir = dfir_syntax! {
+    let mut flow = dfir_rs::dfir_syntax! {
         source_stream(input_recv)
             -> map(|x| x + 1)
             -> for_each(|x| output_send.send(x).unwrap());
     };
-    let mut metrics_intervals = df.metrics_intervals();
+    let mut metrics_intervals = flow.metrics_intervals();
 
     // Zero at start
     let metrics = metrics_intervals.take_interval();
@@ -163,7 +163,7 @@ async fn test_metrics_intervals() {
     // Send some data and run first tick
     input_send.send(1).unwrap();
     input_send.send(2).unwrap();
-    df.run_tick().await;
+    flow.run_tick().await;
 
     // After first tick, metrics should be updated
     let metrics = metrics_intervals.take_interval();
@@ -176,7 +176,7 @@ async fn test_metrics_intervals() {
     for x in 0..10_000 {
         input_send.send(x).unwrap();
     }
-    df.run_tick().await;
+    flow.run_tick().await;
 
     // After second tick, metrics updated
     let metrics = metrics_intervals.take_interval();
@@ -188,7 +188,7 @@ async fn test_metrics_intervals() {
     // Total duration matches sum of intervals
     assert_eq!(
         poll_duration_1 + poll_duration_2,
-        df.metrics().subgraphs[sg_id].total_poll_duration()
+        flow.metrics().subgraphs[sg_id].total_poll_duration()
     );
 
     let output: Vec<_> = collect_ready_async(&mut output_recv).await;

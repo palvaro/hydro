@@ -2,7 +2,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use dfir_rs::dfir_expect_warnings;
-use dfir_rs::scheduled::graph::Dfir;
 use dfir_rs::util::collect_ready;
 
 #[test]
@@ -89,7 +88,7 @@ pub fn test_warped_diamond() {
 
 #[test]
 pub fn test_warped_diamond_2() {
-    let mut hf: Dfir = dfir_expect_warnings! {
+    let mut hf = dfir_expect_warnings! {
         {
             // active nodes
             nodes = union();

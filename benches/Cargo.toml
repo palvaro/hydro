@@ -59,9 +59,10 @@ harness = false
 name = "join"
 harness = false
 
-[[bench]]
-name = "reachability"
-harness = false
+# TODO(inline): disabled, uses intra-tick cycles
+# [[bench]]
+# name = "reachability"
+# harness = false
 
 [[bench]]
 name = "micro_ops"
