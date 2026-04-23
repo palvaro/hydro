@@ -432,7 +432,7 @@ impl Display for PortIndexValue {
     }
 }
 
-/// Output of [`build_dfir_code_inline`].
+/// Output of [`build_dfir_code`].
 pub struct BuildDfirCodeOutput {
     /// The now-partitioned graph.
     pub partitioned_graph: DfirGraph,
@@ -442,9 +442,8 @@ pub struct BuildDfirCodeOutput {
     pub diagnostics: Diagnostics,
 }
 
-/// Compiles a [`DfirCode`] AST into inline source code that runs the dataflow
-/// without the `Dfir` runtime scheduler.
-pub fn build_dfir_code_inline(
+/// Compiles a [`DfirCode`] AST into inline source code that runs the dataflow.
+pub fn build_dfir_code(
     dfir_code: DfirCode,
     root: &TokenStream,
 ) -> Result<BuildDfirCodeOutput, Diagnostics> {
@@ -474,17 +473,13 @@ pub fn build_dfir_code_inline(
     };
 
     // Inline-specific validation: reject unsupported features.
-    validate_inline(&partitioned_graph, &mut diagnostics);
+    validate_graph(&partitioned_graph, &mut diagnostics);
     if diagnostics.has_error() {
         return Err(diagnostics);
     }
 
-    let code = partitioned_graph.as_code_inline(
-        root,
-        true,
-        quote::quote! { #( #uses )* },
-        &mut diagnostics,
-    )?;
+    let code =
+        partitioned_graph.as_code(root, true, quote::quote! { #( #uses )* }, &mut diagnostics)?;
 
     Ok(BuildDfirCodeOutput {
         partitioned_graph,
@@ -495,7 +490,24 @@ pub fn build_dfir_code_inline(
 
 /// Validates that a partitioned graph is compatible with the inline codegen path.
 /// Rejects: (1) `loop {}` blocks, (2) intra-tick cycles.
-fn validate_inline(graph: &DfirGraph, diagnostics: &mut Diagnostics) {
+///
+/// TODO(cleanup): This validation is largely redundant with work already done inside
+/// `partition_graph` / `find_subgraph_strata` in `flat_to_partitioned.rs`. See #2794.
+/// `find_subgraph_strata` builds a subgraph-level directed graph (excluding `Tick`/`TickLazy`
+/// back-edges) and runs `topo_sort_scc` on it to assign strata. The intra-tick cycle check
+/// here (part 2) rebuilds a nearly identical subgraph graph and runs its own `topo_sort`.
+///
+/// Both passes exist because the old scheduled DFIR runtime *allowed* intra-tick fixpoint
+/// cycles — stratification would place them in the same stratum and the runtime would iterate
+/// them to convergence. Now that the graph must be a DAG within a tick, stratification is
+/// over-general: it collapses SCCs and assigns strata when a simple topo sort suffices.
+///
+/// The plan is to replace `find_subgraph_strata` with a plain topological sort that rejects
+/// any intra-tick cycle as an error, which would subsume the cycle check here. At that point
+/// this function can be removed entirely (the `loop {}` rejection in part 1 could move into
+/// `partition_graph` or the caller). All callers of `partition_graph` — including the
+/// `hydro_lang` compile and sim paths — would then get cycle validation automatically.
+fn validate_graph(graph: &DfirGraph, diagnostics: &mut Diagnostics) {
     // 1. Reject `loop { }` blocks.
     if let Some((_loop_id, nodes)) = graph.loops().next() {
         let span = nodes
