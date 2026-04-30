@@ -40,6 +40,12 @@ use backtrace::Backtrace;
 #[derive(Clone, Hash)]
 pub struct DebugExpr(pub Box<syn::Expr>);
 
+impl serde::Serialize for DebugExpr {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
 impl From<syn::Expr> for DebugExpr {
     fn from(expr: syn::Expr) -> Self {
         Self(Box::new(expr))
@@ -255,9 +261,47 @@ impl Debug for DebugType {
     }
 }
 
+impl serde::Serialize for DebugType {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&format!("{}", self.0.to_token_stream()))
+    }
+}
+
+fn serialize_backtrace_as_span<S: serde::Serializer>(
+    backtrace: &Backtrace,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match backtrace.format_span() {
+        Some(span) => serializer.serialize_some(&span),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn serialize_ident<S: serde::Serializer>(
+    ident: &syn::Ident,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&ident.to_string())
+}
+
 pub enum DebugInstantiate {
     Building,
     Finalized(Box<DebugInstantiateFinalized>),
+}
+
+impl serde::Serialize for DebugInstantiate {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            DebugInstantiate::Building => {
+                serializer.serialize_unit_variant("DebugInstantiate", 0, "Building")
+            }
+            DebugInstantiate::Finalized(_) => {
+                panic!(
+                    "cannot serialize DebugInstantiate::Finalized: contains non-serializable runtime state (closures)"
+                )
+            }
+        }
+    }
 }
 
 #[cfg_attr(
@@ -310,7 +354,7 @@ impl Clone for DebugInstantiate {
 /// All subsequent nodes for the same pair are set to [`Self::Tee`] so that
 /// during code-gen they simply reference the tee output of the first node
 /// instead of creating a redundant `source_stream`.
-#[derive(Debug, Hash, Clone)]
+#[derive(Debug, Hash, Clone, serde::Serialize)]
 pub enum ClusterMembersState {
     /// Not yet instantiated.
     Uninit,
@@ -324,15 +368,15 @@ pub enum ClusterMembersState {
 }
 
 /// A source in a Hydro graph, where data enters the graph.
-#[derive(Debug, Hash, Clone)]
+#[derive(Debug, Hash, Clone, serde::Serialize)]
 pub enum HydroSource {
     Stream(DebugExpr),
     ExternalNetwork(),
     Iter(DebugExpr),
     Spin(),
     ClusterMembers(LocationId, ClusterMembersState),
-    Embedded(syn::Ident),
-    EmbeddedSingleton(syn::Ident),
+    Embedded(#[serde(serialize_with = "serialize_ident")] syn::Ident),
+    EmbeddedSingleton(#[serde(serialize_with = "serialize_ident")] syn::Ident),
 }
 
 #[cfg(feature = "build")]
@@ -676,7 +720,7 @@ where
 /// An root in a Hydro graph, which is an pipeline that doesn't emit
 /// any downstream values. Traversals over the dataflow graph and
 /// generating DFIR IR start from roots.
-#[derive(Debug, Hash)]
+#[derive(Debug, Hash, serde::Serialize)]
 pub enum HydroRoot {
     ForEach {
         f: DebugExpr,
@@ -704,6 +748,7 @@ pub enum HydroRoot {
         op_metadata: HydroIrOpMetadata,
     },
     EmbeddedOutput {
+        #[serde(serialize_with = "serialize_ident")]
         ident: syn::Ident,
         input: Box<HydroNode>,
         op_metadata: HydroIrOpMetadata,
@@ -1606,6 +1651,11 @@ pub fn deep_clone(ir: &[HydroRoot]) -> Vec<HydroRoot> {
 type PrintedTees = RefCell<Option<(usize, HashMap<*const RefCell<HydroNode>, usize>)>>;
 thread_local! {
     static PRINTED_TEES: PrintedTees = const { RefCell::new(None) };
+    /// Tracks shared nodes already serialized so that `SharedNode::serialize`
+    /// emits the full subtree only once and uses a `"<shared N>"` back-reference
+    /// on subsequent encounters, preventing infinite loops.
+    static SERIALIZED_SHARED: PrintedTees
+        = const { RefCell::new(None) };
 }
 
 pub fn dbg_dedup_tee<T>(f: impl FnOnce() -> T) -> T {
@@ -1623,7 +1673,84 @@ pub fn dbg_dedup_tee<T>(f: impl FnOnce() -> T) -> T {
     })
 }
 
+/// Runs `f` with a fresh shared-node deduplication scope for serialization.
+/// Any `SharedNode` serialized inside `f` will be tracked; the first occurrence
+/// emits the full subtree while later occurrences emit a `{"$shared_ref": id}`
+/// back-reference.  The tracking state is restored when `f` returns or panics.
+pub fn serialize_dedup_shared<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = SerializedSharedGuard::enter();
+    f()
+}
+
+/// RAII guard that saves/restores the `SERIALIZED_SHARED` thread-local,
+/// making `serialize_dedup_shared` re-entrant and panic-safe.
+struct SerializedSharedGuard {
+    previous: Option<(usize, HashMap<*const RefCell<HydroNode>, usize>)>,
+}
+
+impl SerializedSharedGuard {
+    fn enter() -> Self {
+        let previous = SERIALIZED_SHARED.with(|cell| {
+            let mut guard = cell.borrow_mut();
+            guard.replace((0, HashMap::new()))
+        });
+        Self { previous }
+    }
+}
+
+impl Drop for SerializedSharedGuard {
+    fn drop(&mut self) {
+        SERIALIZED_SHARED.with(|cell| {
+            *cell.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
 pub struct SharedNode(pub Rc<RefCell<HydroNode>>);
+
+impl serde::Serialize for SharedNode {
+    /// Multiple `SharedNode`s can point to the same underlying `HydroNode` (via
+    /// `Tee` / `Partition`).  A naïve recursive serialization would revisit the
+    /// same subtree every time and, if the graph ever contains a cycle, loop
+    /// forever.
+    ///
+    /// We keep a thread-local map (`SERIALIZED_SHARED`) from raw `Rc` pointer →
+    /// integer id.  The first time we see a pointer we assign it the next id and
+    /// emit the full subtree as `{"$shared": <id>, "node": …}`.  Every later
+    /// encounter of the same pointer emits `{"$shared_ref": <id>}`, cutting the
+    /// recursion.  Requires an active `serialize_dedup_shared` scope.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        SERIALIZED_SHARED.with(|cell| {
+            let mut guard = cell.borrow_mut();
+            // (next_id, pointer → assigned_id)
+            let state = guard.as_mut().ok_or_else(|| {
+                serde::ser::Error::custom(
+                    "SharedNode serialization requires an active serialize_dedup_shared scope",
+                )
+            })?;
+            let ptr = self.0.as_ptr() as *const RefCell<HydroNode>;
+
+            if let Some(&id) = state.1.get(&ptr) {
+                drop(guard);
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("$shared_ref", &id)?;
+                map.end()
+            } else {
+                let id = state.0;
+                state.0 += 1;
+                state.1.insert(ptr, id);
+                drop(guard);
+
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("$shared", &id)?;
+                map.serialize_entry("node", &*self.0.borrow())?;
+                map.end()
+            }
+        })
+    }
+}
 
 impl SharedNode {
     pub fn as_ptr(&self) -> *const RefCell<HydroNode> {
@@ -1668,25 +1795,25 @@ impl Hash for SharedNode {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(serde::Serialize, Clone, PartialEq, Eq, Debug)]
 pub enum BoundKind {
     Unbounded,
     Bounded,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(serde::Serialize, Clone, PartialEq, Eq, Debug)]
 pub enum StreamOrder {
     NoOrder,
     TotalOrder,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(serde::Serialize, Clone, PartialEq, Eq, Debug)]
 pub enum StreamRetry {
     AtLeastOnce,
     ExactlyOnce,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(serde::Serialize, Clone, PartialEq, Eq, Debug)]
 pub enum KeyedSingletonBoundKind {
     Unbounded,
     MonotonicValue,
@@ -1694,14 +1821,14 @@ pub enum KeyedSingletonBoundKind {
     Bounded,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(serde::Serialize, Clone, PartialEq, Eq, Debug)]
 pub enum SingletonBoundKind {
     Unbounded,
     Monotonic,
     Bounded,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize)]
 pub enum CollectionKind {
     Stream {
         bound: BoundKind,
@@ -1755,7 +1882,7 @@ impl CollectionKind {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize)]
 pub struct HydroIrMetadata {
     pub location_id: LocationId,
     pub collection_kind: CollectionKind,
@@ -1788,8 +1915,9 @@ impl Debug for HydroIrMetadata {
 
 /// Metadata that is specific to the operator itself, rather than its outputs.
 /// This is available on _both_ inner nodes and roots.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize)]
 pub struct HydroIrOpMetadata {
+    #[serde(rename = "span", serialize_with = "serialize_backtrace_as_span")]
     pub backtrace: Backtrace,
     pub cpu_usage: Option<f64>,
     pub network_recv_cpu_usage: Option<f64>,
@@ -1827,7 +1955,7 @@ impl Hash for HydroIrOpMetadata {
 
 /// An intermediate node in a Hydro graph, which consumes data
 /// from upstream nodes and emits data to downstream nodes.
-#[derive(Debug, Hash)]
+#[derive(Debug, Hash, serde::Serialize)]
 pub enum HydroNode {
     Placeholder,
 
@@ -2073,6 +2201,7 @@ pub enum HydroNode {
         from_port_id: ExternalPortId,
         from_many: bool,
         codec_type: DebugType,
+        #[serde(skip)]
         port_hint: NetworkHint,
         instantiate_fn: DebugInstantiate,
         deserialize_fn: Option<DebugExpr>,
@@ -4602,6 +4731,9 @@ where
     };
     (sink, source, connect_fn)
 }
+
+#[cfg(test)]
+mod serde_test;
 
 #[cfg(test)]
 mod test {
