@@ -5,7 +5,286 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.16.0 (2026-05-01)
+
+### New Features
+
+ - <csr-id-67c066ef77042b337100de5e119f20ced0cae394/> advance dfir_syntax_inline! migration — expose current_tick, fix singleton ordering, convert ~77 tests
+   Three changes stacked:
+   
+   1. feat(dfir_rs): expose `current_tick()` on `InlineDfir` via shared
+   `Rc<Cell<TickInstant>>`
+      - Resolves #2741
+   - Shares tick counter between InlineContext (inside closure) and
+   InlineDfir (outer handle)
+      - Updated codegen in dfir_lang and dfir_macro
+   
+   2. refactor(dfir_rs): convert 55+ non-blocked tests to
+   dfir_syntax_inline!
+      - surface_scan.rs (8/8), surface_state_scheduling.rs (8/8),
+        surface_difference.rs (8/10), surface_codegen.rs (17/20),
+        surface_fold.rs (6/7), surface_fold_keyed.rs (4/5),
+        surface_reduce_keyed.rs (3/4), surface_unique.rs (5/6),
+        surface_zip_unzip.rs (3/5), surface_lattice_fold.rs (1/3)
+   - Tests with loop {} blocks or intra-tick cycles remain on dfir_syntax!
+   
+   3. fix(dfir_lang): include singleton reference edges in inline
+   topological sort
+   - Root cause of "behavioral differences" blocker for
+   surface_singleton.rs
+   - Singleton refs (`#name`) now create ordering constraints in the topo
+   sort
+      - Converts surface_singleton.rs (10/10 tests) to dfir_syntax_inline!
+   
+   ---------
+ - <csr-id-2633db89ef2768285219a0e5af18f5a971a9aa1c/> port runtime metrics to inline codegen path
+   ### Summary
+   
+   Ports per-subgraph and per-handoff runtime metrics from the scheduled
+   `Dfir<'_>` codegen path to the new `InlineDfir` inline codegen path, and
+   updates the EMF telemetry sidecar to work with both.
+   
+   ### Changes
+   
+   **`dfir_rs/src/scheduled/context.rs`**
+   - Added `Rc<DfirMetrics>` to `InlineDfir` with `metrics()` and
+   `metrics_intervals()` accessors, threaded through `into_erased()`.
+   
+   **`dfir_rs/src/scheduled/metrics.rs`**
+   - Made `InstrumentSubgraph` and its constructor `pub #[doc(hidden)]` for
+   codegen access.
+   - `define_metrics!` macro now hardcodes `pub #[doc(hidden)]` on fields
+   internally instead of accepting a visibility specifier at the call site.
+   
+   **`dfir_lang/src/graph/meta_graph.rs`**
+   - Inline codegen now builds `DfirMetrics` with pre-initialized entries
+   for each subgraph and handoff, using slotmap raw indices
+   (`KeyData::as_ffi() & 0xFFFF_FFFF`) so runtime metrics IDs match the
+   meta graph for cross-referencing with Mermaid/Dot visualizations.
+   - Recv port code instruments handoff metrics (`total_items_count`,
+   `curr_items_count`) before draining, matching the scheduled path's
+   "measure at recv" strategy.
+   - Each subgraph async block is wrapped with `InstrumentSubgraph` for
+   per-subgraph
+   `total_poll_duration`/`total_poll_count`/`total_idle_duration`/`total_idle_count`
+   tracking, with `total_run_count` incremented after each run.
+   - Send-side `curr_items_count` updated after each subgraph completes.
+   
+   **`hydro_lang/src/telemetry/emf.rs`**
+   - `record_metrics_sidecar` now takes `DfirMetricsIntervals` directly
+   instead of `&Dfir<'_>`. The generated sidecar code calls
+   `.metrics_intervals()` on the dfir instance, which works for both `Dfir`
+   and `InlineDfir`.
+   
+   **`dfir_macro/src/lib.rs`**
+   - Updated error fallback to pass default metrics `Rc` to
+   `InlineDfir::new`.
+   
+   ---------
+ - <csr-id-476e22fe79049d5f92a066937b18fe4abc7d4cc0/> add `meta_graph` & `diagnostics` support to `InlineDfir`
+ - <csr-id-de0fa9767573e2968b7e7f6e271bf371c3207775/> switch all codegen paths to inline DFIR execution [ci-bench]
+   Switches all three Hydro compilation paths (trybuild, embedded, sim)
+   from the scheduler-based `Dfir` runtime to inline codegen, building on
+   the `as_code_inline` infrastructure from the previous PR.
+   
+   ## Results
+   
+   - **35-50% throughput improvement on the Paxos benchmark** — zero
+   application code changes
+   - **All Hydro tests pass** — 51 sim, 6 embedded, deploy tests (paxos,
+   two_pc, many_to_many, etc.)
+   
+   ## Changes
+   
+   ### Hydro compilation paths
+   - **trybuild/generate.rs** — `as_code` → `as_code_inline`, generated
+   binaries return `InlineFlow` instead of `Dfir`
+   - **embedded.rs** — `generate_embedded` defaults to inline; removed
+   redundant `generate_embedded_inline`
+   - **sim/graph.rs** — `as_code` → `as_code_inline`, each location wrapped
+   with `into_erased()` for `Vec` storage
+   - **sim/compiled.rs** — `Dfir<'static>` → `ErasedInlineDfir` throughout
+   
+   ### Runtime support
+   - **launch.rs** — Added `Runnable` trait with impls for both `Dfir` and
+   `InlineFlow`, making `run_stdin_commands` generic
+     - (likely will be removed in a future PR)
+   - **InlineDfir** — A new wrapper around the tick closure provides an API
+   which matches the existing `Dfir<'_>` API. Of note: `run_tick()` returns
+   `bool` (whether subgraphs were run in a meaningful way, [see
+   here](https://github.com/hydro-project/hydro/pull/2732#issuecomment-4240163682)),
+   matching `Dfir::run_tick` semantics. First tick pre-set to true to match
+   Dfir's pre-scheduling behavior. Necessary for the simulator to work
+   properly.
+   - **TickClosure** — `call_tick` returns `bool` directly; eliminated
+   `work_done` shared state and `__mark_work_done`
+   
+   ### Type erasure for sim
+   - **`ErasedTickFn`** / **`ErasedInlineFlow`** — enables storing multiple
+   locations with different closure types in `Vec`. Uses object-safe inner
+   trait (`ErasedTickFnInner`) since `AsyncFnMut` is not object-safe. Zero
+   overhead on the concrete (trybuild/embedded) path.
+   - **`into_erased()`** — converts concrete `InlineDfir` to
+   `ErasedInlineDfir`, one box allocation per tick (for the `dyn Future`)
+   
+   ---------
+ - <csr-id-7181305785e9f69fc07258b07d38d7bdc805794f/> add experimental inline DAG codegen (S3+Ref3 prototype) [ci-bench]
+   Add `dfir_syntax_inline!` macro that generates inline dataflow code
+   using
+   local Vec buffers and compile-time stratum ordering, bypassing the Dfir
+   runtime scheduler entirely.
+   
+   ### Core changes
+   - Add `InlineContext`: lightweight alternative to `Dfir` & `Context`
+   with just the state
+     API — no tokio channels, scheduler queues, or handoff infrastructure
+   - Add `DfirGraph::as_code_inline()`: generates an `AsyncFnMut` closure
+   where
+     each call runs one tick, with subgraph blocks inlined in stratum order
+     (sorted by `(stratum, !is_source)` tuple)
+   - Add `build_dfir_code_inline()` and `dfir_syntax_inline!` /
+     `dfir_syntax_inline_noemit!` proc macros
+   - State persists across ticks in the closure's captured environment;
+     `__end_tick()` handles tick-scoped state reset between invocations
+   - Operators using `.await` (e.g. `fold`) work naturally inside the async
+     closure without synchronous wrappers
+   - Cross-referencing doc comments between `as_code` and `as_code_inline`
+   
+   ### Tests & benchmarks
+   - 14 passing tests covering: linear pipelines, diamonds, intertwined
+     diamonds, joins, multi-stratum cascades, W-mesh, `source_stream`,
+     `resolve_futures_blocking`, multi-tick with `fold::<'static>`/`'tick`,
+     and `defer_tick` cycles
+   - 4 benchmark suites with inline variants (`words_diamond`, `fan_in`,
+   `fan_out`, `micro_ops`) using `iter_batched` for fair comparison against
+     scheduler-based benchmarks
+
+### Bug Fixes
+
+ - <csr-id-c16e13a8bdae3b099d498f9b7f1f43872cfdc939/> flag non-determinstic hashmap iterators, fix hydro_lang codegen nondeterminism fix #2464
+   Out of an abundance of caution, the `hydro_lang` IR `Demux` variants
+   containing `HashMap<u32 ...>` have been replaced with `BTreeMap`
+
+### Refactor
+
+ - <csr-id-bafcb57e02f0b538a2bedc9051dd36a05f3ad7e9/> replace stratification with plain topo sort, remove next_stratum
+ - <csr-id-4eea87b5466e52d8b7ea7709f0a19836b18440ca/> pass `&mut InlineContext` as argument to tick closure instead of capturing it
+
+### Chore (BREAKING)
+
+ - <csr-id-efaa8f61c124c4b3c691b92a58df1686751cf45c/> update pinned rust to 1.92, add lints/fixes for redundant cloning, string handling
+   Somewhat waiting on https://github.com/hydro-project/stageleft/pull/56
+   to be published
+
+### New Features (BREAKING)
+
+ - <csr-id-52ed1062f8fb30b9b2ec8f4615d9187bba62e2b0/> Add `Push::size_hint`, `VecPush` terminal operator, use in dfir codegen [ci-bench]
+   Added `size_hint(self: Pin<&mut Self>, hint: (usize, Option<usize>))` to
+   the `Push` trait as the push-side analog of `Pull::size_hint`. This
+   allows producers to announce how many items they're about to send,
+   enabling downstream operators and sinks to pre-allocate.
+   
+   New terminal operator:
+   - `VecPush<Buf>`: pushes items into a `Vec`, uses `size_hint` to call
+   `Vec::reserve(hint.0)` for pre-allocation. Gated on `alloc` feature.
+   - Constructor: `push::vec_push(buf)` creates a VecPush from a `&mut
+   Vec<T>`.
+ - <csr-id-a662ff38541e58bec801644b81b2bfc505779e7b/> use custom `dfir_pipes::Pull` trait [ci-bench]
+   This is the pull-half of a big change from using other iterators
+   (`std::iter::Iterator` or `futures_core::stream::Stream`) to our own
+   `Pull` trait. Key to this more powerful iterator trait is the step enum:
+   ```rust
+   pub enum Step<Item, Meta, CanPend: Toggle, CanEnd: Toggle> {
+       /// An item is ready with associated metadata.
+       Ready(Item, Meta),
+       /// The pull is not ready yet (only possible when `CanPend = Yes`).
+       Pending(CanPend),
+       /// The pull has ended (only possible when `CanEnd = Yes`).
+       Ended(CanEnd),
+   }
+   ```
+   This abstraction allows `Pull` to represent both synchronous `Iterator`s
+   and asynchronous `Stream`s with zero cost. (As well as distinguishing
+   between infinite vs finite iterators, which I guess is not actually that
+   useful to us). In the future we will also add an `Error` variant
+   (#2635). The `Meta` metadata field may be used for full record-level
+   tracing (#2242).
+   
+   This trait has some pseudo-specialization around `Fuse`, and further
+   performance improvements may come from true nightly
+   `min_specialization`, as well as from converting from `Pusherator/Sink`
+   to a new `Push` trait.
+   
+   Other changes:
+   * Moves much of `dfir_rs::compiled::pull` into `dfir_pipes`, using new
+   trait
+   * Update itertools to `0.14`
+
+### Bug Fixes (BREAKING)
+
+ - <csr-id-024cfd693b884f51b13dee5a0c51b1a2ce4e0a27/> fix & test sim DFIR codegen; DFIR use `Result` to force error handling
+
+### Refactor (BREAKING)
+
+ - <csr-id-16f1c0bf960c3b4238adb020a833f214bd3fd064/> remove scheduled Dfir runtime, rename Inline types
+ - <csr-id-9cb780085e19197381653eb010d8abdaeb23729d/> remove scheduled codegen path, rename inline codegen
+ - <csr-id-296a491c80546eb7f48327b48f9d50951abdf172/> switch `dfir_syntax!` to inline codegen, begin removing scheduled DFIR [ci-bench]
+ - <csr-id-3e6e26c4cc87d6f7857591b10876074cba97caff/> use custom `dfir_pipes::Push` trait instead of `Sink` [ci-bench]
+
+### Commit Statistics
+
+<csr-read-only-do-not-edit/>
+
+ - 16 commits contributed to the release.
+ - 156 days passed between releases.
+ - 16 commits were understood as [conventional](https://www.conventionalcommits.org).
+ - 16 unique issues were worked on: [#2511](https://github.com/hydro-project/hydro/issues/2511), [#2525](https://github.com/hydro-project/hydro/issues/2525), [#2541](https://github.com/hydro-project/hydro/issues/2541), [#2618](https://github.com/hydro-project/hydro/issues/2618), [#2644](https://github.com/hydro-project/hydro/issues/2644), [#2678](https://github.com/hydro-project/hydro/issues/2678), [#2716](https://github.com/hydro-project/hydro/issues/2716), [#2732](https://github.com/hydro-project/hydro/issues/2732), [#2737](https://github.com/hydro-project/hydro/issues/2737), [#2740](https://github.com/hydro-project/hydro/issues/2740), [#2769](https://github.com/hydro-project/hydro/issues/2769), [#2776](https://github.com/hydro-project/hydro/issues/2776), [#2779](https://github.com/hydro-project/hydro/issues/2779), [#2782](https://github.com/hydro-project/hydro/issues/2782), [#2795](https://github.com/hydro-project/hydro/issues/2795), [#2797](https://github.com/hydro-project/hydro/issues/2797)
+
+### Commit Details
+
+<csr-read-only-do-not-edit/>
+
+<details><summary>view details</summary>
+
+ * **[#2511](https://github.com/hydro-project/hydro/issues/2511)**
+    - Flag non-determinstic hashmap iterators, fix hydro_lang codegen nondeterminism fix #2464 ([`c16e13a`](https://github.com/hydro-project/hydro/commit/c16e13a8bdae3b099d498f9b7f1f43872cfdc939))
+ * **[#2525](https://github.com/hydro-project/hydro/issues/2525)**
+    - Update pinned rust to 1.92, add lints/fixes for redundant cloning, string handling ([`efaa8f6`](https://github.com/hydro-project/hydro/commit/efaa8f61c124c4b3c691b92a58df1686751cf45c))
+ * **[#2541](https://github.com/hydro-project/hydro/issues/2541)**
+    - Fix & test sim DFIR codegen; DFIR use `Result` to force error handling ([`024cfd6`](https://github.com/hydro-project/hydro/commit/024cfd693b884f51b13dee5a0c51b1a2ce4e0a27))
+ * **[#2618](https://github.com/hydro-project/hydro/issues/2618)**
+    - Use custom `dfir_pipes::Pull` trait [ci-bench] ([`a662ff3`](https://github.com/hydro-project/hydro/commit/a662ff38541e58bec801644b81b2bfc505779e7b))
+ * **[#2644](https://github.com/hydro-project/hydro/issues/2644)**
+    - Use custom `dfir_pipes::Push` trait instead of `Sink` [ci-bench] ([`3e6e26c`](https://github.com/hydro-project/hydro/commit/3e6e26c4cc87d6f7857591b10876074cba97caff))
+ * **[#2678](https://github.com/hydro-project/hydro/issues/2678)**
+    - Add `Push::size_hint`, `VecPush` terminal operator, use in dfir codegen [ci-bench] ([`52ed106`](https://github.com/hydro-project/hydro/commit/52ed1062f8fb30b9b2ec8f4615d9187bba62e2b0))
+ * **[#2716](https://github.com/hydro-project/hydro/issues/2716)**
+    - Add experimental inline DAG codegen (S3+Ref3 prototype) [ci-bench] ([`7181305`](https://github.com/hydro-project/hydro/commit/7181305785e9f69fc07258b07d38d7bdc805794f))
+ * **[#2732](https://github.com/hydro-project/hydro/issues/2732)**
+    - Switch all codegen paths to inline DFIR execution [ci-bench] ([`de0fa97`](https://github.com/hydro-project/hydro/commit/de0fa9767573e2968b7e7f6e271bf371c3207775))
+ * **[#2737](https://github.com/hydro-project/hydro/issues/2737)**
+    - Add `meta_graph` & `diagnostics` support to `InlineDfir` ([`476e22f`](https://github.com/hydro-project/hydro/commit/476e22fe79049d5f92a066937b18fe4abc7d4cc0))
+ * **[#2740](https://github.com/hydro-project/hydro/issues/2740)**
+    - Port runtime metrics to inline codegen path ([`2633db8`](https://github.com/hydro-project/hydro/commit/2633db89ef2768285219a0e5af18f5a971a9aa1c))
+ * **[#2769](https://github.com/hydro-project/hydro/issues/2769)**
+    - Advance dfir_syntax_inline! migration — expose current_tick, fix singleton ordering, convert ~77 tests ([`67c066e`](https://github.com/hydro-project/hydro/commit/67c066ef77042b337100de5e119f20ced0cae394))
+ * **[#2776](https://github.com/hydro-project/hydro/issues/2776)**
+    - Pass `&mut InlineContext` as argument to tick closure instead of capturing it ([`4eea87b`](https://github.com/hydro-project/hydro/commit/4eea87b5466e52d8b7ea7709f0a19836b18440ca))
+ * **[#2779](https://github.com/hydro-project/hydro/issues/2779)**
+    - Switch `dfir_syntax!` to inline codegen, begin removing scheduled DFIR [ci-bench] ([`296a491`](https://github.com/hydro-project/hydro/commit/296a491c80546eb7f48327b48f9d50951abdf172))
+ * **[#2782](https://github.com/hydro-project/hydro/issues/2782)**
+    - Remove scheduled codegen path, rename inline codegen ([`9cb7800`](https://github.com/hydro-project/hydro/commit/9cb780085e19197381653eb010d8abdaeb23729d))
+ * **[#2795](https://github.com/hydro-project/hydro/issues/2795)**
+    - Remove scheduled Dfir runtime, rename Inline types ([`16f1c0b`](https://github.com/hydro-project/hydro/commit/16f1c0bf960c3b4238adb020a833f214bd3fd064))
+ * **[#2797](https://github.com/hydro-project/hydro/issues/2797)**
+    - Replace stratification with plain topo sort, remove next_stratum ([`bafcb57`](https://github.com/hydro-project/hydro/commit/bafcb57e02f0b538a2bedc9051dd36a05f3ad7e9))
+</details>
+
 ## 0.15.0 (2025-11-25)
+
+<csr-id-97426b8a7e3b3af8a58b4c44c768c3f48cd0ed71/>
+<csr-id-806a6239a649e24fe10c3c90dd30bd18debd41d2/>
+<csr-id-9d943ac294a8735452f8535ad13767c60ce46ec7/>
 
 ### Chore
 
@@ -36,7 +315,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <csr-read-only-do-not-edit/>
 
- - 5 commits contributed to the release.
+ - 6 commits contributed to the release.
+ - 117 days passed between releases.
  - 5 commits were understood as [conventional](https://www.conventionalcommits.org).
  - 4 unique issues were worked on: [#1977](https://github.com/hydro-project/hydro/issues/1977), [#2024](https://github.com/hydro-project/hydro/issues/2024), [#2028](https://github.com/hydro-project/hydro/issues/2028), [#2134](https://github.com/hydro-project/hydro/issues/2134)
 
@@ -55,6 +335,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
  * **[#2134](https://github.com/hydro-project/hydro/issues/2134)**
     - Make DFIR use `sinktools` for pushing to outputs [ci-bench] ([`9d943ac`](https://github.com/hydro-project/hydro/commit/9d943ac294a8735452f8535ad13767c60ce46ec7))
  * **Uncategorized**
+    - Release hydro_build_utils v0.0.1, dfir_lang v0.15.0, dfir_macro v0.15.0, variadics v0.0.10, sinktools v0.0.1, hydro_deploy_integration v0.15.0, lattices_macro v0.5.11, variadics_macro v0.6.2, lattices v0.6.2, multiplatform_test v0.6.0, dfir_rs v0.15.0, copy_span v0.1.0, hydro_deploy v0.15.0, hydro_lang v0.15.0, hydro_std v0.15.0, safety bump 5 crates ([`092de25`](https://github.com/hydro-project/hydro/commit/092de252238dfb9fa6b01e777c6dd8bf9db93398))
     - Ensure `hydro_build_utils` is published in the correct order ([`806a623`](https://github.com/hydro-project/hydro/commit/806a6239a649e24fe10c3c90dd30bd18debd41d2))
 </details>
 

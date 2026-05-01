@@ -1,5 +1,272 @@
 
 
+## v0.16.0 (2026-05-01)
+
+### New Features
+
+ - <csr-id-7fddc970b30538f2373007fab080d35444178fa5/> rename `interleave` to `merge_unordered` for symmetry with `merge_ordered`
+   Added `merge_unordered` as the new primary method name on both `Stream`
+   and `KeyedStream`, and updated all internal call sites and doc
+   references to use it.
+   
+   To avoid a breaking change, the old `interleave` method is preserved as
+   a deprecated forwarding wrapper on both types, marked with
+   `#[deprecated(note = "use `merge_unordered` instead")]`.
+   
+   Files changed:
+   - hydro_lang/src/live_collections/stream/mod.rs: New method + deprecated
+   wrapper, updated docs/examples/tests
+   - hydro_lang/src/live_collections/keyed_stream/mod.rs: New method +
+   deprecated wrapper, updated docs/examples/tests
+   - hydro_lang/src/live_collections/keyed_singleton.rs: Doc example
+   - hydro_lang/src/location/cluster.rs: Call site
+   - hydro_lang/src/location/mod.rs: Doc example
+   - hydro_std/src/bench_client/mod.rs: Call site
+   - hydro_test/src/external_client/http_counter.rs: Call sites
+   - hydro_test/src/maelstrom/broadcast.rs: Call sites
+   - hydro_test/src/cluster/paxos.rs: Call sites
+   
+   Closes hydro-project/hydro#2392.
+ - <csr-id-fad81f0f79bac3d7524165df515fd746af148bfb/> allow passing runtime environment variables and use for benchmarking
+   Binaries no longer need to be recompiled & uploaded when the number of
+   virtual clients change. Should greatly reduce testing time.
+ - <csr-id-08cb0ed12b213bc9a6ef449095cb89a69adc84ab/> add `manual_proof!` macro that accepts doc comments
+ - <csr-id-1866677da0a5b71e48d7b1cdf9442ee66d0f1e23/> improve quality of error spans in `sliced!` macro
+ - <csr-id-0b31dbbb079f4c4a3dd6445a4ac92af98aaab6f9/> introduce `Weaker{Ordering/Retries}Than` to simplify stream weakening
+   Previously, the `weaken_*` APIs required an asymmetric `MinX` trait
+   implementation, which would cause trouble when trying to weaken the
+   `Other` stream to the same weaker guarantee. We introduce a
+   `WeakerXThan` pair of traits which are implemented in both directions
+   automatically if there is a `MinX` implementation in one direction,
+   which allows weakening all streams explicitly to `MinX::Min`.
+ - <csr-id-708e835452958120edce77cd693bd8fb1cb6c48c/> make network channels configurable with a generic `Stream::send` API
+   This eliminates the hardcoding of networking APIs to specific
+   serialzation formats, transport protocols, etc. Includes similar
+   refactors across `demux` / `round_robin` / etc APIs.
+ - <csr-id-b69438cc963f26a8109b227b2755ab9ba1817d51/> port `request_response` to use `sliced!` and add simulation tests
+ - <csr-id-853db69e4487ae9c097fe838f05e9447c736ec98/> add `use::state` syntax for stateful `sliced!`
+ - <csr-id-3f65882e04633cb92a2e6ac52edff81a26b35320/> add tagless member ids, add docker member id
+
+### Bug Fixes
+
+ - <csr-id-f104f2b3d4f78ccd05465d2af69b1be34d5ea7a5/> Virtual clients off-by-one error
+   We created 1 more virtual client than specified.
+ - <csr-id-661c72a402d0a9f102e73772e6cc377ae92c73fc/> bench_client realistic latency measurements
+   Replaced `SystemTime` (which is NOT monotonic) with `Instant`. Expect
+   reported latency for Paxos to 10x at 1 physical & virtual client (from
+   0.07ms to 0.7ms).
+ - <csr-id-117d617a76ef11a88df1c069bc2edac0067c080c/> Latency calculation fix
+   The implementation works by subtracting start time from end time for
+   each payload. The start time is measured whenever a new payload with the
+   same key is created, which is effectively the moment the previous output
+   is received. This overwrites the actual start time of the previous
+   payload and results in unnaturally small latencies.
+
+### Refactor
+
+ - <csr-id-2f38e7eddf0363f818aa4b204c7bf549c317428a/> Generalize bench_client
+   Previous behavior:
+   - `bench_client` generates virtual client IDs. Payloads are assigned to
+   each ID via `workload_generator`, then fed to the protocol via
+   `transaction_cycle`. Both `workload_generator` and `transaction_cycle`
+   are lambdas passed into `bench_client`.
+   - This fixes the input/output streams of the protocol so it can only
+   have 1 input and 1 output. Not ideal if
+   - Multiple input streams types are more ergonomic. For example, a Put
+   and a Get stream
+   - Latencies aren't necessary bound by 1 round trip. For example, a lock
+   request's latency may be the total of "acquire (success) + release" or
+   "acquire (fail) + retry + release"
+     - Multiple output streams that should get their own graphs
+   
+   New behavior:
+   - `bench_client` outputs per-payload latency with the output payload
+   attached, so the benchmark can choose to graph partition outputs onto
+   separate graphs based on request type
+   - Latency can be fed into `compute_throughput_latency` to generate part
+   of the latency histogram and batched throughput numbers (`BenchResult`).
+   - The protocol's benchmark client has flexibility on when to calculate
+   latency (and any other metric), and which aggregator to feed the results
+   to.
+   - `BenchResult` is fed to `print_bench_results` so the aggregator prints
+   throughput/latency once per second.
+   
+   ## Note
+   `bench_client` contains an unused variable in `sliced!` because `sliced`
+   requires at least 1 `use` statement. The error is currently suppressed
+   but the requirement should probably be removed from `sliced`?
+ - <csr-id-59f5216642e3f08eae896ea67cfc5b213ad86e4a/> port `bench_client` to use sliced!, introduce `Stream::merge_ordered`
+   This also fixes a bug where the throughput reset timer would cause a
+   batch of payloads to be not counted in the throughput.
+   
+   We add support for tick-cycles / `use::state` to `Optional` and
+   `KeyedSingleton` to support this code more cleanly.
+   
+   To further simplify the code, we add `merge_ordered` to combine two
+   streams while preserving order. This makes it possible to implement
+   throughput windowing without slices.
+ - <csr-id-fcce19b958bbc39ccef94277ca146baafc98ce59/> port quorum to use `sliced!`
+
+### Chore (BREAKING)
+
+ - <csr-id-efaa8f61c124c4b3c691b92a58df1686751cf45c/> update pinned rust to 1.92, add lints/fixes for redundant cloning, string handling
+   Somewhat waiting on https://github.com/hydro-project/stageleft/pull/56
+   to be published
+
+### New Features (BREAKING)
+
+ - <csr-id-0a8ae174c0752eca16e13ca5ac9d40d4ae3ebd37/> refactor atomic() to generate tick IDs internally with union-find unification
+   Breaking Change: Previously, `.atomic(&tick)` required passing an
+   existing `Tick` reference. Now `.atomic()` takes no arguments and
+   internally generates a fresh `ClockId`. When performing `batch_atomic`
+   or `snapshot_atomic`, you must pass in a `Tick` where the output will be emitted.
+   
+   Before emitting DFIR, a union-find pass traverses the IR to unify tick
+   IDs connected through `Batch` and `YieldConcat` nodes at atomic
+   boundaries, then rewrites all `LocationId`s to use the representative
+   tick ID.
+   
+   Key changes:
+   
+   1. **atomic() signatures** (Stream, Singleton, Optional, KeyedSingleton,
+   KeyedStream): Removed `tick: &Tick<L>` parameter; each now calls
+   `self.location.flow_state().borrow_mut().next_clock_id()` to generate a
+   fresh tick internally.
+   
+   2. **Union-find pass** (`unify_atomic_ticks` in compile/ir/mod.rs):
+   - Pass 1: traverses IR bottom-up, unifying tick IDs on both sides of
+   `Batch` and `YieldConcat` nodes where both sides have ticks.
+   - Pass 2: rewrites all `LocationId`s to use the representative tick ID.
+   Called from both `ir::emit()` and `sim::flow` before DFIR generation.
+   
+   3. **Sliced macro** (sliced/style.rs): Removed `assert_eq!(tick.id(),
+   ...)` assertions from all atomic `Slicable::slice()` impls since tick
+   unification now handles matching.
+   
+   4. **Call site updates**: All `.atomic(&tick)` calls updated to
+   `.atomic()`. Unused tick variables removed where they were only used for
+   atomic().
+   
+   5. **Documentation updates**: Updated doc comments on `Atomic` struct,
+   atomicity.mdx reference docs, single-counter.mdx quickstart, and
+   slices-atomicity index. Removed references to `atomic(&tick)` pattern.
+   
+   6. **Compile-fail tests**: Updated source and regenerated stderr for
+   `sliced_missing_arg` test (both nightly and stable variants).
+ - <csr-id-e91d1584f29d04cf4778c911127f80bb53059ff8/> Refactor filter_is_some/none to filter_is_true/false, added boolean support operators (equals, and, or)
+   Breaking Changes: All references to `filter_is_some` and
+   `filter_is_none` replaced with `filter_if`. Use negation `!` to flip a
+   singleton from true to false & vice versa.
+ - <csr-id-4d628dc323c14a8ca08cc68ef782da515dc64150/> implement support for clusters and cluster networking in embedded mode
+   Breaking Change: cluster networking APIs in `Deploy` trait now take the
+   `InstantiateEnv`, and `cluster_membership_stream` takes the location
+   where the stream is being materialized. Also eliminates `D: Deploy` type
+   parameter for IR emit logic.
+ - <csr-id-83a1221e04be1aad10679ae41ae041a247db44bb/> require explicit failure policy for TCP channels
+   Currently, we only offer `fail_stop` as a policy, which was the implicit
+   default TCP guarantees thus far.
+ - <csr-id-3f8e1c7c91037f98971989d5e0f2c65b65326ddb/> bench_client time series
+   Instead of outputting throughput and latency aggregated across time
+   (which hides any blips in throughput/latency), output metrics based that
+   only contain data for that time interval.
+ - <csr-id-30167649b29b1c199a14daabc796950d1a588297/> Join consistent naming
+   Create operations to `join` and `lookup` between Stream, KeyedSingleton,
+   and KeyedStream, and rename confusing operations.
+   
+   - `get_many`: Now `join_keyed_singleton`
+   - `get_many_if_present`: Now `join_keyed_stream`
+   - `get_from`: Now `lookup_keyed_singleton` (and also
+   `lookup_keyed_stream`)
+ - <csr-id-d8ebb19948c65e13276539a3e6b99041407b64e9/> unify remaining stream / keyed stream APIs using properties
+   Breaking Changes:
+   - All `_commutative` and `_idempotent` APIs have been removed. You
+   should now directly use `.fold` or `.reduce ` with property annotations
+   - All deprecated `fold_keyed` / `reduce_keyed` APIs have been removed
+ - <csr-id-101c7c70c3381d181241ce7c648e4f70e12f589b/> unify `fold` API by using Stageleft properties to track commutativity and idempotence
+   With support for property annotations in Stageleft, we can now eliminate
+   the `_commutative` and `_idempotent` variations of `fold` and instead
+   require a `commutative = ...` or `idempotent = ...` annotation next to
+   the UDF. This also paves the path for configurable verification methods
+   such as Kani.
+
+### Refactor (BREAKING)
+
+ - <csr-id-502e26470cbc5f9c645d7907eb6addf95b5c5533/> Refactor client_aggregator so printing is a separate function
+   Preparing for a custom throughput/latency printer in hydro_optimize so I
+   can parse the results
+ - <csr-id-1b947b3dab7a93fcb83b732eca968c3f2b049301/> convert locations (Cluster/Process/External) to use slotmaps, new key type
+   This improves code quality by ensuring `LocationKey` types are
+   explicitly locations intead of magic `usize` fields.
+
+### Commit Statistics
+
+<csr-read-only-do-not-edit/>
+
+ - 26 commits contributed to the release.
+ - 156 days passed between releases.
+ - 26 commits were understood as [conventional](https://www.conventionalcommits.org).
+ - 26 unique issues were worked on: [#2330](https://github.com/hydro-project/hydro/issues/2330), [#2373](https://github.com/hydro-project/hydro/issues/2373), [#2379](https://github.com/hydro-project/hydro/issues/2379), [#2381](https://github.com/hydro-project/hydro/issues/2381), [#2394](https://github.com/hydro-project/hydro/issues/2394), [#2400](https://github.com/hydro-project/hydro/issues/2400), [#2405](https://github.com/hydro-project/hydro/issues/2405), [#2412](https://github.com/hydro-project/hydro/issues/2412), [#2435](https://github.com/hydro-project/hydro/issues/2435), [#2465](https://github.com/hydro-project/hydro/issues/2465), [#2492](https://github.com/hydro-project/hydro/issues/2492), [#2508](https://github.com/hydro-project/hydro/issues/2508), [#2522](https://github.com/hydro-project/hydro/issues/2522), [#2525](https://github.com/hydro-project/hydro/issues/2525), [#2531](https://github.com/hydro-project/hydro/issues/2531), [#2550](https://github.com/hydro-project/hydro/issues/2550), [#2554](https://github.com/hydro-project/hydro/issues/2554), [#2558](https://github.com/hydro-project/hydro/issues/2558), [#2578](https://github.com/hydro-project/hydro/issues/2578), [#2607](https://github.com/hydro-project/hydro/issues/2607), [#2614](https://github.com/hydro-project/hydro/issues/2614), [#2619](https://github.com/hydro-project/hydro/issues/2619), [#2626](https://github.com/hydro-project/hydro/issues/2626), [#2669](https://github.com/hydro-project/hydro/issues/2669), [#2692](https://github.com/hydro-project/hydro/issues/2692), [#2700](https://github.com/hydro-project/hydro/issues/2700)
+
+### Commit Details
+
+<csr-read-only-do-not-edit/>
+
+<details><summary>view details</summary>
+
+ * **[#2330](https://github.com/hydro-project/hydro/issues/2330)**
+    - Add tagless member ids, add docker member id ([`3f65882`](https://github.com/hydro-project/hydro/commit/3f65882e04633cb92a2e6ac52edff81a26b35320))
+ * **[#2373](https://github.com/hydro-project/hydro/issues/2373)**
+    - Add `use::state` syntax for stateful `sliced!` ([`853db69`](https://github.com/hydro-project/hydro/commit/853db69e4487ae9c097fe838f05e9447c736ec98))
+ * **[#2379](https://github.com/hydro-project/hydro/issues/2379)**
+    - Port `request_response` to use `sliced!` and add simulation tests ([`b69438c`](https://github.com/hydro-project/hydro/commit/b69438cc963f26a8109b227b2755ab9ba1817d51))
+ * **[#2381](https://github.com/hydro-project/hydro/issues/2381)**
+    - Port quorum to use `sliced!` ([`fcce19b`](https://github.com/hydro-project/hydro/commit/fcce19b958bbc39ccef94277ca146baafc98ce59))
+ * **[#2394](https://github.com/hydro-project/hydro/issues/2394)**
+    - Port `bench_client` to use sliced!, introduce `Stream::merge_ordered` ([`59f5216`](https://github.com/hydro-project/hydro/commit/59f5216642e3f08eae896ea67cfc5b213ad86e4a))
+ * **[#2400](https://github.com/hydro-project/hydro/issues/2400)**
+    - Make network channels configurable with a generic `Stream::send` API ([`708e835`](https://github.com/hydro-project/hydro/commit/708e835452958120edce77cd693bd8fb1cb6c48c))
+ * **[#2405](https://github.com/hydro-project/hydro/issues/2405)**
+    - Unify `fold` API by using Stageleft properties to track commutativity and idempotence ([`101c7c7`](https://github.com/hydro-project/hydro/commit/101c7c70c3381d181241ce7c648e4f70e12f589b))
+ * **[#2412](https://github.com/hydro-project/hydro/issues/2412)**
+    - Unify remaining stream / keyed stream APIs using properties ([`d8ebb19`](https://github.com/hydro-project/hydro/commit/d8ebb19948c65e13276539a3e6b99041407b64e9))
+ * **[#2435](https://github.com/hydro-project/hydro/issues/2435)**
+    - Generalize bench_client ([`2f38e7e`](https://github.com/hydro-project/hydro/commit/2f38e7eddf0363f818aa4b204c7bf549c317428a))
+ * **[#2465](https://github.com/hydro-project/hydro/issues/2465)**
+    - Convert locations (Cluster/Process/External) to use slotmaps, new key type ([`1b947b3`](https://github.com/hydro-project/hydro/commit/1b947b3dab7a93fcb83b732eca968c3f2b049301))
+ * **[#2492](https://github.com/hydro-project/hydro/issues/2492)**
+    - Join consistent naming ([`3016764`](https://github.com/hydro-project/hydro/commit/30167649b29b1c199a14daabc796950d1a588297))
+ * **[#2508](https://github.com/hydro-project/hydro/issues/2508)**
+    - Introduce `Weaker{Ordering/Retries}Than` to simplify stream weakening ([`0b31dbb`](https://github.com/hydro-project/hydro/commit/0b31dbbb079f4c4a3dd6445a4ac92af98aaab6f9))
+ * **[#2522](https://github.com/hydro-project/hydro/issues/2522)**
+    - Refactor client_aggregator so printing is a separate function ([`502e264`](https://github.com/hydro-project/hydro/commit/502e26470cbc5f9c645d7907eb6addf95b5c5533))
+ * **[#2525](https://github.com/hydro-project/hydro/issues/2525)**
+    - Update pinned rust to 1.92, add lints/fixes for redundant cloning, string handling ([`efaa8f6`](https://github.com/hydro-project/hydro/commit/efaa8f61c124c4b3c691b92a58df1686751cf45c))
+ * **[#2531](https://github.com/hydro-project/hydro/issues/2531)**
+    - Improve quality of error spans in `sliced!` macro ([`1866677`](https://github.com/hydro-project/hydro/commit/1866677da0a5b71e48d7b1cdf9442ee66d0f1e23))
+ * **[#2550](https://github.com/hydro-project/hydro/issues/2550)**
+    - Require explicit failure policy for TCP channels ([`83a1221`](https://github.com/hydro-project/hydro/commit/83a1221e04be1aad10679ae41ae041a247db44bb))
+ * **[#2554](https://github.com/hydro-project/hydro/issues/2554)**
+    - Bench_client time series ([`3f8e1c7`](https://github.com/hydro-project/hydro/commit/3f8e1c7c91037f98971989d5e0f2c65b65326ddb))
+ * **[#2558](https://github.com/hydro-project/hydro/issues/2558)**
+    - Latency calculation fix ([`117d617`](https://github.com/hydro-project/hydro/commit/117d617a76ef11a88df1c069bc2edac0067c080c))
+ * **[#2578](https://github.com/hydro-project/hydro/issues/2578)**
+    - Implement support for clusters and cluster networking in embedded mode ([`4d628dc`](https://github.com/hydro-project/hydro/commit/4d628dc323c14a8ca08cc68ef782da515dc64150))
+ * **[#2607](https://github.com/hydro-project/hydro/issues/2607)**
+    - Add `manual_proof!` macro that accepts doc comments ([`08cb0ed`](https://github.com/hydro-project/hydro/commit/08cb0ed12b213bc9a6ef449095cb89a69adc84ab))
+ * **[#2614](https://github.com/hydro-project/hydro/issues/2614)**
+    - Allow passing runtime environment variables and use for benchmarking ([`fad81f0`](https://github.com/hydro-project/hydro/commit/fad81f0f79bac3d7524165df515fd746af148bfb))
+ * **[#2619](https://github.com/hydro-project/hydro/issues/2619)**
+    - Refactor filter_is_some/none to filter_is_true/false, added boolean support operators (equals, and, or) ([`e91d158`](https://github.com/hydro-project/hydro/commit/e91d1584f29d04cf4778c911127f80bb53059ff8))
+ * **[#2626](https://github.com/hydro-project/hydro/issues/2626)**
+    - Bench_client realistic latency measurements ([`661c72a`](https://github.com/hydro-project/hydro/commit/661c72a402d0a9f102e73772e6cc377ae92c73fc))
+ * **[#2669](https://github.com/hydro-project/hydro/issues/2669)**
+    - Rename `interleave` to `merge_unordered` for symmetry with `merge_ordered` ([`7fddc97`](https://github.com/hydro-project/hydro/commit/7fddc970b30538f2373007fab080d35444178fa5))
+ * **[#2692](https://github.com/hydro-project/hydro/issues/2692)**
+    - Refactor atomic() to generate tick IDs internally with union-find unification ([`0a8ae17`](https://github.com/hydro-project/hydro/commit/0a8ae174c0752eca16e13ca5ac9d40d4ae3ebd37))
+ * **[#2700](https://github.com/hydro-project/hydro/issues/2700)**
+    - Virtual clients off-by-one error ([`f104f2b`](https://github.com/hydro-project/hydro/commit/f104f2b3d4f78ccd05465d2af69b1be34d5ea7a5))
+</details>
+
 ## v0.15.0 (2025-11-25)
 
 <csr-id-0be5729dd87a91a70001f88283b380d3da8df7d0/>
@@ -295,7 +562,8 @@
 
 <csr-read-only-do-not-edit/>
 
- - 38 commits contributed to the release.
+ - 39 commits contributed to the release.
+ - 117 days passed between releases.
  - 36 commits were understood as [conventional](https://www.conventionalcommits.org).
  - 36 unique issues were worked on: [#1970](https://github.com/hydro-project/hydro/issues/1970), [#1975](https://github.com/hydro-project/hydro/issues/1975), [#1983](https://github.com/hydro-project/hydro/issues/1983), [#1984](https://github.com/hydro-project/hydro/issues/1984), [#1990](https://github.com/hydro-project/hydro/issues/1990), [#1995](https://github.com/hydro-project/hydro/issues/1995), [#2011](https://github.com/hydro-project/hydro/issues/2011), [#2016](https://github.com/hydro-project/hydro/issues/2016), [#2028](https://github.com/hydro-project/hydro/issues/2028), [#2032](https://github.com/hydro-project/hydro/issues/2032), [#2033](https://github.com/hydro-project/hydro/issues/2033), [#2035](https://github.com/hydro-project/hydro/issues/2035), [#2060](https://github.com/hydro-project/hydro/issues/2060), [#2067](https://github.com/hydro-project/hydro/issues/2067), [#2073](https://github.com/hydro-project/hydro/issues/2073), [#2075](https://github.com/hydro-project/hydro/issues/2075), [#2099](https://github.com/hydro-project/hydro/issues/2099), [#2104](https://github.com/hydro-project/hydro/issues/2104), [#2108](https://github.com/hydro-project/hydro/issues/2108), [#2111](https://github.com/hydro-project/hydro/issues/2111), [#2135](https://github.com/hydro-project/hydro/issues/2135), [#2136](https://github.com/hydro-project/hydro/issues/2136), [#2140](https://github.com/hydro-project/hydro/issues/2140), [#2158](https://github.com/hydro-project/hydro/issues/2158), [#2172](https://github.com/hydro-project/hydro/issues/2172), [#2173](https://github.com/hydro-project/hydro/issues/2173), [#2181](https://github.com/hydro-project/hydro/issues/2181), [#2209](https://github.com/hydro-project/hydro/issues/2209), [#2219](https://github.com/hydro-project/hydro/issues/2219), [#2227](https://github.com/hydro-project/hydro/issues/2227), [#2243](https://github.com/hydro-project/hydro/issues/2243), [#2256](https://github.com/hydro-project/hydro/issues/2256), [#2265](https://github.com/hydro-project/hydro/issues/2265), [#2272](https://github.com/hydro-project/hydro/issues/2272), [#2293](https://github.com/hydro-project/hydro/issues/2293), [#2304](https://github.com/hydro-project/hydro/issues/2304)
 
@@ -378,6 +646,7 @@
  * **[#2304](https://github.com/hydro-project/hydro/issues/2304)**
     - Add specialized `sim_input` / `sim_output` to reduce simulation boilerplate ([`6b1d66a`](https://github.com/hydro-project/hydro/commit/6b1d66aa61056ffb4dd2896e98288489e64d654f))
  * **Uncategorized**
+    - Release copy_span v0.1.0, hydro_deploy v0.15.0, hydro_lang v0.15.0, hydro_std v0.15.0 ([`bdfd6e0`](https://github.com/hydro-project/hydro/commit/bdfd6e0d10a49f1b6c45f9514982a1c60da80b9f))
     - Release sinktools v0.0.1, hydro_deploy_integration v0.15.0, lattices_macro v0.5.11, variadics_macro v0.6.2, lattices v0.6.2, multiplatform_test v0.6.0, dfir_rs v0.15.0, copy_span v0.1.0, hydro_deploy v0.15.0, hydro_lang v0.15.0, hydro_std v0.15.0 ([`ac88df1`](https://github.com/hydro-project/hydro/commit/ac88df1e98af9fa2027488252f6014efa7bef229))
     - Release hydro_build_utils v0.0.1, dfir_lang v0.15.0, dfir_macro v0.15.0, variadics v0.0.10, sinktools v0.0.1, hydro_deploy_integration v0.15.0, lattices_macro v0.5.11, variadics_macro v0.6.2, lattices v0.6.2, multiplatform_test v0.6.0, dfir_rs v0.15.0, copy_span v0.1.0, hydro_deploy v0.15.0, hydro_lang v0.15.0, hydro_std v0.15.0, safety bump 5 crates ([`092de25`](https://github.com/hydro-project/hydro/commit/092de252238dfb9fa6b01e777c6dd8bf9db93398))
 </details>

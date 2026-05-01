@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.7.0 (2026-05-01)
+
+### Chore
+
+ - <csr-id-e26d40c96f0aa022ee90388aad0a51ecd23ae345/> remove unused deps
+
+### Bug Fixes
+
+ - <csr-id-c16e13a8bdae3b099d498f9b7f1f43872cfdc939/> flag non-determinstic hashmap iterators, fix hydro_lang codegen nondeterminism fix #2464
+   Out of an abundance of caution, the `hydro_lang` IR `Demux` variants
+   containing `HashMap<u32 ...>` have been replaced with `BTreeMap`
+
+### Style
+
+ - <csr-id-1c8f85366c592b2768df65ba1ee2e98d2c06d496/> leading colons to workaround rustfmt change
+   Workaround change introduced in
+   https://github.com/rust-lang/rustfmt/pull/6784
+
+### Chore (BREAKING)
+
+ - <csr-id-efaa8f61c124c4b3c691b92a58df1686751cf45c/> update pinned rust to 1.92, add lints/fixes for redundant cloning, string handling
+   Somewhat waiting on https://github.com/hydro-project/stageleft/pull/56
+   to be published
+
+### Commit Statistics
+
+<csr-read-only-do-not-edit/>
+
+ - 4 commits contributed to the release over the course of 104 calendar days.
+ - 156 days passed between releases.
+ - 4 commits were understood as [conventional](https://www.conventionalcommits.org).
+ - 4 unique issues were worked on: [#2448](https://github.com/hydro-project/hydro/issues/2448), [#2511](https://github.com/hydro-project/hydro/issues/2511), [#2525](https://github.com/hydro-project/hydro/issues/2525), [#2623](https://github.com/hydro-project/hydro/issues/2623)
+
+### Commit Details
+
+<csr-read-only-do-not-edit/>
+
+<details><summary>view details</summary>
+
+ * **[#2448](https://github.com/hydro-project/hydro/issues/2448)**
+    - Remove unused deps ([`e26d40c`](https://github.com/hydro-project/hydro/commit/e26d40c96f0aa022ee90388aad0a51ecd23ae345))
+ * **[#2511](https://github.com/hydro-project/hydro/issues/2511)**
+    - Flag non-determinstic hashmap iterators, fix hydro_lang codegen nondeterminism fix #2464 ([`c16e13a`](https://github.com/hydro-project/hydro/commit/c16e13a8bdae3b099d498f9b7f1f43872cfdc939))
+ * **[#2525](https://github.com/hydro-project/hydro/issues/2525)**
+    - Update pinned rust to 1.92, add lints/fixes for redundant cloning, string handling ([`efaa8f6`](https://github.com/hydro-project/hydro/commit/efaa8f61c124c4b3c691b92a58df1686751cf45c))
+ * **[#2623](https://github.com/hydro-project/hydro/issues/2623)**
+    - Leading colons to workaround rustfmt change ([`1c8f853`](https://github.com/hydro-project/hydro/commit/1c8f85366c592b2768df65ba1ee2e98d2c06d496))
+</details>
+
 ## 0.6.2 (2025-11-25)
 
 <csr-id-97426b8a7e3b3af8a58b4c44c768c3f48cd0ed71/>
@@ -38,7 +87,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <csr-read-only-do-not-edit/>
 
- - 6 commits contributed to the release.
+ - 7 commits contributed to the release.
+ - 255 days passed between releases.
  - 5 commits were understood as [conventional](https://www.conventionalcommits.org).
  - 4 unique issues were worked on: [#2024](https://github.com/hydro-project/hydro/issues/2024), [#2028](https://github.com/hydro-project/hydro/issues/2028), [#2157](https://github.com/hydro-project/hydro/issues/2157), [#2271](https://github.com/hydro-project/hydro/issues/2271)
 
@@ -57,6 +107,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
  * **[#2271](https://github.com/hydro-project/hydro/issues/2271)**
     - Add efficient tombstone storage for lattices (RoaringBitmap + FST) ([`1f05026`](https://github.com/hydro-project/hydro/commit/1f05026c2d695522713b152e3b872455e1c1b439))
  * **Uncategorized**
+    - Release sinktools v0.0.1, hydro_deploy_integration v0.15.0, lattices_macro v0.5.11, variadics_macro v0.6.2, lattices v0.6.2, multiplatform_test v0.6.0, dfir_rs v0.15.0, copy_span v0.1.0, hydro_deploy v0.15.0, hydro_lang v0.15.0, hydro_std v0.15.0 ([`ac88df1`](https://github.com/hydro-project/hydro/commit/ac88df1e98af9fa2027488252f6014efa7bef229))
     - Release hydro_build_utils v0.0.1, dfir_lang v0.15.0, dfir_macro v0.15.0, variadics v0.0.10, sinktools v0.0.1, hydro_deploy_integration v0.15.0, lattices_macro v0.5.11, variadics_macro v0.6.2, lattices v0.6.2, multiplatform_test v0.6.0, dfir_rs v0.15.0, copy_span v0.1.0, hydro_deploy v0.15.0, hydro_lang v0.15.0, hydro_std v0.15.0, safety bump 5 crates ([`092de25`](https://github.com/hydro-project/hydro/commit/092de252238dfb9fa6b01e777c6dd8bf9db93398))
     - Ensure `hydro_build_utils` is published in the correct order ([`806a623`](https://github.com/hydro-project/hydro/commit/806a6239a649e24fe10c3c90dd30bd18debd41d2))
 </details>
@@ -517,9 +568,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Release hydroflow_lang v0.7.0, hydroflow_datalog_core v0.7.0, hydroflow_datalog v0.7.0, hydroflow_macro v0.7.0, lattices v0.5.5, multiplatform_test v0.1.0, pusherator v0.0.6, hydroflow v0.7.0, stageleft_macro v0.2.0, stageleft v0.3.0, stageleft_tool v0.2.0, hydroflow_plus v0.7.0, hydro_deploy v0.7.0, hydro_cli v0.7.0, hydroflow_plus_cli_integration v0.7.0, safety bump 8 crates ([`855fda6`](https://github.com/hydro-project/hydro/commit/855fda65442ad7a9074a099ecc29e74322332418))
     - Definitions of linearity and bilinearity in algebra lib ([`41bf0a7`](https://github.com/hydro-project/hydro/commit/41bf0a78b97c1373724af6063aff5c4133e8dbdd))
 </details>
-
-<csr-unknown>
-Min<T>: T is not a latticeset_union<T>: is not a latticemap_union - not safe to expose mapunion_find<K> - K is not a latticeVecUnion<Lat> - not safe to expose vecWithTop<Lat>/WithBot<Lat> - already pubPair<LatA, LatB> - Changed in this commitDomPair<LatKey, LatVal> - Already correctly done with left pub andright private.Conflict<T> / Point<T> - T is not a lattice type.() - No nested types here.<csr-unknown/>
 
 ## 0.5.4 (2024-04-05)
 
@@ -1010,9 +1058,6 @@ Unchanged from previous release.
     - Add `Seq` lattice. ([`d9a60d0`](https://github.com/hydro-project/hydro/commit/d9a60d0196c2e48ed1764c828086a3f3b3b5d25b))
 </details>
 
-<csr-unknown>
-Use () provenance for kvs_bench example.<csr-unknown/>
-
 ## 0.2.0 (2023-05-31)
 
 <csr-id-fd896fbe925fbd8ef1d16be7206ac20ba585081a/>
@@ -1206,9 +1251,6 @@ Use () provenance for kvs_bench example.<csr-unknown/>
  * **Uncategorized**
     - Release hydroflow_cli_integration v0.0.1, hydroflow_lang v0.0.1, hydroflow_datalog_core v0.0.1, hydroflow_datalog v0.0.1, hydroflow_macro v0.0.1, lattices v0.1.0, variadics v0.0.2, pusherator v0.0.1, hydroflow v0.0.2 ([`d91ebc9`](https://github.com/hydro-project/hydro/commit/d91ebc9e8e23965089c929558a09fc430ee72f2c))
 </details>
-
-<csr-unknown>
-Adds mdbook-katex to the book build for latex support.Update mdbook-* plugins.Moves most lattice implementations to the top level of the crateto eliminate redundant documentation.<csr-unknown/>
 
 ## 0.0.0 (2023-05-02)
 

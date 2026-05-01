@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.7.0 (2026-05-01)
+
+### Refactor
+
+ - <csr-id-ed38dd72aaeec449e35c4324d96ffef55cedf0a4/> convert pull from Iterator to Stream to support async yielding [ci-bench]
+
+### Commit Statistics
+
+<csr-read-only-do-not-edit/>
+
+ - 1 commit contributed to the release.
+ - 156 days passed between releases.
+ - 1 commit was understood as [conventional](https://www.conventionalcommits.org).
+ - 1 unique issue was worked on: [#2338](https://github.com/hydro-project/hydro/issues/2338)
+
+### Commit Details
+
+<csr-read-only-do-not-edit/>
+
+<details><summary>view details</summary>
+
+ * **[#2338](https://github.com/hydro-project/hydro/issues/2338)**
+    - Convert pull from Iterator to Stream to support async yielding [ci-bench] ([`ed38dd7`](https://github.com/hydro-project/hydro/commit/ed38dd72aaeec449e35c4324d96ffef55cedf0a4))
+</details>
+
 ## 0.6.0 (2025-11-25)
 
 <csr-id-e5d90803ae16993ac3db24a7795d0864abc4ac52/>
@@ -17,7 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <csr-read-only-do-not-edit/>
 
- - 2 commits contributed to the release.
+ - 3 commits contributed to the release.
+ - 262 days passed between releases.
  - 1 commit was understood as [conventional](https://www.conventionalcommits.org).
  - 1 unique issue was worked on: [#2087](https://github.com/hydro-project/hydro/issues/2087)
 
@@ -30,6 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
  * **[#2087](https://github.com/hydro-project/hydro/issues/2087)**
     - Update wasm ([`e5d9080`](https://github.com/hydro-project/hydro/commit/e5d90803ae16993ac3db24a7795d0864abc4ac52))
  * **Uncategorized**
+    - Release sinktools v0.0.1, hydro_deploy_integration v0.15.0, lattices_macro v0.5.11, variadics_macro v0.6.2, lattices v0.6.2, multiplatform_test v0.6.0, dfir_rs v0.15.0, copy_span v0.1.0, hydro_deploy v0.15.0, hydro_lang v0.15.0, hydro_std v0.15.0 ([`ac88df1`](https://github.com/hydro-project/hydro/commit/ac88df1e98af9fa2027488252f6014efa7bef229))
     - Release hydro_build_utils v0.0.1, dfir_lang v0.15.0, dfir_macro v0.15.0, variadics v0.0.10, sinktools v0.0.1, hydro_deploy_integration v0.15.0, lattices_macro v0.5.11, variadics_macro v0.6.2, lattices v0.6.2, multiplatform_test v0.6.0, dfir_rs v0.15.0, copy_span v0.1.0, hydro_deploy v0.15.0, hydro_lang v0.15.0, hydro_std v0.15.0, safety bump 5 crates ([`092de25`](https://github.com/hydro-project/hydro/commit/092de252238dfb9fa6b01e777c6dd8bf9db93398))
 </details>
 
