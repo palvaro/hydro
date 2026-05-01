@@ -111,8 +111,9 @@ impl Debug for OperatorConstraints {
 }
 
 /// The code generated and returned by a [`OperatorConstraints::write_fn`].
+/// **Important**: When destructuring this struct in delegating operators, list all fields
+/// explicitly rather than using `..` to ensure new fields are not silently dropped.
 #[derive(Default)]
-#[non_exhaustive]
 pub struct OperatorWriteOutput {
     /// Code which runs once outside any subgraphs, BEFORE subgraphs are initialized,
     /// to set up any external state (state API, chanels, network connections, etc.)
@@ -130,6 +131,9 @@ pub struct OperatorWriteOutput {
     pub write_iterator: TokenStream,
     /// Code which runs after `Stream`s/`Sink`s have been run. Mainly for flushing IO.
     pub write_iterator_after: TokenStream,
+    /// Code which runs at the end of each tick, after all subgraphs have run.
+    /// Used for resetting state with `'tick` persistence.
+    pub write_tick_end: TokenStream,
 }
 
 /// Convenience range: zero or more (any number).
@@ -428,7 +432,7 @@ pub struct WriteContextArgs<'a> {
     /// These arguments include singleton postprocessing codegen, with
     /// [`std::cell::RefCell::borrow_mut`] code pre-generated.
     pub arguments: &'a Punctuated<Expr, Token![,]>,
-    /// Same as [`Self::arguments`] but with only `StateHandle`s, no borrowing code.
+    /// Same as [`Self::arguments`] but with only raw idents, no borrowing code.
     pub arguments_handles: &'a Punctuated<Expr, Token![,]>,
 }
 impl WriteContextArgs<'_> {
