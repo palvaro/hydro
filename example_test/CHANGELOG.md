@@ -2,6 +2,8 @@
 
 ## v0.0.1 (2026-05-01)
 
+<csr-id-df128eb7b093d3bd275349b83813c83d2d8929a5/>
+
 ### Chore
 
  - <csr-id-df128eb7b093d3bd275349b83813c83d2d8929a5/> run `compute_pi` test without optimizations
@@ -16,7 +18,7 @@
 
 <csr-read-only-do-not-edit/>
 
- - 2 commits contributed to the release.
+ - 3 commits contributed to the release.
  - 274 days passed between releases.
  - 2 commits were understood as [conventional](https://www.conventionalcommits.org).
  - 2 unique issues were worked on: [#2461](https://github.com/hydro-project/hydro/issues/2461), [#2483](https://github.com/hydro-project/hydro/issues/2483)
@@ -31,6 +33,8 @@
     - Run `compute_pi` test without optimizations ([`df128eb`](https://github.com/hydro-project/hydro/commit/df128eb7b093d3bd275349b83813c83d2d8929a5))
  * **[#2483](https://github.com/hydro-project/hydro/issues/2483)**
     - Use `trybuild-internals-api` to forward features and avoid re-compilation ([`9b98d48`](https://github.com/hydro-project/hydro/commit/9b98d4858c8f0a13f19076e87f633f66f7636455))
+ * **Uncategorized**
+    - Release hydro_build_utils v0.1.0, dfir_lang v0.16.0, dfir_macro v0.16.0, variadics v0.1.0, dfir_pipes v0.0.1, example_test v0.0.1, sinktools v0.1.0, hydro_deploy_integration v0.16.0, lattices_macro v0.6.0, variadics_macro v0.7.0, lattices v0.7.0, multiplatform_test v0.7.0, dfir_rs v0.16.0, copy_span v0.1.1, hydro_deploy v0.16.0, hydro_lang v0.16.0, hydro_std v0.16.0, safety bump 13 crates ([`c20757a`](https://github.com/hydro-project/hydro/commit/c20757ae0e9e10463b2a499de4b7d37ab02269d0))
 </details>
 
 ## v0.0.0 (2025-07-31)

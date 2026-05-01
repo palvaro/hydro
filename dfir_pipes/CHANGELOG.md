@@ -2,9 +2,20 @@
 
 ## v0.0.1 (2026-05-01)
 
+<csr-id-bbe8617b47a059d36e55ac1be1940023083cf6cb/>
+<csr-id-be35ffa266cf564cf967bb653720dc664b24b813/>
+<csr-id-d0f9d3b5ae0b281401c78702f28399fcec5a6fcd/>
+<csr-id-f76b0224d62af0d4ac34a7386e45c52d4f58a81a/>
+<csr-id-db8d7f1a7fb2556302d92ff77dbb40beef8f3a44/>
+<csr-id-3e6e26c4cc87d6f7857591b10876074cba97caff/>
+
 ### Chore
 
  - <csr-id-bbe8617b47a059d36e55ac1be1940023083cf6cb/> prepare for release
+
+### Chore
+
+ - <csr-id-c9d078e533de7ee7d85b5f4c31c9cc049fb230e3/> fix dfir_pipes/Cargo.toml
 
 ### New Features
 
@@ -128,12 +139,12 @@
    `Pull` trait. Key to this more powerful iterator trait is the step enum:
    ```rust
    pub enum Step<Item, Meta, CanPend: Toggle, CanEnd: Toggle> {
-       /// An item is ready with associated metadata.
-       Ready(Item, Meta),
-       /// The pull is not ready yet (only possible when `CanPend = Yes`).
-       Pending(CanPend),
-       /// The pull has ended (only possible when `CanEnd = Yes`).
-       Ended(CanEnd),
+   /// An item is ready with associated metadata.
+   Ready(Item, Meta),
+   /// The pull is not ready yet (only possible when `CanPend = Yes`).
+   Pending(CanPend),
+   /// The pull has ended (only possible when `CanEnd = Yes`).
+   Ended(CanEnd),
    }
    ```
    This abstraction allows `Pull` to represent both synchronous `Iterator`s
@@ -171,8 +182,8 @@
 
 <csr-read-only-do-not-edit/>
 
- - 17 commits contributed to the release.
- - 17 commits were understood as [conventional](https://www.conventionalcommits.org).
+ - 19 commits contributed to the release.
+ - 18 commits were understood as [conventional](https://www.conventionalcommits.org).
  - 16 unique issues were worked on: [#2618](https://github.com/hydro-project/hydro/issues/2618), [#2644](https://github.com/hydro-project/hydro/issues/2644), [#2665](https://github.com/hydro-project/hydro/issues/2665), [#2666](https://github.com/hydro-project/hydro/issues/2666), [#2671](https://github.com/hydro-project/hydro/issues/2671), [#2673](https://github.com/hydro-project/hydro/issues/2673), [#2674](https://github.com/hydro-project/hydro/issues/2674), [#2675](https://github.com/hydro-project/hydro/issues/2675), [#2678](https://github.com/hydro-project/hydro/issues/2678), [#2680](https://github.com/hydro-project/hydro/issues/2680), [#2681](https://github.com/hydro-project/hydro/issues/2681), [#2682](https://github.com/hydro-project/hydro/issues/2682), [#2683](https://github.com/hydro-project/hydro/issues/2683), [#2684](https://github.com/hydro-project/hydro/issues/2684), [#2686](https://github.com/hydro-project/hydro/issues/2686), [#2710](https://github.com/hydro-project/hydro/issues/2710)
 
 ### Commit Details
@@ -214,6 +225,8 @@
  * **[#2710](https://github.com/hydro-project/hydro/issues/2710)**
     - Add scan_async_blocking operator to hydro_lang and dfir ([`eacc3cd`](https://github.com/hydro-project/hydro/commit/eacc3cd85a0a9bdd70c9f6b9da4da312059f3c5a))
  * **Uncategorized**
+    - Fix dfir_pipes/Cargo.toml ([`c9d078e`](https://github.com/hydro-project/hydro/commit/c9d078e533de7ee7d85b5f4c31c9cc049fb230e3))
+    - Release hydro_build_utils v0.1.0, dfir_lang v0.16.0, dfir_macro v0.16.0, variadics v0.1.0, dfir_pipes v0.0.1, example_test v0.0.1, sinktools v0.1.0, hydro_deploy_integration v0.16.0, lattices_macro v0.6.0, variadics_macro v0.7.0, lattices v0.7.0, multiplatform_test v0.7.0, dfir_rs v0.16.0, copy_span v0.1.1, hydro_deploy v0.16.0, hydro_lang v0.16.0, hydro_std v0.16.0, safety bump 13 crates ([`c20757a`](https://github.com/hydro-project/hydro/commit/c20757ae0e9e10463b2a499de4b7d37ab02269d0))
     - Prepare for release ([`bbe8617`](https://github.com/hydro-project/hydro/commit/bbe8617b47a059d36e55ac1be1940023083cf6cb))
 </details>
 

@@ -2,6 +2,13 @@
 
 ## v0.16.0 (2026-05-01)
 
+<csr-id-2f38e7eddf0363f818aa4b204c7bf549c317428a/>
+<csr-id-59f5216642e3f08eae896ea67cfc5b213ad86e4a/>
+<csr-id-fcce19b958bbc39ccef94277ca146baafc98ce59/>
+<csr-id-efaa8f61c124c4b3c691b92a58df1686751cf45c/>
+<csr-id-502e26470cbc5f9c645d7907eb6addf95b5c5533/>
+<csr-id-1b947b3dab7a93fcb83b732eca968c3f2b049301/>
+
 ### New Features
 
  - <csr-id-7fddc970b30538f2373007fab080d35444178fa5/> rename `interleave` to `merge_unordered` for symmetry with `merge_ordered`
@@ -92,6 +99,22 @@
    throughput/latency once per second.
    
    ## Note
+   `bench_client` contains an unused variable in `sliced!` because `sliced`
+   requires at least 1 `use` statement. The error is currently suppressed
+   but the requirement should probably be removed from `sliced`?
+ - <csr-id-59f5216642e3f08eae896ea67cfc5b213ad86e4a/> port `bench_client` to use sliced!, introduce `Stream::merge_ordered`
+   This also fixes a bug where the throughput reset timer would cause a
+   batch of payloads to be not counted in the throughput.
+   
+   We add support for tick-cycles / `use::state` to `Optional` and
+   `KeyedSingleton` to support this code more cleanly.
+   
+   To further simplify the code, we add `merge_ordered` to combine two
+   streams while preserving order. This makes it possible to implement
+   throughput windowing without slices.
+ - <csr-id-fcce19b958bbc39ccef94277ca146baafc98ce59/> port quorum to use `sliced!`
+
+## Note
    `bench_client` contains an unused variable in `sliced!` because `sliced`
    requires at least 1 `use` statement. The error is currently suppressed
    but the requirement should probably be removed from `sliced`?
@@ -202,7 +225,7 @@
 
 <csr-read-only-do-not-edit/>
 
- - 26 commits contributed to the release.
+ - 27 commits contributed to the release.
  - 156 days passed between releases.
  - 26 commits were understood as [conventional](https://www.conventionalcommits.org).
  - 26 unique issues were worked on: [#2330](https://github.com/hydro-project/hydro/issues/2330), [#2373](https://github.com/hydro-project/hydro/issues/2373), [#2379](https://github.com/hydro-project/hydro/issues/2379), [#2381](https://github.com/hydro-project/hydro/issues/2381), [#2394](https://github.com/hydro-project/hydro/issues/2394), [#2400](https://github.com/hydro-project/hydro/issues/2400), [#2405](https://github.com/hydro-project/hydro/issues/2405), [#2412](https://github.com/hydro-project/hydro/issues/2412), [#2435](https://github.com/hydro-project/hydro/issues/2435), [#2465](https://github.com/hydro-project/hydro/issues/2465), [#2492](https://github.com/hydro-project/hydro/issues/2492), [#2508](https://github.com/hydro-project/hydro/issues/2508), [#2522](https://github.com/hydro-project/hydro/issues/2522), [#2525](https://github.com/hydro-project/hydro/issues/2525), [#2531](https://github.com/hydro-project/hydro/issues/2531), [#2550](https://github.com/hydro-project/hydro/issues/2550), [#2554](https://github.com/hydro-project/hydro/issues/2554), [#2558](https://github.com/hydro-project/hydro/issues/2558), [#2578](https://github.com/hydro-project/hydro/issues/2578), [#2607](https://github.com/hydro-project/hydro/issues/2607), [#2614](https://github.com/hydro-project/hydro/issues/2614), [#2619](https://github.com/hydro-project/hydro/issues/2619), [#2626](https://github.com/hydro-project/hydro/issues/2626), [#2669](https://github.com/hydro-project/hydro/issues/2669), [#2692](https://github.com/hydro-project/hydro/issues/2692), [#2700](https://github.com/hydro-project/hydro/issues/2700)
@@ -265,6 +288,8 @@
     - Refactor atomic() to generate tick IDs internally with union-find unification ([`0a8ae17`](https://github.com/hydro-project/hydro/commit/0a8ae174c0752eca16e13ca5ac9d40d4ae3ebd37))
  * **[#2700](https://github.com/hydro-project/hydro/issues/2700)**
     - Virtual clients off-by-one error ([`f104f2b`](https://github.com/hydro-project/hydro/commit/f104f2b3d4f78ccd05465d2af69b1be34d5ea7a5))
+ * **Uncategorized**
+    - Release hydro_build_utils v0.1.0, dfir_lang v0.16.0, dfir_macro v0.16.0, variadics v0.1.0, dfir_pipes v0.0.1, example_test v0.0.1, sinktools v0.1.0, hydro_deploy_integration v0.16.0, lattices_macro v0.6.0, variadics_macro v0.7.0, lattices v0.7.0, multiplatform_test v0.7.0, dfir_rs v0.16.0, copy_span v0.1.1, hydro_deploy v0.16.0, hydro_lang v0.16.0, hydro_std v0.16.0, safety bump 13 crates ([`c20757a`](https://github.com/hydro-project/hydro/commit/c20757ae0e9e10463b2a499de4b7d37ab02269d0))
 </details>
 
 ## v0.15.0 (2025-11-25)

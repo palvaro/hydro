@@ -2,6 +2,8 @@
 
 ## v0.1.1 (2026-05-01)
 
+<csr-id-6ead0cd2d1d89c393b0e5add7ceae5081c302077/>
+
 ### New Features
 
  - <csr-id-1866677da0a5b71e48d7b1cdf9442ee66d0f1e23/> improve quality of error spans in `sliced!` macro
@@ -18,7 +20,7 @@
 
 <csr-read-only-do-not-edit/>
 
- - 2 commits contributed to the release.
+ - 3 commits contributed to the release.
  - 156 days passed between releases.
  - 2 commits were understood as [conventional](https://www.conventionalcommits.org).
  - 2 unique issues were worked on: [#2530](https://github.com/hydro-project/hydro/issues/2530), [#2531](https://github.com/hydro-project/hydro/issues/2531)
@@ -33,6 +35,8 @@
     - Remove assumption that `use` always has two parameters ([`6ead0cd`](https://github.com/hydro-project/hydro/commit/6ead0cd2d1d89c393b0e5add7ceae5081c302077))
  * **[#2531](https://github.com/hydro-project/hydro/issues/2531)**
     - Improve quality of error spans in `sliced!` macro ([`1866677`](https://github.com/hydro-project/hydro/commit/1866677da0a5b71e48d7b1cdf9442ee66d0f1e23))
+ * **Uncategorized**
+    - Release hydro_build_utils v0.1.0, dfir_lang v0.16.0, dfir_macro v0.16.0, variadics v0.1.0, dfir_pipes v0.0.1, example_test v0.0.1, sinktools v0.1.0, hydro_deploy_integration v0.16.0, lattices_macro v0.6.0, variadics_macro v0.7.0, lattices v0.7.0, multiplatform_test v0.7.0, dfir_rs v0.16.0, copy_span v0.1.1, hydro_deploy v0.16.0, hydro_lang v0.16.0, hydro_std v0.16.0, safety bump 13 crates ([`c20757a`](https://github.com/hydro-project/hydro/commit/c20757ae0e9e10463b2a499de4b7d37ab02269d0))
 </details>
 
 ## v0.1.0 (2025-11-25)

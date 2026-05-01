@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## 0.7.0 (2026-05-01)
 
+<csr-id-ed38dd72aaeec449e35c4324d96ffef55cedf0a4/>
+
 ### Refactor
 
  - <csr-id-ed38dd72aaeec449e35c4324d96ffef55cedf0a4/> convert pull from Iterator to Stream to support async yielding [ci-bench]
@@ -15,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <csr-read-only-do-not-edit/>
 
- - 1 commit contributed to the release.
+ - 2 commits contributed to the release.
  - 156 days passed between releases.
  - 1 commit was understood as [conventional](https://www.conventionalcommits.org).
  - 1 unique issue was worked on: [#2338](https://github.com/hydro-project/hydro/issues/2338)
@@ -28,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
  * **[#2338](https://github.com/hydro-project/hydro/issues/2338)**
     - Convert pull from Iterator to Stream to support async yielding [ci-bench] ([`ed38dd7`](https://github.com/hydro-project/hydro/commit/ed38dd72aaeec449e35c4324d96ffef55cedf0a4))
+ * **Uncategorized**
+    - Release hydro_build_utils v0.1.0, dfir_lang v0.16.0, dfir_macro v0.16.0, variadics v0.1.0, dfir_pipes v0.0.1, example_test v0.0.1, sinktools v0.1.0, hydro_deploy_integration v0.16.0, lattices_macro v0.6.0, variadics_macro v0.7.0, lattices v0.7.0, multiplatform_test v0.7.0, dfir_rs v0.16.0, copy_span v0.1.1, hydro_deploy v0.16.0, hydro_lang v0.16.0, hydro_std v0.16.0, safety bump 13 crates ([`c20757a`](https://github.com/hydro-project/hydro/commit/c20757ae0e9e10463b2a499de4b7d37ab02269d0))
 </details>
 
 ## 0.6.0 (2025-11-25)

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## 0.16.0 (2026-05-01)
 
+<csr-id-d2fcb582cf7836fda546eb9b24fa0d039b3329fb/>
+<csr-id-cb73aea75b6c5c5ec25caa121a04e261be290404/>
+
 ### New Features
 
  - <csr-id-97d32af9c7cbd15882a9b4103baa9bb29491c2ed/> add bidi support for docker containers
@@ -51,7 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <csr-read-only-do-not-edit/>
 
- - 5 commits contributed to the release.
+ - 6 commits contributed to the release.
  - 156 days passed between releases.
  - 5 commits were understood as [conventional](https://www.conventionalcommits.org).
  - 5 unique issues were worked on: [#2370](https://github.com/hydro-project/hydro/issues/2370), [#2372](https://github.com/hydro-project/hydro/issues/2372), [#2495](https://github.com/hydro-project/hydro/issues/2495), [#2499](https://github.com/hydro-project/hydro/issues/2499), [#2511](https://github.com/hydro-project/hydro/issues/2511)
@@ -72,6 +75,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Add bidi support for docker containers ([`97d32af`](https://github.com/hydro-project/hydro/commit/97d32af9c7cbd15882a9b4103baa9bb29491c2ed))
  * **[#2511](https://github.com/hydro-project/hydro/issues/2511)**
     - Flag non-determinstic hashmap iterators, fix hydro_lang codegen nondeterminism fix #2464 ([`c16e13a`](https://github.com/hydro-project/hydro/commit/c16e13a8bdae3b099d498f9b7f1f43872cfdc939))
+ * **Uncategorized**
+    - Release hydro_build_utils v0.1.0, dfir_lang v0.16.0, dfir_macro v0.16.0, variadics v0.1.0, dfir_pipes v0.0.1, example_test v0.0.1, sinktools v0.1.0, hydro_deploy_integration v0.16.0, lattices_macro v0.6.0, variadics_macro v0.7.0, lattices v0.7.0, multiplatform_test v0.7.0, dfir_rs v0.16.0, copy_span v0.1.1, hydro_deploy v0.16.0, hydro_lang v0.16.0, hydro_std v0.16.0, safety bump 13 crates ([`c20757a`](https://github.com/hydro-project/hydro/commit/c20757ae0e9e10463b2a499de4b7d37ab02269d0))
 </details>
 
 ## 0.15.0 (2025-11-25)

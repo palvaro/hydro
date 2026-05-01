@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## 0.16.0 (2026-05-01)
 
+<csr-id-6803fcdf57cf06ca9f76fda4bd98f194d38deecc/>
+<csr-id-cb06e6f2032d698afc66db30e0cd3be8607ddd15/>
+<csr-id-5ce2fa716d7c81da8ed5f5ccd5819cff98f80039/>
+<csr-id-5bccb09b69199639d3265dbbe90a96e02bad7f1d/>
+<csr-id-88965c5e374f110d04a130e9ff37fc5e889d747d/>
+<csr-id-df45ef75f5ff9671aefab46d7367cd65b27a9ac0/>
+<csr-id-8d22dd95b2e3ce3984ea009df60971f08edb0731/>
+<csr-id-373e07b15777012e5364d6a86f8b42e7b6bf5a99/>
+<csr-id-c6a22b8ba67ebc6b9caebf3ab79cd07f12633496/>
+<csr-id-a8976f0bd82745b8e6c4d89cd2ff06b90eab3bfa/>
+<csr-id-e26d40c96f0aa022ee90388aad0a51ecd23ae345/>
+<csr-id-c1619d053448fa0e5a7ef41833400be759be8fa5/>
+<csr-id-bafcb57e02f0b538a2bedc9051dd36a05f3ad7e9/>
+<csr-id-4eea87b5466e52d8b7ea7709f0a19836b18440ca/>
+<csr-id-2fcd738a6e6f4a74b33cf2d13d491e927a9db906/>
+<csr-id-e99802f8d34142f85ced75ab16fda57ee56730cf/>
+<csr-id-60fb98690cd8c63fff30fde7bf20b6d506a6be88/>
+<csr-id-8b519c3e9679bb2b2296be07ffa7a6da211457bf/>
+<csr-id-d60ebfb6fd5b935beb5fee9b72238a815553b88e/>
+<csr-id-53b0c9636c5b2c690fc15405906e2fd442faf6f3/>
+<csr-id-ed38dd72aaeec449e35c4324d96ffef55cedf0a4/>
+<csr-id-1c8f85366c592b2768df65ba1ee2e98d2c06d496/>
+<csr-id-4020ec7ca1a3bc663eaadaf6fa30533bc1b27efb/>
+<csr-id-829bfeee51c21e20ef1e9bc9be37f8c63ebd951a/>
+<csr-id-efaa8f61c124c4b3c691b92a58df1686751cf45c/>
+<csr-id-16f1c0bf960c3b4238adb020a833f214bd3fd064/>
+<csr-id-296a491c80546eb7f48327b48f9d50951abdf172/>
+<csr-id-3e6e26c4cc87d6f7857591b10876074cba97caff/>
+<csr-id-6738e4821acb6deac212099c2f0cb948eb6caaeb/>
+<csr-id-149e3e7af467ae3c4b16bc8122f4993b5164fcc5/>
+
 ### Chore
 
  - <csr-id-6803fcdf57cf06ca9f76fda4bd98f194d38deecc/> update nightly snapshots
@@ -86,18 +117,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    
    1. feat(dfir_rs): expose `current_tick()` on `InlineDfir` via shared
    `Rc<Cell<TickInstant>>`
-      - Resolves #2741
+   - Resolves #2741
    - Shares tick counter between InlineContext (inside closure) and
    InlineDfir (outer handle)
-      - Updated codegen in dfir_lang and dfir_macro
+   - Updated codegen in dfir_lang and dfir_macro
    
    2. refactor(dfir_rs): convert 55+ non-blocked tests to
    dfir_syntax_inline!
-      - surface_scan.rs (8/8), surface_state_scheduling.rs (8/8),
-        surface_difference.rs (8/10), surface_codegen.rs (17/20),
-        surface_fold.rs (6/7), surface_fold_keyed.rs (4/5),
-        surface_reduce_keyed.rs (3/4), surface_unique.rs (5/6),
-        surface_zip_unzip.rs (3/5), surface_lattice_fold.rs (1/3)
+   - surface_scan.rs (8/8), surface_state_scheduling.rs (8/8),
+   surface_difference.rs (8/10), surface_codegen.rs (17/20),
+   surface_fold.rs (6/7), surface_fold_keyed.rs (4/5),
+   surface_reduce_keyed.rs (3/4), surface_unique.rs (5/6),
+   surface_zip_unzip.rs (3/5), surface_lattice_fold.rs (1/3)
    - Tests with loop {} blocks or intra-tick cycles remain on dfir_syntax!
    
    3. fix(dfir_lang): include singleton reference edges in inline
@@ -106,7 +137,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    surface_singleton.rs
    - Singleton refs (`#name`) now create ordering constraints in the topo
    sort
-      - Converts surface_singleton.rs (10/10 tests) to dfir_syntax_inline!
+   - Converts surface_singleton.rs (10/10 tests) to dfir_syntax_inline!
    
    ---------
  - <csr-id-caf6993925fb7b6d4aad720966c28602432aec17/> support defer_tick() in dfir_syntax_inline! codegen
@@ -170,7 +201,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    subgraphs
    (including self-loops) using topological sort. `defer_tick_lazy()` edges
    break
-      cycles across ticks and are excluded from detection.
+   cycles across ticks and are excluded from detection.
    
    2. **`defer_tick()` (non-lazy)**: Rejects the `defer_tick` operator
    since it's not
@@ -179,7 +210,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    
    3. **`loop { }` blocks**: Rejects any loop blocks since they're not
    supported in
-      the inline codegen path.
+   the inline codegen path.
    
    New files:
    - dfir_rs/tests/compile-fail{,-stable}/surface_inline_cycle.rs + .stderr
@@ -212,7 +243,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    ### Runtime support
    - **launch.rs** — Added `Runnable` trait with impls for both `Dfir` and
    `InlineFlow`, making `run_stdin_commands` generic
-     - (likely will be removed in a future PR)
+   - (likely will be removed in a future PR)
    - **InlineDfir** — A new wrapper around the tick closure provides an API
    which matches the existing `Dfir<'_>` API. Of note: `run_tick()` returns
    `bool` (whether subgraphs were run in a meaningful way, [see
@@ -241,42 +272,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    ### Core changes
    - Add `InlineContext`: lightweight alternative to `Dfir` & `Context`
    with just the state
-     API — no tokio channels, scheduler queues, or handoff infrastructure
+   API — no tokio channels, scheduler queues, or handoff infrastructure
    - Add `DfirGraph::as_code_inline()`: generates an `AsyncFnMut` closure
    where
-     each call runs one tick, with subgraph blocks inlined in stratum order
-     (sorted by `(stratum, !is_source)` tuple)
+   each call runs one tick, with subgraph blocks inlined in stratum order
+   (sorted by `(stratum, !is_source)` tuple)
    - Add `build_dfir_code_inline()` and `dfir_syntax_inline!` /
-     `dfir_syntax_inline_noemit!` proc macros
+   `dfir_syntax_inline_noemit!` proc macros
    - State persists across ticks in the closure's captured environment;
-     `__end_tick()` handles tick-scoped state reset between invocations
+   `__end_tick()` handles tick-scoped state reset between invocations
    - Operators using `.await` (e.g. `fold`) work naturally inside the async
-     closure without synchronous wrappers
+   closure without synchronous wrappers
    - Cross-referencing doc comments between `as_code` and `as_code_inline`
    
    ### Tests & benchmarks
    - 14 passing tests covering: linear pipelines, diamonds, intertwined
-     diamonds, joins, multi-stratum cascades, W-mesh, `source_stream`,
-     `resolve_futures_blocking`, multi-tick with `fold::<'static>`/`'tick`,
-     and `defer_tick` cycles
+   diamonds, joins, multi-stratum cascades, W-mesh, `source_stream`,
+   `resolve_futures_blocking`, multi-tick with `fold::<'static>`/`'tick`,
+   and `defer_tick` cycles
    - 4 benchmark suites with inline variants (`words_diamond`, `fan_in`,
    `fan_out`, `micro_ops`) using `iter_batched` for fair comparison against
-     scheduler-based benchmarks
+   scheduler-based benchmarks
  - <csr-id-354ede54dc007131fe7adbb355017019cd39b13a/> add flatten_stream, flat_map_stream to Stream
    STACK PREV: #2688
    
    - Added FlatMapStream variant to HydroNode enum in compile/ir/mod.rs
    with
-     the same shape as FlatMap (f, input, metadata).
+   the same shape as FlatMap (f, input, metadata).
    - Handled FlatMapStream in all match arms: traversal, deep_clone,
    lowering
-     (emits flat_map_stream(#f)), expression refs, metadata/metadata_mut,
-     input(), and print_root().
+   (emits flat_map_stream(#f)), expression refs, metadata/metadata_mut,
+   input(), and print_root().
    - Updated viz/render.rs to handle FlatMapStream in the transform group.
    - Added flat_map_stream() and flatten_stream() methods to Stream in
-     hydro_lang/src/live_collections/stream/mod.rs. flat_map_stream takes a
+   hydro_lang/src/live_collections/stream/mod.rs. flat_map_stream takes a
    closure mapping items to futures::Stream; flatten_stream flattens items
-     that are already Streams.
+   that are already Streams.
    
    ---------
  - <csr-id-f9f212d66f5d06a1de0e137e8dce47aa9d7db35f/> Add flat_map_stream and flatten_stream operators to dfir_lang with tests
@@ -284,9 +315,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    combinators:
    
    - dfir_lang/src/graph/ops/flat_map_stream.rs: maps each item to a Stream
-     via a closure and flattens the results, propagating Pending.
+   via a closure and flattens the results, propagating Pending.
    - dfir_lang/src/graph/ops/flatten_stream.rs: flattens items that are
-     Streams, emitting their elements one by one, propagating Pending.
+   Streams, emitting their elements one by one, propagating Pending.
    
    Both registered in declare_ops! macro in mod.rs.
    
@@ -381,9 +412,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    
    ## Changes
    - Bumped `slotmap` from `1.0.0` → `1.1.0` in:
-     - `dfir_rs/Cargo.toml`
-     - `dfir_lang/Cargo.toml`
-     - `hydro_lang/Cargo.toml`
+   - `dfir_rs/Cargo.toml`
+   - `dfir_lang/Cargo.toml`
+   - `hydro_lang/Cargo.toml`
    
    The resolved version in `Cargo.lock` is already `1.1.1`, so no lock file
    churn is expected.
@@ -525,6 +556,183 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    ---------
  - <csr-id-ed38dd72aaeec449e35c4324d96ffef55cedf0a4/> convert pull from Iterator to Stream to support async yielding [ci-bench]
 
+### `dfir_lang` — operator codegen fixes
+   
+   - **`state_by`**, **`lattice_bimorphism`**: Extract
+   `context.state_ref_unchecked()` calls outside the type guard functions,
+   passing `&RefCell<Lat>` directly instead of `(StateHandle, &Context)`.
+   This avoids naming the concrete context type, making these operators
+   work with both codegen paths.
+   
+
+### `dfir_rs` — new API
+   
+   - **`InlineDfir::run_available_sync()`**: Mirrors the existing
+   `Dfir::run_available_sync()`, so converted tests can stay synchronous.
+   
+
+### `dfir_rs` — test conversions
+   
+   Per-file diff is minimal:
+   - `dfir_syntax!` → `dfir_syntax_inline!`
+   - Import swap (`use dfir_rs::dfir_syntax` → `use
+   dfir_rs::dfir_syntax_inline`)
+   - Removed `assert_graphvis_snapshots!` calls (unavailable for
+   `InlineDfir`)
+   - Removed `Dfir` type annotations where present
+   - `surface_async.rs`: `let None = flow.run().await` → `flow.run().await`
+   (`Infallible` vs `Never`)
+   - `surface_lattice_join.rs`: Fixed assertion that was asserting
+   known-buggy duplicate output (#1050); inline path produces the correct
+   single output
+   - `surface_lattice_bimorphism_persist_insertion.rs`: Use
+   `InlineDfirErased` via `.into_erased()` to replace `Dfir` in helper
+   function signature
+   
+
+### Remaining 20 files
+   
+   | Blocker | Files |
+   |---|---|
+   | `loop {}` blocks | `surface_cross_join_multiset`,
+   `surface_difference`, `surface_fold`, `surface_fold_keyed`,
+   `surface_join`, `surface_loop`, `surface_reduce_keyed`,
+   `surface_unique`, `surface_zip_unzip` |
+   | `df.current_tick()` / `df.current_stratum()` | `surface_scan`,
+   `surface_state_scheduling`, `metrics` |
+   | `context.current_stratum()` / `context.add_state()` |
+   `surface_context`, `surface_persist`, `surface_scheduling` |
+   | Cyclical dataflow within a tick | `surface_codegen`,
+   `surface_lattice_fold`, `surface_stratum` |
+   | Behavioral differences between paths | `surface_singleton` |
+   
+   ---------
+ - <csr-id-e99802f8d34142f85ced75ab16fda57ee56730cf/> more precise span on generic diagnostics
+ - <csr-id-60fb98690cd8c63fff30fde7bf20b6d506a6be88/> move `clear()` to `HalfJoinState` instead of separate trait
+ - <csr-id-8b519c3e9679bb2b2296be07ffa7a6da211457bf/> improve `cross_join_multiset()` performance by up to 1.7x [ci-bench]
+   ~1.7x throughput for large batches, ~1.25x for small (100x100)
+   
+   Old code deferred to SHJ with a `()` key - ends up being a HashMap of
+   one item. This switches for nested-loops-esque iteration.
+   
+   Adds tests.
+ - <csr-id-d60ebfb6fd5b935beb5fee9b72238a815553b88e/> remove unused buffered_lazy_sink_source
+ - <csr-id-53b0c9636c5b2c690fc15405906e2fd442faf6f3/> context waker to use std::task::Wake, fix #2345
+   ## Refactor to use std::task::Wake instead of futures::task::ArcWake
+   
+   - [x] Review current implementation in context.rs and reactor.rs
+   - [x] Understand the std::task::Wake API differences
+   - [x] Update context.rs waker() method to use std::task::Wake
+   - [x] Update reactor.rs into_waker() method to use std::task::Wake
+   - [x] Build and test the changes
+   - [x] Run tests to ensure functionality is preserved
+   - [ ] Run code review
+   - [ ] Run security checks
+   
+   <!-- START COPILOT ORIGINAL PROMPT -->
+   
+   
+   
+   <details>
+   
+   <summary>Original prompt</summary>
+   
+   > 
+   > ----
+   > 
+   > *This section details on the original issue you should resolve*
+   > 
+   > <issue_title>refactor(dfir_rs): Use `std::task::Wake` instead of
+   `ArcWake` in context waker implementation</issue_title>
+   > <issue_description>in
+   dfir_rs/src/scheduled/context.rs</issue_description>
+   > 
+   > ## Comments on the Issue (you are @copilot in this section)
+   > 
+   > <comments>
+   > </comments>
+   > 
+   
+   
+   </details>
+   
+   
+   
+   <!-- START COPILOT CODING AGENT SUFFIX -->
+   
+   - Fixes hydro-project/hydro#2345
+   
+   <!-- START COPILOT CODING AGENT TIPS -->
+   ---
+   
+   ✨ Let Copilot coding agent [set things up for
+   you](https://github.com/hydro-project/hydro/issues/new?title=✨+Set+up+Copilot+instructions&body=Configure%20instructions%20for%20this%20repository%20as%20documented%20in%20%5BBest%20practices%20for%20Copilot%20coding%20agent%20in%20your%20repository%5D%28https://gh.io/copilot-coding-agent-tips%29%2E%0A%0A%3COnboard%20this%20repo%3E&assignees=copilot)
+   — coding agent works faster and does higher quality work when set up for
+   your repo.
+   
+   ---------
+
+## Refactor to use std::task::Wake instead of futures::task::ArcWake
+   
+   - [x] Review current implementation in context.rs and reactor.rs
+   - [x] Understand the std::task::Wake API differences
+   - [x] Update context.rs waker() method to use std::task::Wake
+   - [x] Update reactor.rs into_waker() method to use std::task::Wake
+   - [x] Build and test the changes
+   - [x] Run tests to ensure functionality is preserved
+   - [ ] Run code review
+   - [ ] Run security checks
+   
+   <!-- START COPILOT ORIGINAL PROMPT -->
+   
+   
+   
+   <details>
+   
+   <summary>Original prompt</summary>
+   
+   > 
+   > ----
+   > 
+   > *This section details on the original issue you should resolve*
+   > 
+   > <issue_title>refactor(dfir_rs): Use `std::task::Wake` instead of
+   `ArcWake` in context waker implementation</issue_title>
+   > <issue_description>in
+   dfir_rs/src/scheduled/context.rs</issue_description>
+   > 
+   > ## Comments on the Issue (you are @copilot in this section)
+   > 
+   > <comments>
+   > </comments>
+   > 
+
+## Comments on the Issue (you are @copilot in this section)
+   > 
+   > <comments>
+   > </comments>
+   > 
+   
+   
+   </details>
+   
+   
+   
+   <!-- START COPILOT CODING AGENT SUFFIX -->
+   
+   - Fixes hydro-project/hydro#2345
+   
+   <!-- START COPILOT CODING AGENT TIPS -->
+   ---
+   
+   ✨ Let Copilot coding agent [set things up for
+   you](https://github.com/hydro-project/hydro/issues/new?title=✨+Set+up+Copilot+instructions&body=Configure%20instructions%20for%20this%20repository%20as%20documented%20in%20%5BBest%20practices%20for%20Copilot%20coding%20agent%20in%20your%20repository%5D%28https://gh.io/copilot-coding-agent-tips%29%2E%0A%0A%3COnboard%20this%20repo%3E&assignees=copilot)
+   — coding agent works faster and does higher quality work when set up for
+   your repo.
+   
+   ---------
+ - <csr-id-ed38dd72aaeec449e35c4324d96ffef55cedf0a4/> convert pull from Iterator to Stream to support async yielding [ci-bench]
+
 ### Style
 
  - <csr-id-1c8f85366c592b2768df65ba1ee2e98d2c06d496/> leading colons to workaround rustfmt change
@@ -564,12 +772,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    `Pull` trait. Key to this more powerful iterator trait is the step enum:
    ```rust
    pub enum Step<Item, Meta, CanPend: Toggle, CanEnd: Toggle> {
-       /// An item is ready with associated metadata.
-       Ready(Item, Meta),
-       /// The pull is not ready yet (only possible when `CanPend = Yes`).
-       Pending(CanPend),
-       /// The pull has ended (only possible when `CanEnd = Yes`).
-       Ended(CanEnd),
+   /// An item is ready with associated metadata.
+   Ready(Item, Meta),
+   /// The pull is not ready yet (only possible when `CanPend = Yes`).
+   Pending(CanPend),
+   /// The pull has ended (only possible when `CanEnd = Yes`).
+   Ended(CanEnd),
    }
    ```
    This abstraction allows `Pull` to represent both synchronous `Iterator`s
@@ -613,7 +821,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <csr-read-only-do-not-edit/>
 
- - 63 commits contributed to the release over the course of 150 calendar days.
+ - 64 commits contributed to the release over the course of 150 calendar days.
  - 156 days passed between releases.
  - 63 commits were understood as [conventional](https://www.conventionalcommits.org).
  - 63 unique issues were worked on: [#2179](https://github.com/hydro-project/hydro/issues/2179), [#2241](https://github.com/hydro-project/hydro/issues/2241), [#2328](https://github.com/hydro-project/hydro/issues/2328), [#2338](https://github.com/hydro-project/hydro/issues/2338), [#2350](https://github.com/hydro-project/hydro/issues/2350), [#2358](https://github.com/hydro-project/hydro/issues/2358), [#2390](https://github.com/hydro-project/hydro/issues/2390), [#2401](https://github.com/hydro-project/hydro/issues/2401), [#2406](https://github.com/hydro-project/hydro/issues/2406), [#2422](https://github.com/hydro-project/hydro/issues/2422), [#2426](https://github.com/hydro-project/hydro/issues/2426), [#2448](https://github.com/hydro-project/hydro/issues/2448), [#2458](https://github.com/hydro-project/hydro/issues/2458), [#2503](https://github.com/hydro-project/hydro/issues/2503), [#2511](https://github.com/hydro-project/hydro/issues/2511), [#2516](https://github.com/hydro-project/hydro/issues/2516), [#2525](https://github.com/hydro-project/hydro/issues/2525), [#2541](https://github.com/hydro-project/hydro/issues/2541), [#2560](https://github.com/hydro-project/hydro/issues/2560), [#2561](https://github.com/hydro-project/hydro/issues/2561), [#2562](https://github.com/hydro-project/hydro/issues/2562), [#2566](https://github.com/hydro-project/hydro/issues/2566), [#2585](https://github.com/hydro-project/hydro/issues/2585), [#2592](https://github.com/hydro-project/hydro/issues/2592), [#2618](https://github.com/hydro-project/hydro/issues/2618), [#2621](https://github.com/hydro-project/hydro/issues/2621), [#2623](https://github.com/hydro-project/hydro/issues/2623), [#2630](https://github.com/hydro-project/hydro/issues/2630), [#2633](https://github.com/hydro-project/hydro/issues/2633), [#2640](https://github.com/hydro-project/hydro/issues/2640), [#2644](https://github.com/hydro-project/hydro/issues/2644), [#2668](https://github.com/hydro-project/hydro/issues/2668), [#2672](https://github.com/hydro-project/hydro/issues/2672), [#2675](https://github.com/hydro-project/hydro/issues/2675), [#2676](https://github.com/hydro-project/hydro/issues/2676), [#2677](https://github.com/hydro-project/hydro/issues/2677), [#2678](https://github.com/hydro-project/hydro/issues/2678), [#2682](https://github.com/hydro-project/hydro/issues/2682), [#2686](https://github.com/hydro-project/hydro/issues/2686), [#2688](https://github.com/hydro-project/hydro/issues/2688), [#2689](https://github.com/hydro-project/hydro/issues/2689), [#2693](https://github.com/hydro-project/hydro/issues/2693), [#2710](https://github.com/hydro-project/hydro/issues/2710), [#2716](https://github.com/hydro-project/hydro/issues/2716), [#2732](https://github.com/hydro-project/hydro/issues/2732), [#2733](https://github.com/hydro-project/hydro/issues/2733), [#2737](https://github.com/hydro-project/hydro/issues/2737), [#2738](https://github.com/hydro-project/hydro/issues/2738), [#2740](https://github.com/hydro-project/hydro/issues/2740), [#2751](https://github.com/hydro-project/hydro/issues/2751), [#2762](https://github.com/hydro-project/hydro/issues/2762), [#2763](https://github.com/hydro-project/hydro/issues/2763), [#2769](https://github.com/hydro-project/hydro/issues/2769), [#2774](https://github.com/hydro-project/hydro/issues/2774), [#2776](https://github.com/hydro-project/hydro/issues/2776), [#2777](https://github.com/hydro-project/hydro/issues/2777), [#2778](https://github.com/hydro-project/hydro/issues/2778), [#2779](https://github.com/hydro-project/hydro/issues/2779), [#2789](https://github.com/hydro-project/hydro/issues/2789), [#2795](https://github.com/hydro-project/hydro/issues/2795), [#2797](https://github.com/hydro-project/hydro/issues/2797), [#2798](https://github.com/hydro-project/hydro/issues/2798), [#2804](https://github.com/hydro-project/hydro/issues/2804)
@@ -750,6 +958,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Double-buffer defer_tick handoffs, remove intermediate subgraphs [ci-bench] ([`c1619d0`](https://github.com/hydro-project/hydro/commit/c1619d053448fa0e5a7ef41833400be759be8fa5))
  * **[#2804](https://github.com/hydro-project/hydro/issues/2804)**
     - Defer `_counter` task spawning via `Context::request_task` buffer ([`a9a8e58`](https://github.com/hydro-project/hydro/commit/a9a8e584f7bc6c1cf778bdf692f3fe4a6c3ae52c))
+ * **Uncategorized**
+    - Release hydro_build_utils v0.1.0, dfir_lang v0.16.0, dfir_macro v0.16.0, variadics v0.1.0, dfir_pipes v0.0.1, example_test v0.0.1, sinktools v0.1.0, hydro_deploy_integration v0.16.0, lattices_macro v0.6.0, variadics_macro v0.7.0, lattices v0.7.0, multiplatform_test v0.7.0, dfir_rs v0.16.0, copy_span v0.1.1, hydro_deploy v0.16.0, hydro_lang v0.16.0, hydro_std v0.16.0, safety bump 13 crates ([`c20757a`](https://github.com/hydro-project/hydro/commit/c20757ae0e9e10463b2a499de4b7d37ab02269d0))
 </details>
 
 ## 0.15.0 (2025-11-25)
@@ -851,6 +1061,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    mechanics of `Sink`s.
    
    ## Pull Request Overview
+   
+   This PR refactors the `dfir_rs` library by removing the `demux` operator
+   and replacing its usage with the `demux_enum` operator, which provides
+   better type safety and ergonomics.
+   
+   - Removes the `demux` operator implementation and related code
+   - Updates examples to use `demux_enum` with enums for message handling
+   - Removes all compile-fail tests specific to the `demux` operator
+ - <csr-id-29027701471205a7c43e26ef2f8cee98663c578e/> superficially make subgraphs/operators asynchronous
+   Subgraphs now are async (create a future when running) which must be
+   awaited. However this PR does not actually change any
+   subgraphs/operators, so all subgraphs/operators return `Poll::Ready(())`
+   immediately
+
+## Pull Request Overview
    
    This PR refactors the `dfir_rs` library by removing the `demux` operator
    and replacing its usage with the `demux_enum` operator, which provides

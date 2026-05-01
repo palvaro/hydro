@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## 0.7.0 (2026-05-01)
 
+<csr-id-e26d40c96f0aa022ee90388aad0a51ecd23ae345/>
+<csr-id-1c8f85366c592b2768df65ba1ee2e98d2c06d496/>
+<csr-id-efaa8f61c124c4b3c691b92a58df1686751cf45c/>
+
 ### Chore
 
  - <csr-id-e26d40c96f0aa022ee90388aad0a51ecd23ae345/> remove unused deps
@@ -33,7 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <csr-read-only-do-not-edit/>
 
- - 4 commits contributed to the release over the course of 104 calendar days.
+ - 5 commits contributed to the release over the course of 105 calendar days.
  - 156 days passed between releases.
  - 4 commits were understood as [conventional](https://www.conventionalcommits.org).
  - 4 unique issues were worked on: [#2448](https://github.com/hydro-project/hydro/issues/2448), [#2511](https://github.com/hydro-project/hydro/issues/2511), [#2525](https://github.com/hydro-project/hydro/issues/2525), [#2623](https://github.com/hydro-project/hydro/issues/2623)
@@ -52,6 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Update pinned rust to 1.92, add lints/fixes for redundant cloning, string handling ([`efaa8f6`](https://github.com/hydro-project/hydro/commit/efaa8f61c124c4b3c691b92a58df1686751cf45c))
  * **[#2623](https://github.com/hydro-project/hydro/issues/2623)**
     - Leading colons to workaround rustfmt change ([`1c8f853`](https://github.com/hydro-project/hydro/commit/1c8f85366c592b2768df65ba1ee2e98d2c06d496))
+ * **Uncategorized**
+    - Release hydro_build_utils v0.1.0, dfir_lang v0.16.0, dfir_macro v0.16.0, variadics v0.1.0, dfir_pipes v0.0.1, example_test v0.0.1, sinktools v0.1.0, hydro_deploy_integration v0.16.0, lattices_macro v0.6.0, variadics_macro v0.7.0, lattices v0.7.0, multiplatform_test v0.7.0, dfir_rs v0.16.0, copy_span v0.1.1, hydro_deploy v0.16.0, hydro_lang v0.16.0, hydro_std v0.16.0, safety bump 13 crates ([`c20757a`](https://github.com/hydro-project/hydro/commit/c20757ae0e9e10463b2a499de4b7d37ab02269d0))
 </details>
 
 ## 0.6.2 (2025-11-25)
