@@ -4,7 +4,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use proc_macro2::Span;
 use slotmap::{SecondaryMap, SparseSecondaryMap};
-use syn::parse_quote;
 
 use super::meta_graph::DfirGraph;
 use super::ops::{DelayType, FloType};
@@ -300,8 +299,8 @@ fn can_connect_colorize(
     can_connect
 }
 
-/// Topologically sorts subgraphs and injects intermediate identity subgraphs for `defer_tick`
-/// edges that go forward in the topological order (so they become back-edges).
+/// Topologically sorts subgraphs and marks tick-boundary (`defer_tick` / `defer_tick_lazy`)
+/// handoffs with their delay type for double-buffered codegen in `as_code`.
 ///
 /// Returns an error if there is an intra-tick cycle (i.e. the subgraph DAG has a cycle when
 /// tick-boundary edges are excluded).
@@ -351,84 +350,32 @@ fn order_subgraphs(
     }
 
     // Topological sort — rejects intra-tick cycles.
-    let topo_sort_order = graph_algorithms::topo_sort(partitioned_graph.subgraph_ids(), |v| {
+    if let Err(cycle) = graph_algorithms::topo_sort(partitioned_graph.subgraph_ids(), |v| {
         sg_preds.get(&v).into_iter().flatten().copied()
-    });
-    let topo_sort_order = match topo_sort_order {
-        Ok(order) => order,
-        Err(cycle) => {
-            let span = cycle
-                .first()
-                .and_then(|&sg_id| partitioned_graph.subgraph(sg_id).first().copied())
-                .map(|n| partitioned_graph.node(n).span())
-                .unwrap_or_else(Span::call_site);
-            return Err(Diagnostic::spanned(
-                span,
-                Level::Error,
-                "Cyclical dataflow within a tick is not supported. Use `defer_tick()` or `defer_tick_lazy()` to break the cycle across ticks.",
-            ));
-        }
-    };
+    }) {
+        let span = cycle
+            .first()
+            .and_then(|&sg_id| partitioned_graph.subgraph(sg_id).first().copied())
+            .map(|n| partitioned_graph.node(n).span())
+            .unwrap_or_else(Span::call_site);
+        return Err(Diagnostic::spanned(
+            span,
+            Level::Error,
+            "Cyclical dataflow within a tick is not supported. Use `defer_tick()` or `defer_tick_lazy()` to break the cycle across ticks.",
+        ));
+    }
 
-    // Build a position map for the topo sort order.
-    let sg_position: BTreeMap<GraphSubgraphId, usize> = topo_sort_order
-        .iter()
-        .enumerate()
-        .map(|(i, &sg_id)| (sg_id, i))
-        .collect();
-
-    // Process tick-boundary edges: inject intermediate identity subgraphs where needed.
-    // TODO(cleanup): The intermediate identity subgraph injection is a workaround. In the future,
-    // handoff buffers should be sufficient without needing an extra subgraph.
+    // Mark tick-boundary handoffs with their delay type.
+    // These handoffs are excluded from the intra-tick topo ordering in
+    // `as_code`; instead, their double-buffered handoff semantics defer data
+    // across the tick boundary to the next tick.
     for (edge_id, delay_type) in tick_edges {
-        let (hoff, dst) = partitioned_graph.edge(edge_id);
-        // Ignore barriers within `loop {` blocks.
-        if partitioned_graph.node_loop(dst).is_some() {
-            continue;
-        }
-
-        assert_eq!(1, partitioned_graph.node_predecessors(hoff).len());
-        let src = partitioned_graph
-            .node_predecessor_nodes(hoff)
-            .next()
-            .unwrap();
-
-        let src_sg = partitioned_graph.node_subgraph(src).unwrap();
-        let dst_sg = partitioned_graph.node_subgraph(dst).unwrap();
-        let src_pos = sg_position[&src_sg];
-        let dst_pos = sg_position[&dst_sg];
-        let dst_span = partitioned_graph.node(dst).span();
-
-        // If tick edge goes forward in topo order, need to inject a buffer subgraph.
-        if src_pos <= dst_pos {
-            // Before: A (src) -> H -> B (dst)
-            // Then add intermediate identity:
-            let (new_node_id, new_edge_id) = partitioned_graph.insert_intermediate_node(
-                edge_id,
-                // TODO(mingwei): Proper span w/ `parse_quote_spanned!`?
-                GraphNode::Operator(parse_quote! { identity() }),
-            );
-            // Intermediate: A (src) -> H -> ID -> B (dst)
-            let hoff_node = GraphNode::Handoff {
-                src_span: dst_span,
-                dst_span,
-            };
-            let (hoff_node_id, _hoff_edge_id) =
-                partitioned_graph.insert_intermediate_node(new_edge_id, hoff_node);
-            // After: A (src) -> H -> ID -> H' -> B (dst)
-
-            // Create subgraph for the intermediate identity.
-            partitioned_graph
-                .insert_subgraph(vec![new_node_id])
-                .unwrap();
-
-            // Mark H' as a tick-boundary back-edge.
-            partitioned_graph.set_handoff_delay_type(hoff_node_id, delay_type);
-        } else {
-            // Already a back-edge (src after dst in topo order).
-            // Mark the original handoff H as a tick-boundary back-edge.
-            partitioned_graph.set_handoff_delay_type(hoff, delay_type);
-        }
+        let (hoff, _dst) = partitioned_graph.edge(edge_id);
+        assert!(matches!(
+            partitioned_graph.node(hoff),
+            GraphNode::Handoff { .. }
+        ));
+        partitioned_graph.set_handoff_delay_type(hoff, delay_type);
     }
     Ok(())
 }
@@ -444,7 +391,7 @@ pub fn partition_graph(flat_graph: DfirGraph) -> Result<DfirGraph, Diagnostic> {
     // Partition into subgraphs.
     make_subgraphs(&mut partitioned_graph, &mut barrier_crossers);
 
-    // Topologically order subgraphs and inject intermediate subgraphs for defer_tick edges.
+    // Topologically order subgraphs and mark tick-boundary handoffs for double-buffering.
     order_subgraphs(&mut partitioned_graph, &barrier_crossers)?;
 
     Ok(partitioned_graph)
