@@ -1,4 +1,6 @@
+## Unreleased
 
+Unchanged from previous release.
 
 ## v0.6.2 (2025-11-25)
 

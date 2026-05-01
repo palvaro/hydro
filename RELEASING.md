@@ -21,18 +21,21 @@ cargo install cargo-smart-release
 Re-run this command before each release to update the tool before testing locally, as the CI will
 always use the latest version.
 
-Re-run this command before each release to update the tool before testing locally, as the CI will always use the latest version.
+Re-run this command before each release to update the tool before testing locally, as the CI will always use the latest
+version.
 
 To (dry) run the command locally to spot-check for errors and warnings:
 ```bash
 cargo smart-release --update-crates-index \
    --no-changelog-preview --allow-fully-generated-changelogs \
-   --bump-dependencies auto --bump minor \ # or `patch`, `major`, `keep`, `auto`
-   dfir_rs dfir_lang dfir_macro \
+   --bump-dependencies auto --bump minor \
+   dfir_rs dfir_pipes dfir_lang dfir_macro \
    hydro_lang hydro_std \
    hydro_deploy hydro_deploy_integration \
    multiplatform_test
 ```
+Make sure to set `--bump` to the right value, other are  `patch`, `major`, `keep`, `auto`. Also make sure the listed
+crates are up-todate and match those in `release.yml`.
 
 ## Dry run to ensure changelogs can be generated
 

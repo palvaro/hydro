@@ -22,7 +22,7 @@ nameof = "1.0.0"
 rand = "0.8.0"
 rand_distr = "0.4.3"
 seq-macro = "0.2.0"
-sinktools = { path = "../sinktools", version = "^0.0.1" }
+sinktools = { path = "../sinktools" }
 static_assertions = "1.0.0"
 timely = { package = "timely-master", version = "0.13.0-dev.1" }
 tokio = { version = "1.29.0", features = [ "rt-multi-thread" ] }
