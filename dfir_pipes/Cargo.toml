@@ -1,9 +1,12 @@
 [package]
 name = "dfir_pipes"
+publish = true
 version = "0.0.1"
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
+documentation = "https://docs.rs/dfir_pipes/"
+description = "Pipes are a generalization of iterators/streams/sinks used by dfir_rs."
+edition = { workspace = true }
+repository = { workspace = true }
+license = { workspace = true }
 
 [features]
 default = ["std", "variadics"]
@@ -24,10 +27,10 @@ variadics = { optional = true, path = "../variadics", default-features = false, 
 # coax cargo-smart-release into publishing this crate.
 # https://github.com/hydro-project/hydro/blob/main/RELEASING.md#addendum-adding-new-crates
 # https://github.com/GitoxideLabs/cargo-smart-release/issues/36
-hydro_build_utils = { path = "../hydro_build_utils", optional = true }
+hydro_build_utils = { version = "0.1.0", path = "../hydro_build_utils", optional = true }
 
 [build-dependencies]
-hydro_build_utils = { path = "../hydro_build_utils" }
+hydro_build_utils = { version = "0.1.0", path = "../hydro_build_utils" }
 
 [dev-dependencies]
 futures-util = { version = "0.3.0", default-features = false, features = ["alloc"] }
