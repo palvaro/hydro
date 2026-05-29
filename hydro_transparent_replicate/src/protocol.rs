@@ -30,12 +30,12 @@ use crate::ReplicableService;
 fn index_payloads<'a, L: Location<'a> + NoTick, P>(
     p_max_slot: Optional<usize, Tick<L>, Bounded>,
     c_to_proposers: Stream<P, Tick<L>, Bounded>,
-    tick: &Tick<L>,
 ) -> Stream<(usize, P), Tick<L>, Bounded>
 where
     P: Clone + Serialize + DeserializeOwned + Debug + Send + 'static,
 {
-    sliced! {
+    let tick = c_to_proposers.location().clone();
+    let sliced_result = sliced! {
         let mut next_slot = use::state(|l| l.singleton(q!(0)));
         let updated_max_slot = use::atomic(p_max_slot.latest_atomic(), nondet!(/** up to date with tick input */));
         let payload_batch = use::atomic(c_to_proposers.all_ticks_atomic(), nondet!(/** up to date with tick input */));
@@ -57,7 +57,8 @@ where
             .map(q!(|(num_payloads, base_slot)| base_slot + num_payloads));
 
         yield_atomic(indexed_payloads)
-    }.batch_atomic(tick, nondet!(/** up to date with tick input */))
+    };
+    sliced_result.batch_atomic(&tick, nondet!(/** up to date with tick input */))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -167,7 +168,7 @@ where
 
     let batch = mutating_commands.batch(tick, nondet!(/** NONDET #1: batch boundaries */));
     let primary_ops = batch.filter_if_some(is_primary.clone());
-    let slot_table = index_payloads(base_seq, primary_ops, tick); // NONDET #2: slot ordering
+    let slot_table = index_payloads(base_seq, primary_ops); // NONDET #2: slot ordering
 
     // ═══════════════════════════════════════════════════════════════════════
     // DETERMINISTIC: Everything below processes (slot, op) pairs.
