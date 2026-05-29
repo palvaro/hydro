@@ -163,12 +163,57 @@ pub fn collect_quorum<
     )
 }
 
+/// Like [`collect_quorum`] but with a dynamic quorum threshold provided as a
+/// runtime [`Singleton`]. Use this when the quorum size can change (e.g., on
+/// view changes in a primary/backup protocol).
+///
+/// Emits a slot key when the number of successful acks for that key reaches
+/// the current value of `quorum_size`. Acks are discarded once quorum is reached.
+#[expect(clippy::type_complexity, reason = "stream types with ordering")]
+pub fn collect_dynamic_quorum<
+    'a,
+    L: Location<'a> + NoTick,
+    K: Clone + Eq + Hash,
+>(
+    acks: Stream<(K, Result<(), ()>), L, Unbounded, NoOrder>,
+    quorum_size: Singleton<usize, L, Unbounded>,
+) -> Stream<K, L, Unbounded, NoOrder> {
+    sliced! {
+        let new_acks = use(acks, nondet!(
+            /// Persist acks that haven't reached quorum yet.
+        ));
+        let threshold = use(quorum_size, nondet!(
+            /// Dynamic quorum size may be stale; safe because a stale (larger)
+            /// threshold only delays commits, never causes incorrect ones.
+        ));
+
+        let mut pending = use::state_null::<Stream<(K, Result<(), ()>), _, Bounded, NoOrder>>();
+
+        let all_acks = pending.chain(new_acks);
+
+        let count_per_key = all_acks.clone().into_keyed().fold(
+            q!(|| 0usize),
+            q!(|count, ack: Result<(), ()>| {
+                if ack.is_ok() { *count += 1; }
+            }, commutative = manual_proof!(/** counting is commutative */)),
+        );
+
+        let reached = count_per_key.entries()
+            .cross_singleton(threshold)
+            .filter_map(q!(|((key, count), min)| if count >= min { Some(key) } else { None }));
+
+        pending = all_acks.anti_join(reached.clone());
+
+        reached
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use hydro_lang::live_collections::stream::{NoOrder, TotalOrder};
     use hydro_lang::prelude::*;
 
-    use super::{collect_quorum, collect_quorum_with_response};
+    use super::{collect_quorum, collect_quorum_with_response, collect_dynamic_quorum};
 
     #[test]
     fn collect_quorum_with_response_preserves_order() {
@@ -378,9 +423,83 @@ mod tests {
             in_send.send((2, Ok(())));
             in_send.send((2, Err(()))); // Additional error after quorum
 
-            // Each key should appear exactly once, even though they received
+              // Each key should appear exactly once, even though they received
             // additional responses after reaching quorum
             success_recv.assert_yields_only_unordered([1, 2]).await;
+        });
+    }
+
+    #[test]
+    fn dynamic_quorum_basic() {
+        let mut flow = FlowBuilder::new();
+        let node = flow.process::<()>();
+
+        let (ack_send, acks) = node.sim_input::<(usize, Result<(), ()>), NoOrder, _>();
+        let (qs_send, qs_stream) = node.sim_input::<usize, _, _>();
+        let quorum_size: Singleton<usize, _, _> = qs_stream.fold(
+            q!(|| 2usize), q!(|cur, new| *cur = new),
+        ).into();
+        let confirmed = collect_dynamic_quorum(acks, quorum_size);
+        let out = confirmed.sim_output();
+
+        flow.sim().exhaustive(async || {
+            qs_send.send(2);
+            ack_send.send_many_unordered([
+                (0, Ok(())),
+                (0, Ok(())),
+                (1, Ok(())),
+            ]);
+
+            out.assert_yields_only_unordered([0usize]).await;
+        });
+    }
+
+    #[test]
+    fn dynamic_quorum_errors_dont_count() {
+        let mut flow = FlowBuilder::new();
+        let node = flow.process::<()>();
+
+        let (ack_send, acks) = node.sim_input::<(usize, Result<(), ()>), NoOrder, _>();
+        let (qs_send, qs_stream) = node.sim_input::<usize, _, _>();
+        let quorum_size: Singleton<usize, _, _> = qs_stream.fold(
+            q!(|| 2usize), q!(|cur, new| *cur = new),
+        ).into();
+        let confirmed = collect_dynamic_quorum(acks, quorum_size);
+        let out = confirmed.sim_output();
+
+        flow.sim().exhaustive(async || {
+            qs_send.send(2);
+            ack_send.send_many_unordered([
+                (0, Ok(())),
+                (0, Err(())),
+            ]);
+
+            out.assert_no_more().await;
+        });
+    }
+
+    #[test]
+    fn dynamic_quorum_no_double_emit() {
+        let mut flow = FlowBuilder::new();
+        let node = flow.process::<()>();
+
+        let (ack_send, acks) = node.sim_input::<(usize, Result<(), ()>), NoOrder, _>();
+        let (qs_send, qs_stream) = node.sim_input::<usize, _, _>();
+        let quorum_size: Singleton<usize, _, _> = qs_stream.fold(
+            q!(|| 2usize), q!(|cur, new| *cur = new),
+        ).into();
+        let confirmed = collect_dynamic_quorum(acks, quorum_size);
+        let out = confirmed.sim_output();
+
+        flow.sim().exhaustive(async || {
+            qs_send.send(2);
+            ack_send.send_many_unordered([
+                (0, Ok(())),
+                (0, Ok(())),
+                (0, Ok(())),
+            ]);
+
+            out.assert_yields_only_unordered([0usize]).await;
         });
     }
 }
