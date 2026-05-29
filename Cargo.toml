@@ -20,6 +20,7 @@ members = [
     "lattices_macro",
     "lattices",
     "lego_replicate",
+    "hydro_transparent_replicate",
     "multiplatform_test",
     "sinktools",
     "variadics_macro",
