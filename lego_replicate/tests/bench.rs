@@ -73,8 +73,22 @@ fn lego_bench<'a>(
                 replicas, proposers, acceptors, at_replicas, no_proposals, config,
             );
 
-            // Route committed responses back to originating client
-            output.committed_in_order
+            // Apply on primary, route responses back to originating client
+            let scan_tick = replicas.tick();
+            replicas.source_interval(q!(std::time::Duration::from_millis(1)), nondet!(/** */))
+                .batch(&scan_tick, nondet!(/** */))
+                .for_each(q!(|_| {}));
+
+            let is_primary = output.current_view
+                .snapshot(&scan_tick, nondet!(/** */))
+                .filter(q!(move |v: &lego_replicate::View| CLUSTER_SELF_ID.get_raw_id() == v.primary()))
+                .map(q!(|_| ()));
+
+            let responses_on_primary = output.replicated
+                .batch(&scan_tick, nondet!(/** */))
+                .filter_if_some(is_primary)
+                .weaken_ordering::<NoOrder>()
+                .all_ticks()
                 .map(q!(|(_seq, payload): (usize, Vec<u8>)| {
                     let (client_raw, vid, value): (u32, u32, i32) = bincode::deserialize(&payload).unwrap();
                     (client_raw, (vid, value))
@@ -85,7 +99,9 @@ fn lego_bench<'a>(
                 )))
                 .demux(clients, TCP.fail_stop().bincode())
                 .values()
-                .into_keyed()
+                .into_keyed();
+
+            responses_on_primary
         },
     )
     .entries()

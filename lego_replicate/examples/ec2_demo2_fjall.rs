@@ -157,11 +157,7 @@ async fn main() {
     let mut deployment = Deployment::new();
     let existing_vpc = hydro_deploy::AwsNetwork::new(
         region,
-        Some(hydro_deploy::aws::NetworkResources::new(
-            "vpc-041b334556d749bfb",
-            "subnet-099a08497349a365a",
-            "sg-05d8b0bfd0d33b8c4",
-        )),
+        None,
     );
 
     let hosts: Vec<Arc<dyn Host>> = (0..N)
