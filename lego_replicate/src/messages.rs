@@ -14,6 +14,12 @@ pub struct TransparentReplica {}
 /// Cluster marker type for the router process.
 pub struct Router;
 
+/// Cluster marker for benchmark clients.
+pub struct BenchClient;
+
+/// Process marker for benchmark aggregator.
+pub struct BenchAggregator;
+
 /// Current view of the cluster membership.
 ///
 /// `members[0]` is the primary for this view. Views are ordered by `view_num`.
