@@ -1,5 +1,7 @@
 //! Feature-gated backend implementations of `ReplicableService`.
 
+pub mod hashmap_kv;
+
 #[cfg(feature = "backend_redb")]
 pub mod redb;
 
