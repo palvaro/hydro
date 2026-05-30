@@ -77,8 +77,12 @@ fn lego_bench<'a>(
             output.committed_in_order
                 .map(q!(|(_seq, payload): (usize, Vec<u8>)| {
                     let (client_raw, vid, value): (u32, u32, i32) = bincode::deserialize(&payload).unwrap();
-                    (hydro_lang::location::MemberId::<BenchClient>::from_raw_id(client_raw), (vid, value))
+                    (client_raw, (vid, value))
                 }))
+                .map(q!(|(client_raw, payload)| (
+                    hydro_lang::location::MemberId::from_raw_id(client_raw),
+                    payload,
+                )))
                 .demux(clients, TCP.fail_stop().bincode())
                 .values()
                 .into_keyed()
