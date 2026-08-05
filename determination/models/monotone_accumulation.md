@@ -1,62 +1,92 @@
-# Model: Monotone Accumulation
+# Model: Monotone Accumulation (Enumerated)
 
-## Specification (CIDR'27 Formalism)
+## Instance
 
-### Input (I)
-A set of values V = {a, b, c, ...} arriving at cluster nodes p₁, p₂, ..., pₙ.
-Each node receives some subset of V.
+Two nodes: {p, q}. Two values: {a, b}.
+- p receives: {a}
+- q receives: {b}
+- Both broadcast to each other.
 
-### Output (O)
-Sets of values. Each node exposes a set representing "values I have accumulated."
+## Input
 
-### Allowed Outputs: S(i)
-For input i (a distribution of values across nodes), S(i) = all subsets of V that
-are reachable by some delivery schedule. Concretely: every subset of V that includes
-at least the node's own local values.
+```
+i = (p_local={a}, q_local={b})
+```
 
-### Extension Order (⪯)
-Set inclusion: o₁ ⪯ o₂ iff o₁ ⊆ o₂.
+## Output Domain (O)
 
-## Monotonicity Check
+Pairs of sets — what each node exposes:
 
-**Claim:** S(i) is monotone.
+```
+O = (set_at_p, set_at_q) where set_at_p, set_at_q ⊆ {a, b}
+```
 
-**Proof:** Take any finite collection of exposed outputs o₁, ..., oₖ ∈ S(i).
-Each oⱼ is a subset of V. Their union u = o₁ ∪ ... ∪ oₖ is also a subset of V,
-and u ∈ S(i) (reachable by delivering all relevant messages). For every j, oⱼ ⊆ u,
-so oⱼ ⪯ u. The common extension exists. ∎
+Possible output pairs (both nodes expose a subset of {a,b} containing at least their local value):
 
-## Worked Example
+```
+o₁ = ({a}, {b})        — no messages delivered yet
+o₂ = ({a,b}, {b})      — q's broadcast arrived at p
+o₃ = ({a}, {a,b})      — p's broadcast arrived at q
+o₄ = ({a,b}, {a,b})    — both broadcasts delivered
+```
 
-Cluster: {p, q}. Values arriving: p receives {a, b}, q receives {c}.
+## Allowed Outputs: S(i)
 
-After broadcast, both can accumulate {a, b, c}. At any intermediate point:
-- p might expose {a, b} (before receiving q's broadcast)
-- q might expose {c} (before receiving p's broadcast)
+```
+S(i) = {o₁, o₂, o₃, o₄}
+```
 
-Common extension: {a, b, c} ∈ S(i), and {a,b} ⊆ {a,b,c}, {c} ⊆ {a,b,c}. ✓
+All four are reachable by some delivery schedule.
 
-No matter what order messages arrive, the union is always a valid common extension.
+## Extension Order (⪯)
+
+Componentwise set inclusion: (A₁,B₁) ⪯ (A₂,B₂) iff A₁ ⊆ A₂ and B₁ ⊆ B₂.
+
+Hasse diagram:
+
+```
+        o₄ = ({a,b}, {a,b})
+       /                    \
+o₂ = ({a,b}, {b})    o₃ = ({a}, {a,b})
+       \                    /
+        o₁ = ({a}, {b})
+```
+
+All pairs in ⪯ (including reflexive):
+- o₁ ⪯ o₁, o₁ ⪯ o₂, o₁ ⪯ o₃, o₁ ⪯ o₄
+- o₂ ⪯ o₂, o₂ ⪯ o₄
+- o₃ ⪯ o₃, o₃ ⪯ o₄
+- o₄ ⪯ o₄
+
+## Monotonicity Check (Exhaustive)
+
+For every finite collection from S(i), does a common extension exist in S(i)?
+
+| Collection | Common extension in S(i)? |
+|-----------|--------------------------|
+| {o₁} | o₁ ⪯ o₄ ✓ |
+| {o₂} | o₂ ⪯ o₄ ✓ |
+| {o₃} | o₃ ⪯ o₄ ✓ |
+| {o₄} | o₄ ⪯ o₄ ✓ |
+| {o₁, o₂} | o₄ extends both ✓ |
+| {o₁, o₃} | o₄ extends both ✓ |
+| {o₁, o₄} | o₄ extends both ✓ |
+| {o₂, o₃} | o₄ extends both ✓ |
+| {o₂, o₄} | o₄ extends both ✓ |
+| {o₃, o₄} | o₄ extends both ✓ |
+| {o₁, o₂, o₃} | o₄ extends all ✓ |
+| {o₁, o₂, o₃, o₄} | o₄ extends all ✓ |
+
+**Every collection has a common extension. S(i) is monotone. ✓**
 
 ## Commitment Basis
 
 **Φ = ∅**
 
-There are no genuine commitments. The `fold` is commutative (set insert order
-doesn't matter). No `nondet!` points introduce contingency.
+No commitments needed. No output exposure rules out any future extension.
 
 ## Determination Depth
 
 **Depth = 0**
 
-All outputs are robust — they hold under every possible determination.
-No coordination is needed.
-
-## Connection to Hydro Code
-
-The program has:
-- No `nondet!` annotations
-- No `sliced!` blocks
-- Only a commutative fold (set union)
-
-A compiler pass would classify all outputs as depth-0 (robust).
+All outputs are robust.

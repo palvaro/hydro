@@ -1,125 +1,117 @@
-# Model: Single Quorum — Leader Election
+# Model: Leader Election via Quorum (Enumerated)
 
-## Specification (CIDR'27 Formalism)
+## Instance
 
-### Input (I)
-A set of ack messages arriving at the proposer:
+Two keys: {k₁, k₂}. Quorum threshold: 2.
+Acks available: ack(k₁), ack(k₁), ack(k₂), ack(k₂).
+Both keys have enough acks to reach quorum. The "leader" is whichever key reaches quorum first.
+
+## Input
+
 ```
-i = {(k₁, ok), (k₁, ok), (k₁, ok), (k₂, ok), (k₂, ok), (k₂, ok)}
+i = {ack(k₁), ack(k₁), ack(k₂), ack(k₂)}, threshold = 2
 ```
-Both k₁ and k₂ have enough acks to reach quorum (threshold = 3).
 
-### Output (O)
-A leader identity: an element of {k₁, k₂, ...} (whichever key reaches quorum first).
+## Output Domain (O)
 
-### Allowed Outputs: S(i)
-S(i) = {k₁, k₂} — both are valid leaders, since both can reach quorum.
+The leader identity, or "undecided":
 
-### Extension Order (⪯)
-Equality: o₁ ⪯ o₂ iff o₁ = o₂. Once a leader is chosen, it cannot be
-"extended" to a different leader. This is NOT a growing set — it's a
-single irrevocable choice.
+```
+O = {⊥, k₁, k₂}
+```
 
-## Monotonicity Check
+- ⊥ = no key has reached quorum yet
+- k₁ = k₁ reached quorum first (leader)
+- k₂ = k₂ reached quorum first (leader)
 
-**Claim:** S(i) is NOT monotone.
+## Allowed Outputs: S(i)
 
-**Witness:** Two processes (or two schedules) can independently expose:
-- Process/Schedule A exposes: o₁ = k₁ (k₁'s acks arrived first)
-- Process/Schedule B exposes: o₂ = k₂ (k₂'s acks arrived first)
+```
+S(i) = {⊥, k₁, k₂}
+```
 
-Is there a common extension u ∈ S(i) with o₁ ⪯ u and o₂ ⪯ u?
-Under equality: u must equal k₁ AND u must equal k₂. Impossible since k₁ ≠ k₂.
+All three are reachable: ⊥ before any batch completes; k₁ if k₁'s acks are batched first; k₂ if k₂'s acks are batched first.
 
-**No common extension exists. Coordination is required.**
+## Extension Order (⪯)
 
-## Worked Example
+Once a leader is chosen, it's irrevocable. ⊥ can extend to either; k₁ and k₂ cannot extend to each other.
 
-**Setup:**
-- Quorum threshold: 3
-- Acks available: (k₁, ok) ×3, (k₂, ok) ×3
+```
+⊥ ⪯ k₁
+⊥ ⪯ k₂
+k₁ ⪯ k₁ (reflexive)
+k₂ ⪯ k₂ (reflexive)
+⊥ ⪯ ⊥ (reflexive)
+```
 
-**Schedule A:**
-- Batch 1: {(k₁, ok), (k₁, ok), (k₁, ok)} → k₁ reaches quorum
-- k₁ is first to confirm → **leader = k₁**
-- Output: k₁
+Hasse diagram:
 
-**Schedule B:**
-- Batch 1: {(k₂, ok), (k₂, ok), (k₂, ok)} → k₂ reaches quorum
-- k₂ is first to confirm → **leader = k₂**
-- Output: k₂
+```
+k₁        k₂
+ \        /
+    ⊥
+```
 
-Two different schedules produce incompatible outputs (k₁ ≠ k₂, no common
-extension under equality). The batch boundary is a genuine commitment —
-it determines the output.
+(k₁ and k₂ are incomparable — neither extends the other.)
+
+## Monotonicity Check (Exhaustive)
+
+| Collection | Common extension in S(i)? |
+|-----------|--------------------------|
+| {⊥} | ⊥ ⪯ k₁ (or k₂) ✓ |
+| {k₁} | k₁ ⪯ k₁ ✓ |
+| {k₂} | k₂ ⪯ k₂ ✓ |
+| {⊥, k₁} | k₁ extends both ✓ |
+| {⊥, k₂} | k₂ extends both ✓ |
+| **{k₁, k₂}** | Need u with k₁ ⪯ u AND k₂ ⪯ u. No such u ∈ S(i). **✗** |
+| {⊥, k₁, k₂} | Same — no common extension. **✗** |
+
+**S(i) is NOT monotone.** The pair (k₁, k₂) witnesses the failure.
+
+Two processes exposing different leaders have made incompatible commitments. Coordination is required.
 
 ## Commitment Basis
 
-**Φ = {φ_batch}**
+**Φ = {φ_A, φ_B}**
 
-φ_batch: the batch boundary operator inside `collect_quorum`'s `sliced!` block.
-It determines which acks are processed together in one tick, and therefore
-which key crosses the quorum threshold first.
+- φ_A = "k₁'s acks are batched first" (batch commitment favoring k₁)
+- φ_B = "k₂'s acks are batched first" (batch commitment favoring k₂)
 
-**Why this is a genuine commitment (not absorbed):**
-The downstream fold (`if leader.is_none() { *leader = Some(key) }`) is
-NOT commutative — it is sensitive to arrival order. The first key wins.
-Different batch orderings → different first keys → different outputs.
+Effects on S(i):
 
-Contrast with the depth-0 version (set accumulation): there the downstream
-fold IS commutative (set insert), so batch ordering doesn't affect the final
-output. The nondeterminism is absorbed. Here it is not.
+```
+Before any commitment: S(i) = {⊥, k₁, k₂}
+After φ_A:             S(i) = {⊥, k₁}        (k₂ ruled out — k₁ won the race)
+After φ_B:             S(i) = {⊥, k₂}        (k₁ ruled out — k₂ won the race)
+```
 
-### Commutativity of φ_batch instances
+After either commitment, the remaining S(i) IS monotone:
+- {⊥, k₁}: ⊥ ⪯ k₁. Every collection has a common extension. ✓
+- {⊥, k₂}: ⊥ ⪯ k₂. Every collection has a common extension. ✓
 
-All instances of φ_batch commute WITH EACH OTHER: the batch boundaries for
-k₁'s acks and k₂'s acks are independent (each key's quorum is evaluated
-independently within collect_quorum). But the COLLECTION of batch commitments
-as a whole determines a total order of quorum-crossing events, and the
-first one wins.
+## Commutativity
 
-More precisely: the commitments commute in the sense that they don't affect
-each other's EXISTENCE (whether each key reaches quorum). But they produce
-a schedule-dependent ORDERING of confirmation events, and the downstream
-"first" selection is sensitive to that ordering. This is a single-layer
-phenomenon — one set of commuting commitments whose joint resolution
-determines the output.
+φ_A and φ_B are MUTUALLY EXCLUSIVE (not both applicable) — they represent
+alternative resolutions of the same nondeterminism. Within a single determination,
+exactly one fires.
+
+However, if there were multiple independent keys racing (k₃, k₄, ...) with their
+own batch commitments, those would commute with each other (each key's quorum is
+independent). The single "first wins" selection is the non-monotone output.
 
 ## Determination Depth
 
 **Depth = 1**
 
-One layer of batch commitments. They commute pairwise (each key's quorum
-is independent), but their joint timing determines which key wins the race.
-The "first" selection makes the output contingent on the commitment resolution.
+Single layer: one batch commitment resolves the race. After resolution, the
+residual is monotone.
 
-- Depth 0 outputs: "key k₁ has reached quorum" (robust — it will eventually
-  be true regardless of schedule)
-- Depth 1 output: "the leader is k₁" (contingent — depends on which key
-  crossed first)
+## Contrast: Depth-0 Version
 
-## Connection to Hydro Code
+If the output were a SET of confirmed keys (not "first wins"):
+- O = {∅, {k₁}, {k₂}, {k₁,k₂}}
+- S(i) = {∅, {k₁}, {k₂}, {k₁,k₂}}
+- ⪯ = set inclusion
+- Every collection has {k₁,k₂} as common extension → monotone → depth 0
 
-The program has:
-- `collect_quorum` which internally uses `sliced!` with `nondet!` (batch boundary)
-- Downstream: a NON-commutative fold (first element wins)
-
-A compiler pass would:
-1. Identify the `nondet!` inside `collect_quorum` as a potential commitment
-2. Trace the dataflow path from `nondet!` to the output
-3. Check: is the downstream fold commutative? **No** (order matters for "first")
-4. Conclude: the batch nondeterminism is NOT absorbed → genuine commitment
-5. No dependency between commitment instances → single layer
-6. Assign depth = 1
-
-### Contrast with Depth-0 Version
-
-If the downstream were `fold(HashSet::new(), |set, key| set.insert(key))`:
-- The fold IS commutative (set insert order doesn't matter)
-- All schedules produce the same final set {k₁, k₂}
-- The batch nondeterminism is ABSORBED
-- Depth = 0
-
-The difference between depth 0 and depth 1 here is entirely in the
-downstream composition — not in the `nondet!` point itself. The same
-`nondet!` can contribute depth 0 or depth 1 depending on what consumes it.
+The same `nondet!` point, different downstream composition, different depth.

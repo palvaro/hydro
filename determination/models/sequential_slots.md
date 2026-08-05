@@ -1,132 +1,156 @@
-# Model: Sequential Slots with Application Dependency
+# Model: Sequential Slots (Enumerated)
 
-## Specification (CIDR'27 Formalism)
+## Instance
 
-### Input (I)
-Two streams of messages:
-- Stream 1: threshold votes — proposals for what quorum size to use: {((), Ok(2)), ((), Ok(3)), ((), Ok(2)), ...}
-- Stream 2: operation acks — acks for actual operations: {(k₁, Ok(())), (k₁, Ok(())), ...}
+- Slot 1: decides a quorum threshold. Two possible values: 2 or 3.
+  - Votes available: 2, 2, 3, 3. Slot 1 quorum = 2.
+- Slot 2: confirms operations using the decided threshold.
+  - Key k₁ has exactly 2 acks.
 
-### Output (O)
-Sets of confirmed operation keys (from stream 2).
+## Input
 
-### Allowed Outputs: S(i)
-**This is where the cross-slot dependency lives.**
+```
+i = (slot1_votes = {2, 2, 3, 3}, slot2_acks = {ack(k₁), ack(k₁)}, slot1_quorum = 2)
+```
 
-S(i) depends on which threshold is decided in slot 1:
-- If slot 1 decides threshold = 2: S(i) = {subsets of keys with ≥ 2 acks in stream 2}
-- If slot 1 decides threshold = 3: S(i) = {subsets of keys with ≥ 3 acks in stream 2}
+## Output Domain (O)
 
-Before slot 1 resolves, S(i) contains outputs from BOTH possible worlds.
-After slot 1 commits to a threshold, S(i) narrows to only those outputs
-consistent with that threshold.
+The output is a pair: (decided_threshold, confirmed_set).
 
-### Extension Order (⪯)
-Set inclusion on confirmed operation keys: o₁ ⪯ o₂ iff o₁ ⊆ o₂.
+Valid outputs (k₁ can only be confirmed if 2 acks ≥ threshold):
 
-## Monotonicity Check
+```
+o₁ = (⊥, ∅)         — nothing decided yet
+o₂ = (2, ∅)         — threshold=2 decided, k₁ not yet confirmed
+o₃ = (3, ∅)         — threshold=3 decided, k₁ not yet confirmed
+o₄ = (2, {k₁})     — threshold=2, k₁ confirmed (2 acks ≥ 2) ✓
+     (3, {k₁})     — INVALID: 2 acks < 3. Not in O.
+```
 
-**Claim:** S(i) is NOT monotone before both commitments resolve.
+## Allowed Outputs: S(i)
 
-**Witness of non-monotonicity:**
+```
+S(i) = {o₁, o₂, o₃, o₄}
+     = {(⊥,∅), (2,∅), (3,∅), (2,{k₁})}
+```
 
-Let stream 2 contain exactly 2 successful acks for key k₁.
+All four are reachable by some schedule:
+- o₁ = (⊥, ∅): before slot 1 resolves
+- o₂ = (2, ∅): slot 1 decided threshold=2, slot 2 hasn't processed acks yet
+- o₃ = (3, ∅): slot 1 decided threshold=3, slot 2 hasn't processed acks yet
+- o₄ = (2, {k₁}): slot 1 decided threshold=2, slot 2 confirmed k₁
 
-- Under threshold = 2: k₁ is confirmable. Process exposes o₁ = {k₁}.
-- Under threshold = 3: k₁ is NOT confirmable. Process exposes o₂ = {}.
+## Extension Order (⪯)
 
-Is there a common extension u ∈ S(i) with {k₁} ⊆ u and {} ⊆ u?
-That requires u ⊇ {k₁}, so u must confirm k₁. But under threshold = 3,
-k₁ cannot be confirmed (only 2 acks). No such u exists in S(i) when
-threshold = 3 is the resolution.
+Threshold refines from ⊥; confirmed set grows; but only within consistent threshold.
 
-The exposures {k₁} and {} are incompatible — they arise from different
-resolutions of slot 1, and no single output extends both. **Coordination
-required.**
+Pairs in ⪯:
+```
+o₁ ⪯ o₁ (reflexive)
+o₁ ⪯ o₂    (⊥,∅) extends to (2,∅)
+o₁ ⪯ o₃    (⊥,∅) extends to (3,∅)
+o₁ ⪯ o₄    (⊥,∅) extends to (2,{k₁})
+o₂ ⪯ o₂ (reflexive)
+o₂ ⪯ o₄    (2,∅) extends to (2,{k₁})
+o₃ ⪯ o₃ (reflexive)
+o₄ ⪯ o₄ (reflexive)
+```
 
-## Worked Example (Full Trace)
+NOT in ⪯:
+- o₂ ⪯ o₃ — NO (threshold 2 → 3 is not extension, it's contradiction)
+- o₃ ⪯ o₂ — NO
+- o₃ ⪯ o₄ — NO (threshold mismatch)
+- o₄ ⪯ o₃ — NO
 
-**Setup:**
-- Slot 1 quorum size: 2 (need 2 votes to decide threshold)
-- Stream 1 votes: ((), Ok(2)), ((), Ok(3)), ((), Ok(2))
-- Stream 2 acks: (k₁, Ok(())), (k₁, Ok(()))
+Hasse diagram:
 
-**Execution under Schedule A (slot 1 decides threshold = 2):**
-- Batch 1 of votes: {((), Ok(2)), ((), Ok(2))} → quorum for value 2
-- Decided threshold = max(2, 2) = 2
-- Slot 2 uses threshold = 2: k₁ has 2 acks ≥ 2 → **k₁ confirmed**
-- Output: {k₁}
+```
+    o₄ = (2, {k₁})
+    |
+    o₂ = (2, ∅)        o₃ = (3, ∅)
+        \              /
+         o₁ = (⊥, ∅)
+```
 
-**Execution under Schedule B (slot 1 decides threshold = 3):**
-- Batch 1 of votes: {((), Ok(3)), ((), Ok(3))} → quorum for value 3
-  (assuming different vote distribution)
-- Decided threshold = 3
-- Slot 2 uses threshold = 3: k₁ has 2 acks < 3 → **k₁ NOT confirmed**
-- Output: {}
+## Monotonicity Check (Exhaustive)
 
-**The two outputs {k₁} and {} have no common extension under set inclusion
-when the specification constrains outputs to be consistent with the decided
-threshold.**
+| Collection | Common extension in S(i)? |
+|-----------|--------------------------|
+| {o₁} | o₁ ⪯ o₂ (or o₃, o₄) ✓ |
+| {o₂} | o₂ ⪯ o₄ ✓ |
+| {o₃} | o₃ ⪯ o₃ (terminal) ✓ |
+| {o₄} | o₄ ⪯ o₄ (terminal) ✓ |
+| {o₁, o₂} | o₄ extends both ✓ |
+| {o₁, o₃} | o₃ extends both ✓ |
+| {o₁, o₄} | o₄ extends both ✓ |
+| **{o₂, o₃}** | Need u: o₂⪯u AND o₃⪯u. No such u in S(i). **✗** |
+| {o₂, o₄} | o₄ extends both ✓ |
+| **{o₃, o₄}** | Need u: o₃⪯u AND o₄⪯u. No such u. **✗** |
+| {o₁, o₂, o₃} | Need u extending o₂ and o₃. None. **✗** |
+| {o₁, o₂, o₄} | o₄ extends all ✓ |
+| {o₁, o₃, o₄} | Need u extending o₃ and o₄. None. **✗** |
+
+**S(i) is NOT monotone.** Witness: {o₂, o₃} = {(2,∅), (3,∅)} — incompatible threshold decisions.
 
 ## Commitment Basis
 
-**Φ = {φ_batch1, φ_batch2}**
+**Φ = {φ₁_A, φ₁_B, φ₂}**
 
-- φ_batch1: batch boundary for slot 1 (threshold votes). Determines which
-  votes are processed together → which threshold value wins.
-- φ_batch2: batch boundary for slot 2 (operation acks). Determines when
-  operation keys cross the quorum threshold.
+Slot 1 commitments (which threshold wins):
+- φ₁_A = "two votes for 2 are batched first" → decides threshold = 2
+- φ₁_B = "two votes for 3 are batched first" → decides threshold = 3
 
-### Commutativity Analysis
+Slot 2 commitment (ack processing):
+- φ₂ = "k₁'s acks are batched and evaluated against the threshold"
 
-**φ_batch1 and φ_batch2 do NOT commute.**
+### Effects of φ₁ on S(i):
 
-The EFFECT of φ_batch2 depends on the OUTCOME of φ_batch1:
-- If φ_batch1 resolves to threshold = 2, then φ_batch2 with 2 acks for k₁ → confirms k₁
-- If φ_batch1 resolves to threshold = 3, then φ_batch2 with 2 acks for k₁ → does NOT confirm k₁
-
-The same batch of acks (same φ_batch2 resolution) produces different effects
-depending on slot 1's outcome. Therefore: Spec(H · φ_batch1 · φ_batch2) ≠ Spec(H · φ_batch2 · φ_batch1).
-
-### Dataflow Evidence
-
-In the Hydro code, the dependency is visible:
 ```
-decided_threshold ──────→ collect_dynamic_quorum(operation_acks, decided_threshold)
-       ↑                              ↑
-   slot 1 output              slot 2 commitment point
+Before φ₁:  S(i) = {o₁, o₂, o₃, o₄}
+After φ₁_A: S(i) = {o₁, o₂, o₄}       — o₃ ruled out (threshold ≠ 3)
+After φ₁_B: S(i) = {o₁, o₃}            — o₂, o₄ ruled out (threshold ≠ 2)
 ```
 
-There is a direct dataflow path from slot 1's commitment output to slot 2's
-commitment input. The compiler can see this.
+### Effects of φ₂ (depends on which φ₁ fired):
+
+```
+After φ₁_A then φ₂: S(i) = {o₄}        — k₁ confirmed (2 ≥ 2)
+After φ₁_B then φ₂: S(i) = {o₃}        — k₁ NOT confirmed (2 < 3)
+```
+
+## Non-Commutativity (Demonstrates Depth > 1)
+
+**φ₂'s effect depends on φ₁'s outcome:**
+
+- If φ₁_A fired (threshold=2): φ₂ narrows to {o₄} = {(2,{k₁})}
+- If φ₁_B fired (threshold=3): φ₂ narrows to {o₃} = {(3,∅)}
+
+Same operator φ₂, applied to different post-φ₁ states, produces different results.
+**They do NOT commute: φ₂'s effect is conditional on φ₁.**
+
+In the determination provenance sense: Spec(H·φ₁_A·φ₂) ≠ Spec(H·φ₁_B·φ₂),
+and the choice between φ₁_A and φ₁_B must be resolved BEFORE φ₂ can be evaluated.
 
 ## Determination Depth
 
 **Depth = 2**
 
-- Layer 1: φ_batch1 (threshold votes batching)
-- Layer 2: φ_batch2 (operation acks batching) — depends on Layer 1's outcome
+- Layer 1: {φ₁_A or φ₁_B} — resolves threshold (one fires per determination)
+- Layer 2: {φ₂} — resolves k₁ confirmation (effect depends on Layer 1's outcome)
 
-Two sequential layers. Two rounds of coordination needed.
+Two sequential rounds of commitment. Layer 2 cannot be evaluated until Layer 1 resolves.
 
-## Connection to Hydro Code
+## Dataflow Evidence
 
-The program has:
-- `collect_quorum` for slot 1 (contains `nondet!` — genuine commitment)
-- `collect_dynamic_quorum` for slot 2 (contains `nondet!` — genuine commitment)
-- A dataflow edge from slot 1's output (`decided_threshold`) to slot 2's input
+In the Hydro code, the dependency is a direct edge:
 
-A compiler pass would:
-1. Identify both `nondet!` points as genuine commitments
-2. Trace the dataflow: slot 1's output flows into slot 2's threshold parameter
-3. Conclude: slot 2's commitment EFFECT depends on slot 1's outcome
-4. Assign: Layer 1 = {φ_batch1}, Layer 2 = {φ_batch2}
-5. Output: depth = 2
+```
+slot1: collect_quorum(threshold_votes) → decided_threshold
+                                              |
+                                              v
+slot2: collect_dynamic_quorum(operation_acks, decided_threshold)
+```
 
-## Generalization
-
-This pattern appears whenever:
-- A coordination result is used as a PARAMETER for further coordination
-- State machine replication: slot N's command determines the state that slot N+1 operates on
-- Reconfiguration: a membership change (slot 1) affects quorum requirements (slot 2)
-- Conditional writes: a schema migration (slot 1) determines validity of writes (slot 2)
+The compiler sees: slot 1's output (decided_threshold) is an INPUT to slot 2's
+commitment point (collect_dynamic_quorum's threshold parameter). Therefore
+slot 2's commitment depends on slot 1's outcome. Depth = 2.
