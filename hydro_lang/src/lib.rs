@@ -108,6 +108,9 @@ pub mod forward_handle;
 
 pub mod compile;
 
+/// Determination depth analysis — computes how many sequential coordination layers a program needs.
+pub mod determination;
+
 mod manual_expr;
 
 #[cfg(stageleft_runtime)]
