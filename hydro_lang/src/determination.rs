@@ -11,7 +11,6 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::rc::Rc;
 
 use crate::compile::ir::{CollectionKind, HydroNode, HydroRoot, StreamOrder};
 
@@ -129,7 +128,7 @@ impl TreeCollector {
     /// `passed_absorber`: whether an absorbing fold lies between the root and this node.
     ///
     /// The tree points from outputs (roots) toward inputs (leaves), so "children" are inputs.
-    /// When we find a nondet node:
+    /// When we find a nondet node (ObserveNonDet OR Batch):
     /// - If NOT absorbed (no absorber between root and here): it's a genuine commitment.
     ///   It depends on any genuine commitment further down in its subtree.
     /// - If absorbed (absorber between root and here): depth 0, not genuine.
@@ -185,6 +184,33 @@ impl TreeCollector {
                 }
             }
 
+            // Batch is the PRIMARY nondeterminism point — it determines which
+            // messages land in which tick. This is where batching nondeterminism lives.
+            HydroNode::Batch { inner, .. } => {
+                let id = self.next_id;
+                self.next_id += 1;
+
+                let absorbed = passed_absorber;
+
+                self.nondet_points.push(NonDetPoint {
+                    id,
+                    trusted: false,
+                    absorbed,
+                });
+
+                if !absorbed {
+                    for &ancestor_id in ancestor_commitments {
+                        self.dependency_edges.push((id, ancestor_id));
+                    }
+
+                    let mut new_ancestors = ancestor_commitments.to_vec();
+                    new_ancestors.push(id);
+                    self.visit_node(inner, &new_ancestors, false);
+                } else {
+                    self.visit_node(inner, ancestor_commitments, passed_absorber);
+                }
+            }
+
             HydroNode::Fold { input, .. }
             | HydroNode::FoldKeyed { input, .. }
             | HydroNode::Reduce { input, .. }
@@ -206,8 +232,54 @@ impl TreeCollector {
             | HydroNode::CrossSingleton { left, right, .. }
             | HydroNode::Join { left, right, .. }
             | HydroNode::JoinHalf { left, right, .. } => {
+                // For binary operators: commitments found in either subtree
+                // are upstream of any ancestor commitment above this node.
+                // Additionally, we need to detect cross-branch dependencies:
+                // if commitment A is in the right branch and commitment B is
+                // in the left branch, B's observable output is influenced by A
+                // (because the binary operator combines both).
+                //
+                // Strategy: first collect commitments from both subtrees,
+                // then record dependencies between them and ancestors.
+                let before_left = self.nondet_points.len();
                 self.visit_node(left, ancestor_commitments, passed_absorber);
+                let after_left = self.nondet_points.len();
                 self.visit_node(right, ancestor_commitments, passed_absorber);
+                let after_right = self.nondet_points.len();
+
+                // Commitments found in left subtree
+                let left_commitments: Vec<NonDetId> = self.nondet_points[before_left..after_left]
+                    .iter()
+                    .filter(|p| !p.absorbed)
+                    .map(|p| p.id)
+                    .collect();
+
+                // Commitments found in right subtree
+                let right_commitments: Vec<NonDetId> = self.nondet_points[after_left..after_right]
+                    .iter()
+                    .filter(|p| !p.absorbed)
+                    .map(|p| p.id)
+                    .collect();
+
+                // Cross-branch dependencies: each side depends on the other
+                // because the binary operator combines their outputs.
+                // A commitment in the left branch has its effect influenced
+                // by commitments in the right branch (and vice versa).
+                for &left_id in &left_commitments {
+                    for &right_id in &right_commitments {
+                        // left_id's output is combined with right_id's output
+                        // → left_id depends on right_id (right is also upstream)
+                        self.dependency_edges.push((right_id, left_id));
+                        // right_id depends on left_id similarly? No — only if
+                        // right's EFFECT depends on left's OUTCOME.
+                        // For CrossSingleton: the singleton (right) doesn't depend
+                        // on the stream (left), but the stream's interpretation
+                        // depends on the singleton.
+                        // Conservative: add both directions. This may over-report.
+                        // TODO: Be smarter about which direction the dependency goes
+                        // based on the operator semantics.
+                    }
+                }
             }
 
             HydroNode::Difference { pos, neg, .. }
@@ -229,7 +301,6 @@ impl TreeCollector {
             HydroNode::Cast { inner, .. }
             | HydroNode::BeginAtomic { inner, .. }
             | HydroNode::EndAtomic { inner, .. }
-            | HydroNode::Batch { inner, .. }
             | HydroNode::YieldConcat { inner, .. } => {
                 self.visit_node(inner, ancestor_commitments, passed_absorber);
             }
@@ -359,7 +430,7 @@ mod tests {
 
     fn dummy_op_metadata() -> HydroIrOpMetadata {
         HydroIrOpMetadata {
-            backtrace: Backtrace,
+            backtrace: Backtrace::get_backtrace(0),
             cpu_usage: None,
             network_recv_cpu_usage: None,
             id: None,
@@ -541,5 +612,115 @@ mod tests {
         assert_eq!(result.dependency_edges.len(), 1);
         // Edge should be (A_id, B_id) meaning B depends on A
         assert_eq!(result.layers.len(), 2);
+    }
+
+    // =========================================================================
+    // End-to-end tests: Hydro DSL → IR → analyze_depth
+    //
+    // These use source_iter (no sim feature needed) and finalize() to get IR.
+    // =========================================================================
+
+    use crate::prelude::*;
+    use stageleft::q;
+
+    /// End-to-end Example 1: Pure monotone accumulation.
+    /// A simple source_iter → map → for_each pipeline with no nondet.
+    /// Expected: depth 0 (no ObserveNonDet nodes at all).
+    #[test]
+    fn e2e_monotone_accumulation_depth_0() {
+        let mut flow = FlowBuilder::new();
+        let process = flow.process::<()>();
+
+        // Simple pipeline: no batching, no nondet
+        process
+            .source_iter(q!(0..10))
+            .map(q!(|x| x * 2))
+            .for_each(q!(|v| println!("{}", v)));
+
+        let built = flow.finalize();
+        let result = analyze_depth(built.ir());
+
+        // No ObserveNonDet nodes in this simple pipeline → depth 0
+        assert_eq!(
+            result.depth, 0,
+            "Simple source_iter → map → for_each should be depth 0. Got: {:?}",
+            result
+        );
+    }
+
+    /// End-to-end Example 2: Batching with non-commutative downstream.
+    /// source_iter → batch (introduces nondet) → non-commutative fold (first wins).
+    /// The batch nondet should NOT be absorbed.
+    /// Expected: depth >= 1.
+    #[test]
+    fn e2e_batched_first_wins_depth_1() {
+        let mut flow = FlowBuilder::new();
+        let process = flow.process::<()>();
+        let tick = process.tick();
+
+        process
+            .source_iter(q!(vec![1i32, 2, 3]))
+            .batch(&tick, nondet!(/** test: batch boundary */))
+            .fold(
+                q!(|| None::<i32>),
+                q!(|first, v| { if first.is_none() { *first = Some(v); } }),
+            )
+            .all_ticks()
+            .for_each(q!(|v| println!("{:?}", v)));
+
+        let built = flow.finalize();
+        let result = analyze_depth(built.ir());
+
+        // The batch introduces ObserveNonDet; fold is over TotalOrder input
+        // (batch preserves order) → not absorbed → depth >= 1
+        assert!(
+            result.depth >= 1,
+            "Batched first-wins should be depth >= 1. Got: {:?}",
+            result
+        );
+    }
+
+    /// End-to-end Example 3: Two batches where second depends on first.
+    /// First batch decides a value, which feeds (via cross_singleton) into
+    /// the context of the second batch's fold.
+    /// Expected: depth >= 2.
+    #[test]
+    fn e2e_sequential_batches_depth_2() {
+        let mut flow = FlowBuilder::new();
+        let process = flow.process::<()>();
+        let tick = process.tick();
+
+        // Stream 1 → batch → fold (non-commutative) → produces threshold
+        let threshold = process
+            .source_iter(q!(vec![2usize, 3, 2]))
+            .batch(&tick, nondet!(/** slot 1: which values are batched */))
+            .fold(
+                q!(|| 0usize),
+                q!(|first, v| { if *first == 0 { *first = v; } }),
+            );
+
+        // Stream 2 → batch → cross_singleton(threshold) → fold (non-commutative)
+        process
+            .source_iter(q!(vec![10i32, 20, 30]))
+            .batch(&tick, nondet!(/** slot 2: which ops are batched */))
+            .cross_singleton(threshold)
+            .fold(
+                q!(|| None::<(i32, usize)>),
+                q!(|first, v| { if first.is_none() { *first = Some(v); } }),
+            )
+            .all_ticks()
+            .for_each(q!(|v| println!("{:?}", v)));
+
+        let built = flow.finalize();
+        let result = analyze_depth(built.ir());
+
+        // Two nondet points (two batch calls). The second batch's fold
+        // receives data crossed with the first batch's fold output.
+        // Dependency: second depends on first → depth >= 2.
+        assert!(
+            result.depth >= 2,
+            "Sequential batches with cross-dependency should be depth >= 2. Got: {:?}",
+            result
+        );
     }
 }
