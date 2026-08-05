@@ -764,27 +764,27 @@ impl DfirBuilder for ProdDfirBuilder {
         false
     }
 
-    /// The DFIR persistence lifetime for tick-scoped operator state. Inside a tick's
-    /// `loop { ... }` context (`'none`), state resets each loop execution (== each tick);
-    /// at the top level (`'tick`), it resets each tick.
-    fn tick_state_lifetime(&self, op_location: &LocationId) -> TokenStream {
-        if Self::tick_of(op_location).is_some() {
-            quote!('none)
-        } else {
-            quote!('tick)
-        }
-    }
+    // /// The DFIR persistence lifetime for tick-scoped operator state. Inside a tick's
+    // /// `loop { ... }` context (`'none`), state resets each loop execution (== each tick);
+    // /// at the top level (`'tick`), it resets each tick.
+    // fn tick_state_lifetime(&self, op_location: &LocationId) -> TokenStream {
+    //     if Self::tick_of(op_location).is_some() {
+    //         quote!('none)
+    //     } else {
+    //         quote!('tick)
+    //     }
+    // }
 
-    /// The DFIR persistence lifetime for cross-tick operator state. Inside a tick's
-    /// `loop { ... }` context (`'loop`), state persists across loop executions (== across ticks);
-    /// at the top level (`'static`), it persists forever.
-    fn cross_tick_state_lifetime(&self, op_location: &LocationId) -> TokenStream {
-        if Self::tick_of(op_location).is_some() {
-            quote!('loop)
-        } else {
-            quote!('static)
-        }
-    }
+    // /// The DFIR persistence lifetime for cross-tick operator state. Inside a tick's
+    // /// `loop { ... }` context (`'loop`), state persists across loop executions (== across ticks);
+    // /// at the top level (`'static`), it persists forever.
+    // fn cross_tick_state_lifetime(&self, op_location: &LocationId) -> TokenStream {
+    //     if Self::tick_of(op_location).is_some() {
+    //         quote!('loop)
+    //     } else {
+    //         quote!('static)
+    //     }
+    // }
 
     fn add_dfir_at(
         &mut self,
@@ -5129,7 +5129,7 @@ impl HydroNode {
 
                     HydroNode::Fold { .. } | HydroNode::FoldKeyed { .. } | HydroNode::Scan { .. } | HydroNode::ScanAsyncBlocking { .. } => {
                         let operator: syn::Ident = if let HydroNode::Fold { input, .. } = node {
-                            if input.metadata().location_id.is_top_level()
+                            if input.metadata().location_id.is_root()
                                 && input.metadata().collection_kind.is_bounded()
                             {
                                 parse_quote!(fold_no_replay)
@@ -5141,7 +5141,7 @@ impl HydroNode {
                         } else if matches!(node, HydroNode::ScanAsyncBlocking { .. }) {
                             parse_quote!(scan_async_blocking)
                         } else if let HydroNode::FoldKeyed { input, .. } = node {
-                            if input.metadata().location_id.is_top_level()
+                            if input.metadata().location_id.is_root()
                                 && input.metadata().collection_kind.is_bounded()
                             {
                                 todo!("Fold keyed on a top-level bounded collection is not yet supported")
@@ -5188,8 +5188,7 @@ impl HydroNode {
                                 };
 
                                 if matches!(node, HydroNode::Fold { .. })
-                                    && node.metadata().location_id.is_top_level()
-                                    && !(matches!(node.metadata().location_id, LocationId::Atomic(_)))
+                                    && node.metadata().location_id.is_root()
                                     && graph_builders.singleton_intermediates()
                                     && !node.metadata().collection_kind.is_bounded()
                                 {
@@ -5240,8 +5239,7 @@ impl HydroNode {
                                         fold_hooked_idents.insert(fold_ident.to_string());
                                     }
                                 } else if matches!(node, HydroNode::FoldKeyed { .. })
-                                    && node.metadata().location_id.is_top_level()
-                                    && !(matches!(node.metadata().location_id, LocationId::Atomic(_)))
+                                    && node.metadata().location_id.is_root()
                                     && graph_builders.singleton_intermediates()
                                     && !node.metadata().collection_kind.is_bounded()
                                 {
@@ -5330,7 +5328,7 @@ impl HydroNode {
 
                     HydroNode::Reduce { .. } | HydroNode::ReduceKeyed { .. } => {
                         let operator: syn::Ident = if let HydroNode::Reduce { input, .. } = node {
-                            if input.metadata().location_id.is_top_level()
+                            if input.metadata().location_id.is_root()
                                 && input.metadata().collection_kind.is_bounded()
                             {
                                 parse_quote!(reduce_no_replay)
@@ -5338,7 +5336,7 @@ impl HydroNode {
                                 parse_quote!(reduce)
                             }
                         } else if let HydroNode::ReduceKeyed { input, .. } = node {
-                            if input.metadata().location_id.is_top_level()
+                            if input.metadata().location_id.is_root()
                                 && input.metadata().collection_kind.is_bounded()
                             {
                                 todo!(
@@ -5380,8 +5378,7 @@ impl HydroNode {
                                 };
 
                                 if matches!(node, HydroNode::Reduce { .. })
-                                    && node.metadata().location_id.is_top_level()
-                                    && !(matches!(node.metadata().location_id, LocationId::Atomic(_)))
+                                    && node.metadata().location_id.is_root()
                                     && graph_builders.singleton_intermediates()
                                     && !node.metadata().collection_kind.is_bounded()
                                 {
@@ -5389,8 +5386,7 @@ impl HydroNode {
                                         "Reduce with optional intermediates is not yet supported in simulator"
                                     );
                                 } else if matches!(node, HydroNode::ReduceKeyed { .. })
-                                    && node.metadata().location_id.is_top_level()
-                                    && !(matches!(node.metadata().location_id, LocationId::Atomic(_)))
+                                    && node.metadata().location_id.is_root()
                                     && graph_builders.singleton_intermediates()
                                     && !node.metadata().collection_kind.is_bounded()
                                 {
@@ -5421,7 +5417,6 @@ impl HydroNode {
                         metadata,
                         ..
                     } => {
-                        let input_top_level = input.metadata().location_id.is_top_level();
 
                         // watermark is processed second, so it's on top
                         let watermark_ident = ident_stack.pop().unwrap();
@@ -5437,7 +5432,7 @@ impl HydroNode {
                         let fold_ident =
                             syn::Ident::new(&format!("stream_{}", stmt_id), Span::call_site());
 
-                        let agg_operator: syn::Ident = if input.metadata().location_id.is_top_level()
+                        let agg_operator: syn::Ident = if input.metadata().location_id.is_root()
                             && input.metadata().collection_kind.is_bounded()
                         {
                             parse_quote!(fold_no_replay)
@@ -5447,14 +5442,13 @@ impl HydroNode {
 
                         match builders_or_callback {
                             BuildersOrCallback::Builders(graph_builders) => {
-                                let lifetime = if input_top_level {
+                                let lifetime = if input.metadata().location_id.is_top_level() {
                                     graph_builders.cross_tick_state_lifetime(&out_location)
                                 } else {
                                     graph_builders.tick_state_lifetime(&out_location)
                                 };
 
-                                if metadata.location_id.is_top_level()
-                                    && !(matches!(metadata.location_id, LocationId::Atomic(_)))
+                                if metadata.location_id.is_root()
                                     && graph_builders.singleton_intermediates()
                                     && !metadata.collection_kind.is_bounded()
                                 {

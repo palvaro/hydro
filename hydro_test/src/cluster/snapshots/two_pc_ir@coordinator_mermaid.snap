@@ -18,7 +18,7 @@ linkStyle default stroke:#aaa
 8v1["<div style=text-align:center>(8v1)</div> <code><br>source_stream(DUMMY_SOURCE)</code>"]:::otherClass
 9v1["<div style=text-align:center>(9v1)</div> <code><br>map(|res| {<br>    let (id, b) = res.unwrap();<br>    (<br>        hydro_lang::__staged::location::MemberId::&lt;<br>            hydro_test::__staged::cluster::two_pc_bench::Client,<br>        &gt;::from_tagless(id as hydro_lang::__staged::location::TaglessMemberId),<br>        hydro_lang::runtime_support::bincode::deserialize::&lt;(u32, i32)&gt;(&amp;b).unwrap(),<br>    )<br>})</code>"]:::otherClass
 10v1["<div style=text-align:center>(10v1)</div> <code><br>batch()</code>"]:::otherClass
-11v1["<div style=text-align:center>(11v1)</div> <code><br>cross_join_multiset::&lt;'none, 'none&gt;()</code>"]:::otherClass
+11v1["<div style=text-align:center>(11v1)</div> <code><br>cross_join_multiset::&lt;'tick, 'tick&gt;()</code>"]:::otherClass
 12v1["<div style=text-align:center>(12v1)</div> <code><br>all_iterations()</code>"]:::otherClass
 13v1["<div style=text-align:center>(13v1)</div> <code><br>map(|(id, data)| {<br>    (<br>        id.into_tagless(),<br>        hydro_lang::runtime_support::bincode::serialize(&amp;data).unwrap().into(),<br>    )<br>})</code>"]:::otherClass
 14v1["<div style=text-align:center>(14v1)</div> <code><br>dest_sink(DUMMY_SINK)</code>"]:::otherClass
@@ -30,10 +30,10 @@ linkStyle default stroke:#aaa
 20v1["<div style=text-align:center>(20v1)</div> <code><br>batch()</code>"]:::otherClass
 21v1["<div style=text-align:center>(21v1)</div> <code><br>chain()</code>"]:::otherClass
 22v1["<div style=text-align:center>(22v1)</div> <code><br>tee()</code>"]:::otherClass
-23v1["<div style=text-align:center>(23v1)</div> <code><br>fold_keyed::&lt;<br>    'none,<br>&gt;(<br>    {<br>        hydro_std::__stageleft_quote_src_quorum_rs_LINE_COL!([] [move | | (0, 0)])<br>    },<br>    {<br>        hydro_std::__stageleft_quote_src_quorum_rs_LINE_COL!(<br>            [] [move | accum, value | { if value.is_ok() { accum.0 += 1; } else {<br>            accum.1 += 1; } }]<br>        )<br>    },<br>)</code>"]:::otherClass
+23v1["<div style=text-align:center>(23v1)</div> <code><br>fold_keyed::&lt;<br>    'tick,<br>&gt;(<br>    {<br>        hydro_std::__stageleft_quote_src_quorum_rs_LINE_COL!([] [move | | (0, 0)])<br>    },<br>    {<br>        hydro_std::__stageleft_quote_src_quorum_rs_LINE_COL!(<br>            [] [move | accum, value | { if value.is_ok() { accum.0 += 1; } else {<br>            accum.1 += 1; } }]<br>        )<br>    },<br>)</code>"]:::otherClass
 25v1["<div style=text-align:center>(25v1)</div> <code><br>filter_map({<br>    hydro_std::__stageleft_quote_src_quorum_rs_LINE_COL!(<br>        [min__free = 3usize,] [move | (key, (success, _error)) | if success &gt;=<br>        min__free { Some(key) } else { None }]<br>    )<br>})</code>"]:::otherClass
 26v1["<div style=text-align:center>(26v1)</div> <code><br>tee()</code>"]:::otherClass
-27v1["<div style=text-align:center>(27v1)</div> <code><br>anti_join::&lt;'none, 'none&gt;()</code>"]:::otherClass
+27v1["<div style=text-align:center>(27v1)</div> <code><br>anti_join::&lt;'tick, 'tick&gt;()</code>"]:::otherClass
 28v1["<div style=text-align:center>(28v1)</div> <code><br>identity::&lt;<br>    (<br>        (<br>            hydro_test::__staged::__deps::hydro_lang::location::member_id::MemberId&lt;<br>                hydro_test::__staged::cluster::two_pc_bench::Client,<br>            &gt;,<br>            (u32, i32),<br>        ),<br>        core::result::Result&lt;(), ()&gt;,<br>    ),<br>&gt;()</code>"]:::otherClass
 29v1["<div style=text-align:center>(29v1)</div> <code><br>defer_tick_lazy()</code>"]:::otherClass
 30v1["<div style=text-align:center>(30v1)</div> <code><br>identity::&lt;<br>    (<br>        hydro_test::__staged::__deps::hydro_lang::location::member_id::MemberId&lt;<br>            hydro_test::__staged::cluster::two_pc_bench::Client,<br>        &gt;,<br>        (u32, i32),<br>    ),<br>&gt;()</code>"]:::otherClass
@@ -48,7 +48,7 @@ linkStyle default stroke:#aaa
 39v1["<div style=text-align:center>(39v1)</div> <code><br>map({<br>    hydro_lang::__stageleft_quote_src_live_collections_keyed_singleton_rs_LINE_COL!(<br>        [] [| (k, _) | k]<br>    )<br>})</code>"]:::otherClass
 40v1["<div style=text-align:center>(40v1)</div> <code><br>all_iterations()</code>"]:::otherClass
 41v1["<div style=text-align:center>(41v1)</div> <code><br>batch()</code>"]:::otherClass
-42v1["<div style=text-align:center>(42v1)</div> <code><br>cross_join_multiset::&lt;'none, 'none&gt;()</code>"]:::otherClass
+42v1["<div style=text-align:center>(42v1)</div> <code><br>cross_join_multiset::&lt;'tick, 'tick&gt;()</code>"]:::otherClass
 43v1["<div style=text-align:center>(43v1)</div> <code><br>all_iterations()</code>"]:::otherClass
 44v1["<div style=text-align:center>(44v1)</div> <code><br>map(|(id, data)| {<br>    (<br>        id.into_tagless(),<br>        hydro_lang::runtime_support::bincode::serialize(&amp;data).unwrap().into(),<br>    )<br>})</code>"]:::otherClass
 45v1["<div style=text-align:center>(45v1)</div> <code><br>dest_sink(DUMMY_SINK)</code>"]:::otherClass
@@ -60,10 +60,10 @@ linkStyle default stroke:#aaa
 51v1["<div style=text-align:center>(51v1)</div> <code><br>batch()</code>"]:::otherClass
 52v1["<div style=text-align:center>(52v1)</div> <code><br>chain()</code>"]:::otherClass
 53v1["<div style=text-align:center>(53v1)</div> <code><br>tee()</code>"]:::otherClass
-54v1["<div style=text-align:center>(54v1)</div> <code><br>fold_keyed::&lt;<br>    'none,<br>&gt;(<br>    {<br>        hydro_std::__stageleft_quote_src_quorum_rs_LINE_COL!([] [move | | (0, 0)])<br>    },<br>    {<br>        hydro_std::__stageleft_quote_src_quorum_rs_LINE_COL!(<br>            [] [move | accum, value | { if value.is_ok() { accum.0 += 1; } else {<br>            accum.1 += 1; } }]<br>        )<br>    },<br>)</code>"]:::otherClass
+54v1["<div style=text-align:center>(54v1)</div> <code><br>fold_keyed::&lt;<br>    'tick,<br>&gt;(<br>    {<br>        hydro_std::__stageleft_quote_src_quorum_rs_LINE_COL!([] [move | | (0, 0)])<br>    },<br>    {<br>        hydro_std::__stageleft_quote_src_quorum_rs_LINE_COL!(<br>            [] [move | accum, value | { if value.is_ok() { accum.0 += 1; } else {<br>            accum.1 += 1; } }]<br>        )<br>    },<br>)</code>"]:::otherClass
 56v1["<div style=text-align:center>(56v1)</div> <code><br>filter_map({<br>    hydro_std::__stageleft_quote_src_quorum_rs_LINE_COL!(<br>        [min__free = 3usize,] [move | (key, (success, _error)) | if success &gt;=<br>        min__free { Some(key) } else { None }]<br>    )<br>})</code>"]:::otherClass
 57v1["<div style=text-align:center>(57v1)</div> <code><br>tee()</code>"]:::otherClass
-58v1["<div style=text-align:center>(58v1)</div> <code><br>anti_join::&lt;'none, 'none&gt;()</code>"]:::otherClass
+58v1["<div style=text-align:center>(58v1)</div> <code><br>anti_join::&lt;'tick, 'tick&gt;()</code>"]:::otherClass
 59v1["<div style=text-align:center>(59v1)</div> <code><br>identity::&lt;<br>    (<br>        (<br>            hydro_test::__staged::__deps::hydro_lang::location::member_id::MemberId&lt;<br>                hydro_test::__staged::cluster::two_pc_bench::Client,<br>            &gt;,<br>            (u32, i32),<br>        ),<br>        core::result::Result&lt;(), ()&gt;,<br>    ),<br>&gt;()</code>"]:::otherClass
 60v1["<div style=text-align:center>(60v1)</div> <code><br>defer_tick_lazy()</code>"]:::otherClass
 61v1["<div style=text-align:center>(61v1)</div> <code><br>identity::&lt;<br>    (<br>        hydro_test::__staged::__deps::hydro_lang::location::member_id::MemberId&lt;<br>            hydro_test::__staged::cluster::two_pc_bench::Client,<br>        &gt;,<br>        (u32, i32),<br>    ),<br>&gt;()</code>"]:::otherClass

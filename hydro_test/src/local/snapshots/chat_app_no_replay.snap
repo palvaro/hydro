@@ -27,7 +27,7 @@ linkStyle default stroke:#aaa
 17v1[\"<div style=text-align:center>(17v1)</div> <code>map({<br>    use crate::__staged::__deps::*;<br>    use crate::__staged::local::chat_app::*;<br>    crate::__staged::__stageleft_quote_src_local_chat_app_rs_LINE_COL!(<br>        [] [| s | s.to_uppercase()]<br>    )<br>})</code>"/]:::pullClass
 18v1[\"(18v1) <code>batch()</code>"/]:::pullClass
 19v1[\"<div style=text-align:center>(19v1)</div> <code>map({<br>    use hydro_lang::__staged::__deps::*;<br>    use hydro_lang::__staged::live_collections::stream::*;<br>    hydro_lang::__stageleft_quote_src_live_collections_stream_mod_rs_LINE_COL!(<br>        [] [| v | ((), v)]<br>    )<br>})</code>"/]:::pullClass
-20v1[\"(20v1) <code>join_multiset_half::&lt;'none, 'none&gt;()</code>"/]:::pullClass
+20v1[\"(20v1) <code>join_multiset_half::&lt;'tick, 'tick&gt;()</code>"/]:::pullClass
 21v1[\"<div style=text-align:center>(21v1)</div> <code>map({<br>    use hydro_lang::__staged::__deps::*;<br>    use hydro_lang::__staged::live_collections::stream::*;<br>    hydro_lang::__stageleft_quote_src_live_collections_stream_mod_rs_LINE_COL!(<br>        [] [| ((), (v1, v2)) | (v1, v2)]<br>    )<br>})</code>"/]:::pullClass
 22v1[\"(22v1) <code>all_iterations()</code>"/]:::pullClass
 23v1[\"<div style=text-align:center>(23v1)</div> <code>map(|data| {<br>    hydro_lang::runtime_support::bincode::serialize(&amp;data).unwrap().into()<br>})</code>"/]:::pullClass
