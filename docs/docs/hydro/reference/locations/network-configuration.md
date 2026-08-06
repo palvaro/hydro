@@ -34,11 +34,39 @@ Serialization configures how data is encoded and decoded when sent over the netw
 
 ### Bincode
 
-The `.bincode()` API configures the channel to use the [`bincode`](https://docs.rs/bincode) crate for serialization and deserialization. The types being sent must implement `Serialize` and `DeserializeOwned`. This is currently the only supported serialization backend.
+The `.bincode()` API configures the channel to use the [`bincode`](https://docs.rs/bincode) crate for serialization and deserialization. The types being sent must implement `Serialize` and `DeserializeOwned`. Bincode is currently the only built-in wire format — the one where Hydro performs the encoding and decoding for you — and it works on all deployment backends.
+
+### Embedded
+
+The `.embedded()` API configures the channel to leave serialization to code **outside of Hydro**. Instead of Hydro serializing elements to bytes, the raw element type `T` is exposed at the network boundary: the generated sender side hands you `T` values directly, and the receiver side accepts a stream of `T` values. You are then responsible for encoding, transporting, and decoding the elements yourself—for example with a custom wire format, a specialized transport like DPDK or shared memory, or an existing messaging layer.
+
+```rust,no_run
+# use hydro_lang::prelude::*;
+let config = TCP.fail_stop().embedded().name("messages");
+```
+
+Embedded serialization works with any transport configuration, including [UDP](#udp):
+
+```rust,no_run
+# use hydro_lang::prelude::*;
+let config = UDP.lossy_delayed_forever().embedded().name("messages");
+```
+
+Note that with embedded serialization, the transport and fault policy describe a **contract** rather than an implementation: since your external code carries the data, *you* must ensure your transport upholds the declared guarantees (e.g. in-order, prefix delivery for `TCP.fail_stop()`; for `UDP` channels, messages may be dropped or reordered, and Hydro's type system will treat the received stream accordingly, as `NoOrder`).
+
+Because there is no transport managed by Hydro, the receiving side gets the raw payload with no transport `Result` to unwrap—your external code decides how to handle serialization and delivery faults before feeding elements into the receiver.
+
+:::caution
+
+Embedded serialization is only supported in [embedded deployments](../deploy/embedded.mdx) (where you wire up network channels manually) and the Hydro simulator (where raw values are carried directly through in-memory channels). Attempting to use `.embedded()` with other deployment backends, such as Hydro Deploy or Maelstrom, will panic at compile time; use `.bincode()` there instead.
+
+:::
+
+See [Embedded Mode: Embedded Serialization](../deploy/embedded.mdx#embedded-serialization) for details on the generated code.
 
 ## TCP
 
-TCP is currently the only transport backend. When using `TCP`, you **must** choose a fault tolerance policy before configuring serialization. Calling `TCP.bincode()` directly will result in a compile error—you need to first call `.fail_stop()`, `.lossy_delayed_forever()`, or `.lossy()`.
+TCP is one of two available transport backends (see also [UDP](#udp)). When using `TCP`, you **must** choose a fault tolerance policy before configuring serialization. Calling `TCP.bincode()` directly will result in a compile error—you need to first call `.fail_stop()`, `.lossy_delayed_forever()`, or `.lossy()`.
 
 ### Fail-Stop
 
@@ -66,7 +94,7 @@ let config = TCP.lossy_delayed_forever().bincode();
 
 With `lossy_delayed_forever`, messages may be **dropped**, but dropped messages are modeled as being **indefinitely delayed** rather than lost. This mode does **not** require a `nondet!` annotation because the output stream is unordered, so even if messages are lost the output will have a subset of the intended elements.
 
-The tradeoff is that the output stream has a [`NoOrder`](pathname:///rustdoc/hydro_lang/live_collections/stream/enum.NoOrder) guarantee, imposing stricter conditions on downstream consumers. For example, you cannot use order-dependent operators like `fold` without proving commutativity.
+The tradeoff is that the output stream has a [`NoOrder`](rust:hydro_lang::live_collections::stream::NoOrder) guarantee, imposing stricter conditions on downstream consumers. For example, you cannot use order-dependent operators like `fold` without proving commutativity.
 
 This is the **preferred** mode for protocols that tolerate message loss, because:
 - It does not require `nondet!`, making it easier to reason about correctness.
@@ -80,13 +108,13 @@ When using `lossy_delayed_forever` in the Hydro simulator, you must call `.test_
 flow.sim().test_safety_only().exhaustive(async || { /* ... */ });
 ```
 
-This is required because the simulator models dropped messages as delayed to after the undropped messages, which only tests **safety** (race-condition) properties (not **liveness**). A message that is "delayed forever" may never arrive, so the simulator cannot guarantee that your program will eventually make progress—only that it won't produce incorrect results.
+This is required because the simulator will not actually drop packets—instead, it delays "dropped" messages until the end of the execution. This catches **safety** bugs (such as race conditions where a message arrives later than expected), but cannot test **liveness**: a message that is "delayed forever" may never arrive in a real deployment, so the simulator cannot guarantee that your program will eventually make progress—only that it won't produce incorrect results.
 
 :::
 
 :::caution
 
-The `lossy_delayed_forever` fault model is currently only available for the Hydro simulator and Maelstrom testing. Support in Hydro Deploy will be available once TCP reconnect is implemented.
+The `lossy_delayed_forever` fault model is currently available for [embedded deployments](../deploy/embedded.mdx) (the only production deployment option), Maelstrom testing, and the Hydro simulator (with `.test_safety_only()`). Support in Hydro Deploy will be available once TCP reconnect is implemented.
 
 :::
 
@@ -109,10 +137,46 @@ In most cases, prefer [`lossy_delayed_forever`](#lossy-delayed-forever) over `lo
 
 :::caution
 
-The `lossy` fault model is currently only available for [embedded deployments](../deploy/embedded.mdx) and Maelstrom testing. Support in Hydro Deploy will be available in the near future.
+The `lossy` fault model is currently available for [embedded deployments](../deploy/embedded.mdx) (the only production deployment option) and Maelstrom testing. It is **not supported in the Hydro simulator**—use `lossy_delayed_forever` if you want to simulate message loss. Support in Hydro Deploy will be available in the near future.
 
 :::
 
 This is appropriate for protocols that are designed to tolerate message loss, such as gossip protocols or systems running under network partition testing (e.g. [Maelstrom](https://github.com/jepsen-io/maelstrom)).
 
 Because message loss is non-deterministic, `lossy` requires a `nondet!` marker to make this explicit in your code. You should document why your protocol is correct despite potential message loss.
+
+## UDP
+
+UDP is a connectionless transport that guarantees **neither delivery nor ordering**. Output streams from a UDP channel always have a [`NoOrder`](rust:hydro_lang::live_collections::stream::NoOrder) guarantee, imposing stricter conditions on downstream consumers (e.g. you cannot use order-dependent operators like `fold` without proving commutativity).
+
+Like `TCP`, you **must** choose a fault tolerance policy before configuring serialization. Because UDP is connectionless, there is no connection that can fail, so there is **no `fail_stop` policy**—only `.lossy_delayed_forever()` and `.lossy()` are available.
+
+### Lossy Delayed Forever
+
+```rust,no_run
+# use hydro_lang::prelude::*;
+let config = UDP.lossy_delayed_forever().bincode();
+```
+
+With `lossy_delayed_forever`, dropped messages are modeled as being **indefinitely delayed** rather than lost. Like the TCP mode of the same name, this does **not** require a `nondet!` annotation because the output stream is unordered, so even if messages are lost the output will have a subset of the intended elements.
+
+This is the **preferred** UDP mode, for the same reasons as [TCP's `lossy_delayed_forever`](#lossy-delayed-forever): it does not require `nondet!` and can be simulated in exhaustive mode (with `.test_safety_only()`).
+
+### Lossy
+
+```rust,no_run
+# use hydro_lang::prelude::*;
+let config = UDP.lossy(nondet!(/** messages may be dropped, explanation... */)).bincode();
+```
+
+With `lossy`, messages may be **arbitrarily dropped and reordered**. Because message loss is non-deterministic, this requires a `nondet!` marker to make it explicit in your code.
+
+Unlike TCP's `lossy` mode, UDP's `lossy` mode does **not** preserve the ordering of the input stream—the output is always `NoOrder`.
+
+:::caution
+
+UDP is **not yet available** in "deploy" deployment mode (via Hydro Deploy, including Docker and ECS deployments)—attempting to deploy a UDP channel there will panic at compile time.
+
+Both UDP modes are available for [embedded deployments](../deploy/embedded.mdx) (the only production deployment option) and Maelstrom testing. In the Hydro simulator, only `lossy_delayed_forever` is supported, and it requires `.test_safety_only()`: the simulator will not actually drop packets—it delays "dropped" messages until the end of the execution, which catches safety bugs but cannot test liveness.
+
+:::

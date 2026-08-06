@@ -9,6 +9,8 @@ members = [
     "dfir_rs",
     "dfir_pipes",
     "example_test",
+    "hydro_build_utils",
+    "hydro_concurrent_cargo",
     "hydro_deploy/core",
     "hydro_deploy/hydro_deploy_integration",
     "hydro_lang",
@@ -77,13 +79,15 @@ explicit_into_iter_loop = "warn"
 let_and_return = "allow"
 manual_is_variant_and = "warn"
 manual_let_else = "warn"
+manual_ok_or = "warn"
+or_fun_call = "warn"
 redundant_clone = "warn"
 self_named_module_files = "warn"
+single_match_else = "warn"
 str_to_string = "warn"
 try_err = "warn"
-uninlined_format_args = "allow"
 unused_async = "warn"
 
 [workspace.dependencies]
-stageleft = "0.13.5"
-stageleft_tool = "0.13.5"
+stageleft = "0.15.1"
+stageleft_tool = "0.15.1"

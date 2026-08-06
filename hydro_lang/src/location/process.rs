@@ -15,7 +15,7 @@ use std::marker::PhantomData;
 
 use super::{Location, LocationId};
 use crate::compile::builder::FlowState;
-use crate::location::LocationKey;
+use crate::location::{LocationKey, TopLevel};
 use crate::staging_util::Invariant;
 
 /// A single-node location in a distributed Hydro program.
@@ -30,9 +30,13 @@ use crate::staging_util::Invariant;
 /// needed.
 ///
 /// # Creating a Process
-/// ```rust,ignore
+/// ```rust
+/// # use hydro_lang::prelude::*;
+/// struct MyTag;
 /// let mut flow = FlowBuilder::new();
 /// let node = flow.process::<MyTag>();
+/// # let _ = &node;
+/// # let _ = flow.finalize();
 /// ```
 pub struct Process<'a, ProcessTag = ()> {
     pub(crate) key: LocationKey,
@@ -64,7 +68,7 @@ impl<P> Clone for Process<'_, P> {
 }
 
 impl<'a, P> super::dynamic::DynLocation for Process<'a, P> {
-    fn id(&self) -> LocationId {
+    fn dyn_id(&self) -> LocationId {
         LocationId::Process(self.key)
     }
 
@@ -79,12 +83,32 @@ impl<'a, P> super::dynamic::DynLocation for Process<'a, P> {
     fn multiversioned(&self) -> bool {
         false // processes are always single-versioned
     }
+
+    fn cluster_consistency() -> Option<super::dynamic::ClusterConsistency> {
+        None
+    }
 }
 
 impl<'a, P> Location<'a> for Process<'a, P> {
     type Root = Self;
 
+    type DropConsistency = Self;
+
+    fn consistency() -> Option<super::dynamic::ClusterConsistency> {
+        None
+    }
+
     fn root(&self) -> Self::Root {
         self.clone()
     }
+
+    fn drop_consistency(&self) -> Self::DropConsistency {
+        self.clone()
+    }
+
+    fn from_drop_consistency(l2: Self::DropConsistency) -> Self {
+        l2
+    }
 }
+
+impl<'a, P> TopLevel<'a> for Process<'a, P> {}

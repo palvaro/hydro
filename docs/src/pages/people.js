@@ -2,6 +2,7 @@ import Link from "@docusaurus/Link";
 import Layout from "@theme/Layout";
 import Image from "@theme/IdealImage";
 
+import aanand from "./people-img/aanand.png";
 import akcheung from "./people-img/akcheung.jpeg";
 import conor from "./people-img/conor.jpeg";
 import david from "./people-img/david.jpeg";
@@ -12,6 +13,7 @@ import natacha from "./people-img/natacha.jpeg";
 import shadaj from "./people-img/shadaj.png";
 import lucky from "./people-img/lucky.jpeg";
 import rohit from "./people-img/rohit.jpg";
+import ben from "./people-img/ben.jpg";
 import hydroTurtle from "../../static/img/hydro-turtle.png";
 
 import styles from "./people.module.css";
@@ -94,7 +96,7 @@ export default function Home() {
                 name={"Aanand Kainth"}
                 role={"Engineer, AWS"}
                 url={"https://www.linkedin.com/in/akainth015"}
-                img={hydroTurtle}
+                img={aanand}
               ></PersonCard>
               <PersonCard
                 name={"Lucky Katahanas"}
@@ -120,12 +122,6 @@ export default function Home() {
                 url={"https://github.com/MingweiSamuel"}
                 img={mingwei}
               ></PersonCard>
-              <PersonCard
-                name={"Ben Schofield"}
-                role={"Engineer, AWS"}
-                url={"https://www.linkedin.com/in/benjscho"}
-                img={hydroTurtle}
-              ></PersonCard>
             </div>
 
             <div className={styles["subtitle"]}>
@@ -144,7 +140,7 @@ export default function Home() {
                 url={"https://nacrooks.github.io"}
                 img={natacha}
               ></PersonCard>
-              
+
               <PersonCard
                 name={"Mae Milano"}
                 role={"Professor, Princeton University"}
@@ -157,7 +153,7 @@ export default function Home() {
                 url={"https://www.linkedin.com/in/chris-douglas-73333a1"}
                 img={hydroTurtle}
               ></PersonCard>
-              
+
             </div>
 
             <div className={styles["subtitle"]}>Project Alumni</div>
@@ -182,6 +178,12 @@ export default function Home() {
                 url={"https://www.linkedin.com/in/justinjaffray/"}
                 img={hydroTurtle}
               ></PersonCard>
+              <PersonCard
+                name={"Ben Schofield"}
+                role={"Engineer, AWS"}
+                url={"https://www.linkedin.com/in/benjscho"}
+                img={ben}
+              />
             </div>
           </div>
         </div>

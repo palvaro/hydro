@@ -83,10 +83,10 @@ fi
 TARGETS=""
 FEATURES=""
 if [ "$TEST_DFIR" = true ]; then
-    TARGETS="$TARGETS -p dfir_lang -p dfir_pipes -p dfir_rs -p dfir_macro"
+    TARGETS="$TARGETS -p dfir_lang -p dfir_pipes -p dfir_rs -p dfir_macro -p lattices -p variadics"
 fi
 if [ "$TEST_HYDRO" = true ]; then
-    TARGETS="$TARGETS -p hydro_lang -p hydro_std -p hydro_test -p hydro_deploy -p hydro_deploy_integration"
+    TARGETS="$TARGETS -p hydro_lang -p hydro_std -p hydro_test -p hydro_test_embedded -p hydro_deploy -p hydro_deploy_integration"
     FEATURES="$FEATURES --features deploy,sim"
 
     if [ "$TEST_DOCKER" = true ]; then
@@ -112,10 +112,13 @@ fi
 # Run the tests, echoing the commands as they are run
 set -x
 
+./template/generate_prompts.py
 cargo +nightly fmt --all
-cargo clippy $TARGETS --all-targets --no-default-features -- -D warnings
-cargo clippy $TARGETS --all-targets --all-features -- -D warnings
-cargo clippy $TARGETS --all-targets $FEATURES -- -D warnings
+
+cargo clippy $TARGETS --keep-going --all-targets --no-default-features -- -D warnings
+cargo clippy $TARGETS --keep-going --all-targets --all-features -- -D warnings
+cargo clippy $TARGETS --keep-going --all-targets $FEATURES -- -D warnings
+
 [ "$TEST_ALL" = false ] || cargo check --all-targets --no-default-features
 
 # `--all-targets` is everything except `--doc`: https://github.com/rust-lang/cargo/issues/6669.

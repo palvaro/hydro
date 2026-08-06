@@ -1,17 +1,18 @@
 //! Entrypoint for compiling and running Hydro simulations.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::panic::RefUnwindSafe;
 use std::rc::Rc;
 
 use dfir_lang::graph::{DfirGraph, FlatGraphBuilder, FlatGraphBuilderOutput};
 use libloading::Library;
-use slotmap::SparseSecondaryMap;
+use slotmap::{SecondaryMap, SparseSecondaryMap};
 
 use super::builder::SimBuilder;
 use super::compiled::{CompiledSim, CompiledSimInstance};
 use super::graph::{SimDeploy, SimExternal, SimNode, compile_sim, create_sim_graph_trybuild};
+use crate::compile::builder::StmtId;
 use crate::compile::ir::HydroRoot;
 use crate::location::LocationKey;
 use crate::location::dynamic::LocationId;
@@ -35,8 +36,22 @@ pub struct SimFlow<'a> {
     /// Handle to state handling `external`s' ports.
     pub(crate) externals_port_registry: Rc<RefCell<SimExternalPortRegistry>>,
 
+    /// The program version each location belongs to (all `0` for a single-version flow). Every
+    /// location has an entry.
+    pub(crate) location_version: SecondaryMap<LocationKey, u32>,
+
+    /// Maps each location to the root key of its cross-version correspondence group: version 0 of
+    /// the same logical location. Every location has an entry (its own key unless it is a
+    /// `next_version` successor); populated eagerly at location creation.
+    pub(crate) location_version_group_root: SecondaryMap<LocationKey, LocationKey>,
+
     /// When true, the simulator only tests safety properties (not liveness).
     pub(crate) test_safety_only: bool,
+
+    /// When true, consistency assertions are skipped (treated as identity no-ops).
+    /// When false (default), encountering a consistency assertion panics because
+    /// validating consistency assertions is not yet supported in the simulator.
+    pub(crate) skip_consistency_assertions: bool,
 
     /// Number of iterations to use for fuzzing, defaults to 8192
     pub(crate) unit_test_fuzz_iterations: usize,
@@ -64,6 +79,15 @@ impl<'a> SimFlow<'a> {
         self
     }
 
+    /// Opts in to skipping consistency assertions. When enabled, `assert_is_consistent`
+    /// nodes are treated as identity no-ops in the simulator. When disabled (the default),
+    /// encountering a consistency assertion will panic because validating consistency
+    /// assertions is not yet supported in the simulator.
+    pub fn skip_consistency_assertions(mut self) -> Self {
+        self.skip_consistency_assertions = true;
+        self
+    }
+
     /// Sets the number of fuzz iterations for this test. Overrides the
     /// the default value of 8192
     pub fn unit_test_fuzz_iterations(mut self, iterations: usize) -> Self {
@@ -86,7 +110,7 @@ impl<'a> SimFlow<'a> {
     /// When running the test with `cargo test` (such as in CI), if a reproducer is found it will
     /// be executed, and if no reproducer is found a small number of random executions will be
     /// performed.
-    pub fn fuzz(self, thunk: impl AsyncFn() + RefUnwindSafe) {
+    pub fn fuzz(self, thunk: impl AsyncFnMut() + RefUnwindSafe) {
         self.compiled().fuzz(thunk)
     }
 
@@ -106,9 +130,12 @@ impl<'a> SimFlow<'a> {
 
     /// Compiles the simulation into a dynamically loadable library, and returns a handle to it.
     pub fn compiled(mut self) -> CompiledSim {
-        use std::collections::BTreeMap;
-
         use dfir_lang::graph::{eliminate_extra_unions_tees, partition_graph};
+
+        let compiled_span = tracing::debug_span!(target: "hydro_build", "sim_compiled").entered();
+        let flow_build_span = tracing::debug_span!(target: "hydro_build", "flow_build").entered();
+
+        let is_multi_version = self.location_version.values().any(|&v| v > 0);
 
         let mut sim_emit = SimBuilder {
             process_graphs: BTreeMap::new(),
@@ -117,8 +144,10 @@ impl<'a> SimFlow<'a> {
             cluster_tick_dfirs: BTreeMap::new(),
             extra_stmts_global: vec![],
             extra_stmts_cluster: BTreeMap::new(),
-            next_hoff_id: 0,
+            next_hoff_id: crate::Counter::default(),
             test_safety_only: self.test_safety_only,
+            skip_consistency_assertions: self.skip_consistency_assertions,
+            channel_tables: BTreeMap::new(),
         };
 
         // Ensure the default (0) external is always present.
@@ -143,15 +172,25 @@ impl<'a> SimFlow<'a> {
             );
         });
 
+        if is_multi_version {
+            super::versioned_network::splice_versioned_networks(
+                &mut self.ir,
+                &self.location_version_group_root,
+                &self.location_version,
+            );
+        }
+
         let mut seen_tees = HashMap::new();
         let mut built_tees = HashMap::new();
-        let mut next_stmt_id = 0;
+        let mut next_stmt_id = crate::Counter::<StmtId>::default();
+        let mut fold_hooked_idents = HashSet::new();
         for leaf in &mut self.ir {
             leaf.emit(
                 &mut sim_emit,
                 &mut seen_tees,
                 &mut built_tees,
                 &mut next_stmt_id,
+                &mut fold_hooked_idents,
             );
         }
 
@@ -189,10 +228,14 @@ impl<'a> SimFlow<'a> {
             );
         }
 
+        let (cluster_max_sizes, cluster_member_ids) = self.cluster_sizing();
+        drop(flow_build_span);
+
         let (bin, trybuild) = create_sim_graph_trybuild(
             process_graphs,
             cluster_graphs,
-            self.cluster_max_sizes,
+            cluster_max_sizes,
+            cluster_member_ids,
             process_tick_graphs,
             cluster_tick_graphs,
             sim_emit.extra_stmts_global,
@@ -200,7 +243,11 @@ impl<'a> SimFlow<'a> {
         );
 
         let out = compile_sim(bin, trybuild).unwrap();
-        let lib = unsafe { Library::new(&out).unwrap() };
+        let lib = {
+            let _span = tracing::debug_span!(target: "hydro_build", "load_dylib").entered();
+            unsafe { Library::new(&out).unwrap() }
+        };
+        drop(compiled_span);
 
         CompiledSim {
             _path: out,
@@ -208,5 +255,68 @@ impl<'a> SimFlow<'a> {
             externals_port_registry: self.externals_port_registry.take(),
             unit_test_fuzz_iterations: self.unit_test_fuzz_iterations,
         }
+    }
+
+    /// Computes each cluster's merged size and the global member-id slice it constructs.
+    ///
+    /// Corresponding clusters (a [`next_version`](crate::location::Cluster::next_version) chain)
+    /// share a group key; the merged size for a group is the sum of its per-version sizes, and each
+    /// version gets a contiguous member-id slice assigned in version order. A single-version
+    /// cluster is the degenerate case: its own group, one version, slice `0..size`.
+    fn cluster_sizing(
+        &self,
+    ) -> (
+        SparseSecondaryMap<LocationKey, usize>,
+        BTreeMap<LocationId, Vec<u32>>,
+    ) {
+        // Group corresponding clusters by their shared group root, recording each version's size.
+        let mut sizes_by_group_root: BTreeMap<LocationKey, BTreeMap<u32, usize>> = BTreeMap::new();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "each cluster key is unique; iteration order does not affect the result"
+        )]
+        for key in self.clusters.keys() {
+            let group_root = self.location_version_group_root[key];
+            let version = self.location_version[key];
+            let size = *self.cluster_max_sizes.get(key).unwrap_or_else(|| {
+                panic!(
+                    "cluster {key:?} missing max size; `compiled()` asserts every cluster has one \
+                     before calling `cluster_sizing`"
+                )
+            });
+            let prev = sizes_by_group_root
+                .entry(group_root)
+                .or_default()
+                .insert(version, size);
+            assert!(
+                prev.is_none(),
+                "multi-version simulation has two corresponding clusters at the same version; \
+                 each `next_version()` call must advance to a distinct version"
+            );
+        }
+
+        // Each cluster location gets the merged total size (so its membership lists the union) and
+        // its own contiguous slice of the global member-id range, assigned in version order.
+        let mut cluster_sizes: SparseSecondaryMap<LocationKey, usize> = SparseSecondaryMap::new();
+        let mut cluster_member_ids: BTreeMap<LocationId, Vec<u32>> = BTreeMap::new();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "each cluster key is unique; iteration order does not affect the result"
+        )]
+        for key in self.clusters.keys() {
+            let group_root = self.location_version_group_root[key];
+            let version = self.location_version[key];
+            let per_version = &sizes_by_group_root[&group_root];
+            let merged_total: usize = per_version.values().sum();
+            let offset: u32 = per_version.range(..version).map(|(_, &n)| n as u32).sum();
+            let size = *per_version
+                .get(&version)
+                .expect("every (group, version) was recorded by the first pass above")
+                as u32;
+            cluster_sizes.insert(key, merged_total);
+            cluster_member_ids.insert(LocationId::Cluster(key), (offset..offset + size).collect());
+        }
+
+        (cluster_sizes, cluster_member_ids)
     }
 }

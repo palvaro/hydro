@@ -3,7 +3,7 @@ use quote::quote_spanned;
 use syn::{Ident, parse_quote};
 
 use super::{
-    DelayType, OperatorCategory, OperatorConstraints, OperatorWriteOutput, Persistence, RANGE_0,
+    OperatorCategory, OperatorConstraints, OperatorWriteOutput, Persistence, RANGE_0,
     RANGE_1, WriteContextArgs,
 };
 use crate::diagnostic::Diagnostic;
@@ -106,14 +106,12 @@ pub const JOIN_FUSED: OperatorConstraints = OperatorConstraints {
     persistence_args: &(0..=2),
     type_args: RANGE_0,
     is_external_input: false,
-    has_singleton_output: false,
     flo_type: None,
     ports_inn: Some(|| super::PortListSpec::Fixed(parse_quote! { 0, 1 })),
     ports_out: None,
-    input_delaytype_fn: |_| Some(DelayType::Stratum),
+    input_delaytype_fn: |_| None,
     write_fn: |wc @ &WriteContextArgs {
                    root,
-                   context,
                    op_span,
                    work_fn_async,
                    ident,
@@ -125,12 +123,12 @@ pub const JOIN_FUSED: OperatorConstraints = OperatorConstraints {
                diagnostics| {
         assert!(is_pull);
 
-        let persistences: [_; 2] = wc.persistence_args_disallow_mutable(diagnostics);
+        let persistences: [_; 2] = wc.persistence_args(diagnostics);
 
-        let (lhs_prologue, lhs_prologue_after, lhs_pre_write_iter, lhs_borrow) =
+        let (lhs_prologue, lhs_tick_end, lhs_pre_write_iter, lhs_borrow) =
             make_joindata(wc, persistences[0], "lhs").map_err(|err| diagnostics.push(err))?;
 
-        let (rhs_prologue, rhs_prologue_after, rhs_pre_write_iter, rhs_borrow) =
+        let (rhs_prologue, rhs_tick_end, rhs_pre_write_iter, rhs_borrow) =
             make_joindata(wc, persistences[1], "rhs").map_err(|err| diagnostics.push(err))?;
 
         let lhs = &inputs[0];
@@ -139,7 +137,7 @@ pub const JOIN_FUSED: OperatorConstraints = OperatorConstraints {
         let lhs_accum = &arguments[0];
         let rhs_accum = &arguments[1];
 
-        // Since both input arguments are stratum blocking then we don't need to keep track of ticks to avoid emitting the same thing twice in the same tick.
+        // Since both inputs are fully accumulated before emitting, we don't need to keep track of ticks to avoid emitting the same thing twice in the same tick.
         let write_iterator = quote_spanned! {op_span=>
             #lhs_pre_write_iter
             #rhs_pre_write_iter
@@ -170,32 +168,22 @@ pub const JOIN_FUSED: OperatorConstraints = OperatorConstraints {
             };
         };
 
-        let write_iterator_after =
-            if persistences[0] == Persistence::Static || persistences[1] == Persistence::Static {
-                quote_spanned! {op_span=>
-                    // TODO: Probably only need to schedule if #*_borrow.len() > 0?
-                    #context.schedule_subgraph(#context.current_subgraph(), false);
-                }
-            } else {
-                quote_spanned! {op_span=>}
-            };
-
         Ok(OperatorWriteOutput {
             write_prologue: quote_spanned! {op_span=>
                 #lhs_prologue
                 #rhs_prologue
             },
-            write_prologue_after: quote_spanned! {op_span=>
-                #lhs_prologue_after
-                #rhs_prologue_after
-            },
             write_iterator,
-            write_iterator_after,
+            write_iterator_after: Default::default(),
+            write_tick_end: quote_spanned! {op_span=>
+                #lhs_tick_end
+                #rhs_tick_end
+            },
         })
     },
 };
 
-/// Returns `(prologue, prologue_after, pre_write_iter, borrow)`.
+/// Returns `(prologue, tick_end, pre_write_iter, borrow_ident)`.
 pub(crate) fn make_joindata(
     wc: &WriteContextArgs,
     persistence: Persistence,
@@ -205,8 +193,6 @@ pub(crate) fn make_joindata(
     let borrow_ident = wc.make_ident(format!("joindata_{}_borrow", side));
 
     let &WriteContextArgs {
-        context,
-        df_ident,
         root,
         op_span,
         ..
@@ -222,24 +208,22 @@ pub(crate) fn make_joindata(
             borrow_ident,
         ),
         Persistence::Tick | Persistence::Loop | Persistence::Static => {
-            let lifespan = wc.persistence_as_state_lifespan(persistence);
+            let tick_end = match persistence {
+                Persistence::Tick => quote_spanned! {op_span=>
+                    #joindata_ident.clear();
+                },
+                _ => Default::default(),
+            };
             (
                 quote_spanned! {op_span=>
-                    let #joindata_ident = #df_ident.add_state(::std::cell::RefCell::new(#root::rustc_hash::FxHashMap::default()));
+                    let mut #joindata_ident = #root::rustc_hash::FxHashMap::default();
                 },
-                lifespan.map(|lifespan| quote_spanned! {op_span=>
-                    // Reset the value to the initializer fn at the end of each tick/loop execution.
-                    #df_ident.set_state_lifespan_hook(#joindata_ident, #lifespan, |rcell| { rcell.take(); });
-                }).unwrap_or_default(),
+                tick_end,
                 quote_spanned! {op_span=>
-                    let mut #borrow_ident = unsafe {
-                        // SAFETY: handles from `#df_ident`.
-                        #context.state_ref_unchecked(#joindata_ident)
-                    }.borrow_mut();
+                    let #borrow_ident = &mut #joindata_ident;
                 },
                 borrow_ident
             )
         }
-        Persistence::Mutable => panic!(),
     })
 }

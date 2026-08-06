@@ -2,7 +2,7 @@ use quote::quote_spanned;
 use syn::{parse_quote, parse_quote_spanned};
 
 use super::{
-    DelayType, OpInstGenerics, OperatorCategory, OperatorConstraints, OperatorInstance,
+    OpInstGenerics, OperatorCategory, OperatorConstraints, OperatorInstance,
     OperatorWriteOutput, RANGE_1, WriteContextArgs,
 };
 
@@ -13,7 +13,7 @@ use super::{
 /// Unlike [`join`](#join), the result is not a stream of tuples, it's a stream of MapUnionSingletonMap
 /// lattices. You can (non-monotonically) "reveal" these as tuples if desired via [`map`](#map); see the examples below.
 ///
-/// You must specify the the accumulating lattice types, they cannot be inferred. The first type argument corresponds to the `[0]` input of the join, and the second to the `[1]` input.
+/// You must specify the accumulating lattice types, they cannot be inferred. The first type argument corresponds to the `[0]` input of the join, and the second to the `[1]` input.
 /// Type arguments are specified in dfir using the rust turbofish syntax `::<>`, for example `_lattice_join_fused_join::<Min<_>, Max<_>>()`
 /// The accumulating lattice type is not necessarily the same type as the input, see the below example involving SetUnion for such a case.
 ///
@@ -21,7 +21,7 @@ use super::{
 /// `'tick` or `'static`, to specify how join data persists. With `'tick`, pairs will only be
 /// joined with corresponding pairs within the same tick. With `'static`, pairs will be remembered
 /// across ticks and will be joined with pairs arriving in later ticks. When not explicitly
-/// specified persistence defaults to `tick.
+/// specified persistence defaults to `'tick`.
 ///
 /// Like [`join`](#join), when two persistence arguments are supplied the first maps to port `0` and the second maps to
 /// port `1`.
@@ -84,11 +84,10 @@ pub const _LATTICE_JOIN_FUSED_JOIN: OperatorConstraints = OperatorConstraints {
     persistence_args: &(0..=2),
     type_args: &(2..=2),
     is_external_input: false,
-    has_singleton_output: false,
     flo_type: None,
     ports_inn: Some(|| super::PortListSpec::Fixed(parse_quote! { 0, 1 })),
     ports_out: None,
-    input_delaytype_fn: |_| Some(DelayType::MonotoneAccum),
+    input_delaytype_fn: |_| None,
     write_fn: |wc @ &WriteContextArgs {
                    root,
                    op_span,
@@ -121,9 +120,9 @@ pub const _LATTICE_JOIN_FUSED_JOIN: OperatorConstraints = OperatorConstraints {
         // Use `join_fused`'s codegen.
         let OperatorWriteOutput {
             write_prologue,
-            write_prologue_after,
             write_iterator,
             write_iterator_after,
+            write_tick_end,
         } = (super::join_fused::JOIN_FUSED.write_fn)(&wc, diagnostics).unwrap();
 
         let write_iterator = quote_spanned! {op_span=>
@@ -142,9 +141,9 @@ pub const _LATTICE_JOIN_FUSED_JOIN: OperatorConstraints = OperatorConstraints {
 
         Ok(OperatorWriteOutput {
             write_prologue,
-            write_prologue_after,
             write_iterator,
             write_iterator_after,
+            write_tick_end,
         })
     },
 };

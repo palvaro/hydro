@@ -46,21 +46,17 @@ pub const PERSIST: OperatorConstraints = OperatorConstraints {
     persistence_args: RANGE_1,
     type_args: &(0..=1),
     is_external_input: false,
-    has_singleton_output: true,
     flo_type: None,
     ports_inn: None,
     ports_out: None,
     input_delaytype_fn: |_| None,
     write_fn: |wc @ &WriteContextArgs {
                    root,
-                   context,
-                   df_ident,
                    op_span,
                    ident,
                    is_pull,
                    inputs,
                    outputs,
-                   singleton_output_ident,
                    op_name,
                    work_fn_async,
                    op_inst:
@@ -86,47 +82,33 @@ pub const PERSIST: OperatorConstraints = OperatorConstraints {
         let generic_type = type_args
             .first()
             .map(quote::ToTokens::to_token_stream)
-            .unwrap_or(quote_spanned!(op_span=> _));
+            .unwrap_or_else(|| quote_spanned!(op_span=> _));
 
-        let persistdata_ident = singleton_output_ident;
+        let persistdata_ident = wc.make_ident("persistdata");
         let vec_ident = wc.make_ident("persistvec");
         let write_prologue = quote_spanned! {op_span=>
-            let #persistdata_ident = #df_ident.add_state(::std::cell::RefCell::new(
-                ::std::vec::Vec::<#generic_type>::new(),
-            ));
+            let mut #persistdata_ident = ::std::vec::Vec::<#generic_type>::new();
         };
 
         let write_iterator = if is_pull {
             let input = &inputs[0];
             quote_spanned! {op_span=>
-                let mut #vec_ident = unsafe {
-                    // SAFETY: handle from `#df_ident.add_state(..)`.
-                    #context.state_ref_unchecked(#persistdata_ident)
-                }.borrow_mut();
+                let #vec_ident = &mut #persistdata_ident;
 
                 let #ident = {
-                    let replay_idx = if #context.is_first_run_this_tick() {
-                        0
-                    } else {
-                        #vec_ident.len()
-                    };
-
                     let fut = #root::dfir_pipes::pull::Pull::for_each(#input, |item| {
                         #vec_ident.push(item);
                     });
                     let () = #work_fn_async(fut).await;
 
-                    let iter = #vec_ident[replay_idx..].iter().cloned();
+                    let iter = #vec_ident.iter().cloned();
                     #root::dfir_pipes::pull::iter(iter)
                 };
             }
         } else {
             let output = &outputs[0];
             quote_spanned! {op_span=>
-                let mut #vec_ident = unsafe {
-                    // SAFETY: handle from `#df_ident.add_state(..)`.
-                    #context.state_ref_unchecked(#persistdata_ident)
-                }.borrow_mut();
+                let #vec_ident = &mut #persistdata_ident;
 
                 let #ident = {
                     fn constrain_types<'ctx, Psh, Item>(vec: &'ctx mut Vec<Item>, output: Psh, is_new_tick: bool) -> impl 'ctx + #root::dfir_pipes::push::Push<Item, ()>
@@ -136,19 +118,14 @@ pub const PERSIST: OperatorConstraints = OperatorConstraints {
                     {
                         #root::dfir_pipes::push::persist_state(vec, is_new_tick, output)
                     }
-                    constrain_types(&mut *#vec_ident, #output, #context.is_first_run_this_tick())
+                    constrain_types(&mut *#vec_ident, #output, true)
                 };
             }
-        };
-
-        let write_iterator_after = quote_spanned! {op_span=>
-            #context.schedule_subgraph(#context.current_subgraph(), false);
         };
 
         Ok(OperatorWriteOutput {
             write_prologue,
             write_iterator,
-            write_iterator_after,
             ..Default::default()
         })
     },

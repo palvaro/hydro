@@ -98,11 +98,7 @@ impl<'a> PaxosLike<'a> for CoreCompartmentalizedPaxos<'a> {
 /// in deterministic order. However, when the leader is changing, payloads may be
 /// non-deterministically dropped. The stream of ballots is also non-deterministic because
 /// leaders are elected in a non-deterministic process.
-#[expect(
-    clippy::type_complexity,
-    clippy::too_many_arguments,
-    reason = "internal paxos code // TODO"
-)]
+#[expect(clippy::too_many_arguments, reason = "internal paxos code // TODO")]
 pub fn compartmentalized_paxos_core<'a, P: PaxosPayload>(
     proposers: &Cluster<'a, Proposer>,
     proxy_leaders: &Cluster<'a, ProxyLeader>,
@@ -241,7 +237,7 @@ fn sequence_payload<'a, P: PaxosPayload>(
         NoOrder,
     >,
     config: CompartmentalizedPaxosConfig,
-    a_max_ballot: Singleton<Ballot, Tick<Cluster<'a, Acceptor>>, Bounded>,
+    a_max_ballot: Singleton<Option<Ballot>, Tick<Cluster<'a, Acceptor>>, Bounded>,
     nondet_commit_leader_change: NonDet,
 ) -> (
     Stream<(usize, Option<P>), Cluster<'a, ProxyLeader>, Unbounded, NoOrder>,
@@ -342,7 +338,7 @@ fn sequence_payload<'a, P: PaxosPayload>(
     );
 
     let pl_failed_p2b_to_proposer = fails
-        .map(q!(|(_, ballot)| (ballot.proposer_id.clone(), ballot)))
+        .flat_map_ordered(q!(|(_, ballot)| ballot.map(|b| (b.proposer_id.clone(), b))))
         .inspect(q!(|(_, ballot)| println!("Failed P2b: {:?}", ballot)))
         .demux(proposers, TCP.fail_stop().bincode())
         .values();

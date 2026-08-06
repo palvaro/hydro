@@ -6,7 +6,7 @@ use std::time::Duration;
 use hydro_lang::live_collections::sliced::yield_atomic;
 use hydro_lang::live_collections::stream::{AtLeastOnce, NoOrder, TotalOrder};
 use hydro_lang::location::cluster::CLUSTER_SELF_ID;
-use hydro_lang::location::{Atomic, Location, MemberId, NoTick};
+use hydro_lang::location::{Atomic, Location, MemberId};
 use hydro_lang::prelude::*;
 use hydro_std::quorum::{collect_quorum, collect_quorum_with_response};
 use hydro_std::request_response::join_responses;
@@ -132,7 +132,6 @@ impl<'a> PaxosLike<'a> for CorePaxos<'a> {
 /// in deterministic order. However, when the leader is changing, payloads may be
 /// non-deterministically dropped. The stream of ballots is also non-deterministic because
 /// leaders are elected in a non-deterministic process.
-#[expect(clippy::type_complexity, reason = "internal paxos code // TODO")]
 pub fn paxos_core<'a, P: PaxosPayload>(
     proposers: &Cluster<'a, Proposer>,
     acceptors: &Cluster<'a, Acceptor>,
@@ -262,7 +261,7 @@ pub fn leader_election<'a, L: Clone + Debug + Serialize + DeserializeOwned>(
     Singleton<Ballot, Tick<Cluster<'a, Proposer>>, Bounded>,
     Singleton<bool, Tick<Cluster<'a, Proposer>>, Bounded>,
     Stream<(Option<usize>, L), Tick<Cluster<'a, Proposer>>, Bounded, NoOrder>,
-    Singleton<Ballot, Tick<Cluster<'a, Acceptor>>, Bounded>,
+    Singleton<Option<Ballot>, Tick<Cluster<'a, Acceptor>>, Bounded>,
 ) {
     let (p1b_fail_complete, p1b_fail) =
         proposers.forward_ref::<Stream<Ballot, _, Unbounded, NoOrder>>();
@@ -278,14 +277,7 @@ pub fn leader_election<'a, L: Clone + Debug + Serialize + DeserializeOwned>(
         .merge_unordered(p_received_p2b_ballots)
         .merge_unordered(p_to_proposers_i_am_leader_forward_ref)
         .max()
-        .unwrap_or(
-            proposers
-                .singleton(q!(Ballot {
-                    num: 0,
-                    proposer_id: MemberId::from_raw_id(0)
-                }))
-                .into(),
-        );
+        .into_singleton();
 
     let (p_ballot, p_has_largest_ballot) = p_ballot_calc(p_received_max_ballot.snapshot(
         proposer_tick,
@@ -320,7 +312,6 @@ pub fn leader_election<'a, L: Clone + Debug + Serialize + DeserializeOwned>(
         .values();
 
     let (a_max_ballot, a_to_proposers_p1b) = acceptor_p1(
-        acceptor_tick,
         p_to_acceptors_p1a.batch(
             acceptor_tick,
             nondet!(
@@ -349,9 +340,8 @@ pub fn leader_election<'a, L: Clone + Debug + Serialize + DeserializeOwned>(
 }
 
 // Proposer logic to calculate the next ballot number. Expects p_received_max_ballot, the largest ballot received so far. Outputs streams: ballot_num, and has_largest_ballot, which only contains a value if we have the largest ballot.
-#[expect(clippy::type_complexity, reason = "internal paxos code // TODO")]
 fn p_ballot_calc<'a>(
-    p_received_max_ballot: Singleton<Ballot, Tick<Cluster<'a, Proposer>>, Bounded>,
+    p_received_max_ballot: Singleton<Option<Ballot>, Tick<Cluster<'a, Proposer>>, Bounded>,
 ) -> (
     Singleton<Ballot, Tick<Cluster<'a, Proposer>>, Bounded>,
     Singleton<bool, Tick<Cluster<'a, Proposer>>, Bounded>,
@@ -365,11 +355,11 @@ fn p_ballot_calc<'a>(
             .clone()
             .zip(p_ballot_num)
             .map(q!(move |(received_max_ballot, ballot_num)| {
-                if received_max_ballot
-                    > (Ballot {
+                if let Some(received_max_ballot) = received_max_ballot
+                    && (Ballot {
                         num: ballot_num,
                         proposer_id: CLUSTER_SELF_ID.clone(),
-                    })
+                    }) < received_max_ballot
                 {
                     received_max_ballot.num + 1
                 } else {
@@ -385,7 +375,7 @@ fn p_ballot_calc<'a>(
         let p_has_largest_ballot = p_received_max_ballot
             .zip(p_ballot.clone())
             .map(q!(
-                |(received_max_ballot, cur_ballot)| received_max_ballot <= cur_ballot
+                |(received_max_ballot, cur_ballot)| received_max_ballot <= Some(cur_ballot)
             ));
 
         (yield_atomic(p_ballot), yield_atomic(p_has_largest_ballot))
@@ -403,7 +393,6 @@ fn p_ballot_calc<'a>(
     )
 }
 
-#[expect(clippy::type_complexity, reason = "internal paxos code // TODO")]
 fn p_leader_heartbeat<'a>(
     proposers: &Cluster<'a, Proposer>,
     proposer_tick: &Tick<Cluster<'a, Proposer>>,
@@ -459,14 +448,15 @@ fn p_leader_heartbeat<'a>(
                         .into()
                 )),
                 q!(Duration::from_secs(i_am_leader_check_timeout)),
+            )
+            .batch(
+                proposer_tick,
                 nondet!(
                     /// If the leader 'un-expires' due to non-deterministic delay, we return
                     /// to a stable leader state. If the leader remains expired, non-deterministic
                     /// delay is propagated to the non-determinism of which leader is elected.
-                    nondet_reelection
                 ),
             )
-            .batch(proposer_tick, nondet!(/** absorbed into interval */))
             .first()
             .is_some(),
     );
@@ -475,22 +465,23 @@ fn p_leader_heartbeat<'a>(
 
 #[expect(clippy::type_complexity, reason = "internal paxos code // TODO")]
 fn acceptor_p1<'a, L: Serialize + DeserializeOwned + Clone>(
-    acceptor_tick: &Tick<Cluster<'a, Acceptor>>,
     p_to_acceptors_p1a: Stream<Ballot, Tick<Cluster<'a, Acceptor>>, Bounded, NoOrder>,
     a_log: Singleton<(Option<usize>, L), Tick<Cluster<'a, Acceptor>>, Bounded>,
     proposers: &Cluster<'a, Proposer>,
 ) -> (
-    Singleton<Ballot, Tick<Cluster<'a, Acceptor>>, Bounded>,
-    Stream<(Ballot, Result<(Option<usize>, L), Ballot>), Cluster<'a, Proposer>, Unbounded, NoOrder>,
+    Singleton<Option<Ballot>, Tick<Cluster<'a, Acceptor>>, Bounded>,
+    Stream<
+        (Ballot, Result<(Option<usize>, L), Option<Ballot>>),
+        Cluster<'a, Proposer>,
+        Unbounded,
+        NoOrder,
+    >,
 ) {
     let a_max_ballot = p_to_acceptors_p1a
         .clone()
         .inspect(q!(|p1a| println!("Acceptor received P1a: {:?}", p1a)))
         .across_ticks(|s| s.max())
-        .unwrap_or(acceptor_tick.singleton(q!(Ballot {
-            num: 0,
-            proposer_id: MemberId::from_raw_id(0)
-        })));
+        .into_singleton();
 
     (
         a_max_ballot.clone(),
@@ -501,7 +492,7 @@ fn acceptor_p1<'a, L: Serialize + DeserializeOwned + Clone>(
                 ballot.proposer_id.clone(),
                 (
                     ballot.clone(),
-                    if ballot == max_ballot {
+                    if Some(ballot) == max_ballot {
                         Ok(log)
                     } else {
                         Err(max_ballot)
@@ -519,7 +510,7 @@ fn acceptor_p1<'a, L: Serialize + DeserializeOwned + Clone>(
 fn p_p1b<'a, P: Clone + Serialize + DeserializeOwned>(
     proposer_tick: &Tick<Cluster<'a, Proposer>>,
     a_to_proposers_p1b: Stream<
-        (Ballot, Result<(Option<usize>, P), Ballot>),
+        (Ballot, Result<(Option<usize>, P), Option<Ballot>>),
         Cluster<'a, Proposer>,
         Unbounded,
         NoOrder,
@@ -579,7 +570,7 @@ fn p_p1b<'a, P: Clone + Serialize + DeserializeOwned>(
         p_is_leader,
         // we used an unordered accumulator, so flattened has no order
         p_received_quorum_of_p1bs.flatten_unordered(),
-        fails.map(q!(|(_, ballot)| ballot)),
+        fails.flat_map_ordered(q!(|(_, ballot)| ballot)),
     )
 }
 
@@ -686,7 +677,7 @@ fn sequence_payload<'a, P: PaxosPayload>(
     >,
     f: usize,
 
-    a_max_ballot: Singleton<Ballot, Tick<Cluster<'a, Acceptor>>, Bounded>,
+    a_max_ballot: Singleton<Option<Ballot>, Tick<Cluster<'a, Acceptor>>, Bounded>,
 
     nondet_commit: NonDet,
 ) -> (
@@ -764,15 +755,15 @@ fn sequence_payload<'a, P: PaxosPayload>(
     (
         p_to_replicas.map(q!(|((slot, _ballot), (value, _))| (slot, value))),
         a_log,
-        fails.map(q!(|(_, ballot)| ballot)),
+        fails.flat_map_ordered(q!(|(_, ballot)| ballot)),
     )
 }
 
 // Proposer logic to send p2as, outputting the next slot and the p2as to send to acceptors.
-pub fn index_payloads<'a, L: Location<'a> + NoTick, P: PaxosPayload>(
+pub fn index_payloads<'a, L: Location<'a>, P: PaxosPayload>(
     p_max_slot: Optional<usize, Tick<L>, Bounded>,
     c_to_proposers: Stream<P, Tick<L>, Bounded>,
-) -> Stream<(usize, P), Tick<L>, Bounded> {
+) -> Stream<(usize, P), Tick<L::DropConsistency>, Bounded> {
     let tick = c_to_proposers.location().clone();
     let sliced_result = sliced! {
         let mut next_slot = use::state(|l| l.singleton(q!(0)));
@@ -803,7 +794,7 @@ pub fn index_payloads<'a, L: Location<'a> + NoTick, P: PaxosPayload>(
 #[expect(clippy::type_complexity, reason = "internal paxos code // TODO")]
 pub fn acceptor_p2<'a, P: PaxosPayload, S: Clone>(
     acceptor_tick: &Tick<Cluster<'a, Acceptor>>,
-    a_max_ballot: Singleton<Ballot, Tick<Cluster<'a, Acceptor>>, Bounded>,
+    a_max_ballot: Singleton<Option<Ballot>, Tick<Cluster<'a, Acceptor>>, Bounded>,
     p_to_acceptors_p2a: Stream<P2a<P, S>, Cluster<'a, Acceptor>, Unbounded, NoOrder>,
     a_checkpoint: Optional<usize, Cluster<'a, Acceptor>, Unbounded>,
     proposers: &Cluster<'a, S>,
@@ -813,7 +804,7 @@ pub fn acceptor_p2<'a, P: PaxosPayload, S: Clone>(
         Atomic<Cluster<'a, Acceptor>>,
         Unbounded,
     >,
-    Stream<((usize, Ballot), Result<(), Ballot>), Cluster<'a, S>, Unbounded, NoOrder>,
+    Stream<((usize, Ballot), Result<(), Option<Ballot>>), Cluster<'a, S>, Unbounded, NoOrder>,
 ) {
     let p_to_acceptors_p2a_batch = p_to_acceptors_p2a.batch(
         acceptor_tick,
@@ -838,7 +829,7 @@ pub fn acceptor_p2<'a, P: PaxosPayload, S: Clone>(
         .clone()
         .cross_singleton(a_max_ballot.clone()) // Don't consider p2as if the current ballot is higher
         .filter_map(q!(|(p2a, max_ballot)|
-            if p2a.ballot >= max_ballot {
+            if Some(&p2a.ballot) >= max_ballot.as_ref() {
                 Some((p2a.slot, LogValue {
                     ballot: p2a.ballot,
                     value: p2a.value,
@@ -877,7 +868,7 @@ pub fn acceptor_p2<'a, P: PaxosPayload, S: Clone>(
             p2a.sender,
             (
                 (p2a.slot, p2a.ballot.clone()),
-                if p2a.ballot == max_ballot {
+                if Some(p2a.ballot) == max_ballot {
                     Ok(())
                 } else {
                     Err(max_ballot)
@@ -955,7 +946,7 @@ mod tests {
 
             let mut next_expected = 0;
             for i in 1..=4 {
-                let (next_slot, v) = out_recv.next().await.unwrap();
+                let (next_slot, v) = out_recv.next().await;
                 assert_eq!(v, i);
 
                 if next_expected < 123 {

@@ -5,6 +5,108 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.17.0-alpha.1 (2026-06-19)
+
+### Commit Statistics
+
+<csr-read-only-do-not-edit/>
+
+ - 1 commit contributed to the release.
+ - 0 commits were understood as [conventional](https://www.conventionalcommits.org).
+ - 0 issues like '(#ID)' were seen in commit messages
+
+### Commit Details
+
+<csr-read-only-do-not-edit/>
+
+<details><summary>view details</summary>
+
+ * **Uncategorized**
+    - Release dfir_lang v0.17.0-alpha.1, dfir_macro v0.17.0-alpha.1, variadics v0.2.0-alpha.1, variadics_macro v0.8.0-alpha.1, lattices v0.8.0-alpha.1, dfir_pipes v0.1.0-alpha.1, sinktools v0.2.0-alpha.1, dfir_rs v0.17.0-alpha.1, hydro_lang v0.17.0-alpha.1, hydro_std v0.17.0-alpha.1 ([`2035d2e`](https://github.com/hydro-project/hydro/commit/2035d2e29fabae26c069bb01aefbed58b631742c))
+</details>
+
+## 0.17.0-alpha.0 (2026-06-10)
+
+### Commit Statistics
+
+<csr-read-only-do-not-edit/>
+
+ - 2 commits contributed to the release.
+ - 40 days passed between releases.
+ - 0 commits were understood as [conventional](https://www.conventionalcommits.org).
+ - 0 issues like '(#ID)' were seen in commit messages
+
+### Commit Details
+
+<csr-read-only-do-not-edit/>
+
+<details><summary>view details</summary>
+
+ * **Uncategorized**
+    - Release lattices_macro v0.6.1-alpha.0, lattices v0.8.0-alpha.0, dfir_pipes v0.1.0-alpha.0, sinktools v0.2.0-alpha.0, hydro_deploy_integration v0.17.0-alpha.0, dfir_rs v0.17.0-alpha.0, hydro_deploy v0.17.0-alpha.0, hydro_lang v0.17.0-alpha.0, hydro_std v0.17.0-alpha.0 ([`2fabf68`](https://github.com/hydro-project/hydro/commit/2fabf6839e34f9275b5d698f396c1864e1539082))
+    - Release hydro_build_utils v0.1.1-alpha.0, dfir_lang v1.0.0-alpha.0, dfir_macro v0.17.0-alpha.0, variadics v1.0.0-alpha.0, variadics_macro v0.8.0-alpha.0, lattices v0.8.0-alpha.0, dfir_pipes v0.1.0-alpha.0, sinktools v0.2.0-alpha.0, hydro_deploy_integration v0.17.0-alpha.0, dfir_rs v0.17.0-alpha.0, hydro_deploy v0.17.0-alpha.0, hydro_lang v0.17.0-alpha.0, hydro_std v0.17.0-alpha.0, safety bump 10 crates ([`12e7666`](https://github.com/hydro-project/hydro/commit/12e76666f7104f81b48de5ddf397b8e72c8a6711))
+</details>
+
+## 0.16.0 (2026-05-01)
+
+<csr-id-d2fcb582cf7836fda546eb9b24fa0d039b3329fb/>
+<csr-id-cb73aea75b6c5c5ec25caa121a04e261be290404/>
+
+### New Features
+
+ - <csr-id-97d32af9c7cbd15882a9b4103baa9bb29491c2ed/> add bidi support for docker containers
+   - add a new implementation of multi source/multi sink specificially just
+   for TCP. I couldn't find a neat way to unfiy the two implementations so
+   they're basically identical unfortunately. I suspect this code will
+   change in the near future so I think it's fine to just leave it
+   duplicated for now.
+   - rejig the distributed_echo test to use bidi connections. The old style
+   external connections are very jank and I had to remove it from the
+   distributed echo test to actually get it working.
+   
+   ---------
+ - <csr-id-60c45036a7f5923bfa52e6804b2598d64d980957/> Add sidecar API
+   This API allows us to add "sidecars" which run asynchronously alongside
+   DFIR in the localset. This will primarily be used for telemetry/metrics.
+   The `Sidecar` trait takes in info about the node and returns code which
+   may inspect the DFIR instance before returning a future to run.
+
+### Bug Fixes
+
+ - <csr-id-c16e13a8bdae3b099d498f9b7f1f43872cfdc939/> flag non-determinstic hashmap iterators, fix hydro_lang codegen nondeterminism fix #2464
+   Out of an abundance of caution, the `hydro_lang` IR `Demux` variants
+   containing `HashMap<u32 ...>` have been replaced with `BTreeMap`
+
+### Commit Statistics
+
+<csr-read-only-do-not-edit/>
+
+ - 7 commits contributed to the release.
+ - 156 days passed between releases.
+ - 5 commits were understood as [conventional](https://www.conventionalcommits.org).
+ - 5 unique issues were worked on: [#2370](https://github.com/hydro-project/hydro/issues/2370), [#2372](https://github.com/hydro-project/hydro/issues/2372), [#2495](https://github.com/hydro-project/hydro/issues/2495), [#2499](https://github.com/hydro-project/hydro/issues/2499), [#2511](https://github.com/hydro-project/hydro/issues/2511)
+
+### Commit Details
+
+<csr-read-only-do-not-edit/>
+
+<details><summary>view details</summary>
+
+ * **[#2370](https://github.com/hydro-project/hydro/issues/2370)**
+    - Remove unused `#[async_trait]` ([`d2fcb58`](https://github.com/hydro-project/hydro/commit/d2fcb582cf7836fda546eb9b24fa0d039b3329fb))
+ * **[#2372](https://github.com/hydro-project/hydro/issues/2372)**
+    - Use `&self` to avoid `RwLock` where possible ([`cb73aea`](https://github.com/hydro-project/hydro/commit/cb73aea75b6c5c5ec25caa121a04e261be290404))
+ * **[#2495](https://github.com/hydro-project/hydro/issues/2495)**
+    - Add sidecar API ([`60c4503`](https://github.com/hydro-project/hydro/commit/60c45036a7f5923bfa52e6804b2598d64d980957))
+ * **[#2499](https://github.com/hydro-project/hydro/issues/2499)**
+    - Add bidi support for docker containers ([`97d32af`](https://github.com/hydro-project/hydro/commit/97d32af9c7cbd15882a9b4103baa9bb29491c2ed))
+ * **[#2511](https://github.com/hydro-project/hydro/issues/2511)**
+    - Flag non-determinstic hashmap iterators, fix hydro_lang codegen nondeterminism fix #2464 ([`c16e13a`](https://github.com/hydro-project/hydro/commit/c16e13a8bdae3b099d498f9b7f1f43872cfdc939))
+ * **Uncategorized**
+    - Release dfir_pipes v0.0.1, example_test v0.0.1, sinktools v0.1.0, hydro_deploy_integration v0.16.0, lattices_macro v0.6.0, variadics_macro v0.7.0, lattices v0.7.0, multiplatform_test v0.7.0, dfir_rs v0.16.0, copy_span v0.1.1, hydro_deploy v0.16.0, hydro_lang v0.16.0, hydro_std v0.16.0 ([`118b356`](https://github.com/hydro-project/hydro/commit/118b356447d92e778313d72a351e5a8d2814aa1a))
+    - Release hydro_build_utils v0.1.0, dfir_lang v0.16.0, dfir_macro v0.16.0, variadics v0.1.0, dfir_pipes v0.0.1, example_test v0.0.1, sinktools v0.1.0, hydro_deploy_integration v0.16.0, lattices_macro v0.6.0, variadics_macro v0.7.0, lattices v0.7.0, multiplatform_test v0.7.0, dfir_rs v0.16.0, copy_span v0.1.1, hydro_deploy v0.16.0, hydro_lang v0.16.0, hydro_std v0.16.0, safety bump 13 crates ([`c20757a`](https://github.com/hydro-project/hydro/commit/c20757ae0e9e10463b2a499de4b7d37ab02269d0))
+</details>
+
 ## 0.15.0 (2025-11-25)
 
 <csr-id-97b879db93081b9dda3eecc834d06b55e5636030/>
@@ -54,15 +156,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    Finally, we show an end-to-end example using this interface to write a
    simple HTTP server.
 
-### Refactor (BREAKING)
-
- - <csr-id-97b879db93081b9dda3eecc834d06b55e5636030/> remove unnecessary `ConnectedSourceSink` trait
-
 ### Commit Statistics
 
 <csr-read-only-do-not-edit/>
 
- - 11 commits contributed to the release.
+ - 12 commits contributed to the release.
+ - 118 days passed between releases.
  - 10 commits were understood as [conventional](https://www.conventionalcommits.org).
  - 10 unique issues were worked on: [#1966](https://github.com/hydro-project/hydro/issues/1966), [#1978](https://github.com/hydro-project/hydro/issues/1978), [#1980](https://github.com/hydro-project/hydro/issues/1980), [#1981](https://github.com/hydro-project/hydro/issues/1981), [#1996](https://github.com/hydro-project/hydro/issues/1996), [#2029](https://github.com/hydro-project/hydro/issues/2029), [#2031](https://github.com/hydro-project/hydro/issues/2031), [#2163](https://github.com/hydro-project/hydro/issues/2163), [#2246](https://github.com/hydro-project/hydro/issues/2246), [#2267](https://github.com/hydro-project/hydro/issues/2267)
 
@@ -93,11 +192,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
  * **[#2267](https://github.com/hydro-project/hydro/issues/2267)**
     - Compilation on non-Unix [ci-full] ([`e5f2004`](https://github.com/hydro-project/hydro/commit/e5f200472d9effe591d55dd82b4c37b0aff55d21))
  * **Uncategorized**
+    - Release sinktools v0.0.1, hydro_deploy_integration v0.15.0, lattices_macro v0.5.11, variadics_macro v0.6.2, lattices v0.6.2, multiplatform_test v0.6.0, dfir_rs v0.15.0, copy_span v0.1.0, hydro_deploy v0.15.0, hydro_lang v0.15.0, hydro_std v0.15.0 ([`ac88df1`](https://github.com/hydro-project/hydro/commit/ac88df1e98af9fa2027488252f6014efa7bef229))
     - Release hydro_build_utils v0.0.1, dfir_lang v0.15.0, dfir_macro v0.15.0, variadics v0.0.10, sinktools v0.0.1, hydro_deploy_integration v0.15.0, lattices_macro v0.5.11, variadics_macro v0.6.2, lattices v0.6.2, multiplatform_test v0.6.0, dfir_rs v0.15.0, copy_span v0.1.0, hydro_deploy v0.15.0, hydro_lang v0.15.0, hydro_std v0.15.0, safety bump 5 crates ([`092de25`](https://github.com/hydro-project/hydro/commit/092de252238dfb9fa6b01e777c6dd8bf9db93398))
 </details>
-
-<csr-unknown>
- use round-robin polling for MergeSource to ensure fairness make polling fair with round-robin<csr-unknown/>
 
 ## 0.14.0 (2025-07-30)
 
@@ -116,16 +213,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
  - <csr-id-ca704e500245ee4ac0a528e2cf78e0dd2944f3a1/> leftover logging when setting up Unix sockets
    Oops!
-
-### Refactor
-
- - <csr-id-59041df58be2de0717b851cc1c3355479cd722f2/> minimize Tokio feature flags
-   Now that `hydro_lang` no longer needs multi-threaded runtime, we can
-   eliminate it from the features used in `trybuild` compilation. Minimizes
-   Tokio features elsewhere too.
- - <csr-id-903fbdada5f3d729f6564915d77c4e15812aa1be/> eliminate `pin-project` proc macro dependency
-   This was the only use of the proc-macro version along the Hydro
-   dependencies, we can just use the declarative macro version.
 
 ### Commit Statistics
 
@@ -191,16 +278,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <csr-id-260902b210378af5291ec71a574256d7a5bcb463/>
 <csr-id-7dd71d67da162d2e4f3043b271a52037a3c983c0/>
-
-### Chore
-
- - <csr-id-260902b210378af5291ec71a574256d7a5bcb463/> set `hydro_deploy_integration` to release as `0.12.1`
-
-### Refactor (BREAKING)
-
- - <csr-id-7dd71d67da162d2e4f3043b271a52037a3c983c0/> remove "hydroflow" for `hydro_deploy_integration`, `hydro_deploy::rust_crate`, fix #1712
-   Opted to use `RustCrate` as the replacement prefix with the expectation
-   that @shadaj may have a more coincise name in mind?
 
 ### Commit Statistics
 

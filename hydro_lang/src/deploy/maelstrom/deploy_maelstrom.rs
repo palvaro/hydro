@@ -7,7 +7,7 @@
 use std::cell::RefCell;
 use std::future::Future;
 use std::io::{BufRead, BufReader, Error};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
 use std::rc::Rc;
@@ -22,7 +22,10 @@ use stageleft::{QuotedWithContext, RuntimeData};
 use super::deploy_runtime_maelstrom::*;
 use crate::compile::builder::ExternalPortId;
 use crate::compile::deploy_provider::{ClusterSpec, Deploy, Node, RegisterPort};
-use crate::compile::trybuild::generate::{LinkingMode, create_graph_trybuild};
+use crate::compile::trybuild::generate::{
+    ExampleBuildConfig, LinkingMode, TrybuildConfig, compile_trybuild_example,
+    create_graph_trybuild,
+};
 use crate::location::dynamic::LocationId;
 use crate::location::member_id::TaglessMemberId;
 use crate::location::{LocationKey, MembershipEvent, NetworkHint};
@@ -51,6 +54,7 @@ impl<'a> Deploy<'a> for MaelstromDeploy {
         _p2_port: &<Self::Process as Node>::Port,
         _name: Option<&str>,
         _networking_info: &crate::networking::NetworkingInfo,
+        _external_types: Option<(&syn::Type, &syn::Type)>,
     ) -> (syn::Expr, syn::Expr) {
         panic!("Maelstrom deployment does not support processes, only clusters")
     }
@@ -72,6 +76,7 @@ impl<'a> Deploy<'a> for MaelstromDeploy {
         _c2_port: &<Self::Cluster as Node>::Port,
         _name: Option<&str>,
         _networking_info: &crate::networking::NetworkingInfo,
+        _external_types: Option<(&syn::Type, &syn::Type)>,
     ) -> (syn::Expr, syn::Expr) {
         panic!("Maelstrom deployment does not support processes, only clusters")
     }
@@ -93,6 +98,7 @@ impl<'a> Deploy<'a> for MaelstromDeploy {
         _p2_port: &<Self::Process as Node>::Port,
         _name: Option<&str>,
         _networking_info: &crate::networking::NetworkingInfo,
+        _external_types: Option<(&syn::Type, &syn::Type)>,
     ) -> (syn::Expr, syn::Expr) {
         panic!("Maelstrom deployment does not support processes, only clusters")
     }
@@ -114,6 +120,7 @@ impl<'a> Deploy<'a> for MaelstromDeploy {
         _c2_port: &<Self::Cluster as Node>::Port,
         _name: Option<&str>,
         networking_info: &crate::networking::NetworkingInfo,
+        _external_types: Option<(&syn::Type, &syn::Type)>,
     ) -> (syn::Expr, syn::Expr) {
         use crate::networking::{NetworkingInfo, TcpFault};
         match networking_info {
@@ -128,6 +135,7 @@ impl<'a> Deploy<'a> for MaelstromDeploy {
                 }
                 (TcpFault::FailStop, Some(_)) => {} // other nemeses are fine with fail_stop
             },
+            NetworkingInfo::Udp { .. } => {} // UDP is always lossy, which is always allowed
         }
         deploy_maelstrom_m2m(RuntimeData::new("__hydro_lang_maelstrom_meta"))
     }
@@ -272,13 +280,11 @@ impl Node for MaelstromCluster {
             sidecars,
             self.name_hint.as_deref(),
             crate::compile::trybuild::generate::DeployMode::Maelstrom,
-            LinkingMode::Static,
+            LinkingMode::Dynamic,
         );
 
         env.bin_name = Some(bin_name);
-        env.project_dir = Some(config.project_dir);
-        env.target_dir = Some(config.target_dir);
-        env.features = config.features;
+        env.trybuild = Some(config);
     }
 }
 
@@ -403,9 +409,7 @@ pub struct MaelstromDeployment {
 
     // Populated during deployment
     pub(crate) bin_name: Option<String>,
-    pub(crate) project_dir: Option<PathBuf>,
-    pub(crate) target_dir: Option<PathBuf>,
-    pub(crate) features: Option<Vec<String>>,
+    pub(crate) trybuild: Option<TrybuildConfig>,
 }
 
 impl MaelstromDeployment {
@@ -421,9 +425,7 @@ impl MaelstromDeployment {
             nemesis: None,
             extra_args: vec![],
             bin_name: None,
-            project_dir: None,
-            target_dir: None,
-            features: None,
+            trybuild: None,
         }
     }
 
@@ -471,41 +473,35 @@ impl MaelstromDeployment {
 
     /// Build the compiled binary in dev mode.
     /// Returns the path to the compiled binary.
+    ///
+    /// This shares the same parallel-compilation machinery as the simulator: the
+    /// program is linked dynamically against a prebuilt dylib of its dependencies,
+    /// so repeated and concurrent builds only need to recompile the generated
+    /// example itself.
     pub fn build(&self) -> Result<PathBuf, Error> {
         let bin_name = self
             .bin_name
             .as_ref()
             .expect("No binary name set - did you call deploy?");
-        let project_dir = self.project_dir.as_ref().expect("No project dir set");
-        let target_dir = self.target_dir.as_ref().expect("No target dir set");
+        let trybuild = self
+            .trybuild
+            .as_ref()
+            .expect("No trybuild config set - did you call deploy?");
 
-        let mut cmd = std::process::Command::new("cargo");
-        cmd.arg("build")
-            .arg("--example")
-            .arg(bin_name)
-            .arg("--no-default-features")
-            .current_dir(project_dir)
-            .env("CARGO_TARGET_DIR", target_dir)
-            .env("STAGELEFT_TRYBUILD_BUILD_STAGED", "1");
+        let out = compile_trybuild_example(ExampleBuildConfig {
+            trybuild: trybuild.clone(),
+            bin_name: bin_name.clone(),
+            runtime_feature: "hydro___feature_maelstrom_runtime",
+            // Maelstrom builds the generated example directly as an executable.
+            example_name: bin_name.clone(),
+            crate_type: None,
+            set_trybuild_lib_name: false,
+            allow_fuzz: false,
+        })
+        .map_err(|()| Error::other("Maelstrom binary compilation failed"))?;
 
-        // Always include maelstrom_runtime feature for runtime support
-        let mut all_features = vec!["hydro___feature_maelstrom_runtime".to_owned()];
-        if let Some(features) = &self.features {
-            all_features.extend(features.iter().cloned());
-        }
-        if !all_features.is_empty() {
-            cmd.arg("--features").arg(all_features.join(","));
-        }
-
-        let status = cmd.status()?;
-        if !status.success() {
-            return Err(Error::other(format!(
-                "cargo build failed with status: {}",
-                status
-            )));
-        }
-
-        Ok(target_dir.join("debug").join("examples").join(bin_name))
+        // Persist the built executable so it survives past the temporary build guards.
+        out.keep().map_err(|e| Error::other(e.to_string()))
     }
 
     /// Run Maelstrom with the compiled binary, return Ok(()) if all checks pass.
@@ -513,6 +509,24 @@ impl MaelstromDeployment {
     /// This will block until Maelstrom completes.
     pub fn run(self) -> Result<(), Error> {
         let binary_path = self.build()?;
+
+        // Warm up the binary before handing it to Maelstrom. On macOS, the
+        // first execution of a freshly written binary triggers a Gatekeeper /
+        // XProtect (`syspolicyd`) scan that can take several seconds on loaded
+        // CI machines. Maelstrom only waits 10 seconds for each node to answer
+        // the `init` RPC, so a cold first exec (multiplied across concurrently
+        // launched nodes) can cause spurious node-startup timeouts. The warmup
+        // invocation sees EOF on stdin and exits immediately, priming the
+        // system's first-exec caches for the real run.
+        std::process::Command::new(&binary_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?
+            .wait()?;
+
+        // Use a unique working directory per run to avoid conflicts with concurrent tests.
+        let run_dir = tempfile::tempdir().map_err(Error::other)?;
 
         let mut cmd = std::process::Command::new(&self.maelstrom_path);
         cmd.arg("test")
@@ -522,6 +536,7 @@ impl MaelstromDeployment {
             .arg(&binary_path)
             .arg("--node-count")
             .arg(self.node_count.to_string())
+            .current_dir(run_dir.path())
             .stdout(Stdio::piped());
 
         if let Some(time_limit) = self.time_limit {
@@ -548,10 +563,15 @@ impl MaelstromDeployment {
 
         for line in BufReader::new(spawned.stdout.unwrap()).lines() {
             let line = line?;
-            eprintln!("{}", &line);
+            eprintln!("{}", line);
 
             if line.starts_with("Analysis invalid!") {
-                return Err(Error::other("Analysis was invalid"));
+                let path = run_dir.keep();
+                dump_node_logs(&path);
+                return Err(Error::other(format!(
+                    "Analysis was invalid. Maelstrom store at: {}",
+                    path.display()
+                )));
             } else if line.starts_with("Errors occurred during analysis, but no anomalies found.")
                 || line.starts_with("Everything looks good!")
             {
@@ -559,13 +579,58 @@ impl MaelstromDeployment {
             }
         }
 
-        Err(Error::other("Maelstrom produced an unexpected result"))
+        let path = run_dir.keep();
+        dump_node_logs(&path);
+        Err(Error::other(format!(
+            "Maelstrom produced an unexpected result. Store at: {}",
+            path.display()
+        )))
     }
 
-    /// Get the path to the compiled binary (after building).
+    /// Get the path to the compiled binary, building it if necessary.
     pub fn binary_path(&self) -> Option<PathBuf> {
-        let bin_name = self.bin_name.as_ref()?;
-        let target_dir = self.target_dir.as_ref()?;
-        Some(target_dir.join("debug").join("examples").join(bin_name))
+        self.build().ok()
+    }
+}
+
+/// Print the per-node logs from a Maelstrom run directory to stderr.
+///
+/// Maelstrom truncates node stderr in its own error messages (keeping only the
+/// tail), so when a node crashes the actual panic message is often cut off.
+/// The full logs live in `store/<workload>/<timestamp>/node-logs/*.log` under
+/// the run directory; dump them so failures are debuggable in CI, where the
+/// preserved store directory is not otherwise accessible.
+fn dump_node_logs(run_dir: &Path) {
+    fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // Skip symlinks (e.g. `store/latest`) to avoid duplicates.
+            if path.is_symlink() || !path.is_dir() {
+                continue;
+            }
+            if path.file_name().is_some_and(|name| name == "node-logs") {
+                if let Ok(logs) = std::fs::read_dir(&path) {
+                    out.extend(logs.flatten().map(|e| e.path()));
+                }
+            } else {
+                collect(&path, out);
+            }
+        }
+    }
+
+    let mut log_files = Vec::new();
+    collect(&run_dir.join("store"), &mut log_files);
+    log_files.sort();
+
+    for log in log_files {
+        eprintln!("==== Maelstrom node log: {} ====", log.display());
+        match std::fs::read_to_string(&log) {
+            Ok(contents) => eprint!("{}", contents),
+            Err(e) => eprintln!("(failed to read log: {})", e),
+        }
+        eprintln!("==== end of node log: {} ====", log.display());
     }
 }

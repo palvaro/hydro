@@ -19,15 +19,17 @@ use super::{
 /// use std::collections::HashSet;
 /// use lattices::set_union::{CartesianProductBimorphism, SetUnionHashSet, SetUnionSingletonSet};
 ///
-/// lhs = source_iter(0..3)
+/// lhs_op = source_iter(0..3)
 ///     -> map(SetUnionSingletonSet::new_from)
 ///     -> state::<'static, SetUnionHashSet<u32>>();
-/// rhs = source_iter(3..5)
+/// rhs_op = source_iter(3..5)
 ///     -> map(SetUnionSingletonSet::new_from)
 ///     -> state::<'static, SetUnionHashSet<u32>>();
 ///
-/// lhs -> [0]my_join;
-/// rhs -> [1]my_join;
+/// lhs_op[items] -> [0]my_join;
+/// rhs_op[items] -> [1]my_join;
+/// lhs = lhs_op[state] -> singleton();
+/// rhs = rhs_op[state] -> singleton();
 ///
 /// my_join = lattice_bimorphism(CartesianProductBimorphism::<HashSet<_>>::default(), #lhs, #rhs)
 ///     -> assert_eq([SetUnionHashSet::new(HashSet::from_iter([
@@ -50,48 +52,42 @@ pub const LATTICE_BIMORPHISM: OperatorConstraints = OperatorConstraints {
     persistence_args: RANGE_0,
     type_args: RANGE_0,
     is_external_input: false,
-    has_singleton_output: false,
     flo_type: None,
     ports_inn: Some(|| super::PortListSpec::Fixed(parse_quote! { 0, 1 })),
     ports_out: None,
     input_delaytype_fn: |_| None,
     write_fn: |&WriteContextArgs {
-                   root,
-                   context,
-                   op_span,
+                     root,
+                     op_span,
                    is_pull,
                    ident,
                    inputs,
                    arguments,
-                   arguments_handles,
                    ..
                },
                _| {
         assert!(is_pull);
 
         let func = &arguments[0];
-        let lhs_state_handle = &arguments_handles[1];
-        let rhs_state_handle = &arguments_handles[2];
+        let lhs_state = &arguments[1];
+        let rhs_state = &arguments[2];
 
         let lhs_items = &inputs[0];
         let rhs_items = &inputs[1];
 
         let write_iterator = quote_spanned! {op_span=>
             let #ident = {
-                let (lhs_state, rhs_state) = unsafe {
-                    // SAFETY: handle from `#df_ident.add_state(..)`.
-                    (
-                        #context.state_ref_unchecked(#lhs_state_handle),
-                        #context.state_ref_unchecked(#rhs_state_handle),
-                    )
-                };
+                let (lhs_state, rhs_state) = (
+                    #lhs_state,
+                    #rhs_state,
+                );
                 #[inline(always)]
                 fn check_inputs<'a, Func, LhsPull, RhsPull, LhsState, RhsState, Output>(
                     lhs_pull: LhsPull,
                     rhs_pull: RhsPull,
                     func: Func,
-                    lhs_state: &'a ::std::cell::RefCell<LhsState>,
-                    rhs_state: &'a ::std::cell::RefCell<RhsState>,
+                    lhs_state: &'a LhsState,
+                    rhs_state: &'a RhsState,
                 ) -> impl #root::dfir_pipes::pull::Pull<
                     Item = Output,
                     Meta = (),

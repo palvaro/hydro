@@ -15,17 +15,28 @@ use syn::spanned::Spanned;
 
 use super::graph_write::{Dot, GraphWrite, Mermaid};
 use super::ops::{
-    DelayType, OPERATORS, OperatorWriteOutput, WriteContextArgs, find_op_op_constraints,
+    DelayType, FloType, OPERATORS, OperatorWriteOutput, WriteContextArgs, find_op_op_constraints,
     null_write_iterator_fn,
 };
 use super::{
     CONTEXT, Color, DiMulGraph, GRAPH, GraphEdgeId, GraphLoopId, GraphNode, GraphNodeId,
-    GraphSubgraphId, HANDOFF_NODE_STR, MODULE_BOUNDARY_NODE_STR, OperatorInstance, PortIndexValue,
-    Varname, change_spans, get_operator_generics,
+    GraphSubgraphId, HANDOFF_NODE_STR, HandoffKind, MODULE_BOUNDARY_NODE_STR, OperatorInstance,
+    PortIndexValue, SINGLETON_SLOT_NODE_STR, Varname, change_spans, get_operator_generics,
 };
 use crate::diagnostic::{Diagnostic, Diagnostics, Level};
 use crate::pretty_span::{PrettyRowCol, PrettySpan};
 use crate::process_singletons;
+
+/// A resolved handoff reference: the target node ID plus mutability and access group info.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResolvedHandoffRef {
+    /// The resolved target node ID (`None` if unresolved/error).
+    pub node_id: Option<GraphNodeId>,
+    /// Whether this is a mutable reference (`#mut var`).
+    pub is_mut: bool,
+    /// Optional access group for ordering (`#{N} var`).
+    pub access_group: Option<u32>,
+}
 
 /// An abstract "meta graph" representation of a DFIR graph.
 ///
@@ -68,9 +79,11 @@ pub struct DfirGraph {
 
     /// Which nodes belong to each subgraph.
     subgraph_nodes: SlotMap<GraphSubgraphId, Vec<GraphNodeId>>,
+    /// Subgraph IDs in topological sort order (set during partitioning).
+    subgraph_toposort: Vec<GraphSubgraphId>,
 
-    /// Resolved singletons varnames references, per node.
-    node_singleton_references: SparseSecondaryMap<GraphNodeId, Vec<Option<GraphNodeId>>>,
+    /// Resolved handoff varnames references, per node.
+    node_handoff_references: SparseSecondaryMap<GraphNodeId, Vec<ResolvedHandoffRef>>,
     /// What variable name each graph node belongs to (if any). For debugging (graph writing) purposes only.
     node_varnames: SparseSecondaryMap<GraphNodeId, Varname>,
 
@@ -241,7 +254,14 @@ impl DfirGraph {
 
     /// Assign all operator instances if not set. Write diagnostic messages/errors into `diagnostics`.
     pub fn insert_node_op_insts_all(&mut self, diagnostics: &mut Diagnostics) {
+        // Handle all nodes in two phases, since the helper methods take total ownership of `&self`.
+        // Possible to do in one phase, but would require accessing fields directly for partial mutable ownership.
+
+        // Collect operator instances, then assign.
         let mut op_insts = Vec::new();
+        // Collect nodes that should be lowered to handoffs (the `handoff()`/`singleton()` pseudo-operators).
+        let mut handoff_nodes: Vec<(GraphNodeId, HandoffKind, Span)> = Vec::new();
+
         for (node_id, node) in self.nodes() {
             let GraphNode::Operator(operator) = node else {
                 continue;
@@ -249,6 +269,32 @@ impl DfirGraph {
             if self.node_op_inst(node_id).is_some() {
                 continue;
             };
+
+            // Recognize `handoff()`/`singleton()` pseudo-operators and lower to GraphNode::Handoff.
+            let handoff_kind = match &*operator.name_string() {
+                "handoff" => Some(HandoffKind::Vec),
+                "singleton" => Some(HandoffKind::Singleton),
+                "optional" => Some(HandoffKind::Optional),
+                _ => None,
+            };
+            if let Some(kind) = handoff_kind {
+                if !operator.args.is_empty() {
+                    diagnostics.push(Diagnostic::spanned(
+                        operator.path.span(),
+                        Level::Error,
+                        format!("`{}` takes no arguments.", operator.name_string()),
+                    ));
+                }
+                if operator.type_arguments().is_some() {
+                    diagnostics.push(Diagnostic::spanned(
+                        operator.path.span(),
+                        Level::Error,
+                        format!("`{}` takes no generic arguments.", operator.name_string()),
+                    ));
+                }
+                handoff_nodes.push((node_id, kind, operator.path.span()));
+                continue;
+            }
 
             // Op constraints.
             let Some(op_constraints) = find_op_op_constraints(operator) else {
@@ -346,6 +392,15 @@ impl DfirGraph {
 
         for (node_id, op_inst) in op_insts {
             self.insert_node_op_inst(node_id, op_inst);
+        }
+
+        // Replace pseudo-operator nodes with GraphNode::Handoff.
+        for (node_id, kind, span) in handoff_nodes {
+            self.nodes[node_id] = GraphNode::Handoff {
+                kind,
+                src_span: span,
+                dst_span: span,
+            };
         }
     }
 
@@ -483,28 +538,56 @@ impl DfirGraph {
     }
 }
 
-/// Singleton references.
+/// Handoff references.
 impl DfirGraph {
-    /// Set the singletons referenced for the `node_id` operator. Each reference corresponds to the
+    /// Set the handoff references for the `node_id` operator. Each reference corresponds to the
     /// same index in the [`crate::parse::Operator::singletons_referenced`] vec.
-    pub fn set_node_singleton_references(
+    pub fn set_node_handoff_references(
         &mut self,
         node_id: GraphNodeId,
-        singletons_referenced: Vec<Option<GraphNodeId>>,
-    ) -> Option<Vec<Option<GraphNodeId>>> {
-        self.node_singleton_references
+        singletons_referenced: Vec<ResolvedHandoffRef>,
+    ) -> Option<Vec<ResolvedHandoffRef>> {
+        self.node_handoff_references
             .insert(node_id, singletons_referenced)
     }
 
-    /// Gets the singletons referenced by a node. Returns an empty iterator for non-operators and
-    /// operators that do not reference singletons.
-    pub fn node_singleton_references(&self, node_id: GraphNodeId) -> &[Option<GraphNodeId>] {
-        self.node_singleton_references
+    /// Gets the handoff references for a node. Returns an empty slice for non-operators and
+    /// operators that do not reference handoffs.
+    pub fn node_handoff_references(&self, node_id: GraphNodeId) -> &[ResolvedHandoffRef] {
+        self.node_handoff_references
             .get(node_id)
             .map(std::ops::Deref::deref)
             .unwrap_or_default()
     }
+
+    /// Collect all refs, grouped by the handoff they're pointing at, then by the access group idx `Option<u32>`.
+    pub fn node_handoff_reference_groups(&self) -> NodeHandoffReferenceGroups<'_> {
+        let mut handoff_references = NodeHandoffReferenceGroups::new();
+        for node_id in self.node_ids() {
+            if let GraphNode::Operator(operator) = self.node(node_id) {
+                let resolved = self.node_handoff_references(node_id);
+                for (resolved_ref, ref_token) in
+                    resolved.iter().zip(operator.singletons_referenced.iter())
+                {
+                    if let Some(target_nid) = resolved_ref.node_id {
+                        handoff_references
+                            .entry(target_nid)
+                            .or_default()
+                            .entry(resolved_ref.access_group)
+                            .or_default()
+                            .push((node_id, resolved_ref, ref_token.span()));
+                    }
+                }
+            }
+        }
+        handoff_references
+    }
 }
+
+/// Per-node handoff references, in turn grouped by access group.
+/// Map: handoff_node_id -> access_group -> (source `GraphNodeId`, `ResolvedHandoffRef`, `#ref` span)
+pub type NodeHandoffReferenceGroups<'a> =
+    BTreeMap<GraphNodeId, BTreeMap<Option<u32>, Vec<(GraphNodeId, &'a ResolvedHandoffRef, Span)>>>;
 
 /// Module methods.
 impl DfirGraph {
@@ -665,6 +748,16 @@ impl DfirGraph {
         self.subgraph_nodes.keys()
     }
 
+    /// Subgraph IDs in topological sort order.
+    pub fn subgraph_toposort(&self) -> &[GraphSubgraphId] {
+        &self.subgraph_toposort
+    }
+
+    /// Set the topological sort order for subgraphs.
+    pub fn set_subgraph_toposort(&mut self, order: Vec<GraphSubgraphId>) {
+        self.subgraph_toposort = order;
+    }
+
     /// Iterator over all subgraphs, ID and members: `(GraphSubgraphId, Vec<GraphNodeId>)`.
     pub fn subgraphs(&self) -> slotmap::basic::Iter<'_, GraphSubgraphId, Vec<GraphNodeId>> {
         self.subgraph_nodes.iter()
@@ -729,8 +822,19 @@ impl DfirGraph {
     fn node_as_ident(&self, node_id: GraphNodeId, is_pred: bool) -> Ident {
         let name = match &self.nodes[node_id] {
             GraphNode::Operator(_) => format!("op_{:?}", node_id.data()),
-            GraphNode::Handoff { .. } => format!(
+            GraphNode::Handoff {
+                kind: HandoffKind::Vec,
+                ..
+            } => format!(
                 "hoff_{:?}_{}",
+                node_id.data(),
+                if is_pred { "recv" } else { "send" }
+            ),
+            GraphNode::Handoff {
+                kind: HandoffKind::Singleton | HandoffKind::Optional,
+                ..
+            } => format!(
+                "singleton_{:?}_{}",
                 node_id.data(),
                 if is_pred { "recv" } else { "send" }
             ),
@@ -745,22 +849,60 @@ impl DfirGraph {
         Ident::new(&name, span)
     }
 
-    /// For per-node singleton references. Helper to generate a deterministic `Ident` for the given node.
-    fn node_as_singleton_ident(&self, node_id: GraphNodeId, span: Span) -> Ident {
-        Ident::new(&format!("singleton_op_{:?}", node_id.data()), span)
+    /// Helper to generate the main buffer `Ident` for a handoff node.
+    fn hoff_buf_ident(&self, hoff_id: GraphNodeId, span: Span) -> Ident {
+        Ident::new(&format!("hoff_{:?}_buf", hoff_id.data()), span)
     }
 
-    /// Resolve the singletons via [`Self::node_singleton_references`] for the given `node_id`.
-    fn helper_resolve_singletons(&self, node_id: GraphNodeId, span: Span) -> Vec<Ident> {
-        self.node_singleton_references(node_id)
+    /// Helper to generate the back (double-buffer) `Ident` for a handoff node.
+    fn hoff_back_ident(&self, hoff_id: GraphNodeId, span: Span) -> Ident {
+        Ident::new(&format!("hoff_{:?}_back", hoff_id.data()), span)
+    }
+
+    /// Resolve the handoff references via [`Self::node_handoff_references`] for the given `node_id`.
+    /// Returns token streams for each reference:
+    /// - For HandoffKind::Singleton: `buf.as_ref().unwrap()` (shared, `&T`) or
+    ///   `buf.as_mut().unwrap()` (mutable, `&mut T`)
+    /// - For HandoffKind::Optional: `&buf` (shared, `&Option<T>`) or
+    ///   `&mut buf` (mutable, `&mut Option<T>`)
+    /// - For HandoffKind::Vec: `&buf` (shared, `&Vec<T>`) or
+    ///   `&mut buf` (mutable, `&mut Vec<T>`)
+    fn helper_resolve_singletons(&self, node_id: GraphNodeId, span: Span) -> Vec<TokenStream> {
+        self.node_handoff_references(node_id)
             .iter()
-            .map(|singleton_node_id| {
+            .map(|resolved_ref| {
                 // TODO(mingwei): this `expect` should be caught in error checking
-                self.node_as_singleton_ident(
-                    singleton_node_id
-                        .expect("Expected singleton to be resolved but was not, this is a bug."),
-                    span,
-                )
+                let ref_node_id = resolved_ref
+                    .node_id
+                    .expect("Expected singleton to be resolved but was not, this is a bug.");
+                let is_mut = resolved_ref.is_mut;
+                match self.node(ref_node_id) {
+                    GraphNode::Handoff {
+                        kind: HandoffKind::Singleton,
+                        ..
+                    } => {
+                        let buf_ident = self.hoff_buf_ident(ref_node_id, span);
+                        if is_mut {
+                            quote_spanned! {span=> #buf_ident.as_mut().unwrap() }
+                        } else {
+                            quote_spanned! {span=> #buf_ident.as_ref().unwrap() }
+                        }
+                    }
+                    GraphNode::Handoff {
+                        kind: HandoffKind::Optional | HandoffKind::Vec,
+                        ..
+                    } => {
+                        let buf_ident = self.hoff_buf_ident(ref_node_id, span);
+                        if is_mut {
+                            quote_spanned! {span=> &mut #buf_ident }
+                        } else {
+                            quote_spanned! {span=> &#buf_ident }
+                        }
+                    }
+                    _ => {
+                        unreachable!("Only handoff nodes should be reachable as handoff references")
+                    }
+                }
             })
             .collect::<Vec<_>>()
     }
@@ -780,24 +922,243 @@ impl DfirGraph {
             .map(|k| (k, Default::default()))
             .collect();
 
-        // For each handoff node, add it to the `send`/`recv` lists for the corresponding subgraphs.
-        for (hoff_id, node) in self.nodes() {
-            if !matches!(node, GraphNode::Handoff { .. }) {
+        // For each handoff/singleton node, add it to the `send`/`recv` lists for the corresponding subgraphs.
+        for (hoff_id, hoff) in self.nodes() {
+            if !matches!(hoff, GraphNode::Handoff { .. }) {
                 continue;
             }
             // Receivers from the handoff. (Should really only be one).
             for (_edge, succ_id) in self.node_successors(hoff_id) {
-                let succ_sg = self.node_subgraph(succ_id).unwrap();
+                let succ_sg = self
+                    .node_subgraph(succ_id)
+                    .expect("bug: successor not in subgraph, may be a doubled/adjacent handoff");
                 subgraph_handoffs[succ_sg].0.push(hoff_id);
             }
             // Senders into the handoff. (Should really only be one).
             for (_edge, pred_id) in self.node_predecessors(hoff_id) {
-                let pred_sg = self.node_subgraph(pred_id).unwrap();
+                let pred_sg = self
+                    .node_subgraph(pred_id)
+                    .expect("bug: predecessor not in subgraph, may be a doubled/adjacent handoff");
                 subgraph_handoffs[pred_sg].1.push(hoff_id);
             }
         }
 
         subgraph_handoffs
+    }
+
+    /// Compute the output handoffs exiting each loop (sender inside, receiver outside).
+    /// Returns a map from loop ID to the list of handoff node IDs that exit that loop.
+    fn helper_loop_output_handoffs(&self) -> SecondaryMap<GraphLoopId, Vec<GraphNodeId>> {
+        let mut loop_hoffs_out = SecondaryMap::<GraphLoopId, Vec<GraphNodeId>>::new();
+
+        for (hoff_id, hoff) in self.nodes() {
+            if !matches!(hoff, GraphNode::Handoff { .. }) {
+                continue;
+            }
+
+            let loop_pred = self
+                .node_predecessors(hoff_id)
+                .next()
+                .and_then(|(_, pred)| self.node_loop(pred));
+            let loop_succ = self
+                .node_successors(hoff_id)
+                .next()
+                .and_then(|(_, succ)| self.node_loop(succ));
+
+            if let Some(loop_pred) = loop_pred
+                && loop_succ == self.loop_parent(loop_pred)
+            {
+                // Pred is inside a child loop, succ is in the parent/outer.
+                loop_hoffs_out
+                    .entry(loop_pred)
+                    .expect("loop removed")
+                    .or_default()
+                    .push(hoff_id);
+            }
+        }
+
+        loop_hoffs_out
+    }
+
+    /// Returns true if `node_loop` is `loop_id` or a (transitive) child of `loop_id`.
+    fn is_inside_loop(&self, node_loop: Option<GraphLoopId>, loop_id: GraphLoopId) -> bool {
+        let mut current = node_loop;
+        while let Some(l) = current {
+            if l == loop_id {
+                return true;
+            }
+            current = self.loop_parent(l);
+        }
+        false
+    }
+
+    /// Emit a loop gate: wraps `child_body` in the appropriate control structure
+    /// and appends the result + swap code to `output`.
+    ///
+    /// - **Root-level loops** (no parent) are fused with the tick: they emit an `if`
+    ///   so the body runs at most once per tick when their entry condition is met.
+    /// - **Nested loops** (have a parent loop) emit a `while` so they can iterate
+    ///   until fixpoint (driven by `defer_tick` back-edges).
+    /// - If there are no gate checks, the body is emitted unconditionally.
+    fn emit_loop_gate(
+        &self,
+        loop_id: GraphLoopId,
+        child_body: TokenStream,
+        loop_input_handoffs: &SecondaryMap<GraphLoopId, Vec<GraphNodeId>>,
+        back_edge_hoffs_and_lazyness: &SparseSecondaryMap<GraphNodeId, bool>,
+        loop_swap_code: &std::collections::HashMap<GraphLoopId, Vec<TokenStream>>,
+        output: &mut TokenStream,
+    ) {
+        // Get swap code for this loop's defer_tick handoffs.
+        let swap_code = loop_swap_code
+            .get(&loop_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+
+        // Root-level loops are fused with the tick: emit `if` instead of `while`.
+        let is_root_loop = self.loop_parent(loop_id).is_none();
+
+        // Build the gate condition from entry handoffs (excluding lazy windowing operators).
+        let entry_handoffs = loop_input_handoffs.get(loop_id).expect("loop missing");
+        let mut gate_checks: Vec<TokenStream> = entry_handoffs
+            .iter()
+            .filter(|&&hoff_id| {
+                // Check if the successor (windowing operator) is lazy.
+                // If so, exclude from the gate — it doesn't trigger the loop.
+                let is_lazy = self
+                    .node_successors(hoff_id)
+                    .next()
+                    .and_then(|(_, succ)| self.node_op_inst(succ))
+                    .is_some_and(|op_inst| {
+                        op_inst.op_constraints.flo_type == Some(FloType::WindowingLazy)
+                    });
+                !is_lazy
+            })
+            .map(|&hoff_id| {
+                let span = self.node(hoff_id).span();
+                let buf_ident = self.hoff_buf_ident(hoff_id, span);
+                if back_edge_hoffs_and_lazyness.contains_key(hoff_id) {
+                    let back_ident = self.hoff_back_ident(hoff_id, span);
+                    quote_spanned! {span=> !#back_ident.is_empty() }
+                } else {
+                    quote_spanned! {span=> !#buf_ident.is_empty() }
+                }
+            })
+            .collect();
+
+        // Non-lazy defer_tick back-buffers also contribute to the gate (nested loops only).
+        if !is_root_loop {
+            for (hoff_id, hoff) in self.nodes() {
+                if !matches!(hoff, GraphNode::Handoff { .. }) {
+                    continue;
+                }
+                let Some(delay_type) = self.handoff_delay_type(hoff_id) else {
+                    continue;
+                };
+                if delay_type != DelayType::Loop {
+                    continue;
+                }
+                // Check this handoff belongs to loop_id.
+                let hoff_loop = self
+                    .node_successors(hoff_id)
+                    .next()
+                    .and_then(|(_, succ)| self.node_subgraph(succ))
+                    .and_then(|sg| self.subgraph_loop(sg));
+                if hoff_loop != Some(loop_id) {
+                    continue;
+                }
+                let span = self.node(hoff_id).span();
+                let back_ident = self.hoff_back_ident(hoff_id, span);
+                gate_checks.push(quote_spanned! {span=> !#back_ident.is_empty() });
+            }
+        }
+
+        // For root-level loops: non-lazy defer_tick back-buffers also contribute to the gate.
+        // This ensures the loop fires on the next tick when data was deferred via defer_tick.
+        if is_root_loop {
+            for (hoff_id, hoff) in self.nodes() {
+                if !matches!(hoff, GraphNode::Handoff { .. }) {
+                    continue;
+                }
+                let Some(delay_type) = self.handoff_delay_type(hoff_id) else {
+                    continue;
+                };
+                if delay_type != DelayType::Tick {
+                    continue;
+                }
+                // Check this handoff's consumer is inside this root-level loop.
+                let hoff_loop = self
+                    .node_successors(hoff_id)
+                    .next()
+                    .and_then(|(_, succ)| self.node_subgraph(succ))
+                    .and_then(|sg| self.subgraph_loop(sg));
+                if hoff_loop != Some(loop_id) {
+                    continue;
+                }
+                let span = self.node(hoff_id).span();
+                let back_ident = self.hoff_back_ident(hoff_id, span);
+                gate_checks.push(quote_spanned! {span=> !#back_ident.is_empty() });
+            }
+        }
+
+        if gate_checks.is_empty() {
+            // No entry handoffs — always run.
+            output.extend(child_body);
+            output.extend(quote! { #( #swap_code )* });
+        } else if is_root_loop {
+            // Root-level loop: fused with tick, fire at most once.
+            output.extend(quote! {
+                #[allow(clippy::nonminimal_bool, reason = "codegen")]
+                if false #( || #gate_checks )* {
+                    #child_body
+                    #( #swap_code )*
+                }
+            });
+        } else {
+            // Nested loop: iterate until fixpoint.
+            output.extend(quote! {
+                #[allow(clippy::nonminimal_bool, reason = "codegen")]
+                while false #( || #gate_checks )* {
+                    #child_body
+                    #( #swap_code )*
+                }
+            });
+        }
+    }
+
+    /// Compute the input handoffs into each loop (predecessor outside, successor inside).
+    fn helper_loop_input_handoffs(&self) -> SecondaryMap<GraphLoopId, Vec<GraphNodeId>> {
+        let mut loop_hoffs_inn = SecondaryMap::<GraphLoopId, Vec<GraphNodeId>>::new();
+
+        // Check each handoff node.
+        for (hoff_id, hoff) in self.nodes() {
+            if !matches!(hoff, GraphNode::Handoff { .. }) {
+                continue;
+            }
+
+            // Get the loop context of the predecessor and successor.
+            let loop_pred = self
+                .node_predecessors(hoff_id)
+                .next()
+                .and_then(|(_, pred)| self.node_loop(pred));
+            let loop_succ = self
+                .node_successors(hoff_id)
+                .next()
+                .and_then(|(_, succ)| self.node_loop(succ));
+
+            if let Some(loop_succ) = loop_succ
+                && loop_pred == self.loop_parent(loop_succ)
+            {
+                // Pred is parent/outer loop of succ.
+                loop_hoffs_inn
+                    .entry(loop_succ)
+                    .expect("loop removed")
+                    .or_default()
+                    .push(hoff_id);
+            }
+        }
+
+        loop_hoffs_inn
     }
 
     /// Emit this graph as runnable Rust source code tokens that execute inline.
@@ -806,10 +1167,9 @@ impl DfirGraph {
     /// instead of runtime handoffs. Each call to the closure runs one tick.
     ///
     /// The generated code block evaluates to a `Dfir` instance wrapping the
-    /// closure. Operator prologues (`add_state`, `set_state_lifespan_hook`)
-    /// run at construction time on the `Context` before it is moved into
-    /// `Dfir::new`. `Dfir` provides the `Context` to the closure on
-    /// each tick run.
+    /// closure. Operator prologues run at construction time on the `Context`
+    /// before it is moved into `Dfir::new`. `Dfir` provides the `Context`
+    /// to the closure on each tick run.
     ///
     /// # Errors
     ///
@@ -822,126 +1182,248 @@ impl DfirGraph {
         prefix: TokenStream,
         diagnostics: &mut Diagnostics,
     ) -> Result<TokenStream, Diagnostics> {
-        // Extract the slot index from a slotmap key for use as a runtime metrics key.
-        // Uses the low 32 bits of `KeyData::as_ffi()` (the idx, ignoring the version).
-        // TODO(cleanup): When scheduled Dfir is removed, DfirMetrics could use slotmap
-        // SecondaryMaps directly, eliminating this conversion.
-        fn slotmap_raw_idx(key: impl Key) -> usize {
-            (key.data().as_ffi() & 0xFFFF_FFFF) as usize
-        }
+        self.as_code_with_options(root, include_type_guards, true, prefix, diagnostics)
+    }
 
+    /// Like [`Self::as_code`], but with `include_meta` controlling whether
+    /// the runtime meta graph + diagnostics JSON blobs are baked into the
+    /// generated `Dfir::new(...)` call.
+    ///
+    /// The simulator calls Dfir::new() on each iteration, and as a part of that
+    /// it does parsing of the metagraph and diganostics blob. One of them causes spans to get allocated,
+    /// each time a span is allocated, some threadlocal u32 is being incremented, and, on a long simulator run,
+    /// the u32 overflows and panics.
+    pub fn as_code_with_options(
+        &self,
+        root: &TokenStream,
+        include_type_guards: bool,
+        include_meta: bool,
+        prefix: TokenStream,
+        diagnostics: &mut Diagnostics,
+    ) -> Result<TokenStream, Diagnostics> {
         let df = Ident::new(GRAPH, Span::call_site());
         let context = Ident::new(CONTEXT, Span::call_site());
+        // Tick-local bump-allocated Vec handoff declarations (inside the tick closure).
+        let bump_ident = Ident::new("__dfir_bump", Span::call_site());
 
-        // 1. Generate local Vec buffers for each handoff node.
-        let handoff_nodes: Vec<_> = self
+        // 1. Collect all handoff nodes.
+        let handoff_nodes = self
             .nodes
             .iter()
             .filter_map(|(node_id, node)| match node {
+                &GraphNode::Handoff {
+                    kind,
+                    src_span,
+                    dst_span,
+                } => Some((node_id, kind, (src_span, dst_span))),
                 GraphNode::Operator(_) => None,
-                &GraphNode::Handoff { src_span, dst_span } => Some((node_id, (src_span, dst_span))),
                 GraphNode::ModuleBoundary { .. } => panic!(),
             })
-            .collect();
+            .collect::<Vec<_>>();
 
-        let buffer_code: Vec<TokenStream> = handoff_nodes
+        // Determine which handoff nodes are tick-boundary (defer_tick) back-edges.
+        // These must remain as captured Vec<T> since they persist across ticks.
+        // All other Vec handoffs will be bump-allocated (tick-local).
+        let back_edge_hoffs_and_lazyness = handoff_nodes
             .iter()
-            .map(|&(node_id, (src_span, dst_span))| {
-                let span = src_span.join(dst_span).unwrap_or(src_span);
-                let buf_ident = Ident::new(&format!("hoff_{:?}_buf", node_id.data()), span);
-                quote_spanned! {span=>
-                    let mut #buf_ident: Vec<_> = Vec::new();
+            .map(|&(node_id, _, _)| node_id)
+            .filter_map(|node_id| {
+                let delay_type = self.handoff_delay_type(node_id)?;
+                Some((
+                    node_id,
+                    matches!(delay_type, DelayType::TickLazy | DelayType::LoopLazy),
+                ))
+            })
+            .collect::<SparseSecondaryMap<_, _>>();
+
+        // Back buffer idents, buf idents, and if they are lazy.
+        let back_buffer_idents_laziness = handoff_nodes
+            .iter()
+            .filter_map(|&(hoff_id, _kind, (src_span, dst_span))| {
+                back_edge_hoffs_and_lazyness.get(hoff_id).map(|&is_lazy| {
+                    let span = src_span.join(dst_span).unwrap_or(src_span);
+                    let back_ident = self.hoff_back_ident(hoff_id, span);
+                    let buf_ident = self.hoff_buf_ident(hoff_id, span);
+                    (back_ident, buf_ident, is_lazy)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        // Generate swap code for tick-boundary (defer_tick / defer_tick_lazy) handoffs.
+        // At the end of each tick, swap the regular buffer and back buffer so the
+        // consumer reads last tick's data from the back buffer.
+        // Only tick-level swaps go here; loop-level swaps are emitted inside the loop gate.
+        // IMPORTANT: For defer_tick handoffs whose consumer is inside a root-level loop,
+        // the swap is emitted inside the `if` gate (via loop_swap_code), not at tick level.
+        let back_edge_swap_code = handoff_nodes
+            .iter()
+            .filter(|&&(node_id, _kind, _)| {
+                self.handoff_delay_type(node_id)
+                    .is_some_and(|dt| matches!(dt, DelayType::Tick | DelayType::TickLazy))
+            })
+            .filter(|&&(hoff_id, _kind, _)| {
+                // Exclude handoffs whose consumer is inside a root-level loop.
+                // Those get their swap emitted inside the loop gate.
+                let consumer_loop = self
+                    .node_successors(hoff_id)
+                    .next()
+                    .and_then(|(_, succ)| self.node_subgraph(succ))
+                    .and_then(|sg| self.subgraph_loop(sg));
+                if let Some(loop_id) = consumer_loop {
+                    // If it's a root-level loop, don't include in tick-level swap.
+                    self.loop_parent(loop_id).is_some()
+                } else {
+                    // No loop context: emit at tick level (original behavior).
+                    true
                 }
             })
-            .collect();
+            .map(|&(hoff_id, _kind, _)| {
+                let span = self.nodes[hoff_id].span();
+                let buf_ident = self.hoff_buf_ident(hoff_id, span);
+                let back_ident = self.hoff_back_ident(hoff_id, span);
+                quote_spanned! {span=>
+                    ::std::mem::swap(&mut #buf_ident, &mut #back_ident);
+                }
+            })
+            .collect::<Vec<_>>();
 
-        // 2. Collect subgraph handoffs (same as as_code).
+        // Collect per-loop swap code for defer_tick / defer_tick_lazy handoffs.
+        // AND defer_tick / defer_tick_lazy handoffs inside root-level loops.
+        // Keyed by the loop ID of the consumer (successor) of the handoff.
+        let mut loop_swap_code: std::collections::HashMap<GraphLoopId, Vec<TokenStream>> =
+            std::collections::HashMap::new();
+        for &(hoff_id, _kind, _) in handoff_nodes.iter() {
+            let Some(delay_type) = self.handoff_delay_type(hoff_id) else {
+                continue;
+            };
+            // Find the loop this handoff belongs to (from its consumer's loop context).
+            let loop_id = self
+                .node_successors(hoff_id)
+                .next()
+                .and_then(|(_, succ)| self.node_subgraph(succ))
+                .and_then(|sg| self.subgraph_loop(sg));
+            let Some(loop_id) = loop_id else {
+                continue;
+            };
+            let include = match delay_type {
+                DelayType::Loop | DelayType::LoopLazy => true,
+                DelayType::Tick | DelayType::TickLazy => {
+                    // Only include in loop swap if this is a root-level loop.
+                    self.loop_parent(loop_id).is_none()
+                }
+            };
+            if !include {
+                continue;
+            }
+            let span = self.nodes[hoff_id].span();
+            let buf_ident = self.hoff_buf_ident(hoff_id, span);
+            let back_ident = self.hoff_back_ident(hoff_id, span);
+            loop_swap_code
+                .entry(loop_id)
+                .or_default()
+                .push(quote_spanned! {span=>
+                    ::std::mem::swap(&mut #buf_ident, &mut #back_ident);
+                });
+        }
+
+        // 2. Collect per-subgraph recv & send handoffs.
         let subgraph_handoffs = self.helper_collect_subgraph_handoffs();
 
-        // 3. Sort subgraphs topologically and collect non-lazy defer_tick buffer idents.
-        //
-        // Handoffs marked with a `DelayType` (Tick/TickLazy) are tick-boundary back-edges.
-        // For these, we reverse the ordering constraint (producer runs after consumer) to
-        // preserve the required same-tick ordering. Unmarked handoffs are forward edges.
-        //
-        // While iterating handoffs, we also collect buffer idents for non-lazy tick-boundary
-        // edges (defer_tick). When these buffers are non-empty at end of tick, we set
-        // can_start_tick so that run_available continues ticking.
-        let mut defer_tick_buf_idents: Vec<Ident> = Vec::new();
-        let all_subgraphs = {
-            // Build predecessor map for subgraphs.
-            let mut sg_preds = SecondaryMap::<_, Vec<_>>::with_capacity(self.subgraph_nodes.len());
-            for (hoff_id, node) in self.nodes() {
-                if !matches!(node, GraphNode::Handoff { .. }) {
-                    // Not a handoff; skip.
-                    continue;
-                }
-                assert_eq!(1, self.node_successors(hoff_id).len());
-                assert_eq!(1, self.node_predecessors(hoff_id).len());
-                let (_edge_id, pred) = self.node_predecessors(hoff_id).next().unwrap();
-                let (_edge_id, succ) = self.node_successors(hoff_id).next().unwrap();
-                let pred_sg = self.node_subgraph(pred).unwrap();
-                let succ_sg = self.node_subgraph(succ).unwrap();
-                if pred_sg == succ_sg {
-                    panic!("bug: unexpected subgraph self-handoff cycle");
-                }
-                if let Some(delay_type) = self.handoff_delay_type(hoff_id) {
-                    debug_assert!(matches!(delay_type, DelayType::Tick | DelayType::TickLazy));
-                    // Tick/back-edge handoff: preserve the required same-tick ordering by
-                    // forcing the higher-order producer subgraph to run after the
-                    // lower-order consumer subgraph.
-                    sg_preds.entry(pred_sg).unwrap().or_default().push(succ_sg);
+        // 3. Use pre-computed subgraph topological order.
+        let all_subgraphs: Vec<_> = self
+            .subgraph_toposort()
+            .iter()
+            .map(|&sg_id| (sg_id, self.subgraph(sg_id)))
+            .collect();
 
-                    // Non-lazy tick-boundary: defer_tick (not defer_tick_lazy).
-                    if !matches!(delay_type, DelayType::TickLazy) {
-                        defer_tick_buf_idents.push(Ident::new(
-                            &format!("hoff_{:?}_buf", hoff_id.data()),
-                            node.span(),
-                        ));
-                    }
-                } else {
-                    sg_preds.entry(succ_sg).unwrap().or_default().push(pred_sg);
-                }
-            }
-
-            // Include singleton reference edges: if node A references the
-            // singleton output of node B, then A's subgraph must run after B's.
-            for dst_id in self.node_ids() {
-                for src_ref_id in self
-                    .node_singleton_references(dst_id)
-                    .iter()
-                    .copied()
-                    .flatten()
-                {
-                    let src_sg = self
-                        .node_subgraph(src_ref_id)
-                        .expect("bug: singleton ref node must belong to a subgraph");
-                    let dst_sg = self
-                        .node_subgraph(dst_id)
-                        .expect("bug: singleton ref consumer must belong to a subgraph");
-                    if src_sg != dst_sg {
-                        sg_preds.entry(dst_sg).unwrap().or_default().push(src_sg);
-                    }
-                }
-            }
-
-            let topo_sort = super::graph_algorithms::topo_sort(self.subgraph_ids(), |sg_id| {
-                sg_preds.get(sg_id).into_iter().flatten().copied()
-            })
-            .expect("bug: unexpected cycle between subgraphs within the tick");
-
-            topo_sort
-                .into_iter()
-                .map(|sg_id| (sg_id, self.subgraph(sg_id)))
-                .collect::<Vec<_>>()
-        };
+        // TODO(mingwei): If a handoff has no pipe consumers we should drop it as soon as possible, after all reference
+        // consumers. Right now we just let these handoffs die at the end of the tick.
 
         let mut op_prologue_code = Vec::new();
-        let mut op_prologue_after_code = Vec::new();
-        let mut subgraph_blocks = Vec::new();
+        let mut op_tick_end_code = Vec::new();
+
+        // Stack-based hierarchical code generation.
+        // Each entry is (loop_id, body_tokens) for an open loop context.
+        // The "current output" is always the innermost open context (or root).
+        let mut loop_stack: Vec<(GraphLoopId, TokenStream)> = Vec::new();
+        let mut current_output = TokenStream::new();
+
+        // Pre-compute loop gate data.
+        let loop_input_handoffs = self.helper_loop_input_handoffs();
+        let loop_output_handoffs = self.helper_loop_output_handoffs();
+
         {
             for &(subgraph_id, subgraph_nodes) in all_subgraphs.iter() {
-                let sg_metrics_idx = slotmap_raw_idx(subgraph_id);
+                let sg_loop = self.subgraph_loop(subgraph_id);
+
+                // Transition loop contexts: close loops we've exited, open loops we've entered.
+                // Close loops until we're at the right level.
+                while let Some(&(top_loop, _)) = loop_stack.last() {
+                    if sg_loop == Some(top_loop) || self.is_inside_loop(sg_loop, top_loop) {
+                        break;
+                    }
+                    // Pop: wrap the body in a loop gate and append to parent.
+                    let (closed_loop, child_body) = loop_stack.pop().unwrap();
+                    let target = if let Some((_, parent_body)) = loop_stack.last_mut() {
+                        parent_body
+                    } else {
+                        &mut current_output
+                    };
+                    self.emit_loop_gate(
+                        closed_loop,
+                        child_body,
+                        &loop_input_handoffs,
+                        &back_edge_hoffs_and_lazyness,
+                        &loop_swap_code,
+                        target,
+                    );
+                }
+
+                // Open new loops if we've descended.
+                if let Some(target_loop) = sg_loop
+                    && loop_stack.last().map(|&(l, _)| l) != Some(target_loop)
+                {
+                    // Find the path of loops to open (from outermost to target).
+                    let mut path = Vec::new();
+                    let mut cur = Some(target_loop);
+                    while let Some(l) = cur {
+                        if loop_stack.last().map(|&(top, _)| top) == Some(l) {
+                            break;
+                        }
+                        path.push(l);
+                        cur = self.loop_parent(l);
+                    }
+                    // Push in outermost-first order, emitting exit-handoff declarations
+                    // to the parent level before the while loop.
+                    for &loop_id in path.iter().rev() {
+                        // Declare exit-handoff buffers at the current (parent) level.
+                        if let Some(exit_hoffs) = loop_output_handoffs.get(loop_id) {
+                            let exit_hoff_decls = exit_hoffs.iter().map(|&hoff_id| {
+                                let span = self.nodes[hoff_id].span();
+                                let buf_ident = self.hoff_buf_ident(hoff_id, span);
+                                let GraphNode::Handoff { kind, .. } = self.node(hoff_id) else {
+                                    panic!()
+                                };
+                                match kind {
+                                    HandoffKind::Vec => quote_spanned! {span=>
+                                        let mut #buf_ident = #root::bumpalo::collections::Vec::new_in(&#bump_ident);
+                                    },
+                                    HandoffKind::Singleton | HandoffKind::Optional => quote_spanned! {span=>
+                                        let mut #buf_ident = ::std::option::Option::None;
+                                    },
+                                }
+                            });
+                            let target = if let Some((_, body)) = loop_stack.last_mut() {
+                                body
+                            } else {
+                                &mut current_output
+                            };
+                            target.extend(quote! { #( #exit_hoff_decls )* });
+                        }
+                        loop_stack.push((loop_id, TokenStream::new()));
+                    }
+                }
+                let sg_metrics_ffi = subgraph_id.data().as_ffi();
                 let (recv_hoffs, send_hoffs) = &subgraph_handoffs[subgraph_id];
 
                 // Generate buffer ident helpers for this subgraph's handoffs.
@@ -957,45 +1439,84 @@ impl DfirGraph {
                 // Map handoff node IDs to buffer idents.
                 let recv_buf_idents: Vec<Ident> = recv_hoffs
                     .iter()
-                    .map(|&hoff_id| {
-                        let span = self.nodes[hoff_id].span();
-                        Ident::new(&format!("hoff_{:?}_buf", hoff_id.data()), span)
-                    })
+                    .map(|&hoff_id| self.hoff_buf_ident(hoff_id, self.nodes[hoff_id].span()))
                     .collect();
                 let send_buf_idents: Vec<Ident> = send_hoffs
                     .iter()
-                    .map(|&hoff_id| {
-                        let span = self.nodes[hoff_id].span();
-                        Ident::new(&format!("hoff_{:?}_buf", hoff_id.data()), span)
-                    })
+                    .map(|&hoff_id| self.hoff_buf_ident(hoff_id, self.nodes[hoff_id].span()))
                     .collect();
 
+                // Handoff kinds
+                let recv_kinds = recv_hoffs
+                    .iter()
+                    .map(|&hoff_id| {
+                        let GraphNode::Handoff { kind, .. } = self.node(hoff_id) else {
+                            panic!()
+                        };
+                        *kind
+                    })
+                    .collect::<Vec<_>>();
+                let send_kinds = send_hoffs
+                    .iter()
+                    .map(|&hoff_id| {
+                        let GraphNode::Handoff { kind, .. } = self.node(hoff_id) else {
+                            panic!()
+                        };
+                        *kind
+                    })
+                    .collect::<Vec<_>>();
+
                 // Recv port code: drain from buffer into iterator, tracking if non-empty.
+                // For back-edge (defer_tick) handoffs, drain from the back buffer instead.
                 // Also update handoff metrics (measured at recv, not send — see graph.rs).
                 let recv_port_code: Vec<TokenStream> = recv_port_idents
                     .iter()
                     .zip(recv_buf_idents.iter())
+                    .zip(recv_kinds.iter())
                     .zip(recv_hoffs.iter())
-                    .map(|((port_ident, buf_ident), &hoff_id)| {
-                        let hoff_idx = slotmap_raw_idx(hoff_id);
+                    .map(|(((port_ident, buf_ident), &kind), &hoff_id)| {
+                        let hoff_ffi = hoff_id.data().as_ffi();
                         // Use call_site span for internal identifiers to avoid
                         // hygiene issues when invoked through declarative macros
                         // (e.g. dfir_expect_warnings!). TODO(#2781): define these once.
                         let work_done = Ident::new("__dfir_work_done", Span::call_site());
                         let metrics = Ident::new("__dfir_metrics", Span::call_site());
+
+                        // Compute len and drain expressions based on handoff kind.
+                        let (len_expr, drain_expr) = match kind {
+                            HandoffKind::Singleton | HandoffKind::Optional => (
+                                quote! { if #buf_ident.is_some() { 1usize } else { 0usize } },
+                                quote! { #root::dfir_pipes::pull::iter(#buf_ident.take().into_iter()) },
+                            ),
+                            HandoffKind::Vec => {
+                                // Special asymmetric handling for defer tick handoffs, which are double-buffered.
+                                // The producer writes to the regular buffer; at end-of-tick the buffers are swapped,
+                                // so the consumer drains from the back buffer (here).
+                                let drain_ident = if back_edge_hoffs_and_lazyness.contains_key(hoff_id) {
+                                    &self.hoff_back_ident(hoff_id, buf_ident.span())
+                                } else {
+                                    buf_ident
+                                };
+                                (
+                                    quote! { #drain_ident.len() },
+                                    quote! { #root::dfir_pipes::pull::iter(#drain_ident.drain(..)) },
+                                )
+                            }
+                        };
+
                         quote_spanned! {port_ident.span()=>
                             {
-                                let hoff_len = #buf_ident.len();
+                                let hoff_len = #len_expr;
                                 if hoff_len > 0 {
                                     #work_done = true;
                                 }
                                 let hoff_metrics = &#metrics.handoffs[
-                                    #root::util::slot_vec::Key::<#root::scheduled::HandoffTag>::from_raw(#hoff_idx)
+                                    #root::slotmap::KeyData::from_ffi(#hoff_ffi).into()
                                 ];
                                 hoff_metrics.total_items_count.update(|x| x + hoff_len);
                                 hoff_metrics.curr_items_count.set(hoff_len);
                             }
-                            let #port_ident = #root::dfir_pipes::pull::iter(#buf_ident.drain(..));
+                            let #port_ident = #drain_expr;
                         }
                     })
                     .collect();
@@ -1004,9 +1525,35 @@ impl DfirGraph {
                 let send_port_code: Vec<TokenStream> = send_port_idents
                     .iter()
                     .zip(send_buf_idents.iter())
-                    .map(|(port_ident, buf_ident)| {
-                        quote_spanned! {port_ident.span()=>
-                            let #port_ident = #root::dfir_pipes::push::vec_push(&mut #buf_ident);
+                    .zip(send_kinds.iter())
+                    .map(|((port_ident, buf_ident), &kind)| {
+                        match kind {
+                            HandoffKind::Singleton => {
+                                // Singleton slot: store exactly one item, panic on duplicate.
+                                quote_spanned! {port_ident.span()=>
+                                    let #port_ident = #root::dfir_pipes::push::for_each(|__item| {
+                                        if #buf_ident.replace(__item).is_some() {
+                                            panic!("singleton() received more than one item");
+                                        }
+                                    });
+                                }
+                            }
+                            HandoffKind::Optional => {
+                                // Optional slot: store at most one item, panic on duplicate.
+                                quote_spanned! {port_ident.span()=>
+                                    let #port_ident = #root::dfir_pipes::push::for_each(|__item| {
+                                        if #buf_ident.replace(__item).is_some() {
+                                            panic!("optional() received more than one item");
+                                        }
+                                    });
+                                }
+                            }
+                            HandoffKind::Vec => {
+                                quote_spanned! {port_ident.span()=>
+                                    // TODO(mingwei): use `#root::dfir_pipes::push::vec_push`?
+                                    let #port_ident = #root::dfir_pipes::push::for_each(|item| { #buf_ident.push(item); });
+                                }
+                            }
                         }
                     })
                     .collect();
@@ -1079,13 +1626,6 @@ impl DfirGraph {
 
                             let is_pull = idx < pull_to_push_idx;
 
-                            let singleton_output_ident = &if op_constraints.has_singleton_output {
-                                self.node_as_singleton_ident(node_id, op_span)
-                            } else {
-                                // This ident *should* go unused.
-                                Ident::new(&format!("{}_has_no_singleton_output", op_name), op_span)
-                            };
-
                             // There's a bit of dark magic hidden in `Span`s... you'd think it's just a `file:line:column`,
                             // but it has one extra bit of info for _name resolution_, used for `Ident`s. `Span::call_site()`
                             // has the (unhygienic) resolution we want, an ident is just solely determined by its string name,
@@ -1099,23 +1639,17 @@ impl DfirGraph {
 
                             let singletons_resolved =
                                 self.helper_resolve_singletons(node_id, op_span);
+
                             let arguments = &process_singletons::postprocess_singletons(
                                 op_inst.arguments_raw.clone(),
-                                singletons_resolved.clone(),
-                                context,
+                                singletons_resolved,
                             );
-                            let arguments_handles =
-                                &process_singletons::postprocess_singletons_handles(
-                                    op_inst.arguments_raw.clone(),
-                                    singletons_resolved.clone(),
-                                );
 
                             let source_tag = 'a: {
                                 if let Some(tag) = self.operator_tag.get(node_id).cloned() {
                                     break 'a tag;
                                 }
 
-                                #[cfg(nightly)]
                                 if proc_macro::is_available() {
                                     let op_span = op_span.unwrap();
                                     break 'a format!(
@@ -1166,20 +1700,18 @@ impl DfirGraph {
                                 is_pull,
                                 inputs: &inputs,
                                 outputs: &outputs,
-                                singleton_output_ident,
                                 op_name,
                                 op_inst,
                                 arguments,
-                                arguments_handles,
                             };
 
                             let write_result =
                                 (op_constraints.write_fn)(&context_args, diagnostics);
                             let OperatorWriteOutput {
                                 write_prologue,
-                                write_prologue_after,
                                 write_iterator,
                                 write_iterator_after,
+                                write_tick_end,
                             } = write_result.unwrap_or_else(|()| {
                                 assert!(
                                     diagnostics.has_error(),
@@ -1193,13 +1725,13 @@ impl DfirGraph {
                             });
 
                             op_prologue_code.push(syn::parse_quote! {
-                                #[allow(non_snake_case)]
+                                #[allow(dead_code, non_snake_case, reason = "codegen")]
                                 #[inline(always)]
                                 fn #work_fn<T>(thunk: impl ::std::ops::FnOnce() -> T) -> T {
                                     thunk()
                                 }
 
-                                #[allow(non_snake_case)]
+                                #[allow(dead_code, non_snake_case, reason = "codegen")]
                                 #[inline(always)]
                                 async fn #work_fn_async<T>(
                                     thunk: impl ::std::future::Future<Output = T>,
@@ -1208,7 +1740,7 @@ impl DfirGraph {
                                 }
                             });
                             op_prologue_code.push(write_prologue);
-                            op_prologue_after_code.push(write_prologue_after);
+                            op_tick_end_code.push(write_tick_end);
                             subgraph_op_iter_code.push(write_iterator);
 
                             if include_type_guards {
@@ -1305,11 +1837,11 @@ impl DfirGraph {
                                                     }
 
                                                     #[inline(always)]
-                                                    fn poll_flush(
+                                                    fn poll_finalize(
                                                         self: ::std::pin::Pin<&mut Self>,
                                                         ctx: &mut Self::Ctx<'_>,
                                                     ) -> #root::dfir_pipes::push::PushStep<Self::CanPend> {
-                                                        #root::dfir_pipes::push::Push::poll_flush(self.project().inner, ctx)
+                                                        #root::dfir_pipes::push::Push::poll_finalize(self.project().inner, ctx)
                                                     }
 
                                                     #[inline(always)]
@@ -1366,8 +1898,10 @@ impl DfirGraph {
                             .span()
                             .join(push_ident.span())
                             .unwrap_or_else(|| push_ident.span());
-                        let pivot_fn_ident =
-                            Ident::new(&format!("pivot_run_sg_{:?}", subgraph_id.0), pivot_span);
+                        let pivot_fn_ident = Ident::new(
+                            &format!("pivot_run_sg_{:?}", subgraph_id.data()),
+                            pivot_span,
+                        );
                         let root = change_spans(root.clone(), pivot_span);
                         subgraph_op_iter_code.push(quote_spanned! {pivot_span=>
                             #[inline(always)]
@@ -1390,20 +1924,89 @@ impl DfirGraph {
                 let sg_fut_ident = subgraph_id.as_ident(Span::call_site());
 
                 // Generate send-side curr_items_count updates (after subgraph runs).
-                let send_metrics_code: Vec<TokenStream> = send_hoffs
+                let send_metrics_code = send_hoffs
                     .iter()
                     .zip(send_buf_idents.iter())
-                    .map(|(&hoff_id, buf_ident)| {
-                        let hoff_idx = slotmap_raw_idx(hoff_id);
+                    .zip(send_kinds.iter())
+                    .map(|((&hoff_id, buf_ident), &kind)| {
+                        let hoff_ffi = hoff_id.data().as_ffi();
+                        let len_expr = match kind {
+                            HandoffKind::Singleton | HandoffKind::Optional => {
+                                quote! { if #buf_ident.is_some() { 1 } else { 0 } }
+                            }
+                            HandoffKind::Vec => {
+                                quote! { #buf_ident.len() }
+                            }
+                        };
                         quote! {
                             __dfir_metrics.handoffs[
-                                #root::util::slot_vec::Key::<#root::scheduled::HandoffTag>::from_raw(#hoff_idx)
-                            ].curr_items_count.set(#buf_ident.len());
+                                #root::slotmap::KeyData::from_ffi(#hoff_ffi).into()
+                            ].curr_items_count.set(#len_expr);
                         }
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
 
-                subgraph_blocks.push(quote! {
+                // Create the handoffs we are about to push to (send).
+                // Exit handoffs (sender inside a loop, receiver in parent) are already declared
+                // before the while loop, so skip them here.
+                let send_hoff_make_code = send_buf_idents.iter()
+                    .zip(send_kinds.iter())
+                    .zip(send_hoffs.iter())
+                    .filter_map(|((buf_ident, &kind), &hoff_id)| {
+                        let span = buf_ident.span();
+                        if back_edge_hoffs_and_lazyness.contains_key(hoff_id) {
+                            // Defer_tick send buffers are declared outside the tick closure
+                            // as std::vec::Vec for O(1) swap. Just clear here.
+                            Some(quote_spanned! {span=>
+                                #buf_ident.clear();
+                            })
+                        } else {
+                            // Check if this is a loop-exit handoff: sender is in a loop,
+                            // receiver is in the parent (already declared outside the while loop).
+                            let receiver_loop = self
+                                .node_successors(hoff_id)
+                                .next()
+                                .and_then(|(_, succ)| self.node_loop(succ));
+                            let is_exit = if let Some(sender_loop) = sg_loop {
+                                receiver_loop == self.loop_parent(sender_loop)
+                            } else {
+                                false
+                            };
+                            if is_exit {
+                                // Exit handoff: buffer already declared at parent level.
+                                None
+                            } else {
+                                Some(match kind {
+                                    HandoffKind::Vec => quote_spanned! {span=>
+                                        let mut #buf_ident = #root::bumpalo::collections::Vec::new_in(&#bump_ident);
+                                    },
+                                    HandoffKind::Singleton | HandoffKind::Optional => quote_spanned! {span=>
+                                        let mut #buf_ident = ::std::option::Option::None;
+                                    },
+                                })
+                            }
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                // Drop the handoffs we just drained (recv).
+                // TODO(mingwei): we could use `.into_iter()` instead of `.drain(..)` to consume the handoffs directly.
+                // This only works for handoffs within the tick, though, not `defer_tick` handoffs.
+                let recv_hoff_drop_code = recv_buf_idents
+                    .iter()
+                    .zip(recv_hoffs.iter())
+                    .filter(|&(_, &hoff_id)| !back_edge_hoffs_and_lazyness.contains_key(hoff_id))
+                    .map(|(buf_ident, _)| {
+                        let span = buf_ident.span();
+                        quote_spanned! {span=>
+                            let _ = #buf_ident;
+                        }
+                    });
+
+                // Emit subgraph block to the current loop level (top of stack or root).
+                let sg_block = quote! {
+                    // Create the handoffs we are about to push to (send).
+                    #( #send_hoff_make_code )*
+
                     let #sg_fut_ident = async {
                         let #context = &#df;
                         #( #recv_port_code )*
@@ -1412,56 +2015,134 @@ impl DfirGraph {
                         #( #subgraph_op_iter_after_code )*
                     };
                     {
+                        // Instrument w/ the subgraph metrics.
                         let sg_metrics = &__dfir_metrics.subgraphs[
-                            #root::util::slot_vec::Key::<#root::scheduled::SubgraphTag>::from_raw(#sg_metrics_idx)
+                            #root::slotmap::KeyData::from_ffi(#sg_metrics_ffi).into()
                         ];
                         #root::scheduled::metrics::InstrumentSubgraph::new(
                             #sg_fut_ident, sg_metrics
                         ).await;
                         sg_metrics.total_run_count.update(|x| x + 1);
-                    }
-                    #( #send_metrics_code )*
-                });
 
-                // Collect per-subgraph prologues into the main prologue lists.
-                // (They are already pushed above in the operator loop.)
+                        // Update send (output) handoff metrics.
+                        #( #send_metrics_code )*
+
+                        // Drop the handoffs we just drained (recv).
+                        #( #recv_hoff_drop_code )*
+                    }
+                };
+                if let Some((_, body)) = loop_stack.last_mut() {
+                    body.extend(sg_block);
+                } else {
+                    current_output.extend(sg_block);
+                }
             }
         }
+
+        // Close any remaining open loops.
+        let gated_subgraph_code = {
+            while let Some((closed_loop, child_body)) = loop_stack.pop() {
+                let target = if let Some((_, parent_body)) = loop_stack.last_mut() {
+                    parent_body
+                } else {
+                    &mut current_output
+                };
+                self.emit_loop_gate(
+                    closed_loop,
+                    child_body,
+                    &loop_input_handoffs,
+                    &back_edge_hoffs_and_lazyness,
+                    &loop_swap_code,
+                    target,
+                );
+            }
+            current_output
+        };
 
         if diagnostics.has_error() {
             return Err(std::mem::take(diagnostics));
         }
         let _ = diagnostics; // Ensure no more diagnostics may be added after checking for errors.
 
-        let meta_graph_json = serde_json::to_string(&self).unwrap();
-        let meta_graph_json = Literal::string(&meta_graph_json);
+        let (meta_graph_arg, diagnostics_arg) = if include_meta {
+            let meta_graph_json = serde_json::to_string(&self).unwrap();
+            let meta_graph_json = Literal::string(&meta_graph_json);
 
-        let serde_diagnostics: Vec<_> = diagnostics.iter().map(Diagnostic::to_serde).collect();
-        let diagnostics_json = serde_json::to_string(&*serde_diagnostics).unwrap();
-        let diagnostics_json = Literal::string(&diagnostics_json);
+            let serde_diagnostics: Vec<_> = diagnostics.iter().map(Diagnostic::to_serde).collect();
+            let diagnostics_json = serde_json::to_string(&*serde_diagnostics).unwrap();
+            let diagnostics_json = Literal::string(&diagnostics_json);
+
+            (
+                quote! { Some(#meta_graph_json) },
+                quote! { Some(#diagnostics_json) },
+            )
+        } else {
+            (quote! { None }, quote! { None })
+        };
 
         // Generate metrics initialization: one entry per handoff and per subgraph.
         let metrics_init_code = {
-            let handoff_inits = handoff_nodes.iter().map(|&(node_id, _)| {
-                let idx = slotmap_raw_idx(node_id);
+            let handoff_inits = handoff_nodes.iter().map(|&(node_id, _, _)| {
+                let ffi = node_id.data().as_ffi();
                 quote! {
                     dfir_metrics.handoffs.insert(
-                        #root::util::slot_vec::Key::from_raw(#idx),
+                        #root::slotmap::KeyData::from_ffi(#ffi).into(),
                         ::std::default::Default::default(),
                     );
                 }
             });
             let subgraph_inits = all_subgraphs.iter().map(|&(sg_id, _)| {
-                let idx = slotmap_raw_idx(sg_id);
+                let ffi = sg_id.data().as_ffi();
                 quote! {
                     dfir_metrics.subgraphs.insert(
-                        #root::util::slot_vec::Key::from_raw(#idx),
+                        #root::slotmap::KeyData::from_ffi(#ffi).into(),
                         ::std::default::Default::default(),
                     );
                 }
             });
             handoff_inits.chain(subgraph_inits).collect::<Vec<_>>()
         };
+
+        // For creating back-buffer handoff vecs.
+        let back_buffer_idents = back_buffer_idents_laziness
+            .iter()
+            .map(|(back_ident, _, _)| back_ident);
+        // For creating the send-side buffer for defer_tick handoffs (also outside the closure).
+        let defer_tick_buf_idents = back_buffer_idents_laziness
+            .iter()
+            .map(|(_, buf_ident, _)| buf_ident);
+        // For checking if we should start the next tick (`schedule_subgraph`):
+        // Collect the ident to check for each non-lazy back-edge handoff.
+        // - For defer_tick handoffs in a root-level loop: check `back` (swap happened inside `if`)
+        // - For all others: check `buf` (original behavior; tick-level swap hasn't happened yet)
+        let non_lazy_schedule_idents: Vec<&Ident> = handoff_nodes
+            .iter()
+            .filter_map(|&(hoff_id, _, _)| {
+                let delay_type = self.handoff_delay_type(hoff_id)?;
+                // Only non-lazy.
+                if matches!(delay_type, DelayType::TickLazy | DelayType::LoopLazy) {
+                    return None;
+                }
+                let span = self.nodes[hoff_id].span();
+                let expected_back_ident = self.hoff_back_ident(hoff_id, span);
+                let entry = back_buffer_idents_laziness
+                    .iter()
+                    .find(|(back_ident, _, _)| *back_ident == expected_back_ident)?;
+
+                // For defer_tick inside a root-level loop, check `back`.
+                if delay_type == DelayType::Tick {
+                    let consumer_loop = self
+                        .node_successors(hoff_id)
+                        .next()
+                        .and_then(|(_, succ)| self.node_subgraph(succ))
+                        .and_then(|sg| self.subgraph_loop(sg));
+                    if consumer_loop.is_some_and(|lid| self.loop_parent(lid).is_none()) {
+                        return Some(&entry.0); // back ident
+                    }
+                }
+                Some(&entry.1) // buf ident
+            })
+            .collect();
 
         // Prologues and buffer declarations persist across ticks (outside the closure).
         // Subgraph blocks run each tick (inside the closure).
@@ -1487,40 +2168,56 @@ impl DfirGraph {
                     __dfir_metrics,
                 );
 
-                #( #buffer_code )*
                 #( #op_prologue_code )*
-                #( #op_prologue_after_code )*
+
+                // For tick-boundary handoffs (`defer_tick` / `defer_tick_lazy`), declare both the
+                // send buffer and the "back" buffer as std::vec::Vec outside the tick closure.
+                // This enables O(1) mem::swap at end of tick for double-buffering.
+                #( let mut #back_buffer_idents = ::std::vec::Vec::new(); )*
+                #( let mut #defer_tick_buf_idents = ::std::vec::Vec::new(); )*
+
+                // Bump allocator for handoffs (except for back-edge handoffs, above).
+                let mut #bump_ident = #root::bumpalo::Bump::new();
 
                 // Pre-set to true so the first tick always returns true
                 // (matching Dfir pre-scheduling behavior). Subsequent ticks
                 // start false (from take()) and are set true by recv port code
                 // if any handoff buffer has data.
                 let mut __dfir_work_done = true;
-                #[allow(unused_qualifications, unused_mut, unused_variables, clippy::await_holding_refcell_ref)]
+                #[allow(unused_qualifications, unused_mut, unused_variables, clippy::await_holding_refcell_ref, clippy::deref_addrof)]
                 let __dfir_inline_tick = async move |#df: &mut #root::scheduled::context::Context| {
-                    let __dfir_metrics = #df.metrics();
-                    #( #subgraph_blocks )*
+                    // Reset arena between ticks (start-of-tick)
+                    #bump_ident.reset();
 
-                    // For non-lazy defer_tick: if any deferred buffer has data,
-                    // signal that another tick should run (sets can_start_tick).
-                    // Inline DFIR doesn't dynamically schedule subgraph IDs, so the
-                    // subgraph ID here is a meaningless placeholder.
-                    // TODO(cleanup): remove the subgraph ID parameter once scheduled DFIR is gone.
-                    if false #( || !#defer_tick_buf_idents.is_empty() )* {
-                        #df.schedule_subgraph(
-                            #root::scheduled::SubgraphId::from_raw(0),
-                            true,
-                        );
+                    {
+                        let __dfir_metrics = #df.metrics();
+
+                        #gated_subgraph_code
+
+                        // For non-lazy defer_tick: if any deferred buffer has data,
+                        // signal that another tick should run.
+                        #[allow(clippy::nonminimal_bool, reason = "codegen")]
+                        if false #( || !#non_lazy_schedule_idents.is_empty() )* {
+                            #df.schedule_subgraph(true);
+                        }
+
+                        // Double-buffer swap for defer_tick handoffs: move last tick's producer output (regular buffer)
+                        // into the back buffer for the consumer to drain.
+                        #( #back_edge_swap_code )*
                     }
 
+                    // End-of-tick per-operator state handling (i.e. 'tick persistence).
+                    #( #op_tick_end_code )*
+
                     #df.__end_tick();
+
                     ::std::mem::take(&mut __dfir_work_done)
                 };
                 #root::scheduled::context::Dfir::new(
                     __dfir_inline_tick,
                     #df,
-                    Some(#meta_graph_json),
-                    Some(#diagnostics_json),
+                    #meta_graph_arg,
+                    #diagnostics_arg,
                 )
             }
         })
@@ -1625,23 +2322,10 @@ impl DfirGraph {
 
         // Define nodes.
         let mut skipped_handoffs = BTreeSet::new();
-        let mut subgraph_handoffs = <BTreeMap<GraphSubgraphId, Vec<GraphNodeId>>>::new();
         for (node_id, node) in self.nodes() {
-            if matches!(node, GraphNode::Handoff { .. }) {
-                if write_config.no_handoffs {
-                    skipped_handoffs.insert(node_id);
-                    continue;
-                } else {
-                    let pred_node = self.node_predecessor_nodes(node_id).next().unwrap();
-                    let pred_sg = self.node_subgraph(pred_node);
-                    let succ_node = self.node_successor_nodes(node_id).next().unwrap();
-                    let succ_sg = self.node_subgraph(succ_node);
-                    if let Some((pred_sg, succ_sg)) = pred_sg.zip(succ_sg)
-                        && pred_sg == succ_sg
-                    {
-                        subgraph_handoffs.entry(pred_sg).or_default().push(node_id);
-                    }
-                }
+            if matches!(node, GraphNode::Handoff { .. }) && write_config.no_handoffs {
+                skipped_handoffs.insert(node_id);
+                continue;
             }
             graph_write.write_node_definition(
                 node_id,
@@ -1679,8 +2363,13 @@ impl DfirGraph {
 
             let (src_port, mut dst_port) = self.edge_ports(edge_id);
             if skipped_handoffs.contains(&dst_id) {
+                // The destination is a hidden handoff. If it has a successor, skip through.
+                // If it has 0 successors (ref-only singleton), drop this edge entirely —
+                // the data dependency is captured via the reference edge instead.
                 let mut handoff_succs = self.node_successors(dst_id);
-                assert_eq!(1, handoff_succs.len());
+                if handoff_succs.len() == 0 {
+                    continue;
+                }
                 let (succ_edge, succ_node) = handoff_succs.next().unwrap();
                 dst_id = succ_node;
                 dst_port = self.edge_ports(succ_edge).1;
@@ -1697,14 +2386,22 @@ impl DfirGraph {
         if !write_config.no_references {
             for dst_id in self.node_ids() {
                 for src_ref_id in self
-                    .node_singleton_references(dst_id)
+                    .node_handoff_references(dst_id)
                     .iter()
-                    .copied()
-                    .flatten()
+                    .filter_map(|r| r.node_id)
                 {
-                    let delay_type = Some(DelayType::Stratum);
+                    // When handoffs are hidden, resolve through to the predecessor of
+                    // the singleton handoff so the edge points from the actual writer.
+                    let resolved_src = if skipped_handoffs.contains(&src_ref_id) {
+                        self.node_predecessor_nodes(src_ref_id).next()
+                    } else {
+                        Some(src_ref_id)
+                    };
+                    let Some(resolved_src) = resolved_src else {
+                        continue;
+                    };
                     let label = None;
-                    graph_write.write_edge(src_ref_id, dst_id, delay_type, label, true)?;
+                    graph_write.write_edge(resolved_src, dst_id, None, label, true)?;
                 }
             }
         }
@@ -1800,17 +2497,50 @@ impl DfirGraph {
         for (key, node) in self.nodes.iter() {
             match node {
                 GraphNode::Operator(op) => {
-                    writeln!(write, "{:?} = {};", key.data(), op.to_token_stream())?;
+                    writeln!(write, "_{:?} = {};", key.data(), op.to_token_stream())?;
                 }
-                GraphNode::Handoff { .. } => {
-                    writeln!(write, "// {:?} = <handoff>;", key.data())?;
+                GraphNode::Handoff {
+                    kind: HandoffKind::Vec,
+                    ..
+                } => {
+                    writeln!(write, "_{:?} = handoff();", key.data())?;
+                }
+                GraphNode::Handoff {
+                    kind: HandoffKind::Singleton,
+                    ..
+                } => {
+                    writeln!(write, "_{:?} = singleton();", key.data())?;
+                }
+                GraphNode::Handoff {
+                    kind: HandoffKind::Optional,
+                    ..
+                } => {
+                    writeln!(write, "_{:?} = optional();", key.data())?;
                 }
                 GraphNode::ModuleBoundary { .. } => panic!(),
             }
         }
         writeln!(write)?;
-        for (_e, (src_key, dst_key)) in self.graph.edges() {
-            writeln!(write, "{:?} -> {:?};", src_key.data(), dst_key.data())?;
+        for (e, (src_key, dst_key)) in self.graph.edges() {
+            let (src_port, dst_port) = self.edge_ports(e);
+            let src_port_str = if src_port.is_specified() {
+                format!("[{}]", src_port)
+            } else {
+                String::new()
+            };
+            let dst_port_str = if dst_port.is_specified() {
+                format!("[{}]", dst_port)
+            } else {
+                String::new()
+            };
+            writeln!(
+                write,
+                "_{:?}{} -> {}_{:?};",
+                src_key.data(),
+                src_port_str,
+                dst_port_str,
+                dst_key.data()
+            )?;
         }
         Ok(())
     }
@@ -1842,8 +2572,22 @@ impl DfirGraph {
                         .replace('"', "&quot;")
                         .replace('\n', "<br>"),
                 ),
-                GraphNode::Handoff { .. } => {
+                GraphNode::Handoff {
+                    kind: HandoffKind::Vec,
+                    ..
+                } => {
                     writeln!(write, r#"    {:?}{{"{}"}}"#, key.data(), HANDOFF_NODE_STR)
+                }
+                GraphNode::Handoff {
+                    kind: HandoffKind::Singleton | HandoffKind::Optional,
+                    ..
+                } => {
+                    writeln!(
+                        write,
+                        r#"    {:?}{{"{}"}}"#,
+                        key.data(),
+                        SINGLETON_SLOT_NODE_STR
+                    )
                 }
                 GraphNode::ModuleBoundary { .. } => {
                     writeln!(
@@ -1873,6 +2617,11 @@ impl DfirGraph {
     /// Iterator over all loops, ID and members: `(GraphLoopId, Vec<GraphNodeId>)`.
     pub fn loops(&self) -> slotmap::basic::Iter<'_, GraphLoopId, Vec<GraphNodeId>> {
         self.loop_nodes.iter()
+    }
+
+    /// Get a loop's member nodes.
+    pub fn loop_nodes(&self, loop_id: GraphLoopId) -> &[GraphNodeId] {
+        self.loop_nodes.get(loop_id).unwrap()
     }
 
     /// Create a new loop context, with the given parent loop (or `None`).
@@ -1917,6 +2666,11 @@ impl DfirGraph {
     /// Get a loop context's child loops.
     pub fn loop_children(&self, loop_id: GraphLoopId) -> &Vec<GraphLoopId> {
         self.loop_children.get(loop_id).unwrap()
+    }
+
+    /// Get root-level loops (those with no parent loop).
+    pub fn root_loops(&self) -> &[GraphLoopId] {
+        &self.root_loops
     }
 }
 

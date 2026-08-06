@@ -2,7 +2,7 @@ use quote::{quote_spanned, ToTokens};
 use syn::parse_quote;
 
 use super::{
-    DelayType, OpInstGenerics, OperatorCategory, OperatorConstraints, OperatorInstance,
+    OpInstGenerics, OperatorCategory, OperatorConstraints, OperatorInstance,
     OperatorWriteOutput, PortListSpec, WriteContextArgs, RANGE_0, RANGE_1,
 };
 
@@ -41,14 +41,11 @@ pub const _LATTICE_FOLD_BATCH: OperatorConstraints = OperatorConstraints {
     soft_range_out: RANGE_1,
     num_args: 0,
     is_external_input: false,
-    has_singleton_output: false,
     flo_type: None,
     ports_inn: Some(|| PortListSpec::Fixed(parse_quote! { input, signal })),
     ports_out: None,
-    input_delaytype_fn: |_| Some(DelayType::MonotoneAccum),
+    input_delaytype_fn: |_| None,
     write_fn: |wc @ &WriteContextArgs {
-                   context,
-                   df_ident,
                    ident,
                    op_span,
                    work_fn_async,
@@ -68,14 +65,13 @@ pub const _LATTICE_FOLD_BATCH: OperatorConstraints = OperatorConstraints {
         let lattice_type = type_args
             .first()
             .map(ToTokens::to_token_stream)
-            .unwrap_or(quote_spanned!(op_span=> _));
+            .unwrap_or_else(|| quote_spanned!(op_span=> _));
 
-        let lattice_state_ident = wc.make_ident("lattice_state");
         let lattice_ident = wc.make_ident("lattice");
         let signal_ident = wc.make_ident("signal");
 
         let write_prologue = quote_spanned! {op_span=>
-            let #lattice_state_ident = #df_ident.add_state(::std::cell::RefCell::new(<#lattice_type as ::std::default::Default>::default()));
+            let mut #lattice_ident = <#lattice_type as ::std::default::Default>::default();
         };
 
         let input = &inputs[0];
@@ -83,15 +79,10 @@ pub const _LATTICE_FOLD_BATCH: OperatorConstraints = OperatorConstraints {
 
         let write_iterator = {
             quote_spanned! {op_span=>
-                let mut #lattice_ident = unsafe {
-                    // SAFETY: handle from `#df_ident.add_state(..)`.
-                    #context.state_ref_unchecked(#lattice_state_ident)
-                }.borrow_mut();
-
                 // Eagerly consume input to ensure updated state.
                 {
                     let fut = #root::dfir_pipes::pull::Pull::for_each(#input, |delta| {
-                        let _bool = #root::lattices::Merge::merge(&mut *#lattice_ident, delta);
+                        let _bool = #root::lattices::Merge::merge(&mut #lattice_ident, delta);
                     });
                     let () = #work_fn_async(fut).await;
                 }
@@ -104,7 +95,7 @@ pub const _LATTICE_FOLD_BATCH: OperatorConstraints = OperatorConstraints {
 
                 let #ident = #root::dfir_pipes::pull::iter(
                     // `Some` if `true`
-                    bool::then(#signal_ident, || ::std::mem::take(&mut *#lattice_ident))
+                    bool::then(#signal_ident, || ::std::mem::take(&mut #lattice_ident))
                 );
             }
         };
@@ -112,7 +103,6 @@ pub const _LATTICE_FOLD_BATCH: OperatorConstraints = OperatorConstraints {
         Ok(OperatorWriteOutput {
             write_prologue,
             write_iterator,
-            write_iterator_after: Default::default(),
             ..Default::default()
         })
     },

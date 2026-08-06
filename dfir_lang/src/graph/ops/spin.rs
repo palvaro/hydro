@@ -1,7 +1,8 @@
 use quote::quote_spanned;
 
 use super::{
-    OperatorCategory, OperatorConstraints, OperatorWriteOutput, RANGE_0, RANGE_1, WriteContextArgs,
+    FloType, OperatorCategory, OperatorConstraints, OperatorWriteOutput, RANGE_0, RANGE_1,
+    WriteContextArgs,
 };
 
 /// This operator emits Unit, and triggers the start of a new tick at the end of each tick,
@@ -27,8 +28,11 @@ pub const SPIN: OperatorConstraints = OperatorConstraints {
     persistence_args: RANGE_0,
     type_args: RANGE_0,
     is_external_input: false,
-    has_singleton_output: false,
-    flo_type: None,
+    // `spin` is a (non-external) source: it produces `()` from nothing to drive ticks. Like other
+    // `FloType::Source` operators it must live at the root level, not inside a `loop { ... }`
+    // context (data enters a loop only through a windowing operator). Hydro already lowers `spin`
+    // top-level (asserting `is_top_level()`) and windows it into ticks via `batch`.
+    flo_type: Some(FloType::Source),
     ports_inn: None,
     ports_out: None,
     input_delaytype_fn: |_| None,
@@ -46,7 +50,7 @@ pub const SPIN: OperatorConstraints = OperatorConstraints {
             let #ident = #root::dfir_pipes::pull::once(());
         };
         let write_iterator_after = quote_spanned! {op_span=>
-            #context.schedule_subgraph(#context.current_subgraph(), true);
+            #context.schedule_subgraph(true);
         };
         Ok(OperatorWriteOutput {
             write_iterator,

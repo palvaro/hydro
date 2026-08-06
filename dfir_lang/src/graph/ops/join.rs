@@ -89,15 +89,12 @@ pub const JOIN: OperatorConstraints = OperatorConstraints {
     persistence_args: &(0..=2),
     type_args: &(0..=1),
     is_external_input: false,
-    has_singleton_output: false,
     flo_type: None,
     ports_inn: Some(|| super::PortListSpec::Fixed(parse_quote! { 0, 1 })),
     ports_out: None,
     input_delaytype_fn: |_| None,
     write_fn: |wc @ &WriteContextArgs {
                    root,
-                   context,
-                   df_ident,
                    loop_id,
                    op_span,
                    work_fn,
@@ -121,7 +118,7 @@ pub const JOIN: OperatorConstraints = OperatorConstraints {
             type_args
                 .first()
                 .map(ToTokens::to_token_stream)
-                .unwrap_or(quote_spanned!(op_span=>
+                .unwrap_or_else(|| quote_spanned!(op_span=>
                     #root::dfir_pipes::pull::HalfSetJoinState
                 ));
 
@@ -136,32 +133,21 @@ pub const JOIN: OperatorConstraints = OperatorConstraints {
             quote_spanned!(op_span=>)
         };
 
-        let make_joindata = |persistence, side| {
+        let make_joindata = |persistence: Persistence, side| {
             let joindata_ident = wc.make_ident(format!("joindata_{}", side));
-            let borrow_ident = wc.make_ident(format!("joindata_{}_borrow", side));
 
-            let lifespan = wc.persistence_as_state_lifespan(persistence);
-            let reset = lifespan.map(|lifespan| quote_spanned! {op_span=>
-                #df_ident.set_state_lifespan_hook(
-                    #joindata_ident,
-                    #lifespan,
-                    |rcell| (#work_fn)(|| #root::dfir_pipes::pull::HalfJoinState::clear(::std::cell::RefCell::get_mut(rcell)))
-                );
-            }).unwrap_or_default();
+            let tick_reset = match persistence {
+                Persistence::Tick => quote_spanned! {op_span=>
+                    (#work_fn)(|| #root::dfir_pipes::pull::HalfJoinState::clear(&mut #joindata_ident));
+                },
+                _ => Default::default(),
+            };
 
             let prologue = quote_spanned! {op_span=>
-                let #joindata_ident = #df_ident.add_state(::std::cell::RefCell::new(
-                    #join_type::default()
-                ));
-            };
-            let borrow = quote_spanned! {op_span=>
-                unsafe {
-                    // SAFETY: handle from `#df_ident.add_state(..)`.
-                    #context.state_ref_unchecked(#joindata_ident)
-                }.borrow_mut()
+                let mut #joindata_ident = #join_type::default();
             };
 
-            Ok((prologue, reset, borrow, borrow_ident))
+            Ok((prologue, tick_reset, joindata_ident))
         };
 
         let persistences = match persistence_args[..] {
@@ -178,16 +164,14 @@ pub const JOIN: OperatorConstraints = OperatorConstraints {
             _ => panic!(),
         };
 
-        let (lhs_prologue, lhs_prologue_after, lhs_borrow, lhs_borrow_ident) =
+        let (lhs_prologue, lhs_tick_end, lhs_joindata_ident) =
             (make_joindata)(persistences[0], "lhs")?;
-        let (rhs_prologue, rhs_prologue_after, rhs_borrow, rhs_borrow_ident) =
+        let (rhs_prologue, rhs_tick_end, rhs_joindata_ident) =
             (make_joindata)(persistences[1], "rhs")?;
 
         let lhs = &inputs[0];
         let rhs = &inputs[1];
         let write_iterator = quote_spanned! {op_span=>
-            let mut #lhs_borrow_ident = #lhs_borrow;
-            let mut #rhs_borrow_ident = #rhs_borrow;
             let #ident = {
                 // Limit error propagation by bounding locally, erasing output iterator type.
                 #[inline(always)]
@@ -219,32 +203,22 @@ pub const JOIN: OperatorConstraints = OperatorConstraints {
                     ).await
                 }
 
-                let fut = check_inputs(#lhs, #rhs, &mut *#lhs_borrow_ident, &mut *#rhs_borrow_ident, #context.is_first_run_this_tick());
+                let fut = check_inputs(#lhs, #rhs, &mut #lhs_joindata_ident, &mut #rhs_joindata_ident, true);
                 #work_fn_async(fut).await
             };
         };
-
-        let write_iterator_after =
-            if persistences[0] == Persistence::Static || persistences[1] == Persistence::Static {
-                quote_spanned! {op_span=>
-                    // TODO: Probably only need to schedule if #*_borrow.len() > 0?
-                    #context.schedule_subgraph(#context.current_subgraph(), false);
-                }
-            } else {
-                quote_spanned! {op_span=>}
-            };
 
         Ok(OperatorWriteOutput {
             write_prologue: quote_spanned! {op_span=>
                 #lhs_prologue
                 #rhs_prologue
             },
-            write_prologue_after: quote_spanned! {op_span=>
-                #lhs_prologue_after
-                #rhs_prologue_after
-            },
             write_iterator,
-            write_iterator_after,
+            write_iterator_after: Default::default(),
+            write_tick_end: quote_spanned! {op_span=>
+                #lhs_tick_end
+                #rhs_tick_end
+            },
         })
     },
 };

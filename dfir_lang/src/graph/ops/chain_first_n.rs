@@ -1,11 +1,10 @@
 use quote::quote_spanned;
 
 use crate::graph::{
-    PortIndexValue,
     ops::{OperatorWriteOutput, WriteContextArgs},
 };
 
-use super::{DelayType, OperatorCategory, OperatorConstraints, RANGE_0, RANGE_1};
+use super::{OperatorCategory, OperatorConstraints, RANGE_0, RANGE_1};
 
 /// > 2 input streams of the same type, 1 output stream of the same type
 ///
@@ -33,17 +32,10 @@ pub const CHAIN_FIRST_N: OperatorConstraints = OperatorConstraints {
     soft_range_out: RANGE_1,
     num_args: 1,
     is_external_input: false,
-    has_singleton_output: false,
     flo_type: None,
     ports_inn: None,
     ports_out: None,
-    input_delaytype_fn: |idx| match idx {
-        PortIndexValue::Int(idx) if idx.value == 0 => {
-            // will no longer be needed once subgraphs are always DAGs (only run once per tick)
-            Some(DelayType::Stratum)
-        }
-        _else => None,
-    },
+    input_delaytype_fn: |_| None,
     write_fn: |wc @ &WriteContextArgs {
                    root,
                    op_span,
@@ -57,9 +49,9 @@ pub const CHAIN_FIRST_N: OperatorConstraints = OperatorConstraints {
 
         let OperatorWriteOutput {
             write_prologue,
-            write_prologue_after,
             write_iterator,
             write_iterator_after,
+            write_tick_end,
         } = (super::union::UNION.write_fn)(wc, diagnostics)?;
 
         let arg_n = &arguments[0];
@@ -71,9 +63,9 @@ pub const CHAIN_FIRST_N: OperatorConstraints = OperatorConstraints {
 
         Ok(OperatorWriteOutput {
             write_prologue,
-            write_prologue_after,
             write_iterator,
             write_iterator_after,
+            write_tick_end,
         })
     },
 };

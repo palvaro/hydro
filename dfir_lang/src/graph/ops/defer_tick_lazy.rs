@@ -3,8 +3,11 @@ use super::{
     RANGE_1,
 };
 
-/// See `defer_tick`
-/// This operator is identical to defer_tick except that it does not eagerly cause a new tick to be scheduled.
+/// See `defer_tick`.
+///
+/// This operator is identical to `defer_tick` except that it does not eagerly cause a new
+/// tick or loop iteration to be scheduled. Data is buffered until the next tick/iteration fires
+/// for another reason (e.g., external input arriving, or a non-lazy `defer_tick` triggering).
 pub const DEFER_TICK_LAZY: OperatorConstraints = OperatorConstraints {
     name: "defer_tick_lazy",
     categories: &[OperatorCategory::Control],
@@ -16,7 +19,6 @@ pub const DEFER_TICK_LAZY: OperatorConstraints = OperatorConstraints {
     persistence_args: RANGE_0,
     type_args: RANGE_0,
     is_external_input: false,
-    has_singleton_output: false,
     flo_type: None,
     ports_inn: None,
     ports_out: None,

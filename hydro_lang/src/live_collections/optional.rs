@@ -8,6 +8,7 @@ use std::rc::Rc;
 use stageleft::{IntoQuotedMut, QuotedWithContext, q};
 use syn::parse_quote;
 
+use super::OperatorContext;
 use super::boundedness::{Bounded, Boundedness, IsBounded, Unbounded};
 use super::singleton::Singleton;
 use super::stream::{AtLeastOnce, ExactlyOnce, NoOrder, Stream, TotalOrder};
@@ -17,12 +18,15 @@ use crate::compile::ir::{CollectionKind, HydroIrOpMetadata, HydroNode, HydroRoot
 use crate::forward_handle::{CycleCollection, CycleCollectionWithInitial, ReceiverComplete};
 use crate::forward_handle::{ForwardRef, TickCycle};
 use crate::live_collections::singleton::SingletonBound;
+#[cfg(feature = "tokio")]
+use crate::location::TopLevel;
 #[cfg(stageleft_runtime)]
 use crate::location::dynamic::{DynLocation, LocationId};
-use crate::location::tick::{Atomic, DeferTick, NoAtomic};
-use crate::location::{Location, NoTick, Tick, check_matching_location};
+use crate::location::tick::{Atomic, DeferTick};
+use crate::location::{Location, Tick, check_matching_location};
 use crate::nondet::{NonDet, nondet};
 use crate::prelude::KeyedSingleton;
+use crate::properties::{StreamMapFuncAlgebra, ValidMutCommutativityFor, ValidMutIdempotenceFor};
 
 /// A *nullable* Rust value that can asynchronously change over time.
 ///
@@ -39,7 +43,7 @@ use crate::prelude::KeyedSingleton;
 /// - `Bound`: tracks whether the value is [`Bounded`] (fixed) or [`Unbounded`] (changing asynchronously)
 pub struct Optional<Type, Loc, Bound: Boundedness> {
     pub(crate) location: Loc,
-    pub(crate) ir_node: RefCell<HydroNode>,
+    pub(crate) ir_node: Rc<RefCell<HydroNode>>,
     pub(crate) flow_state: FlowState,
 
     _phantom: PhantomData<(Type, Loc, Bound)>,
@@ -60,7 +64,7 @@ impl<T, L, B: Boundedness> Drop for Optional<T, L, B> {
 impl<'a, T, L> From<Optional<T, L, Bounded>> for Optional<T, L, Unbounded>
 where
     T: Clone,
-    L: Location<'a> + NoTick,
+    L: Location<'a>,
 {
     fn from(value: Optional<T, L, Bounded>) -> Self {
         let tick = value.location().tick();
@@ -100,6 +104,10 @@ where
 {
     type Location = Tick<L>;
 
+    fn location(&self) -> &Self::Location {
+        self.location()
+    }
+
     fn create_source_with_initial(cycle_id: CycleId, initial: Self, location: Tick<L>) -> Self {
         let from_previous_tick: Optional<T, Tick<L>, Bounded> = Optional::new(
             location.clone(),
@@ -138,47 +146,9 @@ where
     }
 }
 
-impl<'a, T, L> CycleCollection<'a, ForwardRef> for Optional<T, Tick<L>, Bounded>
-where
-    L: Location<'a>,
-{
-    type Location = Tick<L>;
-
-    fn create_source(cycle_id: CycleId, location: Tick<L>) -> Self {
-        Optional::new(
-            location.clone(),
-            HydroNode::CycleSource {
-                cycle_id,
-                metadata: location.new_node_metadata(Self::collection_kind()),
-            },
-        )
-    }
-}
-
-impl<'a, T, L> ReceiverComplete<'a, ForwardRef> for Optional<T, Tick<L>, Bounded>
-where
-    L: Location<'a>,
-{
-    fn complete(self, cycle_id: CycleId, expected_location: LocationId) {
-        assert_eq!(
-            Location::id(&self.location),
-            expected_location,
-            "locations do not match"
-        );
-        self.location
-            .flow_state()
-            .borrow_mut()
-            .push_root(HydroRoot::CycleSink {
-                cycle_id,
-                input: Box::new(self.ir_node.replace(HydroNode::Placeholder)),
-                op_metadata: HydroIrOpMetadata::new(),
-            });
-    }
-}
-
 impl<'a, T, L, B: Boundedness> CycleCollection<'a, ForwardRef> for Optional<T, L, B>
 where
-    L: Location<'a> + NoTick,
+    L: Location<'a>,
 {
     type Location = L;
 
@@ -195,7 +165,7 @@ where
 
 impl<'a, T, L, B: Boundedness> ReceiverComplete<'a, ForwardRef> for Optional<T, L, B>
 where
-    L: Location<'a> + NoTick,
+    L: Location<'a>,
 {
     fn complete(self, cycle_id: CycleId, expected_location: LocationId) {
         assert_eq!(
@@ -287,11 +257,13 @@ where
             Optional {
                 location: self.location.clone(),
                 flow_state: self.flow_state.clone(),
-                ir_node: HydroNode::Tee {
-                    inner: SharedNode(inner.0.clone()),
-                    metadata: metadata.clone(),
-                }
-                .into(),
+                ir_node: super::tracked_ir_node(
+                    &self.flow_state,
+                    HydroNode::Tee {
+                        inner: SharedNode(inner.0.clone()),
+                        metadata: metadata.clone(),
+                    },
+                ),
                 _phantom: PhantomData,
             }
         } else {
@@ -308,10 +280,11 @@ where
         debug_assert_eq!(ir_node.metadata().location_id, Location::id(&location));
         debug_assert_eq!(ir_node.metadata().collection_kind, Self::collection_kind());
         let flow_state = location.flow_state().clone();
+        let ir_node = super::tracked_ir_node(&flow_state, ir_node);
         Optional {
             location,
             flow_state,
-            ir_node: RefCell::new(ir_node),
+            ir_node,
             _phantom: PhantomData,
         }
     }
@@ -326,6 +299,89 @@ where
     /// Returns the [`Location`] where this optional is being materialized.
     pub fn location(&self) -> &L {
         &self.location
+    }
+
+    /// Creates a shared reference handle to this optional that can be captured inside `q!()`
+    /// closures. The handle resolves to `&Option<T>` at runtime.
+    ///
+    /// The optional must be bounded, otherwise reading it would be non-deterministic.
+    /// The handle can only be captured in closures passed to operators on collections at
+    /// the same location with **matching boundedness**; capturing it in a closure over an
+    /// unbounded collection is rejected at compile time.
+    pub fn by_ref(&self) -> crate::handoff_ref::OptionalRef<'a, '_, T, L, B>
+    where
+        B: IsBounded,
+    {
+        crate::handoff_ref::OptionalRef::new(&self.ir_node)
+    }
+
+    /// Returns a mutable reference handle to this optional that can be captured inside `q!()`
+    /// closures. The handle resolves to `&mut Option<T>` at runtime.
+    pub fn by_mut(&self) -> crate::handoff_ref::OptionalMut<'a, '_, T, L, B>
+    where
+        B: IsBounded,
+    {
+        crate::handoff_ref::OptionalMut::new(&self.ir_node)
+    }
+
+    /// Weakens the consistency of this live collection to not guarantee any consistency across
+    /// cluster members (if this collection is on a cluster).
+    pub fn weaken_consistency(self) -> Optional<T, L::DropConsistency, B>
+    where
+        L: Location<'a>,
+    {
+        if L::consistency()
+            .is_none_or(|c| c == crate::location::dynamic::ClusterConsistency::NoConsistency)
+        {
+            // already no consistency
+            Optional::new(
+                self.location.drop_consistency(),
+                self.ir_node.replace(HydroNode::Placeholder),
+            )
+        } else {
+            Optional::new(
+                self.location.drop_consistency(),
+                HydroNode::Cast {
+                    inner: Box::new(self.ir_node.replace(HydroNode::Placeholder)),
+                    metadata: self
+                        .location
+                        .clone()
+                        .drop_consistency()
+                        .new_node_metadata(Optional::<T, L::DropConsistency, B>::collection_kind()),
+                },
+            )
+        }
+    }
+
+    /// Casts this live collection to have the consistency guarantees specified in the given
+    /// location type parameter. The developer must ensure that the strengthened consistency
+    /// is actually guaranteed, via the proof field (see [`crate::prelude::manual_proof`]).
+    pub fn assert_has_consistency_of<L2: Location<'a, DropConsistency = L::DropConsistency>>(
+        self,
+        _proof: impl crate::properties::ConsistencyProof,
+    ) -> Optional<T, L2, B>
+    where
+        L: Location<'a>,
+    {
+        if L::consistency() == L2::consistency() {
+            Optional::new(
+                self.location.with_consistency_of(),
+                self.ir_node.replace(HydroNode::Placeholder),
+            )
+        } else {
+            Optional::new(
+                self.location.with_consistency_of(),
+                HydroNode::AssertIsConsistent {
+                    inner: Box::new(self.ir_node.replace(HydroNode::Placeholder)),
+                    trusted: false,
+                    metadata: self
+                        .location
+                        .clone()
+                        .with_consistency_of::<L2>()
+                        .new_node_metadata(Optional::<T, L2, B>::collection_kind()),
+                },
+            )
+        }
     }
 
     /// Transforms the optional value by applying a function `f` to it,
@@ -348,11 +404,13 @@ where
     /// # }));
     /// # }
     /// ```
-    pub fn map<U, F>(self, f: impl IntoQuotedMut<'a, F, L>) -> Optional<U, L, B>
+    pub fn map<U, F>(self, f: impl IntoQuotedMut<'a, F, OperatorContext<L, B>>) -> Optional<U, L, B>
     where
         F: Fn(T) -> U + 'a,
     {
-        let f = f.splice_fn1_ctx(&self.location).into();
+        let f = f
+            .splice_fn1_ctx(&OperatorContext::<L, B>::new(&self.location))
+            .into();
         Optional::new(
             self.location.clone(),
             HydroNode::Map {
@@ -393,14 +451,16 @@ where
     /// # }));
     /// # }
     /// ```
-    pub fn flat_map_ordered<U, I, F>(
+    pub fn flat_map_ordered<U, I, F, C, Idemp, const WAS_MUT: bool>(
         self,
-        f: impl IntoQuotedMut<'a, F, L>,
+        f: impl IntoQuotedMut<'a, F, OperatorContext<L, Bounded>, StreamMapFuncAlgebra<C, Idemp>>,
     ) -> Stream<U, L, Bounded, TotalOrder, ExactlyOnce>
     where
         B: IsBounded,
         I: IntoIterator<Item = U>,
-        F: Fn(T) -> I + 'a,
+        F: FnMut(T) -> I + 'a,
+        C: ValidMutCommutativityFor<F, T, I, TotalOrder, WAS_MUT>,
+        Idemp: ValidMutIdempotenceFor<F, T, I, ExactlyOnce, WAS_MUT>,
     {
         self.into_stream().flat_map_ordered(f)
     }
@@ -434,14 +494,16 @@ where
     /// # }));
     /// # }
     /// ```
-    pub fn flat_map_unordered<U, I, F>(
+    pub fn flat_map_unordered<U, I, F, C, Idemp, const WAS_MUT: bool>(
         self,
-        f: impl IntoQuotedMut<'a, F, L>,
+        f: impl IntoQuotedMut<'a, F, OperatorContext<L, Bounded>, StreamMapFuncAlgebra<C, Idemp>>,
     ) -> Stream<U, L, Bounded, NoOrder, ExactlyOnce>
     where
         B: IsBounded,
         I: IntoIterator<Item = U>,
-        F: Fn(T) -> I + 'a,
+        F: FnMut(T) -> I + 'a,
+        C: ValidMutCommutativityFor<F, T, I, TotalOrder, WAS_MUT>,
+        Idemp: ValidMutIdempotenceFor<F, T, I, ExactlyOnce, WAS_MUT>,
     {
         self.into_stream().flat_map_unordered(f)
     }
@@ -543,11 +605,13 @@ where
     /// # }));
     /// # }
     /// ```
-    pub fn filter<F>(self, f: impl IntoQuotedMut<'a, F, L>) -> Optional<T, L, B>
+    pub fn filter<F>(self, f: impl IntoQuotedMut<'a, F, OperatorContext<L, B>>) -> Optional<T, L, B>
     where
         F: Fn(&T) -> bool + 'a,
     {
-        let f = f.splice_fn1_borrow_ctx(&self.location).into();
+        let f = f
+            .splice_fn1_borrow_ctx(&OperatorContext::<L, B>::new(&self.location))
+            .into();
         Optional::new(
             self.location.clone(),
             HydroNode::Filter {
@@ -582,11 +646,16 @@ where
     /// # }));
     /// # }
     /// ```
-    pub fn filter_map<U, F>(self, f: impl IntoQuotedMut<'a, F, L>) -> Optional<U, L, B>
+    pub fn filter_map<U, F>(
+        self,
+        f: impl IntoQuotedMut<'a, F, OperatorContext<L, B>>,
+    ) -> Optional<U, L, B>
     where
         F: Fn(T) -> Option<U> + 'a,
     {
-        let f = f.splice_fn1_ctx(&self.location).into();
+        let f = f
+            .splice_fn1_ctx(&OperatorContext::<L, B>::new(&self.location))
+            .into();
         Optional::new(
             self.location.clone(),
             HydroNode::FilterMap {
@@ -635,16 +704,14 @@ where
         if L::is_top_level()
             && let Some(tick) = self.location.try_tick()
         {
+            let self_location = self.location().clone();
             let out = zip_inside_tick(
                 self.snapshot(&tick, nondet!(/** eventually stabilizes */)),
                 other.snapshot(&tick, nondet!(/** eventually stabilizes */)),
             )
             .latest();
 
-            Optional::new(
-                out.location.clone(),
-                out.ir_node.replace(HydroNode::Placeholder),
-            )
+            Optional::new(self_location, out.ir_node.replace(HydroNode::Placeholder))
         } else {
             zip_inside_tick(self, other)
         }
@@ -687,16 +754,14 @@ where
             && !B::BOUNDED // only if unbounded we need to use a tick
             && let Some(tick) = self.location.try_tick()
         {
+            let self_location = self.location().clone();
             let out = or_inside_tick(
                 self.snapshot(&tick, nondet!(/** eventually stabilizes */)),
                 other.snapshot(&tick, nondet!(/** eventually stabilizes */)),
             )
             .latest();
 
-            Optional::new(
-                out.location.clone(),
-                out.ir_node.replace(HydroNode::Placeholder),
-            )
+            Optional::new(self_location, out.ir_node.replace(HydroNode::Placeholder))
         } else {
             Optional::new(
                 self.location.clone(),
@@ -955,10 +1020,11 @@ where
         T: Clone,
     {
         // TODO(shadaj): avoid printing simulator logs for this snapshot
-        self.snapshot(
+        let inner = self.snapshot(
             tick,
             nondet!(/** bounded top-level optional so deterministic */),
-        )
+        );
+        Optional::new(tick.clone(), inner.ir_node.replace(HydroNode::Placeholder))
     }
 
     /// Converts this optional into a [`Stream`] containing a single element, the value, if it is
@@ -1206,7 +1272,7 @@ where
 
 impl<'a, T, L, B: Boundedness> Optional<T, Atomic<L>, B>
 where
-    L: Location<'a> + NoTick,
+    L: Location<'a>,
 {
     /// Returns an optional value corresponding to the latest snapshot of the optional
     /// being atomically processed. The snapshot at tick `t + 1` is guaranteed to include
@@ -1218,29 +1284,17 @@ where
     /// Because this picks a snapshot of a optional whose value is continuously changing,
     /// the output optional has a non-deterministic value since the snapshot can be at an
     /// arbitrary point in time.
-    pub fn snapshot_atomic(self, tick: &Tick<L>, _nondet: NonDet) -> Optional<T, Tick<L>, Bounded> {
+    pub fn snapshot_atomic<L2: Location<'a, DropConsistency = L::DropConsistency>>(
+        self,
+        tick: &Tick<L2>,
+        _nondet: NonDet,
+    ) -> Optional<T, Tick<L::DropConsistency>, Bounded> {
         Optional::new(
-            tick.clone(),
+            tick.drop_consistency(),
             HydroNode::Batch {
                 inner: Box::new(self.ir_node.replace(HydroNode::Placeholder)),
                 metadata: tick
                     .new_node_metadata(Optional::<T, Tick<L>, Bounded>::collection_kind()),
-            },
-        )
-    }
-
-    /// Returns this optional back into a top-level, asynchronous execution context where updates
-    /// to the value will be asynchronously propagated.
-    pub fn end_atomic(self) -> Optional<T, L, B> {
-        Optional::new(
-            self.location.tick.l.clone(),
-            HydroNode::EndAtomic {
-                inner: Box::new(self.ir_node.replace(HydroNode::Placeholder)),
-                metadata: self
-                    .location
-                    .tick
-                    .l
-                    .new_node_metadata(Optional::<T, L, B>::collection_kind()),
             },
         )
     }
@@ -1250,31 +1304,6 @@ impl<'a, T, L, B: Boundedness> Optional<T, L, B>
 where
     L: Location<'a>,
 {
-    /// Shifts this optional into an atomic context, which guarantees that any downstream logic
-    /// will observe the same version of the value and will be executed synchronously before any
-    /// outputs are yielded (in [`Optional::end_atomic`]).
-    ///
-    /// This is useful to enforce local consistency constraints, such as ensuring that several readers
-    /// see a consistent version of local state (since otherwise each [`Optional::snapshot`] may pick
-    /// a different version).
-    pub fn atomic(self) -> Optional<T, Atomic<L>, B> {
-        let id = self.location.flow_state().borrow_mut().next_clock_id();
-        let out_location = Atomic {
-            tick: Tick {
-                id,
-                l: self.location.clone(),
-            },
-        };
-        Optional::new(
-            out_location.clone(),
-            HydroNode::BeginAtomic {
-                inner: Box::new(self.ir_node.replace(HydroNode::Placeholder)),
-                metadata: out_location
-                    .new_node_metadata(Optional::<T, Atomic<L>, B>::collection_kind()),
-            },
-        )
-    }
-
     /// Given a tick, returns a optional value corresponding to a snapshot of the optional
     /// as of that tick. The snapshot at tick `t + 1` is guaranteed to include at least all
     /// relevant data that contributed to the snapshot at tick `t`.
@@ -1283,10 +1312,14 @@ where
     /// Because this picks a snapshot of a optional whose value is continuously changing,
     /// the output optional has a non-deterministic value since the snapshot can be at an
     /// arbitrary point in time.
-    pub fn snapshot(self, tick: &Tick<L>, _nondet: NonDet) -> Optional<T, Tick<L>, Bounded> {
+    pub fn snapshot<L2: Location<'a, DropConsistency = L::DropConsistency>>(
+        self,
+        tick: &Tick<L2>,
+        _nondet: NonDet,
+    ) -> Optional<T, Tick<L::DropConsistency>, Bounded> {
         assert_eq!(Location::id(tick.outer()), Location::id(&self.location));
         Optional::new(
-            tick.clone(),
+            tick.drop_consistency(),
             HydroNode::Batch {
                 inner: Box::new(self.ir_node.replace(HydroNode::Placeholder)),
                 metadata: tick
@@ -1302,10 +1335,10 @@ where
     /// At runtime, the optional will be arbitrarily sampled as fast as possible, but due
     /// to non-deterministic batching and arrival of inputs, the output stream is
     /// non-deterministic.
-    pub fn sample_eager(self, nondet: NonDet) -> Stream<T, L, Unbounded, TotalOrder, AtLeastOnce>
-    where
-        L: NoTick,
-    {
+    pub fn sample_eager(
+        self,
+        nondet: NonDet,
+    ) -> Stream<T, L::DropConsistency, Unbounded, TotalOrder, AtLeastOnce> {
         let tick = self.location.tick();
         self.snapshot(&tick, nondet).all_ticks().weaken_retries()
     }
@@ -1319,15 +1352,16 @@ where
     /// # Non-Determinism
     /// The output stream is non-deterministic in which elements are sampled, since this
     /// is controlled by a clock.
+    #[cfg(feature = "tokio")]
     pub fn sample_every(
         self,
         interval: impl QuotedWithContext<'a, std::time::Duration, L> + Copy + 'a,
         nondet: NonDet,
-    ) -> Stream<T, L, Unbounded, TotalOrder, AtLeastOnce>
+    ) -> Stream<T, L::DropConsistency, Unbounded, TotalOrder, AtLeastOnce>
     where
-        L: NoTick + NoAtomic,
+        L: TopLevel<'a>,
     {
-        let samples = self.location.source_interval(interval, nondet);
+        let samples = self.location.source_interval(interval);
         let tick = self.location.tick();
 
         self.snapshot(&tick, nondet)
@@ -1677,5 +1711,130 @@ mod tests {
         flow.sim().exhaustive(async || {
             out_recv.assert_yields_only([] as [i32; 0]).await;
         });
+    }
+
+    #[cfg(feature = "deploy")]
+    #[tokio::test]
+    async fn test_optional_ref() {
+        let mut deployment = Deployment::new();
+
+        let mut flow = FlowBuilder::new();
+        let external = flow.external::<()>();
+        let p1 = flow.process::<()>();
+
+        // Create an optional: reduce 0..5 => Some(10) (sum via reduce)
+        let my_opt = p1.source_iter(q!(0..5i32)).reduce(q!(|a, b| *a += b));
+
+        let opt_ref = my_opt.by_ref();
+
+        // Use the optional ref in a map: unwrap_or(0) + x
+        let out_port = p1
+            .source_iter(q!(1..=3i32))
+            .map(q!(|x| x + opt_ref.unwrap_or(0)))
+            .send_bincode_external(&external);
+
+        let nodes = flow
+            .with_default_optimize()
+            .with_process(&p1, deployment.Localhost())
+            .with_external(&external, deployment.Localhost())
+            .deploy(&mut deployment);
+
+        deployment.deploy().await.unwrap();
+
+        let mut out_recv = nodes.connect(out_port).await;
+
+        deployment.start().await.unwrap();
+
+        let mut results = Vec::new();
+        for _ in 0..3 {
+            results.push(out_recv.next().await.unwrap());
+        }
+        results.sort();
+        // reduce(0..5) = 10, so results should be 11, 12, 13
+        assert_eq!(results, vec![11, 12, 13]);
+    }
+
+    #[cfg(feature = "deploy")]
+    #[tokio::test]
+    async fn test_optional_ref_none() {
+        let mut deployment = Deployment::new();
+
+        let mut flow = FlowBuilder::new();
+        let external = flow.external::<()>();
+        let p1 = flow.process::<()>();
+
+        // Create an optional from an empty source => None
+        let my_opt = p1
+            .source_iter(q!(std::iter::empty::<i32>()))
+            .reduce(q!(|a, b| *a += b));
+
+        let opt_ref = my_opt.by_ref();
+
+        // Use the optional ref: should be None, so unwrap_or(99)
+        let out_port = p1
+            .source_iter(q!(1..=2i32))
+            .map(q!(|x| x + opt_ref.unwrap_or(99)))
+            .send_bincode_external(&external);
+
+        let nodes = flow
+            .with_default_optimize()
+            .with_process(&p1, deployment.Localhost())
+            .with_external(&external, deployment.Localhost())
+            .deploy(&mut deployment);
+
+        deployment.deploy().await.unwrap();
+
+        let mut out_recv = nodes.connect(out_port).await;
+
+        deployment.start().await.unwrap();
+
+        let mut results = Vec::new();
+        for _ in 0..2 {
+            results.push(out_recv.next().await.unwrap());
+        }
+        results.sort();
+        // optional is None, so unwrap_or(99) => 100, 101
+        assert_eq!(results, vec![100, 101]);
+    }
+
+    #[cfg(feature = "deploy")]
+    #[tokio::test]
+    async fn test_optional_ref_and_consume() {
+        let mut deployment = Deployment::new();
+
+        let mut flow = FlowBuilder::new();
+        let external = flow.external::<()>();
+        let p1 = flow.process::<()>();
+
+        // Use reduce to produce an Optional
+        let my_opt = p1.source_iter(q!(0..5i32)).reduce(q!(|a, b| *a += b));
+
+        let opt_ref = my_opt.by_ref();
+
+        // Reference path
+        let out_port_ref = p1
+            .source_iter(q!(1..=2i32))
+            .map(q!(|x| x + opt_ref.unwrap_or(0)))
+            .send_bincode_external(&external);
+
+        let nodes = flow
+            .with_default_optimize()
+            .with_process(&p1, deployment.Localhost())
+            .with_external(&external, deployment.Localhost())
+            .deploy(&mut deployment);
+
+        deployment.deploy().await.unwrap();
+
+        let mut out_recv_ref = nodes.connect(out_port_ref).await;
+
+        deployment.start().await.unwrap();
+
+        let mut ref_results = Vec::new();
+        for _ in 0..2 {
+            ref_results.push(out_recv_ref.next().await.unwrap());
+        }
+        ref_results.sort();
+        // reduce(0..5) = 10, so 1+10=11, 2+10=12
+        assert_eq!(ref_results, vec![11, 12]);
     }
 }

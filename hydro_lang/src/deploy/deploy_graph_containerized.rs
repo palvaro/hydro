@@ -16,8 +16,10 @@ use bytes::Bytes;
 use dfir_lang::graph::DfirGraph;
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use http_body_util::Full;
+// Re-export LinuxCompileType so users can configure compile type without depending on hydro_deploy directly.
+pub use hydro_deploy::LinuxCompileType;
+use hydro_deploy::RustCrate;
 use hydro_deploy::rust_crate::build::{BuildError, build_crate_memoized};
-use hydro_deploy::{LinuxCompileType, RustCrate};
 use nanoid::nanoid;
 use proc_macro2::Span;
 use sinktools::lazy::LazySink;
@@ -66,11 +68,17 @@ pub struct DockerDeployProcess {
 
     docker_container_name: Rc<RefCell<Option<String>>>,
 
-    compilation_options: Option<String>,
+    rustflags: Option<String>,
 
     config: Vec<String>,
 
     network: DockerNetwork,
+
+    base_image: Option<String>,
+
+    linux_compile_type: LinuxCompileType,
+
+    features: Vec<String>,
 }
 
 impl Node for DockerDeployProcess {
@@ -124,6 +132,10 @@ impl Node for DockerDeployProcess {
             ret = ret.features(features);
         }
 
+        if !self.features.is_empty() {
+            ret = ret.features(self.features.clone());
+        }
+
         ret = ret.build_env("STAGELEFT_TRYBUILD_BUILD_STAGED", "1");
         ret = ret.config("build.incremental = false");
 
@@ -139,13 +151,21 @@ pub struct DockerDeployCluster {
     next_port: Rc<RefCell<u16>>,
     rust_crate: Rc<RefCell<Option<RustCrate>>>,
 
+    exposed_ports: Rc<RefCell<Vec<u16>>>,
+
     docker_container_name: Rc<RefCell<Vec<String>>>,
 
-    compilation_options: Option<String>,
+    rustflags: Option<String>,
 
     config: Vec<String>,
 
     count: usize,
+
+    base_image: Option<String>,
+
+    linux_compile_type: LinuxCompileType,
+
+    features: Vec<String>,
 }
 
 impl Node for DockerDeployCluster {
@@ -199,6 +219,10 @@ impl Node for DockerDeployCluster {
             ret = ret.features(features);
         }
 
+        if !self.features.is_empty() {
+            ret = ret.features(self.features.clone());
+        }
+
         ret = ret.build_env("STAGELEFT_TRYBUILD_BUILD_STAGED", "1");
         ret = ret.config("build.incremental = false");
 
@@ -208,13 +232,21 @@ impl Node for DockerDeployCluster {
 
 /// Represents an external process, outside the control of this deployment but still with some communication into this deployment.
 #[derive(Clone, Debug)]
+#[expect(
+    dead_code,
+    reason = "fields used via Rc<RefCell> in RegisterPort impl and ExternalBytesPort construction"
+)]
 pub struct DockerDeployExternal {
+    /// The location key for this external, used for port handle construction.
+    pub(crate) key: LocationKey,
     name: String,
     next_port: Rc<RefCell<u16>>,
 
+    /// Counter for generating ExternalPortId values at deploy time.
+    next_external_port_id: Rc<RefCell<crate::Counter<ExternalPortId>>>,
+
     ports: Rc<RefCell<HashMap<ExternalPortId, u16>>>,
 
-    #[expect(clippy::type_complexity, reason = "internal code")]
     connection_info: Rc<RefCell<HashMap<u16, (Rc<RefCell<Option<String>>>, u16, DockerNetwork)>>>,
 }
 
@@ -248,6 +280,55 @@ impl Node for DockerDeployExternal {
         sidecars: &[syn::Expr],
     ) {
         trace!(name: "surface", surface = graph.surface_syntax_string());
+    }
+}
+
+impl DockerDeployProcess {
+    /// Expose a TCP port on this process for external access.
+    ///
+    /// The binary running on this process must bind a `TcpListener` on this port.
+    /// This method ensures the port appears in the Docker image's `EXPOSE` directives
+    /// and is available for endpoint discovery via [`Self::get_tcp_endpoint`].
+    pub fn expose_port(&self, port: u16) {
+        self.exposed_ports.borrow_mut().push(port);
+    }
+
+    /// Returns the TCP endpoint `(host, port)` for this process exposing
+    /// the given container port. Queries Docker for the dynamically allocated
+    /// host port mapping.
+    pub async fn get_tcp_endpoint(&self, container_port: u16) -> (String, u16) {
+        let name = self
+            .docker_container_name
+            .borrow()
+            .as_ref()
+            .expect("container not yet started")
+            .clone();
+        let host_port = find_dynamically_allocated_docker_port(&name, container_port).await;
+        ("localhost".to_owned(), host_port)
+    }
+}
+
+impl DockerDeployCluster {
+    /// Expose a TCP port on every member of this cluster for external access.
+    ///
+    /// The binary running on this cluster must bind a `TcpListener` on this port.
+    /// This method ensures the port appears in the Docker image's `EXPOSE` directives
+    /// and is available for endpoint discovery via [`Self::get_all_tcp_endpoints`].
+    pub fn expose_port(&self, port: u16) {
+        self.exposed_ports.borrow_mut().push(port);
+    }
+
+    /// Returns TCP endpoints `(host, port)` for all cluster members exposing
+    /// the given container port. Queries Docker for the dynamically allocated
+    /// host port mapping.
+    pub async fn get_all_tcp_endpoints(&self, container_port: u16) -> Vec<(String, u16)> {
+        let names = self.docker_container_name.borrow().clone();
+        let mut endpoints = Vec::with_capacity(names.len());
+        for name in names {
+            let host_port = find_dynamically_allocated_docker_port(&name, container_port).await;
+            endpoints.push(("localhost".to_owned(), host_port));
+        }
+        endpoints
     }
 }
 
@@ -517,7 +598,7 @@ async fn create_and_start_container(
         env: Some(vec![
             format!("CONTAINER_NAME={container_name}"),
             format!("DEPLOYMENT_INSTANCE={deployment_instance}"),
-            format!("RUST_LOG=trace"),
+            "RUST_LOG=trace".to_owned(),
         ]),
         networking_config: Some(NetworkingConfig {
             endpoints_config: Some(HashMap::from([(
@@ -548,23 +629,25 @@ async fn create_and_start_container(
 #[instrument(level = "trace", skip_all, fields(%image_name))]
 async fn build_and_create_image(
     rust_crate: &Rc<RefCell<Option<RustCrate>>>,
-    compilation_options: Option<&str>,
+    rustflags: Option<&str>,
     config: &[String],
     exposed_ports: &[u16],
     image_name: &str,
+    base_image: Option<&str>,
+    linux_compile_type: LinuxCompileType,
 ) -> Result<(), anyhow::Error> {
-    let mut rust_crate = rust_crate
-        .borrow_mut()
-        .take()
-        .unwrap()
-        .rustflags(compilation_options.unwrap_or_default());
+    let mut rust_crate = rust_crate.borrow_mut().take().unwrap();
+
+    if let Some(rustflags) = rustflags {
+        rust_crate = rust_crate.rustflags(rustflags);
+    }
 
     for cfg in config {
         rust_crate = rust_crate.config(cfg);
     }
 
     let build_output = match build_crate_memoized(
-        rust_crate.get_build_params(hydro_deploy::HostTargetType::Linux(LinuxCompileType::Musl)),
+        rust_crate.get_build_params(hydro_deploy::HostTargetType::Linux(linux_compile_type)),
     )
     .await
     {
@@ -627,9 +710,10 @@ Failed to build crate {exit_status:?}
             .collect::<Vec<_>>()
             .join("\n");
 
+        let from_image = base_image.unwrap_or("scratch");
         let dockerfile_content = format!(
             r#"
-                FROM scratch
+                FROM {from_image}
                 {exposed_ports}
                 COPY app /app
                 CMD ["/app"]
@@ -696,14 +780,17 @@ impl DockerDeploy {
     /// Add an internal docker service to the deployment.
     pub fn add_localhost_docker(
         &mut self,
-        compilation_options: Option<String>,
+        rustflags: Option<String>,
         config: Vec<String>,
     ) -> DockerDeployProcessSpec {
         let process = DockerDeployProcessSpec {
-            compilation_options,
+            rustflags,
             config,
             network: self.network.clone(),
             deployment_instance: self.deployment_instance.clone(),
+            base_image: None,
+            linux_compile_type: LinuxCompileType::Musl,
+            features: vec![],
         };
 
         self.docker_processes.push(process.clone());
@@ -714,15 +801,18 @@ impl DockerDeploy {
     /// Add an internal docker cluster to the deployment.
     pub fn add_localhost_docker_cluster(
         &mut self,
-        compilation_options: Option<String>,
+        rustflags: Option<String>,
         config: Vec<String>,
         count: usize,
     ) -> DockerDeployClusterSpec {
         let cluster = DockerDeployClusterSpec {
-            compilation_options,
+            rustflags,
             config,
             count,
             deployment_instance: self.deployment_instance.clone(),
+            base_image: None,
+            linux_compile_type: LinuxCompileType::Musl,
+            features: vec![],
         };
 
         self.docker_clusters.push(cluster.clone());
@@ -748,21 +838,26 @@ impl DockerDeploy {
 
             build_and_create_image(
                 &process.rust_crate,
-                process.compilation_options.as_deref(),
+                process.rustflags.as_deref(),
                 &process.config,
                 &exposed_ports,
                 &process.name,
+                process.base_image.as_deref(),
+                process.linux_compile_type,
             )
             .await?;
         }
 
         for (_, _, cluster) in nodes.get_all_clusters() {
+            let exposed_ports = cluster.exposed_ports.borrow().clone();
             build_and_create_image(
                 &cluster.rust_crate,
-                cluster.compilation_options.as_deref(),
+                cluster.rustflags.as_deref(),
                 &cluster.config,
-                &[], // clusters don't have exposed ports.
+                &exposed_ports,
                 &cluster.name,
+                cluster.base_image.as_deref(),
+                cluster.linux_compile_type,
             )
             .await?;
         }
@@ -914,6 +1009,7 @@ impl<'a> Deploy<'a> for DockerDeploy {
         p2_port: &<Self::Process as Node>::Port,
         name: Option<&str>,
         networking_info: &crate::networking::NetworkingInfo,
+        _external_types: Option<(&syn::Type, &syn::Type)>,
     ) -> (syn::Expr, syn::Expr) {
         match networking_info {
             crate::networking::NetworkingInfo::Tcp {
@@ -951,6 +1047,7 @@ impl<'a> Deploy<'a> for DockerDeploy {
         c2_port: &<Self::Cluster as Node>::Port,
         name: Option<&str>,
         networking_info: &crate::networking::NetworkingInfo,
+        _external_types: Option<(&syn::Type, &syn::Type)>,
     ) -> (syn::Expr, syn::Expr) {
         match networking_info {
             crate::networking::NetworkingInfo::Tcp {
@@ -987,6 +1084,7 @@ impl<'a> Deploy<'a> for DockerDeploy {
         p2_port: &<Self::Process as Node>::Port,
         name: Option<&str>,
         networking_info: &crate::networking::NetworkingInfo,
+        _external_types: Option<(&syn::Type, &syn::Type)>,
     ) -> (syn::Expr, syn::Expr) {
         match networking_info {
             crate::networking::NetworkingInfo::Tcp {
@@ -1024,6 +1122,7 @@ impl<'a> Deploy<'a> for DockerDeploy {
         c2_port: &<Self::Cluster as Node>::Port,
         name: Option<&str>,
         networking_info: &crate::networking::NetworkingInfo,
+        _external_types: Option<(&syn::Type, &syn::Type)>,
     ) -> (syn::Expr, syn::Expr) {
         match networking_info {
             crate::networking::NetworkingInfo::Tcp {
@@ -1062,22 +1161,22 @@ impl<'a> Deploy<'a> for DockerDeploy {
         p2.exposed_ports.borrow_mut().push(*p2_port);
 
         let socket_ident = syn::Ident::new(
-            &format!("__hydro_deploy_many_{}_socket", &shared_handle),
+            &format!("__hydro_deploy_many_{}_socket", shared_handle),
             Span::call_site(),
         );
 
         let source_ident = syn::Ident::new(
-            &format!("__hydro_deploy_many_{}_source", &shared_handle),
+            &format!("__hydro_deploy_many_{}_source", shared_handle),
             Span::call_site(),
         );
 
         let sink_ident = syn::Ident::new(
-            &format!("__hydro_deploy_many_{}_sink", &shared_handle),
+            &format!("__hydro_deploy_many_{}_sink", shared_handle),
             Span::call_site(),
         );
 
         let membership_ident = syn::Ident::new(
-            &format!("__hydro_deploy_many_{}_membership", &shared_handle),
+            &format!("__hydro_deploy_many_{}_membership", shared_handle),
             Span::call_site(),
         );
 
@@ -1099,7 +1198,7 @@ impl<'a> Deploy<'a> for DockerDeploy {
     #[instrument(level = "trace", skip_all, fields(%shared_handle))]
     fn e2o_many_sink(shared_handle: String) -> syn::Expr {
         let sink_ident = syn::Ident::new(
-            &format!("__hydro_deploy_many_{}_sink", &shared_handle),
+            &format!("__hydro_deploy_many_{}_sink", shared_handle),
             Span::call_site(),
         );
         parse_quote!(#sink_ident)
@@ -1127,17 +1226,17 @@ impl<'a> Deploy<'a> for DockerDeploy {
         p2.exposed_ports.borrow_mut().push(*p2_port);
 
         let socket_ident = syn::Ident::new(
-            &format!("__hydro_deploy_{}_socket", &shared_handle),
+            &format!("__hydro_deploy_{}_socket", shared_handle),
             Span::call_site(),
         );
 
         let source_ident = syn::Ident::new(
-            &format!("__hydro_deploy_{}_source", &shared_handle),
+            &format!("__hydro_deploy_{}_source", shared_handle),
             Span::call_site(),
         );
 
         let sink_ident = syn::Ident::new(
-            &format!("__hydro_deploy_{}_sink", &shared_handle),
+            &format!("__hydro_deploy_{}_sink", shared_handle),
             Span::call_site(),
         );
 
@@ -1200,7 +1299,7 @@ impl<'a> Deploy<'a> for DockerDeploy {
         shared_handle: String,
     ) -> syn::Expr {
         let sink_ident = syn::Ident::new(
-            &format!("__hydro_deploy_{}_sink", &shared_handle),
+            &format!("__hydro_deploy_{}_sink", shared_handle),
             Span::call_site(),
         );
         parse_quote!(#sink_ident)
@@ -1234,24 +1333,41 @@ const CONTAINER_ALPHABET: [char; 36] = [
     'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
 ];
 
+fn is_valid_docker_image_name(name: &str) -> bool {
+    regex::Regex::new(r"^[a-z0-9]+([._-][a-z0-9]+)*$")
+        .unwrap()
+        .is_match(name)
+}
+
 #[instrument(level = "trace", skip_all, ret, fields(%name_hint, %location_key, %deployment_instance))]
 fn get_docker_image_name(
     name_hint: &str,
     location_key: LocationKey,
     deployment_instance: &str,
 ) -> String {
-    let name_hint = name_hint
+    let name_hint: String = name_hint
         .split("::")
         .last()
         .unwrap()
         .to_ascii_lowercase()
-        .replace(".", "-")
-        .replace("_", "-")
-        .replace("::", "-");
+        .split(['.', '_', '-'])
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
 
-    let image_unique_tag = nanoid::nanoid!(6, &CONTAINER_ALPHABET);
+    let image_name = format!("hy-{name_hint}-{deployment_instance}-{location_key}");
 
-    format!("hy-{name_hint}-{image_unique_tag}-{deployment_instance}-{location_key}")
+    if !is_valid_docker_image_name(&image_name) {
+        panic!(
+            "Generated Docker image name '{image_name}' is not a valid Docker image name. \
+             Docker image names may only contain lowercase alphanumeric characters \
+             separated by single '.', '_', or '-' characters, and must start and end \
+             with an alphanumeric character. The most likely cause is your location \
+             struct name '{name_hint}'"
+        );
+    }
+
+    image_name
 }
 
 #[instrument(level = "trace", skip_all, ret, fields(%image_name, ?instance))]
@@ -1265,10 +1381,13 @@ fn get_docker_container_name(image_name: &str, instance: Option<usize>) -> Strin
 /// Represents a Process running in a docker container
 #[derive(Clone)]
 pub struct DockerDeployProcessSpec {
-    compilation_options: Option<String>,
+    rustflags: Option<String>,
     config: Vec<String>,
     network: DockerNetwork,
     deployment_instance: String,
+    base_image: Option<String>,
+    linux_compile_type: LinuxCompileType,
+    features: Vec<String>,
 }
 
 impl<'a> ProcessSpec<'a, DockerDeploy> for DockerDeployProcessSpec {
@@ -1285,10 +1404,14 @@ impl<'a> ProcessSpec<'a, DockerDeploy> for DockerDeployProcessSpec {
 
             docker_container_name: Rc::new(RefCell::new(None)),
 
-            compilation_options: self.compilation_options,
+            rustflags: self.rustflags,
             config: self.config,
 
             network: self.network.clone(),
+
+            base_image: self.base_image,
+            linux_compile_type: self.linux_compile_type,
+            features: self.features,
         }
     }
 }
@@ -1296,10 +1419,13 @@ impl<'a> ProcessSpec<'a, DockerDeploy> for DockerDeployProcessSpec {
 /// Represents a Cluster running across `count` docker containers.
 #[derive(Clone)]
 pub struct DockerDeployClusterSpec {
-    compilation_options: Option<String>,
+    rustflags: Option<String>,
     config: Vec<String>,
     count: usize,
     deployment_instance: String,
+    base_image: Option<String>,
+    linux_compile_type: LinuxCompileType,
+    features: Vec<String>,
 }
 
 impl<'a> ClusterSpec<'a, DockerDeploy> for DockerDeployClusterSpec {
@@ -1312,13 +1438,75 @@ impl<'a> ClusterSpec<'a, DockerDeploy> for DockerDeployClusterSpec {
             next_port: Rc::new(RefCell::new(1000)),
             rust_crate: Rc::new(RefCell::new(None)),
 
+            exposed_ports: Rc::new(RefCell::new(Vec::new())),
+
             docker_container_name: Rc::new(RefCell::new(Vec::new())),
 
-            compilation_options: self.compilation_options,
+            rustflags: self.rustflags,
             config: self.config,
 
             count: self.count,
+
+            base_image: self.base_image,
+            linux_compile_type: self.linux_compile_type,
+            features: self.features,
         }
+    }
+}
+
+impl DockerDeployProcessSpec {
+    /// Set the base Docker image for this process.
+    /// Defaults to `scratch` if not specified.
+    pub fn base_image(mut self, image: impl Into<String>) -> Self {
+        self.base_image = Some(image.into());
+        self
+    }
+
+    /// Set the Linux compile type (glibc or musl) for this process.
+    /// Defaults to `Musl` if not specified.
+    pub fn linux_compile_type(mut self, compile_type: LinuxCompileType) -> Self {
+        self.linux_compile_type = compile_type;
+        self
+    }
+
+    /// Add features to enable when compiling the final binary.
+    pub fn features(mut self, features: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.features.extend(features.into_iter().map(Into::into));
+        self
+    }
+
+    /// Add a single feature to enable when compiling the final binary.
+    pub fn feature(mut self, feature: impl Into<String>) -> Self {
+        self.features.push(feature.into());
+        self
+    }
+}
+
+impl DockerDeployClusterSpec {
+    /// Set the base Docker image for this cluster.
+    /// Defaults to `scratch` if not specified.
+    pub fn base_image(mut self, image: impl Into<String>) -> Self {
+        self.base_image = Some(image.into());
+        self
+    }
+
+    /// Set the Linux compile type (glibc or musl) for this cluster.
+    /// Defaults to `Musl` if not specified.
+    pub fn linux_compile_type(mut self, compile_type: LinuxCompileType) -> Self {
+        self.linux_compile_type = compile_type;
+        self
+    }
+
+    /// Add features to enable when compiling the final binary.
+    pub fn features(mut self, features: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.features.extend(features.into_iter().map(Into::into));
+        self
+    }
+
+    /// Add a single feature to enable when compiling the final binary.
+    pub fn feature(mut self, feature: impl Into<String>) -> Self {
+        self.features.push(feature.into());
+        self
     }
 }
 
@@ -1331,8 +1519,10 @@ impl<'a> ExternalSpec<'a, DockerDeploy> for DockerDeployExternalSpec {
     #[instrument(level = "trace", skip_all, fields(%key, %name_hint))]
     fn build(self, key: LocationKey, name_hint: &str) -> <DockerDeploy as Deploy<'a>>::External {
         DockerDeployExternal {
+            key,
             name: self.name,
             next_port: Rc::new(RefCell::new(10000)),
+            next_external_port_id: Rc::new(RefCell::new(crate::Counter::default())),
             ports: Rc::new(RefCell::new(HashMap::new())),
             connection_info: Rc::new(RefCell::new(HashMap::new())),
         }

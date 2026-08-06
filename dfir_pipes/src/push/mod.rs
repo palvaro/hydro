@@ -3,11 +3,14 @@
 //! This module provides push-based operators that mirror the pull-based operators
 //! in the parent module, but work in the opposite direction: items are pushed into
 //! a pipeline rather than pulled from it.
+use core::borrow::BorrowMut;
 use core::pin::Pin;
 use core::task::Waker;
 
 use crate::{Context, Toggle};
 
+mod accum_state;
+mod accumulate;
 mod fanout;
 mod filter;
 mod filter_map;
@@ -16,15 +19,27 @@ mod flat_map;
 mod flat_map_stream;
 mod flatten;
 mod flatten_stream;
+#[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
+mod fold_keyed;
 mod for_each;
 mod inspect;
 mod map;
 #[cfg(feature = "alloc")]
 #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 mod persist;
+#[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
+mod reduce_keyed;
 mod resolve_futures;
 mod sink;
 mod sink_compat;
+#[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+mod sort;
+#[cfg(feature = "lattices")]
+#[cfg_attr(docsrs, doc(cfg(feature = "lattices")))]
+mod state_push;
 mod unzip;
 #[cfg(feature = "alloc")]
 #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
@@ -37,6 +52,11 @@ pub(crate) mod test_utils;
 #[cfg_attr(docsrs, doc(cfg(feature = "variadics")))]
 pub mod demux_var;
 
+#[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+pub use accum_state::SortState;
+pub use accum_state::{FoldState, ReduceState};
+pub use accumulate::{AccumState, Accumulate};
 #[cfg(feature = "variadics")]
 #[cfg_attr(docsrs, doc(cfg(feature = "variadics")))]
 pub use demux_var::{DemuxVar, PushVariadic, demux_var};
@@ -48,6 +68,9 @@ pub use flat_map::FlatMap;
 pub use flat_map_stream::FlatMapStream;
 pub use flatten::Flatten;
 pub use flatten_stream::FlattenStream;
+#[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
+pub use fold_keyed::FoldKeyed;
 pub use for_each::ForEach;
 use futures_core::FusedStream;
 pub use inspect::Inspect;
@@ -55,9 +78,18 @@ pub use map::Map;
 #[cfg(feature = "alloc")]
 #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 pub use persist::Persist;
+#[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
+pub use reduce_keyed::ReduceKeyed;
 pub use resolve_futures::ResolveFutures;
 pub use sink::Sink;
 pub use sink_compat::SinkCompat;
+#[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+pub use sort::Sort;
+#[cfg(feature = "lattices")]
+#[cfg_attr(docsrs, doc(cfg(feature = "lattices")))]
+pub use state_push::{StatePush, state_push};
 pub use unzip::Unzip;
 #[cfg(feature = "alloc")]
 #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
@@ -131,10 +163,10 @@ where
 /// a source, `Push` allows you to send items into a sink. Push operators form
 /// chains where each operator transforms items and passes them downstream.
 ///
-/// The protocol mirrors [`futures_sink::Sink`]:
+/// The protocol is:
 /// 1. Call [`Push::poll_ready`] to check if the push can accept an item.
 /// 2. If ready, call [`Push::start_send`] to send the item.
-/// 3. Call [`Push::poll_flush`] to flush buffered items.
+/// 3. Call [`Push::poll_finalize`] to signal end-of-epoch and drain deferred output.
 pub trait Push<Item, Meta>
 where
     Meta: Copy,
@@ -153,8 +185,13 @@ where
     /// Must only be called after [`Push::poll_ready`] returns [`PushStep::Done`].
     fn start_send(self: Pin<&mut Self>, item: Item, meta: Meta);
 
-    /// Flushes any buffered items in this push pipeline.
-    fn poll_flush(self: Pin<&mut Self>, ctx: &mut Self::Ctx<'_>) -> PushStep<Self::CanPend>;
+    /// Finalizes this push pipeline, signaling that no more items will be sent.
+    ///
+    /// Deferred operators (e.g. sort, fold, reduce) emit their accumulated output
+    /// during this call. Buffering operators drain any remaining internal state
+    /// downstream. This is a one-shot operation — the pipeline should not be
+    /// reused after `poll_finalize` returns [`PushStep::Done`].
+    fn poll_finalize(self: Pin<&mut Self>, ctx: &mut Self::Ctx<'_>) -> PushStep<Self::CanPend>;
 
     /// Informs this push how many items are about to be sent.
     ///
@@ -188,8 +225,8 @@ where
         Pin::new(&mut **self).start_send(item, meta)
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, ctx: &mut Self::Ctx<'_>) -> PushStep<Self::CanPend> {
-        Pin::new(&mut **self).poll_flush(ctx)
+    fn poll_finalize(mut self: Pin<&mut Self>, ctx: &mut Self::Ctx<'_>) -> PushStep<Self::CanPend> {
+        Pin::new(&mut **self).poll_finalize(ctx)
     }
 
     fn size_hint(mut self: Pin<&mut Self>, hint: (usize, Option<usize>)) {
@@ -300,6 +337,76 @@ where
     Next: Push<St::Item, Meta>,
 {
     FlattenStream::new(next)
+}
+
+/// Creates a fold push that accumulates all items via a fold function, then emits
+/// the accumulated value downstream on finalize.
+pub const fn fold<AccRef, CombFn, Acc, Item, Next>(
+    acc_ref: AccRef,
+    comb_fn: CombFn,
+    next: Next,
+) -> Accumulate<FoldState<AccRef, CombFn, Acc, Item>, Next>
+where
+    AccRef: BorrowMut<Acc>,
+    CombFn: FnMut(&mut Acc, Item),
+    Next: Push<AccRef, ()>,
+{
+    Accumulate::new(FoldState::new(acc_ref, comb_fn), next)
+}
+
+/// Creates a reduce push (owned mode) that reduces all items into a single value,
+/// then emits it downstream on finalize. If `acc` is `None` and no items were
+/// received, nothing is emitted. If `acc` is `Some(initial)`, the initial value
+/// is used as the starting accumulator and will be emitted even if no items arrive.
+pub const fn reduce<ReduceFn, Next, Item>(
+    acc: Option<Item>,
+    reduce_fn: ReduceFn,
+    next: Next,
+) -> Accumulate<ReduceState<Option<Item>, ReduceFn, Item>, Next>
+where
+    ReduceFn: FnMut(&mut Item, Item),
+    Next: Push<Item, ()>,
+{
+    Accumulate::new(ReduceState::new(acc, reduce_fn), next)
+}
+
+/// Creates a reduce push (borrowed/persistent mode) that reduces all items into
+/// externally-owned state. Emits `&mut Item` downstream on finalize (or nothing
+/// if no items were received). The value persists across ticks.
+pub const fn reduce_ref<'a, ReduceFn, Next, Item>(
+    acc: &'a mut Option<Item>,
+    reduce_fn: ReduceFn,
+    next: Next,
+) -> Accumulate<ReduceState<&'a mut Option<Item>, ReduceFn, Item>, Next>
+where
+    ReduceFn: FnMut(&mut Item, Item),
+    Next: Push<&'a mut Item, ()>,
+{
+    Accumulate::new(ReduceState::new(acc, reduce_fn), next)
+}
+
+/// Creates an [`Accumulate`] push combinator with the given [`AccumState`].
+///
+/// This is the unified accumulator constructor. Use specific state types
+/// ([`FoldState`], [`ReduceState`], [`SortState`], etc.) to get different behaviors.
+pub const fn accumulate<State, Next>(state: State, next: Next) -> Accumulate<State, Next>
+where
+    State: AccumState,
+    Next: Push<State::Output, ()>,
+{
+    Accumulate::new(state, next)
+}
+
+/// Creates a [`Sort`] push that collects all items, sorts them, then emits them
+/// downstream in sorted order on finalize.
+#[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+pub const fn sort<Item, Next>(next: Next) -> Sort<Item, Next>
+where
+    Item: Ord,
+    Next: Push<Item, ()>,
+{
+    Sort::new(next)
 }
 
 /// Creates a [`ForEach`] terminal push that consumes each item with a function.

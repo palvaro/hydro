@@ -1,9 +1,9 @@
-use quote::{ToTokens, quote_spanned};
+use quote::quote_spanned;
 use syn::parse_quote;
 
 use super::{
-    DelayType, OperatorCategory, OperatorConstraints, OperatorInstance, OperatorWriteOutput,
-    PortIndexValue, RANGE_0, RANGE_1, WriteContextArgs,
+    OperatorCategory, OperatorConstraints, OperatorInstance, OperatorWriteOutput,
+    RANGE_0, RANGE_1, WriteContextArgs,
 };
 
 /// > 2 input streams of the same type T, 1 output stream of type T
@@ -33,16 +33,10 @@ pub const DIFFERENCE: OperatorConstraints = OperatorConstraints {
     persistence_args: &(0..=2),
     type_args: RANGE_0,
     is_external_input: false,
-    has_singleton_output: false,
     flo_type: None,
     ports_inn: Some(|| super::PortListSpec::Fixed(parse_quote! { pos, neg })),
     ports_out: None,
-    input_delaytype_fn: |idx| match idx {
-        PortIndexValue::Path(path) if "neg" == path.to_token_stream().to_string() => {
-            Some(DelayType::Stratum)
-        }
-        _else => None,
-    },
+    input_delaytype_fn: |_| None,
     write_fn: |wc @ &WriteContextArgs {
                    root,
                    op_span,
@@ -54,9 +48,9 @@ pub const DIFFERENCE: OperatorConstraints = OperatorConstraints {
                diagnostics| {
         let OperatorWriteOutput {
             write_prologue,
-            write_prologue_after,
             write_iterator,
             write_iterator_after,
+            write_tick_end,
         } = (super::anti_join::ANTI_JOIN.write_fn)(wc, diagnostics)?;
 
         let pos = &inputs[1];
@@ -68,9 +62,9 @@ pub const DIFFERENCE: OperatorConstraints = OperatorConstraints {
 
         Ok(OperatorWriteOutput {
             write_prologue,
-            write_prologue_after,
             write_iterator,
             write_iterator_after,
+            write_tick_end,
         })
     },
 };

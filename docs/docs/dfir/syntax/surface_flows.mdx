@@ -6,9 +6,9 @@ import CodeBlock from "@theme/CodeBlock";
 import example1Code from "!!raw-loader!../../../../dfir_rs/examples/example_surface_flows_1_basic.rs";
 import example2Code from "!!raw-loader!../../../../dfir_rs/examples/example_surface_flows_2_varname.rs";
 import example3Code from "!!raw-loader!../../../../dfir_rs/examples/example_surface_flows_3_ports.rs";
-import example3Out from "!!raw-loader!../../../../dfir_rs/tests/snapshots/surface_examples__example_surface_flows_3_ports.snap";
+import example3Out from "!!raw-loader!../../../../dfir_rs/examples/snapshots/example_surface_flows_3_ports.snap";
 import example4Code from "!!raw-loader!../../../../dfir_rs/examples/example_surface_flows_4_context.rs";
-import example4Out from "!!raw-loader!../../../../dfir_rs/tests/snapshots/surface_examples__example_surface_flows_4_context.snap";
+import example4Out from "!!raw-loader!../../../../dfir_rs/examples/snapshots/example_surface_flows_4_context.snap";
 import { getLines, extractMermaid, extractOutput } from "../../../src/util";
 
 # Flow Syntax
@@ -60,7 +60,7 @@ of [in-out trees](../architecture/in-out_trees.md).
 Closures inside surface syntax operators have access to a special `context` object which provides
 access to scheduling, timing, and state APIs. The object is accessible as a shared reference
 (`&Context`) via the special name `context`.
-[Here is the full API documentation for `Context`](https://hydro.run/rustdoc/dfir_rs/scheduled/context/struct.Context.html).
+[Here is the full API documentation for `Context`](rust:dfir_rs::scheduled::context::Context).
 
 <CodeBlock language="rust">{getLines(example4Code, 5, 6)}</CodeBlock>
 

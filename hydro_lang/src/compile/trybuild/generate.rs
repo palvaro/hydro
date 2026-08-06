@@ -9,15 +9,10 @@ use dfir_lang::graph::DfirGraph;
 use sha2::{Digest, Sha256};
 #[cfg(any(feature = "deploy", feature = "maelstrom"))]
 use stageleft::internal::quote;
-#[cfg(any(feature = "deploy", feature = "maelstrom"))]
-use syn::visit_mut::VisitMut;
 use trybuild_internals_api::cargo::{self, Metadata};
 use trybuild_internals_api::env::Update;
 use trybuild_internals_api::run::{PathDependency, Project};
 use trybuild_internals_api::{Runner, dependencies, features, path};
-
-#[cfg(any(feature = "deploy", feature = "maelstrom"))]
-use super::rewriters::UseTestModeStaged;
 
 pub const HYDRO_RUNTIME_FEATURES: &[&str] = &[
     "deploy_integration",
@@ -25,6 +20,7 @@ pub const HYDRO_RUNTIME_FEATURES: &[&str] = &[
     "docker_runtime",
     "ecs_runtime",
     "maelstrom_runtime",
+    "sim_runtime",
 ];
 
 #[cfg(any(feature = "deploy", feature = "maelstrom"))]
@@ -33,8 +29,17 @@ pub const HYDRO_RUNTIME_FEATURES: &[&str] = &[
 /// - `Dynamic`: Place in dylib crate examples (for sim and localhost deploys)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkingMode {
+    // `Static` is only constructed by the deploy backends; Maelstrom-only builds
+    // always use `Dynamic`.
+    #[cfg_attr(
+        not(feature = "deploy"),
+        expect(
+            dead_code,
+            reason = "only constructed by the deploy backends; Maelstrom-only builds use Dynamic"
+        )
+    )]
     Static,
-    #[cfg(feature = "deploy")]
+    #[cfg(any(feature = "deploy", feature = "maelstrom"))]
     Dynamic,
 }
 
@@ -94,7 +99,13 @@ pub struct TrybuildConfig {
     pub project_dir: PathBuf,
     pub target_dir: PathBuf,
     pub features: Option<Vec<String>>,
-    #[cfg(feature = "deploy")]
+    #[cfg(any(feature = "deploy", feature = "maelstrom"))]
+    // Only the deploy backends read this field; Maelstrom-only builds derive the
+    // linking behavior directly.
+    #[cfg_attr(
+        not(feature = "deploy"),
+        expect(dead_code, reason = "only read by the deploy backends")
+    )]
     /// Which crate within the workspace to use for examples.
     /// - `Static`: base crate (for remote/containerized deploys)
     /// - `Dynamic`: dylib-examples crate (for sim and localhost deploys)
@@ -116,62 +127,23 @@ pub fn create_graph_trybuild(
 
     let is_test = IS_TEST.load(std::sync::atomic::Ordering::Relaxed);
 
-    let generated_code = compile_graph_trybuild(
-        graph,
-        extra_stmts,
-        sidecars,
-        &crate_name,
-        is_test,
-        deploy_mode,
-    );
-
-    let inlined_staged = if is_test {
-        let raw_toml_manifest = toml::from_str::<toml::Value>(
-            &fs::read_to_string(path!(source_dir / "Cargo.toml")).unwrap(),
-        )
-        .unwrap();
-
-        let maybe_custom_lib_path = raw_toml_manifest
-            .get("lib")
-            .and_then(|lib| lib.get("path"))
-            .and_then(|path| path.as_str());
-
-        let mut gen_staged = stageleft_tool::gen_staged_trybuild(
-            &maybe_custom_lib_path
-                .map(|s| path!(source_dir / s))
-                .unwrap_or_else(|| path!(source_dir / "src" / "lib.rs")),
-            &path!(source_dir / "Cargo.toml"),
-            &crate_name,
-            Some("hydro___test".to_owned()),
-        );
-
-        gen_staged.attrs.insert(
-            0,
-            syn::parse_quote! {
-                #![allow(
-                    unused,
-                    ambiguous_glob_reexports,
-                    clippy::suspicious_else_formatting,
-                    unexpected_cfgs,
-                    reason = "generated code"
-                )]
-            },
-        );
-
-        Some(prettyplease::unparse(&gen_staged))
-    } else {
-        None
+    let generated_code = {
+        let _span = tracing::debug_span!(target: "hydro_build", "graph_codegen").entered();
+        compile_graph_trybuild(graph, extra_stmts, sidecars, &crate_name, deploy_mode)
     };
 
-    let source = prettyplease::unparse(&generated_code);
+    let source = {
+        let _span = tracing::debug_span!(target: "hydro_build", "unparse_source").entered();
+        prettyplease::unparse(&generated_code)
+    };
 
     let hash = format!("{:X}", Sha256::digest(&source))
         .chars()
         .take(8)
         .collect::<String>();
 
-    let bin_name = if let Some(bin_name_prefix) = &bin_name_prefix {
-        format!("{}_{}", clean_bin_name_prefix(bin_name_prefix), &hash)
+    let bin_name = if let Some(bin_name_prefix) = bin_name_prefix {
+        format!("{}_{}", clean_bin_name_prefix(bin_name_prefix), hash)
     } else {
         hash
     };
@@ -181,7 +153,7 @@ pub fn create_graph_trybuild(
     // Determine which crate's examples folder to use based on linking mode
     let examples_dir = match linking_mode {
         LinkingMode::Static => path!(project_dir / "examples"),
-        #[cfg(feature = "deploy")]
+        #[cfg(any(feature = "deploy", feature = "maelstrom"))]
         LinkingMode::Dynamic => path!(project_dir / "dylib-examples" / "examples"),
     };
 
@@ -190,16 +162,14 @@ pub fn create_graph_trybuild(
 
     let out_path = path!(examples_dir / format!("{bin_name}.rs"));
     {
+        let _span =
+            tracing::debug_span!(target: "hydro_build", "write_generated_sources").entered();
         let _concurrent_test_lock = CONCURRENT_TEST_LOCK.lock().unwrap();
         write_atomic(source.as_ref(), &out_path).unwrap();
     }
 
-    if let Some(inlined_staged) = inlined_staged {
-        let staged_path = path!(project_dir / "src" / "__staged.rs");
-        {
-            let _concurrent_test_lock = CONCURRENT_TEST_LOCK.lock().unwrap();
-            write_atomic(inlined_staged.as_bytes(), &staged_path).unwrap();
-        }
+    if is_test {
+        write_staged_source_cached(source_dir.as_ref(), &crate_name, &project_dir);
     }
 
     if is_test {
@@ -219,7 +189,7 @@ pub fn create_graph_trybuild(
             project_dir,
             target_dir,
             features: cur_bin_enabled_features,
-            #[cfg(feature = "deploy")]
+            #[cfg(any(feature = "deploy", feature = "maelstrom"))]
             linking_mode,
         },
     )
@@ -231,22 +201,17 @@ pub fn compile_graph_trybuild(
     extra_stmts: &[syn::Stmt],
     sidecars: &[syn::Expr],
     crate_name: &str,
-    is_test: bool,
     deploy_mode: DeployMode,
 ) -> syn::File {
     use crate::staging_util::get_this_crate;
 
     let mut diagnostics = Diagnostics::new();
-    let mut dfir_expr: syn::Expr = syn::parse2(
+    let dfir_expr: syn::Expr = syn::parse2(
         partitioned_graph
             .as_code(&quote! { __root_dfir_rs }, true, quote!(), &mut diagnostics)
             .expect("DFIR code generation failed with diagnostics."),
     )
     .unwrap();
-
-    if is_test {
-        UseTestModeStaged { crate_name }.visit_expr_mut(&mut dfir_expr);
-    }
 
     let orig_crate_name = quote::format_ident!("{}", crate_name);
     let trybuild_crate_name_ident = quote::format_ident!("{}_hydro_trybuild", crate_name);
@@ -258,27 +223,21 @@ pub fn compile_graph_trybuild(
         #[cfg(any(feature = "docker_deploy", feature = "ecs_deploy"))]
         DeployMode::Containerized => {
             syn::parse_quote! {
-                #![allow(unused_imports, unused_crate_dependencies, missing_docs, non_snake_case)]
+                #![allow(unused_imports, unused_crate_dependencies, missing_docs, non_snake_case, unexpected_cfgs, unfulfilled_lint_expectations)]
                 use #trybuild_crate_name_ident::__root as #orig_crate_name;
-                use #trybuild_crate_name_ident::__staged::__deps::*;
+                use #orig_crate_name::*;
+                use #orig_crate_name::__staged::__deps::*;
                 use #root::prelude::*;
                 use #root::runtime_support::dfir_rs as __root_dfir_rs;
-                pub use #trybuild_crate_name_ident::__staged;
-
-                #[allow(unused)]
-                async fn __hydro_runtime<'a>() -> #root::runtime_support::dfir_rs::scheduled::context::Dfir<impl #root::runtime_support::dfir_rs::scheduled::context::TickClosure + 'a> {
-                    /// extra_stmts
-                    #( #extra_stmts )*
-
-                    /// dfir_expr
-                    #dfir_expr
-                }
+                pub use #orig_crate_name::__staged;
 
                 #[#root::runtime_support::tokio::main(crate = #tokio_main_ident, flavor = "current_thread")]
                 async fn main() {
                     #root::telemetry::initialize_tracing();
 
-                    let mut #dfir_ident = __hydro_runtime().await;
+                    #( #extra_stmts )*
+
+                    let mut #dfir_ident = #dfir_expr;
 
                     let local_set = #root::runtime_support::tokio::task::LocalSet::new();
                     #(
@@ -292,28 +251,22 @@ pub fn compile_graph_trybuild(
         #[cfg(feature = "deploy")]
         DeployMode::HydroDeploy => {
             syn::parse_quote! {
-                #![allow(unused_imports, unused_crate_dependencies, missing_docs, non_snake_case)]
+                #![allow(unused_imports, unused_crate_dependencies, missing_docs, non_snake_case, unexpected_cfgs, unfulfilled_lint_expectations)]
                 use #trybuild_crate_name_ident::__root as #orig_crate_name;
-                use #trybuild_crate_name_ident::__staged::__deps::*;
+                use #orig_crate_name::*;
+                use #orig_crate_name::__staged::__deps::*;
                 use #root::prelude::*;
                 use #root::runtime_support::dfir_rs as __root_dfir_rs;
-                pub use #trybuild_crate_name_ident::__staged;
-
-                #[allow(unused)]
-                fn __hydro_runtime<'a>(
-                    __hydro_lang_trybuild_cli: &'a #root::runtime_support::hydro_deploy_integration::DeployPorts<#root::__staged::deploy::deploy_runtime::HydroMeta>
-                )
-                    -> #root::runtime_support::dfir_rs::scheduled::context::Dfir<impl #root::runtime_support::dfir_rs::scheduled::context::TickClosure + 'a>
-                {
-                    #( #extra_stmts )*
-
-                    #dfir_expr
-                }
+                pub use #orig_crate_name::__staged;
 
                 #[#root::runtime_support::tokio::main(crate = #tokio_main_ident, flavor = "current_thread")]
                 async fn main() {
-                    let ports = #root::runtime_support::launch::init_no_ack_start().await;
-                    let mut #dfir_ident = __hydro_runtime(&ports);
+                    let __hydro_lang_trybuild_cli_owned: #root::runtime_support::hydro_deploy_integration::DeployPorts<#root::__staged::deploy::deploy_runtime::HydroMeta> = #root::runtime_support::launch::init_no_ack_start().await;
+                    let __hydro_lang_trybuild_cli = &__hydro_lang_trybuild_cli_owned;
+
+                    #( #extra_stmts )*
+
+                    let mut #dfir_ident = #dfir_expr;
                     println!("ack start");
 
                     // TODO(mingwei): initialize `tracing` at this point in execution.
@@ -335,12 +288,13 @@ pub fn compile_graph_trybuild(
         #[cfg(feature = "maelstrom")]
         DeployMode::Maelstrom => {
             syn::parse_quote! {
-                #![allow(unused_imports, unused_crate_dependencies, missing_docs, non_snake_case)]
+                #![allow(unused_imports, unused_crate_dependencies, missing_docs, non_snake_case, unexpected_cfgs, unfulfilled_lint_expectations)]
                 use #trybuild_crate_name_ident::__root as #orig_crate_name;
-                use #trybuild_crate_name_ident::__staged::__deps::*;
+                use #orig_crate_name::*;
+                use #orig_crate_name::__staged::__deps::*;
                 use #root::prelude::*;
                 use #root::runtime_support::dfir_rs as __root_dfir_rs;
-                pub use #trybuild_crate_name_ident::__staged;
+                pub use #orig_crate_name::__staged;
 
                 #[allow(unused)]
                 fn __hydro_runtime<'a>(
@@ -377,13 +331,466 @@ pub fn compile_graph_trybuild(
     source_ast
 }
 
+/// Configuration for [`compile_trybuild_example`], the shared concurrent-build
+/// entrypoint used by both the simulator and the Maelstrom deployment target.
+#[cfg(any(feature = "sim", feature = "maelstrom"))]
+pub struct ExampleBuildConfig<'a> {
+    /// The trybuild project + target directories and enabled features.
+    pub trybuild: TrybuildConfig,
+    /// The generated example base name (a content hash). Used as the per-job
+    /// directory name and, when [`Self::set_trybuild_lib_name`] is set, as the
+    /// value of the `TRYBUILD_LIB_NAME` environment variable.
+    pub bin_name: String,
+    /// A runtime feature to enable in addition to [`TrybuildConfig::features`]
+    /// (e.g. `hydro___feature_sim_runtime` or `hydro___feature_maelstrom_runtime`).
+    pub runtime_feature: &'a str,
+    /// The cargo `--example` target to build. For the simulator this is the
+    /// fixed `sim-dylib` wrapper; for Maelstrom it is the generated `bin_name`.
+    pub example_name: String,
+    /// If `Some`, override the crate type on the command line (e.g. `cdylib`
+    /// for the simulator). `None` builds a normal executable example.
+    pub crate_type: Option<&'a str>,
+    /// Whether to set `TRYBUILD_LIB_NAME` to `bin_name` (the simulator uses this
+    /// for its `include!`-based indirection).
+    pub set_trybuild_lib_name: bool,
+    /// Whether to honor the `BOLERO_FUZZER` environment variable. Only the
+    /// simulator supports fuzzing; other targets should set this to `false`.
+    pub allow_fuzz: bool,
+}
+
+/// Returns the toolchain's target libdir (where the shared `libstd` lives), memoized.
+#[cfg(any(feature = "sim", feature = "maelstrom"))]
+fn rustc_target_libdir() -> Option<String> {
+    static LIBDIR: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    LIBDIR
+        .get_or_init(|| {
+            let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_owned());
+            std::process::Command::new(rustc)
+                .args(["--print", "target-libdir"])
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| String::from_utf8(out.stdout).unwrap().trim().to_owned())
+        })
+        .clone()
+}
+
+/// Compiles a generated trybuild example against the prebuilt dylib crate,
+/// using the shared parallel-compilation machinery (per-job target dirs with
+/// symlinked shared artifacts, plus a prebuild of the dylib dependencies).
+///
+/// Returns the path to a temporary copy of the built artifact (a `cdylib` for
+/// the simulator, or an executable for Maelstrom). The copy allows the caller
+/// to hold onto the artifact independently of the shared target directory.
+#[cfg(any(feature = "sim", feature = "maelstrom"))]
+pub fn compile_trybuild_example(config: ExampleBuildConfig<'_>) -> Result<tempfile::TempPath, ()> {
+    use std::process::{Command, Stdio};
+
+    let ExampleBuildConfig {
+        trybuild,
+        bin_name,
+        runtime_feature,
+        example_name,
+        crate_type,
+        set_trybuild_lib_name,
+        allow_fuzz,
+    } = config;
+
+    let is_fuzz = allow_fuzz && std::env::var("BOLERO_FUZZER").is_ok();
+    // When RUSTFLAGS is set, our prebuild fingerprint doesn't account for it, so skip the
+    // parallel build machinery entirely and build directly into the shared target dir.
+    let has_custom_rustflags = std::env::var("RUSTFLAGS").is_ok();
+
+    // Run from dylib-examples crate which has the dylib as a dev-dependency (only if not fuzzing)
+    let crate_to_compile = if is_fuzz {
+        trybuild.project_dir.clone()
+    } else {
+        path!(trybuild.project_dir / "dylib-examples")
+    };
+
+    let (final_target_dir, _prebuild_guard, _cargo_lock) = if !has_custom_rustflags {
+        let prebuild_span =
+            tracing::debug_span!(target: "hydro_build", "prebuild", bin_name = %bin_name).entered();
+        let shared_debug = trybuild.target_dir.join("debug");
+        let jobs_dir = trybuild.target_dir.join("jobs");
+        let per_job = hydro_concurrent_cargo::setup_job_dir(&jobs_dir, &bin_name, &shared_debug);
+
+        let mut features: Vec<String> = trybuild.features.clone().unwrap_or_default();
+        features.push(runtime_feature.to_owned());
+
+        let staged_paths = vec![
+            path!(trybuild.project_dir / "src" / "__staged.rs"),
+            path!(trybuild.project_dir / "Cargo.lock"),
+            std::env::current_exe().unwrap(),
+        ];
+
+        let project_dir = trybuild.project_dir.clone();
+        let features_for_closure = features.clone();
+        let is_fuzz_for_closure = is_fuzz;
+
+        let (guard, cargo_lock) = hydro_concurrent_cargo::run_prebuild(
+            &trybuild.target_dir,
+            trybuild.project_dir.file_name().unwrap().to_str().unwrap(),
+            &features,
+            &staged_paths,
+            |prebuild_target| {
+                let features_str = features_for_closure.join(",");
+
+                // Prebuild the lib that final builds will link against, which transitively
+                // builds the trybuild dylib *as a dependency*. This matters: cargo passes
+                // `-C prefer-dynamic` to dylib crates when they are built as dependencies
+                // (linking libstd dynamically), but *not* when they are the primary build
+                // target — and the two variants share a cargo fingerprint, so whichever is
+                // built first wins. Building the dylib as a primary target would poison the
+                // cache with a statically-linked-std variant that later fails to link into
+                // examples ("cannot satisfy dependencies so `std` only shows up once").
+                //
+                // In fuzz mode, examples are compiled from the base trybuild crate directly
+                // (no dylib-examples), so prebuild the base crate's lib instead.
+                let prebuild_crate = if is_fuzz_for_closure {
+                    project_dir.clone()
+                } else {
+                    path!(project_dir / "dylib-examples")
+                };
+                let mut lib_cmd = Command::new("cargo");
+                lib_cmd.current_dir(&prebuild_crate);
+                lib_cmd.args(["build", "--locked", "--lib"]);
+                lib_cmd.args(["--target-dir", prebuild_target.to_str().unwrap()]);
+                lib_cmd.arg("--no-default-features");
+                lib_cmd.args(["--features", &features_str]);
+                lib_cmd.args(["--config", "build.incremental = false"]);
+                lib_cmd.env("STAGELEFT_TRYBUILD_BUILD_STAGED", "1");
+                let status = lib_cmd.stdin(Stdio::null()).status().unwrap();
+                if !status.success() {
+                    panic!("dep prebuild failed");
+                }
+            },
+        );
+
+        // Close the prebuild span before returning the guards: the guards are held for the
+        // entire final build, but the prebuild phase (freshness check + possible dep build)
+        // ends here.
+        drop(prebuild_span);
+        (per_job, Some(guard), Some(cargo_lock))
+    } else {
+        (trybuild.target_dir.clone(), None, None)
+    };
+
+    // Populate per-job build/ dir right before final build. Hold guard for entire build.
+    let _job_build_guard = if !has_custom_rustflags {
+        let populate_span =
+            tracing::debug_span!(target: "hydro_build", "populate_job_dir", bin_name = %bin_name)
+                .entered();
+        let shared_debug = trybuild.target_dir.join("debug");
+        let guard = hydro_concurrent_cargo::populate_job_build_dir(
+            &final_target_dir.join("debug"),
+            &shared_debug,
+        );
+        // Close the populate span here: the returned guard is held until the final build
+        // finishes, but the population work itself ends here.
+        drop(populate_span);
+        Some(guard)
+    } else {
+        None
+    };
+
+    let final_build_span =
+        tracing::debug_span!(target: "hydro_build", "final_build", bin_name = %bin_name).entered();
+    let mut command = Command::new("cargo");
+    command.current_dir(&crate_to_compile);
+    command.args([
+        "rustc",
+        if has_custom_rustflags {
+            "--locked"
+        } else {
+            "--frozen"
+        },
+    ]);
+    command.args(["--example", &example_name]);
+    command.args(["--target-dir", final_target_dir.to_str().unwrap()]);
+    // Never enable default features: the generated example gets exactly the
+    // features it needs via `--features` (plus the runtime feature). This keeps
+    // the feature set minimal and deterministic — matching what the deploy
+    // backends and the base trybuild crate (which carries the source crate's
+    // `default`) would otherwise pull in — and matters for the `is_fuzz` path
+    // that builds from the base crate directly.
+    command.arg("--no-default-features");
+    command.args([
+        "--features",
+        &trybuild
+            .features
+            .clone()
+            .into_iter()
+            .flatten()
+            .chain([runtime_feature.to_owned()])
+            .collect::<Vec<_>>()
+            .join(","),
+    ]);
+    command.args(["--config", "build.incremental = false"]);
+    if let Some(crate_type) = crate_type {
+        command.args(["--crate-type", crate_type]);
+    }
+    command.arg("--message-format=json-diagnostic-rendered-ansi");
+    command.env("STAGELEFT_TRYBUILD_BUILD_STAGED", "1");
+    if set_trybuild_lib_name {
+        command.env("TRYBUILD_LIB_NAME", &bin_name);
+    }
+
+    command.arg("--");
+
+    if cfg!(any(target_os = "linux", target_os = "macos")) {
+        let debug_path = if let Ok(target) = std::env::var("CARGO_BUILD_TARGET") {
+            path!(final_target_dir / target / "debug")
+        } else {
+            path!(final_target_dir / "debug")
+        };
+
+        // The built example links the trybuild dylib dynamically. Bake rpath entries for
+        // where cargo places it (debug/ and debug/deps/) and for the toolchain's shared
+        // libstd, so the artifact can be loaded/run without LD_LIBRARY_PATH.
+        let mut rpaths = vec![debug_path.clone(), path!(debug_path / "deps")];
+        if let Some(libdir) = rustc_target_libdir() {
+            rpaths.push(PathBuf::from(libdir));
+        }
+        for rpath in rpaths {
+            if cfg!(target_os = "macos") {
+                // On macOS rustc may invoke the linker directly (`rust-lld -flavor darwin`),
+                // which rejects `-Wl,`-wrapped arguments. Use raw ld64 syntax (`-rpath <path>`
+                // as two arguments), which the clang driver also forwards to the linker.
+                command.args([
+                    "-Clink-arg=-rpath".to_owned(),
+                    format!("-Clink-arg={}", rpath.to_str().unwrap()),
+                ]);
+            } else {
+                command.args([format!("-Clink-arg=-Wl,-rpath,{}", rpath.to_str().unwrap())]);
+            }
+        }
+
+        if cfg!(all(target_os = "linux", target_env = "gnu")) {
+            command.arg(
+                // https://github.com/rust-lang/rust/issues/91979
+                "-Clink-args=-Wl,-z,nodelete",
+            );
+        }
+    }
+
+    if allow_fuzz && let Ok(fuzzer) = std::env::var("BOLERO_FUZZER") {
+        command.env_remove("BOLERO_FUZZER");
+
+        if fuzzer == "libfuzzer" {
+            #[cfg(target_os = "macos")]
+            {
+                command.args(["-Clink-arg=-undefined", "-Clink-arg=dynamic_lookup"]);
+            }
+
+            #[cfg(target_os = "linux")]
+            {
+                command.args(["-Clink-arg=-Wl,--unresolved-symbols=ignore-all"]);
+            }
+        }
+    }
+
+    tracing::debug!(
+        target: "hydro_build",
+        "final build command (cwd={}): {:?}",
+        crate_to_compile.display(),
+        command
+    );
+
+    let mut spawned = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    let reader = std::io::BufReader::new(spawned.stdout.take().unwrap());
+    let stderr_handle = spawned.stderr.take().unwrap();
+    let stderr_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::BufReader::new(stderr_handle)
+            .read_to_string(&mut buf)
+            .unwrap();
+        buf
+    });
+
+    let mut out = Err(());
+    for message in cargo_metadata::Message::parse_stream(reader) {
+        match message.unwrap() {
+            cargo_metadata::Message::CompilerArtifact(artifact) => {
+                // unlike dylib, cdylib only exports the explicitly exported symbols
+                let is_output = artifact.target.is_example();
+
+                if is_output {
+                    let path = artifact.filenames.first().unwrap();
+                    let path_buf: PathBuf = path.clone().into();
+                    out = Ok(path_buf);
+                }
+            }
+            cargo_metadata::Message::CompilerMessage(mut msg) => {
+                // Update the path displayed to enable clicking in IDE.
+                // TODO(mingwei): deduplicate code with hydro_deploy rust_crate/build.rs
+                if let Some(rendered) = msg.message.rendered.as_mut() {
+                    let file_names = msg
+                        .message
+                        .spans
+                        .iter()
+                        .map(|s| &s.file_name)
+                        .collect::<std::collections::BTreeSet<_>>();
+                    for file_name in file_names {
+                        *rendered = rendered.replace(
+                            file_name,
+                            &format!("(full path) {}/{file_name}", trybuild.project_dir.display()),
+                        )
+                    }
+                }
+                eprintln!("{}", msg.message);
+            }
+            cargo_metadata::Message::TextLine(line) => {
+                eprintln!("{}", line);
+            }
+            cargo_metadata::Message::BuildFinished(_) => {}
+            cargo_metadata::Message::BuildScriptExecuted(_) => {}
+            msg => panic!("Unexpected message type: {:?}", msg),
+        }
+    }
+
+    spawned.wait().unwrap();
+    let stderr_output = stderr_thread.join().unwrap();
+    drop(final_build_span);
+
+    // Check for unexpected recompilations — only dylib-examples should be compiled.
+    // (Only relevant when prebuild is active, i.e. no custom RUSTFLAGS.)
+    if !has_custom_rustflags {
+        for line in stderr_output.lines() {
+            if line.contains("Compiling") && !line.contains("dylib-examples") {
+                panic!(
+                    "unexpected recompilation in final build: {line}\nfull stderr:\n{stderr_output}"
+                );
+            }
+        }
+    }
+
+    if out.is_err() {
+        panic!("final build failed to produce binary.\nstderr:\n{stderr_output}");
+    }
+
+    let out_file = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+    fs::copy(out.as_ref().unwrap(), &out_file).unwrap();
+    Ok(out_file)
+}
+
+/// Generates the inlined `__staged.rs` source for the source crate and writes it into the
+/// trybuild project, caching the (expensive) generation across test processes.
+///
+/// The staged source is a pure function of the source crate's files, and cargo rebuilds the
+/// test executable whenever those change, so the identity (path + mtime) of
+/// [`std::env::current_exe`] is a sound freshness proxy. All tests in a run share the same
+/// executable, so only the first test per test binary pays the ~1s `syn` parse +
+/// `prettyplease` unparse; the rest hit the cache. The stamp holds a single entry — the last
+/// executable to write `__staged.rs` — so a different test binary of the same crate
+/// regenerates on its first test (a no-op rewrite when sources are unchanged). Keeping old
+/// entries around would risk a stale match (e.g. an executable restored with an old mtime
+/// after another binary regenerated `__staged.rs` from different sources).
+pub(crate) fn write_staged_source_cached(source_dir: &Path, crate_name: &str, project_dir: &Path) {
+    let _span = tracing::debug_span!(target: "hydro_build", "gen_staged").entered();
+
+    let staged_path = path!(project_dir / "src" / "__staged.rs");
+    let stamp_path = path!(project_dir / ".hydro-staged-stamp");
+
+    let exe_stamp = std::env::current_exe().ok().and_then(|exe| {
+        let mtime = fs::metadata(&exe)
+            .ok()?
+            .modified()
+            .ok()?
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .ok()?
+            .as_nanos();
+        Some(format!("{}\t{}", exe.display(), mtime))
+    });
+
+    let _concurrent_test_lock = CONCURRENT_TEST_LOCK.lock().unwrap();
+
+    fs::create_dir_all(path!(project_dir / "src")).unwrap();
+
+    // Hold an exclusive lock on the stamp file for the entire check + generate: when many
+    // test processes start concurrently with a cold cache, the first one generates while the
+    // others block here and then hit the cache, instead of all doing the expensive work.
+    let mut stamp_file = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&stamp_path)
+        .unwrap();
+    stamp_file.lock().unwrap();
+
+    let mut existing_stamp = String::new();
+    if stamp_file.read_to_string(&mut existing_stamp).is_err() {
+        existing_stamp.clear();
+    }
+
+    if let Some(stamp) = &exe_stamp
+        && existing_stamp == *stamp
+        && staged_path.exists()
+    {
+        return;
+    }
+
+    let raw_toml_manifest = toml::from_str::<toml::Value>(
+        &fs::read_to_string(path!(source_dir / "Cargo.toml")).unwrap(),
+    )
+    .unwrap();
+
+    let maybe_custom_lib_path = raw_toml_manifest
+        .get("lib")
+        .and_then(|lib| lib.get("path"))
+        .and_then(|path| path.as_str());
+
+    let mut gen_staged = stageleft_tool::gen_staged_trybuild(
+        &maybe_custom_lib_path
+            .map(|s| path!(source_dir / s))
+            .unwrap_or_else(|| path!(source_dir / "src" / "lib.rs")),
+        &path!(source_dir / "Cargo.toml"),
+        crate_name,
+        Some("hydro___test".to_owned()),
+    );
+
+    gen_staged.attrs.insert(
+        0,
+        syn::parse_quote! {
+            #![allow(
+                unused,
+                ambiguous_glob_reexports,
+                clippy::suspicious_else_formatting,
+                unexpected_cfgs,
+                reason = "generated code"
+            )]
+        },
+    );
+
+    let inlined_staged = prettyplease::unparse(&gen_staged);
+
+    write_atomic(inlined_staged.as_bytes(), &staged_path).unwrap();
+
+    if let Some(stamp) = exe_stamp {
+        stamp_file.set_len(0).unwrap();
+        stamp_file.seek(SeekFrom::Start(0)).unwrap();
+        stamp_file.write_all(stamp.as_bytes()).unwrap();
+    }
+}
+
 pub fn create_trybuild()
 -> Result<(PathBuf, PathBuf, Option<Vec<String>>), trybuild_internals_api::error::Error> {
+    let _span = tracing::debug_span!(target: "hydro_build", "create_trybuild").entered();
     let Metadata {
         target_directory: target_dir,
         workspace_root: workspace,
         packages,
-    } = cargo::metadata()?;
+    } = {
+        let _span = tracing::debug_span!(target: "hydro_build", "cargo_metadata").entered();
+        cargo::metadata()?
+    };
 
     let source_dir = cargo::manifest_dir()?;
     let mut source_manifest = dependencies::get_manifest(&source_dir)?;
@@ -406,7 +813,16 @@ pub fn create_trybuild()
         }
     });
 
-    let mut features = features::find();
+    // When the example is re-executed from a test binary by `example_test` (signaled via this
+    // env var), skip feature discovery: it would pick up the *test* binary's features (e.g.
+    // test-only harness features). A real `cargo run --example` invocation has no fingerprint
+    // hash in `argv[0]`, so discovery finds nothing there; emulating that here ensures the test
+    // exercises the example the same way it actually runs.
+    let mut features = if std::env::var("RUNNING_AS_EXAMPLE_TEST").is_ok_and(|v| v == "1") {
+        None
+    } else {
+        features::find()
+    };
 
     let path_dependencies = source_manifest
         .dependencies
@@ -486,6 +902,7 @@ pub fn create_trybuild()
     };
 
     {
+        let _span = tracing::debug_span!(target: "hydro_build", "write_project_files").entered();
         let _concurrent_test_lock = CONCURRENT_TEST_LOCK.lock().unwrap();
 
         let project_lock = File::create(path!(project.dir / ".hydro-trybuild-lock"))?;
@@ -501,15 +918,16 @@ pub fn create_trybuild()
 
         write_atomic(
             prettyplease::unparse(&syn::parse_quote! {
-                #![allow(unused_imports, unused_crate_dependencies, missing_docs, non_snake_case)]
+                #![allow(unused_imports, unused_crate_dependencies, missing_docs, non_snake_case, unexpected_cfgs, unfulfilled_lint_expectations)]
 
-                pub use #crate_name_ident as __root;
+                pub mod __root {
+                    pub use #crate_name_ident::*;
+                    #[cfg(feature = "hydro___test")]
+                    pub use super::__staged;
+                }
 
                 #[cfg(feature = "hydro___test")]
                 pub mod __staged;
-
-                #[cfg(not(feature = "hydro___test"))]
-                pub use #crate_name_ident::__staged;
             })
             .as_bytes(),
             &path!(project.dir / "src" / "lib.rs"),
@@ -530,11 +948,21 @@ pub fn create_trybuild()
             proc_macro2::Span::call_site(),
         );
         write_atomic(
-            prettyplease::unparse(&syn::parse_quote! {
-                #![allow(unused_imports, unused_crate_dependencies, missing_docs, non_snake_case)]
-                pub use #trybuild_crate_name_ident::*;
-            })
-            .as_bytes(),
+            // The leading comment busts cargo's fingerprint for caches where the dylib was
+            // built as a *primary* target (statically linking libstd); it must be built as a
+            // dependency (with `-C prefer-dynamic`) for examples to link against it. The
+            // linkage variant is not part of cargo's fingerprint, so a content change is
+            // needed to force old caches to rebuild.
+            [
+                "// v2: dylib must be built as a dependency (prefer-dynamic).\n".as_bytes(),
+                prettyplease::unparse(&syn::parse_quote! {
+                    #![allow(unused_imports, unused_crate_dependencies, missing_docs, non_snake_case, unexpected_cfgs, unfulfilled_lint_expectations)]
+                    pub use #trybuild_crate_name_ident::*;
+                })
+                .as_bytes(),
+            ]
+            .concat()
+            .as_slice(),
             &path!(dylib_dir / "src" / "lib.rs"),
         )?;
 
@@ -545,9 +973,14 @@ pub fn create_trybuild()
         )
         .unwrap();
 
-        // Dylib crate Cargo.toml - only dylib crate-type, no features needed
-        // Features are enabled on the base crate directly from dylib-examples
+        // Dylib crate Cargo.toml - only dylib crate-type, with feature forwarding to base crate
         // On Windows, we currently disable dylib compilation due to https://github.com/bevyengine/bevy/pull/2016
+        let dylib_features_section = feature_names
+            .iter()
+            .map(|f| format!("{f} = [\"{project_name}/{f}\"]"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
         let dylib_manifest = format!(
             r#"[package]
 name = "{project_name}-dylib"
@@ -559,6 +992,9 @@ crate-type = ["{}"]
 
 [dependencies]
 {project_name} = {{ path = "..", default-features = false }}
+
+[features]
+{dylib_features_section}
 "#,
             serialized_edition,
             if cfg!(target_os = "windows") {
@@ -578,23 +1014,32 @@ crate-type = ["{}"]
             &path!(dylib_examples_dir / "src" / "lib.rs"),
         )?;
 
-        // Build feature forwarding for dylib-examples - forward directly to base crate
+        // Build feature forwarding for dylib-examples - forward through the (renamed) dylib crate
         let features_section = feature_names
             .iter()
             .map(|f| format!("{f} = [\"{project_name}/{f}\"]"))
             .collect::<Vec<_>>()
             .join("\n");
 
-        // Dylib-examples crate Cargo.toml - has dylib as dev-dependency, features go to base crate
+        // Dylib-examples crate Cargo.toml - depends *only* on the dylib crate, renamed to the
+        // base crate's package name so that generated examples referencing
+        // `{crate}_hydro_trybuild` resolve to the dylib. This is what makes dynamic linking
+        // actually kick in: if the base crate were also a direct dependency, rustc would
+        // statically link its rlib (and the entire dependency graph) into every example,
+        // making the per-example "final compile" link take several seconds. With only the
+        // dylib in scope, examples link against the prebuilt shared library instead.
+        //
+        // The dylib is a regular dependency (not a dev-dependency) so that prebuilding this
+        // crate's (empty) lib builds the dylib as a dependency, which is required for cargo
+        // to pass `-C prefer-dynamic` (see the prebuild in `compile_trybuild_example`).
         let dylib_examples_manifest = format!(
             r#"[package]
 name = "{project_name}-dylib-examples"
 version = "0.0.0"
 {}
 
-[dev-dependencies]
-{project_name} = {{ path = "..", default-features = false }}
-{project_name}-dylib = {{ path = "../dylib", default-features = false }}
+[dependencies]
+{project_name} = {{ package = "{project_name}-dylib", path = "../dylib", default-features = false }}
 
 [features]
 {features_section}
@@ -612,7 +1057,7 @@ crate-type = ["cdylib"]
 
         // sim-dylib.rs for the base crate and dylib-examples crate
         let sim_dylib_contents = prettyplease::unparse(&syn::parse_quote! {
-            #![allow(unused_imports, unused_crate_dependencies, missing_docs, non_snake_case)]
+            #![allow(unused_imports, unused_crate_dependencies, missing_docs, non_snake_case, unexpected_cfgs, unfulfilled_lint_expectations)]
             include!(std::concat!(env!("TRYBUILD_LIB_NAME"), ".rs"));
         });
         write_atomic(
@@ -641,11 +1086,18 @@ members = ["dylib", "dylib-examples"]
             &path!(project.dir / "Cargo.toml"),
         )?;
 
-        // Compute hash for cache invalidation (dylib and dylib-examples are functions of workspace_manifest)
-        let manifest_hash = format!("{:X}", Sha256::digest(&workspace_manifest))
-            .chars()
-            .take(8)
-            .collect::<String>();
+        // Compute hash for cache invalidation, covering all generated manifests (the dylib and
+        // dylib-examples manifests affect Cargo.lock, so they must participate in the hash)
+        let manifest_hash = {
+            let mut hasher = Sha256::new();
+            hasher.update(&workspace_manifest);
+            hasher.update(&dylib_manifest);
+            hasher.update(&dylib_examples_manifest);
+            format!("{:X}", hasher.finalize())
+                .chars()
+                .take(8)
+                .collect::<String>()
+        };
 
         let workspace_cargo_lock = path!(project.workspace / "Cargo.lock");
         let workspace_cargo_lock_contents_and_hash = if workspace_cargo_lock.exists() {
@@ -676,6 +1128,7 @@ members = ["dylib", "dylib-examples"]
         )
         .is_ok_and(|b| b)
         {
+            let _span = tracing::debug_span!(target: "hydro_build", "update_lockfile").entered();
             // this is expensive, so we only do it if the manifest changed
             if let Some((cargo_lock_contents, _)) = workspace_cargo_lock_contents_and_hash {
                 // only overwrite when the hash changed, because writing Cargo.lock must be

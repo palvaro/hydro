@@ -1,11 +1,10 @@
-use quote::{ToTokens, quote_spanned};
+use quote::quote_spanned;
 use syn::parse_quote;
 
 use super::{
-    DelayType, OperatorCategory, OperatorConstraints, OperatorWriteOutput, RANGE_0, RANGE_1,
-    WriteContextArgs,
+    OperatorCategory, OperatorConstraints,
+    OperatorWriteOutput, Persistence, RANGE_0, RANGE_1, WriteContextArgs,
 };
-use crate::graph::PortIndexValue;
 
 /// > 2 input streams, 1 output stream, no arguments.
 ///
@@ -30,7 +29,7 @@ use crate::graph::PortIndexValue;
 pub const CROSS_SINGLETON: OperatorConstraints = OperatorConstraints {
     name: "cross_singleton",
     categories: &[OperatorCategory::MultiIn],
-    persistence_args: RANGE_0,
+    persistence_args: &(0..=1),
     type_args: RANGE_0,
     hard_range_inn: &(2..=2),
     soft_range_inn: &(2..=2),
@@ -38,54 +37,47 @@ pub const CROSS_SINGLETON: OperatorConstraints = OperatorConstraints {
     soft_range_out: RANGE_1,
     num_args: 0,
     is_external_input: false,
-    has_singleton_output: false,
     flo_type: None,
     ports_inn: Some(|| super::PortListSpec::Fixed(parse_quote! { input, single })),
     ports_out: None,
-    input_delaytype_fn: |idx| match idx {
-        PortIndexValue::Path(path) if "single" == path.to_token_stream().to_string() => {
-            Some(DelayType::Stratum)
-        }
-        _else => None,
-    },
+    input_delaytype_fn: |_| None,
     write_fn: |wc @ &WriteContextArgs {
                    root,
-                   context,
-                   df_ident,
                    ident,
                    op_span,
                    inputs,
                    is_pull,
                    ..
                },
-               _diagnostics| {
+               diagnostics| {
         assert!(is_pull);
+
+        let [persistence] = wc.persistence_args(diagnostics);
 
         let item_stream = &inputs[0];
         let singleton_stream = &inputs[1];
-        let singleton_handle_ident = wc.make_ident("singleton_handle");
         let singleton_state_ident = wc.make_ident("singleton_state");
 
         let write_prologue = quote_spanned! {op_span=>
-            let #singleton_handle_ident = #df_ident.add_state(
-                ::std::cell::RefCell::new(::std::option::Option::None)
-            );
-            // Reset the value if it is a new tick. TODO(mingwei): handle other lifespans?
-            #df_ident.set_state_lifespan_hook(#singleton_handle_ident, #root::scheduled::StateLifespan::Tick, |rcell| { rcell.take(); });
+            let mut #singleton_state_ident: ::std::option::Option<_> = ::std::option::Option::None;
+        };
+
+        #[expect(clippy::single_match_else, reason = "TODO(mingwei): handle loops")]
+        let write_tick_end = match persistence {
+            Persistence::Static => Default::default(),
+            _ => quote_spanned! {op_span=>
+                #singleton_state_ident = ::std::option::Option::None;
+            },
         };
 
         let write_iterator = quote_spanned! {op_span=>
-            let mut #singleton_state_ident = unsafe {
-                // SAFETY: handle from `#df_ident.add_state(..)`.
-                #context.state_ref_unchecked(#singleton_handle_ident)
-            }.borrow_mut();
-
-            let #ident = #root::dfir_pipes::pull::Pull::cross_singleton_state(#item_stream, #singleton_stream, &mut *#singleton_state_ident);
+            let #ident = #root::dfir_pipes::pull::Pull::cross_singleton_state(#item_stream, #singleton_stream, &mut #singleton_state_ident);
         };
 
         Ok(OperatorWriteOutput {
             write_prologue,
             write_iterator,
+            write_tick_end,
             ..Default::default()
         })
     },

@@ -50,7 +50,7 @@ pub fn single_client_counter_service<'a>(
 
 ## Maintaining State with Singleton
 
-To track the counter value, you need to accumulate state across incoming requests. Hydro provides the [`Singleton`](../../reference/live-collections/singletons-optionals.md) live collection for storing a single value that can be updated over time.
+To track the counter value, you need to accumulate state across incoming requests. Hydro provides the [`Singleton`](../../reference/state-management/singletons-optionals.md) live collection for storing a single value that can be updated over time.
 
 You can create a singleton by counting the number of increment requests:
 
@@ -74,23 +74,23 @@ let increment_ack = increment_requests;
 
 Now comes the interesting part: how do you respond to get requests with the current count? The challenge is that `current_count` is a singleton that updates asynchronously as increment requests arrive, while `get_requests` is a stream that arrives independently.
 
-Hydro provides the `sliced!` macro for this purpose. It allows you to perform computations that rely on a _version_ of several live collections at some point in time. The way this version is revealed depends on the type of live collection. A `Stream` will be revealed as a **batch** of new elements at that point in time, and a `Singleton` will be revealed as a **snapshot** of the state.
+Hydro provides the `sliced!` macro for this purpose. It allows you to perform computations that rely on a _version_ of several live collections at some point in time. The way this version is revealed depends on the style of `use` statement. With `use::batch`, a `Stream` is revealed as a **batch** of new elements at that point in time, and with `use::snapshot`, a `Singleton` is revealed as a **snapshot** of the state.
 
 <CodeBlock language="rust" title={
   <Link href="https://github.com/hydro-project/hydro/tree/main/hydro_test/src/tutorials/single_client_counter_buggy.rs">src/single_client_counter.rs</Link>
 } showLineNumbers={15}>{getLines(singleClientCounterBuggySrc, 15, 17, `
 let get_response = sliced! {
-    let request_batch = use(get_requests, nondet!(/** we never observe batch boundaries */));
-    let count_snapshot = use(current_count, nondet!(/** intentional, based on when the request came in */));
+    let request_batch = use::batch(get_requests, nondet!(/** we never observe batch boundaries */));
+    let count_snapshot = use::snapshot(current_count, nondet!(/** intentional, based on when the request came in */));
 `)}</CodeBlock>
 
-The `sliced!` macro takes multiple `use` statements, using syntax inspired by React hooks. Each specifies a live collection to slice along with a non-determinism explanation, and returns the current slice. In this case:
+The `sliced!` macro takes multiple `use` statements, using syntax inspired by React hooks. Each specifies a live collection to slice, a style controlling how it is sliced (`use::batch` for streams, `use::snapshot` for singletons), and a non-determinism explanation, and returns the current slice. In this case:
 
 - `request_batch` is a batch of get requests (a `Stream<()>`)
 - `count_snapshot` is the current value of the counter at the time this batch is processed (a `Singleton<usize>`)
 
 :::info
-You'll notice the `nondet!` macro in each `use` statement. Hydro guarantees [**eventual determinism**](../../reference/live-collections/determinism.md): given the same inputs, your program will eventually produce the same outputs. However, some operations involve inherent non-determinism, such the boundaries of a batch or which snapshot of asynchronous state is observed.
+You'll notice the `nondet!` macro in each `use` statement. Hydro's type system is focused on [**eventual determinism**](../../reference/correctness/determinism.md): all safe APIs guarantee that given the same inputs, your program will eventually produce the same outputs. However, some operations involve inherent non-determinism, such the boundaries of a batch or which snapshot of asynchronous state is observed.
 
 The `nondet!` macro serves two purposes:
 1. It marks points where non-determinism occurs, making them explicit in your code
@@ -117,7 +117,7 @@ Especially in code that involves `nondet!`, it is important to write simulation 
 
 <CodeBlock language="rust" title={
   <Link href="https://github.com/hydro-project/hydro/tree/main/hydro_test/src/tutorials/single_client_counter.rs">src/single_client_counter.rs</Link>
-} showLineNumbers={32}>{getLines(singleClientCounterSrc, 32, 51, `
+} showLineNumbers={30}>{getLines(singleClientCounterSrc, 30, 49, `
 #[test]
 fn test_counter_read_after_write() {
     let mut flow = FlowBuilder::new();
@@ -142,16 +142,16 @@ If you run this test with `cargo test -- single_client_counter`, you'll see it f
 
 ```ignore
 Running Tick
-  | let request_batch = use(get_requests, nondet!(/** we never observe batch boundaries */));
-  |                        ^ releasing no items
-  | let count_snapshot = use(current_count, nondet!(/** intentional, based on when the request came in */));
-  |                         ^ releasing snapshot: 0
+  | let request_batch = use::batch(get_requests, nondet!(/** we never observe batch boundaries */));
+  |                         ^ releasing no items
+  | let count_snapshot = use::snapshot(current_count, nondet!(/** intentional, based on when the request came in */));
+  |                          ^ releasing snapshot: 0
 
 Running Tick
-  | let request_batch = use(get_requests, nondet!(/** we never observe batch boundaries */));
-  |                        ^ releasing items: [()]
-  | let count_snapshot = use(current_count, nondet!(/** intentional, based on when the request came in */));
-  |                         ^ releasing unchanged snapshot: 0
+  | let request_batch = use::batch(get_requests, nondet!(/** we never observe batch boundaries */));
+  |                         ^ releasing items: [()]
+  | let count_snapshot = use::snapshot(current_count, nondet!(/** intentional, based on when the request came in */));
+  |                          ^ releasing unchanged snapshot: 0
 
 thread ... panicked at src/single_client_counter.rs:50:
 Stream yielded unexpected message: 0
@@ -159,7 +159,7 @@ Stream yielded unexpected message: 0
 
 What went wrong? The issue is that acknowledging the increment is asynchronous with respect to snapshotting the counter. Even though the test waits for the acknowledgement before sending the get request, the counter snapshot may be an older version (we see this with the "releasing unchanged snapshot" message).
 
-When slicing a `Singleton` with `use`, the only guarantee is that each snapshot is _at least_ the same version as the last snapshot. But this snapshot may lag behind, since changes to a singleton are propagated asynchronously.
+When slicing a `Singleton` with `use::snapshot`, the only guarantee is that each snapshot is _at least_ the same version as the last snapshot. But this snapshot may lag behind, since changes to a singleton are propagated asynchronously.
 
 ## Consistent Snapshots with Atomic
 
@@ -189,7 +189,7 @@ Now, let's focus on the outputs of the counter service. It needs to release ackn
 let increment_ack = increment_request_processing.end_atomic();
 
 let get_response = sliced! {
-    let request_batch = use(get_requests, nondet!(/** we never observe batch boundaries */));
+    let request_batch = use::batch(get_requests, nondet!(/** we never observe batch boundaries */));
     let count_snapshot = use::atomic(current_count, nondet!(/** atomicity guarantees consistency wrt increments */));
     request_batch.cross_singleton(count_snapshot).map(q!(|(_, count)| count))
 };

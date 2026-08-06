@@ -14,6 +14,11 @@ on:
           - patch
           - keep
           - auto
+      pre-id:
+        description: "Pre-release identifier label (e.g. 'beta', 'alpha', 'rc'). When set, produces pre-release versions."
+        required: false
+        type: string
+        default: ""
       execute:
         description: "Actually execute and publish the release?"
         required: true
@@ -45,9 +50,11 @@ jobs:
 
       - run: |
           echo "Version bump: $BUMP"
+          echo "Pre-ID: $PRE_ID"
           echo "Execute: $EXECUTE"
         env:
           BUMP: ${{ inputs.bump }}
+          PRE_ID: ${{ inputs.pre-id }}
           EXECUTE: ${{ inputs.execute }}
 
       # https://api.github.com/users/hydro-project-bot[bot]
@@ -67,20 +74,27 @@ jobs:
         run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Install cargo-smart-release
-        run: cargo install cargo-smart-release
+        run: cargo install cargo-smart-release --git https://github.com/hydro-project/cargo-smart-release.git --rev e6f3368337a0
+
+      - name: Determine crates to publish
+        id: crates
+        run: |
+          if [ "${{ inputs.bump }}" = "auto" ] || [ "${{ inputs.bump }}" = "keep" ]; then
+            CRATES=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.publish != []) | .name' | tr '\n' ' ')
+          else
+            CRATES="dfir_rs dfir_pipes dfir_lang dfir_macro hydro_lang hydro_std hydro_deploy hydro_deploy_integration multiplatform_test"
+          fi
+          echo "list=$CRATES" >> "$GITHUB_OUTPUT"
 
       - name: Run cargo smart-release
-        # list lockstep-versioned packages at the end of this command
         run: >-
           set -eo pipefail;
-          cargo smart-release --update-crates-index
-          --no-changelog-preview --allow-fully-generated-changelogs
+          cargo smart-release --update-crates-index --no-changelog-preview
+          --allow-fully-generated-changelogs --allow-empty-release-message
           --bump ${{ inputs.bump }} --bump-dependencies auto
-          ${{ inputs.execute && '--execute' || '--no-publish' }}
-          dfir_rs dfir_pipes dfir_lang dfir_macro
-          hydro_lang hydro_std
-          hydro_deploy hydro_deploy_integration
-          multiplatform_test
+          ${{ inputs.execute && '--execute' || '' }}
+          ${{ inputs.pre-id && format('--pre-id {0}', inputs.pre-id) || '' }}
+          ${{ steps.crates.outputs.list }}
           |& tee release.log
         env:
           # Make sure to set this so the `gh` CLI works using our token.

@@ -447,6 +447,7 @@ fn add_keyed_singleton_bound_property(
             properties.insert(HydroEdgeProp::Bounded);
         }
         KeyedSingletonBoundKind::BoundedValue
+        | KeyedSingletonBoundKind::MonotonicKeys
         | KeyedSingletonBoundKind::MonotonicValue
         | KeyedSingletonBoundKind::Unbounded => {
             properties.insert(HydroEdgeProp::Unbounded);
@@ -876,7 +877,7 @@ impl HydroRoot {
                 config,
                 input,
                 None,
-                NodeLabel::with_exprs("for_each".to_owned(), vec![f.clone()]),
+                NodeLabel::with_exprs("for_each".to_owned(), vec![f.expr.clone()]),
             ),
 
             HydroRoot::SendExternal {
@@ -1118,7 +1119,10 @@ impl HydroNode {
                 cycle_id, metadata, ..
             } => build_source_node(structure, metadata, format!("cycle_source({})", cycle_id)),
 
-            HydroNode::Tee { inner, metadata } => {
+            HydroNode::Tee { inner, metadata }
+            | HydroNode::Reference {
+                inner, metadata, ..
+            } => {
                 let ptr = inner.as_ptr();
                 if let Some(&existing_id) = seen_tees.get(&ptr) {
                     return existing_id;
@@ -1128,9 +1132,14 @@ impl HydroNode {
                     .0
                     .borrow()
                     .build_graph_structure(structure, seen_tees, config);
+                let node_type = if matches!(self, HydroNode::Reference { .. }) {
+                    HydroNodeType::Aggregation
+                } else {
+                    HydroNodeType::Tee
+                };
                 let tee_id = structure.add_node_with_metadata(
                     NodeLabel::Static(extract_op_name(self.print_root())),
-                    HydroNodeType::Tee,
+                    node_type,
                     metadata,
                 );
 
@@ -1203,6 +1212,9 @@ impl HydroNode {
 
             // Transform operations with Stream edges - grouped by node/edge type
             HydroNode::Cast { inner, metadata }
+            | HydroNode::AssertIsConsistent {
+                inner, metadata, ..
+            }
             | HydroNode::DeferTick {
                 input: inner,
                 metadata,
@@ -1252,7 +1264,9 @@ impl HydroNode {
             }),
 
             // Single-expression Transform operations - grouped by node type
-            HydroNode::Map { f, input, metadata }
+            HydroNode::Map {
+                f, input, metadata, ..
+            }
             | HydroNode::Filter { f, input, metadata }
             | HydroNode::FlatMap { f, input, metadata }
             | HydroNode::FlatMapStreamBlocking { f, input, metadata }
@@ -1267,7 +1281,7 @@ impl HydroNode {
                     op_name: extract_op_name(self.print_root()),
                     node_type: HydroNodeType::Transform,
                 },
-                f,
+                &f.expr,
             ),
 
             // Single-expression Aggregation operations - grouped by node type
@@ -1282,7 +1296,7 @@ impl HydroNode {
                     op_name: extract_op_name(self.print_root()),
                     node_type: HydroNodeType::Aggregation,
                 },
-                f,
+                &f.expr,
             ),
 
             // Join-like operations with left/right edge labels - grouped by edge labeling
@@ -1389,12 +1403,14 @@ impl HydroNode {
                 acc,
                 input,
                 metadata,
+                ..
             }
             | HydroNode::FoldKeyed {
                 init,
                 acc,
                 input,
                 metadata,
+                ..
             }
             | HydroNode::Scan {
                 init,
@@ -1420,8 +1436,8 @@ impl HydroNode {
                         op_name: extract_op_name(self.print_root()),
                         node_type,
                     },
-                    init,
-                    acc,
+                    &init.expr,
+                    &acc.expr,
                 )
             }
 
@@ -1465,7 +1481,7 @@ impl HydroNode {
                 );
 
                 let node_id = structure.add_node_with_backtrace(
-                    NodeLabel::with_exprs(extract_op_name(self.print_root()), vec![f.clone()]),
+                    NodeLabel::with_exprs(extract_op_name(self.print_root()), vec![f.expr.clone()]),
                     HydroNodeType::Aggregation,
                     location_key,
                     Some(metadata.op.backtrace.clone()),
@@ -1486,8 +1502,8 @@ impl HydroNode {
             }
 
             HydroNode::Network {
-                serialize_fn,
-                deserialize_fn,
+                serialize,
+                deserialize,
                 input,
                 metadata,
                 ..
@@ -1500,12 +1516,26 @@ impl HydroNode {
                 let to_location_type = root.location_type().unwrap();
                 structure.add_location(to_location_key, to_location_type);
 
+                let has_serialize = match serialize {
+                    crate::compile::ir::NetworkSend::Custom { serialize_fn } => {
+                        serialize_fn.is_some()
+                    }
+                    // Embedded channels still convert member-id tags on the send side.
+                    crate::compile::ir::NetworkSend::Embedded { .. } => true,
+                };
+                let has_deserialize = match deserialize {
+                    crate::compile::ir::NetworkRecv::Custom { deserialize_fn } => {
+                        deserialize_fn.is_some()
+                    }
+                    crate::compile::ir::NetworkRecv::Embedded { .. } => true,
+                };
+
                 let mut label = "network(".to_owned();
-                if serialize_fn.is_some() {
+                if has_serialize {
                     label.push_str("send");
                 }
-                if deserialize_fn.is_some() {
-                    if serialize_fn.is_some() {
+                if has_deserialize {
+                    if has_serialize {
                         label.push_str(" + ");
                     }
                     label.push_str("recv");
@@ -1549,6 +1579,10 @@ impl HydroNode {
                 inner.build_graph_structure(structure, seen_tees, config)
             }
 
+            HydroNode::UnboundSingleton { inner, .. } => {
+                inner.build_graph_structure(structure, seen_tees, config)
+            }
+
             HydroNode::BeginAtomic { inner, .. } => {
                 inner.build_graph_structure(structure, seen_tees, config)
             }
@@ -1558,6 +1592,11 @@ impl HydroNode {
             }
 
             HydroNode::Chain {
+                first,
+                second,
+                metadata,
+            }
+            | HydroNode::MergeOrdered {
                 first,
                 second,
                 metadata,
@@ -1595,6 +1634,71 @@ impl HydroNode {
                 );
 
                 chain_id
+            }
+
+            HydroNode::VersionedNetworkFork {
+                senders, metadata, ..
+            } => {
+                let location_key = Some(setup_location(structure, metadata));
+                let fork_id = structure.add_node_with_backtrace(
+                    NodeLabel::Static(extract_op_name(self.print_root())),
+                    HydroNodeType::NonDeterministic,
+                    location_key,
+                    Some(metadata.op.backtrace.clone()),
+                );
+
+                for (version, sender, _serialize) in senders {
+                    let sender_id = sender.build_graph_structure(structure, seen_tees, config);
+                    let sender_metadata = sender.metadata();
+                    add_edge_with_metadata(
+                        structure,
+                        sender_id,
+                        fork_id,
+                        Some(sender_metadata),
+                        Some(metadata),
+                        Some(format!("send v{version}")),
+                    );
+                }
+
+                fork_id
+            }
+
+            HydroNode::VersionedNetwork {
+                fork,
+                version,
+                metadata,
+                ..
+            } => {
+                let ptr = fork.as_ptr();
+                let fork_id = if let Some(&existing_id) = seen_tees.get(&ptr) {
+                    existing_id
+                } else {
+                    let built = fork
+                        .0
+                        .borrow()
+                        .build_graph_structure(structure, seen_tees, config);
+                    seen_tees.insert(ptr, built);
+                    built
+                };
+
+                let branch_location = Some(setup_location(structure, metadata));
+                let branch_id = structure.add_node_with_backtrace(
+                    NodeLabel::Static(extract_op_name(self.print_root())),
+                    HydroNodeType::NonDeterministic,
+                    branch_location,
+                    Some(metadata.op.backtrace.clone()),
+                );
+
+                add_edge_with_metadata(
+                    structure,
+                    fork_id,
+                    branch_id,
+                    Some(metadata),
+                    Some(metadata),
+                    Some(format!("recv v{version}")),
+                );
+
+                branch_id
             }
 
             HydroNode::ChainFirst {

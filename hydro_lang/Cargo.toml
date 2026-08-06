@@ -1,7 +1,7 @@
 [package]
 name = "hydro_lang"
 publish = true
-version = "0.15.0"
+version = "0.17.0-alpha.4"
 documentation = "https://docs.rs/hydro_lang/"
 description = "A Rust framework for correct and performant distributed systems"
 edition = { workspace = true }
@@ -12,7 +12,8 @@ license = { workspace = true }
 workspace = true
 
 [features]
-default = []
+default = ["tokio"]
+tokio = ["dep:tokio", "dep:tokio-metrics", "dep:tokio-stream", "dep:tokio-util", "dfir_rs?/tokio"]
 stageleft_macro_entrypoint = []
 viz = [
     "build",
@@ -22,8 +23,9 @@ viz = [
     "dep:serde_json",
 ]
 deploy = [
+    "dep:tokio",
     "trybuild",
-    "deploy_integration",
+    "dep:hydro_deploy_integration",
 
     "dep:hydro_deploy",
     "dep:nameof",
@@ -31,7 +33,8 @@ deploy = [
 
 sim = [
     "trybuild",
-    "deploy_integration",
+    "dep:hydro_concurrent_cargo",
+    "dep:hydro_deploy_integration",
     "dep:bolero",
     "dep:cargo_metadata",
     "dep:dfir_rs",
@@ -40,7 +43,11 @@ sim = [
     "dep:pin-project-lite",
     "dep:tempfile",
     "dep:serde_json",
-    "dfir_rs/meta",         # affects layout of DFIR, thus the ABI
+    "dep:tokio",
+    "tokio/macros",
+    # affects layout of DFIR, thus the ABI
+    "dfir_rs/tokio",
+    "dfir_rs/meta",
 ]
 
 docker_deploy = [
@@ -52,6 +59,7 @@ docker_deploy = [
     "dep:bollard",
     "dep:http-body-util",
     "dep:nanoid",
+    "dep:regex",
     "dep:serde_json",
     "dep:tar",
 ]
@@ -65,6 +73,16 @@ ecs_deploy = [
 maelstrom = [
     "trybuild",
     "maelstrom_runtime",
+    "dep:tempfile",
+    "dep:hydro_concurrent_cargo",
+    "dep:cargo_metadata",
+]
+
+sim_runtime = [
+    "runtime_support",
+    # affects layout of DFIR, thus the ABI
+    "dfir_rs/meta",
+    "dfir_rs/tokio",
 ]
 
 # Dependencies needed to compile docker-targeted binaries with trybuild
@@ -90,13 +108,14 @@ maelstrom_runtime = [
     "dep:serde_json",
 ]
 
-embedded_runtime = ["deploy_integration", "runtime_support"]
+embedded_runtime = ["runtime_support"]
 
-deploy_integration = ["dep:hydro_deploy_integration"]
+deploy_integration = ["dep:hydro_deploy_integration", "runtime_support", "dep:tokio", "tokio/macros", "dep:serde_json"]
 build = ["dep:dfir_lang", "dep:backtrace", "dep:ctor"]
 trybuild = ["build", "dep:toml", "dep:prettyplease", "dep:stageleft_tool", "dep:trybuild-internals-api", "dep:sha2"]
-runtime_measure = ["dep:procfs"]
-runtime_support = ["dep:dfir_rs", "dep:serde_json"]
+runtime_measure = ["deploy_integration", "dep:procfs"]
+runtime_support = ["dep:dfir_rs"]
+telemetry_emf = ["tokio", "dep:serde_json", "tokio/fs", "tokio/io-util"]
 dfir_context = ["dep:dfir_rs"]
 
 [package.metadata.docs.rs]
@@ -110,13 +129,14 @@ bytes = { version = "1.1.0", features = ["serde"] }
 chrono = "0.4.42"
 clap = { version = "4.0", features = ["derive"], optional = true }
 colored = { version = "3" }
-copy_span = { path = "../copy_span", version = "^0.1.0" }
-ctor = { version = "0.2", optional = true }
-dfir_lang = { path = "../dfir_lang", version = "^0.15.0", optional = true }
-dfir_rs = { path = "../dfir_rs", version = "^0.15.0", default-features = false, optional = true }
+copy_span = { path = "../copy_span", version = "^0.1.1" }
+ctor = { version = "1", default-features = false, features = ["std"], optional = true }
+dfir_lang = { path = "../dfir_lang", version = "^0.17.0-alpha.3", optional = true }
+dfir_rs = { path = "../dfir_rs", version = "^0.17.0-alpha.4", default-features = false, optional = true }
 futures = "0.3.0"
-hydro_deploy = { path = "../hydro_deploy/core", version = "^0.15.0", optional = true }
-hydro_deploy_integration = { path = "../hydro_deploy/hydro_deploy_integration", version = "^0.15.0", optional = true }
+hydro_concurrent_cargo = { path = "../hydro_concurrent_cargo", version = "^0.1.0-alpha.0", optional = true }
+hydro_deploy = { path = "../hydro_deploy/core", version = "^0.17.0-alpha.3", optional = true }
+hydro_deploy_integration = { path = "../hydro_deploy/hydro_deploy_integration", version = "^0.17.0-alpha.2", optional = true }
 nameof = { version = "1.0.0", optional = true }
 prettyplease = { version = "0.2.0", features = ["verbatim"], optional = true }
 proc-macro-crate = "3.3"
@@ -125,22 +145,17 @@ quote = "1.0.35"
 sealed = "0.6.0"
 serde = { version = "1.0.197", features = ["derive"] }
 sha2 = { version = "0.10.0", optional = true }
-sinktools = { path = "../sinktools", version = "^0.0.1" }
+sinktools = { path = "../sinktools", version = "^0.2.0-alpha.3" }
 slotmap = { version = "1.1.0", features = ["serde"] }
 stageleft_tool = { workspace = true, optional = true }
 stageleft.workspace = true
-syn = { version = "2.0.46", features = [
-    "parsing",
-    "extra-traits",
-    "visit-mut",
-    "visit",
-] }
-tokio = "1.29.0"
-tokio-metrics = "0.4.6"
+syn = { version = "2.0.46", features = [ "parsing", "extra-traits" ] }
+tokio = { version = "1.29.0", optional = true }
+tokio-metrics = { version = "0.4.6", optional = true }
 tokio-stream = { version = "0.1.3", default-features = false, features = [
     "time",
-] }
-tokio-util = { version = "0.7.5", features = ["codec"] }
+], optional = true }
+tokio-util = { version = "0.7.5", features = ["codec"], optional = true }
 toml = { version = "0.9", optional = true }
 tracing = "0.1.37"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
@@ -159,17 +174,17 @@ bollard = { version = "0.19.4", default-features = false, features = [
     "pipe",
 ], optional = true }
 http-body-util = { version = "0.1", optional = true }
-nanoid = { version = "0.4.0", optional = true }
+nanoid = { version = "0.5", optional = true }
 tar = { version = "0.4", optional = true }
 
 # optional dependencies for ECS
-aws-config = { version = "*", optional = true, default-features = false, features = [ "rt-tokio", "default-https-client" ] }
-aws-sdk-ecs = { version = "*", optional = true, default-features = false }
-base64 = { version = "*", optional = true }
+aws-config = { version = "1.8.0", optional = true, default-features = false, features = [ "rt-tokio", "default-https-client" ] }
+aws-sdk-ecs = { version = "1.112.0", optional = true, default-features = false }
+base64 = { version = "0.21.0", optional = true }
 regex = { version = "1.12.2", optional = true }
 
 # For the simulator
-bolero = { package = "bolero-hydro", version = "0.13.5", optional = true }
+bolero = { package = "bolero-hydro", version = "0.13.7", optional = true }
 cargo_metadata = { version = "0.18.0", optional = true }
 indenter = { version = "0.3", optional = true }
 libloading = { version = "0.8", optional = true }
@@ -179,18 +194,17 @@ tempfile = { version = "3", optional = true }
 # coax cargo-smart-release into publishing this crate.
 # https://github.com/hydro-project/hydro/blob/main/RELEASING.md#addendum-adding-new-crates
 # https://github.com/GitoxideLabs/cargo-smart-release/issues/36
-hydro_build_utils = { path = "../hydro_build_utils", version = "^0.0.1", optional = true }
+hydro_build_utils = { path = "../hydro_build_utils", version = "^0.1.1-alpha.0", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 procfs = { version = "0.17.0", optional = true }
 
 [build-dependencies]
 stageleft_tool.workspace = true
-hydro_build_utils = { path = "../hydro_build_utils", version = "^0.0.1" }
+hydro_build_utils = { path = "../hydro_build_utils", version = "^0.1.1-alpha.0" }
 
 [dev-dependencies]
-ctor = "0.2"
-hydro_build_utils = { path = "../hydro_build_utils", version = "^0.0.1", features = ["insta"] }
+ctor = { version = "1", default-features = false, features = ["std"] }
+hydro_build_utils = { path = "../hydro_build_utils", version = "^0.1.1-alpha.0", features = ["insta", "trybuild"] }
 tokio-test = "0.4.4"
-trybuild = "1"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }

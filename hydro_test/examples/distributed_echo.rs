@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use futures::{SinkExt, StreamExt};
 use hydro_deploy::{AwsNetwork, Deployment};
+use hydro_lang::deploy::TrybuildHost;
 use hydro_lang::prelude::FlowBuilder;
 use hydro_lang::telemetry;
 use hydro_test::distributed::distributed_echo::distributed_echo;
@@ -62,9 +63,9 @@ where
     assert_eq!(response, 7);
 }
 
-#[cfg(feature = "docker")]
+#[cfg(feature = "test_docker")]
 async fn docker() {
-    use hydro_lang::deploy::{DockerDeploy, DockerNetwork};
+    use hydro_lang::deploy::{DockerDeploy, DockerNetwork, LinuxCompileType};
 
     telemetry::initialize_tracing_with_filter(
         tracing_subscriber::EnvFilter::try_new("trace,hyper=off").unwrap(),
@@ -84,16 +85,32 @@ async fn docker() {
     let config = vec![r#"profile.dev.strip="symbols""#.to_owned()];
 
     let nodes = builder
-        .with_process(&p1, deployment.add_localhost_docker(None, config.clone()))
+        .with_process(
+            &p1,
+            deployment
+                .add_localhost_docker(None, config.clone())
+                .features(["tokio"]),
+        )
         .with_cluster(
             &c2,
-            deployment.add_localhost_docker_cluster(None, config.clone(), CLUSTER_SIZE),
+            deployment
+                .add_localhost_docker_cluster(None, config.clone(), CLUSTER_SIZE)
+                .features(["tokio"]),
         )
         .with_cluster(
             &c3,
-            deployment.add_localhost_docker_cluster(None, config.clone(), CLUSTER_SIZE),
+            deployment
+                .add_localhost_docker_cluster(None, config.clone(), CLUSTER_SIZE)
+                .features(["tokio"]),
         )
-        .with_process(&p4, deployment.add_localhost_docker(None, config.clone()))
+        .with_process(
+            &p4,
+            deployment
+                .add_localhost_docker(None, config.clone())
+                .base_image("debian:bookworm-slim")
+                .linux_compile_type(LinuxCompileType::Glibc)
+                .features(["tokio"]),
+        )
         .with_external(&external, deployment.add_external("external".to_owned()))
         .deploy(&mut deployment);
 
@@ -128,10 +145,24 @@ async fn localhost() {
     let bidi_port = distributed_echo(&external, &p1, &c2, &c3, &p4);
 
     let nodes = builder
-        .with_process(&p1, deployment.Localhost())
-        .with_cluster(&c2, (0..CLUSTER_SIZE).map(|_| deployment.Localhost()))
-        .with_cluster(&c3, (0..CLUSTER_SIZE).map(|_| deployment.Localhost()))
-        .with_process(&p4, deployment.Localhost())
+        .with_process(
+            &p1,
+            TrybuildHost::new(deployment.Localhost()).features(["tokio"]),
+        )
+        .with_cluster(
+            &c2,
+            (0..CLUSTER_SIZE)
+                .map(|_| TrybuildHost::new(deployment.Localhost()).features(["tokio"])),
+        )
+        .with_cluster(
+            &c3,
+            (0..CLUSTER_SIZE)
+                .map(|_| TrybuildHost::new(deployment.Localhost()).features(["tokio"])),
+        )
+        .with_process(
+            &p4,
+            TrybuildHost::new(deployment.Localhost()).features(["tokio"]),
+        )
         .with_external(&external, deployment.Localhost())
         .deploy(&mut deployment);
 
@@ -215,8 +246,8 @@ async fn aws() {
     println!("successfully deployed and cleaned up");
 }
 
-#[cfg(feature = "ecs")]
-async fn cdk_export(output_path: PathBuf) {
+#[cfg(feature = "test_ecs")]
+async fn export_manifest(output_path: PathBuf) {
     use hydro_lang::deploy::EcsDeploy;
 
     telemetry::initialize_tracing_with_filter(tracing_subscriber::EnvFilter::try_new(
@@ -241,7 +272,7 @@ async fn cdk_export(output_path: PathBuf) {
         .with_external(&external, deployment.add_external("external".to_owned()))
         .deploy(&mut deployment);
 
-    let manifest = deployment.export_for_cdk(&nodes);
+    let manifest = deployment.export(&nodes);
 
     tokio::fs::create_dir_all(&output_path).await.unwrap();
     let manifest_path = output_path.join("hydro-manifest.json");
@@ -250,18 +281,46 @@ async fn cdk_export(output_path: PathBuf) {
         .await
         .unwrap();
 
-    println!("CDK export complete!");
+    println!("Export complete!");
     println!("Manifest written to: {}", manifest_path.display());
+
+    // Build each trybuild binary to verify the generated code compiles.
+    for build in manifest
+        .processes
+        .values()
+        .map(|p| &p.build)
+        .chain(manifest.clusters.values().map(|c| &c.build))
+    {
+        println!("Building trybuild binary: {}", build.bin_name);
+        let status = std::process::Command::new("cargo")
+            .args(["build", "--locked", "--example", &build.bin_name])
+            .args(["--target-dir", &build.target_dir])
+            .args(["--features", &build.features.join(",")])
+            .args([
+                "--manifest-path",
+                &format!("{}/Cargo.toml", build.project_dir),
+            ])
+            .env("STAGELEFT_TRYBUILD_BUILD_STAGED", "1")
+            .status()
+            .expect("failed to invoke cargo build");
+        assert!(
+            status.success(),
+            "cargo build failed for {}",
+            build.bin_name
+        );
+    }
+
+    println!("All trybuild binaries compiled successfully.");
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
 enum DeployMode {
-    #[cfg(feature = "docker")]
+    #[cfg(feature = "test_docker")]
     Docker,
     Localhost,
     Aws,
-    #[cfg(feature = "ecs")]
-    CdkExport,
+    #[cfg(feature = "test_ecs")]
+    Export,
 }
 
 #[derive(Parser, Debug)]
@@ -269,7 +328,7 @@ struct Args {
     #[clap(long, value_enum)]
     mode: DeployMode,
 
-    /// Output directory for CDK export (only used with --mode cdk-export)
+    /// Output directory for export (only used with --mode export)
     #[clap(long, default_value = "./hydro-assets")]
     output: PathBuf,
 }
@@ -279,15 +338,16 @@ async fn main() {
     let args = Args::parse();
 
     match args.mode {
-        #[cfg(feature = "docker")]
+        #[cfg(feature = "test_docker")]
         DeployMode::Docker => docker().await,
         DeployMode::Aws => aws().await,
         DeployMode::Localhost => localhost().await,
-        #[cfg(feature = "ecs")]
-        DeployMode::CdkExport => cdk_export(args.output).await,
+        #[cfg(feature = "test_ecs")]
+        DeployMode::Export => export_manifest(args.output).await,
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn test_distributed_echo_example_localhost() {
     use example_test::run_current_example;
@@ -296,11 +356,21 @@ fn test_distributed_echo_example_localhost() {
     run.read_string("successfully deployed and cleaned up");
 }
 
-#[cfg(feature = "docker")]
+#[cfg(all(target_os = "linux", feature = "test_docker"))]
 #[test]
 fn test_distributed_echo_example_docker() {
     use example_test::run_current_example;
 
     let mut run = run_current_example!("--mode docker");
     run.read_string("successfully deployed and cleaned up");
+}
+
+#[cfg(all(target_os = "linux", feature = "test_ecs"))]
+#[test]
+fn test_distributed_echo_example_export() {
+    use example_test::run_current_example;
+
+    let mut run = run_current_example!("--mode export --output /tmp/hydro-test-export");
+    run.read_string("All trybuild binaries compiled successfully.");
+    let _ = std::fs::remove_dir_all("/tmp/hydro-test-export");
 }

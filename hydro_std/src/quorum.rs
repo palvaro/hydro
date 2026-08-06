@@ -1,13 +1,12 @@
 use std::hash::Hash;
 
 use hydro_lang::live_collections::stream::{NoOrder, Ordering};
-use hydro_lang::location::{Location, NoTick};
+use hydro_lang::location::Location;
 use hydro_lang::prelude::*;
 
-#[expect(clippy::type_complexity, reason = "stream types with ordering")]
 pub fn collect_quorum_with_response<
     'a,
-    L: Location<'a> + NoTick,
+    L: Location<'a>,
     Order: Ordering,
     K: Clone + Eq + Hash,
     V: Clone,
@@ -21,7 +20,7 @@ pub fn collect_quorum_with_response<
     Stream<(K, E), L, Unbounded, Order>,
 ) {
     let quorums = sliced! {
-        let new_inputs = use(responses.clone(), nondet!(
+        let new_inputs = use::batch(responses.clone(), nondet!(
             /// We always persist values that have not reached quorum, so even
             /// with arbitrary batching we always produce deterministic quorum results.
         ));
@@ -79,7 +78,7 @@ pub fn collect_quorum_with_response<
     };
 
     (
-        quorums,
+        quorums.assert_has_consistency_of(manual_proof!(/** TODO */)),
         responses.filter_map(q!(move |(key, res)| match res {
             Ok(_) => None,
             Err(e) => Some((key, e)),
@@ -87,14 +86,7 @@ pub fn collect_quorum_with_response<
     )
 }
 
-#[expect(clippy::type_complexity, reason = "stream types with ordering")]
-pub fn collect_quorum<
-    'a,
-    L: Location<'a> + NoTick,
-    Order: Ordering,
-    K: Clone + Eq + Hash,
-    E: Clone,
->(
+pub fn collect_quorum<'a, L: Location<'a>, Order: Ordering, K: Clone + Eq + Hash, E: Clone>(
     responses: Stream<(K, Result<(), E>), L, Unbounded, Order>,
     min: usize,
     max: usize,
@@ -103,7 +95,7 @@ pub fn collect_quorum<
     Stream<(K, E), L, Unbounded, Order>,
 ) {
     let just_reached_quorum = sliced! {
-        let new_inputs = use(responses.clone(), nondet!(
+        let new_inputs = use::batch(responses.clone(), nondet!(
             /// We always persist values that have not reached quorum, so even
             /// with arbitrary batching we always produce deterministic quorum results.
         ));
@@ -155,7 +147,7 @@ pub fn collect_quorum<
     };
 
     (
-        just_reached_quorum,
+        just_reached_quorum.assert_has_consistency_of(manual_proof!(/** TODO */)),
         responses.filter_map(q!(move |(key, res)| match res {
             Ok(_) => None,
             Err(e) => Some((key, e)),

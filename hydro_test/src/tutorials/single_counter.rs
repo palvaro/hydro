@@ -2,7 +2,6 @@ use hydro_lang::prelude::*;
 
 pub struct CounterServer;
 
-#[expect(clippy::type_complexity, reason = "multiple outputs")]
 pub fn single_counter_service<'a>(
     increment_requests: KeyedStream<u32, (), Process<'a, CounterServer>>,
     get_requests: KeyedStream<u32, (), Process<'a, CounterServer>>,
@@ -15,7 +14,7 @@ pub fn single_counter_service<'a>(
     let increment_ack = increment_request_processing.end_atomic();
 
     let get_response = sliced! {
-        let request_batch = use(get_requests, nondet!(/** we never observe batch boundaries */));
+        let request_batch = use::batch(get_requests, nondet!(/** we never observe batch boundaries */));
         let count_snapshot = use::atomic(current_count, nondet!(/** atomicity guarantees consistency wrt increments */));
 
         request_batch.cross_singleton(count_snapshot).map(q!(|(_, count)| count))
@@ -26,8 +25,6 @@ pub fn single_counter_service<'a>(
 
 #[cfg(test)]
 mod tests {
-    use hydro_lang::prelude::*;
-
     use super::*;
 
     #[test]

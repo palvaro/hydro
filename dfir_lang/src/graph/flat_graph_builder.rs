@@ -10,12 +10,13 @@ use quote::ToTokens;
 use syn::spanned::Spanned;
 use syn::{Error, Ident, ItemUse};
 
-use super::ops::next_iteration::NEXT_ITERATION;
-use super::ops::{FloType, Persistence};
-use super::{DfirGraph, GraphEdgeId, GraphLoopId, GraphNode, GraphNodeId, PortIndexValue};
 use crate::diagnostic::{Diagnostic, Diagnostics, Level};
-use crate::graph::graph_algorithms;
-use crate::graph::ops::{PortListSpec, RangeTrait};
+use crate::graph::meta_graph::ResolvedHandoffRef;
+use crate::graph::ops::{DelayType, FloType, Persistence, PortListSpec, RangeTrait};
+use crate::graph::{
+    DfirGraph, GraphEdgeId, GraphLoopId, GraphNode, GraphNodeId, HandoffKind, PortIndexValue,
+    graph_algorithms,
+};
 use crate::parse::{DfirCode, DfirStatement, Operator, Pipeline};
 use crate::pretty_span::PrettySpan;
 
@@ -136,6 +137,21 @@ impl FlatGraphBuilder {
     /// Add a single [`DfirStatement`] line to this [`DfirGraph`] in the root context.
     pub fn add_statement(&mut self, stmt: DfirStatement) {
         self.add_statement_internal(stmt, None, None);
+    }
+
+    /// Programmatically create a new `loop { ... }` context, with the given parent loop context
+    /// (or `None` for a root-level loop).
+    ///
+    /// The returned [`GraphLoopId`] can be passed as the `current_loop` argument of
+    /// [`Self::add_dfir`] / [`Self::append_assign_pipeline`] to place statements inside the loop,
+    ///
+    /// # Panics
+    /// Panics if `parent_loop` is a loop not belonging to this instance.
+    /// across multiple calls. This is the programmatic equivalent of a
+    /// [`DfirStatement::Loop`] block in the surface syntax, but allows the loop body to be built
+    /// up incrementally.
+    pub fn insert_loop(&mut self, parent_loop: Option<GraphLoopId>) -> GraphLoopId {
+        self.flat_graph.insert_loop(parent_loop)
     }
 
     /// Add a single [`DfirStatement`] line to this [`DfirGraph`] with given configuration.
@@ -388,8 +404,14 @@ impl FlatGraphBuilder {
     fn finalize_connect_operator_links(&mut self) {
         // `->` edges
         for Ends { out, inn } in std::mem::take(&mut self.links) {
-            let out_opt = self.helper_resolve_name(out, false);
-            let inn_opt = self.helper_resolve_name(inn, true);
+            let out_opt = Self::helper_resolve_name(
+                &mut self.varname_ends,
+                out,
+                false,
+                &mut self.diagnostics,
+            );
+            let inn_opt =
+                Self::helper_resolve_name(&mut self.varname_ends, inn, true, &mut self.diagnostics);
             // `None` already have errors in `self.diagnostics`.
             if let (Some((out_port, out_node)), Some((inn_port, inn_node))) = (out_opt, inn_opt) {
                 let _ = self.finalize_connect_operators(out_port, out_node, inn_port, inn_node);
@@ -401,17 +423,22 @@ impl FlatGraphBuilder {
             if let GraphNode::Operator(operator) = self.flat_graph.node(node_id) {
                 let singletons_referenced = operator
                     .singletons_referenced
-                    .clone()
-                    .into_iter()
+                    .iter()
                     .map(|singleton_ref| {
                         let port_det = self
                             .varname_ends
-                            .get(&singleton_ref)
+                            .get(&singleton_ref.ident)
                             .filter(|varname_info| !varname_info.illegal_cycle)
                             .map(|varname_info| &varname_info.ends)
                             .and_then(|ends| ends.out.as_ref())
                             .cloned();
-                        if let Some((_port, node_id)) = self.helper_resolve_name(port_det, false) {
+                        let resolved_node_id = if let Some((_port, node_id)) =
+                            Self::helper_resolve_name(
+                                &mut self.varname_ends,
+                                port_det,
+                                false,
+                                &mut self.diagnostics,
+                            ) {
                             Some(node_id)
                         } else {
                             self.diagnostics.push(Diagnostic::spanned(
@@ -419,16 +446,33 @@ impl FlatGraphBuilder {
                                 Level::Error,
                                 format!(
                                     "Cannot find referenced name `{}`; name was never assigned.",
-                                    singleton_ref
+                                    singleton_ref.ident
                                 ),
                             ));
                             None
+                        };
+                        ResolvedHandoffRef {
+                            node_id: resolved_node_id,
+                            is_mut: singleton_ref.token_mut.is_some(),
+                            access_group: singleton_ref.access_group.as_ref().and_then(
+                                |(_, lit_int)| match lit_int.base10_parse::<u32>() {
+                                    Ok(n) => Some(n),
+                                    Err(e) => {
+                                        self.diagnostics.push(Diagnostic::spanned(
+                                            lit_int.span(),
+                                            Level::Error,
+                                            format!("Access group is not a valid `u32`: {}", e),
+                                        ));
+                                        None
+                                    }
+                                },
+                            ),
                         }
                     })
                     .collect();
 
                 self.flat_graph
-                    .set_node_singleton_references(node_id, singletons_referenced);
+                    .set_node_handoff_references(node_id, singletons_referenced);
             }
         }
     }
@@ -440,9 +484,10 @@ impl FlatGraphBuilder {
     ///
     /// `is_in` set to `true` means the _input_ side will be returned. `false` means the _output_ side will be returned.
     fn helper_resolve_name(
-        &mut self,
+        varname_ends: &mut BTreeMap<Ident, VarnameInfo>,
         mut port_det: Option<(PortIndexValue, GraphDet)>,
         is_in: bool,
+        diagnostics: &mut Diagnostics,
     ) -> Option<(PortIndexValue, GraphNodeId)> {
         const BACKUP_RECURSION_LIMIT: usize = 1024;
 
@@ -453,8 +498,8 @@ impl FlatGraphBuilder {
                     return Some((port, node_id));
                 }
                 (port, GraphDet::Undetermined(ident)) => {
-                    let Some(varname_info) = self.varname_ends.get_mut(&ident) else {
-                        self.diagnostics.push(Diagnostic::spanned(
+                    let Some(varname_info) = varname_ends.get_mut(&ident) else {
+                        diagnostics.push(Diagnostic::spanned(
                             ident.span(),
                             Level::Error,
                             format!("Cannot find name `{}`; name was never assigned.", ident),
@@ -469,7 +514,7 @@ impl FlatGraphBuilder {
                     if cycle_found || varname_info.illegal_cycle {
                         let len = names.len();
                         for (i, name) in names.into_iter().enumerate() {
-                            self.diagnostics.push(Diagnostic::spanned(
+                            diagnostics.push(Diagnostic::spanned(
                                 name.span(),
                                 Level::Error,
                                 format!(
@@ -481,7 +526,7 @@ impl FlatGraphBuilder {
                             ));
                             // Set value as `Err(())` to trigger `name_ends_result.is_err()`
                             // diagnostics above if the name is referenced in the future.
-                            self.varname_ends.get_mut(&name).unwrap().illegal_cycle = true;
+                            varname_ends.get_mut(&name).unwrap().illegal_cycle = true;
                         }
                         return None;
                     }
@@ -495,7 +540,7 @@ impl FlatGraphBuilder {
                         &varname_info.ends.out
                     };
                     port_det = Self::helper_combine_end(
-                        &mut self.diagnostics,
+                        diagnostics,
                         prev.clone(),
                         port,
                         if is_in { "input" } else { "output" },
@@ -503,7 +548,7 @@ impl FlatGraphBuilder {
                 }
             }
         }
-        self.diagnostics.push(Diagnostic::spanned(
+        diagnostics.push(Diagnostic::spanned(
             Span::call_site(),
             Level::Error,
             format!(
@@ -596,6 +641,39 @@ impl FlatGraphBuilder {
     /// Validates that operators have valid number of inputs, outputs, & arguments.
     /// Adds errors (and warnings) to `self.diagnostics`.
     fn check_operator_errors(&mut self) {
+        /// Returns true if an error was found.
+        fn emit_arity_error(
+            op_span: Span,
+            op_name: &str,
+            is_in: bool,
+            is_hard: bool,
+            degree: usize,
+            range: &dyn RangeTrait<usize>,
+            diagnostics: &mut Diagnostics,
+        ) -> bool {
+            let message = format!(
+                "`{}` {} have {} {}, actually has {}.",
+                op_name,
+                if is_hard { "must" } else { "should" },
+                range.human_string(),
+                if is_in { "input(s)" } else { "output(s)" },
+                degree,
+            );
+            let out_of_range = !range.contains(&degree);
+            if out_of_range {
+                diagnostics.push(Diagnostic::spanned(
+                    op_span,
+                    if is_hard {
+                        Level::Error
+                    } else {
+                        Level::Warning
+                    },
+                    message,
+                ));
+            }
+            out_of_range
+        }
+
         for (node_id, node) in self.flat_graph.nodes() {
             match node {
                 GraphNode::Operator(operator) => {
@@ -621,39 +699,6 @@ impl FlatGraphBuilder {
                     }
 
                     // Check input/output (port) arity
-                    /// Returns true if an error was found.
-                    fn emit_arity_error(
-                        op_span: Span,
-                        op_name: &str,
-                        is_in: bool,
-                        is_hard: bool,
-                        degree: usize,
-                        range: &dyn RangeTrait<usize>,
-                        diagnostics: &mut Diagnostics,
-                    ) -> bool {
-                        let message = format!(
-                            "`{}` {} have {} {}, actually has {}.",
-                            op_name,
-                            if is_hard { "must" } else { "should" },
-                            range.human_string(),
-                            if is_in { "input(s)" } else { "output(s)" },
-                            degree,
-                        );
-                        let out_of_range = !range.contains(&degree);
-                        if out_of_range {
-                            diagnostics.push(Diagnostic::spanned(
-                                op_span,
-                                if is_hard {
-                                    Level::Error
-                                } else {
-                                    Level::Warning
-                                },
-                                message,
-                            ));
-                        }
-                        out_of_range
-                    }
-
                     let inn_degree = self.flat_graph.node_degree_in(node_id);
                     let _ = emit_arity_error(
                         operator.span(),
@@ -794,40 +839,117 @@ impl FlatGraphBuilder {
                         &mut self.diagnostics,
                     );
 
-                    // Check that singleton references actually reference *stateful* operators.
+                    // Check that singleton references actually reference valid targets.
                     {
-                        let singletons_resolved =
-                            self.flat_graph.node_singleton_references(node_id);
-                        for (singleton_node_id, singleton_ident) in singletons_resolved
+                        let singletons_resolved = self.flat_graph.node_handoff_references(node_id);
+                        for (resolved_ref, singleton_ref_token) in singletons_resolved
                             .iter()
                             .zip_eq(&*operator.singletons_referenced)
                         {
-                            let &Some(singleton_node_id) = singleton_node_id else {
+                            let Some(singleton_node_id) = resolved_ref.node_id else {
                                 // Error already emitted by `connect_operator_links`, "Cannot find referenced name...".
                                 continue;
                             };
+                            // Handoff nodes are valid reference targets.
+                            if matches!(
+                                self.flat_graph.node(singleton_node_id),
+                                GraphNode::Handoff { .. },
+                            ) {
+                                continue;
+                            }
                             let Some(ref_op_inst) = self.flat_graph.node_op_inst(singleton_node_id)
                             else {
                                 // Error already emitted by `insert_node_op_insts_all`.
                                 continue;
                             };
                             let ref_op_constraints = ref_op_inst.op_constraints;
-                            if !ref_op_constraints.has_singleton_output {
-                                self.diagnostics.push(Diagnostic::spanned(
-                                    singleton_ident.span(),
-                                    Level::Error,
-                                    format!(
-                                        "Cannot reference operator `{}`. Only operators with singleton state can be referenced.",
-                                        ref_op_constraints.name,
-                                    ),
-                                ));
-                            }
+                            self.diagnostics.push(Diagnostic::spanned(
+                                singleton_ref_token.span(),
+                                Level::Error,
+                                format!(
+                                    "Cannot reference operator `{}`. Use `singleton()`, `optional()`, or `handoff()` to create a referenceable name.",
+                                    ref_op_constraints.name,
+                                ),
+                            ));
                         }
                     }
                 }
-                GraphNode::Handoff { .. } => todo!("Node::Handoff"),
+                GraphNode::Handoff { kind, src_span, .. } => {
+                    // Validate arity: handoff must have exactly 1 input and 1 output.
+                    let op_name = match kind {
+                        HandoffKind::Vec => "handoff",
+                        HandoffKind::Singleton => "singleton",
+                        HandoffKind::Optional => "optional",
+                    };
+                    let inn_degree = self.flat_graph.node_degree_in(node_id);
+                    emit_arity_error(
+                        *src_span,
+                        op_name,
+                        true,
+                        true,
+                        inn_degree,
+                        &(1..=1),
+                        &mut self.diagnostics,
+                    );
+                    let out_degree = self.flat_graph.node_degree_out(node_id);
+                    emit_arity_error(
+                        *src_span,
+                        op_name,
+                        false,
+                        true,
+                        out_degree,
+                        &(0..=1), // Handoffs may be no-output, for use only by ref.
+                        &mut self.diagnostics,
+                    );
+                }
                 GraphNode::ModuleBoundary { .. } => {
                     // Module boundaries don't require any checking.
+                }
+            }
+        }
+
+        // Validate singleton references.
+        // All singleton references must have unambiguous group orderings.
+        // Rules:
+        // 1. If any singleton reference has an explicit group number, they all must have one.
+        // 2. Every `#mut` must be in its own group.
+        {
+            let refs_by_target = self.flat_graph.node_handoff_reference_groups();
+            // For each singleton, check the groups.
+            for (_singleton, groups) in refs_by_target {
+                // Rule 1. If any singleton reference has an explicit group number, they all must have one.
+                if 1 < groups.len()
+                    && let Some(ungrouped) = groups.get(&None)
+                {
+                    for &(_src_node, r, span) in ungrouped {
+                        self.diagnostics.push(Diagnostic::spanned(
+                            span,
+                            Level::Error,
+                            format!(
+                                "Must use an explicit group `#{{N}}{}` to reference a singleton when other references use explicit groups.",
+                                if r.is_mut { " mut" } else { "" },
+                            ),
+                        ));
+                    }
+                }
+                // Rule 2. Every `#mut` must be in its own group.
+                for (group_idx, group) in groups {
+                    if 1 < group.len() && group.iter().any(|(_, r, _)| r.is_mut) {
+                        let group_str = if let Some(n) = group_idx {
+                            format!("`#{{{}}}`", n)
+                        } else {
+                            "<default>".to_owned()
+                        };
+                        for (_src_node, _mut_r, span) in
+                            group.into_iter().filter(|(_, r, _)| r.is_mut)
+                        {
+                            self.diagnostics.push(Diagnostic::spanned(
+                                span,
+                                Level::Error,
+                                format!("Mutable singleton references must be the only one in their access group, but group {} has multiple.", group_str),
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -836,7 +958,7 @@ impl FlatGraphBuilder {
     /// Warns about unused port indexing referenced in [`Self::varname_ends`].
     /// https://github.com/hydro-project/hydro/issues/1108
     fn warn_unused_port_indexing(&mut self) {
-        for (_ident, varname_info) in self.varname_ends.iter() {
+        for varname_info in self.varname_ends.values() {
             if !varname_info.inn_used {
                 Self::helper_check_unused_port(&mut self.diagnostics, &varname_info.ends, true);
             }
@@ -1027,7 +1149,7 @@ impl FlatGraphBuilder {
                         ));
                     }
                 }
-                Some(FloType::Windowing) => {
+                Some(FloType::Windowing | FloType::WindowingLazy) => {
                     if !is_input {
                         self.diagnostics.push(Diagnostic::spanned(
                             span,
@@ -1051,44 +1173,33 @@ impl FlatGraphBuilder {
                         ));
                     }
                 }
-                Some(FloType::NextIteration) => {
-                    // Must be in a loop context.
-                    if loop_id.is_none() {
-                        self.diagnostics.push(Diagnostic::spanned(
-                            span,
-                            Level::Error,
-                            format!(
-                                "Operator `{}(...)` must be within a `loop {{ ... }}` context.",
-                                op_inst.op_constraints.name
-                            ),
-                        ));
-                    }
-                }
                 Some(FloType::Source) => {
                     // Handled above.
                 }
             }
         }
 
-        // Must be a DAG (excluding `next_iteration()` operators).
+        // Must be a DAG (excluding back-edge operators like `defer_tick` / `defer_tick_lazy`).
         // TODO(mingwei): Nested loop blocks should count as a single node.
         // But this doesn't cause any correctness issues because the nested loops are also DAGs.
         for (loop_id, loop_nodes) in self.flat_graph.loops() {
-            // Filter out `next_iteration()` operators.
-            let filter_next_iteration = |&node_id: &GraphNodeId| {
-                self.flat_graph
-                    .node_op_inst(node_id)
-                    .map(|op_inst| Some(FloType::NextIteration) != op_inst.op_constraints.flo_type)
-                    .unwrap_or(true)
+            // Filter out defer_tick / defer_tick_lazy operators (they are back-edges).
+            let filter_back_edges = |&node_id: &GraphNodeId| {
+                let Some(op_inst) = self.flat_graph.node_op_inst(node_id) else {
+                    return true;
+                };
+                let delay_type =
+                    (op_inst.op_constraints.input_delaytype_fn)(&PortIndexValue::Elided(None));
+                !matches!(delay_type, Some(DelayType::Tick | DelayType::TickLazy))
             };
 
             let topo_sort_result = graph_algorithms::topo_sort(
-                loop_nodes.iter().copied().filter(filter_next_iteration),
+                loop_nodes.iter().copied().filter(filter_back_edges),
                 |dst| {
                     self.flat_graph
                         .node_predecessor_nodes(dst)
                         .filter(|&src| Some(loop_id) == self.flat_graph.node_loop(src))
-                        .filter(filter_next_iteration)
+                        .filter(filter_back_edges)
                 },
             );
             if let Err(cycle) = topo_sort_result {
@@ -1099,8 +1210,7 @@ impl FlatGraphBuilder {
                         span,
                         Level::Error,
                         format!(
-                            "Operator forms an illegal cycle within a `loop {{ ... }}` block. Use `{}()` to pass data across loop iterations. ({}/{})",
-                            NEXT_ITERATION.name,
+                            "Operator forms an illegal cycle within a `loop {{ ... }}` block. Use `defer_tick()` to pass data across loop iterations. ({}/{})",
                             i + 1,
                             len,
                         ),
@@ -1108,5 +1218,143 @@ impl FlatGraphBuilder {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use syn::parse_quote;
+
+    use super::*;
+
+    /// Test that [`FlatGraphBuilder::insert_loop`] can be used to programmatically build a loop
+    /// context, with statements added across multiple [`FlatGraphBuilder::add_dfir`] calls.
+    #[test]
+    fn test_insert_loop_programmatic() {
+        let mut builder = FlatGraphBuilder::new();
+        builder.add_dfir(
+            parse_quote! {
+                inp = source_iter([1, 2, 3]);
+            },
+            None,
+            None,
+        );
+        let loop_id = builder.insert_loop(None);
+        builder.add_dfir(
+            parse_quote! {
+                batched = inp -> batch();
+            },
+            Some(loop_id),
+            None,
+        );
+        builder.add_dfir(
+            parse_quote! {
+                batched -> for_each(std::mem::drop);
+            },
+            Some(loop_id),
+            None,
+        );
+
+        let output = builder.build().unwrap_or_else(|diagnostics| {
+            panic!("Should build without errors, got: {:?}", diagnostics);
+        });
+        let flat_graph = output.flat_graph;
+
+        // One root loop, containing the `batch()` and `for_each()` (but not `source_iter()`).
+        assert_eq!(1, flat_graph.loops().count());
+        let (built_loop_id, _) = flat_graph.loops().next().unwrap();
+        assert_eq!(loop_id, built_loop_id);
+        assert_eq!(None, flat_graph.loop_parent(built_loop_id));
+
+        for (node_id, _node) in flat_graph.nodes() {
+            let Some(op_inst) = flat_graph.node_op_inst(node_id) else {
+                continue;
+            };
+            let expected_loop = match op_inst.op_constraints.name {
+                "source_iter" => None,
+                "batch" | "for_each" => Some(built_loop_id),
+                other => panic!("Unexpected operator: {}", other),
+            };
+            assert_eq!(
+                expected_loop,
+                flat_graph.node_loop(node_id),
+                "Wrong loop context for operator `{}`.",
+                op_inst.op_constraints.name,
+            );
+        }
+    }
+
+    /// Test that programmatically-built nested loops have the correct parent relationship.
+    #[test]
+    fn test_insert_loop_nested() {
+        let mut builder = FlatGraphBuilder::new();
+        let outer_loop = builder.insert_loop(None);
+        let inner_loop = builder.insert_loop(Some(outer_loop));
+
+        builder.add_dfir(
+            parse_quote! {
+                inp = source_iter([1, 2, 3]);
+            },
+            None,
+            None,
+        );
+        builder.add_dfir(
+            parse_quote! {
+                outer = inp -> batch();
+            },
+            Some(outer_loop),
+            None,
+        );
+        builder.add_dfir(
+            parse_quote! {
+                outer -> batch() -> for_each(std::mem::drop);
+            },
+            Some(inner_loop),
+            None,
+        );
+
+        let output = builder.build().unwrap_or_else(|diagnostics| {
+            panic!("Should build without errors, got: {:?}", diagnostics);
+        });
+        let flat_graph = output.flat_graph;
+
+        assert_eq!(2, flat_graph.loops().count());
+        assert_eq!(None, flat_graph.loop_parent(outer_loop));
+        assert_eq!(Some(outer_loop), flat_graph.loop_parent(inner_loop));
+    }
+
+    /// Test that loop validation (windowing operator required at loop entry) applies to
+    /// programmatically-created loop contexts, same as parsed `loop { ... }` blocks.
+    #[test]
+    fn test_insert_loop_requires_windowing() {
+        let mut builder = FlatGraphBuilder::new();
+        builder.add_dfir(
+            parse_quote! {
+                inp = source_iter([1, 2, 3]);
+            },
+            None,
+            None,
+        );
+        let loop_id = builder.insert_loop(None);
+        // `map` is not a windowing operator, so this should fail to build.
+        builder.add_dfir(
+            parse_quote! {
+                inp -> map(|x: usize| x) -> for_each(std::mem::drop);
+            },
+            Some(loop_id),
+            None,
+        );
+
+        let Err(diagnostics) = builder.build() else {
+            panic!("Should fail to build due to missing windowing operator.");
+        };
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                Level::Error == diagnostic.level
+                    && diagnostic.message.contains("windowing operator")
+            }),
+            "Expected a windowing operator error, got: {:?}",
+            diagnostics,
+        );
     }
 }

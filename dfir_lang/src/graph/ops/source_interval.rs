@@ -53,7 +53,6 @@ pub const SOURCE_INTERVAL: OperatorConstraints = OperatorConstraints {
     persistence_args: RANGE_0,
     type_args: RANGE_0,
     is_external_input: true,
-    has_singleton_output: false,
     flo_type: Some(FloType::Source),
     ports_inn: None,
     ports_out: None,
@@ -77,11 +76,18 @@ pub const SOURCE_INTERVAL: OperatorConstraints = OperatorConstraints {
             arguments: &parse_quote_spanned!(op_span=> #ident_intervalstream),
             ..wc.clone()
         };
-        let write_output = (super::source_stream::SOURCE_STREAM.write_fn)(&wc, diagnostics)?;
-        write_prologue.extend(write_output.write_prologue);
+        let OperatorWriteOutput {
+            write_prologue: write_prologue_stream,
+            write_iterator,
+            write_iterator_after,
+            write_tick_end,
+        } = (super::source_stream::SOURCE_STREAM.write_fn)(&wc, diagnostics)?;
+        write_prologue.extend(write_prologue_stream);
         Ok(OperatorWriteOutput {
             write_prologue,
-            ..write_output
+            write_iterator,
+            write_iterator_after,
+            write_tick_end,
         })
     },
 };

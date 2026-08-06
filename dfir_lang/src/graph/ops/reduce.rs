@@ -1,7 +1,7 @@
 use quote::quote_spanned;
 
 use super::{
-    DelayType, OperatorCategory, OperatorConstraints, OperatorWriteOutput, Persistence, RANGE_0,
+    OperatorCategory, OperatorConstraints, OperatorWriteOutput, Persistence, RANGE_0,
     RANGE_1, WriteContextArgs,
 };
 
@@ -41,36 +41,37 @@ pub const REDUCE: OperatorConstraints = OperatorConstraints {
     persistence_args: &(0..=1),
     type_args: RANGE_0,
     is_external_input: false,
-    has_singleton_output: true,
     flo_type: None,
     ports_inn: None,
     ports_out: None,
-    input_delaytype_fn: |_| Some(DelayType::Stratum),
+    input_delaytype_fn: |_| None,
     write_fn: |wc @ &WriteContextArgs {
                    root,
-                   context,
-                   df_ident,
                    op_span,
                    work_fn,
                    work_fn_async,
                    ident,
                    inputs,
+                   outputs,
                    is_pull,
-                   singleton_output_ident,
                    arguments,
                    ..
                },
                diagnostics| {
-        let [persistence] = wc.persistence_args_disallow_mutable(diagnostics);
+        let [persistence] = wc.persistence_args(diagnostics);
+
+        let singleton_output_ident = wc.make_ident("singleton_output");
 
         let write_prologue = quote_spanned! {op_span=>
-            let #singleton_output_ident = #df_ident.add_state(::std::cell::RefCell::new(::std::option::Option::None));
+            let mut #singleton_output_ident = ::std::option::Option::None;
         };
-        let write_prologue_after = wc
-            .persistence_as_state_lifespan(persistence)
-            .map(|lifespan| quote_spanned! {op_span=>
-                #df_ident.set_state_lifespan_hook(#singleton_output_ident, #lifespan, move |rcell| { rcell.replace(::std::option::Option::None); });
-            }).unwrap_or_default();
+
+        let write_tick_end = match persistence {
+            Persistence::Tick => quote_spanned! {op_span=>
+                #singleton_output_ident = ::std::option::Option::None;
+            },
+            _ => Default::default(),
+        };
 
         let func = &arguments[0];
         let accumulator_ident = wc.make_ident("accumulator");
@@ -94,10 +95,7 @@ pub const REDUCE: OperatorConstraints = OperatorConstraints {
 
         let assign_accum_ident = quote_spanned! {op_span=>
             #[allow(unused_mut)]
-            let mut #accumulator_ident = unsafe {
-                // SAFETY: handle from `#df_ident.add_state(..)`.
-                #context.state_ref_unchecked(#singleton_output_ident)
-            }.borrow_mut();
+            let mut #accumulator_ident = &mut #singleton_output_ident;
         };
 
         let write_iterator = if is_pull {
@@ -120,8 +118,8 @@ pub const REDUCE: OperatorConstraints = OperatorConstraints {
                     )
                 );
             }
-        } else {
-            // Is only push when used as a singleton, so no need to push to `outputs[0]`.
+        } else if outputs.is_empty() {
+            // Terminal push: reduce is a singleton reference target with no downstream.
             quote_spanned! {op_span=>
                 let #ident = #root::dfir_pipes::push::for_each(|#item_ident| {
                     #assign_accum_ident
@@ -129,21 +127,28 @@ pub const REDUCE: OperatorConstraints = OperatorConstraints {
                     #foreach_body
                 });
             }
-        };
-
-        let write_iterator_after = if Persistence::Static == persistence {
-            quote_spanned! {op_span=>
-                #context.schedule_subgraph(#context.current_subgraph(), false);
-            }
         } else {
-            Default::default()
+            let output = &outputs[0];
+            quote_spanned! {op_span=>
+                let #ident = #root::dfir_pipes::push::reduce_ref(
+                    &mut #singleton_output_ident,
+                    |#accumulator_ident: &mut _, #item_ident| {
+                        #[allow(clippy::redundant_closure_call)]
+                        (#func)(#accumulator_ident, #item_ident);
+                    },
+                    #root::dfir_pipes::push::map(
+                        |__val: &mut _| ::std::clone::Clone::clone(&*__val),
+                        #output,
+                    ),
+                );
+            }
         };
 
         Ok(OperatorWriteOutput {
             write_prologue,
-            write_prologue_after,
             write_iterator,
-            write_iterator_after,
+            write_iterator_after: Default::default(),
+            write_tick_end,
         })
     },
 };

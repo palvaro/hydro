@@ -1,7 +1,7 @@
 use quote::{ToTokens, quote_spanned};
 
 use super::{
-    DelayType, OpInstGenerics, OperatorCategory, OperatorConstraints, OperatorInstance,
+    OpInstGenerics, OperatorCategory, OperatorConstraints, OperatorInstance,
     OperatorWriteOutput, Persistence, RANGE_1, WriteContextArgs,
 };
 
@@ -76,27 +76,22 @@ pub const FOLD_KEYED: OperatorConstraints = OperatorConstraints {
     persistence_args: &(0..=1),
     type_args: &(0..=2),
     is_external_input: false,
-    has_singleton_output: true,
     flo_type: None,
     ports_inn: None,
     ports_out: None,
-    input_delaytype_fn: |_| Some(DelayType::Stratum),
+    input_delaytype_fn: |_| None,
     write_fn: |wc @ &WriteContextArgs {
-                   df_ident,
-                   context,
                    op_span,
                    work_fn_async,
                    ident,
                    inputs,
-                   singleton_output_ident,
+                   outputs,
                    is_pull,
                    root,
-                   op_name,
                    op_inst:
                        OperatorInstance {
                            generics:
                                OpInstGenerics {
-                                   persistence_args,
                                    type_args,
                                    ..
                                },
@@ -105,90 +100,51 @@ pub const FOLD_KEYED: OperatorConstraints = OperatorConstraints {
                    arguments,
                    ..
                },
-               _| {
-        assert!(is_pull, "TODO(mingwei): `{}` only supports pull.", op_name);
-
-        let persistence = match persistence_args[..] {
-            [] => Persistence::Tick,
-            [a] => a,
-            _ => unreachable!(),
-        };
+               diagnostics| {
+        let [persistence] = wc.persistence_args(diagnostics);
 
         let generic_type_args = [
             type_args
                 .first()
                 .map(ToTokens::to_token_stream)
-                .unwrap_or(quote_spanned!(op_span=> _)),
+                .unwrap_or_else(|| quote_spanned!(op_span=> _)),
             type_args
                 .get(1)
                 .map(ToTokens::to_token_stream)
-                .unwrap_or(quote_spanned!(op_span=> _)),
+                .unwrap_or_else(|| quote_spanned!(op_span=> _)),
         ];
 
         let input = &inputs[0];
         let initfn = &arguments[0];
         let aggfn = &arguments[1];
 
+        let singleton_output_ident = wc.make_ident("singleton_output");
         let hashtable_ident = wc.make_ident("hashtable");
 
         let write_prologue = quote_spanned! {op_span=>
-            let #singleton_output_ident = #df_ident.add_state(::std::cell::RefCell::new(#root::rustc_hash::FxHashMap::<#( #generic_type_args ),*>::default()));
+            let mut #singleton_output_ident = #root::rustc_hash::FxHashMap::<#( #generic_type_args ),*>::default();
         };
-        let write_prologue_after =wc
-            .persistence_as_state_lifespan(persistence)
-            .map(|lifespan| quote_spanned! {op_span=>
-                #[allow(clippy::redundant_closure_call)]
-                #df_ident.set_state_lifespan_hook(#singleton_output_ident, #lifespan, move |rcell| { rcell.take(); });
-            }).unwrap_or_default();
+
+        let write_tick_end = match persistence {
+            Persistence::Tick => quote_spanned! {op_span=>
+                #singleton_output_ident.clear();
+            },
+            _ => Default::default(),
+        };
 
         let assign_hashtable_ident = quote_spanned! {op_span=>
-            let mut #hashtable_ident = unsafe {
-                // SAFETY: handle from `#df_ident.add_state(..)`.
-                #context.state_ref_unchecked(#singleton_output_ident)
-            }.borrow_mut();
+            let mut #hashtable_ident = &mut #singleton_output_ident;
         };
 
-        let write_iterator = if Persistence::Mutable == persistence {
+        let write_iterator = if !is_pull {
+            let output = &outputs[0];
             quote_spanned! {op_span=>
-                #assign_hashtable_ident
-
-                {
-                    #[inline(always)]
-                    fn check_input<St, K, V>(st: St) -> impl #root::futures::stream::Stream<Item = #root::util::PersistenceKeyed::<K, V>>
-                    where
-                        St: #root::futures::stream::Stream<Item = #root::util::PersistenceKeyed::<K, V>>,
-                        K: ::std::clone::Clone,
-                        V: ::std::clone::Clone,
-                    {
-                        st
-                    }
-
-                    /// A: accumulator type
-                    /// T: iterator item type
-                    #[inline(always)]
-                    fn call_comb_type<A, T>(a: &mut A, t: T, f: impl Fn(&mut A, T)) {
-                        let () = (f)(a, t);
-                    }
-
-                    let fut = #root::dfir_pipes::pull::Pull::for_each(check_input(#input), |item| {
-                        match item {
-                            #root::util::PersistenceKeyed::Persist(k, v) => {
-                                let entry = #hashtable_ident.entry(k).or_insert_with(#initfn);
-                                call_comb_type(entry, v, #aggfn);
-                            },
-                            #root::util::PersistenceKeyed::Delete(k) => {
-                                #hashtable_ident.remove(&k);
-                            },
-                        }
-                    });
-                    let () = #work_fn_async(fut).await;
-                }
-
-                #[allow(clippy::disallowed_methods, reason = "FxHasher is deterministic")]
-                let #ident = #hashtable_ident
-                    .iter()
-                    .map(#[allow(suspicious_double_ref_op, clippy::clone_on_copy)] |(k, v)| (k.clone(), v.clone()));
-                let #ident = #root::dfir_pipes::pull::iter(#ident);
+                let #ident = #root::dfir_pipes::push::FoldKeyed::new(
+                    &mut #singleton_output_ident,
+                    #initfn,
+                    #aggfn,
+                    #output,
+                );
             }
         } else {
             let iter_expr = match persistence {
@@ -205,13 +161,8 @@ pub const FOLD_KEYED: OperatorConstraints = OperatorConstraints {
                     )
                 },
                 Persistence::Static => quote_spanned! {op_span=>
-                    // Play everything but only on the first run of this tick/stratum.
-                    // (We know we won't have any more inputs, so it is fine to only play once.
-                    // Because of the `DelayType::Stratum` or `DelayType::MonotoneAccum`).
-                    #context.is_first_run_this_tick()
-                        .then_some(#hashtable_ident.iter())
-                        .into_iter()
-                        .flatten()
+                    // Play everything (each subgraph runs exactly once per tick).
+                    #hashtable_ident.iter()
                         .map(
                             #[allow(suspicious_double_ref_op, clippy::clone_on_copy)]
                             |(k, v)| (
@@ -220,7 +171,6 @@ pub const FOLD_KEYED: OperatorConstraints = OperatorConstraints {
                             )
                         )
                 },
-                Persistence::Mutable => unreachable!(),
             };
 
             quote_spanned! {op_span=>
@@ -261,19 +211,11 @@ pub const FOLD_KEYED: OperatorConstraints = OperatorConstraints {
             }
         };
 
-        let write_iterator_after = match persistence {
-            Persistence::None | Persistence::Tick | Persistence::Loop => Default::default(),
-            Persistence::Static | Persistence::Mutable => quote_spanned! {op_span=>
-                // Reschedule the subgraph lazily to ensure replay on later ticks.
-                #context.schedule_subgraph(#context.current_subgraph(), false);
-            },
-        };
-
         Ok(OperatorWriteOutput {
             write_prologue,
-            write_prologue_after,
             write_iterator,
-            write_iterator_after,
+            write_iterator_after: Default::default(),
+            write_tick_end,
         })
     },
 };

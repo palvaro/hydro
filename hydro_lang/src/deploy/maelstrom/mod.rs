@@ -6,7 +6,7 @@ use serde::de::DeserializeOwned;
 use crate::forward_handle::ForwardHandle;
 use crate::live_collections::KeyedStream;
 use crate::live_collections::stream::TotalOrder;
-use crate::location::{Cluster, NoTick};
+use crate::location::Cluster;
 use crate::nondet::nondet;
 
 #[cfg(stageleft_runtime)]
@@ -33,16 +33,12 @@ pub mod deploy_runtime_maelstrom;
 ///     (client_id, response_body)
 /// })));
 /// ```
-#[expect(clippy::type_complexity, reason = "stream markers")]
 pub fn maelstrom_bidi_clients<'a, C, In: DeserializeOwned, Out: Serialize>(
     cluster: &Cluster<'a, C>,
 ) -> (
     KeyedStream<String, In, Cluster<'a, C>>,
     ForwardHandle<'a, KeyedStream<String, Out, Cluster<'a, C>>>,
-)
-where
-    Cluster<'a, C>: NoTick,
-{
+) {
     use stageleft::q;
 
     use crate::location::Location;

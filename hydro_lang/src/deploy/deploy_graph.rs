@@ -61,6 +61,7 @@ impl<'a> Deploy<'a> for HydroDeploy {
         p2_port: &<Self::Process as Node>::Port,
         _name: Option<&str>,
         networking_info: &crate::networking::NetworkingInfo,
+        _external_types: Option<(&syn::Type, &syn::Type)>,
     ) -> (syn::Expr, syn::Expr) {
         match networking_info {
             crate::networking::NetworkingInfo::Tcp {
@@ -109,6 +110,7 @@ impl<'a> Deploy<'a> for HydroDeploy {
         c2_port: &<Self::Cluster as Node>::Port,
         _name: Option<&str>,
         networking_info: &crate::networking::NetworkingInfo,
+        _external_types: Option<(&syn::Type, &syn::Type)>,
     ) -> (syn::Expr, syn::Expr) {
         match networking_info {
             crate::networking::NetworkingInfo::Tcp {
@@ -169,6 +171,7 @@ impl<'a> Deploy<'a> for HydroDeploy {
         p2_port: &<Self::Process as Node>::Port,
         _name: Option<&str>,
         networking_info: &crate::networking::NetworkingInfo,
+        _external_types: Option<(&syn::Type, &syn::Type)>,
     ) -> (syn::Expr, syn::Expr) {
         match networking_info {
             crate::networking::NetworkingInfo::Tcp {
@@ -221,6 +224,7 @@ impl<'a> Deploy<'a> for HydroDeploy {
         c2_port: &<Self::Cluster as Node>::Port,
         _name: Option<&str>,
         networking_info: &crate::networking::NetworkingInfo,
+        _external_types: Option<(&syn::Type, &syn::Type)>,
     ) -> (syn::Expr, syn::Expr) {
         match networking_info {
             crate::networking::NetworkingInfo::Tcp {
@@ -285,19 +289,19 @@ impl<'a> Deploy<'a> for HydroDeploy {
         shared_handle: String,
     ) -> syn::Expr {
         let connect_ident = syn::Ident::new(
-            &format!("__hydro_deploy_many_{}_connect", &shared_handle),
+            &format!("__hydro_deploy_many_{}_connect", shared_handle),
             Span::call_site(),
         );
         let source_ident = syn::Ident::new(
-            &format!("__hydro_deploy_many_{}_source", &shared_handle),
+            &format!("__hydro_deploy_many_{}_source", shared_handle),
             Span::call_site(),
         );
         let sink_ident = syn::Ident::new(
-            &format!("__hydro_deploy_many_{}_sink", &shared_handle),
+            &format!("__hydro_deploy_many_{}_sink", shared_handle),
             Span::call_site(),
         );
         let membership_ident = syn::Ident::new(
-            &format!("__hydro_deploy_many_{}_membership", &shared_handle),
+            &format!("__hydro_deploy_many_{}_membership", shared_handle),
             Span::call_site(),
         );
 
@@ -326,7 +330,7 @@ impl<'a> Deploy<'a> for HydroDeploy {
 
     fn e2o_many_sink(shared_handle: String) -> syn::Expr {
         let sink_ident = syn::Ident::new(
-            &format!("__hydro_deploy_many_{}_sink", &shared_handle),
+            &format!("__hydro_deploy_many_{}_sink", shared_handle),
             Span::call_site(),
         );
         parse_quote!(#sink_ident)
@@ -342,15 +346,15 @@ impl<'a> Deploy<'a> for HydroDeploy {
         shared_handle: String,
     ) -> syn::Expr {
         let connect_ident = syn::Ident::new(
-            &format!("__hydro_deploy_{}_connect", &shared_handle),
+            &format!("__hydro_deploy_{}_connect", shared_handle),
             Span::call_site(),
         );
         let source_ident = syn::Ident::new(
-            &format!("__hydro_deploy_{}_source", &shared_handle),
+            &format!("__hydro_deploy_{}_source", shared_handle),
             Span::call_site(),
         );
         let sink_ident = syn::Ident::new(
-            &format!("__hydro_deploy_{}_sink", &shared_handle),
+            &format!("__hydro_deploy_{}_sink", shared_handle),
             Span::call_site(),
         );
 
@@ -417,7 +421,7 @@ impl<'a> Deploy<'a> for HydroDeploy {
         shared_handle: String,
     ) -> syn::Expr {
         let sink_ident = syn::Ident::new(
-            &format!("__hydro_deploy_{}_sink", &shared_handle),
+            &format!("__hydro_deploy_{}_sink", shared_handle),
             Span::call_site(),
         );
         parse_quote!(#sink_ident)

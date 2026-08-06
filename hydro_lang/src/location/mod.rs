@@ -15,24 +15,33 @@
 
 use std::fmt::Debug;
 use std::future::Future;
+#[cfg(feature = "tokio")]
 use std::marker::PhantomData;
 use std::num::ParseIntError;
+#[cfg(feature = "tokio")]
 use std::time::Duration;
 
+#[cfg(feature = "tokio")]
 use bytes::{Bytes, BytesMut};
 use futures::stream::Stream as FuturesStream;
 use proc_macro2::Span;
 use quote::quote;
+#[cfg(feature = "tokio")]
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use slotmap::{Key, new_key_type};
+#[cfg(feature = "tokio")]
+use stageleft::quote_type;
 use stageleft::runtime_support::{FreeVariableWithContextWithProps, QuoteTokens};
-use stageleft::{QuotedWithContext, q, quote_type};
+use stageleft::{QuotedWithContext, q};
 use syn::parse_quote;
+#[cfg(feature = "tokio")]
 use tokio_util::codec::{Decoder, Encoder, LengthDelimitedCodec};
 
+#[cfg(feature = "tokio")]
+use crate::compile::ir::DebugInstantiate;
 use crate::compile::ir::{
-    ClusterMembersState, DebugInstantiate, HydroIrOpMetadata, HydroNode, HydroRoot, HydroSource,
+    ClusterMembersState, HydroIrOpMetadata, HydroNode, HydroRoot, HydroSource,
 };
 use crate::forward_handle::ForwardRef;
 #[cfg(stageleft_runtime)]
@@ -40,14 +49,19 @@ use crate::forward_handle::{CycleCollection, ForwardHandle};
 use crate::live_collections::boundedness::{Bounded, Unbounded};
 use crate::live_collections::keyed_stream::KeyedStream;
 use crate::live_collections::singleton::Singleton;
-use crate::live_collections::stream::{
-    ExactlyOnce, NoOrder, Ordering, Retries, Stream, TotalOrder,
-};
-use crate::location::dynamic::LocationId;
+use crate::live_collections::stream::{ExactlyOnce, NoOrder, Stream, TotalOrder};
+#[cfg(feature = "tokio")]
+use crate::live_collections::stream::{Ordering, Retries};
+#[cfg(stageleft_runtime)]
+use crate::location::dynamic::DynLocation;
+use crate::location::dynamic::{ClusterConsistency, LocationId};
+#[cfg(feature = "tokio")]
 use crate::location::external_process::{
     ExternalBincodeBidi, ExternalBincodeSink, ExternalBytesPort, Many, NotMany,
 };
 use crate::nondet::NonDet;
+#[cfg(feature = "tokio")]
+use crate::properties::manual_proof;
 #[cfg(feature = "sim")]
 use crate::sim::SimSender;
 use crate::staging_util::get_this_crate;
@@ -67,7 +81,7 @@ pub mod member_id;
 pub use member_id::{MemberId, TaglessMemberId};
 
 pub mod tick;
-pub use tick::{Atomic, NoTick, Tick};
+pub use tick::{Atomic, Tick};
 
 /// An event indicating a change in membership status of a location in a group
 /// (e.g. a node in a [`Cluster`] or an external client connection).
@@ -172,6 +186,9 @@ pub enum LocationType {
     External,
 }
 
+/// A top-level location (i.e. a [`Process`] or [`Cluster`]) that is outside a tick / atomic region.
+pub trait TopLevel<'a>: Location<'a> {}
+
 /// A location where data can be materialized and computation can be executed.
 ///
 /// Hydro is a **global**, **distributed** programming model. This means that the data
@@ -189,18 +206,34 @@ pub enum LocationType {
     private_bounds,
     reason = "only internal Hydro code can define location types"
 )]
-pub trait Location<'a>: dynamic::DynLocation {
+pub trait Location<'a>: DynLocation {
     /// The root location type for this location.
     ///
     /// For top-level locations like [`Process`] and [`Cluster`], this is `Self`.
     /// For nested locations like [`Tick`], this is the root location that contains it.
     type Root: Location<'a>;
 
+    /// Location type with consistency guarantees dropped for the live collection on it.
+    type DropConsistency: Location<'a, DropConsistency = Self::DropConsistency>;
+
     /// Returns the root location for this location.
     ///
     /// For top-level locations like [`Process`] and [`Cluster`], this returns `self`.
     /// For nested locations like [`Tick`], this returns the root location that contains it.
     fn root(&self) -> Self::Root;
+
+    /// This location but with consistency guarantees dropped for the live collection
+    fn drop_consistency(&self) -> Self::DropConsistency;
+    /// Gets the runtime enum variant for the current consistency level, if this is a cluster.
+    fn consistency() -> Option<ClusterConsistency>;
+
+    /// Updates the consistency guarantees to match that of the given location.
+    fn with_consistency_of<L2: Location<'a, DropConsistency = Self::DropConsistency>>(&self) -> L2 {
+        L2::from_drop_consistency(self.drop_consistency())
+    }
+
+    #[doc(hidden)]
+    fn from_drop_consistency(l2: Self::DropConsistency) -> Self;
 
     /// Attempts to create a new [`Tick`] clock domain at this location.
     ///
@@ -222,7 +255,7 @@ pub trait Location<'a>: dynamic::DynLocation {
 
     /// Returns the unique identifier for this location.
     fn id(&self) -> LocationId {
-        dynamic::DynLocation::id(self)
+        DynLocation::dyn_id(self)
     }
 
     /// Creates a new [`Tick`] clock domain at this location.
@@ -250,10 +283,11 @@ pub trait Location<'a>: dynamic::DynLocation {
     /// # }));
     /// # }
     /// ```
-    fn tick(&self) -> Tick<Self>
-    where
-        Self: NoTick,
-    {
+    fn tick(&self) -> Tick<Self> {
+        if let LocationId::Tick(_, _) = self.id() {
+            panic!("cannot create nested ticks");
+        }
+
         let id = self.flow_state().borrow_mut().next_clock_id();
         Tick {
             id,
@@ -287,7 +321,7 @@ pub trait Location<'a>: dynamic::DynLocation {
     /// ```
     fn spin(&self) -> Stream<(), Self, Unbounded, TotalOrder, ExactlyOnce>
     where
-        Self: Sized + NoTick,
+        Self: TopLevel<'a> + Sized,
     {
         Stream::new(
             self.clone(),
@@ -327,20 +361,21 @@ pub trait Location<'a>: dynamic::DynLocation {
     fn source_stream<T, E>(
         &self,
         e: impl QuotedWithContext<'a, E, Self>,
-    ) -> Stream<T, Self, Unbounded, TotalOrder, ExactlyOnce>
+    ) -> Stream<T, Self::DropConsistency, Unbounded, TotalOrder, ExactlyOnce>
     where
         E: FuturesStream<Item = T> + Unpin,
-        Self: Sized + NoTick,
+        Self: TopLevel<'a> + Sized,
     {
         let e = e.splice_untyped_ctx(self);
 
+        let target_location = self.drop_consistency();
         Stream::new(
-            self.clone(),
+            target_location.clone(),
             HydroNode::Source {
                 source: HydroSource::Stream(e.into()),
-                metadata: self.new_node_metadata(Stream::<
+                metadata: target_location.new_node_metadata(Stream::<
                     T,
-                    Self,
+                    Self::DropConsistency,
                     Unbounded,
                     TotalOrder,
                     ExactlyOnce,
@@ -373,24 +408,30 @@ pub trait Location<'a>: dynamic::DynLocation {
     fn source_iter<T, E>(
         &self,
         e: impl QuotedWithContext<'a, E, Self>,
-    ) -> Stream<T, Self, Bounded, TotalOrder, ExactlyOnce>
+    ) -> Stream<T, Self::DropConsistency, Bounded, TotalOrder, ExactlyOnce>
     where
         E: IntoIterator<Item = T>,
         Self: Sized,
     {
         let e = e.splice_typed_ctx(self);
 
+        let target_location = self.drop_consistency();
         Stream::new(
-            self.clone(),
+            target_location.clone(),
             HydroNode::Source {
                 source: HydroSource::Iter(e.into()),
-                metadata: self.new_node_metadata(
-                    Stream::<T, Self, Bounded, TotalOrder, ExactlyOnce>::collection_kind(),
-                ),
+                metadata: target_location.new_node_metadata(Stream::<
+                    T,
+                    Self::DropConsistency,
+                    Bounded,
+                    TotalOrder,
+                    ExactlyOnce,
+                >::collection_kind()),
             },
         )
     }
 
+    #[deprecated(note = "use .source_cluster_membership_stream(...) instead")]
     /// Creates a stream of membership events for a cluster.
     ///
     /// This stream emits [`MembershipEvent::Joined`] when a cluster member joins
@@ -399,6 +440,11 @@ pub trait Location<'a>: dynamic::DynLocation {
     ///
     /// This is useful for implementing protocols that need to track cluster membership,
     /// such as broadcasting to all members or detecting failures.
+    ///
+    /// # Non-Determinism
+    /// This stream is non-deterministic because the timing of membership events, for example
+    /// if a node leaves, the membership event may not be received if the node left before the
+    /// stream was created.
     ///
     /// # Example
     /// ```rust
@@ -410,7 +456,7 @@ pub trait Location<'a>: dynamic::DynLocation {
     /// let workers: Cluster<()> = flow.cluster::<()>();
     /// # // do nothing on each worker
     /// # workers.source_iter(q!(vec![])).for_each(q!(|_: ()| {}));
-    /// let cluster_members = p1.source_cluster_members(&workers);
+    /// let cluster_members = p1.source_cluster_members(&workers, nondet!(/** late joiners may miss events */));
     /// # cluster_members.entries().send(&p2, TCP.fail_stop().bincode())
     /// // if there are 4 members in the cluster, we would see a join event for each
     /// // { MemberId::<Worker>(0): [MembershipEvent::Join], MemberId::<Worker>(2): [MembershipEvent::Join], ... }
@@ -427,21 +473,73 @@ pub trait Location<'a>: dynamic::DynLocation {
     fn source_cluster_members<C: 'a>(
         &self,
         cluster: &Cluster<'a, C>,
-    ) -> KeyedStream<MemberId<C>, MembershipEvent, Self, Unbounded>
+        nondet_start: NonDet,
+    ) -> KeyedStream<MemberId<C>, MembershipEvent, Self::DropConsistency, Unbounded>
     where
-        Self: Sized + NoTick,
+        Self: TopLevel<'a> + Sized,
     {
+        self.source_cluster_membership_stream(cluster, nondet_start)
+    }
+
+    /// Creates a stream of membership events for a cluster.
+    ///
+    /// This stream emits [`MembershipEvent::Joined`] when a cluster member joins
+    /// and [`MembershipEvent::Left`] when a cluster member leaves. The stream is
+    /// keyed by the [`MemberId`] of the cluster member.
+    ///
+    /// This is useful for implementing protocols that need to track cluster membership,
+    /// such as broadcasting to all members or detecting failures.
+    ///
+    /// # Non-Determinism
+    /// This stream is non-deterministic because the timing of membership events, for example
+    /// if a node leaves, the membership event may not be received if the node left before the
+    /// stream was created.
+    ///
+    /// # Example
+    /// ```rust
+    /// # #[cfg(feature = "deploy")] {
+    /// # use hydro_lang::prelude::*;
+    /// # use futures::StreamExt;
+    /// # tokio_test::block_on(hydro_lang::test_util::multi_location_test(|flow, p2| {
+    /// let p1 = flow.process::<()>();
+    /// let workers: Cluster<()> = flow.cluster::<()>();
+    /// # // do nothing on each worker
+    /// # workers.source_iter(q!(vec![])).for_each(q!(|_: ()| {}));
+    /// let cluster_members = p1.source_cluster_membership_stream(&workers, nondet!(/** late joiners may miss events */));
+    /// # cluster_members.entries().send(&p2, TCP.fail_stop().bincode())
+    /// // if there are 4 members in the cluster, we would see a join event for each
+    /// // { MemberId::<Worker>(0): [MembershipEvent::Join], MemberId::<Worker>(2): [MembershipEvent::Join], ... }
+    /// # }, |mut stream| async move {
+    /// # let mut results = Vec::new();
+    /// # for w in 0..4 {
+    /// #     results.push(format!("{:?}", stream.next().await.unwrap()));
+    /// # }
+    /// # results.sort();
+    /// # assert_eq!(results, vec!["(MemberId::<()>(0), Joined)", "(MemberId::<()>(1), Joined)", "(MemberId::<()>(2), Joined)", "(MemberId::<()>(3), Joined)"]);
+    /// # }));
+    /// # }
+    /// ```
+    fn source_cluster_membership_stream<C: 'a>(
+        &self,
+        cluster: &Cluster<'a, C>,
+        _nondet_start: NonDet,
+    ) -> KeyedStream<MemberId<C>, MembershipEvent, Self::DropConsistency, Unbounded>
+    where
+        Self: TopLevel<'a> + Sized,
+    {
+        let target_consistency = self.drop_consistency();
         Stream::new(
-            self.clone(),
+            target_consistency.clone(),
             HydroNode::Source {
                 source: HydroSource::ClusterMembers(cluster.id(), ClusterMembersState::Uninit),
-                metadata: self.new_node_metadata(Stream::<
+                metadata: target_consistency.new_node_metadata(Stream::<
                     (TaglessMemberId, MembershipEvent),
                     Self,
                     Unbounded,
                     TotalOrder,
                     ExactlyOnce,
-                >::collection_kind()),
+                >::collection_kind(
+                )),
             },
         )
         .map(q!(|(k, v)| (MemberId::from_tagless(k), v)))
@@ -455,20 +553,21 @@ pub trait Location<'a>: dynamic::DynLocation {
     ///
     /// For bidirectional communication or typed data, see [`Location::bind_single_client`]
     /// or [`Location::source_external_bincode`].
+    #[cfg(feature = "tokio")]
     fn source_external_bytes<L>(
         &self,
         from: &External<L>,
     ) -> (
         ExternalBytesPort,
-        Stream<BytesMut, Self, Unbounded, TotalOrder, ExactlyOnce>,
+        Stream<BytesMut, Self::DropConsistency, Unbounded, TotalOrder, ExactlyOnce>,
     )
     where
-        Self: Sized + NoTick,
+        Self: TopLevel<'a> + Sized,
     {
         let (port, stream, sink) =
             self.bind_single_client::<_, Bytes, LengthDelimitedCodec>(from, NetworkHint::Auto);
 
-        sink.complete(self.source_iter(q!([])));
+        sink.complete(stream.location().source_iter(q!([])));
 
         (port, stream)
     }
@@ -479,20 +578,20 @@ pub trait Location<'a>: dynamic::DynLocation {
     /// of received values.
     ///
     /// For bidirectional communication, see [`Location::bind_single_client_bincode`].
-    #[expect(clippy::type_complexity, reason = "stream markers")]
+    #[cfg(feature = "tokio")]
     fn source_external_bincode<L, T, O: Ordering, R: Retries>(
         &self,
         from: &External<L>,
     ) -> (
         ExternalBincodeSink<T, NotMany, O, R>,
-        Stream<T, Self, Unbounded, O, R>,
+        Stream<T, Self::DropConsistency, Unbounded, O, R>,
     )
     where
-        Self: Sized + NoTick,
+        Self: TopLevel<'a> + Sized,
         T: Serialize + DeserializeOwned,
     {
         let (port, stream, sink) = self.bind_single_client_bincode::<_, T, ()>(from);
-        sink.complete(self.source_iter(q!([])));
+        sink.complete(stream.location().source_iter(q!([])));
 
         (
             ExternalBincodeSink {
@@ -509,12 +608,14 @@ pub trait Location<'a>: dynamic::DynLocation {
     /// Returns a handle to send messages to the location as well as a stream
     /// of received messages. This is only available when the `sim` feature is enabled.
     #[cfg(feature = "sim")]
-    #[expect(clippy::type_complexity, reason = "stream markers")]
     fn sim_input<T, O: Ordering, R: Retries>(
         &self,
-    ) -> (SimSender<T, O, R>, Stream<T, Self, Unbounded, O, R>)
+    ) -> (
+        SimSender<T, O, R>,
+        Stream<T, Self::DropConsistency, Unbounded, O, R>,
+    )
     where
-        Self: Sized + NoTick,
+        Self: TopLevel<'a> + Sized,
         T: Serialize + DeserializeOwned,
     {
         let external_location: External<'a, ()> = External {
@@ -536,17 +637,18 @@ pub trait Location<'a>: dynamic::DynLocation {
     fn embedded_input<T>(
         &self,
         name: impl Into<String>,
-    ) -> Stream<T, Self, Unbounded, TotalOrder, ExactlyOnce>
+    ) -> Stream<T, Self::DropConsistency, Unbounded, TotalOrder, ExactlyOnce>
     where
-        Self: Sized + NoTick,
+        Self: TopLevel<'a> + Sized,
     {
         let ident = syn::Ident::new(&name.into(), Span::call_site());
 
+        let target_location = self.drop_consistency();
         Stream::new(
-            self.clone(),
+            target_location.clone(),
             HydroNode::Source {
                 source: HydroSource::Embedded(ident),
-                metadata: self.new_node_metadata(Stream::<
+                metadata: target_location.new_node_metadata(Stream::<
                     T,
                     Self,
                     Unbounded,
@@ -562,17 +664,22 @@ pub trait Location<'a>: dynamic::DynLocation {
     /// The `name` parameter specifies the name of the generated function parameter
     /// that will supply data to this singleton at runtime. The generated function will
     /// accept a plain `T` parameter with this name.
-    fn embedded_singleton_input<T>(&self, name: impl Into<String>) -> Singleton<T, Self, Bounded>
+    fn embedded_singleton_input<T>(
+        &self,
+        name: impl Into<String>,
+    ) -> Singleton<T, Self::DropConsistency, Bounded>
     where
-        Self: Sized + NoTick,
+        Self: TopLevel<'a> + Sized,
     {
         let ident = syn::Ident::new(&name.into(), Span::call_site());
 
+        let target_location = self.drop_consistency();
         Singleton::new(
-            self.clone(),
+            target_location.clone(),
             HydroNode::Source {
                 source: HydroSource::EmbeddedSingleton(ident),
-                metadata: self.new_node_metadata(Singleton::<T, Self, Bounded>::collection_kind()),
+                metadata: target_location
+                    .new_node_metadata(Singleton::<T, Self, Bounded>::collection_kind()),
             },
         )
     }
@@ -621,6 +728,7 @@ pub trait Location<'a>: dynamic::DynLocation {
     /// # });
     /// # }
     /// ```
+    #[cfg(feature = "tokio")]
     #[expect(clippy::type_complexity, reason = "stream markers")]
     fn bind_single_client<L, T, Codec: Encoder<T> + Decoder>(
         &self,
@@ -628,16 +736,22 @@ pub trait Location<'a>: dynamic::DynLocation {
         port_hint: NetworkHint,
     ) -> (
         ExternalBytesPort<NotMany>,
-        Stream<<Codec as Decoder>::Item, Self, Unbounded, TotalOrder, ExactlyOnce>,
-        ForwardHandle<'a, Stream<T, Self, Unbounded, TotalOrder, ExactlyOnce>>,
+        Stream<<Codec as Decoder>::Item, Self::DropConsistency, Unbounded, TotalOrder, ExactlyOnce>,
+        ForwardHandle<'a, Stream<T, Self::DropConsistency, Unbounded, TotalOrder, ExactlyOnce>>,
     )
     where
-        Self: Sized + NoTick,
+        Self: TopLevel<'a> + Sized,
     {
         let next_external_port_id = from.flow_state.borrow_mut().next_external_port();
+        let target_consistency = self.drop_consistency();
 
-        let (fwd_ref, to_sink) =
-            self.forward_ref::<Stream<T, Self, Unbounded, TotalOrder, ExactlyOnce>>();
+        let (fwd_ref, to_sink) = target_consistency.forward_ref::<Stream<
+            T,
+            Self::DropConsistency,
+            Unbounded,
+            TotalOrder,
+            ExactlyOnce,
+        >>();
         let mut flow_state_borrow = self.flow_state().borrow_mut();
 
         flow_state_borrow.push_root(HydroRoot::SendExternal {
@@ -650,15 +764,16 @@ pub trait Location<'a>: dynamic::DynLocation {
             input: Box::new(to_sink.ir_node.replace(HydroNode::Placeholder)),
             op_metadata: HydroIrOpMetadata::new(),
         });
+        drop(flow_state_borrow);
 
         let raw_stream: Stream<
             Result<<Codec as Decoder>::Item, <Codec as Decoder>::Error>,
-            Self,
+            Self::DropConsistency,
             Unbounded,
             TotalOrder,
             ExactlyOnce,
         > = Stream::new(
-            self.clone(),
+            target_consistency.clone(),
             HydroNode::ExternalInput {
                 from_external_key: from.key,
                 from_port_id: next_external_port_id,
@@ -667,13 +782,14 @@ pub trait Location<'a>: dynamic::DynLocation {
                 port_hint,
                 instantiate_fn: DebugInstantiate::Building,
                 deserialize_fn: None,
-                metadata: self.new_node_metadata(Stream::<
+                metadata: target_consistency.new_node_metadata(Stream::<
                     Result<<Codec as Decoder>::Item, <Codec as Decoder>::Error>,
-                    Self,
+                    Self::DropConsistency,
                     Unbounded,
                     TotalOrder,
                     ExactlyOnce,
-                >::collection_kind()),
+                >::collection_kind(
+                )),
             },
         );
 
@@ -697,22 +813,29 @@ pub trait Location<'a>: dynamic::DynLocation {
     /// # Type Parameters
     /// - `InT`: The type of incoming messages (must implement [`DeserializeOwned`])
     /// - `OutT`: The type of outgoing messages (must implement [`Serialize`])
+    #[cfg(feature = "tokio")]
     #[expect(clippy::type_complexity, reason = "stream markers")]
     fn bind_single_client_bincode<L, InT: DeserializeOwned, OutT: Serialize>(
         &self,
         from: &External<L>,
     ) -> (
         ExternalBincodeBidi<InT, OutT, NotMany>,
-        Stream<InT, Self, Unbounded, TotalOrder, ExactlyOnce>,
-        ForwardHandle<'a, Stream<OutT, Self, Unbounded, TotalOrder, ExactlyOnce>>,
+        Stream<InT, Self::DropConsistency, Unbounded, TotalOrder, ExactlyOnce>,
+        ForwardHandle<'a, Stream<OutT, Self::DropConsistency, Unbounded, TotalOrder, ExactlyOnce>>,
     )
     where
-        Self: Sized + NoTick,
+        Self: TopLevel<'a> + Sized,
     {
         let next_external_port_id = from.flow_state.borrow_mut().next_external_port();
 
-        let (fwd_ref, to_sink) =
-            self.forward_ref::<Stream<OutT, Self, Unbounded, TotalOrder, ExactlyOnce>>();
+        let target_consistency = self.drop_consistency();
+        let (fwd_ref, to_sink) = target_consistency.forward_ref::<Stream<
+            OutT,
+            Self::DropConsistency,
+            Unbounded,
+            TotalOrder,
+            ExactlyOnce,
+        >>();
         let mut flow_state_borrow = self.flow_state().borrow_mut();
 
         let root = get_this_crate();
@@ -734,6 +857,7 @@ pub trait Location<'a>: dynamic::DynLocation {
             input: Box::new(to_sink.ir_node.replace(HydroNode::Placeholder)),
             op_metadata: HydroIrOpMetadata::new(),
         });
+        drop(flow_state_borrow);
 
         let in_t_type = quote_type::<InT>();
 
@@ -744,25 +868,27 @@ pub trait Location<'a>: dynamic::DynLocation {
             }
         };
 
-        let raw_stream: Stream<InT, Self, Unbounded, TotalOrder, ExactlyOnce> = Stream::new(
-            self.clone(),
-            HydroNode::ExternalInput {
-                from_external_key: from.key,
-                from_port_id: next_external_port_id,
-                from_many: false,
-                codec_type: quote_type::<LengthDelimitedCodec>().into(),
-                port_hint: NetworkHint::Auto,
-                instantiate_fn: DebugInstantiate::Building,
-                deserialize_fn: Some(deser_fn.into()),
-                metadata: self.new_node_metadata(Stream::<
-                    InT,
-                    Self,
-                    Unbounded,
-                    TotalOrder,
-                    ExactlyOnce,
-                >::collection_kind()),
-            },
-        );
+        let raw_stream: Stream<InT, Self::DropConsistency, Unbounded, TotalOrder, ExactlyOnce> =
+            Stream::new(
+                target_consistency.clone(),
+                HydroNode::ExternalInput {
+                    from_external_key: from.key,
+                    from_port_id: next_external_port_id,
+                    from_many: false,
+                    codec_type: quote_type::<LengthDelimitedCodec>().into(),
+                    port_hint: NetworkHint::Auto,
+                    instantiate_fn: DebugInstantiate::Building,
+                    deserialize_fn: Some(deser_fn.into()),
+                    metadata: target_consistency.new_node_metadata(Stream::<
+                        InT,
+                        Self::DropConsistency,
+                        Unbounded,
+                        TotalOrder,
+                        ExactlyOnce,
+                    >::collection_kind(
+                    )),
+                },
+            );
 
         (
             ExternalBincodeBidi {
@@ -786,6 +912,7 @@ pub trait Location<'a>: dynamic::DynLocation {
     /// - A keyed stream of incoming messages, keyed by client ID
     /// - A keyed stream of membership events (client joins/leaves), keyed by client ID
     /// - A handle to send outgoing messages, keyed by client ID
+    #[cfg(feature = "tokio")]
     #[expect(clippy::type_complexity, reason = "stream markers")]
     fn bidi_external_many_bytes<L, T, Codec: Encoder<T> + Decoder>(
         &self,
@@ -793,17 +920,42 @@ pub trait Location<'a>: dynamic::DynLocation {
         port_hint: NetworkHint,
     ) -> (
         ExternalBytesPort<Many>,
-        KeyedStream<u64, <Codec as Decoder>::Item, Self, Unbounded, TotalOrder, ExactlyOnce>,
-        KeyedStream<u64, MembershipEvent, Self, Unbounded, TotalOrder, ExactlyOnce>,
-        ForwardHandle<'a, KeyedStream<u64, T, Self, Unbounded, NoOrder, ExactlyOnce>>,
+        KeyedStream<
+            u64,
+            <Codec as Decoder>::Item,
+            Self::DropConsistency,
+            Unbounded,
+            TotalOrder,
+            ExactlyOnce,
+        >,
+        KeyedStream<
+            u64,
+            MembershipEvent,
+            Self::DropConsistency,
+            Unbounded,
+            TotalOrder,
+            ExactlyOnce,
+        >,
+        ForwardHandle<
+            'a,
+            KeyedStream<u64, T, Self::DropConsistency, Unbounded, NoOrder, ExactlyOnce>,
+        >,
     )
     where
-        Self: Sized + NoTick,
+        Self: TopLevel<'a> + Sized,
     {
         let next_external_port_id = from.flow_state.borrow_mut().next_external_port();
 
-        let (fwd_ref, to_sink) =
-            self.forward_ref::<KeyedStream<u64, T, Self, Unbounded, NoOrder, ExactlyOnce>>();
+        let target_consistency = self.drop_consistency();
+        let (fwd_ref, to_sink) = target_consistency.forward_ref::<KeyedStream<
+            u64,
+            T,
+            Self::DropConsistency,
+            Unbounded,
+            NoOrder,
+            ExactlyOnce,
+        >>();
+        let to_sink_input = Box::new(to_sink.entries().ir_node.replace(HydroNode::Placeholder));
         let mut flow_state_borrow = self.flow_state().borrow_mut();
 
         flow_state_borrow.push_root(HydroRoot::SendExternal {
@@ -813,18 +965,19 @@ pub trait Location<'a>: dynamic::DynLocation {
             unpaired: false,
             serialize_fn: None,
             instantiate_fn: DebugInstantiate::Building,
-            input: Box::new(to_sink.entries().ir_node.replace(HydroNode::Placeholder)),
+            input: to_sink_input,
             op_metadata: HydroIrOpMetadata::new(),
         });
+        drop(flow_state_borrow);
 
         let raw_stream: Stream<
             Result<(u64, <Codec as Decoder>::Item), <Codec as Decoder>::Error>,
-            Self,
+            Self::DropConsistency,
             Unbounded,
             TotalOrder,
             ExactlyOnce,
         > = Stream::new(
-            self.clone(),
+            target_consistency.clone(),
             HydroNode::ExternalInput {
                 from_external_key: from.key,
                 from_port_id: next_external_port_id,
@@ -833,13 +986,14 @@ pub trait Location<'a>: dynamic::DynLocation {
                 port_hint,
                 instantiate_fn: DebugInstantiate::Building,
                 deserialize_fn: None,
-                metadata: self.new_node_metadata(Stream::<
+                metadata: target_consistency.new_node_metadata(Stream::<
                     Result<(u64, <Codec as Decoder>::Item), <Codec as Decoder>::Error>,
-                    Self,
+                    Self::DropConsistency,
                     Unbounded,
                     TotalOrder,
                     ExactlyOnce,
-                >::collection_kind()),
+                >::collection_kind(
+                )),
             },
         );
 
@@ -854,22 +1008,23 @@ pub trait Location<'a>: dynamic::DynLocation {
         let raw_membership_stream: KeyedStream<
             u64,
             bool,
-            Self,
+            Self::DropConsistency,
             Unbounded,
             TotalOrder,
             ExactlyOnce,
         > = KeyedStream::new(
-            self.clone(),
+            target_consistency.clone(),
             HydroNode::Source {
                 source: HydroSource::Stream(membership_stream_expr.into()),
-                metadata: self.new_node_metadata(KeyedStream::<
+                metadata: target_consistency.new_node_metadata(KeyedStream::<
                     u64,
                     bool,
-                    Self,
+                    Self::DropConsistency,
                     Unbounded,
                     TotalOrder,
                     ExactlyOnce,
-                >::collection_kind()),
+                >::collection_kind(
+                )),
             },
         );
 
@@ -908,23 +1063,42 @@ pub trait Location<'a>: dynamic::DynLocation {
     /// # Type Parameters
     /// - `InT`: The type of incoming messages (must implement [`DeserializeOwned`])
     /// - `OutT`: The type of outgoing messages (must implement [`Serialize`])
+    #[cfg(feature = "tokio")]
     #[expect(clippy::type_complexity, reason = "stream markers")]
     fn bidi_external_many_bincode<L, InT: DeserializeOwned, OutT: Serialize>(
         &self,
         from: &External<L>,
     ) -> (
         ExternalBincodeBidi<InT, OutT, Many>,
-        KeyedStream<u64, InT, Self, Unbounded, TotalOrder, ExactlyOnce>,
-        KeyedStream<u64, MembershipEvent, Self, Unbounded, TotalOrder, ExactlyOnce>,
-        ForwardHandle<'a, KeyedStream<u64, OutT, Self, Unbounded, NoOrder, ExactlyOnce>>,
+        KeyedStream<u64, InT, Self::DropConsistency, Unbounded, TotalOrder, ExactlyOnce>,
+        KeyedStream<
+            u64,
+            MembershipEvent,
+            Self::DropConsistency,
+            Unbounded,
+            TotalOrder,
+            ExactlyOnce,
+        >,
+        ForwardHandle<
+            'a,
+            KeyedStream<u64, OutT, Self::DropConsistency, Unbounded, NoOrder, ExactlyOnce>,
+        >,
     )
     where
-        Self: Sized + NoTick,
+        Self: TopLevel<'a> + Sized,
     {
         let next_external_port_id = from.flow_state.borrow_mut().next_external_port();
 
-        let (fwd_ref, to_sink) =
-            self.forward_ref::<KeyedStream<u64, OutT, Self, Unbounded, NoOrder, ExactlyOnce>>();
+        let target_consistency = self.drop_consistency();
+        let (fwd_ref, to_sink) = target_consistency.forward_ref::<KeyedStream<
+            u64,
+            OutT,
+            Self::DropConsistency,
+            Unbounded,
+            NoOrder,
+            ExactlyOnce,
+        >>();
+        let to_sink_input = Box::new(to_sink.entries().ir_node.replace(HydroNode::Placeholder));
         let mut flow_state_borrow = self.flow_state().borrow_mut();
 
         let root = get_this_crate();
@@ -943,9 +1117,10 @@ pub trait Location<'a>: dynamic::DynLocation {
             unpaired: false,
             serialize_fn: Some(ser_fn.into()),
             instantiate_fn: DebugInstantiate::Building,
-            input: Box::new(to_sink.entries().ir_node.replace(HydroNode::Placeholder)),
+            input: to_sink_input,
             op_metadata: HydroIrOpMetadata::new(),
         });
+        drop(flow_state_borrow);
 
         let in_t_type = quote_type::<InT>();
 
@@ -956,27 +1131,34 @@ pub trait Location<'a>: dynamic::DynLocation {
             }
         };
 
-        let raw_stream: KeyedStream<u64, InT, Self, Unbounded, TotalOrder, ExactlyOnce> =
-            KeyedStream::new(
-                self.clone(),
-                HydroNode::ExternalInput {
-                    from_external_key: from.key,
-                    from_port_id: next_external_port_id,
-                    from_many: true,
-                    codec_type: quote_type::<LengthDelimitedCodec>().into(),
-                    port_hint: NetworkHint::Auto,
-                    instantiate_fn: DebugInstantiate::Building,
-                    deserialize_fn: Some(deser_fn.into()),
-                    metadata: self.new_node_metadata(KeyedStream::<
-                        u64,
-                        InT,
-                        Self,
-                        Unbounded,
-                        TotalOrder,
-                        ExactlyOnce,
-                    >::collection_kind()),
-                },
-            );
+        let raw_stream: KeyedStream<
+            u64,
+            InT,
+            Self::DropConsistency,
+            Unbounded,
+            TotalOrder,
+            ExactlyOnce,
+        > = KeyedStream::new(
+            target_consistency.clone(),
+            HydroNode::ExternalInput {
+                from_external_key: from.key,
+                from_port_id: next_external_port_id,
+                from_many: true,
+                codec_type: quote_type::<LengthDelimitedCodec>().into(),
+                port_hint: NetworkHint::Auto,
+                instantiate_fn: DebugInstantiate::Building,
+                deserialize_fn: Some(deser_fn.into()),
+                metadata: target_consistency.new_node_metadata(KeyedStream::<
+                    u64,
+                    InT,
+                    Self::DropConsistency,
+                    Unbounded,
+                    TotalOrder,
+                    ExactlyOnce,
+                >::collection_kind(
+                )),
+            },
+        );
 
         let membership_stream_ident = syn::Ident::new(
             &format!(
@@ -989,22 +1171,23 @@ pub trait Location<'a>: dynamic::DynLocation {
         let raw_membership_stream: KeyedStream<
             u64,
             bool,
-            Self,
+            Self::DropConsistency,
             Unbounded,
             TotalOrder,
             ExactlyOnce,
         > = KeyedStream::new(
-            self.clone(),
+            target_consistency.clone(),
             HydroNode::Source {
                 source: HydroSource::Stream(membership_stream_expr.into()),
-                metadata: self.new_node_metadata(KeyedStream::<
+                metadata: target_consistency.new_node_metadata(KeyedStream::<
                     u64,
                     bool,
-                    Self,
+                    Self::DropConsistency,
                     Unbounded,
                     TotalOrder,
                     ExactlyOnce,
-                >::collection_kind()),
+                >::collection_kind(
+                )),
             },
         );
 
@@ -1026,6 +1209,123 @@ pub trait Location<'a>: dynamic::DynLocation {
         )
     }
 
+    /// Bridges user-owned async code to the dataflow as a **bidirectional sidecar**.
+    ///
+    /// The closure is called once at startup and must return a
+    /// `(Stream<InT>, Sink<OutT>)` pair. The framework reads from the stream
+    /// (items flowing *into* the dataflow) and writes to the sink (items flowing
+    /// *out* to the sidecar). The user controls buffering, backpressure, and
+    /// internal lifecycle — Hydro only sees the stream/sink interface.
+    ///
+    /// This will hopefully make it easy to integrate hydro with existing frameworks,
+    /// for example grpc code generated service endpoints.
+    ///
+    /// # Returns
+    /// - A `Stream<InT>` carrying items from the sidecar into the dataflow.
+    /// - A [`ForwardHandle`] expecting a `Stream<OutT>` that the user completes
+    ///   with items destined for the sidecar.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # #[cfg(feature = "deploy")] {
+    /// # use hydro_lang::prelude::*;
+    /// # use futures::StreamExt;
+    /// # tokio_test::block_on(hydro_lang::test_util::stream_transform_test(|process| {
+    /// // Sidecar that echoes whatever it receives back into the dataflow.
+    /// let (inbound, response_handle) = process.sidecar_bidi::<String, String, _>(q!(|| {
+    ///     let (to_df_tx, to_df_rx) = tokio::sync::mpsc::channel::<String>(16);
+    ///     let (from_df_tx, mut from_df_rx) = tokio::sync::mpsc::channel::<String>(16);
+    ///
+    ///     // Spawn the sidecar: echoes items from the dataflow back into it.
+    ///     tokio::spawn(async move {
+    ///         while let Some(msg) = from_df_rx.recv().await {
+    ///             to_df_tx.send(msg).await.ok();
+    ///         }
+    ///     });
+    ///
+    ///     // Return the framework-facing ends (concrete types, no boxing needed).
+    ///     let stream = tokio_stream::wrappers::ReceiverStream::new(to_df_rx);
+    ///     let sink = tokio_util::sync::PollSender::new(from_df_tx);
+    ///     (stream, sink)
+    /// }));
+    ///
+    /// // Send "hello" into the sidecar via the response channel.
+    /// let input = process.source_stream(q!(futures::stream::iter(vec!["hello".to_string()])));
+    /// response_handle.complete(input);
+    ///
+    /// // The sidecar echoes it back — assert we get "hello" out.
+    /// inbound
+    /// # }, |mut stream| async move {
+    /// #     assert_eq!(stream.next().await.unwrap(), "hello");
+    /// # }));
+    /// # }
+    /// ```
+    fn sidecar_bidi<InT: 'static, OutT: 'static, F>(
+        &self,
+        sidecar: impl QuotedWithContext<'a, F, Self>,
+    ) -> (
+        Stream<InT, Self, Unbounded, TotalOrder, ExactlyOnce>,
+        ForwardHandle<'a, Stream<OutT, Self, Unbounded, NoOrder, ExactlyOnce>>,
+    )
+    where
+        Self: Sized + TopLevel<'a>,
+    {
+        let location_key = Location::id(self).key();
+
+        let sidecar_id = self.flow_state().borrow_mut().next_sidecar_id();
+        let (stream_ident, sink_ident) = sidecar_id.idents();
+
+        let sidecar_closure: syn::Expr = sidecar.splice_untyped_ctx(self);
+        self.flow_state()
+            .borrow_mut()
+            .sidecars
+            .push(crate::compile::builder::Sidecar::Bidi {
+                location_key,
+                sidecar_id,
+                sidecar_closure: Box::new(sidecar_closure),
+            });
+
+        // Inbound stream: reads from the stream returned by the sidecar closure
+        let source_expr: syn::Expr = parse_quote! {
+            #stream_ident
+        };
+        let inbound: Stream<InT, Self, Unbounded, TotalOrder, ExactlyOnce> = Stream::new(
+            self.clone(),
+            HydroNode::Source {
+                source: HydroSource::Stream(source_expr.into()),
+                metadata: self.new_node_metadata(Stream::<
+                    InT,
+                    Self,
+                    Unbounded,  // TODO: maybe bounded sidecars are interesting..?
+                    TotalOrder, // TODO: NoOrder..?
+                    ExactlyOnce,
+                >::collection_kind()),
+            },
+        );
+
+        // Outbound: forward_ref cycle feeding the sink returned by the sidecar closure
+        let (fwd_ref, to_sink): (
+            ForwardHandle<'a, Stream<OutT, Self, Unbounded, NoOrder, ExactlyOnce>>,
+            Stream<OutT, Self, Unbounded, NoOrder, ExactlyOnce>,
+        ) = self.forward_ref();
+
+        let sink_expr: syn::Expr = parse_quote! {
+            #sink_ident
+        };
+
+        let sink_input_ir = to_sink.ir_node.replace(HydroNode::Placeholder);
+        self.flow_state()
+            .borrow_mut()
+            .try_push_root(HydroRoot::DestSink {
+                sink: sink_expr.into(),
+                input: Box::new(sink_input_ir),
+                op_metadata: HydroIrOpMetadata::new(),
+            });
+
+        (inbound, fwd_ref)
+    }
+
     /// Constructs a [`Singleton`] materialized at this location with the given static value.
     ///
     /// See also: [`Tick::singleton`], for creating a singleton _within_ a tick, which requires
@@ -1045,18 +1345,26 @@ pub trait Location<'a>: dynamic::DynLocation {
     /// # }));
     /// # }
     /// ```
-    fn singleton<T>(&self, e: impl QuotedWithContext<'a, T, Self>) -> Singleton<T, Self, Bounded>
+    fn singleton<T>(
+        &self,
+        e: impl QuotedWithContext<'a, T, Self>,
+    ) -> Singleton<T, Self::DropConsistency, Bounded>
     where
-        Self: Sized + NoTick,
+        Self: Sized,
     {
         let e = e.splice_untyped_ctx(self);
 
+        let target_location = self.drop_consistency();
         Singleton::new(
-            self.clone(),
+            target_location.clone(),
             HydroNode::SingletonSource {
                 value: e.into(),
                 first_tick_only: false,
-                metadata: self.new_node_metadata(Singleton::<T, Self, Bounded>::collection_kind()),
+                metadata: target_location.new_node_metadata(Singleton::<
+                    T,
+                    Self::DropConsistency,
+                    Bounded,
+                >::collection_kind()),
             },
         )
     }
@@ -1086,58 +1394,64 @@ pub trait Location<'a>: dynamic::DynLocation {
     fn singleton_future<F>(
         &self,
         e: impl QuotedWithContext<'a, F, Self>,
-    ) -> Singleton<F::Output, Self, Bounded>
+    ) -> Singleton<F::Output, Self::DropConsistency, Bounded>
     where
         F: Future,
-        Self: Sized + NoTick,
+        Self: Sized,
     {
         self.singleton(e).resolve_future_blocking()
     }
 
-    /// Generates a stream with values emitted at a fixed interval, with
-    /// each value being the current time (as an [`tokio::time::Instant`]).
+    /// Generates a stream that emits `()` at a fixed interval.
     ///
-    /// The clock source used is monotonic, so elements will be emitted in
-    /// increasing order.
+    /// The first tick completes immediately. Missed ticks will be scheduled
+    /// as soon as possible.
     ///
-    /// # Non-Determinism
-    /// Because this stream is generated by an OS timer, it will be
-    /// non-deterministic because each timestamp will be arbitrary.
+    /// Because this only emits `()`, the non-determinism of *when* events fire
+    /// is captured by the `AtLeastOnce` retry semantics downstream, so no
+    /// [`NonDet`] guard is required.
+    #[cfg(feature = "tokio")]
     fn source_interval(
         &self,
         interval: impl QuotedWithContext<'a, Duration, Self> + Copy + 'a,
-        _nondet: NonDet,
-    ) -> Stream<tokio::time::Instant, Self, Unbounded, TotalOrder, ExactlyOnce>
+    ) -> Stream<(), Self, Unbounded, TotalOrder, ExactlyOnce>
     where
-        Self: Sized + NoTick,
+        Self: TopLevel<'a> + Sized,
     {
-        self.source_stream(q!(tokio_stream::wrappers::IntervalStream::new(
-            tokio::time::interval(interval)
+        self.source_stream(q!(tokio_stream::StreamExt::map(
+            tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(interval)),
+            |_| ()
         )))
+        .assert_has_consistency_of_trusted(
+            manual_proof!(/** interval does not reveal timestamps */),
+        )
     }
 
-    /// Generates a stream with values emitted at a fixed interval (with an
-    /// initial delay), with each value being the current time
-    /// (as an [`tokio::time::Instant`]).
+    /// Generates a stream that emits `()` at a fixed interval, after an
+    /// initial delay.
     ///
-    /// The clock source used is monotonic, so elements will be emitted in
-    /// increasing order.
-    ///
-    /// # Non-Determinism
-    /// Because this stream is generated by an OS timer, it will be
-    /// non-deterministic because each timestamp will be arbitrary.
+    /// Because this only emits `()`, the non-determinism of *when* events fire
+    /// is captured by the `AtLeastOnce` retry semantics downstream, so no
+    /// [`NonDet`] guard is required.
+    #[cfg(feature = "tokio")]
     fn source_interval_delayed(
         &self,
         delay: impl QuotedWithContext<'a, Duration, Self> + Copy + 'a,
         interval: impl QuotedWithContext<'a, Duration, Self> + Copy + 'a,
-        _nondet: NonDet,
-    ) -> Stream<tokio::time::Instant, Self, Unbounded, TotalOrder, ExactlyOnce>
+    ) -> Stream<(), Self, Unbounded, TotalOrder, ExactlyOnce>
     where
-        Self: Sized + NoTick,
+        Self: TopLevel<'a> + Sized,
     {
-        self.source_stream(q!(tokio_stream::wrappers::IntervalStream::new(
-            tokio::time::interval_at(tokio::time::Instant::now() + delay, interval)
+        self.source_stream(q!(tokio_stream::StreamExt::map(
+            tokio_stream::wrappers::IntervalStream::new(tokio::time::interval_at(
+                tokio::time::Instant::now() + delay,
+                interval,
+            )),
+            |_| ()
         )))
+        .assert_has_consistency_of_trusted(
+            manual_proof!(/** interval does not reveal timestamps */),
+        )
     }
 
     /// Creates a forward reference, allowing a stream to be used before its source is defined.

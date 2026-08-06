@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use dfir_lang::graph::{
     DfirGraph, FlatGraphBuilderOutput, eliminate_extra_unions_tees, partition_graph,
 };
-use slotmap::{SecondaryMap, SlotMap, SparseSecondaryMap};
+use slotmap::{SecondaryMap, SlotMap};
 
 use super::compiled::CompiledFlow;
 use super::deploy::{DeployFlow, DeployResult};
@@ -23,8 +23,21 @@ pub struct BuiltFlow<'a> {
     pub(super) locations: SlotMap<LocationKey, LocationType>,
     pub(super) location_names: SecondaryMap<LocationKey, String>,
 
+    /// Compile-time sidecar directives extracted from the flow state.
+    pub(super) sidecars: Vec<super::builder::Sidecar>,
+
     /// Application name used in telemetry.
     pub(super) flow_name: String,
+
+    /// The program version each location belongs to (every location has an entry; 0 unless it is a
+    /// `next_version` successor).
+    #[cfg(feature = "sim")]
+    pub(super) location_version: SecondaryMap<LocationKey, u32>,
+
+    /// Maps from a given location to Version 0 of that location (or itself it is already v0).
+    /// [`Cluster::next_version`](crate::location::Cluster::next_version)).
+    #[cfg(feature = "sim")]
+    pub(super) location_version_group_root: SecondaryMap<LocationKey, LocationKey>,
 
     pub(super) _phantom: Invariant<'a>,
 }
@@ -50,7 +63,7 @@ impl<'a> BuiltFlow<'a> {
     }
 
     /// Serialize the IR as JSON.
-    #[cfg(feature = "runtime_support")]
+    #[cfg(feature = "viz")]
     pub fn ir_json(&self) -> Result<String, serde_json::Error> {
         super::ir::serialize_dedup_shared(|| serde_json::to_string_pretty(&self.ir))
     }
@@ -121,7 +134,7 @@ impl<'a> BuiltFlow<'a> {
 
         use crate::sim::graph::SimNodePort;
 
-        let shared_port_counter = Rc::new(RefCell::new(SimNodePort::default()));
+        let shared_port_counter = Rc::new(RefCell::new(crate::Counter::<SimNodePort>::default()));
 
         let mut processes = SparseSecondaryMap::new();
         let mut clusters = SparseSecondaryMap::new();
@@ -158,7 +171,10 @@ impl<'a> BuiltFlow<'a> {
             externals,
             cluster_max_sizes: SparseSecondaryMap::new(),
             externals_port_registry: Default::default(),
+            location_version: self.location_version,
+            location_version_group_root: self.location_version_group_root,
             test_safety_only: false,
+            skip_consistency_assertions: false,
             unit_test_fuzz_iterations: 8192,
             _phantom: PhantomData,
         }
@@ -173,7 +189,7 @@ impl<'a> BuiltFlow<'a> {
             processes,
             clusters,
             externals,
-            sidecars: SparseSecondaryMap::new(),
+            sidecars: self.sidecars,
             flow_name: self.flow_name,
             _phantom: PhantomData,
         }

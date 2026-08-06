@@ -43,7 +43,6 @@ impl<K: KvKey, V: KvValue> PartialOrd for SequencedKv<K, V> {
 }
 
 // Replicas. All relations for replicas will be prefixed with r. Expects ReplicaPayload on p_to_replicas, outputs a stream of (client address, ReplicaPayload) after processing.
-#[expect(clippy::type_complexity, reason = "internal paxos code // TODO")]
 pub fn kv_replica<'a, K: KvKey, V: KvValue>(
     replicas: &Cluster<'a, Replica>,
     p_to_replicas: impl Into<
@@ -81,7 +80,7 @@ pub fn kv_replica<'a, K: KvKey, V: KvValue>(
 
     // Send checkpoints to the acceptors when we've processed enough payloads
     let (r_checkpointed_seqs_complete_cycle, r_checkpointed_seqs) =
-        replica_tick.cycle::<Optional<usize, _, _>>();
+        replica_tick.cycle::<Optional<usize, _, _>, _>();
     let r_max_checkpointed_seq = r_checkpointed_seqs
         .into_stream()
         .across_ticks(|s| s.max())

@@ -31,7 +31,6 @@ pub const DEST_FILE: OperatorConstraints = OperatorConstraints {
     persistence_args: RANGE_0,
     type_args: RANGE_0,
     is_external_input: false,
-    has_singleton_output: false,
     flo_type: None,
     ports_inn: None,
     ports_out: None,
@@ -76,9 +75,9 @@ pub const DEST_FILE: OperatorConstraints = OperatorConstraints {
 
         let OperatorWriteOutput {
             write_prologue: write_prologue_sink,
-            write_prologue_after,
             write_iterator,
             write_iterator_after,
+            write_tick_end,
         } = (super::dest_sink::DEST_SINK.write_fn)(&wc, diagnostics)?;
 
         let write_prologue = quote_spanned! {op_span=>
@@ -92,9 +91,9 @@ pub const DEST_FILE: OperatorConstraints = OperatorConstraints {
 
         Ok(OperatorWriteOutput {
             write_prologue,
-            write_prologue_after,
             write_iterator,
             write_iterator_after,
+            write_tick_end,
         })
     },
 };

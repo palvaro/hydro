@@ -8,6 +8,7 @@ use std::rc::Rc;
 use sealed::sealed;
 use stageleft::{IntoQuotedMut, QuotedWithContext, QuotedWithContextWithProps, q};
 
+use super::OperatorContext;
 use super::boundedness::{Bounded, Boundedness, IsBounded, Unbounded};
 use super::optional::Optional;
 use super::sliced::sliced;
@@ -19,13 +20,16 @@ use crate::compile::ir::{
 #[cfg(stageleft_runtime)]
 use crate::forward_handle::{CycleCollection, CycleCollectionWithInitial, ReceiverComplete};
 use crate::forward_handle::{ForwardRef, TickCycle};
+#[cfg(feature = "tokio")]
+use crate::location::TopLevel;
 #[cfg(stageleft_runtime)]
 use crate::location::dynamic::{DynLocation, LocationId};
-use crate::location::tick::{Atomic, NoAtomic};
-use crate::location::{Location, NoTick, Tick, check_matching_location};
+use crate::location::tick::Atomic;
+use crate::location::{Location, Tick, check_matching_location};
 use crate::nondet::{NonDet, nondet};
 use crate::properties::{
-    ApplyMonotoneStream, ApplyOrderPreservingSingleton, MapFuncAlgebra, Proved,
+    ApplyMonotoneStream, ApplyOrderPreservingSingleton, Proved, SingletonMapFuncAlgebra,
+    StreamMapFuncAlgebra, ValidMutCommutativityFor, ValidMutIdempotenceFor,
 };
 
 /// A marker trait indicating which components of a [`Singleton`] may change.
@@ -109,7 +113,7 @@ impl<B: IsBounded> IsMonotonic for B {}
 /// - `Bound`: tracks whether the value is [`Bounded`] (fixed) or [`Unbounded`] (changing asynchronously)
 pub struct Singleton<Type, Loc, Bound: SingletonBound> {
     pub(crate) location: Loc,
-    pub(crate) ir_node: RefCell<HydroNode>,
+    pub(crate) ir_node: Rc<RefCell<HydroNode>>,
     pub(crate) flow_state: FlowState,
 
     _phantom: PhantomData<(Type, Loc, Bound)>,
@@ -130,11 +134,18 @@ impl<T, L, B: SingletonBound> Drop for Singleton<T, L, B> {
 impl<'a, T, L> From<Singleton<T, L, Bounded>> for Singleton<T, L, Unbounded>
 where
     T: Clone,
-    L: Location<'a> + NoTick,
+    L: Location<'a>,
 {
     fn from(value: Singleton<T, L, Bounded>) -> Self {
-        let tick = value.location().tick();
-        value.clone_into_tick(&tick).latest()
+        let location = value.location().clone();
+        Singleton::new(
+            location.clone(),
+            HydroNode::UnboundSingleton {
+                inner: Box::new(value.ir_node.replace(HydroNode::Placeholder)),
+                metadata: location
+                    .new_node_metadata(Singleton::<T, L, Unbounded>::collection_kind()),
+            },
+        )
     }
 }
 
@@ -143,6 +154,10 @@ where
     L: Location<'a>,
 {
     type Location = Tick<L>;
+
+    fn location(&self) -> &Self::Location {
+        self.location()
+    }
 
     fn create_source_with_initial(cycle_id: CycleId, initial: Self, location: Tick<L>) -> Self {
         let from_previous_tick: Optional<T, Tick<L>, Bounded> = Optional::new(
@@ -182,47 +197,9 @@ where
     }
 }
 
-impl<'a, T, L> CycleCollection<'a, ForwardRef> for Singleton<T, Tick<L>, Bounded>
-where
-    L: Location<'a>,
-{
-    type Location = Tick<L>;
-
-    fn create_source(cycle_id: CycleId, location: Tick<L>) -> Self {
-        Singleton::new(
-            location.clone(),
-            HydroNode::CycleSource {
-                cycle_id,
-                metadata: location.new_node_metadata(Self::collection_kind()),
-            },
-        )
-    }
-}
-
-impl<'a, T, L> ReceiverComplete<'a, ForwardRef> for Singleton<T, Tick<L>, Bounded>
-where
-    L: Location<'a>,
-{
-    fn complete(self, cycle_id: CycleId, expected_location: LocationId) {
-        assert_eq!(
-            Location::id(&self.location),
-            expected_location,
-            "locations do not match"
-        );
-        self.location
-            .flow_state()
-            .borrow_mut()
-            .push_root(HydroRoot::CycleSink {
-                cycle_id,
-                input: Box::new(self.ir_node.replace(HydroNode::Placeholder)),
-                op_metadata: HydroIrOpMetadata::new(),
-            });
-    }
-}
-
 impl<'a, T, L, B: SingletonBound> CycleCollection<'a, ForwardRef> for Singleton<T, L, B>
 where
-    L: Location<'a> + NoTick,
+    L: Location<'a>,
 {
     type Location = L;
 
@@ -239,7 +216,7 @@ where
 
 impl<'a, T, L, B: SingletonBound> ReceiverComplete<'a, ForwardRef> for Singleton<T, L, B>
 where
-    L: Location<'a> + NoTick,
+    L: Location<'a>,
 {
     fn complete(self, cycle_id: CycleId, expected_location: LocationId) {
         assert_eq!(
@@ -276,11 +253,13 @@ where
             Singleton {
                 location: self.location.clone(),
                 flow_state: self.flow_state.clone(),
-                ir_node: HydroNode::Tee {
-                    inner: SharedNode(inner.0.clone()),
-                    metadata: metadata.clone(),
-                }
-                .into(),
+                ir_node: super::tracked_ir_node(
+                    &self.flow_state,
+                    HydroNode::Tee {
+                        inner: SharedNode(inner.0.clone()),
+                        metadata: metadata.clone(),
+                    },
+                ),
                 _phantom: PhantomData,
             }
         } else {
@@ -306,10 +285,11 @@ where
         debug_assert_eq!(ir_node.metadata().location_id, Location::id(&location));
         debug_assert_eq!(ir_node.metadata().collection_kind, Self::collection_kind());
         let flow_state = location.flow_state().clone();
+        let ir_node = super::tracked_ir_node(&flow_state, ir_node);
         Singleton {
             location,
             flow_state,
-            ir_node: RefCell::new(ir_node),
+            ir_node,
             _phantom: PhantomData,
         }
     }
@@ -324,6 +304,171 @@ where
     /// Returns the [`Location`] where this singleton is being materialized.
     pub fn location(&self) -> &L {
         &self.location
+    }
+
+    /// Creates a lightweight reference handle to this singleton that can be captured
+    /// inside `q!()` closures. The handle resolves to `&T` at runtime.
+    ///
+    /// The singleton must be bounded, otherwise reading it would be non-deterministic.
+    /// The handle can only be captured in closures passed to operators on collections at
+    /// the same location with **matching boundedness**; capturing it in a closure over an
+    /// unbounded collection is rejected at compile time, since the bounded singleton is only
+    /// materialized on the first tick while the closure would keep running on later ticks,
+    /// where accessing the reference would crash.
+    ///
+    /// ```rust
+    /// # #[cfg(feature = "deploy")] {
+    /// # use hydro_lang::prelude::*;
+    /// # use futures::StreamExt;
+    /// # tokio_test::block_on(async {
+    /// # let mut deployment = hydro_deploy::Deployment::new();
+    /// # let mut builder = hydro_lang::compile::builder::FlowBuilder::new();
+    /// # let process = builder.process::<()>();
+    /// # let external = builder.external::<()>();
+    /// let my_count = process
+    ///     .source_iter(q!(0..5i32))
+    ///     .fold(q!(|| 0i32), q!(|acc: &mut i32, x| *acc += x));
+    /// let count_ref = my_count.by_ref();
+    /// let out_port = process
+    ///     .source_iter(q!(1..=3i32))
+    ///     .map(q!(|x| x + *count_ref))
+    ///     .send_bincode_external(&external);
+    /// # let nodes = builder
+    /// #     .with_default_optimize()
+    /// #     .with_process(&process, deployment.Localhost())
+    /// #     .with_external(&external, deployment.Localhost())
+    /// #     .deploy(&mut deployment);
+    /// # deployment.deploy().await.unwrap();
+    /// # let mut out_recv = nodes.connect(out_port).await;
+    /// # deployment.start().await.unwrap();
+    /// # let mut results = Vec::new();
+    /// # for _ in 0..3 { results.push(out_recv.next().await.unwrap()); }
+    /// # results.sort();
+    /// // fold(0..5) = 10, so results are 11, 12, 13
+    /// # assert_eq!(results, vec![11, 12, 13]);
+    /// # });
+    /// # }
+    /// ```
+    pub fn by_ref(
+        &self,
+    ) -> crate::handoff_ref::SingletonRef<'a, '_, T, L, <B as SingletonBound>::UnderlyingBound>
+    where
+        B: IsBounded,
+    {
+        crate::handoff_ref::SingletonRef::new(&self.ir_node)
+    }
+
+    /// Returns a mutable reference handle to this singleton that can be captured inside `q!()`
+    /// closures. The handle resolves to `&mut T` at runtime.
+    ///
+    /// Mutable references are ordered via access groups in the generated DFIR code, ensuring
+    /// exclusive access at each point in the execution order.
+    ///
+    /// ```rust
+    /// # #[cfg(feature = "deploy")] {
+    /// # use hydro_lang::prelude::*;
+    /// # use futures::StreamExt;
+    /// # tokio_test::block_on(async {
+    /// # let mut deployment = hydro_deploy::Deployment::new();
+    /// # let mut builder = hydro_lang::compile::builder::FlowBuilder::new();
+    /// # let process = builder.process::<()>();
+    /// # let external = builder.external::<()>();
+    /// let my_count = process
+    ///     .source_iter(q!(0..5i32))
+    ///     .fold(q!(|| 0i32), q!(|acc: &mut i32, x| *acc += x));
+    /// let count_mut = my_count.by_mut();
+    /// let out_port = process
+    ///     .source_iter(q!(1..=3i32))
+    ///     .map(q!(|x| {
+    ///         *count_mut += x;
+    ///         *count_mut
+    ///     }))
+    ///     .send_bincode_external(&external);
+    /// # let nodes = builder
+    /// #     .with_default_optimize()
+    /// #     .with_process(&process, deployment.Localhost())
+    /// #     .with_external(&external, deployment.Localhost())
+    /// #     .deploy(&mut deployment);
+    /// # deployment.deploy().await.unwrap();
+    /// # let mut out_recv = nodes.connect(out_port).await;
+    /// # deployment.start().await.unwrap();
+    /// # let mut results = Vec::new();
+    /// # for _ in 0..3 { results.push(out_recv.next().await.unwrap()); }
+    /// # results.sort();
+    /// // fold(0..5) = 10, then each map adds x: results are 11, 13, 16
+    /// # assert_eq!(results, vec![11, 13, 16]);
+    /// # });
+    /// # }
+    /// ```
+    pub fn by_mut(
+        &self,
+    ) -> crate::handoff_ref::SingletonMut<'a, '_, T, L, <B as SingletonBound>::UnderlyingBound>
+    where
+        B: IsBounded,
+    {
+        crate::handoff_ref::SingletonMut::new(&self.ir_node)
+    }
+
+    /// Weakens the consistency of this live collection to not guarantee any consistency across
+    /// cluster members (if this collection is on a cluster).
+    pub fn weaken_consistency(self) -> Singleton<T, L::DropConsistency, B>
+    where
+        L: Location<'a>,
+    {
+        if L::consistency()
+            .is_none_or(|c| c == crate::location::dynamic::ClusterConsistency::NoConsistency)
+        {
+            // already no consistency
+            Singleton::new(
+                self.location.drop_consistency(),
+                self.ir_node.replace(HydroNode::Placeholder),
+            )
+        } else {
+            Singleton::new(
+                self.location.drop_consistency(),
+                HydroNode::Cast {
+                    inner: Box::new(self.ir_node.replace(HydroNode::Placeholder)),
+                    metadata:
+                        self.location
+                            .clone()
+                            .drop_consistency()
+                            .new_node_metadata(
+                                Singleton::<T, L::DropConsistency, B>::collection_kind(),
+                            ),
+                },
+            )
+        }
+    }
+
+    /// Casts this live collection to have the consistency guarantees specified in the given
+    /// location type parameter. The developer must ensure that the strengthened consistency
+    /// is actually guaranteed, via the proof field (see [`crate::prelude::manual_proof`]).
+    pub fn assert_has_consistency_of<L2: Location<'a, DropConsistency = L::DropConsistency>>(
+        self,
+        _proof: impl crate::properties::ConsistencyProof,
+    ) -> Singleton<T, L2, B>
+    where
+        L: Location<'a>,
+    {
+        if L::consistency() == L2::consistency() {
+            Singleton::new(
+                self.location.with_consistency_of(),
+                self.ir_node.replace(HydroNode::Placeholder),
+            )
+        } else {
+            Singleton::new(
+                self.location.with_consistency_of(),
+                HydroNode::AssertIsConsistent {
+                    inner: Box::new(self.ir_node.replace(HydroNode::Placeholder)),
+                    trusted: false,
+                    metadata: self
+                        .location
+                        .clone()
+                        .with_consistency_of::<L2>()
+                        .new_node_metadata(Singleton::<T, L2, B>::collection_kind()),
+                },
+            )
+        }
     }
 
     /// Drops the monotonicity property of the [`Singleton`].
@@ -367,13 +512,21 @@ where
     /// ```
     pub fn map<U, F, OP, B2: SingletonBound>(
         self,
-        f: impl IntoQuotedMut<'a, F, L, MapFuncAlgebra<OP>>,
+        f: impl IntoQuotedMut<
+            'a,
+            F,
+            OperatorContext<L, <B as SingletonBound>::UnderlyingBound>,
+            SingletonMapFuncAlgebra<OP>,
+        >,
     ) -> Singleton<U, L, B2>
     where
         F: Fn(T) -> U + 'a,
         B: ApplyOrderPreservingSingleton<OP, B2>,
     {
-        let (f, proof) = f.splice_fn1_ctx_props(&self.location);
+        let (f, proof) = f
+            .splice_fn1_ctx_props(
+                &OperatorContext::<L, <B as SingletonBound>::UnderlyingBound>::new(&self.location),
+            );
         proof.register_proof(&f);
         let f = f.into();
         Singleton::new(
@@ -415,14 +568,16 @@ where
     /// # }));
     /// # }
     /// ```
-    pub fn flat_map_ordered<U, I, F>(
+    pub fn flat_map_ordered<U, I, F, C, Idemp, const WAS_MUT: bool>(
         self,
-        f: impl IntoQuotedMut<'a, F, L>,
+        f: impl IntoQuotedMut<'a, F, OperatorContext<L, Bounded>, StreamMapFuncAlgebra<C, Idemp>>,
     ) -> Stream<U, L, Bounded, TotalOrder, ExactlyOnce>
     where
         B: IsBounded,
         I: IntoIterator<Item = U>,
-        F: Fn(T) -> I + 'a,
+        F: FnMut(T) -> I + 'a,
+        C: ValidMutCommutativityFor<F, T, I, TotalOrder, WAS_MUT>,
+        Idemp: ValidMutIdempotenceFor<F, T, I, ExactlyOnce, WAS_MUT>,
     {
         self.into_stream().flat_map_ordered(f)
     }
@@ -455,14 +610,16 @@ where
     /// # }));
     /// # }
     /// ```
-    pub fn flat_map_unordered<U, I, F>(
+    pub fn flat_map_unordered<U, I, F, C, Idemp, const WAS_MUT: bool>(
         self,
-        f: impl IntoQuotedMut<'a, F, L>,
+        f: impl IntoQuotedMut<'a, F, OperatorContext<L, Bounded>, StreamMapFuncAlgebra<C, Idemp>>,
     ) -> Stream<U, L, Bounded, NoOrder, ExactlyOnce>
     where
         B: IsBounded,
         I: IntoIterator<Item = U>,
-        F: Fn(T) -> I + 'a,
+        F: FnMut(T) -> I + 'a,
+        C: ValidMutCommutativityFor<F, T, I, TotalOrder, WAS_MUT>,
+        Idemp: ValidMutIdempotenceFor<F, T, I, ExactlyOnce, WAS_MUT>,
     {
         self.into_stream().flat_map_unordered(f)
     }
@@ -561,11 +718,18 @@ where
     /// # }));
     /// # }
     /// ```
-    pub fn filter<F>(self, f: impl IntoQuotedMut<'a, F, L>) -> Optional<T, L, B::UnderlyingBound>
+    pub fn filter<F>(
+        self,
+        f: impl IntoQuotedMut<'a, F, OperatorContext<L, <B as SingletonBound>::UnderlyingBound>>,
+    ) -> Optional<T, L, B::UnderlyingBound>
     where
         F: Fn(&T) -> bool + 'a,
     {
-        let f = f.splice_fn1_borrow_ctx(&self.location).into();
+        let f = f
+            .splice_fn1_borrow_ctx(
+                &OperatorContext::<L, <B as SingletonBound>::UnderlyingBound>::new(&self.location),
+            )
+            .into();
         Optional::new(
             self.location.clone(),
             HydroNode::Filter {
@@ -603,12 +767,16 @@ where
     /// ```
     pub fn filter_map<U, F>(
         self,
-        f: impl IntoQuotedMut<'a, F, L>,
+        f: impl IntoQuotedMut<'a, F, OperatorContext<L, <B as SingletonBound>::UnderlyingBound>>,
     ) -> Optional<U, L, B::UnderlyingBound>
     where
         F: Fn(T) -> Option<U> + 'a,
     {
-        let f = f.splice_fn1_ctx(&self.location).into();
+        let f = f
+            .splice_fn1_ctx(
+                &OperatorContext::<L, <B as SingletonBound>::UnderlyingBound>::new(&self.location),
+            )
+            .into();
         Optional::new(
             self.location.clone(),
             HydroNode::FilterMap {
@@ -658,6 +826,7 @@ where
         if L::is_top_level()
             && let Some(tick) = self.location.try_tick()
         {
+            let self_location = self.location().clone();
             let other_location = <Self as ZipResult<'a, O>>::other_location(&other);
             let out = zip_inside_tick(
                 self.snapshot(&tick, nondet!(/** eventually stabilizes */)),
@@ -677,10 +846,7 @@ where
             )
             .latest();
 
-            Self::make(
-                out.location.clone(),
-                out.ir_node.replace(HydroNode::Placeholder),
-            )
+            Self::make(self_location, out.ir_node.replace(HydroNode::Placeholder))
         } else {
             Self::make(
                 self.location.clone(),
@@ -891,6 +1057,7 @@ where
         B: IsMonotonic,
     {
         let threshold = threshold.make_bounded();
+        let self_location = self.location().clone();
         match self.try_make_bounded() {
             Ok(bounded) => {
                 let uncasted = threshold
@@ -905,7 +1072,7 @@ where
             }
             Err(me) => {
                 let uncasted = sliced! {
-                    let me = use(me, nondet!(/** thresholds are deterministic */));
+                    let me = use::snapshot(me, nondet!(/** thresholds are deterministic */));
                     let mut remaining_threshold = use::state(|l| {
                         let as_option: Optional<_, _, _> = threshold.clone_into_tick(l).into();
                         as_option
@@ -917,7 +1084,7 @@ where
                 };
 
                 Stream::new(
-                    uncasted.location.clone(),
+                    self_location,
                     uncasted.ir_node.replace(HydroNode::Placeholder),
                 )
             }
@@ -1042,7 +1209,7 @@ where
 
 impl<'a, T, L, B: SingletonBound> Singleton<T, Atomic<L>, B>
 where
-    L: Location<'a> + NoTick,
+    L: Location<'a>,
 {
     /// Returns a singleton value corresponding to the latest snapshot of the singleton
     /// being atomically processed. The snapshot at tick `t + 1` is guaranteed to include
@@ -1054,33 +1221,17 @@ where
     /// Because this picks a snapshot of a singleton whose value is continuously changing,
     /// the output singleton has a non-deterministic value since the snapshot can be at an
     /// arbitrary point in time.
-    pub fn snapshot_atomic(
+    pub fn snapshot_atomic<L2: Location<'a, DropConsistency = L::DropConsistency>>(
         self,
-        tick: &Tick<L>,
+        tick: &Tick<L2>,
         _nondet: NonDet,
-    ) -> Singleton<T, Tick<L>, Bounded> {
+    ) -> Singleton<T, Tick<L::DropConsistency>, Bounded> {
         Singleton::new(
-            tick.clone(),
+            tick.drop_consistency(),
             HydroNode::Batch {
                 inner: Box::new(self.ir_node.replace(HydroNode::Placeholder)),
                 metadata: tick
                     .new_node_metadata(Singleton::<T, Tick<L>, Bounded>::collection_kind()),
-            },
-        )
-    }
-
-    /// Returns this singleton back into a top-level, asynchronous execution context where updates
-    /// to the value will be asynchronously propagated.
-    pub fn end_atomic(self) -> Singleton<T, L, B> {
-        Singleton::new(
-            self.location.tick.l.clone(),
-            HydroNode::EndAtomic {
-                inner: Box::new(self.ir_node.replace(HydroNode::Placeholder)),
-                metadata: self
-                    .location
-                    .tick
-                    .l
-                    .new_node_metadata(Singleton::<T, L, B>::collection_kind()),
             },
         )
     }
@@ -1090,31 +1241,6 @@ impl<'a, T, L, B: SingletonBound> Singleton<T, L, B>
 where
     L: Location<'a>,
 {
-    /// Shifts this singleton into an atomic context, which guarantees that any downstream logic
-    /// will observe the same version of the value and will be executed synchronously before any
-    /// outputs are yielded (in [`Optional::end_atomic`]).
-    ///
-    /// This is useful to enforce local consistency constraints, such as ensuring that several readers
-    /// see a consistent version of local state (since otherwise each [`Singleton::snapshot`] may pick
-    /// a different version).
-    pub fn atomic(self) -> Singleton<T, Atomic<L>, B> {
-        let id = self.location.flow_state().borrow_mut().next_clock_id();
-        let out_location = Atomic {
-            tick: Tick {
-                id,
-                l: self.location.clone(),
-            },
-        };
-        Singleton::new(
-            out_location.clone(),
-            HydroNode::BeginAtomic {
-                inner: Box::new(self.ir_node.replace(HydroNode::Placeholder)),
-                metadata: out_location
-                    .new_node_metadata(Singleton::<T, Atomic<L>, B>::collection_kind()),
-            },
-        )
-    }
-
     /// Given a tick, returns a singleton value corresponding to a snapshot of the singleton
     /// as of that tick. The snapshot at tick `t + 1` is guaranteed to include at least all
     /// relevant data that contributed to the snapshot at tick `t`.
@@ -1123,10 +1249,14 @@ where
     /// Because this picks a snapshot of a singleton whose value is continuously changing,
     /// the output singleton has a non-deterministic value since the snapshot can be at an
     /// arbitrary point in time.
-    pub fn snapshot(self, tick: &Tick<L>, _nondet: NonDet) -> Singleton<T, Tick<L>, Bounded> {
+    pub fn snapshot<L2: Location<'a, DropConsistency = L::DropConsistency>>(
+        self,
+        tick: &Tick<L2>,
+        _nondet: NonDet,
+    ) -> Singleton<T, Tick<L::DropConsistency>, Bounded> {
         assert_eq!(Location::id(tick.outer()), Location::id(&self.location));
         Singleton::new(
-            tick.clone(),
+            tick.drop_consistency(),
             HydroNode::Batch {
                 inner: Box::new(self.ir_node.replace(HydroNode::Placeholder)),
                 metadata: tick
@@ -1142,12 +1272,12 @@ where
     /// At runtime, the singleton will be arbitrarily sampled as fast as possible, but due
     /// to non-deterministic batching and arrival of inputs, the output stream is
     /// non-deterministic.
-    pub fn sample_eager(self, nondet: NonDet) -> Stream<T, L, Unbounded, TotalOrder, AtLeastOnce>
-    where
-        L: NoTick,
-    {
+    pub fn sample_eager(
+        self,
+        nondet: NonDet,
+    ) -> Stream<T, L::DropConsistency, Unbounded, TotalOrder, AtLeastOnce> {
         sliced! {
-            let snapshot = use(self, nondet);
+            let snapshot = use::snapshot(self, nondet);
             snapshot.into_stream()
         }
         .weaken_retries()
@@ -1162,18 +1292,19 @@ where
     /// # Non-Determinism
     /// The output stream is non-deterministic in which elements are sampled, since this
     /// is controlled by a clock.
+    #[cfg(feature = "tokio")]
     pub fn sample_every(
         self,
         interval: impl QuotedWithContext<'a, std::time::Duration, L> + Copy + 'a,
         nondet: NonDet,
-    ) -> Stream<T, L, Unbounded, TotalOrder, AtLeastOnce>
+    ) -> Stream<T, L::DropConsistency, Unbounded, TotalOrder, AtLeastOnce>
     where
-        L: NoTick + NoAtomic,
+        L: TopLevel<'a>,
     {
-        let samples = self.location.source_interval(interval, nondet);
+        let samples = self.location.source_interval(interval);
         sliced! {
-            let snapshot = use(self, nondet);
-            let sample_batch = use(samples, nondet);
+            let snapshot = use::snapshot(self, nondet);
+            let sample_batch = use::batch(samples, nondet);
 
             snapshot.filter_if(sample_batch.first().is_some()).into_stream()
         }
@@ -1192,7 +1323,6 @@ where
         )
     }
 
-    #[expect(clippy::result_large_err, reason = "internal use only")]
     fn try_make_bounded(self) -> Result<Singleton<T, L, Bounded>, Singleton<T, L, B>> {
         if B::UnderlyingBound::BOUNDED {
             Ok(Singleton::new(
@@ -1207,16 +1337,20 @@ where
     /// Clones this bounded singleton into a tick, returning a singleton that has the
     /// same value as the outer singleton. Because the outer singleton is bounded, this
     /// is deterministic because there is only a single immutable version.
-    pub fn clone_into_tick(self, tick: &Tick<L>) -> Singleton<T, Tick<L>, Bounded>
+    pub fn clone_into_tick<L2: Location<'a, DropConsistency = L::DropConsistency>>(
+        self,
+        tick: &Tick<L2>,
+    ) -> Singleton<T, Tick<L2>, Bounded>
     where
         B: IsBounded,
         T: Clone,
     {
         // TODO(shadaj): avoid printing simulator logs for this snapshot
-        self.snapshot(
+        let inner = self.snapshot(
             tick,
             nondet!(/** bounded top-level singleton so deterministic */),
-        )
+        );
+        Singleton::new(tick.clone(), inner.ir_node.replace(HydroNode::Placeholder))
     }
 
     /// Converts this singleton into a [`Stream`] containing a single element, the value.
@@ -1587,7 +1721,7 @@ mod tests {
         let out_recv = batch.all_ticks().sim_output();
 
         flow.sim().exhaustive(async || {
-            assert_eq!(out_recv.next().await.unwrap(), 10);
+            assert_eq!(out_recv.next().await, 10);
         });
     }
 
@@ -1631,11 +1765,11 @@ mod tests {
         let out_recv = batch.all_ticks().sim_output();
 
         flow.sim().exhaustive(async || {
-            assert_eq!(out_recv.next().await.unwrap(), 0);
+            assert_eq!(out_recv.next().await, 0);
 
             in_port.send(123);
 
-            assert_eq!(out_recv.next().await.unwrap(), 123);
+            assert_eq!(out_recv.next().await, 123);
         });
     }
 
@@ -1659,8 +1793,7 @@ mod tests {
         let out_recv = batch.all_ticks().sim_output();
 
         flow.sim().exhaustive(async || {
-            if out_recv.next().await.unwrap() == (1, 3) && out_recv.next().await.unwrap() == (2, 3)
-            {
+            if out_recv.next().await == (1, 3) && out_recv.next().await == (2, 3) {
                 panic!("repeated snapshot");
             }
         });
@@ -1687,7 +1820,6 @@ mod tests {
         });
 
         assert_eq!(count, 52);
-        // don't have a combinatorial explanation for this number yet, but checked via logs
     }
 
     #[cfg(feature = "sim")]
@@ -1764,7 +1896,7 @@ mod tests {
         let folded = source_iter.fold(q!(|| 0), q!(|a, b| *a += b));
 
         let out_recv = sliced! {
-            let v = use(folded, nondet!(/** test */));
+            let v = use::snapshot(folded, nondet!(/** test */));
             v.clone().zip(v).into_stream()
         }
         .sim_output();
@@ -1775,5 +1907,142 @@ mod tests {
         });
 
         assert_eq!(count, 4);
+    }
+
+    /// Reproducer for simulator hang when using cross_singleton on a top-level
+    /// unbounded stream (not inside sliced!). The exhaustive simulator hangs
+    /// after the first iteration.
+    #[cfg(feature = "sim")]
+    #[test]
+    fn sim_cross_singleton_top_level_unbounded_hang() {
+        let mut flow = FlowBuilder::new();
+        let node = flow.process::<()>();
+
+        let (cmd_port, input) = node.sim_input::<String, _, _>();
+
+        let top_level_singleton = node.singleton(q!(123));
+
+        // cross_singleton on a top-level stream - bug trigger
+        let crossed = input.cross_singleton(top_level_singleton);
+
+        // Output directly
+        let resp_port = crossed.sim_output();
+
+        let count = flow.sim().exhaustive(async || {
+            cmd_port.send("abc".to_owned());
+
+            let responses: Vec<_> = resp_port.collect().await;
+            assert!(!responses.is_empty());
+        });
+
+        assert_eq!(count, 1);
+    }
+
+    #[cfg(feature = "sim")]
+    #[test]
+    fn sim_top_level_singleton_state_count() {
+        let mut flow = FlowBuilder::new();
+        let process = flow.process::<()>();
+
+        let (cmd_port, input) = process.sim_input();
+        {
+            // increases exhaustive inputs from 1 to 2 before we optimized `From`
+            use super::Singleton;
+            use crate::live_collections::boundedness::Unbounded;
+            let _singleton: Singleton<_, _, Unbounded> = process.singleton(q!(false)).into();
+        }
+        let tick = process.tick();
+        let batched_unbatched = input.batch(&tick, nondet!(/** */)).all_ticks();
+        let resp_port = batched_unbatched.sim_output();
+
+        let count = flow.sim().exhaustive(async || {
+            cmd_port.send(());
+            let _responses: Vec<_> = resp_port.collect().await;
+        });
+
+        assert_eq!(count, 1);
+    }
+
+    /// Regression test for #2939: singleton mut access-group counter resets per root.
+    /// Two sequential `by_mut` captures on the same singleton, consumed by separate
+    /// `for_each` roots, should get distinct access groups and build successfully.
+    #[cfg(feature = "sim")]
+    #[test]
+    #[expect(unused_mut, reason = "sliced! macro generates mut bindings for state")]
+    fn sim_mut_access_group_across_roots() {
+        use crate::live_collections::sliced::sliced;
+
+        let mut flow = FlowBuilder::new();
+        let node = flow.process::<()>();
+
+        let source = node.source_iter(q!(vec![1i32, 2, 3]));
+
+        let (first, second) = sliced! {
+            let batch = use::batch(source, nondet!(/** test */));
+            let mut total = use::state(|l| l.singleton(q!(0i32)));
+            let total_mut = total.by_mut();
+
+            let first = batch.clone().map(q!(|x| {
+                *total_mut += x;
+                *total_mut
+            }));
+            let second = batch.map(q!(|x| {
+                *total_mut += x;
+                *total_mut
+            }));
+            (first, second)
+        };
+
+        let first_recv = first.sim_output();
+        let second_recv = second.sim_output();
+
+        flow.sim().exhaustive(async || {
+            // Both outputs should produce values without panicking.
+            // The exact values depend on ordering, but the graph must build.
+            let _first: Vec<i32> = first_recv.collect().await;
+            let _second: Vec<i32> = second_recv.collect().await;
+        });
+    }
+
+    /// Regression test for #2940: access groups must follow code (staging) order,
+    /// not IR traversal order. When `second.chain(first)` reverses the consumption
+    /// order, the mutations must still execute in the order they were staged.
+    #[cfg(feature = "sim")]
+    #[test]
+    #[expect(unused_mut, reason = "sliced! macro generates mut bindings for state")]
+    fn sim_mut_access_groups_follow_code_order() {
+        use crate::live_collections::sliced::sliced;
+
+        let mut flow = FlowBuilder::new();
+        let node = flow.process::<()>();
+
+        let source = node.source_iter(q!(vec![3i32]));
+
+        let out_recv = sliced! {
+            let batch = use::batch(source, nondet!(/** test */));
+            let mut total = use::state(|l| l.singleton(q!(0i32)));
+            let total_mut = total.by_mut();
+
+            // Defined FIRST in code: addition
+            let first = batch.clone().map(q!(|x| {
+                *total_mut += x;
+                *total_mut
+            }));
+            // Defined SECOND in code: doubling
+            let second = batch.map(q!(|_x| {
+                *total_mut *= 2;
+                *total_mut
+            }));
+            // Chain in OPPOSITE order of definition — must not affect mutation order.
+            second.chain(first)
+        }
+        .sim_output();
+
+        flow.sim().exhaustive(async || {
+            let results: Vec<i32> = out_recv.collect().await;
+            // Code-order semantics: first runs (total = 0 + 3 = 3), then second
+            // runs (total = 3 * 2 = 6). Output is second.chain(first) => [6, 3].
+            assert_eq!(results, vec![6, 3]);
+        });
     }
 }

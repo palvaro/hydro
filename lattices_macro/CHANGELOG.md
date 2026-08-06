@@ -1,5 +1,83 @@
 
 
+## v0.6.1-alpha.0 (2026-06-10)
+
+### Commit Statistics
+
+<csr-read-only-do-not-edit/>
+
+ - 1 commit contributed to the release.
+ - 40 days passed between releases.
+ - 0 commits were understood as [conventional](https://www.conventionalcommits.org).
+ - 0 issues like '(#ID)' were seen in commit messages
+
+### Commit Details
+
+<csr-read-only-do-not-edit/>
+
+<details><summary>view details</summary>
+
+ * **Uncategorized**
+    - Release hydro_build_utils v0.1.1-alpha.0, dfir_lang v1.0.0-alpha.0, dfir_macro v0.17.0-alpha.0, variadics v1.0.0-alpha.0, variadics_macro v0.8.0-alpha.0, lattices v0.8.0-alpha.0, dfir_pipes v0.1.0-alpha.0, sinktools v0.2.0-alpha.0, hydro_deploy_integration v0.17.0-alpha.0, dfir_rs v0.17.0-alpha.0, hydro_deploy v0.17.0-alpha.0, hydro_lang v0.17.0-alpha.0, hydro_std v0.17.0-alpha.0, safety bump 10 crates ([`12e7666`](https://github.com/hydro-project/hydro/commit/12e76666f7104f81b48de5ddf397b8e72c8a6711))
+</details>
+
+## v0.6.0 (2026-05-01)
+
+### New Features (BREAKING)
+
+ - <csr-id-a662ff38541e58bec801644b81b2bfc505779e7b/> use custom `dfir_pipes::Pull` trait [ci-bench]
+   This is the pull-half of a big change from using other iterators
+   (`std::iter::Iterator` or `futures_core::stream::Stream`) to our own
+   `Pull` trait. Key to this more powerful iterator trait is the step enum:
+   ```rust
+   pub enum Step<Item, Meta, CanPend: Toggle, CanEnd: Toggle> {
+   /// An item is ready with associated metadata.
+   Ready(Item, Meta),
+   /// The pull is not ready yet (only possible when `CanPend = Yes`).
+   Pending(CanPend),
+   /// The pull has ended (only possible when `CanEnd = Yes`).
+   Ended(CanEnd),
+   }
+   ```
+   This abstraction allows `Pull` to represent both synchronous `Iterator`s
+   and asynchronous `Stream`s with zero cost. (As well as distinguishing
+   between infinite vs finite iterators, which I guess is not actually that
+   useful to us). In the future we will also add an `Error` variant
+   (#2635). The `Meta` metadata field may be used for full record-level
+   tracing (#2242).
+   
+   This trait has some pseudo-specialization around `Fuse`, and further
+   performance improvements may come from true nightly
+   `min_specialization`, as well as from converting from `Pusherator/Sink`
+   to a new `Push` trait.
+   
+   Other changes:
+   * Moves much of `dfir_rs::compiled::pull` into `dfir_pipes`, using new
+   trait
+   * Update itertools to `0.14`
+
+### Commit Statistics
+
+<csr-read-only-do-not-edit/>
+
+ - 3 commits contributed to the release.
+ - 156 days passed between releases.
+ - 1 commit was understood as [conventional](https://www.conventionalcommits.org).
+ - 1 unique issue was worked on: [#2618](https://github.com/hydro-project/hydro/issues/2618)
+
+### Commit Details
+
+<csr-read-only-do-not-edit/>
+
+<details><summary>view details</summary>
+
+ * **[#2618](https://github.com/hydro-project/hydro/issues/2618)**
+    - Use custom `dfir_pipes::Pull` trait [ci-bench] ([`a662ff3`](https://github.com/hydro-project/hydro/commit/a662ff38541e58bec801644b81b2bfc505779e7b))
+ * **Uncategorized**
+    - Release dfir_pipes v0.0.1, example_test v0.0.1, sinktools v0.1.0, hydro_deploy_integration v0.16.0, lattices_macro v0.6.0, variadics_macro v0.7.0, lattices v0.7.0, multiplatform_test v0.7.0, dfir_rs v0.16.0, copy_span v0.1.1, hydro_deploy v0.16.0, hydro_lang v0.16.0, hydro_std v0.16.0 ([`118b356`](https://github.com/hydro-project/hydro/commit/118b356447d92e778313d72a351e5a8d2814aa1a))
+    - Release hydro_build_utils v0.1.0, dfir_lang v0.16.0, dfir_macro v0.16.0, variadics v0.1.0, dfir_pipes v0.0.1, example_test v0.0.1, sinktools v0.1.0, hydro_deploy_integration v0.16.0, lattices_macro v0.6.0, variadics_macro v0.7.0, lattices v0.7.0, multiplatform_test v0.7.0, dfir_rs v0.16.0, copy_span v0.1.1, hydro_deploy v0.16.0, hydro_lang v0.16.0, hydro_std v0.16.0, safety bump 13 crates ([`c20757a`](https://github.com/hydro-project/hydro/commit/c20757ae0e9e10463b2a499de4b7d37ab02269d0))
+</details>
+
 ## v0.5.11 (2025-11-25)
 
 <csr-id-806a6239a649e24fe10c3c90dd30bd18debd41d2/>
@@ -10,21 +88,12 @@
  - <csr-id-c40876ec4bd3b31254d683e479b9a235f3d11f67/> refactor github actions workflows, make stable the default toolchain
  - <csr-id-5ec8b3b9b10b30f3c1b7bd8949874f0b4b7da7e9/> hardcoded crate name issues
 
-### Other
-
- - <csr-id-806a6239a649e24fe10c3c90dd30bd18debd41d2/> ensure `hydro_build_utils` is published in the correct order
-
-### Test
-
- - <csr-id-dc170e63f62e890bfd0dd054e5a930607fd67545/> exclude crate/module in lib snapshot file names [ci-full]
-   Also removes unused
-   `hydro_lang/src/compile/ir/snapshots/hydro_lang__compile__ir__backtrace__tests__backtrace.snap`
-
 ### Commit Statistics
 
 <csr-read-only-do-not-edit/>
 
- - 5 commits contributed to the release.
+ - 6 commits contributed to the release.
+ - 118 days passed between releases.
  - 4 commits were understood as [conventional](https://www.conventionalcommits.org).
  - 3 unique issues were worked on: [#1977](https://github.com/hydro-project/hydro/issues/1977), [#2028](https://github.com/hydro-project/hydro/issues/2028), [#2283](https://github.com/hydro-project/hydro/issues/2283)
 
@@ -41,6 +110,7 @@
  * **[#2283](https://github.com/hydro-project/hydro/issues/2283)**
     - Exclude crate/module in lib snapshot file names [ci-full] ([`dc170e6`](https://github.com/hydro-project/hydro/commit/dc170e63f62e890bfd0dd054e5a930607fd67545))
  * **Uncategorized**
+    - Release sinktools v0.0.1, hydro_deploy_integration v0.15.0, lattices_macro v0.5.11, variadics_macro v0.6.2, lattices v0.6.2, multiplatform_test v0.6.0, dfir_rs v0.15.0, copy_span v0.1.0, hydro_deploy v0.15.0, hydro_lang v0.15.0, hydro_std v0.15.0 ([`ac88df1`](https://github.com/hydro-project/hydro/commit/ac88df1e98af9fa2027488252f6014efa7bef229))
     - Release hydro_build_utils v0.0.1, dfir_lang v0.15.0, dfir_macro v0.15.0, variadics v0.0.10, sinktools v0.0.1, hydro_deploy_integration v0.15.0, lattices_macro v0.5.11, variadics_macro v0.6.2, lattices v0.6.2, multiplatform_test v0.6.0, dfir_rs v0.15.0, copy_span v0.1.0, hydro_deploy v0.15.0, hydro_lang v0.15.0, hydro_std v0.15.0, safety bump 5 crates ([`092de25`](https://github.com/hydro-project/hydro/commit/092de252238dfb9fa6b01e777c6dd8bf9db93398))
     - Ensure `hydro_build_utils` is published in the correct order ([`806a623`](https://github.com/hydro-project/hydro/commit/806a6239a649e24fe10c3c90dd30bd18debd41d2))
 </details>
@@ -48,10 +118,6 @@
 ## v0.5.10 (2025-07-30)
 
 <csr-id-3d40d1a65c41dca3893867fb567993a27491fa0c/>
-
-### Chore
-
- - <csr-id-3d40d1a65c41dca3893867fb567993a27491fa0c/> update `proc-macro-crate`
 
 ### Commit Statistics
 
@@ -79,24 +145,6 @@
 <csr-id-49a387d4a21f0763df8ec94de73fb953c9cd333a/>
 <csr-id-ec3795a678d261a38085405b6e9bfea943dafefb/>
 
-### Chore
-
- - <csr-id-49a387d4a21f0763df8ec94de73fb953c9cd333a/> upgrade to Rust 2024 edition
-   - Updates `Cargo.toml` to use new shared workspace keys
-   - Updates lint settings (in workspace `Cargo.toml`)
-   - `rustfmt` has changed slightly, resulting in a big diff - there are no
-   actual code changes
-   - Adds a script to `rustfmt` the template src files
-
-### Chore
-
- - <csr-id-ec3795a678d261a38085405b6e9bfea943dafefb/> upgrade to Rust 2024 edition
-   - Updates `Cargo.toml` to use new shared workspace keys
-   - Updates lint settings (in workspace `Cargo.toml`)
-   - `rustfmt` has changed slightly, resulting in a big diff - there are no
-   actual code changes
-   - Adds a script to `rustfmt` the template src files
-
 ### Commit Statistics
 
 <csr-read-only-do-not-edit/>
@@ -123,24 +171,8 @@
 <csr-id-accb13cad718c99d350e4bafe82e0ca38bf94c62/>
 <csr-id-2a22d50285ae1be1a5f888d5d15321cc1bb13c82/>
 
-### Chore
-
- - <csr-id-accb13cad718c99d350e4bafe82e0ca38bf94c62/> cleanup snapshots
-
-### Chore
-
- - <csr-id-2a22d50285ae1be1a5f888d5d15321cc1bb13c82/> cleanup snapshots
-
 ### Documentation
 
- - <csr-id-28cd220c68e3660d9ebade113949a2346720cd04/> add `repository` field to `Cargo.toml`s, fix #1452
-   #1452 
-   
-   Will trigger new releases of the following:
-   `unchanged = 'hydroflow_deploy_integration', 'variadics',
-   'variadics_macro', 'pusherator'`
-   
-   (All other crates already have changes, so would be released anyway)
  - <csr-id-204bd117ca3a8845b4986539efb91a0c612dfa05/> add `repository` field to `Cargo.toml`s, fix #1452
    #1452 
    
@@ -178,14 +210,6 @@
 <csr-id-d5677604e93c07a5392f4229af94a0b736eca382/>
 <csr-id-014ebb2628b5b80ea1b6426b58c4d62706edb9ef/>
 
-### Chore
-
- - <csr-id-d5677604e93c07a5392f4229af94a0b736eca382/> update pinned rust version, clippy lints, remove some dead code
-
-### Chore
-
- - <csr-id-014ebb2628b5b80ea1b6426b58c4d62706edb9ef/> update pinned rust version, clippy lints, remove some dead code
-
 ### Commit Statistics
 
 <csr-read-only-do-not-edit/>
@@ -212,20 +236,6 @@
 <csr-id-11af32828bab6e4a4264d2635ff71a12bb0bb778/>
 <csr-id-2c04f51f1ec44f7898307b6610371dcb490ea686/>
 
-### Chore
-
- - <csr-id-11af32828bab6e4a4264d2635ff71a12bb0bb778/> lower min dependency versions where possible, update `Cargo.lock`
-   Moved from #1418
-   
-   ---------
-
-### Chore
-
- - <csr-id-2c04f51f1ec44f7898307b6610371dcb490ea686/> lower min dependency versions where possible, update `Cargo.lock`
-   Moved from #1418
-   
-   ---------
-
 ### Commit Statistics
 
 <csr-read-only-do-not-edit/>
@@ -251,29 +261,10 @@
 
 ### Documentation
 
- - <csr-id-b4e226f1305a9631083bb6e9c7e5f01cc7c9aa90/> add `#[derive(Lattice)]` docs to README, import into book, fix #1259
  - <csr-id-6655f4b44e98f679c049fce8df973531106b428a/> add `#[derive(Lattice)]` docs to README, import into book, fix #1259
 
 ### New Features
 
- - <csr-id-b3d01c20cae2335a3da2c02343debe677f17786b/> add `#[derive(Lattice)]` derive macros, fix #1247
-   This adds derive macros to allow user-created macros. Each field must be
-   a lattice.
-   
-   Example usage:
-   ```rust
-   struct MyLattice<KeySet, Epoch>
-   where
-   KeySet: Collection,
-   Epoch: Ord,
-   {
-   keys: SetUnion<KeySet>,
-   epoch: Max<Epoch>,
-   }
-   ```
-   
-   Uses `#[derive(Lattice)]` for the `lattices` library `Pair` lattice.
-   Also contains some cleanup in the `lattices` crate.
  - <csr-id-33b9795f207804e9561f228fa0307c5973745241/> add `#[derive(Lattice)]` derive macros, fix #1247
    This adds derive macros to allow user-created macros. Each field must be
    a lattice.

@@ -28,7 +28,7 @@ fn sim_crash_in_output() {
     flow.sim().fuzz(async || {
         in_send.send(bolero::any::<Vec<u8>>().into());
 
-        let x = out_recv.next().await.unwrap();
+        let x = out_recv.next().await;
         if !x.is_empty() && x[0] == 42 && x.len() > 1 && x[1] == 43 && x.len() > 2 && x[2] == 44 {
             panic!("boom");
         }
@@ -56,7 +56,7 @@ fn sim_crash_in_output_with_filter() {
     flow.sim().fuzz(async || {
         in_send.send(bolero::any::<Vec<u8>>().into());
 
-        if let Some(x) = out_recv.next().await
+        if let Some(x) = out_recv.try_next().await
             && x.len() > 2
             && x[2] == 44
         {
@@ -84,10 +84,10 @@ fn sim_batch_preserves_order_fuzzed() {
         in_send.send(2);
         in_send.send(3);
 
-        assert_eq!(out_recv.next().await.unwrap(), 1);
-        assert_eq!(out_recv.next().await.unwrap(), 2);
-        assert_eq!(out_recv.next().await.unwrap(), 3);
-        assert!(out_recv.next().await.is_none());
+        assert_eq!(out_recv.next().await, 1);
+        assert_eq!(out_recv.next().await, 2);
+        assert_eq!(out_recv.next().await, 3);
+        assert!(out_recv.try_next().await.is_none());
     });
 }
 
@@ -118,7 +118,7 @@ fn fuzzed_batching_program_sliced<'a>(
     let (in_send, input) = node.sim_input();
 
     let out_recv = sliced! {
-        let batch = use(input, nondet!(/** test */));
+        let batch = use::batch(input, nondet!(/** test */));
         batch.fold(q!(|| 0), q!(|acc, v| *acc += v)).into_stream()
     }
     .sim_output();
@@ -144,7 +144,7 @@ fn sim_crash_with_fuzzed_batching() {
 
         in_send.send(99); // the fuzzer must put this in a later batch
 
-        while let Some(out) = out_recv.next().await {
+        while let Some(out) = out_recv.try_next().await {
             if out == 456 {
                 // make sure exhaustive can't catch the bug by using trivial (size 1) batches
                 return;
@@ -185,7 +185,7 @@ fn trace_for_fuzzed_batching() {
 
                 in_send.send(99); // the fuzzer must put this in a later batch
 
-                while let Some(out) = out_recv.next().await {
+                while let Some(out) = out_recv.try_next().await {
                     if out == 456 {
                         // make sure exhaustive can't catch the bug by using trivial (size 1) batches
                         return;
@@ -237,7 +237,7 @@ fn trace_for_fuzzed_batching_sliced() {
 
                 in_send.send(99); // the fuzzer must put this in a later batch
 
-                while let Some(out) = out_recv.next().await {
+                while let Some(out) = out_recv.try_next().await {
                     if out == 456 {
                         // make sure exhaustive can't catch the bug by using trivial (size 1) batches
                         return;
@@ -283,11 +283,35 @@ fn sim_batch_nondebuggable_type() {
 }
 
 #[test]
+fn sim_embedded_send() {
+    use crate::networking::TCP;
+
+    let mut flow = FlowBuilder::new();
+    let p1 = flow.process::<()>();
+    let p2 = flow.process::<()>();
+
+    let (in_send, input) = p1.sim_input::<i32, _, _>();
+    // `.embedded()` leaves serialization to external code; in the simulator the raw value is
+    // carried directly through the in-memory channel.
+    let out_recv = input
+        .send(&p2, TCP.fail_stop().embedded().name("ch"))
+        .map(q!(|x| x * 10))
+        .sim_output();
+
+    flow.sim().exhaustive(async || {
+        in_send.send(1);
+        in_send.send(2);
+        let all: Vec<i32> = out_recv.collect().await;
+        assert_eq!(all, vec![10, 20]);
+    });
+}
+
+#[test]
 fn sim_cluster_e2m_m2e() {
     let mut flow = FlowBuilder::new();
     let cluster = flow.cluster::<()>();
 
-    let (in_send, input) = cluster.sim_input::<i32>();
+    let (in_send, input) = cluster.sim_input::<i32, _, _>();
     let out_recv = input.map(q!(|x| x * 10)).sim_cluster_output();
 
     flow.sim()
@@ -299,10 +323,46 @@ fn sim_cluster_e2m_m2e() {
             in_send.send(2, 3); // member 2 gets 3
 
             // Each member multiplies by 10
-            assert_eq!(out_recv.next(0).await, Some(10));
-            assert_eq!(out_recv.next(1).await, Some(20));
-            assert_eq!(out_recv.next(2).await, Some(30));
+            assert_eq!(out_recv.next(0).await, 10);
+            assert_eq!(out_recv.next(1).await, 20);
+            assert_eq!(out_recv.next(2).await, 30);
         });
+}
+#[test]
+fn sim_cluster_unordered_input() {
+    use crate::live_collections::stream::NoOrder;
+
+    let mut flow = FlowBuilder::new();
+    let cluster = flow.cluster::<()>();
+
+    // Create a cluster input that is semantically unordered, driven directly
+    // via `send_many_unordered` without needing to `weaken_ordering` afterwards.
+    let (in_send, input) = cluster.sim_input::<i32, NoOrder, ExactlyOnce>();
+
+    // Batch the unordered input through a tick via `sliced!` so the simulator
+    // explores the different interleavings of the unordered arrivals.
+    let out_recv = sliced! {
+        let batch = use::batch(input, nondet!(/** test */));
+        batch.map(q!(|x| x * 10))
+    }
+    .sim_cluster_output();
+
+    let count = flow
+        .sim()
+        .with_cluster_size(&cluster, 2)
+        .exhaustive(async || {
+            in_send.send_many_unordered([(0, 1), (0, 2), (1, 3)]);
+
+            let r0 = out_recv.collect_sorted::<Vec<_>>(0).await;
+            assert_eq!(r0, vec![10, 20]);
+
+            let r1 = out_recv.collect_sorted::<Vec<_>>(1).await;
+            assert_eq!(r1, vec![30]);
+        });
+
+    // The two unordered values delivered to member 0 are batched non-deterministically
+    // across ticks, so the simulator explores multiple executions.
+    assert_eq!(count, 8);
 }
 
 #[test]
@@ -341,6 +401,252 @@ fn assert_yields_only_catches_extra_value() {
     });
 }
 
+/// A two-slice program for testing quiescence handling: the first slice passes the input
+/// through, and a second slice counts a clone of the first slice's output, reporting the
+/// current count whenever a read request arrives. After `assert_yields`/`assert_yields_only`
+/// observes the passed-through messages, the second slice's tick still has the cloned
+/// messages buffered, so the simulation cannot settle to quiescence deterministically.
+fn two_slice_counter_program(
+    process: Process<'_>,
+) -> (
+    SimSender<u32, TotalOrder, ExactlyOnce>,
+    SimReceiver<u32, TotalOrder, ExactlyOnce>,
+    SimSender<(), TotalOrder, ExactlyOnce>,
+    SimReceiver<i32, TotalOrder, ExactlyOnce>,
+) {
+    let (send_port, input) = process.sim_input();
+
+    let first_slice_out = sliced! {
+        let in_batch = use::batch(input, nondet!(/** test */));
+        in_batch
+    };
+
+    let first_slice_out_cloned = first_slice_out.clone();
+    let (send_read_counter, read_counter) = process.sim_input();
+    #[expect(unused_mut, reason = "`mut` is consumed by the `sliced!` macro")]
+    let second_slice_count_out = sliced! {
+        let mut count = use::state(|l| l.singleton(q!(0)));
+        let cloned_batch = use::batch(first_slice_out_cloned, nondet!(/** test */));
+        let read_counter_batch = use::batch(read_counter, nondet!(/** test */));
+
+        let count_mut = count.by_mut();
+        cloned_batch.for_each(q!(|_| {
+            *count_mut += 1
+        }));
+
+        read_counter_batch.first().into_stream().map(q!(|_| *count_mut))
+    };
+
+    let out_port = first_slice_out.sim_output();
+    let second_slice_out_port = second_slice_count_out.sim_output();
+
+    (
+        send_port,
+        out_port,
+        send_read_counter,
+        second_slice_out_port,
+    )
+}
+
+#[test]
+fn sim_assert_yields_only_doesnt_trigger_unnecessary_ticks() {
+    let mut flow = FlowBuilder::new();
+    let process = flow.process::<()>();
+    let (send_port, out_port, send_read_counter, second_slice_out_port) =
+        two_slice_counter_program(process);
+
+    let mut at_least_one_zero = false;
+    flow.sim().exhaustive(async || {
+        send_port.send_many([1u32, 2u32]);
+        out_port.assert_yields_only([1u32, 2u32]).await;
+
+        send_read_counter.send(());
+        let count_first_read = second_slice_out_port.next().await;
+        if count_first_read == 0 {
+            at_least_one_zero = true;
+        }
+    });
+
+    assert!(at_least_one_zero);
+}
+
+/// When `assert_yields_only` observes extra output, the failure must be attributed to that
+/// assertion (via its quiescence check) rather than leaking the extra message into a later
+/// assertion. In exhaustive mode, the instance that performs the quiescence check must be
+/// explored *first*, so the misattributed failure is never reached.
+#[test]
+fn sim_assert_yields_only_checks_quiescence_first() {
+    let mut flow = FlowBuilder::new();
+    let process = flow.process::<()>();
+
+    let (send_port, input) = process.sim_input();
+    let out_port = input.atomic().end_atomic().sim_output();
+
+    let mut instances = 0;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        flow.sim().exhaustive(async || {
+            instances += 1;
+            send_port.send_many([1u32, 2u32, 3u32]);
+            // The extra `3` must be caught here by the quiescence check...
+            out_port.assert_yields_only([1u32, 2u32]).await;
+
+            // ...and not surface as a mismatch (`expected 4, got 3`) in this later assertion.
+            send_port.send(4u32);
+            out_port.assert_yields_only([4u32]).await;
+        });
+    }));
+
+    let panic_msg = *result.unwrap_err().downcast::<String>().unwrap();
+    assert!(
+        panic_msg.contains("expected termination"),
+        "failure was not attributed to the quiescence check: {}",
+        panic_msg
+    );
+    // The failing quiescence check must be explored on the very first instance
+    // (bolero replays the failing instance once, hence 2).
+    assert_eq!(instances, 2);
+}
+
+/// Concurrent receiver awaits (e.g. via `join!`) each hold their own scheduler pause while
+/// settling: one of them finishing (or being dropped) must not unpause the scheduler while
+/// the other is still settling. This exercises the pause *count* on the quiescence state.
+#[test]
+fn sim_concurrent_settling_awaits() {
+    let mut flow = FlowBuilder::new();
+    let process = flow.process::<()>();
+    let (send_port, out_port, send_read_counter, second_slice_out_port) =
+        two_slice_counter_program(process);
+
+    flow.sim().exhaustive(async || {
+        send_port.send_many([1u32, 2u32]);
+        send_read_counter.send(());
+
+        let (msgs, count) = futures::join!(
+            out_port.collect_n::<Vec<_>>(2),
+            second_slice_out_port.next()
+        );
+        assert_eq!(msgs, vec![1, 2]);
+        assert!(count <= 2);
+    });
+}
+
+/// Outside exhaustive mode there is no forking, so when `assert_yields_only`'s quiescence
+/// check has to force pending nondeterministic work (the second slice's buffered ticks), the
+/// instance is tainted: sending more input and then receiving output must panic instead of
+/// potentially misattributing failures caused by the forced overrun.
+#[test]
+#[should_panic(expected = "cannot receive more simulator output")]
+fn sim_fuzz_forced_quiescence_check_poisons_later_receives() {
+    let mut flow = FlowBuilder::new();
+    let process = flow.process::<()>();
+    let (send_port, out_port, send_read_counter, second_slice_out_port) =
+        two_slice_counter_program(process);
+
+    // uses RNG fuzzing when run under `cargo test`
+    flow.sim().fuzz(async || {
+        send_port.send_many([1u32, 2u32]);
+        // The second slice still has the cloned messages buffered, so this check must force
+        // its ticks to run, tainting the instance.
+        out_port.assert_yields_only([1u32, 2u32]).await;
+
+        // Sending after the taint poisons the instance...
+        send_read_counter.send(());
+        // ...so this receive must panic.
+        let _ = second_slice_out_port.next().await;
+    });
+}
+
+/// When the simulation settles to quiescence with only deterministic work, the quiescence
+/// check is free: even outside exhaustive mode, it does not taint the instance, so the test
+/// can keep sending input and asserting afterwards.
+#[test]
+fn sim_fuzz_free_quiescence_check_does_not_taint() {
+    let mut flow = FlowBuilder::new();
+    let process = flow.process::<()>();
+
+    let (send_port, input) = process.sim_input();
+    // A pass-through flow with no ticks: consuming the expected messages leaves no pending
+    // nondeterministic work, so the quiescence check settles deterministically.
+    let out_port = input.sim_output();
+
+    // uses RNG fuzzing when run under `cargo test`
+    flow.sim().fuzz(async || {
+        send_port.send(1u32);
+        out_port.assert_yields_only([1u32]).await;
+
+        // Not poisoned: the check above was free, so the test can continue.
+        send_port.send(2u32);
+        out_port.assert_yields_only([2u32]).await;
+    });
+}
+
+/// The drain-everything APIs (`collect`, `try_next`) cannot fork the search (their result
+/// feeds the rest of the test), so they taint the instance in *every* mode — including
+/// exhaustive — when they force pending nondeterministic work to run.
+#[test]
+#[should_panic(expected = "cannot receive more simulator output")]
+fn sim_collect_poisons_later_receives_even_in_exhaustive() {
+    let mut flow = FlowBuilder::new();
+    let process = flow.process::<()>();
+    let (send_port, out_port, send_read_counter, second_slice_out_port) =
+        two_slice_counter_program(process);
+
+    flow.sim().exhaustive(async || {
+        send_port.send_many([1u32, 2u32]);
+        // Draining forces the second slice's buffered ticks to run, tainting the instance.
+        let all: Vec<u32> = out_port.collect().await;
+        assert_eq!(all, vec![1, 2]);
+
+        // Sending after the taint poisons the instance, so the receive must panic.
+        send_read_counter.send(());
+        let _ = second_slice_out_port.next().await;
+    });
+}
+
+/// `sim::quiesce()` is an explicit phase barrier: it forces the simulation to settle and
+/// lifts the taint, so multi-phase tests can drain outputs between rounds of input without
+/// poisoning later receives.
+#[test]
+fn sim_quiesce_barrier_allows_receives_after_forced_drain() {
+    let mut flow = FlowBuilder::new();
+    let process = flow.process::<()>();
+    let (send_port, out_port, send_read_counter, second_slice_out_port) =
+        two_slice_counter_program(process);
+
+    flow.sim().exhaustive(async || {
+        send_port.send_many([1u32, 2u32]);
+        // This drain forces the second slice's buffered ticks to run, tainting the instance
+        // (see sim_collect_poisons_later_receives_even_in_exhaustive)...
+        let all: Vec<u32> = out_port.collect().await;
+        assert_eq!(all, vec![1, 2]);
+
+        // ...but an explicit phase barrier declares that the test intends to observe only
+        // fully-settled states from here on, so later phases are allowed.
+        crate::sim::quiesce().await;
+
+        send_read_counter.send(());
+        // After the barrier, both cloned messages are guaranteed to have been counted.
+        assert_eq!(second_slice_out_port.next().await, 2);
+    });
+}
+
+/// `next()` always returns a message; if the simulation quiesces without producing one, the
+/// test fails (rather than returning an `Option` like `try_next()`).
+#[test]
+#[should_panic(expected = "another message was expected")]
+fn sim_next_fails_when_no_message_can_arrive() {
+    let mut flow = FlowBuilder::new();
+    let process = flow.process::<()>();
+
+    let (send_port, input) = process.sim_input();
+    let out_port = input.filter(q!(|x: &u32| *x > 10)).sim_output();
+
+    flow.sim().exhaustive(async || {
+        send_port.send(1u32); // filtered out, so no message ever arrives
+        let _ = out_port.next().await;
+    });
+}
+
 #[test]
 fn sim_collect_waits_for_all_ticks() {
     let mut flow = FlowBuilder::new();
@@ -359,4 +665,633 @@ fn sim_collect_waits_for_all_ticks() {
         let all: Vec<i32> = out_recv.collect().await;
         assert_eq!(all, vec![1, 2, 3]);
     });
+}
+
+/// Regression test for https://github.com/hydro-project/hydro/issues/2602
+/// Verifies that `resolve_futures_blocking` preserves `Bounded`, allowing
+/// its output to be used with APIs that require boundedness (e.g. `cross_singleton`).
+/// If `resolve_futures_blocking` ever regresses to return `Unbounded`, this test
+/// will fail to compile.
+#[test]
+fn resolve_futures_blocking_preserves_bounded() {
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+    let tick = node.tick();
+
+    let resolved = node
+        .source_iter(q!(vec![1, 2, 3]))
+        .batch(&tick, nondet!(/** test */))
+        .map(q!(|x| async move { x }))
+        .resolve_futures_blocking();
+
+    // cross_singleton requires Bounded — this is the compile-time regression check
+    let crossed = resolved.cross_singleton(node.singleton(q!(10)).clone_into_tick(&tick));
+
+    let out_recv = crossed.all_ticks().sim_output();
+
+    flow.sim().exhaustive(async || {
+        let results: Vec<(i32, i32)> = out_recv.collect_sorted().await;
+        assert_eq!(results, vec![(1, 10), (2, 10), (3, 10)]);
+    });
+}
+
+#[test]
+fn sim_fold_sample_eager_state_count() {
+    use crate::live_collections::stream::NoOrder;
+    use crate::properties::manual_proof;
+
+    // Assert the exact exhaustive state count to detect regressions.
+    // 108 states with batch-fold optimization + passthrough singleton hook + always permute.
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+
+    let (in_send, input) = node.sim_input::<i32, NoOrder, ExactlyOnce>();
+
+    let folded = input.fold(
+        q!(|| 0),
+        q!(
+            |acc, v| *acc += v,
+            commutative = manual_proof!(/** integer addition is commutative */)
+        ),
+    );
+    let out_recv = sliced! {
+        let snapshot = use::snapshot(folded, nondet!(/** test */));
+        snapshot.into_stream()
+    }
+    .sim_output();
+
+    let count = flow.sim().exhaustive(async || {
+        in_send.send_many_unordered([1, 2, 3]);
+
+        let all: Vec<i32> = out_recv.collect().await;
+        // The final value must always be 6 (1+2+3)
+        assert_eq!(*all.last().unwrap(), 6);
+    });
+
+    assert_eq!(count, 108, "Exhaustive states explored");
+}
+
+#[test]
+fn sim_fold_commutative_explores_all_subset_sums() {
+    use std::collections::HashSet;
+
+    use crate::live_collections::stream::NoOrder;
+    use crate::properties::manual_proof;
+
+    // With inputs [1, 2, 4], the possible subset sums are:
+    // {1}, {2}, {4}, {1,2}, {1,4}, {2,4}, {1,2,4} → sums: 1, 2, 4, 3, 5, 6, 7
+    // The fold can be snapshotted after processing any prefix of subsets.
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+
+    let (in_send, input) = node.sim_input::<i32, NoOrder, ExactlyOnce>();
+    let folded = input.fold(
+        q!(|| 0),
+        q!(
+            |acc, v| *acc += v,
+            commutative = manual_proof!(/** addition is commutative */)
+        ),
+    );
+    let out_recv = sliced! {
+        let snapshot = use::snapshot(folded, nondet!(/** test */));
+        snapshot.into_stream()
+    }
+    .sim_output();
+
+    let mut observed_values = HashSet::new();
+
+    flow.sim().exhaustive(async || {
+        in_send.send_many_unordered([1, 2, 4]);
+        let all: Vec<i32> = out_recv.collect().await;
+        assert_eq!(*all.last().unwrap(), 7);
+        for &v in &all {
+            observed_values.insert(v);
+        }
+    });
+
+    // The exhaustive exploration must observe every possible subset sum.
+    // With inputs [1, 2, 4], the fold can be snapshotted after processing any
+    // non-empty subset, so all values 1..=7 must appear, plus 0 (initial state).
+    let expected: HashSet<i32> = (0..=7).collect();
+    assert_eq!(
+        observed_values, expected,
+        "Should observe all subset sums across all executions"
+    );
+}
+
+#[test]
+fn sim_fold_total_order_no_permutation() {
+    // Non-commutative fold on TotalOrder: no hook emitted, order is fixed.
+    // Every intermediate must be a prefix-concatenation of "a","b","c".
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+
+    let source = node.source_stream(q!(tokio_stream::iter(vec!["a", "b", "c"])));
+    let folded = source.fold(q!(|| String::new()), q!(|acc, v| acc.push_str(v)));
+    let out_recv = sliced! {
+        let snapshot = use::snapshot(folded, nondet!(/** test */));
+        snapshot.into_stream()
+    }
+    .sim_output();
+
+    let mut all_observed = std::collections::HashSet::new();
+
+    flow.sim().exhaustive(async || {
+        let all: Vec<String> = out_recv.collect().await;
+        assert_eq!(all.last().unwrap(), "abc");
+        for v in all {
+            all_observed.insert(v);
+        }
+    });
+
+    // Only valid prefixes should be observed (no permutations like "ba", "cab", etc.)
+    for v in &all_observed {
+        assert!(
+            ["", "a", "ab", "abc"].contains(&v.as_str()),
+            "Unexpected intermediate: {:?}",
+            v
+        );
+    }
+}
+
+#[test]
+fn sim_fold_keyed_no_order() {
+    use crate::live_collections::stream::NoOrder;
+    use crate::properties::manual_proof;
+
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+    let (in_send, input) = node.sim_input::<(u32, i32), NoOrder, ExactlyOnce>();
+
+    let folded = input.into_keyed().fold(
+        q!(|| 0),
+        q!(
+            |acc, v| *acc += v,
+            commutative = manual_proof!(/** addition is commutative */)
+        ),
+    );
+    let out_recv = sliced! {
+        let snapshot = use::snapshot(folded, nondet!(/** test */));
+        snapshot.entries()
+    }
+    .sim_output();
+
+    flow.sim().exhaustive(async || {
+        in_send.send_many_unordered([(1, 10), (2, 20), (1, 30)]);
+        let all: Vec<(u32, i32)> = out_recv.collect_sorted().await;
+        let mut last_by_key = std::collections::HashMap::new();
+        for (k, v) in all {
+            last_by_key.insert(k, v);
+        }
+        assert_eq!(last_by_key.get(&1), Some(&40));
+        assert_eq!(last_by_key.get(&2), Some(&20));
+    });
+}
+
+#[test]
+fn sim_fold_tee_downstream_sees_different_subsets() {
+    use std::collections::HashSet;
+
+    // Two downstream consumers of the same fold([1, 2, 3]) accumulator can
+    // independently snapshot at different times. One might see {3, 6} while
+    // the other sees {1, 3, 6} — they are not forced to observe the same
+    // intermediate states.
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+
+    let source = node.source_stream(q!(tokio_stream::iter(vec![1, 2, 3])));
+    let folded = source.fold(q!(|| 0), q!(|acc, v| *acc += v));
+
+    let out_a = sliced! {
+        let snapshot = use::snapshot(folded.clone(), nondet!(/** test */));
+        snapshot.into_stream()
+    }
+    .sim_output();
+
+    let out_b = sliced! {
+        let snapshot = use::snapshot(folded, nondet!(/** test */));
+        snapshot.into_stream()
+    }
+    .sim_output();
+
+    let mut observed_pairs: HashSet<(Vec<i32>, Vec<i32>)> = HashSet::new();
+
+    flow.sim().exhaustive(async || {
+        let a_values: Vec<i32> = out_a.collect().await;
+        let b_values: Vec<i32> = out_b.collect().await;
+
+        // Both must end at 6 (1+2+3)
+        assert_eq!(*a_values.last().unwrap(), 6);
+        assert_eq!(*b_values.last().unwrap(), 6);
+
+        observed_pairs.insert((a_values, b_values));
+    });
+
+    // There must exist at least one execution where the two downstreams
+    // observed different sequences of intermediate states.
+    #[expect(clippy::disallowed_methods, reason = "order is not used in test")]
+    let has_divergent = observed_pairs.iter().any(|(a, b)| a != b);
+    assert!(
+        has_divergent,
+        "Expected at least one execution where downstream consumers see different intermediate states, \
+         but all observed pairs were identical: {:?}",
+        observed_pairs
+    );
+}
+
+/// Demonstrates that the simulator catches a bug in a fold that falsely claims commutativity.
+/// The exhaustive run should observe different final values (e.g. "ab" vs "ba"),
+/// which would violate the invariant that a commutative fold's result is order-independent.
+#[test]
+fn sim_fold_catches_false_commutativity() {
+    use std::collections::HashSet;
+
+    use crate::live_collections::stream::NoOrder;
+    use crate::properties::manual_proof;
+
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+
+    let (in_send, input) = node.sim_input::<String, NoOrder, ExactlyOnce>();
+    // string concatenation is not commutative, but lets claim it is, what
+    // could go wrong
+    let folded = input.fold(
+        q!(|| String::new()),
+        q!(
+            |acc, v| acc.push_str(&v),
+            commutative = manual_proof!(/** WRONG */)
+        ),
+    );
+    let out_recv = sliced! {
+        let snapshot = use::snapshot(folded, nondet!(/** test */));
+        snapshot.into_stream()
+    }
+    .sim_output();
+
+    let mut final_values = HashSet::new();
+
+    flow.sim().exhaustive(async || {
+        in_send.send_many_unordered(["a".to_owned(), "b".to_owned()]);
+        let all: Vec<String> = out_recv.collect().await;
+        // Collect the first values we see to verify we're fully exploring
+        // the state space. If we're _not_ then we wouldn't see a "ba"
+        // permutation as the first result
+        final_values.insert(all.first().unwrap().clone());
+    });
+
+    // If commutativity held, we wouldn't see "ba"
+    assert!(
+        final_values.contains("ab") && final_values.contains("ba"),
+        "Expected both 'ab' and 'ba' to be observed, got: {:?}",
+        final_values
+    );
+}
+
+/// Verifies that the simulator catches false commutativity for in-tick folds on
+/// NoOrder streams by permuting the batch before it reaches the fold.
+///
+/// Top-level folds ARE tested via cross-batch subset selection + permutation
+/// (see `sim_fold_catches_false_commutativity`).
+#[test]
+fn sim_fold_in_tick_catches_false_commutativity() {
+    use std::collections::HashSet;
+
+    use crate::live_collections::stream::NoOrder;
+    use crate::properties::manual_proof;
+
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+
+    let (in_send, input) = node.sim_input::<String, NoOrder, ExactlyOnce>();
+
+    let tick = node.tick();
+    let out_recv = input
+        .batch(&tick, nondet!(/** test */))
+        .fold(
+            q!(|| String::new()),
+            q!(
+                |acc, v| acc.push_str(&v),
+                commutative = manual_proof!(/** WRONG */)
+            ),
+        )
+        .into_stream()
+        .all_ticks()
+        .sim_output();
+
+    let mut final_values = HashSet::new();
+
+    flow.sim().exhaustive(async || {
+        in_send.send_many_unordered(["a".to_owned(), "b".to_owned()]);
+        let all: Vec<String> = out_recv.collect().await;
+        for v in all {
+            final_values.insert(v);
+        }
+    });
+
+    assert!(
+        final_values.contains("ab") && final_values.contains("ba"),
+        "Expected both \"ab\" and \"ba\" to be observed, got: {:?}",
+        final_values
+    );
+}
+
+/// Minimal repro for the singleton empty-on-first-tick bug.
+///
+/// The bug: when one `sliced!` block emits a singleton that is consumed by
+/// another `sliced!` block, the second tick may be scheduled before the first
+/// has run. At that point the singleton has no value yet, but the IR marks it
+/// as `Singleton` (which must always have a value). The SingletonHook panics
+/// with "No input and no last released item to re-release".
+#[test]
+fn sim_singleton_not_ready_until_producer_runs() {
+    use crate::live_collections::stream::NoOrder;
+
+    let mut flow = FlowBuilder::new();
+    let p = flow.process::<()>();
+
+    let (in_port, in_stream) = p.sim_input::<u32, TotalOrder, _>();
+    let in_no_order = in_stream.weaken_ordering::<NoOrder>();
+
+    // First sliced block: produces an Unbounded Singleton
+    let produced_singleton = sliced! {
+        let batch = use::batch(in_no_order.clone(), nondet!(/** batch */));
+        batch.assume_ordering::<TotalOrder>(nondet!(/** order */))
+            .fold(q!(|| 0u32), q!(|acc, v| *acc += v))
+    };
+
+    // Second sliced block: consumes the singleton via use(singleton, nondet).
+    // If the simulator schedules this tick before the first one has run,
+    // the SingletonHook has no value → panic.
+    let out = sliced! {
+        let trigger = use::batch(in_no_order, nondet!(/** batch */));
+        let snapshot = use::snapshot(produced_singleton, nondet!(/** snapshot */));
+        trigger.cross_singleton(snapshot)
+    }
+    .assume_ordering::<TotalOrder>(nondet!(/** test */));
+
+    let out_port = out.sim_output();
+
+    flow.sim().exhaustive(async || {
+        in_port.send(42);
+        let _ = out_port.next().await;
+    });
+}
+
+/// The simulator does not yet support `Unbounded` keyed singletons (where keys can be removed).
+/// This snapshot test verifies the panic message when attempting to simulate one.
+#[test]
+#[cfg_attr(target_os = "windows", ignore)]
+fn sim_unbounded_keyed_singleton_rejected_snapshot() {
+    use crate::compile::ir::KeyedSingletonBoundKind;
+
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+
+    let (input_port, input) = node.sim_input::<(u32, u32), TotalOrder, ExactlyOnce>();
+
+    let monotone_keys_singleton = input
+        .into_keyed()
+        .fold(q!(|| 0u32), q!(|acc, v| *acc = (*acc).max(v)));
+
+    // Patch the IR node's collection_kind to Unbounded.
+    // There's currently no public API that produces an Unbounded keyed singleton.
+    {
+        let mut ir = monotone_keys_singleton.ir_node.borrow_mut();
+        if let crate::compile::ir::CollectionKind::KeyedSingleton { ref mut bound, .. } =
+            ir.metadata_mut().collection_kind
+        {
+            *bound = KeyedSingletonBoundKind::Unbounded;
+        }
+    }
+
+    let output = monotone_keys_singleton
+        .snapshot(&node.tick(), nondet!(/** test */))
+        .entries()
+        .all_ticks()
+        .sim_output();
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        flow.sim().exhaustive(async || {
+            input_port.send((1, 100));
+            let _ = output.collect_sorted::<Vec<_>>().await;
+        });
+    }));
+
+    let err = result.unwrap_err();
+    let panic_msg = err
+        .downcast_ref::<String>()
+        .map(|s| s.as_str())
+        .or_else(|| err.downcast_ref::<&str>().copied())
+        .unwrap_or("(non-string panic)");
+
+    hydro_build_utils::assert_snapshot!(panic_msg);
+}
+
+/// The simulator does not yet support non-atomic yield of an Optional (i.e., `latest()`
+/// on a tick-level Optional that produces a top-level Unbounded Optional).
+/// This snapshot test verifies the panic message.
+#[test]
+#[cfg_attr(target_os = "windows", ignore)]
+fn sim_unbounded_optional_rejected_snapshot() {
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+
+    let (input_port, input) = node.sim_input::<u32, TotalOrder, ExactlyOnce>();
+
+    let tick = node.tick();
+    let optional = input
+        .batch(&tick, nondet!(/** test */))
+        .sort()
+        .first()
+        .latest();
+
+    let output = sliced! {
+        let snapshot = use::snapshot(optional, nondet!(/** test */));
+        snapshot.into_stream()
+    }
+    .sim_output();
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        flow.sim().exhaustive(async || {
+            input_port.send(42);
+            let _ = output.collect::<Vec<_>>().await;
+        });
+    }));
+
+    let err = result.unwrap_err();
+    let panic_msg = err
+        .downcast_ref::<String>()
+        .map(|s| s.as_str())
+        .or_else(|| err.downcast_ref::<&str>().copied())
+        .unwrap_or("(non-string panic)");
+
+    hydro_build_utils::assert_snapshot!(panic_msg);
+}
+
+/// `continue_if!` should discard instances that fail the assumption (rather than failing the test),
+/// while instances that satisfy it continue executing. Covers the exhaustive engine.
+#[test]
+fn sim_continue_if_discards_instances_exhaustive() {
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+
+    let (in_send, input) = node.sim_input();
+    let tick = node.tick();
+    let out_recv = input
+        .batch(&tick, nondet!(/** test */))
+        .count()
+        .all_ticks()
+        .sim_output();
+
+    let mut accepted = 0;
+    let total = flow.sim().exhaustive(async || {
+        in_send.send(1);
+        in_send.send(2);
+        let counts: Vec<usize> = out_recv.collect().await;
+        // Only consider executions where both values landed in the first batch.
+        crate::sim::continue_if!(counts.first() == Some(&2), "first batch was {:?}", counts);
+        accepted += 1;
+        assert_eq!(counts, vec![2]);
+    });
+
+    assert!(
+        accepted >= 1,
+        "at least one execution should satisfy the assumption"
+    );
+    assert!(
+        accepted < total,
+        "some executions should be discarded by the assumption (accepted: {}, total: {})",
+        accepted,
+        total
+    );
+}
+
+/// Same as above, but covers the RNG-based fuzz engine used by `cargo test`.
+#[test]
+fn sim_continue_if_discards_instances_fuzz() {
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+
+    let (in_send, input) = node.sim_input();
+    let tick = node.tick();
+    let out_recv = input
+        .batch(&tick, nondet!(/** test */))
+        .count()
+        .all_ticks()
+        .sim_output();
+
+    let mut accepted = 0;
+    let mut discarded = 0;
+    flow.sim().fuzz(async || {
+        in_send.send(1);
+        in_send.send(2);
+        let counts: Vec<usize> = out_recv.collect().await;
+        if counts.first() != Some(&2) {
+            discarded += 1;
+        }
+        crate::sim::continue_if!(counts.first() == Some(&2), "first batch was {:?}", counts);
+        accepted += 1;
+        assert_eq!(counts, vec![2]);
+    });
+
+    assert!(
+        accepted >= 1,
+        "at least one execution should satisfy the assumption"
+    );
+    assert!(
+        discarded >= 1,
+        "some executions should be discarded by the assumption"
+    );
+}
+
+/// A failing assertion after a passing `continue_if!` must still fail the test, and discarded
+/// instances must not mask it (or pollute its error message).
+#[test]
+#[should_panic]
+fn sim_continue_if_does_not_mask_failures() {
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+
+    let (in_send, input) = node.sim_input();
+    let tick = node.tick();
+    let out_recv = input
+        .batch(&tick, nondet!(/** test */))
+        .count()
+        .all_ticks()
+        .sim_output();
+
+    flow.sim().exhaustive(async || {
+        in_send.send(1);
+        in_send.send(2);
+        let counts: Vec<usize> = out_recv.collect().await;
+        crate::sim::continue_if!(counts.first() == Some(&2), "first batch was {:?}", counts);
+        panic!("boom");
+    });
+}
+
+/// A crash that is only reachable behind a passing `continue_if!`. Used by the
+/// `fuzz_with_cargo_sim_continue_if` harness test (in `tests/sim_fuzzer.rs`) to verify that under
+/// the libfuzzer engine, instances failing the assumption are discarded (counted as invalid)
+/// without stopping the fuzzer, which must still find the real crash behind the assumption.
+#[test]
+#[should_panic]
+fn sim_crash_behind_continue_if() {
+    // run as PATH="$PATH:." cargo sim -p hydro_lang --features sim -- sim_crash_behind_continue_if
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+
+    let (in_send, input) = node.sim_input();
+    let tick = node.tick();
+    let out_recv = input
+        .batch(&tick, nondet!(/** test */))
+        .count()
+        .all_ticks()
+        .sim_output();
+
+    flow.sim().fuzz(async || {
+        in_send.send(1);
+        in_send.send(2);
+        in_send.send(3);
+        let counts: Vec<usize> = out_recv.collect().await;
+        // Discard instances where the first batch is a singleton; roughly half of random
+        // batchings will fail this, exercising the discard path under the fuzzer. The message
+        // is deterministic so that `fuzz_with_cargo_sim_continue_if` can snapshot the logged output.
+        crate::sim::continue_if!(
+            counts.first().is_some_and(|c| *c >= 2),
+            "first batch was a singleton"
+        );
+        if counts.first() == Some(&3) {
+            // Only reachable in instances that passed the assumption.
+            panic!("boom");
+        }
+    });
+}
+
+/// An `continue_if!` failure during `fuzz_repro` indicates a stale reproducer and should produce a
+/// clear error message.
+#[test]
+#[should_panic(expected = "assumption failed while replaying")]
+fn sim_continue_if_failure_in_fuzz_repro_is_reported() {
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+
+    let (in_send, input) = node.sim_input::<i32, _, _>();
+    let out_recv = input.sim_output();
+
+    flow.sim()
+        .compiled()
+        .fuzz_repro(vec![0; 64], async |compiled| {
+            let schedule = compiled.schedule_with_logger(std::io::sink());
+            let rest = async move {
+                in_send.send(1);
+                let _: Vec<i32> = out_recv.collect().await;
+                crate::sim::continue_if!(false, "always fails");
+            };
+
+            tokio::select! {
+                biased;
+                _ = rest => {},
+                _ = schedule => {},
+            };
+        });
 }

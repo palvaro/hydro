@@ -23,14 +23,14 @@ use crate::parse::{Operator, PortIndex};
 /// The delay (soft barrier) type, for each input to an operator if needed.
 #[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum DelayType {
-    /// Input must be collected over the preceding stratum.
-    Stratum,
-    /// Monotone accumulation: can delay to reduce flow rate, but also correct to emit "early"
-    MonotoneAccum,
     /// Input must be collected over the previous tick.
     Tick,
     /// Input must be collected over the previous tick but also not cause a new tick to occur.
     TickLazy,
+    /// Input must be collected over the previous loop iteration. Causes the loop to re-fire.
+    Loop,
+    /// Input must be collected over the previous loop iteration. Does NOT cause the loop to re-fire.
+    LoopLazy,
 }
 
 /// Specification of the named (or unnamed) ports for an operator's inputs or outputs.
@@ -68,10 +68,6 @@ pub struct OperatorConstraints {
     /// If this operator receives external inputs and therefore must be in
     /// stratum 0.
     pub is_external_input: bool,
-    /// If this operator has a singleton reference output. For stateful operators.
-    /// If true, [`WriteContextArgs::singleton_output_ident`] will be set to a meaningful value in
-    /// the [`Self::write_fn`] invocation.
-    pub has_singleton_output: bool,
     /// Flo semantics type.
     pub flo_type: Option<FloType>,
 
@@ -111,16 +107,13 @@ impl Debug for OperatorConstraints {
 }
 
 /// The code generated and returned by a [`OperatorConstraints::write_fn`].
+/// **Important**: When destructuring this struct in delegating operators, list all fields
+/// explicitly rather than using `..` to ensure new fields are not silently dropped.
 #[derive(Default)]
-#[non_exhaustive]
 pub struct OperatorWriteOutput {
-    /// Code which runs once outside any subgraphs, BEFORE subgraphs are initialized,
-    /// to set up any external state (state API, chanels, network connections, etc.)
-    /// to be used by the subgraph.
+    /// Code which runs once outside any subgraphs to set up external state
+    /// (channels, network connections, etc.) to be used by the subgraph.
     pub write_prologue: TokenStream,
-    /// Code which runs once outside the subgraph, AFTER subgraphs are initialized,
-    /// to set up state hooks which may need the subgraph ID.
-    pub write_prologue_after: TokenStream,
     /// Iterator (or pusherator) code inside the subgraphs. The code for each
     /// operator is emitted in order.
     ///
@@ -130,6 +123,9 @@ pub struct OperatorWriteOutput {
     pub write_iterator: TokenStream,
     /// Code which runs after `Stream`s/`Sink`s have been run. Mainly for flushing IO.
     pub write_iterator_after: TokenStream,
+    /// Code which runs at the end of each tick, after all subgraphs have run.
+    /// Used for resetting state with `'tick` persistence.
+    pub write_tick_end: TokenStream,
 }
 
 /// Convenience range: zero or more (any number).
@@ -160,7 +156,7 @@ pub fn identity_write_iterator_fn(
     let generic_type = type_args
         .first()
         .map(quote::ToTokens::to_token_stream)
-        .unwrap_or(quote_spanned!(op_span=> _));
+        .unwrap_or_else(|| quote_spanned!(op_span=> _));
 
     if is_pull {
         let input = &inputs[0];
@@ -276,11 +272,11 @@ macro_rules! declare_ops {
 }
 declare_ops![
     all_iterations::ALL_ITERATIONS,
-    all_once::ALL_ONCE,
     anti_join::ANTI_JOIN,
     assert::ASSERT,
     assert_eq::ASSERT_EQ,
     batch::BATCH,
+    batch_lazy::BATCH_LAZY,
     chain::CHAIN,
     chain_first_n::CHAIN_FIRST_N,
     _counter::_COUNTER,
@@ -305,6 +301,7 @@ declare_ops![
     identity::IDENTITY,
     initialize::INITIALIZE,
     inspect::INSPECT,
+    iter_ref::ITER_REF,
     join::JOIN,
     join_fused::JOIN_FUSED,
     join_fused_lhs::JOIN_FUSED_LHS,
@@ -313,8 +310,6 @@ declare_ops![
     join_multiset_half::JOIN_MULTISET_HALF,
     fold_keyed::FOLD_KEYED,
     reduce_keyed::REDUCE_KEYED,
-    repeat_n::REPEAT_N,
-    // last_iteration::LAST_ITERATION,
     lattice_bimorphism::LATTICE_BIMORPHISM,
     _lattice_fold_batch::_LATTICE_FOLD_BATCH,
     lattice_fold::LATTICE_FOLD,
@@ -323,16 +318,12 @@ declare_ops![
     map::MAP,
     union::UNION,
     multiset_delta::MULTISET_DELTA,
-    next_iteration::NEXT_ITERATION,
     defer_signal::DEFER_SIGNAL,
     defer_tick::DEFER_TICK,
     defer_tick_lazy::DEFER_TICK_LAZY,
     null::NULL,
     partition::PARTITION,
     persist::PERSIST,
-    persist_mut::PERSIST_MUT,
-    persist_mut_keyed::PERSIST_MUT_KEYED,
-    prefix::PREFIX,
     resolve_futures::RESOLVE_FUTURES,
     resolve_futures_blocking::RESOLVE_FUTURES_BLOCKING,
     resolve_futures_blocking_ordered::RESOLVE_FUTURES_BLOCKING_ORDERED,
@@ -415,8 +406,6 @@ pub struct WriteContextArgs<'a> {
     pub inputs: &'a [Ident],
     /// Output `Sink` operator idents (or ref idents; used for push).
     pub outputs: &'a [Ident],
-    /// Ident for the singleton output of this operator, if any.
-    pub singleton_output_ident: &'a Ident,
 
     /// Operator name.
     pub op_name: &'static str,
@@ -428,8 +417,6 @@ pub struct WriteContextArgs<'a> {
     /// These arguments include singleton postprocessing codegen, with
     /// [`std::cell::RefCell::borrow_mut`] code pre-generated.
     pub arguments: &'a Punctuated<Expr, Token![,]>,
-    /// Same as [`Self::arguments`] but with only `StateHandle`s, no borrowing code.
-    pub arguments_handles: &'a Punctuated<Expr, Token![,]>,
 }
 impl WriteContextArgs<'_> {
     /// Generate a (almost certainly) unique identifier with the given suffix.
@@ -449,19 +436,9 @@ impl WriteContextArgs<'_> {
         )
     }
 
-    /// Returns `#root::scheduled::StateLifespan::#variant` corresponding to the given
-    /// peristence.
-    pub fn persistence_as_state_lifespan(&self, persistence: Persistence) -> Option<TokenStream> {
-        let root = self.root;
-        let variant =
-            persistence.as_state_lifespan_variant(self.subgraph_id, self.loop_id, self.op_span)?;
-        Some(quote_spanned! {self.op_span=>
-            #root::scheduled::StateLifespan::#variant
-        })
-    }
-
-    /// Returns the given number of persistence arguments, disallowing mutable lifetimes.
-    pub fn persistence_args_disallow_mutable<const N: usize>(
+    /// Returns the given number of persistence arguments, with loop-context-aware defaults
+    /// (`'none` within a `loop { ... }` context, `'tick` otherwise) when not specified.
+    pub fn persistence_args<const N: usize>(
         &self,
         diagnostics: &mut Diagnostics,
     ) -> [Persistence; N] {
@@ -491,21 +468,6 @@ impl WriteContextArgs<'_> {
             .cycle() // Re-use the first element for both persistences.
             .take(N)
             .enumerate()
-            .filter(|&(_i, p)| {
-                if p == Persistence::Mutable {
-                    diagnostics.push(Diagnostic::spanned(
-                        self.op_span,
-                        Level::Error,
-                        format!(
-                            "An implementation of `'{}` does not exist",
-                            p.to_str_lowercase()
-                        ),
-                    ));
-                    false
-                } else {
-                    true
-                }
-            })
             .for_each(|(i, p)| {
                 out[i] = p;
             });
@@ -578,7 +540,7 @@ where
     }
 }
 
-/// Persistence lifetimes: `'none`, `'tick`, `'static`, or `'mutable`.
+/// Persistence lifetimes: `'none`, `'loop`, `'tick`, or `'static`.
 #[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Persistence {
     /// No persistence, for within a loop iteration.
@@ -589,34 +551,8 @@ pub enum Persistence {
     Tick,
     /// Persistence across all ticks.
     Static,
-    /// The static lifetime but allowing non-monotonic mutability.
-    Mutable,
 }
 impl Persistence {
-    /// Returns just the variant of `#root::scheduled::StateLifespan::VARIANT` for use in macros.
-    pub fn as_state_lifespan_variant(
-        self,
-        subgraph_id: GraphSubgraphId,
-        loop_id: Option<GraphLoopId>,
-        span: Span,
-    ) -> Option<TokenStream> {
-        match self {
-            Persistence::None => {
-                let sg_ident = subgraph_id.as_ident(span);
-                Some(quote_spanned!(span=> Subgraph(#sg_ident)))
-            }
-            Persistence::Loop => {
-                let loop_ident = loop_id
-                    .expect("`Persistence::Loop` outside of a loop context.")
-                    .as_ident(span);
-                Some(quote_spanned!(span=> Loop(#loop_ident)))
-            }
-            Persistence::Tick => Some(quote_spanned!(span=> Tick)),
-            Persistence::Static => None,
-            Persistence::Mutable => None,
-        }
-    }
-
     /// Returns a lowercase string for the persistence type.
     pub fn to_str_lowercase(self) -> &'static str {
         match self {
@@ -624,7 +560,6 @@ impl Persistence {
             Persistence::Tick => "tick",
             Persistence::Loop => "loop",
             Persistence::Static => "static",
-            Persistence::Mutable => "mutable",
         }
     }
 }
@@ -689,8 +624,9 @@ pub enum FloType {
     Source,
     /// A windowing operator, for moving data into a loop context.
     Windowing,
+    /// A lazy windowing operator — moves data into a loop context but does not trigger the loop.
+    /// Data is dropped if the loop does not fire that tick.
+    WindowingLazy,
     /// An un-windowing operator, for moving data out of a loop context.
     Unwindowing,
-    /// Moves data into the next loop iteration within a loop context.
-    NextIteration,
 }

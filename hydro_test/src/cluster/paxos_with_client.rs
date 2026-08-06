@@ -29,7 +29,6 @@ pub trait PaxosLike<'a>: Sized {
     /// # Non-Determinism
     /// During leader-reelection, the latest known leader may be stale, which may
     /// result in non-deterministic dropping of payloads.
-    #[expect(clippy::type_complexity, reason = "internal paxos code // TODO")]
     fn build<P: PaxosPayload>(
         self,
         payload_generator: impl FnOnce(
@@ -44,7 +43,6 @@ pub trait PaxosLike<'a>: Sized {
     /// During leader-reelection, the latest known leader may be stale, which may
     /// result in non-deterministic dropping of payloads. Also, payloads across
     /// clients will be arbitrarily interleaved as they arrive at the leader.
-    #[expect(clippy::type_complexity, reason = "internal paxos code // TODO")]
     fn with_client<C: 'a, P: PaxosPayload>(
         self,
         clients: &Cluster<'a, C>,
@@ -71,8 +69,8 @@ pub trait PaxosLike<'a>: Sized {
                 let payloads_at_proposer = sliced! {
                     let mut unsent_payloads = use::state_null::<Stream<_, _, _, TotalOrder>>();
 
-                    let payload_batch = use(payloads, nondet!(/** see below */));
-                    let latest_leader = use(cur_leader_id,
+                    let payload_batch = use::batch(payloads, nondet!(/** see below */));
+                    let latest_leader = use::snapshot(cur_leader_id,
                         nondet!(
                             /// the risk here is that we send a batch of requests
                             /// with a stale leader ID, but because the leader ID comes from the

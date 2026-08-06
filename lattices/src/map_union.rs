@@ -1,15 +1,24 @@
 //! Module containing the [`MapUnion`] lattice and aliases for different datastructures.
 
-use std::cmp::Ordering::{self, *};
-use std::collections::{BTreeMap, HashMap};
-use std::fmt::Debug;
-use std::marker::PhantomData;
+#[cfg(feature = "alloc")]
+use alloc::collections::BTreeMap;
+use core::cmp::Ordering::{self, *};
+use core::fmt::Debug;
+use core::marker::PhantomData;
+#[cfg(feature = "std")]
+use std::collections::HashMap;
 
 use cc_traits::{Collection, GetKeyValue, Iter, MapInsert, SimpleCollectionRef};
 
-use crate::cc_traits::{GetMut, Keyed, Map, MapIter, SimpleKeyedRef};
-use crate::collections::{ArrayMap, MapMapValues, OptionMap, SingletonMap, VecMap};
-use crate::{Atomize, DeepReveal, IsBot, IsTop, LatticeBimorphism, LatticeFrom, LatticeOrd, Merge};
+#[cfg(feature = "alloc")]
+use crate::cc_traits::GetMut;
+use crate::cc_traits::{Keyed, Map, MapIter, SimpleKeyedRef};
+#[cfg(feature = "alloc")]
+use crate::collections::VecMap;
+use crate::collections::{ArrayMap, MapMapValues, OptionMap, SingletonMap};
+#[cfg(feature = "alloc")]
+use crate::{Atomize, Merge};
+use crate::{DeepReveal, IsBot, IsTop, LatticeBimorphism, LatticeFrom, LatticeOrd};
 
 /// Map-union compound lattice.
 ///
@@ -58,6 +67,7 @@ where
     }
 }
 
+#[cfg(feature = "alloc")]
 impl<MapSelf, MapOther, K, ValSelf, ValOther> Merge<MapUnion<MapOther>> for MapUnion<MapSelf>
 where
     MapSelf: Keyed<Key = K, Item = ValSelf>
@@ -68,6 +78,8 @@ where
     ValOther: IsBot,
 {
     fn merge(&mut self, other: MapUnion<MapOther>) -> bool {
+        use alloc::vec::Vec;
+
         let mut changed = false;
         // This vec collect is needed to prevent simultaneous mut references `self.0.extend` and
         // `self.0.get_mut`.
@@ -78,17 +90,14 @@ where
             .into_iter()
             .filter(|(_k_other, val_other)| !val_other.is_bot())
             .filter_map(|(k_other, val_other)| {
-                match self.0.get_mut(&k_other) {
+                if let Some(mut val_self) = self.0.get_mut(&k_other) {
                     // Key collision, merge into `self`.
-                    Some(mut val_self) => {
-                        changed |= val_self.merge(val_other);
-                        None
-                    }
+                    changed |= val_self.merge(val_other);
+                    None
+                } else {
                     // New value, convert for extending.
-                    None => {
-                        changed = true;
-                        Some((k_other, ValSelf::lattice_from(val_other)))
-                    }
+                    changed = true;
+                    Some((k_other, ValSelf::lattice_from(val_other)))
                 }
             })
             .collect();
@@ -226,6 +235,7 @@ impl<Map> IsTop for MapUnion<Map> {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl<Map, K, Val> Atomize for MapUnion<Map>
 where
     Map: 'static
@@ -239,10 +249,10 @@ where
     type Atom = MapUnionSingletonMap<K, Val::Atom>;
 
     // TODO: use impl trait, then remove 'static.
-    type AtomIter = Box<dyn Iterator<Item = Self::Atom>>;
+    type AtomIter = alloc::boxed::Box<dyn Iterator<Item = Self::Atom>>;
 
     fn atomize(self) -> Self::AtomIter {
-        Box::new(self.0.into_iter().flat_map(|(k, val)| {
+        alloc::boxed::Box::new(self.0.into_iter().flat_map(|(k, val)| {
             val.atomize()
                 .map(move |v| MapUnionSingletonMap::new_from((k.clone(), v)))
         }))
@@ -250,12 +260,15 @@ where
 }
 
 /// [`std::collections::HashMap`]-backed [`MapUnion`] lattice.
+#[cfg(feature = "std")]
 pub type MapUnionHashMap<K, Val> = MapUnion<HashMap<K, Val>>;
 
 /// [`std::collections::BTreeMap`]-backed [`MapUnion`] lattice.
+#[cfg(feature = "alloc")]
 pub type MapUnionBTreeMap<K, Val> = MapUnion<BTreeMap<K, Val>>;
 
-/// [`Vec`]-backed [`MapUnion`] lattice.
+/// [`Vec`](alloc::vec::Vec)-backed [`MapUnion`] lattice.
+#[cfg(feature = "alloc")]
 pub type MapUnionVec<K, Val> = MapUnion<VecMap<K, Val>>;
 
 /// Array-backed [`MapUnion`] lattice.
@@ -335,8 +348,12 @@ mod test {
         my_map_a.merge(my_map_c);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn consistency_atomize() {
+        use alloc::vec;
+        use alloc::vec::Vec;
+
         let mut test_vec = Vec::new();
 
         // Size 0.

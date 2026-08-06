@@ -1,0 +1,196 @@
+---
+sidebar_position: 3
+---
+
+import SliceBatchAnimation from './SliceBatchAnimation';
+import SliceSnapshotAnimation from './SliceSnapshotAnimation';
+
+# Slice Blocks
+
+When building distributed applications, you often need to process incoming requests while observing the current state of your system. For example, a counter service needs to respond to "get" requests with the current count, or a key-value store needs to look up values for incoming queries.
+
+The challenge is that in Hydro, live collections update asynchronously. A `Stream` of requests arrives over time, and a `Singleton` holding state changes as updates are processed. How do you combine these two asynchronous sources in a meaningful way?
+
+## The `sliced!` Macro
+
+Hydro provides the `sliced!` macro to solve this problem. It allows you to take a **slice** of multiple live collections at a point in time, process them together, and emit results back into the asynchronous world.
+
+```rust,ignore
+use hydro_lang::prelude::*;
+
+let get_response = sliced! {
+    let request_batch = use::batch(get_requests, nondet!(/** batch boundaries are never observed */));
+    let count_snapshot = use::snapshot(current_count, nondet!(/** each request reads the count at the time it is processed */));
+
+    let count_ref = count_snapshot.by_ref();
+    request_batch.map(q!(|_req| *count_ref))
+};
+```
+
+A `sliced!` block starts with one or more `use` statements — **hooks**, with syntax inspired by React hooks — each specifying a live collection to slice and a style controlling how it is sliced. Each hook returns the sliced version of the collection, which is [bounded](../correctness/bounded-unbounded.md) for the duration of the slice:
+
+- For a `Stream` / `KeyedStream`, `use::batch` gives a **batch** of elements that arrived since the last slice
+- For a `Singleton` / `Optional`, `use::snapshot` gives a **snapshot** of the current value
+- For a `KeyedSingleton`, `use::snapshot` gives a **snapshot** of the current entries, or `use::batch` gives a **batch** of new entries if values are immutable (`BoundedValue`)
+
+The full set of hooks — including atomic and stateful variants — and their per-collection semantics are documented in [Slice Hooks](./slice-hooks.md).
+
+The body of `sliced!` must return a live collection (or a tuple of them). This collection is automatically "unsliced" back into an unbounded collection that continues across slice boundaries. For example, a bounded `Stream` becomes an unbounded `Stream` (concatenating elements across slices). When a `Singleton` is returned, the "unsliced" `Singleton` is continually updated to the latest `Singleton` result inside the slice.
+
+## Batches and Snapshots
+
+When you slice a `Stream`, you receive a batch of elements. The batch contains all elements that have arrived since the previous slice was processed. The boundaries of these batches are non-deterministic—they depend on network timing, processing speed, and other runtime factors.
+
+In the animation below, elements arrive continuously on the input stream. When a slice is taken, all pending elements are collected into a batch for processing. The batch is then transformed (in this case, each integer is converted to a string), and the results are emitted back to the output stream.
+
+```rust
+# use hydro_lang::prelude::*;
+# use futures::StreamExt;
+# tokio_test::block_on(hydro_lang::test_util::stream_transform_test(|process| {
+let numbers = process.source_iter(q!(vec![1, 2, 3, 4, 5]));
+
+let stringified = sliced! {
+    let batch = use::batch(numbers, nondet!(/** batch boundaries don't affect final result */));
+    batch.map(q!(|x| x.to_string()))
+};
+// Eventually emits: "1", "2", "3", "4", "5" (in batches)
+# stringified
+# }, |mut stream| async move {
+# let mut results = vec![];
+# for _ in 0..5 {
+#     results.push(stream.next().await.unwrap());
+# }
+# results.sort();
+# assert_eq!(results, vec!["1", "2", "3", "4", "5"]);
+# }));
+```
+
+<SliceBatchAnimation />
+
+The key insight is that while batch boundaries are non-deterministic, the **eventual result** is deterministic—all elements will eventually be processed and emitted.
+
+When you slice a `Singleton`, you receive a snapshot of its current value. This snapshot represents the state at the moment the slice is taken. If the singleton is updated between slices, subsequent slices will observe the new value.
+
+The animation below shows how a singleton's value changes over time as updates are processed. When a slice is taken, the current value is captured and can be used in computations with other sliced collections.
+
+```rust,ignore
+let requests: Stream<()> = ...; // (), (), ()
+let state: Singleton<i32> = ...; // 5 ~> 7
+
+let scaled = sliced! {
+    let batch = use::batch(requests, nondet!(/** batch boundaries are non-deterministic */));
+    let current_state = use::snapshot(state, nondet!(/** snapshot timing is non-deterministic */));
+    batch.cross_singleton(current_state)
+};
+```
+
+<SliceSnapshotAnimation />
+
+The `sliced!` macro can combine any number of live collections. All collections are sliced at the same logical point in time, allowing you to perform joins and lookups across several sources of state.
+
+## Reading State with References
+
+The most common use of a slice is to answer a batch of requests using a snapshot of some state. While you *can* pair each request with the snapshot using `cross_singleton` (as above), the more ergonomic idiom is to capture the snapshot with a [**reference handle**](./references-mutations.md) (`by_ref()`) and read it directly inside a `q!()` closure:
+
+```rust
+# use hydro_lang::prelude::*;
+# use futures::StreamExt;
+# tokio_test::block_on(hydro_lang::test_util::stream_transform_test(|process| {
+let increments = process.source_iter(q!(vec![(), (), ()]));
+let get_requests = process.source_iter(q!(vec!["alice", "bob"]));
+
+let current_count = increments.count();
+
+let get_response = sliced! {
+    let request_batch = use::batch(get_requests, nondet!(/** batch boundaries are never observed */));
+    let count_snapshot = use::snapshot(current_count, nondet!(/** each request reads the count at the time it is processed */));
+
+    let count_ref = count_snapshot.by_ref();
+    request_batch.map(q!(|requester| (requester, *count_ref)))
+};
+# get_response.map(q!(|(name, count)| (name.to_string(), count)))
+# }, |mut stream| async move {
+# let mut results = vec![];
+# for _ in 0..2 { results.push(stream.next().await.unwrap()); }
+# assert_eq!(results.len(), 2);
+# }));
+```
+
+Because the snapshot revealed by the hook is bounded, `by_ref()` gives you a handle that resolves to a plain `&usize` at runtime — no tuple plumbing through `cross_singleton`, even when a response depends on several pieces of state. Reference handles can also *mutate* state within a slice via `by_mut()`; see [References and Mutations](./references-mutations.md).
+
+:::caution
+
+Snapshots taken with the `use::snapshot` hook are only guaranteed to be *monotone* — they may lag behind outputs your program has already released. If clients require read-after-write consistency (e.g., a get request issued after an acknowledged increment must observe that increment), use [atomic collections](../atomic-collections.mdx) and the `use::atomic` hook.
+
+:::
+
+## Using Slices Well
+
+Slices are a powerful tool for manipulating asynchronous data, but should only be used when necessary, since they introduce non-determinism: batch boundaries, snapshot timing, and the interleaving of slices are all decided at runtime. This is why every hook requires a [`nondet!`](../correctness/nondet.md) guard.
+
+1. **Keep slices focused**: Each `sliced!` block should have a clear purpose. If you're doing multiple unrelated operations, consider separate blocks.
+2. **Document non-determinism**: The explanation in each `nondet!` call should explain why the non-determinism doesn't affect correctness — see [Non-Determinism and `nondet!`](../correctness/nondet.md) for what makes a good explanation.
+3. **Test with simulation**: Use [exhaustive simulation testing](../simulation/writing.mdx) to verify your code handles all possible batch boundaries and snapshot timings correctly.
+
+## Stateful Slices
+
+Sometimes you need to maintain state across slice iterations—for example, accumulating a running count or buffering elements until a condition is met. The `sliced!` macro supports stateful computations using `let mut` bindings with the `use::state` or `use::state_null` hooks:
+
+```rust,ignore
+let running_count = sliced! {
+    let batch = use::batch(input_stream, nondet!(/** batch boundaries don't affect final count */));
+    let mut counter = use::state(|l| l.singleton(q!(0)));
+
+    // Increment counter by the number of items in this batch
+    let new_count = counter.clone().zip(batch.count())
+        .map(q!(|(old, add)| old + add));
+    counter = new_count.clone();
+    new_count.into_stream()
+};
+```
+
+The mutable binding can be reassigned in the body, and the final value is automatically passed to the next iteration. See [Slice Hooks](./slice-hooks.md) for the full semantics of state hooks, including `use::state_null` for state that starts out empty.
+
+When state must be read *and* written while processing elements — especially when **multiple input streams** share the same state — mutating the state through a `by_mut()` reference handle is often clearer than fold-style reassignment. See [References and Mutations](./references-mutations.md) for this pattern.
+
+## Scheduling and Timers
+
+Slices are **lazy**—a slice only re-runs when there is new input to process on at least one of its `use`d collections. If no new data arrives, the slice will not execute again. This means that if you need a slice to run on a regular schedule (e.g., to periodically emit a heartbeat or poll for changes), you must explicitly provide a time-based input.
+
+The simplest approach is to use `sample_every`, which produces a stream of periodic snapshots from a live collection. You can directly process this stream, or `use` this sampled stream inside a `sliced!` block to combine it with other inputs:
+
+```rust,ignore
+let sampled_state: Stream<...> = state.sample_every(
+    q!(Duration::from_secs(1)),
+    nondet!(/** sampling timing is non-deterministic */),
+);
+
+sampled_state.clone().for_each(q!(|sample| {
+    println!("Sampled state: {:?}", sample);
+}));
+
+let periodic_output = sliced! {
+    let sample_batch = use::batch(sampled_state, nondet!(/** batch boundaries are non-deterministic */));
+    let other_state_snapshot = use::snapshot(other_state, nondet!(/** snapshot timing is non-deterministic */));
+
+    sample_batch.cross_singleton(other_state_snapshot)
+        .map(q!(|(s1, s2)| process(s1, s2)))
+};
+```
+
+Alternatively, you can use `source_interval` to create a raw stream of timer ticks and `use` it directly in a slice. However, be careful: because slices can be triggered by *any* of their inputs, the slice may sometimes run when the interval stream has an **empty batch** (i.e., no new timer events since the last run). Your slice logic must handle this case, for example by using `first()` or `count()` to check whether any interval events are present before acting on them.
+
+```rust,ignore
+let ticks = process.source_interval(
+    q!(Duration::from_secs(1)),
+    nondet!(/** timer is non-deterministic */),
+);
+
+let periodic_output = sliced! {
+    let tick_batch = use::batch(ticks, nondet!(/** batch boundaries are non-deterministic */));
+    let state = use::snapshot(current_state, nondet!(/** snapshot timing is non-deterministic */));
+
+    // Only emit when there is at least one tick in this batch
+    state.filter_if(tick_batch.first().is_some()).into_stream()
+};
+```

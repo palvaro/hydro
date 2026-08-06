@@ -3,9 +3,9 @@
 
 //! Hydro is a high-level distributed programming framework for Rust.
 //! Hydro can help you quickly write scalable distributed services that are correct by construction.
-//! Much like Rust helps with memory safety, Hydro helps with [distributed safety](https://hydro.run/docs/hydro/reference/correctness).
+//! Much like Rust helps with memory safety, Hydro helps with [distributed safety](https://hydro.run/docs/hydro/reference/correctness/).
 //!
-//! The core Hydro API involves [live collections](https://hydro.run/docs/hydro/reference/live-collections/), which represent asynchronously
+//! The core Hydro API involves [live collections](https://hydro.run/docs/hydro/reference/introduction/live-collections), which represent asynchronously
 //! updated sources of data such as incoming network requests and application state. The most common live collection is
 //! [`live_collections::stream::Stream`]; other live collections can be found in [`live_collections`].
 //!
@@ -18,19 +18,23 @@ stageleft::stageleft_no_entry_crate!();
 #[cfg_attr(docsrs, doc(cfg(feature = "runtime_support")))]
 #[doc(hidden)]
 pub mod runtime_support {
-    pub use ::{bincode, dfir_rs, slotmap, stageleft, tokio};
+    pub use ::{bincode, dfir_rs, slotmap, stageleft};
     #[cfg(feature = "sim")]
     pub use colored;
     #[cfg(feature = "deploy_integration")]
     pub use hydro_deploy_integration;
+    #[cfg(feature = "tokio")]
+    pub use tokio;
 
-    #[cfg(any(feature = "deploy_integration", feature = "docker_runtime"))]
+    #[cfg(feature = "deploy_integration")]
     pub mod launch;
 }
 
 #[doc(hidden)]
 pub mod macro_support {
     pub use copy_span;
+    #[cfg(feature = "trybuild")]
+    pub use ctor;
 }
 
 pub mod prelude {
@@ -49,17 +53,18 @@ pub mod prelude {
 
     pub use crate::compile::builder::FlowBuilder;
     pub use crate::live_collections::boundedness::{Bounded, Unbounded};
-    pub use crate::live_collections::keyed_singleton::KeyedSingleton;
+    pub use crate::live_collections::keyed_singleton::{KeyedSingleton, MonotonicKeys};
     pub use crate::live_collections::keyed_stream::KeyedStream;
     pub use crate::live_collections::optional::Optional;
     pub use crate::live_collections::singleton::Singleton;
     pub use crate::live_collections::sliced::sliced;
     pub use crate::live_collections::stream::Stream;
     pub use crate::location::{Cluster, External, Location as _, Process, Tick};
-    pub use crate::networking::TCP;
+    pub use crate::networking::{TCP, UDP};
     pub use crate::nondet::{NonDet, nondet};
-    pub use crate::properties::{ManualProof, manual_proof};
+    pub use crate::properties::{ConsistencyProof, ManualProof, manual_proof};
 
+    #[cfg(feature = "trybuild")]
     /// A macro to set up a Hydro crate.
     #[macro_export]
     macro_rules! setup {
@@ -68,11 +73,22 @@ pub mod prelude {
 
             #[cfg(test)]
             mod test_init {
-                #[ctor::ctor]
-                fn init() {
-                    $crate::compile::init_test();
-                }
+                $crate::macro_support::ctor::declarative::ctor!(
+                    #[ctor(unsafe)]
+                    fn init() {
+                        $crate::compile::init_test();
+                    }
+                );
             }
+        };
+    }
+
+    #[cfg(not(feature = "trybuild"))]
+    /// A macro to set up a Hydro crate.
+    #[macro_export]
+    macro_rules! setup {
+        () => {
+            stageleft::stageleft_no_entry_crate!();
         };
     }
 }
@@ -95,9 +111,10 @@ pub mod telemetry;
 
 #[cfg(any(
     feature = "deploy",
+    feature = "sim",
     feature = "deploy_integration" // hidden internal feature enabled in the trybuild
 ))]
-#[cfg_attr(docsrs, doc(cfg(feature = "deploy")))]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "deploy", feature = "sim"))))]
 pub mod deploy;
 
 #[cfg(feature = "sim")]
@@ -108,8 +125,7 @@ pub mod forward_handle;
 
 pub mod compile;
 
-/// Determination depth analysis — computes how many sequential coordination layers a program needs.
-pub mod determination;
+pub mod handoff_ref;
 
 mod manual_expr;
 
@@ -130,26 +146,38 @@ mod staging_util;
 pub mod test_util;
 
 #[cfg(feature = "build")]
-#[ctor::ctor]
-fn init_rewrites() {
-    stageleft::add_private_reexport(
-        vec!["tokio_util", "codec", "lines_codec"],
-        vec!["tokio_util", "codec"],
-    );
-}
+ctor::declarative::ctor!(
+    #[ctor(unsafe)]
+    fn init_rewrites() {
+        stageleft::add_private_reexport(
+            vec!["tokio_util", "codec", "lines_codec"],
+            vec!["tokio_util", "codec"],
+        );
+        // TODO: remove once stabilized
+        stageleft::add_private_reexport(
+            vec!["core", "io", "error", "Error"],
+            vec!["std", "io", "Error"],
+        );
+    }
+);
 
 #[cfg(all(test, feature = "trybuild"))]
 mod test_init {
-    #[ctor::ctor]
-    fn init() {
-        crate::compile::init_test();
-    }
+    ctor::declarative::ctor!(
+        #[ctor(unsafe)]
+        fn init() {
+            crate::compile::init_test();
+            // Install a tracing subscriber so diagnostics (e.g. the `hydro_build` build-timing
+            // events used by scripts/bench_trybuild.sh) can be enabled via RUST_LOG.
+            crate::telemetry::initialize_tracing();
+        }
+    );
 }
 
 /// Creates a newtype wrapper around an integer type.
 ///
 /// Usage:
-/// ```rust
+/// ```rust,ignore
 /// hydro_lang::newtype_counter! {
 ///     /// My counter.
 ///     pub struct MyCounter(u32);
@@ -170,27 +198,11 @@ macro_rules! newtype_counter {
         $(
             $( #[$attr] )*
             #[repr(transparent)]
-            #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+            #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
             $vis struct $name($typ);
 
             #[allow(clippy::allow_attributes, dead_code, reason = "macro-generated methods may be unused")]
             impl $name {
-                /// Gets the current ID and increments for the next.
-                pub fn get_and_increment(&mut self) -> Self {
-                    let id = self.0;
-                    self.0 += 1;
-                    Self(id)
-                }
-
-                /// Returns an iterator from zero up to (but excluding) `self`.
-                ///
-                /// This is useful for iterating already-allocated values.
-                pub fn range_up_to(&self) -> impl std::iter::DoubleEndedIterator<Item = Self>
-                    + std::iter::FusedIterator
-                {
-                    (0..self.0).map(Self)
-                }
-
                 /// Reveals the inner ID.
                 pub fn into_inner(self) -> $typ {
                     self.0
@@ -220,6 +232,53 @@ macro_rules! newtype_counter {
                     serde::de::Deserialize::deserialize(deserializer).map(Self)
                 }
             }
+
+            #[sealed::sealed]
+            impl $crate::Countable for $name {
+                fn from_count(val: usize) -> Self {
+                    Self(val as $typ)
+                }
+            }
         )*
     };
+}
+
+/// Sealed trait implemented by ID types produced via [`newtype_counter!`].
+///
+/// This allows [`Counter<T>`] to mint new IDs without exposing a public
+/// constructor on the ID types themselves.
+#[doc(hidden)]
+#[sealed::sealed]
+pub trait Countable {
+    #[doc(hidden)]
+    fn from_count(val: usize) -> Self;
+}
+
+/// An opaque counter that produces unique IDs of type `T` via [`Counter::get_and_increment`].
+///
+/// This is separate from the ID types themselves so that holding an ID does not
+/// give the ability to mint new IDs.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Counter<T: Countable>(usize, std::marker::PhantomData<T>);
+
+impl<T: Countable> Default for Counter<T> {
+    fn default() -> Self {
+        Self(0, std::marker::PhantomData)
+    }
+}
+
+impl<T: Countable> Counter<T> {
+    /// Gets the current counter value and increments for the next call.
+    pub fn get_and_increment(&mut self) -> T {
+        let id = self.0;
+        self.0 += 1;
+        T::from_count(id)
+    }
+
+    /// Returns an iterator from zero up to (but excluding) the current counter value.
+    ///
+    /// This is useful for iterating already-allocated values.
+    pub fn range_up_to(&self) -> impl DoubleEndedIterator<Item = T> + std::iter::FusedIterator {
+        (0..self.0).map(T::from_count)
+    }
 }

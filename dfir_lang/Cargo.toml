@@ -1,7 +1,7 @@
 [package]
 name = "dfir_lang"
 publish = true
-version = "0.15.0"
+version = "0.17.0-alpha.3"
 documentation = "https://docs.rs/dfir_lang/"
 description = "Hydro's Dataflow Intermediate Representation (DFIR) implementation"
 edition = { workspace = true }
@@ -12,35 +12,50 @@ license = { workspace = true }
 workspace = true
 
 [features]
-default = []
-debugging = [ "dep:data-encoding", "dep:webbrowser", "clap-derive" ]
-clap-derive = [ "dep:clap" ]
+default = ["std", "codegen"]
+std = ["alloc", "serde?/std", "slotmap/std"]
+alloc = ["serde?/alloc"]
+serde = ["dep:serde", "slotmap/serde"]
+codegen = [
+    "std",
+    "serde",
+    "dep:auto_impl",
+    "dep:documented",
+    "dep:itertools",
+    "dep:prettyplease",
+    "dep:proc-macro2",
+    "dep:quote",
+    "dep:serde_json",
+    "dep:syn",
+]
+debugging = [ "codegen", "dep:data-encoding", "dep:webbrowser", "clap-derive" ]
+clap-derive = [ "codegen", "dep:clap" ]
 
 [package.metadata.docs.rs]
 all-features = true
 
 [dependencies]
-auto_impl = "1.0.0"
+auto_impl = { version = "1.0.0", optional = true }
 clap = { version = "4.5.4", features = [ "derive" ], optional = true }
 data-encoding = { version = "2.0.0", optional = true }
-documented = "0.9.1"
-itertools = "0.14.0"
-prettyplease = { version = "0.2.0", features = [ "verbatim" ] }
-proc-macro2 = { version = "1.0.95", features = [ "span-locations" ] }
-quote = "1.0.35"
-serde = "1.0.197"
-serde_json = "1.0.115"
-slotmap = { version = "1.1.0", features = ["serde"] }
-syn = { version = "2.0.46", features = [ "extra-traits", "full", "parsing", "visit-mut" ] }
+documented = { version = "0.9.1", optional = true }
+itertools = { version = "0.14.0", optional = true }
+prettyplease = { version = "0.2.0", features = [ "verbatim" ], optional = true }
+proc-macro2 = { version = "1.0.95", features = [ "span-locations" ], optional = true }
+quote = { version = "1.0.35", optional = true }
+serde = { version = "1.0.197", default-features = false, optional = true }
+serde_json = { version = "1.0.115", optional = true }
+slotmap = { version = "1.1.0", default-features = false }
+syn = { version = "2.0.46", features = [ "extra-traits", "full", "parsing", "visit-mut" ], optional = true }
 webbrowser = { version = "1.0.3", optional = true }
 
 # coax cargo-smart-release into publishing this crate.
 # https://github.com/hydro-project/hydro/blob/main/RELEASING.md#addendum-adding-new-crates
 # https://github.com/GitoxideLabs/cargo-smart-release/issues/36
-hydro_build_utils = { path = "../hydro_build_utils", version = "^0.0.1", optional = true }
+hydro_build_utils = { path = "../hydro_build_utils", version = "^0.1.1-alpha.0", optional = true }
 
 [dev-dependencies]
 
 [build-dependencies]
 syn = { version = "2.0.46", features = [ "extra-traits", "full", "parsing" ] }
-hydro_build_utils = { path = "../hydro_build_utils", version = "^0.0.1" }
+hydro_build_utils = { path = "../hydro_build_utils", version = "^0.1.1-alpha.0" }

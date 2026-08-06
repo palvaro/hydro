@@ -1,23 +1,28 @@
 ---
 source: hydro_lang/src/compile/ir/serde_test.rs
-assertion_line: 128
 expression: json
 ---
 [
   {
     "ForEach": {
-      "f": "q!(| v | println ! (\"{}\" , v))",
+      "f": {
+        "expr": "q!(| v | println ! (\"{}\" , v))",
+        "singleton_refs": []
+      },
       "input": {
         "Tee": {
           "inner": {
             "$shared": 0,
             "node": {
               "Map": {
-                "f": "q!(| x | x * 2)",
+                "f": {
+                  "expr": "q!(| x | x * 2)",
+                  "singleton_refs": []
+                },
                 "input": {
                   "Source": {
                     "source": {
-                      "Iter": "q!(stageleft :: runtime_support :: type_hint :: < std :: ops :: Range < i32 > > ({ use crate :: __staged :: __deps :: * ; use crate :: __staged :: compile :: ir :: serde_test :: tests :: * ; 0 .. 10 }))"
+                      "Iter": "q!(stageleft :: runtime_support :: type_hint :: < core :: ops :: Range < i32 > > ({ use crate :: __staged :: __deps :: * ; use crate :: __staged :: compile :: ir :: serde_test :: tests :: * ; { 0 .. 10 } }))"
                     },
                     "metadata": {
                       "location_id": {
@@ -34,10 +39,11 @@ expression: json
                           "element_type": "i32"
                         }
                       },
+                      "consistency": null,
                       "cardinality": null,
                       "tag": null,
                       "op": {
-                        "span": "[workspace]/hydro_lang/src/compile/ir/serde_test.rs:120:30",
+                        "span": "[workspace]/hydro_lang/src/compile/ir/serde_test.rs:120",
                         "cpu_usage": null,
                         "network_recv_cpu_usage": null,
                         "id": null
@@ -60,10 +66,11 @@ expression: json
                       "element_type": "i32"
                     }
                   },
+                  "consistency": null,
                   "cardinality": null,
                   "tag": null,
                   "op": {
-                    "span": "[workspace]/hydro_lang/src/compile/ir/serde_test.rs:120:53",
+                    "span": "[workspace]/hydro_lang/src/compile/ir/serde_test.rs:120",
                     "cpu_usage": null,
                     "network_recv_cpu_usage": null,
                     "id": null
@@ -87,10 +94,11 @@ expression: json
                 "element_type": "i32"
               }
             },
+            "consistency": null,
             "cardinality": null,
             "tag": null,
             "op": {
-              "span": "[workspace]/hydro_lang/src/compile/ir/serde_test.rs:121:27",
+              "span": "[workspace]/hydro_lang/src/compile/ir/serde_test.rs:121",
               "cpu_usage": null,
               "network_recv_cpu_usage": null,
               "id": null
@@ -99,7 +107,7 @@ expression: json
         }
       },
       "op_metadata": {
-        "span": "[workspace]/hydro_lang/src/compile/ir/serde_test.rs:122:14",
+        "span": "[workspace]/hydro_lang/src/compile/ir/serde_test.rs:122",
         "cpu_usage": null,
         "network_recv_cpu_usage": null,
         "id": null
@@ -108,7 +116,10 @@ expression: json
   },
   {
     "ForEach": {
-      "f": "q!(| v | eprintln ! (\"{}\" , v))",
+      "f": {
+        "expr": "q!(| v | eprintln ! (\"{}\" , v))",
+        "singleton_refs": []
+      },
       "input": {
         "Tee": {
           "inner": {
@@ -129,10 +140,11 @@ expression: json
                 "element_type": "i32"
               }
             },
+            "consistency": null,
             "cardinality": null,
             "tag": null,
             "op": {
-              "span": "[workspace]/hydro_lang/src/compile/ir/serde_test.rs:121:27",
+              "span": "[workspace]/hydro_lang/src/compile/ir/serde_test.rs:121",
               "cpu_usage": null,
               "network_recv_cpu_usage": null,
               "id": null
@@ -141,7 +153,7 @@ expression: json
         }
       },
       "op_metadata": {
-        "span": "[workspace]/hydro_lang/src/compile/ir/serde_test.rs:123:16",
+        "span": "[workspace]/hydro_lang/src/compile/ir/serde_test.rs:123",
         "cpu_usage": null,
         "network_recv_cpu_usage": null,
         "id": null

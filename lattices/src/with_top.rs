@@ -1,6 +1,8 @@
-use std::cmp::Ordering::{self, *};
+use core::cmp::Ordering::{self, *};
 
-use crate::{Atomize, DeepReveal, IsBot, IsTop, LatticeFrom, LatticeOrd, Merge};
+#[cfg(feature = "alloc")]
+use crate::Atomize;
+use crate::{DeepReveal, IsBot, IsTop, LatticeFrom, LatticeOrd, Merge};
 
 /// Adds a new "top" value to the nested lattice type.
 ///
@@ -137,6 +139,7 @@ where
     }
 }
 
+#[cfg(feature = "alloc")]
 impl<Inner> Atomize for WithTop<Inner>
 where
     Inner: Atomize + LatticeFrom<<Inner as Atomize>::Atom>,
@@ -144,12 +147,12 @@ where
     type Atom = WithTop<Inner::Atom>;
 
     // TODO: use impl trait, then remove 'static.
-    type AtomIter = Box<dyn Iterator<Item = Self::Atom>>;
+    type AtomIter = alloc::boxed::Box<dyn Iterator<Item = Self::Atom>>;
 
     fn atomize(self) -> Self::AtomIter {
         match self.0 {
-            Some(inner) => Box::new(inner.atomize().map(WithTop::new_from)),
-            None => Box::new(std::iter::once(WithTop::new(None))),
+            Some(inner) => alloc::boxed::Box::new(inner.atomize().map(WithTop::new_from)),
+            None => alloc::boxed::Box::new(core::iter::once(WithTop::new(None))),
         }
     }
 }

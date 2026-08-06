@@ -6,14 +6,13 @@ use std::hash::Hash;
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::ToTokens;
 use serde::{Deserialize, Serialize};
-use slotmap::new_key_type;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{Expr, ExprPath, GenericArgument, Token, Type};
 
 use self::ops::{OperatorConstraints, Persistence};
 use crate::diagnostic::{Diagnostic, Diagnostics, Level};
-use crate::parse::{DfirCode, IndexInt, Operator, PortIndex, Ported};
+use crate::parse::{DfirCode, IndexInt, Operator, PortIndex, Ported, SingletonRef};
 use crate::pretty_span::PrettySpan;
 
 mod di_mul_graph;
@@ -32,22 +31,10 @@ pub use flat_graph_builder::{FlatGraphBuilder, FlatGraphBuilderOutput};
 pub use flat_to_partitioned::partition_graph;
 pub use meta_graph::{DfirGraph, WriteConfig, WriteGraphType};
 
+pub use crate::graph_ids::{GraphEdgeId, GraphLoopId, GraphNodeId, GraphSubgraphId};
+
 pub mod graph_algorithms;
 pub mod ops;
-
-new_key_type! {
-    /// ID to identify a node (operator or handoff) in [`DfirGraph`].
-    pub struct GraphNodeId;
-
-    /// ID to identify an edge.
-    pub struct GraphEdgeId;
-
-    /// ID to identify a subgraph in [`DfirGraph`].
-    pub struct GraphSubgraphId;
-
-    /// ID to identify a loop block in [`DfirGraph`].
-    pub struct GraphLoopId;
-}
 
 impl GraphSubgraphId {
     /// Generate a deterministic `Ident` for the given subgraph ID.
@@ -71,6 +58,7 @@ const CONTEXT: &str = "context";
 const GRAPH: &str = "df";
 
 const HANDOFF_NODE_STR: &str = "handoff";
+const SINGLETON_SLOT_NODE_STR: &str = "singleton";
 const MODULE_BOUNDARY_NODE_STR: &str = "module_boundary";
 
 mod serde_syn {
@@ -100,13 +88,28 @@ mod serde_syn {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialOrd, Ord, PartialEq, Eq, Hash)]
 pub struct Varname(#[serde(with = "serde_syn")] pub Ident);
 
+/// The kind of inter-subgraph handoff.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HandoffKind {
+    /// A `Vec<T>` buffer for streams (zero or more items).
+    Vec,
+    /// An `Option<T>` slot for singletons (exactly one item expected).
+    /// `#varname` gives `&T` (panics if empty).
+    Singleton,
+    /// An `Option<T>` slot for optionals (zero or one item).
+    /// `#varname` gives `&Option<T>`.
+    Optional,
+}
+
 /// A node, corresponding to an operator or a handoff.
 #[derive(Clone, Serialize, Deserialize)]
 pub enum GraphNode {
     /// An operator.
     Operator(#[serde(with = "serde_syn")] Operator),
-    /// A handoff point, used between subgraphs (or within a subgraph to break a cycle).
+    /// An inter-subgraph handoff point for buffering data between subgraphs.
     Handoff {
+        /// What kind of storage this handoff uses.
+        kind: HandoffKind,
         /// The span of the input into the handoff.
         #[serde(skip, default = "Span::call_site")]
         src_span: Span,
@@ -132,7 +135,14 @@ impl GraphNode {
     pub fn to_pretty_string(&self) -> Cow<'static, str> {
         match self {
             GraphNode::Operator(op) => op.to_pretty_string().into(),
-            GraphNode::Handoff { .. } => HANDOFF_NODE_STR.into(),
+            GraphNode::Handoff {
+                kind: HandoffKind::Vec,
+                ..
+            } => HANDOFF_NODE_STR.into(),
+            GraphNode::Handoff {
+                kind: HandoffKind::Singleton | HandoffKind::Optional,
+                ..
+            } => SINGLETON_SLOT_NODE_STR.into(),
             GraphNode::ModuleBoundary { .. } => MODULE_BOUNDARY_NODE_STR.into(),
         }
     }
@@ -141,12 +151,19 @@ impl GraphNode {
     pub fn to_name_string(&self) -> Cow<'static, str> {
         match self {
             GraphNode::Operator(op) => op.name_string().into(),
-            GraphNode::Handoff { .. } => HANDOFF_NODE_STR.into(),
+            GraphNode::Handoff {
+                kind: HandoffKind::Vec,
+                ..
+            } => HANDOFF_NODE_STR.into(),
+            GraphNode::Handoff {
+                kind: HandoffKind::Singleton | HandoffKind::Optional,
+                ..
+            } => SINGLETON_SLOT_NODE_STR.into(),
             GraphNode::ModuleBoundary { .. } => MODULE_BOUNDARY_NODE_STR.into(),
         }
     }
 
-    /// Return the source code span of the node (for operators) or input/otput spans for handoffs.
+    /// Return the source code span of the node.
     pub fn span(&self) -> Span {
         match self {
             Self::Operator(op) => op.span(),
@@ -163,7 +180,7 @@ impl std::fmt::Debug for GraphNode {
             Self::Operator(operator) => {
                 write!(f, "Node::Operator({} span)", PrettySpan(operator.span()))
             }
-            Self::Handoff { .. } => write!(f, "Node::Handoff"),
+            Self::Handoff { kind, .. } => write!(f, "Node::Handoff({kind:?})"),
             Self::ModuleBoundary { input, .. } => {
                 write!(f, "Node::ModuleBoundary{{input: {}}}", input)
             }
@@ -188,7 +205,7 @@ pub struct OperatorInstance {
     /// Port values used as this operator's output.
     pub output_ports: Vec<PortIndexValue>,
     /// Singleton references within the operator arguments.
-    pub singletons_referenced: Vec<Ident>,
+    pub singletons_referenced: Vec<SingletonRef>,
 
     /// Generic arguments.
     pub generics: OpInstGenerics,
@@ -255,7 +272,7 @@ impl OpInstGenerics {
 /// Gets the generic arguments for the operator.
 ///
 /// This helper method is useful due to the special handling of persistence lifetimes (`'static`,
-/// `'tick`, `'mutable`) which must come before other generic parameters.
+/// `'tick`) which must come before other generic parameters.
 pub fn get_operator_generics(diagnostics: &mut Diagnostics, operator: &Operator) -> OpInstGenerics {
     // Generic arguments.
     let generic_args = operator.type_arguments().cloned();
@@ -266,12 +283,11 @@ pub fn get_operator_generics(diagnostics: &mut Diagnostics, operator: &Operator)
                     "loop" => Some(Persistence::Loop),
                     "tick" => Some(Persistence::Tick),
                     "static" => Some(Persistence::Static),
-                    "mutable" => Some(Persistence::Mutable),
                     _ => {
                         diagnostics.push(Diagnostic::spanned(
                             generic_arg.span(),
                             Level::Error,
-                            format!("Unknown lifetime generic argument `'{}`, expected `'none`, `'loop`, `'tick`, `'static`, or `'mutable`.", lifetime.ident),
+                            format!("Unknown lifetime generic argument `'{}`, expected `'none`, `'loop`, `'tick`, or `'static`.", lifetime.ident),
                         ));
                         // TODO(mingwei): should really keep going and not short circuit?
                         None
@@ -465,19 +481,23 @@ pub fn build_dfir_code(
 
     eliminate_extra_unions_tees(&mut flat_graph);
 
-    // Reject `loop { }` blocks (not yet supported in inline codegen).
-    // TODO(cleanup): find a better home for this check — ideally inside `partition_graph` once
-    // it supports returning multiple diagnostics.
-    for (_loop_id, nodes) in flat_graph.loops() {
-        let span = nodes
-            .first()
-            .map_or_else(Span::call_site, |&n| flat_graph.node(n).span());
-        diagnostics.push(Diagnostic::spanned(
-            span,
-            Level::Error,
-            "`loop { }` blocks are not (yet) supported in `dfir_syntax!`.",
-        ));
+    // Detect adjacent handoffs (e.g. `handoff() -> handoff()` or `singleton() -> singleton()`),
+    // which can arise after unary tee/union elimination.
+    for (edge_id, (src, dst)) in flat_graph.edges() {
+        let _ = edge_id;
+        if matches!(flat_graph.node(src), GraphNode::Handoff { .. })
+            && matches!(flat_graph.node(dst), GraphNode::Handoff { .. })
+        {
+            let span = flat_graph.node(dst).span();
+            diagnostics.push(Diagnostic::spanned(
+                span,
+                Level::Error,
+                "Adjacent handoff/singleton operators are not allowed. \
+                 Remove one or insert an operator between them.",
+            ));
+        }
     }
+
     if diagnostics.has_error() {
         return Err(diagnostics);
     }

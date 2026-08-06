@@ -4,7 +4,7 @@ pub mod style;
 
 use super::boundedness::{Bounded, Unbounded};
 use super::stream::{Ordering, Retries};
-use crate::location::{Location, NoTick, Tick};
+use crate::location::{Location, Tick};
 
 #[doc(hidden)]
 #[macro_export]
@@ -23,6 +23,9 @@ macro_rules! __sliced_parse_uses__ {
     };
 
     // Parse immutable use statements without style: let name = use(args...);
+    // This form is deprecated; the `default` style function it expands to is marked
+    // `#[deprecated]`, which surfaces a deprecation warning on the user's `use(...)` tokens
+    // (via `copy_span!`).
     (
         @uses [$($uses:tt)*]
         @states [$($states:tt)*]
@@ -86,9 +89,24 @@ macro_rules! __sliced_parse_uses__ {
                 $($use_name,)+
             ) = __sliced;
 
-            // Create all cycles and pack handles/values into tuples
+            // Create all cycles and pack handles/values into tuples.
+            //
+            // The `copy_span!` wrapper re-spans the macro-generated tokens (the style function
+            // path and the `build` call) to the user's tokens, so that errors arising from the
+            // state creation (e.g. an initializer that is not general enough over lifetimes) are
+            // attributed to the originating `use` statement instead of the entire `sliced!`
+            // invocation. The `$state_ty` and `$state_arg` fragments are passed through untouched
+            // (as interpolated fragments), preserving the precise spans of errors within the
+            // user-provided argument.
+            //
+            // Each state borrows its own clone of the tick (created inside the `copy_span!`
+            // target and spanned to the style name, e.g. `state`), so lifetime errors caused
+            // by a bad initializer point at the originating `use` statement rather than the
+            // shared `__tick` local, whose span covers the entire macro invocation.
             let (__handles, __states) = $crate::live_collections::sliced::unzip_cycles((
-                $($crate::live_collections::sliced::style::$state_style$(::<$state_ty, _>)?(& __tick, $($state_arg)?),)*
+                $($crate::macro_support::copy_span::copy_span!($state_style, {
+                    $crate::live_collections::sliced::style::$state_style$(::<$state_ty, _>)?(& __tick.clone()).build($($state_arg)?)
+                }),)*
             ));
 
             // Unpack mutable state values
@@ -121,19 +139,27 @@ macro_rules! __sliced_parse_uses__ {
 /// # Syntax
 /// The `sliced!` macro takes in a closure-like syntax specifying the live collections to be sliced
 /// and the body of the transformation. Each `use` statement indicates a live collection to be sliced,
-/// along with a non-determinism explanation. Optionally, a style can be specified to control how the
-/// live collection is sliced (e.g., atomically). All `use` statements must appear before the body.
+/// along with a non-determinism explanation. The style specifies how the live collection is sliced:
+/// `use::batch` for stream-like collections (such as [`Stream`](crate::live_collections::Stream)),
+/// `use::snapshot` for singleton-like collections (such as
+/// [`Singleton`](crate::live_collections::Singleton)), and `use::atomic` for atomically-processed
+/// collections. All `use` statements must appear before the body.
 ///
 /// ```rust,ignore
 /// let stream = sliced! {
-///     let name1 = use(collection1, nondet!(/** explanation */));
-///     let name2 = use::atomic(collection2, nondet!(/** explanation */));
+///     let name1 = use::batch(stream1, nondet!(/** explanation */));
+///     let name2 = use::snapshot(singleton2, nondet!(/** explanation */));
+///     let name3 = use::atomic(collection3, nondet!(/** explanation */));
 ///
 ///     // arbitrary statements can follow
 ///     let intermediate = name1.map(...);
 ///     intermediate.cross_singleton(name2)
 /// };
 /// ```
+///
+/// The style-less form `use(collection, nondet!(...))`, which picks between batching and
+/// snapshotting automatically based on the collection type, is deprecated; use the explicit
+/// `use::batch` or `use::snapshot` styles instead.
 ///
 /// # Stateful Computations
 /// The `sliced!` macro also supports stateful computations across iterations using `let mut` bindings
@@ -148,7 +174,7 @@ macro_rules! __sliced_parse_uses__ {
 ///
 /// ```rust,ignore
 /// let counter_stream = sliced! {
-///     let batch = use(input_stream, nondet!(/** explanation */));
+///     let batch = use::batch(input_stream, nondet!(/** explanation */));
 ///     let mut counter = use::state(|l| l.singleton(q!(0)));
 ///
 ///     // Increment counter by the number of items in this batch
@@ -190,7 +216,7 @@ pub trait Slicable<'a, L: Location<'a>> {
     type Backtrace;
 
     /// Gets the location associated with this live collection.
-    fn get_location(&self) -> &L;
+    fn get_location(&self) -> L;
 
     /// Creates a tick that is appropriate for the collection's location.
     fn create_tick(&self) -> Tick<L> {
@@ -249,7 +275,7 @@ impl<'a, L: Location<'a>> Slicable<'a, L> for () {
     type Slice = ();
     type Backtrace = ();
 
-    fn get_location(&self) -> &L {
+    fn get_location(&self) -> L {
         unreachable!()
     }
 
@@ -268,7 +294,7 @@ macro_rules! impl_slicable_for_tuple {
             type Slice = ($($T::Slice,)+);
             type Backtrace = ($($T::Backtrace,)+);
 
-            fn get_location(&self) -> &L {
+            fn get_location(&self) -> L {
                 self.0.get_location()
             }
 
@@ -451,7 +477,7 @@ impl<'a, K, V, L: Location<'a>, O: Ordering, R: Retries> Unslicable
 }
 
 // Unslicable implementations for Atomic-wrapped bounded collections
-impl<'a, T, L: Location<'a> + NoTick, O: Ordering, R: Retries> Unslicable
+impl<'a, T, L: Location<'a>, O: Ordering, R: Retries> Unslicable
     for style::Atomic<super::Stream<T, Tick<L>, Bounded, O, R>>
 {
     type Unsliced = super::Stream<T, crate::location::Atomic<L>, Unbounded, O, R>;
@@ -461,9 +487,7 @@ impl<'a, T, L: Location<'a> + NoTick, O: Ordering, R: Retries> Unslicable
     }
 }
 
-impl<'a, T, L: Location<'a> + NoTick> Unslicable
-    for style::Atomic<super::Singleton<T, Tick<L>, Bounded>>
-{
+impl<'a, T, L: Location<'a>> Unslicable for style::Atomic<super::Singleton<T, Tick<L>, Bounded>> {
     type Unsliced = super::Singleton<T, crate::location::Atomic<L>, Unbounded>;
 
     fn unslice(self) -> Self::Unsliced {
@@ -471,9 +495,7 @@ impl<'a, T, L: Location<'a> + NoTick> Unslicable
     }
 }
 
-impl<'a, T, L: Location<'a> + NoTick> Unslicable
-    for style::Atomic<super::Optional<T, Tick<L>, Bounded>>
-{
+impl<'a, T, L: Location<'a>> Unslicable for style::Atomic<super::Optional<T, Tick<L>, Bounded>> {
     type Unsliced = super::Optional<T, crate::location::Atomic<L>, Unbounded>;
 
     fn unslice(self) -> Self::Unsliced {
@@ -481,7 +503,7 @@ impl<'a, T, L: Location<'a> + NoTick> Unslicable
     }
 }
 
-impl<'a, K, V, L: Location<'a> + NoTick, O: Ordering, R: Retries> Unslicable
+impl<'a, K, V, L: Location<'a>, O: Ordering, R: Retries> Unslicable
     for style::Atomic<super::KeyedStream<K, V, Tick<L>, Bounded, O, R>>
 {
     type Unsliced = super::KeyedStream<K, V, crate::location::Atomic<L>, Unbounded, O, R>;
@@ -511,7 +533,7 @@ mod tests {
         let (input_send, input) = node.sim_input::<i32, _, _>();
 
         let out_recv = sliced! {
-            let batch = use(input, nondet!(/** test */));
+            let batch = use::batch(input, nondet!(/** test */));
             let mut counter = use::state(|l| l.singleton(q!(0)));
 
             let new_count = counter.clone().zip(batch.count())
@@ -523,13 +545,13 @@ mod tests {
 
         flow.sim().exhaustive(async || {
             input_send.send(1);
-            assert_eq!(out_recv.next().await.unwrap(), 1);
+            assert_eq!(out_recv.next().await, 1);
 
             input_send.send(1);
-            assert_eq!(out_recv.next().await.unwrap(), 2);
+            assert_eq!(out_recv.next().await, 2);
 
             input_send.send(1);
-            assert_eq!(out_recv.next().await.unwrap(), 3);
+            assert_eq!(out_recv.next().await, 3);
         });
     }
 
@@ -547,7 +569,7 @@ mod tests {
         let (input_send, input) = node.sim_input::<i32, _, _>();
 
         let out_recv = sliced! {
-            let batch = use(input, nondet!(/** test */));
+            let batch = use::batch(input, nondet!(/** test */));
             let mut prev = use::state_null::<Optional<i32, Tick<_>, Bounded>>();
 
             // Output the previous value (or -1 if none)
@@ -561,15 +583,15 @@ mod tests {
         flow.sim().exhaustive(async || {
             input_send.send(10);
             // First tick: prev is None, so output is -1
-            assert_eq!(out_recv.next().await.unwrap(), -1);
+            assert_eq!(out_recv.next().await, -1);
 
             input_send.send(20);
             // Second tick: prev is Some(10), so output is 10
-            assert_eq!(out_recv.next().await.unwrap(), 10);
+            assert_eq!(out_recv.next().await, 10);
 
             input_send.send(30);
             // Third tick: prev is Some(20), so output is 20
-            assert_eq!(out_recv.next().await.unwrap(), 20);
+            assert_eq!(out_recv.next().await, 20);
         });
     }
 
@@ -584,7 +606,7 @@ mod tests {
         let (input_send, input) = node.sim_input::<i32, _, _>();
 
         let out_recv = sliced! {
-            let batch = use(input, nondet!(/** test */));
+            let batch = use::batch(input, nondet!(/** test */));
             let mut items = use::state(|l| l.source_iter(q!([10, 20])));
 
             // Output the current state, then replace it with the batch
@@ -598,18 +620,18 @@ mod tests {
             input_send.send(3);
             // First tick: items = initial [10, 20], output = [10, 20]
             let mut results = vec![];
-            results.push(out_recv.next().await.unwrap());
-            results.push(out_recv.next().await.unwrap());
+            results.push(out_recv.next().await);
+            results.push(out_recv.next().await);
             results.sort();
             assert_eq!(results, vec![10, 20]);
 
             input_send.send(4);
             // Second tick: items = [3] (from previous batch), output = [3]
-            assert_eq!(out_recv.next().await.unwrap(), 3);
+            assert_eq!(out_recv.next().await, 3);
 
             input_send.send(5);
             // Third tick: items = [4] (from previous batch), output = [4]
-            assert_eq!(out_recv.next().await.unwrap(), 4);
+            assert_eq!(out_recv.next().await, 4);
         });
     }
 
@@ -643,16 +665,16 @@ mod tests {
 
         flow.sim().exhaustive(async || {
             input_send.send((1, 1));
-            assert_eq!(out_recv.next().await.unwrap(), (1, 1));
+            assert_eq!(out_recv.next().await, (1, 1));
 
             input_send.send((1, 2));
-            assert_eq!(out_recv.next().await.unwrap(), (1, 3));
+            assert_eq!(out_recv.next().await, (1, 3));
 
             input_send.send((2, 1));
-            assert_eq!(out_recv.next().await.unwrap(), (2, 1));
+            assert_eq!(out_recv.next().await, (2, 1));
 
             input_send.send((1, 3));
-            assert_eq!(out_recv.next().await.unwrap(), (1, 6));
+            assert_eq!(out_recv.next().await, (1, 6));
         });
     }
 }

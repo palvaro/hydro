@@ -1,8 +1,8 @@
-use quote::{ToTokens, quote_spanned};
+use quote::quote_spanned;
 use syn::parse_quote;
 
 use super::{
-    DelayType, OperatorCategory, OperatorConstraints, OperatorWriteOutput, PortIndexValue, RANGE_0,
+    OperatorCategory, OperatorConstraints, OperatorWriteOutput, RANGE_0,
     RANGE_1, WriteContextArgs,
 };
 
@@ -20,16 +20,10 @@ pub const JOIN_FUSED_RHS: OperatorConstraints = OperatorConstraints {
     persistence_args: &(0..=2),
     type_args: RANGE_0,
     is_external_input: false,
-    has_singleton_output: false,
     flo_type: None,
     ports_inn: Some(|| super::PortListSpec::Fixed(parse_quote! { 0, 1 })),
     ports_out: None,
-    input_delaytype_fn: |idx| match idx {
-        PortIndexValue::Int(path) if "1" == path.to_token_stream().to_string() => {
-            Some(DelayType::Stratum)
-        }
-        _ => None,
-    },
+    input_delaytype_fn: |_| None,
     write_fn: |wc @ &WriteContextArgs {
                    root,
                    op_span,
@@ -47,9 +41,9 @@ pub const JOIN_FUSED_RHS: OperatorConstraints = OperatorConstraints {
 
         let OperatorWriteOutput {
             write_prologue,
-            write_prologue_after,
             write_iterator,
             write_iterator_after,
+            write_tick_end,
         } = (super::join_fused_lhs::JOIN_FUSED_LHS.write_fn)(&wc, diagnostics)?;
 
         let write_iterator = quote_spanned! {op_span=>
@@ -59,9 +53,9 @@ pub const JOIN_FUSED_RHS: OperatorConstraints = OperatorConstraints {
 
         Ok(OperatorWriteOutput {
             write_prologue,
-            write_prologue_after,
             write_iterator,
             write_iterator_after,
+            write_tick_end,
         })
     },
 };

@@ -7,12 +7,15 @@ use std::marker::PhantomData;
 use std::ops::Deref;
 use std::rc::Rc;
 
+use sealed::sealed;
 use stageleft::{IntoQuotedMut, QuotedWithContext, q};
 
+use super::OperatorContext;
 use super::boundedness::{Bounded, Boundedness, IsBounded, Unbounded};
 use super::keyed_stream::KeyedStream;
 use super::optional::Optional;
 use super::singleton::Singleton;
+use super::sliced::sliced;
 use super::stream::{ExactlyOnce, NoOrder, Stream, TotalOrder};
 use crate::compile::builder::{CycleId, FlowState};
 use crate::compile::ir::{
@@ -25,7 +28,7 @@ use crate::live_collections::stream::{Ordering, Retries};
 #[cfg(stageleft_runtime)]
 use crate::location::dynamic::{DynLocation, LocationId};
 use crate::location::tick::DeferTick;
-use crate::location::{Atomic, Location, NoTick, Tick, check_matching_location};
+use crate::location::{Atomic, Location, Tick, check_matching_location};
 use crate::manual_expr::ManualExpr;
 use crate::nondet::{NonDet, nondet};
 use crate::properties::manual_proof;
@@ -52,6 +55,13 @@ pub trait KeyedSingletonBound {
     /// The [`Boundedness`] of this [`Singleton`] if it is produced from a [`KeyedStream`] with [`Self`] boundedness.
     type KeyedStreamToMonotone: KeyedSingletonBound<UnderlyingBound = Self::UnderlyingBound, ValueBound = Self::ValueBound>;
 
+    /// The [`Boundedness`] of the keyed singleton produced by folding a [`KeyedStream`] with
+    /// [`Self`] boundedness when the aggregation does *not* have a monotonicity proof.
+    ///
+    /// Without a monotonicity proof, the per-key values may change arbitrarily, so an unbounded
+    /// input collapses to [`MonotonicKeys`] (keys are still only added, never removed).
+    type KeyedStreamToNonMonotone: KeyedSingletonBound<UnderlyingBound = Self::UnderlyingBound, ValueBound = Self::ValueBound>;
+
     /// The type of the keyed singleton if the value for each key is no longer monotonic.
     type EraseMonotonic: KeyedSingletonBound<UnderlyingBound = Self::UnderlyingBound, ValueBound = Self::ValueBound>;
 
@@ -64,6 +74,7 @@ impl KeyedSingletonBound for Unbounded {
     type ValueBound = Unbounded;
     type WithBoundedValue = BoundedValue;
     type KeyedStreamToMonotone = MonotonicValue;
+    type KeyedStreamToNonMonotone = MonotonicKeys;
     type EraseMonotonic = Unbounded;
 
     fn bound_kind() -> KeyedSingletonBoundKind {
@@ -76,6 +87,7 @@ impl KeyedSingletonBound for Bounded {
     type ValueBound = Bounded;
     type WithBoundedValue = Bounded;
     type KeyedStreamToMonotone = Bounded;
+    type KeyedStreamToNonMonotone = Bounded;
     type EraseMonotonic = Bounded;
 
     fn bound_kind() -> KeyedSingletonBoundKind {
@@ -92,6 +104,7 @@ impl KeyedSingletonBound for BoundedValue {
     type ValueBound = Bounded;
     type WithBoundedValue = BoundedValue;
     type KeyedStreamToMonotone = BoundedValue;
+    type KeyedStreamToNonMonotone = BoundedValue;
     type EraseMonotonic = BoundedValue;
 
     fn bound_kind() -> KeyedSingletonBoundKind {
@@ -108,12 +121,52 @@ impl KeyedSingletonBound for MonotonicValue {
     type ValueBound = Unbounded;
     type WithBoundedValue = BoundedValue;
     type KeyedStreamToMonotone = MonotonicValue;
-    type EraseMonotonic = Unbounded;
+    type KeyedStreamToNonMonotone = MonotonicKeys;
+    type EraseMonotonic = MonotonicKeys;
 
     fn bound_kind() -> KeyedSingletonBoundKind {
         KeyedSingletonBoundKind::MonotonicValue
     }
 }
+
+/// A variation of boundedness specific to [`KeyedSingleton`], which indicates that once a key
+/// appears, it will never be removed, but the corresponding value may change arbitrarily.
+pub struct MonotonicKeys;
+
+impl KeyedSingletonBound for MonotonicKeys {
+    type UnderlyingBound = Unbounded;
+    type ValueBound = Unbounded;
+    type WithBoundedValue = BoundedValue;
+    type KeyedStreamToMonotone = MonotonicKeys;
+    type KeyedStreamToNonMonotone = MonotonicKeys;
+    type EraseMonotonic = MonotonicKeys;
+
+    fn bound_kind() -> KeyedSingletonBoundKind {
+        KeyedSingletonBoundKind::MonotonicKeys
+    }
+}
+
+#[sealed]
+#[diagnostic::on_unimplemented(
+    message = "The keyed singleton must have monotonic values (`MonotonicValue`) or be bounded (`Bounded`), but has bound `{Self}`. Strengthen the monotonicity upstream or consider a different API.",
+    label = "required here",
+    note = "To intentionally process a non-deterministic snapshot or batch, you may want to use a `sliced!` region. This introduces non-determinism so avoid unless necessary."
+)]
+/// Marker trait that is implemented for [`KeyedSingletonBound`] types whose per-key values
+/// are monotonically non-decreasing (or bounded).
+pub trait IsKeyedMonotonic: KeyedSingletonBound {}
+
+#[sealed]
+#[diagnostic::do_not_recommend]
+impl IsKeyedMonotonic for MonotonicValue {}
+
+#[sealed]
+#[diagnostic::do_not_recommend]
+impl IsKeyedMonotonic for BoundedValue {}
+
+#[sealed]
+#[diagnostic::do_not_recommend]
+impl<B: IsBounded + KeyedSingletonBound> IsKeyedMonotonic for B {}
 
 /// Mapping from keys of type `K` to values of type `V`.
 ///
@@ -133,7 +186,7 @@ impl KeyedSingletonBound for MonotonicValue {
 ///     - [`BoundedValue`] (asynchronous with immutable values for each key and no removals)
 pub struct KeyedSingleton<K, V, Loc, Bound: KeyedSingletonBound> {
     pub(crate) location: Loc,
-    pub(crate) ir_node: RefCell<HydroNode>,
+    pub(crate) ir_node: Rc<RefCell<HydroNode>>,
     pub(crate) flow_state: FlowState,
 
     _phantom: PhantomData<(K, V, Loc, Bound)>,
@@ -167,11 +220,13 @@ impl<'a, K: Clone, V: Clone, Loc: Location<'a>, Bound: KeyedSingletonBound> Clon
             KeyedSingleton {
                 location: self.location.clone(),
                 flow_state: self.flow_state.clone(),
-                ir_node: HydroNode::Tee {
-                    inner: SharedNode(inner.0.clone()),
-                    metadata: metadata.clone(),
-                }
-                .into(),
+                ir_node: super::tracked_ir_node(
+                    &self.flow_state,
+                    HydroNode::Tee {
+                        inner: SharedNode(inner.0.clone()),
+                        metadata: metadata.clone(),
+                    },
+                ),
                 _phantom: PhantomData,
             }
         } else {
@@ -183,18 +238,22 @@ impl<'a, K: Clone, V: Clone, Loc: Location<'a>, Bound: KeyedSingletonBound> Clon
 impl<'a, K, V, L, B: KeyedSingletonBound> CycleCollection<'a, ForwardRef>
     for KeyedSingleton<K, V, L, B>
 where
-    L: Location<'a> + NoTick,
+    L: Location<'a>,
 {
     type Location = L;
 
     fn create_source(cycle_id: CycleId, location: L) -> Self {
+        let flow_state = location.flow_state().clone();
         KeyedSingleton {
-            flow_state: location.flow_state().clone(),
-            location: location.clone(),
-            ir_node: RefCell::new(HydroNode::CycleSource {
-                cycle_id,
-                metadata: location.new_node_metadata(Self::collection_kind()),
-            }),
+            ir_node: super::tracked_ir_node(
+                &flow_state,
+                HydroNode::CycleSource {
+                    cycle_id,
+                    metadata: location.new_node_metadata(Self::collection_kind()),
+                },
+            ),
+            flow_state,
+            location,
             _phantom: PhantomData,
         }
     }
@@ -229,7 +288,7 @@ where
 impl<'a, K, V, L, B: KeyedSingletonBound> ReceiverComplete<'a, ForwardRef>
     for KeyedSingleton<K, V, L, B>
 where
-    L: Location<'a> + NoTick,
+    L: Location<'a>,
 {
     fn complete(self, cycle_id: CycleId, expected_location: LocationId) {
         assert_eq!(
@@ -275,10 +334,11 @@ impl<'a, K, V, L: Location<'a>, B: KeyedSingletonBound> KeyedSingleton<K, V, L, 
         debug_assert_eq!(ir_node.metadata().collection_kind, Self::collection_kind());
 
         let flow_state = location.flow_state().clone();
+        let ir_node = super::tracked_ir_node(&flow_state, ir_node);
         KeyedSingleton {
             location,
             flow_state,
-            ir_node: RefCell::new(ir_node),
+            ir_node,
             _phantom: PhantomData,
         }
     }
@@ -286,6 +346,68 @@ impl<'a, K, V, L: Location<'a>, B: KeyedSingletonBound> KeyedSingleton<K, V, L, 
     /// Returns the [`Location`] where this keyed singleton is being materialized.
     pub fn location(&self) -> &L {
         &self.location
+    }
+
+    /// Weakens the consistency of this live collection to not guarantee any consistency across
+    /// cluster members (if this collection is on a cluster).
+    pub fn weaken_consistency(self) -> KeyedSingleton<K, V, L::DropConsistency, B>
+    where
+        L: Location<'a>,
+    {
+        if L::consistency()
+            .is_none_or(|c| c == crate::location::dynamic::ClusterConsistency::NoConsistency)
+        {
+            // already no consistency
+            KeyedSingleton::new(
+                self.location.drop_consistency(),
+                self.ir_node.replace(HydroNode::Placeholder),
+            )
+        } else {
+            KeyedSingleton::new(
+                self.location.drop_consistency(),
+                HydroNode::Cast {
+                    inner: Box::new(self.ir_node.replace(HydroNode::Placeholder)),
+                    metadata: self
+                        .location
+                        .drop_consistency()
+                        .new_node_metadata(
+                            KeyedSingleton::<K, V, L::DropConsistency, B>::collection_kind(),
+                        ),
+                },
+            )
+        }
+    }
+
+    /// Casts this live collection to have the consistency guarantees specified in the given
+    /// location type parameter. The developer must ensure that the strengthened consistency
+    /// is actually guaranteed, via the proof field (see [`crate::prelude::manual_proof`]).
+    pub fn assert_has_consistency_of<L2: Location<'a, DropConsistency = L::DropConsistency>>(
+        self,
+        _proof: impl crate::properties::ConsistencyProof,
+    ) -> KeyedSingleton<K, V, L2, B>
+    where
+        L: Location<'a>,
+    {
+        if L::consistency() == L2::consistency() {
+            // already consistent
+            KeyedSingleton::new(
+                self.location.with_consistency_of(),
+                self.ir_node.replace(HydroNode::Placeholder),
+            )
+        } else {
+            KeyedSingleton::new(
+                self.location.with_consistency_of(),
+                HydroNode::AssertIsConsistent {
+                    inner: Box::new(self.ir_node.replace(HydroNode::Placeholder)),
+                    trusted: false,
+                    metadata: self
+                        .location
+                        .clone()
+                        .with_consistency_of::<L2>()
+                        .new_node_metadata(KeyedSingleton::<K, V, L2, B>::collection_kind()),
+                },
+            )
+        }
     }
 }
 
@@ -361,17 +483,22 @@ impl<'a, K, V, L: Location<'a>, B: KeyedSingletonBound> KeyedSingleton<K, V, L, 
     /// ```
     pub fn map<U, F>(
         self,
-        f: impl IntoQuotedMut<'a, F, L> + Copy,
+        f: impl IntoQuotedMut<'a, F, OperatorContext<L, B::UnderlyingBound>> + Copy,
     ) -> KeyedSingleton<K, U, L, B::EraseMonotonic>
     where
         F: Fn(V) -> U + 'a,
     {
-        let f: ManualExpr<F, _> = ManualExpr::new(move |ctx: &L| f.splice_fn1_ctx(ctx));
+        let f: ManualExpr<F, _> =
+            ManualExpr::new(move |ctx: &OperatorContext<L, B::UnderlyingBound>| {
+                f.splice_fn1_ctx(ctx)
+            });
         let map_f = q!({
             let orig = f;
             move |(k, v)| (k, orig(v))
         })
-        .splice_fn1_ctx::<(K, V), (K, U)>(&self.location)
+        .splice_fn1_ctx::<(K, V), (K, U)>(&OperatorContext::<L, B::UnderlyingBound>::new(
+            &self.location,
+        ))
         .into();
 
         KeyedSingleton::new(
@@ -421,13 +548,16 @@ impl<'a, K, V, L: Location<'a>, B: KeyedSingletonBound> KeyedSingleton<K, V, L, 
     /// ```
     pub fn map_with_key<U, F>(
         self,
-        f: impl IntoQuotedMut<'a, F, L> + Copy,
+        f: impl IntoQuotedMut<'a, F, OperatorContext<L, B::UnderlyingBound>> + Copy,
     ) -> KeyedSingleton<K, U, L, B::EraseMonotonic>
     where
         F: Fn((K, V)) -> U + 'a,
         K: Clone,
     {
-        let f: ManualExpr<F, _> = ManualExpr::new(move |ctx: &L| f.splice_fn1_ctx(ctx));
+        let f: ManualExpr<F, _> =
+            ManualExpr::new(move |ctx: &OperatorContext<L, B::UnderlyingBound>| {
+                f.splice_fn1_ctx(ctx)
+            });
         let map_f = q!({
             let orig = f;
             move |(k, v)| {
@@ -435,7 +565,9 @@ impl<'a, K, V, L: Location<'a>, B: KeyedSingletonBound> KeyedSingleton<K, V, L, 
                 (k, out)
             }
         })
-        .splice_fn1_ctx::<(K, V), (K, U)>(&self.location)
+        .splice_fn1_ctx::<(K, V), (K, U)>(&OperatorContext::<L, B::UnderlyingBound>::new(
+            &self.location,
+        ))
         .into();
 
         KeyedSingleton::new(
@@ -485,27 +617,29 @@ impl<'a, K, V, L: Location<'a>, B: KeyedSingletonBound> KeyedSingleton<K, V, L, 
             let me: KeyedSingleton<K, V, L, B::WithBoundedValue> = KeyedSingleton {
                 location: self.location.clone(),
                 flow_state: self.flow_state.clone(),
-                ir_node: RefCell::new(self.ir_node.replace(HydroNode::Placeholder)),
+                ir_node: super::tracked_ir_node(
+                    &self.flow_state,
+                    self.ir_node.replace(HydroNode::Placeholder),
+                ),
                 _phantom: PhantomData,
             };
 
             me.entries().count().ignore_monotonic()
         } else if L::is_top_level()
             && let Some(tick) = self.location.try_tick()
-            && B::bound_kind() == KeyedSingletonBoundKind::Unbounded
+            && (B::bound_kind() == KeyedSingletonBoundKind::Unbounded
+                || B::bound_kind() == KeyedSingletonBoundKind::MonotonicKeys
+                || B::bound_kind() == KeyedSingletonBoundKind::MonotonicValue)
         {
-            let me: KeyedSingleton<K, V, L, Unbounded> = KeyedSingleton::new(
-                self.location.clone(),
-                self.ir_node.replace(HydroNode::Placeholder),
-            );
+            let location = self.location.clone();
+            let ir_node = self.ir_node.replace(HydroNode::Placeholder);
+            let me: KeyedSingleton<K, V, L, MonotonicKeys> =
+                KeyedSingleton::new(location.clone(), ir_node);
 
             let out =
                 key_count_inside_tick(me.snapshot(&tick, nondet!(/** eventually stabilizes */)))
                     .latest();
-            Singleton::new(
-                out.location.clone(),
-                out.ir_node.replace(HydroNode::Placeholder),
-            )
+            Singleton::new(location, out.ir_node.replace(HydroNode::Placeholder))
         } else {
             panic!("BoundedValue or Unbounded KeyedSingleton inside a tick, not supported");
         }
@@ -544,7 +678,10 @@ impl<'a, K, V, L: Location<'a>, B: KeyedSingletonBound> KeyedSingleton<K, V, L, 
             let me: KeyedSingleton<K, V, L, B::WithBoundedValue> = KeyedSingleton {
                 location: self.location.clone(),
                 flow_state: self.flow_state.clone(),
-                ir_node: RefCell::new(self.ir_node.replace(HydroNode::Placeholder)),
+                ir_node: super::tracked_ir_node(
+                    &self.flow_state,
+                    self.ir_node.replace(HydroNode::Placeholder),
+                ),
                 _phantom: PhantomData,
             };
 
@@ -566,21 +703,20 @@ impl<'a, K, V, L: Location<'a>, B: KeyedSingletonBound> KeyedSingleton<K, V, L, 
                 )
         } else if L::is_top_level()
             && let Some(tick) = self.location.try_tick()
-            && B::bound_kind() == KeyedSingletonBoundKind::Unbounded
+            && (B::bound_kind() == KeyedSingletonBoundKind::Unbounded
+                || B::bound_kind() == KeyedSingletonBoundKind::MonotonicKeys
+                || B::bound_kind() == KeyedSingletonBoundKind::MonotonicValue)
         {
-            let me: KeyedSingleton<K, V, L, Unbounded> = KeyedSingleton::new(
-                self.location.clone(),
-                self.ir_node.replace(HydroNode::Placeholder),
-            );
+            let location = self.location.clone();
+            let ir_node = self.ir_node.replace(HydroNode::Placeholder);
+            let me: KeyedSingleton<K, V, L, MonotonicKeys> =
+                KeyedSingleton::new(location.clone(), ir_node);
 
             let out = into_singleton_inside_tick(
                 me.snapshot(&tick, nondet!(/** eventually stabilizes */)),
             )
             .latest();
-            Singleton::new(
-                out.location.clone(),
-                out.ir_node.replace(HydroNode::Placeholder),
-            )
+            Singleton::new(location, out.ir_node.replace(HydroNode::Placeholder))
         } else {
             panic!("BoundedValue or Unbounded KeyedSingleton inside a tick, not supported");
         }
@@ -864,6 +1000,278 @@ impl<'a, K, V, L: Location<'a>, B: KeyedSingletonBound> KeyedSingleton<K, V, L, 
             .into_keyed()
             .lookup_keyed_stream(lookup)
     }
+
+    /// For each key present in both `self` and `thresholds`, emits a [`KeyedStream`] event the first
+    /// time that key's value becomes greater than or equal to the corresponding threshold value.
+    /// The emitted value for each key is the threshold value itself.
+    ///
+    /// This requires the keyed singleton to have monotonic values ([`MonotonicValue`] or [`Bounded`]),
+    /// because otherwise the threshold detection would be non-deterministic.
+    ///
+    /// The `thresholds` parameter is a [`BoundedValue`] keyed singleton mapping each key to its
+    /// threshold. Thresholds may arrive asynchronously (new keys appear over time), but once set
+    /// for a key, the threshold value is fixed. Late-arriving thresholds are checked against the
+    /// current snapshot value immediately.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use hydro_lang::prelude::*;
+    ///
+    /// // Given a monotonically increasing keyed singleton (e.g. from fold with monotone proof)
+    /// let counts: KeyedSingleton<u32, usize, _, MonotonicValue> = events.into_keyed()
+    ///     .fold(q!(|| 0), q!(|acc, _| *acc += 1, monotone = manual_proof!(/** +1 is monotone */)));
+    ///
+    /// // BoundedValue keyed singleton of thresholds (from .first())
+    /// let thresholds = threshold_source.into_keyed().first();
+    ///
+    /// // Emits (key, threshold_value) the first time each key's value >= threshold
+    /// let crossed = counts.threshold_greater_or_equal(thresholds);
+    /// ```
+    pub fn threshold_greater_or_equal(
+        self,
+        thresholds: KeyedSingleton<K, V, L, BoundedValue>,
+    ) -> KeyedStream<K, V, L, B::UnderlyingBound, NoOrder, ExactlyOnce>
+    where
+        K: Clone + Eq + Hash,
+        V: Clone + PartialOrd,
+        B: IsKeyedMonotonic,
+    {
+        let self_location = self.location.clone();
+        match B::bound_kind() {
+            KeyedSingletonBoundKind::Bounded => {
+                // Bounded case: self is already fixed, just join and filter
+                let me: KeyedSingleton<K, V, L, Bounded> = KeyedSingleton::new(
+                    self.location.clone(),
+                    self.ir_node.replace(HydroNode::Placeholder),
+                );
+                let result = me
+                    .entries()
+                    .join(thresholds.entries())
+                    .filter_map(q!(|(k, (val, thresh))| {
+                        if val >= thresh {
+                            Some((k, thresh))
+                        } else {
+                            None
+                        }
+                    }))
+                    .into_keyed();
+                KeyedStream::new(
+                    result.location.clone(),
+                    result.ir_node.replace(HydroNode::Placeholder),
+                )
+            }
+            KeyedSingletonBoundKind::MonotonicValue => {
+                let me: KeyedSingleton<K, V, L, MonotonicValue> = KeyedSingleton::new(
+                    self.location.clone(),
+                    self.ir_node.replace(HydroNode::Placeholder),
+                );
+
+                let result = sliced! {
+                    let snapshot = use::snapshot(me, nondet!(/** thresholds are deterministic */));
+                    let thresh_snapshot =
+                        use::batch(thresholds, nondet!(/** thresholds are deterministic */));
+                    let mut already_crossed =
+                        use::state_null::<Stream<K, Tick<_>, Bounded, NoOrder>>();
+
+                    let joined = thresh_snapshot.entries().join(snapshot.entries());
+                    let passed = joined
+                        .filter(q!(|(_, (thresh, val))| *val >= *thresh))
+                        .map(q!(|(k, (thresh, _))| (k, thresh)));
+
+                    let newly_crossed = passed.anti_join(already_crossed.clone());
+                    already_crossed =
+                        already_crossed.chain(newly_crossed.clone().map(q!(|(k, _)| k)));
+
+                    newly_crossed.into_keyed()
+                };
+
+                KeyedStream::new(
+                    self_location,
+                    result.ir_node.replace(HydroNode::Placeholder),
+                )
+            }
+            KeyedSingletonBoundKind::BoundedValue => {
+                let me: KeyedSingleton<K, V, L, BoundedValue> = KeyedSingleton::new(
+                    self.location.clone(),
+                    self.ir_node.replace(HydroNode::Placeholder),
+                );
+
+                let result = sliced! {
+                    let snapshot = use::batch(me, nondet!(/** thresholds are deterministic */));
+                    let thresh_snapshot =
+                        use::batch(thresholds, nondet!(/** thresholds are deterministic */));
+                    let mut already_crossed =
+                        use::state_null::<Stream<K, Tick<_>, Bounded, NoOrder>>();
+
+                    let joined = thresh_snapshot.entries().join(snapshot.entries());
+                    let passed = joined
+                        .filter(q!(|(_, (thresh, val))| *val >= *thresh))
+                        .map(q!(|(k, (thresh, _))| (k, thresh)));
+
+                    let newly_crossed = passed.anti_join(already_crossed.clone());
+                    already_crossed =
+                        already_crossed.chain(newly_crossed.clone().map(q!(|(k, _)| k)));
+
+                    newly_crossed.into_keyed()
+                };
+
+                KeyedStream::new(
+                    self_location,
+                    result.ir_node.replace(HydroNode::Placeholder),
+                )
+            }
+            _ => {
+                unreachable!(
+                    "IsKeyedMonotonic is only implemented for Bounded, BoundedValue, and MonotonicValue"
+                )
+            }
+        }
+    }
+
+    /// Like [`Self::threshold_greater_or_equal`], but uses a single [`Singleton`] threshold
+    /// shared across all keys. Emits a `(K, V)` event for each key the first time that key's
+    /// value becomes >= the threshold. The emitted value is the threshold itself.
+    ///
+    /// Because the threshold is a [`Bounded`] singleton, it is a compile-time constant and
+    /// does not carry ongoing memory cost.
+    ///
+    /// # Example
+    /// ```rust
+    /// # #[cfg(feature = "deploy")] {
+    /// # use hydro_lang::prelude::*;
+    /// # use futures::StreamExt;
+    /// # tokio_test::block_on(hydro_lang::test_util::stream_transform_test(|process| {
+    /// // A keyed singleton of per-key values (in practice often a monotone counter): { 1: 6, 2: 4 }
+    /// let counts = process
+    ///     .source_iter(q!(vec![(1, 6), (2, 4)]))
+    ///     .into_keyed()
+    ///     .first();
+    ///
+    /// // A single threshold value shared across all keys
+    /// let threshold = process.singleton(q!(5));
+    ///
+    /// // Emits (key, threshold) the first time each key's value >= threshold
+    /// counts.threshold_greater_or_equal_uniform(threshold)
+    /// #   .entries()
+    /// # }, |mut stream| async move {
+    /// // { 1: 5 } -- key 1's value 6 >= 5, but key 2's value 4 < 5
+    /// # assert_eq!(stream.next().await.unwrap(), (1, 5));
+    /// # }));
+    /// # }
+    /// ```
+    pub fn threshold_greater_or_equal_uniform(
+        self,
+        threshold: Singleton<V, L, Bounded>,
+    ) -> KeyedStream<K, V, L, B::UnderlyingBound, NoOrder, ExactlyOnce>
+    where
+        K: Clone + Eq + Hash,
+        V: Clone + PartialOrd,
+        B: IsKeyedMonotonic,
+    {
+        let self_location = self.location.clone();
+        match B::bound_kind() {
+            KeyedSingletonBoundKind::Bounded => {
+                let me: KeyedSingleton<K, V, L, Bounded> = KeyedSingleton::new(
+                    self.location.clone(),
+                    self.ir_node.replace(HydroNode::Placeholder),
+                );
+                let result = me
+                    .entries()
+                    .cross_singleton(threshold)
+                    .filter_map(q!(|((k, val), thresh)| {
+                        if val >= thresh {
+                            Some((k, thresh))
+                        } else {
+                            None
+                        }
+                    }))
+                    .into_keyed();
+                KeyedStream::new(
+                    result.location.clone(),
+                    result.ir_node.replace(HydroNode::Placeholder),
+                )
+            }
+            KeyedSingletonBoundKind::MonotonicValue => {
+                let me: KeyedSingleton<K, V, L, MonotonicValue> = KeyedSingleton::new(
+                    self.location.clone(),
+                    self.ir_node.replace(HydroNode::Placeholder),
+                );
+
+                let result = sliced! {
+                    let snapshot = use::snapshot(me, nondet!(/** thresholds are deterministic */));
+                    let mut already_crossed =
+                        use::state_null::<Stream<K, Tick<_>, Bounded, NoOrder>>();
+
+                    let tick = snapshot.location().clone();
+                    let thresh_in_tick = threshold.clone_into_tick(&tick);
+
+                    let crossing = snapshot
+                        .entries()
+                        .cross_singleton(thresh_in_tick)
+                        .filter_map(q!(|((k, val), thresh)| {
+                            if val >= thresh {
+                                Some((k, thresh))
+                            } else {
+                                None
+                            }
+                        }));
+
+                    let newly_crossed = crossing.anti_join(already_crossed.clone());
+                    already_crossed =
+                        already_crossed.chain(newly_crossed.clone().map(q!(|(k, _)| k)));
+
+                    newly_crossed.into_keyed()
+                };
+
+                KeyedStream::new(
+                    self_location,
+                    result.ir_node.replace(HydroNode::Placeholder),
+                )
+            }
+            KeyedSingletonBoundKind::BoundedValue => {
+                let me: KeyedSingleton<K, V, L, BoundedValue> = KeyedSingleton::new(
+                    self.location.clone(),
+                    self.ir_node.replace(HydroNode::Placeholder),
+                );
+
+                let result = sliced! {
+                    let snapshot = use::batch(me, nondet!(/** thresholds are deterministic */));
+                    let mut already_crossed =
+                        use::state_null::<Stream<K, Tick<_>, Bounded, NoOrder>>();
+
+                    let tick = snapshot.location().clone();
+                    let thresh_in_tick = threshold.clone_into_tick(&tick);
+
+                    let crossing = snapshot
+                        .entries()
+                        .cross_singleton(thresh_in_tick)
+                        .filter_map(q!(|((k, val), thresh)| {
+                            if val >= thresh {
+                                Some((k, thresh))
+                            } else {
+                                None
+                            }
+                        }));
+
+                    let newly_crossed = crossing.anti_join(already_crossed.clone());
+                    already_crossed =
+                        already_crossed.chain(newly_crossed.clone().map(q!(|(k, _)| k)));
+
+                    newly_crossed.into_keyed()
+                };
+
+                KeyedStream::new(
+                    self_location,
+                    result.ir_node.replace(HydroNode::Placeholder),
+                )
+            }
+            _ => {
+                unreachable!(
+                    "IsKeyedMonotonic is only implemented for Bounded, BoundedValue, and MonotonicValue"
+                )
+            }
+        }
+    }
 }
 
 impl<'a, K, V, L: Location<'a>, B: KeyedSingletonBound<ValueBound = Bounded>>
@@ -933,7 +1341,9 @@ impl<'a, K, V, L: Location<'a>, B: KeyedSingletonBound<ValueBound = Bounded>>
     /// ```
     pub fn values(self) -> Stream<V, L, B::UnderlyingBound, NoOrder, ExactlyOnce> {
         let map_f = q!(|(_, v)| v)
-            .splice_fn1_ctx::<(K, V), V>(&self.location)
+            .splice_fn1_ctx::<(K, V), V>(&OperatorContext::<L, B::UnderlyingBound>::new(
+                &self.location,
+            ))
             .into();
 
         Stream::new(
@@ -1059,16 +1469,24 @@ impl<'a, K, V, L: Location<'a>, B: KeyedSingletonBound<ValueBound = Bounded>>
     /// # }));
     /// # }
     /// ```
-    pub fn inspect<F>(self, f: impl IntoQuotedMut<'a, F, L> + Copy) -> Self
+    pub fn inspect<F>(
+        self,
+        f: impl IntoQuotedMut<'a, F, OperatorContext<L, B::UnderlyingBound>> + Copy,
+    ) -> Self
     where
         F: Fn(&V) + 'a,
     {
-        let f: ManualExpr<F, _> = ManualExpr::new(move |ctx: &L| f.splice_fn1_borrow_ctx(ctx));
+        let f: ManualExpr<F, _> =
+            ManualExpr::new(move |ctx: &OperatorContext<L, B::UnderlyingBound>| {
+                f.splice_fn1_borrow_ctx(ctx)
+            });
         let inspect_f = q!({
             let orig = f;
             move |t: &(_, _)| orig(&t.1)
         })
-        .splice_fn1_borrow_ctx::<(K, V), ()>(&self.location)
+        .splice_fn1_borrow_ctx::<(K, V), ()>(&OperatorContext::<L, B::UnderlyingBound>::new(
+            &self.location,
+        ))
         .into();
 
         KeyedSingleton::new(
@@ -1107,11 +1525,18 @@ impl<'a, K, V, L: Location<'a>, B: KeyedSingletonBound<ValueBound = Bounded>>
     /// # }));
     /// # }
     /// ```
-    pub fn inspect_with_key<F>(self, f: impl IntoQuotedMut<'a, F, L>) -> Self
+    pub fn inspect_with_key<F>(
+        self,
+        f: impl IntoQuotedMut<'a, F, OperatorContext<L, B::UnderlyingBound>>,
+    ) -> Self
     where
         F: Fn(&(K, V)) + 'a,
     {
-        let inspect_f = f.splice_fn1_borrow_ctx::<(K, V), ()>(&self.location).into();
+        let inspect_f = f
+            .splice_fn1_borrow_ctx::<(K, V), ()>(&OperatorContext::<L, B::UnderlyingBound>::new(
+                &self.location,
+            ))
+            .into();
 
         KeyedSingleton::new(
             self.location.clone(),
@@ -1224,8 +1649,9 @@ impl<'a, K, V, L: Location<'a>, B: KeyedSingletonBound<ValueBound = Bounded>>
 impl<'a, K, V, L, B: KeyedSingletonBound> KeyedSingleton<K, V, L, B>
 where
     L: Location<'a>,
+    B: KeyedSingletonBound<ValueBound = Bounded>,
 {
-    /// Shifts this keyed singleton into an atomic context, which guarantees that any downstream logic
+    /// Shifts this bounded-value keyed singleton into an atomic context, which guarantees that any downstream logic
     /// will all be executed synchronously before any outputs are yielded (in [`KeyedSingleton::end_atomic`]).
     ///
     /// This is useful to enforce local consistency constraints, such as ensuring that a write is
@@ -1251,7 +1677,7 @@ where
 
 impl<'a, K, V, L, B: KeyedSingletonBound> KeyedSingleton<K, V, Atomic<L>, B>
 where
-    L: Location<'a> + NoTick,
+    L: Location<'a>,
 {
     /// Yields the elements of this keyed singleton back into a top-level, asynchronous execution context.
     /// See [`KeyedSingleton::atomic`] for more details.
@@ -1334,14 +1760,14 @@ where
     /// # Non-Determinism
     /// Because this picks a snapshot of each entry, which is continuously changing, each output has a
     /// non-deterministic set of entries since each snapshot can be at an arbitrary point in time.
-    pub fn snapshot(
+    pub fn snapshot<L2: Location<'a, DropConsistency = L::DropConsistency>>(
         self,
-        tick: &Tick<L>,
+        tick: &Tick<L2>,
         _nondet: NonDet,
-    ) -> KeyedSingleton<K, V, Tick<L>, Bounded> {
+    ) -> KeyedSingleton<K, V, Tick<L::DropConsistency>, Bounded> {
         assert_eq!(Location::id(tick.outer()), Location::id(&self.location));
         KeyedSingleton::new(
-            tick.clone(),
+            tick.drop_consistency(),
             HydroNode::Batch {
                 inner: Box::new(self.ir_node.replace(HydroNode::Placeholder)),
                 metadata: tick
@@ -1353,7 +1779,7 @@ where
 
 impl<'a, K, V, L, B: KeyedSingletonBound<ValueBound = Unbounded>> KeyedSingleton<K, V, Atomic<L>, B>
 where
-    L: Location<'a> + NoTick,
+    L: Location<'a>,
 {
     /// Returns a keyed singleton with a snapshot of each key-value entry, consistent with the
     /// state of the keyed singleton being atomically processed.
@@ -1361,13 +1787,13 @@ where
     /// # Non-Determinism
     /// Because this picks a snapshot of each entry, which is continuously changing, each output has a
     /// non-deterministic set of entries since each snapshot can be at an arbitrary point in time.
-    pub fn snapshot_atomic(
+    pub fn snapshot_atomic<L2: Location<'a, DropConsistency = L::DropConsistency>>(
         self,
-        tick: &Tick<L>,
+        tick: &Tick<L2>,
         _nondet: NonDet,
-    ) -> KeyedSingleton<K, V, Tick<L>, Bounded> {
+    ) -> KeyedSingleton<K, V, Tick<L::DropConsistency>, Bounded> {
         KeyedSingleton::new(
-            tick.clone(),
+            tick.drop_consistency(),
             HydroNode::Batch {
                 inner: Box::new(self.ir_node.replace(HydroNode::Placeholder)),
                 metadata: tick
@@ -1415,16 +1841,24 @@ where
     /// # }));
     /// # }
     /// ```
-    pub fn filter<F>(self, f: impl IntoQuotedMut<'a, F, L> + Copy) -> KeyedSingleton<K, V, L, B>
+    pub fn filter<F>(
+        self,
+        f: impl IntoQuotedMut<'a, F, OperatorContext<L, B::UnderlyingBound>> + Copy,
+    ) -> KeyedSingleton<K, V, L, B>
     where
         F: Fn(&V) -> bool + 'a,
     {
-        let f: ManualExpr<F, _> = ManualExpr::new(move |ctx: &L| f.splice_fn1_borrow_ctx(ctx));
+        let f: ManualExpr<F, _> =
+            ManualExpr::new(move |ctx: &OperatorContext<L, B::UnderlyingBound>| {
+                f.splice_fn1_borrow_ctx(ctx)
+            });
         let filter_f = q!({
             let orig = f;
             move |t: &(_, _)| orig(&t.1)
         })
-        .splice_fn1_borrow_ctx::<(K, V), bool>(&self.location)
+        .splice_fn1_borrow_ctx::<(K, V), bool>(&OperatorContext::<L, B::UnderlyingBound>::new(
+            &self.location,
+        ))
         .into();
 
         KeyedSingleton::new(
@@ -1472,17 +1906,22 @@ where
     /// ```
     pub fn filter_map<F, U>(
         self,
-        f: impl IntoQuotedMut<'a, F, L> + Copy,
+        f: impl IntoQuotedMut<'a, F, OperatorContext<L, B::UnderlyingBound>> + Copy,
     ) -> KeyedSingleton<K, U, L, B::EraseMonotonic>
     where
         F: Fn(V) -> Option<U> + 'a,
     {
-        let f: ManualExpr<F, _> = ManualExpr::new(move |ctx: &L| f.splice_fn1_ctx(ctx));
+        let f: ManualExpr<F, _> =
+            ManualExpr::new(move |ctx: &OperatorContext<L, B::UnderlyingBound>| {
+                f.splice_fn1_ctx(ctx)
+            });
         let filter_map_f = q!({
             let orig = f;
             move |(k, v)| orig(v).map(|o| (k, o))
         })
-        .splice_fn1_ctx::<(K, V), Option<(K, U)>>(&self.location)
+        .splice_fn1_ctx::<(K, V), Option<(K, U)>>(&OperatorContext::<L, B::UnderlyingBound>::new(
+            &self.location,
+        ))
         .into();
 
         KeyedSingleton::new(
@@ -1509,13 +1948,14 @@ where
     /// # Non-Determinism
     /// Because this picks a batch of asynchronously added entries, each output keyed singleton
     /// has a non-deterministic set of key-value pairs.
-    pub fn batch(self, tick: &Tick<L>, _nondet: NonDet) -> KeyedSingleton<K, V, Tick<L>, Bounded>
-    where
-        L: NoTick,
-    {
+    pub fn batch<L2: Location<'a, DropConsistency = L::DropConsistency>>(
+        self,
+        tick: &Tick<L2>,
+        _nondet: NonDet,
+    ) -> KeyedSingleton<K, V, Tick<L::DropConsistency>, Bounded> {
         assert_eq!(Location::id(tick.outer()), Location::id(&self.location));
         KeyedSingleton::new(
-            tick.clone(),
+            tick.drop_consistency(),
             HydroNode::Batch {
                 inner: Box::new(self.ir_node.replace(HydroNode::Placeholder)),
                 metadata: tick
@@ -1527,7 +1967,7 @@ where
 
 impl<'a, K, V, L, B: KeyedSingletonBound<ValueBound = Bounded>> KeyedSingleton<K, V, Atomic<L>, B>
 where
-    L: Location<'a> + NoTick,
+    L: Location<'a>,
 {
     /// Returns a keyed singleton with entries consisting of _new_ key-value pairs that are being
     /// atomically processed.
@@ -1538,14 +1978,14 @@ where
     /// # Non-Determinism
     /// Because this picks a batch of asynchronously added entries, each output keyed singleton
     /// has a non-deterministic set of key-value pairs.
-    pub fn batch_atomic(
+    pub fn batch_atomic<L2: Location<'a, DropConsistency = L::DropConsistency>>(
         self,
-        tick: &Tick<L>,
+        tick: &Tick<L2>,
         nondet: NonDet,
-    ) -> KeyedSingleton<K, V, Tick<L>, Bounded> {
+    ) -> KeyedSingleton<K, V, Tick<L::DropConsistency>, Bounded> {
         let _ = nondet;
         KeyedSingleton::new(
-            tick.clone(),
+            tick.drop_consistency(),
             HydroNode::Batch {
                 inner: Box::new(self.ir_node.replace(HydroNode::Placeholder)),
                 metadata: tick
@@ -1839,5 +2279,217 @@ mod tests {
         results.sort();
 
         assert_eq!(results, vec![(1, (10, 100)), (2, (20, 200))]);
+    }
+
+    #[cfg(feature = "sim")]
+    #[test]
+    fn threshold_greater_or_equal_monotonic() {
+        let mut flow = FlowBuilder::new();
+        let node = flow.process::<()>();
+
+        let (input_port, input) = node.sim_input::<(u32, usize), _, _>();
+        let (thresh_port, thresh_input) = node.sim_input::<(u32, usize), _, _>();
+
+        // Create a monotonically increasing keyed singleton via fold with monotone proof
+        let counts: super::KeyedSingleton<u32, usize, _, super::MonotonicValue> =
+            input.into_keyed().fold(
+                q!(|| 0usize),
+                q!(
+                    |acc, v| *acc += v,
+                    monotone = crate::properties::manual_proof!(/** += is monotonic */)
+                ),
+            );
+
+        // BoundedValue keyed singleton of thresholds (from .first() on unbounded stream)
+        let thresholds = thresh_input.into_keyed().first();
+
+        let output = counts
+            .threshold_greater_or_equal(thresholds)
+            .entries()
+            .sim_output();
+
+        let count = flow.sim().exhaustive(async || {
+            // Set thresholds: key 1 needs value >= 5, key 2 needs value >= 10
+            thresh_port.send((1, 5));
+            thresh_port.send((2, 10));
+
+            // key 1 gets increments: 3 + 3 = 6, which is >= 5 ✓
+            input_port.send((1, 3));
+            input_port.send((1, 3));
+            // key 2 gets increments: 3 + 3 = 6, which is < 10 ✗
+            input_port.send((2, 3));
+            input_port.send((2, 3));
+
+            let results = output.collect_sorted::<Vec<_>>().await;
+            assert_eq!(results, vec![(1, 5)]);
+        });
+
+        assert!(count > 0);
+    }
+
+    #[cfg(feature = "sim")]
+    #[test]
+    fn threshold_greater_or_equal_uniform() {
+        let mut flow = FlowBuilder::new();
+        let node = flow.process::<()>();
+
+        let (input_port, input) = node.sim_input::<(u32, usize), _, _>();
+
+        let counts: super::KeyedSingleton<u32, usize, _, super::MonotonicValue> =
+            input.into_keyed().fold(
+                q!(|| 0usize),
+                q!(
+                    |acc, v| *acc += v,
+                    monotone = crate::properties::manual_proof!(/** += is monotonic */)
+                ),
+            );
+
+        // Uniform threshold: all keys need value >= 5
+        let threshold = node.singleton(q!(5usize));
+
+        let output = counts
+            .threshold_greater_or_equal_uniform(threshold)
+            .entries()
+            .sim_output();
+
+        let count = flow.sim().exhaustive(async || {
+            // key 1: 3 + 3 = 6 >= 5 ✓
+            input_port.send((1, 3));
+            input_port.send((1, 3));
+            // key 2: 2 + 2 = 4 < 5 ✗
+            input_port.send((2, 2));
+            input_port.send((2, 2));
+
+            let results = output.collect_sorted::<Vec<_>>().await;
+            assert_eq!(results, vec![(1, 5)]);
+        });
+
+        assert!(count > 0);
+    }
+
+    #[cfg(feature = "sim")]
+    #[test]
+    fn threshold_greater_or_equal_bounded_value() {
+        let mut flow = FlowBuilder::new();
+        let node = flow.process::<()>();
+
+        let (input_port, input) = node.sim_input::<(u32, usize), _, _>();
+        let (thresh_port, thresh_input) = node.sim_input::<(u32, usize), _, _>();
+
+        // BoundedValue keyed singleton (values fixed once per key via .first())
+        let values = input.into_keyed().first();
+
+        // BoundedValue keyed singleton of thresholds
+        let thresholds = thresh_input.into_keyed().first();
+
+        let output = values
+            .threshold_greater_or_equal(thresholds)
+            .entries()
+            .sim_output();
+
+        let count = flow.sim().exhaustive(async || {
+            // Set thresholds: key 1 needs >= 3, key 2 needs >= 10
+            thresh_port.send((1, 3));
+            thresh_port.send((2, 10));
+
+            // key 1 gets value 5 >= 3 ✓, key 2 gets value 4 < 10 ✗
+            input_port.send((1, 5));
+            input_port.send((2, 4));
+
+            let results = output.collect_sorted::<Vec<_>>().await;
+            assert_eq!(results, vec![(1, 3)]);
+        });
+
+        assert!(count > 0);
+    }
+
+    #[cfg(feature = "sim")]
+    #[test]
+    fn threshold_greater_or_equal_uniform_bounded_value() {
+        let mut flow = FlowBuilder::new();
+        let node = flow.process::<()>();
+
+        let (input_port, input) = node.sim_input::<(u32, usize), _, _>();
+
+        // BoundedValue keyed singleton (values fixed once per key via .first())
+        let values = input.into_keyed().first();
+
+        // Uniform threshold: all keys need value >= 5
+        let threshold = node.singleton(q!(5usize));
+
+        let output = values
+            .threshold_greater_or_equal_uniform(threshold)
+            .entries()
+            .sim_output();
+
+        let count = flow.sim().exhaustive(async || {
+            // key 1 gets value 7 >= 5 ✓, key 2 gets value 3 < 5 ✗
+            input_port.send((1, 7));
+            input_port.send((2, 3));
+
+            let results = output.collect_sorted::<Vec<_>>().await;
+            assert_eq!(results, vec![(1, 5)]);
+        });
+
+        assert!(count > 0);
+    }
+
+    #[cfg(feature = "sim")]
+    #[test]
+    fn threshold_greater_or_equal_bounded() {
+        let mut flow = FlowBuilder::new();
+        let node = flow.process::<()>();
+
+        // Bounded keyed singleton (fully known upfront)
+        let values = node
+            .source_iter(q!(vec![(1, 6usize), (2, 4usize)]))
+            .into_keyed()
+            .first();
+
+        // BoundedValue thresholds (from async source)
+        let (thresh_port, thresh_input) = node.sim_input::<(u32, usize), _, _>();
+        let thresholds = thresh_input.into_keyed().first();
+
+        let output = values
+            .threshold_greater_or_equal(thresholds)
+            .entries()
+            .sim_output();
+
+        let count = flow.sim().exhaustive(async || {
+            thresh_port.send((1, 5));
+            thresh_port.send((2, 10));
+
+            // key 1: 6 >= 5 ✓, key 2: 4 < 10 ✗
+            let results = output.collect_sorted::<Vec<_>>().await;
+            assert_eq!(results, vec![(1, 5)]);
+        });
+
+        assert!(count > 0);
+    }
+
+    #[cfg(feature = "sim")]
+    #[test]
+    fn threshold_greater_or_equal_uniform_bounded() {
+        let mut flow = FlowBuilder::new();
+        let node = flow.process::<()>();
+
+        let values = node
+            .source_iter(q!(vec![(1, 6usize), (2, 4usize)]))
+            .into_keyed()
+            .first();
+        let threshold = node.singleton(q!(5usize));
+
+        let output = values
+            .threshold_greater_or_equal_uniform(threshold)
+            .entries()
+            .sim_output();
+
+        let count = flow.sim().exhaustive(async || {
+            // key 1: 6 >= 5 ✓, key 2: 4 < 5 ✗
+            let results = output.collect_sorted::<Vec<_>>().await;
+            assert_eq!(results, vec![(1, 5)]);
+        });
+
+        assert!(count > 0);
     }
 }

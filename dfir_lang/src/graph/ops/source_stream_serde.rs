@@ -37,7 +37,6 @@ pub const SOURCE_STREAM_SERDE: OperatorConstraints = OperatorConstraints {
     persistence_args: RANGE_0,
     type_args: &(0..=1),
     is_external_input: true,
-    has_singleton_output: false,
     flo_type: Some(FloType::Source),
     ports_inn: None,
     ports_out: None,
@@ -59,7 +58,7 @@ pub const SOURCE_STREAM_SERDE: OperatorConstraints = OperatorConstraints {
         let generic_type = type_args
             .first()
             .map(quote::ToTokens::to_token_stream)
-            .unwrap_or(quote_spanned!(op_span=> _));
+            .unwrap_or_else(|| quote_spanned!(op_span=> _));
 
         let receiver = &arguments[0];
         let stream_ident = wc.make_ident("stream");

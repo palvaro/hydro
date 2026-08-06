@@ -2,7 +2,7 @@ use quote::quote_spanned;
 use syn::parse_quote;
 
 use super::{
-    DelayType, OperatorCategory, OperatorConstraints, OperatorWriteOutput, RANGE_0, RANGE_1,
+    OperatorCategory, OperatorConstraints, OperatorWriteOutput, RANGE_0, RANGE_1,
     WriteContextArgs,
 };
 
@@ -33,15 +33,12 @@ pub const DEFER_SIGNAL: OperatorConstraints = OperatorConstraints {
     soft_range_out: RANGE_1,
     num_args: 0,
     is_external_input: false,
-    has_singleton_output: false,
     flo_type: None,
     ports_inn: Some(|| super::PortListSpec::Fixed(parse_quote! { input, signal })),
     ports_out: None,
-    input_delaytype_fn: |_| Some(DelayType::Stratum),
+    input_delaytype_fn: |_| None,
     write_fn: |wc @ &WriteContextArgs {
                    root,
-                   context,
-                   df_ident,
                    ident,
                    op_span,
                    work_fn_async,
@@ -53,12 +50,11 @@ pub const DEFER_SIGNAL: OperatorConstraints = OperatorConstraints {
         assert!(is_pull);
 
         let buffer_ident = wc.make_ident("buffer");
-        let borrow_ident = wc.make_ident("borrow");
         let signal_ident = wc.make_ident("signal");
 
         // TODO(mingwei): different lifetimes? `'tick`?
         let write_prologue = quote_spanned! {op_span=>
-            let #buffer_ident = #df_ident.add_state(::std::cell::RefCell::new(::std::vec::Vec::new()));
+            let mut #buffer_ident = ::std::vec::Vec::new();
         };
 
         let input = &inputs[0];
@@ -66,15 +62,10 @@ pub const DEFER_SIGNAL: OperatorConstraints = OperatorConstraints {
 
         let write_iterator = {
             quote_spanned! {op_span=>
-                let mut #borrow_ident = unsafe {
-                    // SAFETY: handle from `#df_ident.add_state(..)`.
-                    #context.state_ref_unchecked(#buffer_ident)
-                }.borrow_mut();
-
                 // Eagerly consume input to ensure updated state.
                 {
                     let fut = #root::dfir_pipes::pull::Pull::for_each(#input, |item| {
-                        ::std::vec::Vec::push(&mut *#borrow_ident, item);
+                        ::std::vec::Vec::push(&mut #buffer_ident, item);
                     });
                     let () = #work_fn_async(fut).await;
                 }
@@ -86,9 +77,9 @@ pub const DEFER_SIGNAL: OperatorConstraints = OperatorConstraints {
                 };
 
                 let #ident = #root::dfir_pipes::pull::iter(if #signal_ident {
-                    #borrow_ident.drain(..)
+                    #buffer_ident.drain(..)
                 } else {
-                    #borrow_ident.drain(..0) // Hack for empty.
+                    #buffer_ident.drain(..0) // Hack for empty.
                 });
             }
         };
@@ -96,7 +87,6 @@ pub const DEFER_SIGNAL: OperatorConstraints = OperatorConstraints {
         Ok(OperatorWriteOutput {
             write_prologue,
             write_iterator,
-            write_iterator_after: Default::default(),
             ..Default::default()
         })
     },

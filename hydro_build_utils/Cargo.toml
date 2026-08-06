@@ -1,7 +1,7 @@
 [package]
 name = "hydro_build_utils"
 publish = true
-version = "0.0.1"
+version = "0.1.1-alpha.0"
 description = "build and test utils for hydro"
 documentation = "https://docs.rs/hydro_build_utils/"
 edition = { workspace = true }
@@ -10,7 +10,9 @@ license = { workspace = true }
 
 [features]
 insta = ["dep:insta"]
+trybuild = ["dep:trybuild"]
 
 [dependencies]
 rustc_version = "0.4.0"
-insta = { version = "1.39", optional = true }
+insta = { version = "1.39", features = ["filters"], optional = true }
+trybuild = { version = "1", optional = true }

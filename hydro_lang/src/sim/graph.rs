@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::process::{Command, Stdio};
 use std::rc::Rc;
 
 use dfir_lang::diagnostic::Diagnostics;
@@ -11,18 +10,17 @@ use quote::quote;
 use sha2::{Digest, Sha256};
 use slotmap::SparseSecondaryMap;
 use stageleft::QuotedWithContext;
-use syn::visit_mut::VisitMut;
 use tempfile::TempPath;
 use trybuild_internals_api::{cargo, dependencies, path};
 
 use crate::compile::builder::ExternalPortId;
 use crate::compile::deploy_provider::{Deploy, DynSourceSink, Node, RegisterPort};
-#[cfg(feature = "deploy")]
+#[cfg(any(feature = "deploy", feature = "maelstrom"))]
 use crate::compile::trybuild::generate::LinkingMode;
 use crate::compile::trybuild::generate::{
-    CONCURRENT_TEST_LOCK, IS_TEST, TrybuildConfig, create_trybuild, write_atomic,
+    CONCURRENT_TEST_LOCK, ExampleBuildConfig, IS_TEST, TrybuildConfig, compile_trybuild_example,
+    create_trybuild, write_atomic, write_staged_source_cached,
 };
-use crate::compile::trybuild::rewriters::UseTestModeStaged;
 use crate::deploy::deploy_runtime::cluster_membership_stream;
 use crate::location::dynamic::LocationId;
 use crate::location::member_id::TaglessMemberId;
@@ -40,7 +38,7 @@ crate::newtype_counter! {
 #[derive(Clone)]
 pub struct SimNode {
     /// Counter for port IDs, must be shared across all nodes in a simulation to prevent collisions.
-    pub shared_port_counter: Rc<RefCell<SimNodePort>>,
+    pub shared_port_counter: Rc<RefCell<crate::Counter<SimNodePort>>>,
 }
 
 impl Node for SimNode {
@@ -67,7 +65,7 @@ impl Node for SimNode {
 
 #[derive(Clone, Default)]
 pub(crate) struct SimExternalPortRegistry {
-    pub(crate) port_counter: SimExternalPort,
+    pub(crate) port_counter: crate::Counter<SimExternalPort>,
     /// A mapping from external port IDs (generated in `FlowState`)
     /// which are used for looking up connections, to the IDs
     /// of the external channels created in the simulation.
@@ -175,6 +173,10 @@ impl<'a> Deploy<'a> for SimDeploy {
     type Cluster = SimNode;
     type External = SimExternal;
 
+    // The simulator carries the raw payload directly through its in-memory channels, so it can
+    // support channels that leave serialization to external code (see [`crate::networking::Embedded`]).
+    const SUPPORTS_EXTERNAL_SERIALIZATION: bool = true;
+
     fn o2o_sink_source(
         _env: &mut Self::InstantiateEnv,
         _p1: &Self::Process,
@@ -183,6 +185,7 @@ impl<'a> Deploy<'a> for SimDeploy {
         p2_port: &<Self::Process as Node>::Port,
         _name: Option<&str>,
         _networking_info: &crate::networking::NetworkingInfo,
+        _external_types: Option<(&syn::Type, &syn::Type)>,
     ) -> (syn::Expr, syn::Expr) {
         let ident_sink =
             syn::Ident::new(&format!("__hydro_o2o_sink_{}", p1_port), Span::call_site());
@@ -213,6 +216,7 @@ impl<'a> Deploy<'a> for SimDeploy {
         c2_port: &<Self::Cluster as Node>::Port,
         _name: Option<&str>,
         _networking_info: &crate::networking::NetworkingInfo,
+        _external_types: Option<(&syn::Type, &syn::Type)>,
     ) -> (syn::Expr, syn::Expr) {
         let ident_sink =
             syn::Ident::new(&format!("__hydro_o2m_sink_{}", p1_port), Span::call_site());
@@ -243,6 +247,7 @@ impl<'a> Deploy<'a> for SimDeploy {
         p2_port: &<Self::Process as Node>::Port,
         _name: Option<&str>,
         _networking_info: &crate::networking::NetworkingInfo,
+        _external_types: Option<(&syn::Type, &syn::Type)>,
     ) -> (syn::Expr, syn::Expr) {
         let ident_sink =
             syn::Ident::new(&format!("__hydro_m2o_sink_{}", c1_port), Span::call_site());
@@ -274,6 +279,7 @@ impl<'a> Deploy<'a> for SimDeploy {
         c2_port: &<Self::Cluster as Node>::Port,
         _name: Option<&str>,
         _networking_info: &crate::networking::NetworkingInfo,
+        _external_types: Option<(&syn::Type, &syn::Type)>,
     ) -> (syn::Expr, syn::Expr) {
         let ident_sink =
             syn::Ident::new(&format!("__hydro_m2m_sink_{}", c1_port), Span::call_site());
@@ -322,7 +328,7 @@ impl<'a> Deploy<'a> for SimDeploy {
         let ident = syn::Ident::new("__hydro_external_in", Span::call_site());
         let p1_port_usize = p1_port.0;
         syn::parse_quote!({
-            let (__sender, __receiver) = __root_dfir_rs::util::unbounded_channel::<__root_dfir_rs::bytes::Bytes>();
+            let (__sender, __receiver) = __root_dfir_rs::util::unsync::mpsc::unbounded::<__root_dfir_rs::bytes::Bytes>();
             #ident.insert(#p1_port_usize, __sender);
             __receiver
         })
@@ -349,8 +355,8 @@ impl<'a> Deploy<'a> for SimDeploy {
         let ident = syn::Ident::new("__hydro_external_out", Span::call_site());
         let p2_port_usize = p2_port.0;
         syn::parse_quote!({
-            let (__sender, __receiver) = __root_dfir_rs::util::unbounded_channel::<__root_dfir_rs::bytes::Bytes>();
-            #ident.insert(#p2_port_usize, __root_dfir_rs::tokio_stream::wrappers::UnboundedReceiverStream::new(__receiver.into_inner()));
+            let (__sender, __receiver) = __root_dfir_rs::util::unsync::mpsc::unbounded::<__root_dfir_rs::bytes::Bytes>();
+            #ident.insert(#p2_port_usize, __receiver);
             __sender
         })
     }
@@ -367,8 +373,8 @@ impl<'a> Deploy<'a> for SimDeploy {
         let ident = syn::Ident::new("__hydro_cluster_external_in", Span::call_site());
         let p1_port_usize = p1_port.0;
         syn::parse_quote!({
-            let (__sender, __receiver) = __root_dfir_rs::util::unbounded_channel::<__root_dfir_rs::bytes::Bytes>();
-            #ident.entry(#p1_port_usize).or_insert_with(Vec::new).push(__sender);
+            let (__sender, __receiver) = __root_dfir_rs::util::unsync::mpsc::unbounded::<__root_dfir_rs::bytes::Bytes>();
+            #ident.entry(#p1_port_usize).or_insert_with(::std::collections::HashMap::new).insert(__current_cluster_id, __sender);
             __receiver
         })
     }
@@ -393,8 +399,8 @@ impl<'a> Deploy<'a> for SimDeploy {
         let ident = syn::Ident::new("__hydro_cluster_external_out", Span::call_site());
         let p2_port_usize = p2_port.0;
         syn::parse_quote!({
-            let (__sender, __receiver) = __root_dfir_rs::util::unbounded_channel::<__root_dfir_rs::bytes::Bytes>();
-            #ident.entry(#p2_port_usize).or_insert_with(Vec::new).push(__root_dfir_rs::tokio_stream::wrappers::UnboundedReceiverStream::new(__receiver.into_inner()));
+            let (__sender, __receiver) = __root_dfir_rs::util::unsync::mpsc::unbounded::<__root_dfir_rs::bytes::Bytes>();
+            #ident.entry(#p2_port_usize).or_insert_with(::std::collections::HashMap::new).insert(__current_cluster_id, __receiver);
             __sender
         })
     }
@@ -427,128 +433,25 @@ impl<'a> Deploy<'a> for SimDeploy {
 }
 
 pub(super) fn compile_sim(bin: String, trybuild: TrybuildConfig) -> Result<TempPath, ()> {
-    let mut command = Command::new("cargo");
-
-    let is_fuzz = std::env::var("BOLERO_FUZZER").is_ok();
-
-    // Run from dylib-examples crate which has the dylib as a dev-dependency (only if not fuzzing)
-    let crate_to_compile = if is_fuzz {
-        trybuild.project_dir.clone()
-    } else {
-        path!(trybuild.project_dir / "dylib-examples")
-    };
-    command.current_dir(&crate_to_compile);
-    command.args(["rustc", "--locked"]);
-    command.args(["--example", "sim-dylib"]);
-    command.args(["--target-dir", trybuild.target_dir.to_str().unwrap()]);
-    if let Some(features) = &trybuild.features {
-        command.args(["--features", &features.join(",")]);
-    }
-    command.args(["--config", "build.incremental = false"]);
-    command.args(["--crate-type", "cdylib"]);
-    command.arg("--message-format=json-diagnostic-rendered-ansi");
-    command.env("STAGELEFT_TRYBUILD_BUILD_STAGED", "1");
-    command.env("TRYBUILD_LIB_NAME", &bin);
-
-    command.arg("--");
-
-    if cfg!(target_os = "linux") {
-        let debug_path = if let Ok(target) = std::env::var("CARGO_BUILD_TARGET") {
-            path!(trybuild.target_dir / target / "debug")
-        } else {
-            path!(trybuild.target_dir / "debug")
-        };
-
-        command.args([&format!(
-            "-Clink-arg=-Wl,-rpath,{}",
-            debug_path.to_str().unwrap()
-        )]);
-
-        if cfg!(target_env = "gnu") {
-            command.arg(
-                // https://github.com/rust-lang/rust/issues/91979
-                "-Clink-args=-Wl,-z,nodelete",
-            );
-        }
-    }
-
-    if let Ok(fuzzer) = std::env::var("BOLERO_FUZZER") {
-        command.env_remove("BOLERO_FUZZER");
-
-        if fuzzer == "libfuzzer" {
-            #[cfg(target_os = "macos")]
-            {
-                command.args(["-Clink-arg=-undefined", "-Clink-arg=dynamic_lookup"]);
-            }
-
-            #[cfg(target_os = "linux")]
-            {
-                command.args(["-Clink-arg=-Wl,--unresolved-symbols=ignore-all"]);
-            }
-        }
-    }
-
-    let mut spawned = command
-        .stdout(Stdio::piped())
-        .stdin(Stdio::null())
-        .spawn()
-        .unwrap();
-    let reader = std::io::BufReader::new(spawned.stdout.take().unwrap());
-
-    let mut out = Err(());
-    for message in cargo_metadata::Message::parse_stream(reader) {
-        match message.unwrap() {
-            cargo_metadata::Message::CompilerArtifact(artifact) => {
-                // unlike dylib, cdylib only exports the explicitly exported symbols
-                let is_output = artifact.target.is_example();
-
-                if is_output {
-                    use std::path::PathBuf;
-
-                    let path = artifact.filenames.first().unwrap();
-                    let path_buf: PathBuf = path.clone().into();
-                    out = Ok(path_buf);
-                }
-            }
-            cargo_metadata::Message::CompilerMessage(mut msg) => {
-                // Update the path displayed to enable clicking in IDE.
-                // TODO(mingwei): deduplicate code with hydro_deploy rust_crate/build.rs
-                if let Some(rendered) = msg.message.rendered.as_mut() {
-                    let file_names = msg
-                        .message
-                        .spans
-                        .iter()
-                        .map(|s| &s.file_name)
-                        .collect::<std::collections::BTreeSet<_>>();
-                    for file_name in file_names {
-                        *rendered = rendered.replace(
-                            file_name,
-                            &format!("(full path) {}/{file_name}", trybuild.project_dir.display()),
-                        )
-                    }
-                }
-                eprintln!("{}", msg.message);
-            }
-            cargo_metadata::Message::TextLine(line) => {
-                eprintln!("{}", line);
-            }
-            cargo_metadata::Message::BuildFinished(_) => {}
-            cargo_metadata::Message::BuildScriptExecuted(_) => {}
-            msg => panic!("Unexpected message type: {:?}", msg),
-        }
-    }
-
-    spawned.wait().unwrap();
-
-    let out_file = tempfile::NamedTempFile::new().unwrap().into_temp_path();
-    fs::copy(out.as_ref().unwrap(), &out_file).unwrap();
-    Ok(out_file)
+    compile_trybuild_example(ExampleBuildConfig {
+        trybuild,
+        bin_name: bin,
+        runtime_feature: "hydro___feature_sim_runtime",
+        // The simulator builds a fixed `sim-dylib` wrapper that `include!`s the
+        // generated file selected via the `TRYBUILD_LIB_NAME` env var.
+        example_name: "sim-dylib".to_owned(),
+        crate_type: Some("cdylib"),
+        set_trybuild_lib_name: true,
+        allow_fuzz: true,
+    })
 }
 
+#[expect(clippy::too_many_arguments, reason = "necessary for code generation")]
 pub(super) fn create_sim_graph_trybuild(
     process_graphs: BTreeMap<LocationId, DfirGraph>,
     cluster_graphs: BTreeMap<LocationId, DfirGraph>,
     cluster_max_sizes: SparseSecondaryMap<LocationKey, usize>,
+    cluster_member_ids: BTreeMap<LocationId, Vec<u32>>,
     process_tick_graphs: BTreeMap<LocationId, DfirGraph>,
     cluster_tick_graphs: BTreeMap<LocationId, DfirGraph>,
     extra_stmts_global: Vec<syn::Stmt>,
@@ -560,57 +463,25 @@ pub(super) fn create_sim_graph_trybuild(
 
     let is_test = IS_TEST.load(std::sync::atomic::Ordering::Relaxed);
 
-    let generated_code = compile_sim_graph_trybuild(
-        process_graphs,
-        cluster_graphs,
-        cluster_max_sizes,
-        process_tick_graphs,
-        cluster_tick_graphs,
-        extra_stmts_global,
-        extra_stmts_cluster,
-        &crate_name,
-        is_test,
-    );
-
-    let inlined_staged = if is_test {
-        let raw_toml_manifest = toml::from_str::<toml::Value>(
-            &fs::read_to_string(path!(source_dir / "Cargo.toml")).unwrap(),
-        )
-        .unwrap();
-
-        let maybe_custom_lib_path = raw_toml_manifest
-            .get("lib")
-            .and_then(|lib| lib.get("path"))
-            .and_then(|path| path.as_str());
-
-        let mut gen_staged = stageleft_tool::gen_staged_trybuild(
-            &maybe_custom_lib_path
-                .map(|s| path!(source_dir / s))
-                .unwrap_or_else(|| path!(source_dir / "src" / "lib.rs")),
-            &path!(source_dir / "Cargo.toml"),
+    let generated_code = {
+        let _span = tracing::debug_span!(target: "hydro_build", "sim_codegen").entered();
+        compile_sim_graph_trybuild(
+            process_graphs,
+            cluster_graphs,
+            cluster_max_sizes,
+            cluster_member_ids,
+            process_tick_graphs,
+            cluster_tick_graphs,
+            extra_stmts_global,
+            extra_stmts_cluster,
             &crate_name,
-            Some("hydro___test".to_owned()),
-        );
-
-        gen_staged.attrs.insert(
-            0,
-            syn::parse_quote! {
-                #![allow(
-                    unused,
-                    ambiguous_glob_reexports,
-                    clippy::suspicious_else_formatting,
-                    unexpected_cfgs,
-                    reason = "generated code"
-                )]
-            },
-        );
-
-        Some(prettyplease::unparse(&gen_staged))
-    } else {
-        None
+        )
     };
 
-    let source = prettyplease::unparse(&generated_code);
+    let source = {
+        let _span = tracing::debug_span!(target: "hydro_build", "unparse_source").entered();
+        prettyplease::unparse(&generated_code)
+    };
 
     let hash = format!("{:X}", Sha256::digest(&source))
         .chars()
@@ -637,16 +508,14 @@ pub(super) fn create_sim_graph_trybuild(
 
     let out_path = path!(examples_dir / format!("{bin_name}.rs"));
     {
+        let _span =
+            tracing::debug_span!(target: "hydro_build", "write_generated_sources").entered();
         let _concurrent_test_lock = CONCURRENT_TEST_LOCK.lock().unwrap();
         write_atomic(source.as_ref(), &out_path).unwrap();
     }
 
-    if let Some(inlined_staged) = inlined_staged {
-        let staged_path = path!(project_dir / "src" / "__staged.rs");
-        {
-            let _concurrent_test_lock = CONCURRENT_TEST_LOCK.lock().unwrap();
-            write_atomic(inlined_staged.as_bytes(), &staged_path).unwrap();
-        }
+    if is_test {
+        write_staged_source_cached(source_dir.as_ref(), &crate_name, &project_dir);
     }
 
     if is_test {
@@ -666,7 +535,7 @@ pub(super) fn create_sim_graph_trybuild(
             project_dir,
             target_dir,
             features: cur_bin_enabled_features,
-            #[cfg(feature = "deploy")]
+            #[cfg(any(feature = "deploy", feature = "maelstrom"))]
             linking_mode: LinkingMode::Dynamic,
         },
     )
@@ -677,25 +546,27 @@ fn compile_sim_graph_trybuild(
     process_graphs: BTreeMap<LocationId, DfirGraph>,
     cluster_graphs: BTreeMap<LocationId, DfirGraph>,
     cluster_max_sizes: SparseSecondaryMap<LocationKey, usize>,
+    cluster_member_ids: BTreeMap<LocationId, Vec<u32>>,
     process_tick_graphs: BTreeMap<LocationId, DfirGraph>,
     cluster_tick_graphs: BTreeMap<LocationId, DfirGraph>,
-    mut extra_stmts_global: Vec<syn::Stmt>,
-    mut extra_stmts_cluster: BTreeMap<LocationId, Vec<syn::Stmt>>,
+    extra_stmts_global: Vec<syn::Stmt>,
+    extra_stmts_cluster: BTreeMap<LocationId, Vec<syn::Stmt>>,
     crate_name: &str,
-    is_test: bool,
 ) -> syn::File {
     let mut diagnostics = Diagnostics::new();
 
     let mut dfir_into_code = |g: &DfirGraph| {
-        let mut dfir_expr: syn::Expr = syn::parse2(
-            g.as_code(&quote! { __root_dfir_rs }, true, quote!(), &mut diagnostics)
-                .expect("DFIR code generation failed with diagnostics."),
+        let dfir_expr: syn::Expr = syn::parse2(
+            g.as_code_with_options(
+                &quote! { __root_dfir_rs },
+                true,
+                false,
+                quote!(),
+                &mut diagnostics,
+            )
+            .expect("DFIR code generation failed with diagnostics."),
         )
         .unwrap();
-
-        if is_test {
-            UseTestModeStaged { crate_name }.visit_expr_mut(&mut dfir_expr);
-        }
 
         dfir_expr
     };
@@ -707,18 +578,6 @@ fn compile_sim_graph_trybuild(
             __root_dfir_rs::scheduled::context::Dfir::into_erased(#inner)
         }
     };
-
-    if is_test {
-        extra_stmts_global.iter_mut().for_each(|stmt| {
-            UseTestModeStaged { crate_name }.visit_stmt_mut(stmt);
-        });
-
-        extra_stmts_cluster.values_mut().for_each(|stmts| {
-            stmts.iter_mut().for_each(|stmt| {
-                UseTestModeStaged { crate_name }.visit_stmt_mut(stmt);
-            })
-        });
-    }
 
     let process_dfir_exprs = process_graphs
         .into_iter()
@@ -768,7 +627,9 @@ fn compile_sim_graph_trybuild(
             let ser_lid = serde_json::to_string(&lid).unwrap();
             let extra_stmts_per_cluster =
                 extra_stmts_cluster.get(&lid).cloned().unwrap_or_default();
-            let max_size = cluster_max_sizes.get(lid.key()).cloned().unwrap() as u32;
+            let member_ids = cluster_member_ids.get(&lid).cloned().unwrap_or_else(|| {
+                panic!("cluster {lid:?} has a dataflow graph but no member-id range from sizing")
+            });
 
             let self_id_ident = syn::Ident::new(
                 &format!("__hydro_lang_cluster_self_id_{}", lid.key()),
@@ -776,7 +637,7 @@ fn compile_sim_graph_trybuild(
             );
 
             syn::parse_quote! {
-                for __current_cluster_id in 0..#max_size {
+                for __current_cluster_id in [#(#member_ids),*] {
                     __async_dfirs.push((
                         #ser_lid,
                         Some(__current_cluster_id),
@@ -835,19 +696,20 @@ fn compile_sim_graph_trybuild(
 
     let source_ast: syn::File = syn::parse_quote! {
         use #trybuild_crate_name_ident::__root as #orig_crate_name;
-        use #trybuild_crate_name_ident::__staged::__deps::*;
+        use #orig_crate_name::*;
+        use #orig_crate_name::__staged::__deps::*;
         use #root::prelude::*;
         use #root::runtime_support::dfir_rs as __root_dfir_rs;
-        pub use #trybuild_crate_name_ident::__staged;
+        pub use #orig_crate_name::__staged;
 
         /// NOTE: This method signature MUST BE THE SAME as `SimLoaded`.
         /// TODO(mingwei): enforce/check this, somehow
         #[allow(unused)]
         fn __hydro_runtime_core<'a>(
-            __hydro_external_out: &mut ::std::collections::HashMap<usize, __root_dfir_rs::tokio_stream::wrappers::UnboundedReceiverStream<__root_dfir_rs::bytes::Bytes>>,
-            __hydro_external_in: &mut ::std::collections::HashMap<usize, __root_dfir_rs::tokio::sync::mpsc::UnboundedSender<__root_dfir_rs::bytes::Bytes>>,
-            __hydro_cluster_external_out: &mut ::std::collections::HashMap<usize, Vec<__root_dfir_rs::tokio_stream::wrappers::UnboundedReceiverStream<__root_dfir_rs::bytes::Bytes>>>,
-            __hydro_cluster_external_in: &mut ::std::collections::HashMap<usize, Vec<__root_dfir_rs::tokio::sync::mpsc::UnboundedSender<__root_dfir_rs::bytes::Bytes>>>,
+            __hydro_external_out: &mut ::std::collections::HashMap<usize, __root_dfir_rs::util::unsync::mpsc::Receiver<__root_dfir_rs::bytes::Bytes>>,
+            __hydro_external_in: &mut ::std::collections::HashMap<usize, __root_dfir_rs::util::unsync::mpsc::Sender<__root_dfir_rs::bytes::Bytes>>,
+            __hydro_cluster_external_out: &mut ::std::collections::HashMap<usize, ::std::collections::HashMap<u32, __root_dfir_rs::util::unsync::mpsc::Receiver<__root_dfir_rs::bytes::Bytes>>>,
+            __hydro_cluster_external_in: &mut ::std::collections::HashMap<usize, ::std::collections::HashMap<u32, __root_dfir_rs::util::unsync::mpsc::Sender<__root_dfir_rs::bytes::Bytes>>>,
             __println_handler: fn(::std::fmt::Arguments<'_>),
             __eprintln_handler: fn(::std::fmt::Arguments<'_>),
         ) -> (
@@ -914,10 +776,10 @@ fn compile_sim_graph_trybuild(
         #[unsafe(no_mangle)]
         unsafe extern "Rust" fn __hydro_runtime(
             should_color: bool,
-            __hydro_external_out: &mut ::std::collections::HashMap<usize, __root_dfir_rs::tokio_stream::wrappers::UnboundedReceiverStream<__root_dfir_rs::bytes::Bytes>>,
-            __hydro_external_in: &mut ::std::collections::HashMap<usize, __root_dfir_rs::tokio::sync::mpsc::UnboundedSender<__root_dfir_rs::bytes::Bytes>>,
-            __hydro_cluster_external_out: &mut ::std::collections::HashMap<usize, Vec<__root_dfir_rs::tokio_stream::wrappers::UnboundedReceiverStream<__root_dfir_rs::bytes::Bytes>>>,
-            __hydro_cluster_external_in: &mut ::std::collections::HashMap<usize, Vec<__root_dfir_rs::tokio::sync::mpsc::UnboundedSender<__root_dfir_rs::bytes::Bytes>>>,
+            __hydro_external_out: &mut ::std::collections::HashMap<usize, __root_dfir_rs::util::unsync::mpsc::Receiver<__root_dfir_rs::bytes::Bytes>>,
+            __hydro_external_in: &mut ::std::collections::HashMap<usize, __root_dfir_rs::util::unsync::mpsc::Sender<__root_dfir_rs::bytes::Bytes>>,
+            __hydro_cluster_external_out: &mut ::std::collections::HashMap<usize, ::std::collections::HashMap<u32, __root_dfir_rs::util::unsync::mpsc::Receiver<__root_dfir_rs::bytes::Bytes>>>,
+            __hydro_cluster_external_in: &mut ::std::collections::HashMap<usize, ::std::collections::HashMap<u32, __root_dfir_rs::util::unsync::mpsc::Sender<__root_dfir_rs::bytes::Bytes>>>,
             __println_handler: fn(::std::fmt::Arguments<'_>),
             __eprintln_handler: fn(::std::fmt::Arguments<'_>),
         ) -> (

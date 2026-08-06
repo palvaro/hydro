@@ -3,10 +3,7 @@
 //! Provides [`Context`] (the lightweight operator context) and
 //! [`Dfir`] (the dataflow execution wrapper).
 
-use std::any::Any;
 use std::future::Future;
-use std::marker::PhantomData;
-use std::ops::DerefMut;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -19,19 +16,7 @@ use dfir_lang::diagnostic::{Diagnostic, Diagnostics, SerdeSpan};
 use dfir_lang::graph::DfirGraph;
 
 use super::metrics::{DfirMetrics, DfirMetricsIntervals};
-use super::state::StateHandle;
-use super::{StateLifespan, StateTag, SubgraphId};
 use crate::scheduled::ticks::TickInstant;
-use crate::util::slot_vec::SlotVec;
-
-/// Internal state storage for operator accumulators.
-struct StateData {
-    state: Box<dyn Any>,
-    lifespan_hook_fn: Option<LifespanResetFn>,
-    /// `None` for static.
-    lifespan: Option<StateLifespan>,
-}
-type LifespanResetFn = Box<dyn FnMut(&mut dyn Any)>;
 
 /// Coordinates waking between [`Context`] (inside the tick closure) and [`Dfir`]
 /// (the external runner). Shared via `Arc` between both.
@@ -69,16 +54,13 @@ impl Wake for WakeState {
 }
 
 /// A lightweight context for inline codegen that avoids the overhead of the full
-/// [`Context`] (no tokio channels, no scheduler queues, no loop machinery).
+/// scheduled graph (no tokio channels, no scheduler queues, no loop machinery).
 ///
-/// Exposes the same method names that operator-generated code calls on both
-/// `df` (for prologues: `add_state`, `set_state_lifespan_hook`) and
-/// `context` (for iterators: `state_ref_unchecked`, `is_first_run_this_tick`, etc.).
-#[doc(hidden)]
+/// Exposes methods that operator-generated code calls on both
+/// `df` (for prologues: `request_task`) and
+/// `context` (for iterators: `current_tick`, `schedule_subgraph`, etc.).
 #[derive(Default)]
 pub struct Context {
-    /// Storage for the operator-facing State API.
-    states: SlotVec<StateTag, StateData>,
     /// Counter for number of ticks run.
     current_tick: TickInstant,
     /// Coordinates waking between [`Context`] (inside the tick closure) and [`Dfir`]
@@ -86,83 +68,42 @@ pub struct Context {
     wake_state: Arc<WakeState>,
     /// Live-updating DFIR runtime metrics via interior mutability.
     metrics: Rc<DfirMetrics>,
+    /// Tasks buffered via [`Self::request_task`], spawned by [`Dfir::spawn_tasks`]
+    /// once the runtime is running inside a tokio `LocalSet`.
+    #[cfg(feature = "tokio")]
+    tasks_to_spawn: Vec<Pin<Box<dyn Future<Output = ()> + 'static>>>,
 }
 
 impl Context {
     /// Create a new inline context with shared wake state and metrics.
     pub fn new(wake_state: Arc<WakeState>, metrics: Rc<DfirMetrics>) -> Self {
         Self {
-            states: SlotVec::new(),
             current_tick: TickInstant::default(),
             wake_state,
             metrics,
+            #[cfg(feature = "tokio")]
+            tasks_to_spawn: Vec::new(),
         }
     }
 
     // --- Methods called as `df.xxx()` in operator prologues ---
 
-    /// Adds state and returns a handle.
-    pub fn add_state<T>(&mut self, state: T) -> StateHandle<T>
+    /// Buffers an async task to be spawned later by `Dfir::spawn_tasks`.
+    ///
+    /// Tasks are deferred because `write_prologue` runs during graph construction,
+    /// which may occur before a tokio `LocalSet` is entered. Buffered tasks are
+    /// drained and spawned via `tokio::task::spawn_local` at the start of
+    /// [`Dfir::run_tick`]. Tasks requested after that point remain buffered until
+    /// the next call to [`Dfir::run_tick`].
+    #[cfg(feature = "tokio")]
+    pub fn request_task<Fut>(&mut self, future: Fut)
     where
-        T: Any,
+        Fut: Future<Output = ()> + 'static,
     {
-        let state_data = StateData {
-            state: Box::new(state),
-            lifespan_hook_fn: None,
-            lifespan: None,
-        };
-        let state_id = self.states.insert(state_data);
-        StateHandle {
-            state_id,
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Sets a hook to modify state at the end of each tick.
-    pub fn set_state_lifespan_hook<T>(
-        &mut self,
-        handle: StateHandle<T>,
-        _lifespan: StateLifespan,
-        mut hook_fn: impl 'static + FnMut(&mut T),
-    ) where
-        T: Any,
-    {
-        let state_data = self
-            .states
-            .get_mut(handle.state_id)
-            .expect("Failed to find state with given handle.");
-        state_data.lifespan_hook_fn = Some(Box::new(move |state| {
-            (hook_fn)(state.downcast_mut::<T>().unwrap());
-        }));
-        state_data.lifespan = Some(_lifespan);
+        self.tasks_to_spawn.push(Box::pin(future));
     }
 
     // --- Methods called as `context.xxx()` in operator iterators ---
-
-    /// Returns a shared reference to the state.
-    ///
-    /// # Safety
-    /// `StateHandle<T>` must be from _this_ instance.
-    pub unsafe fn state_ref_unchecked<T>(&self, handle: StateHandle<T>) -> &'_ T
-    where
-        T: Any,
-    {
-        let state = self
-            .states
-            .get(handle.state_id)
-            .expect("Failed to find state with given handle.")
-            .state
-            .as_ref();
-        debug_assert!(state.is::<T>());
-        unsafe { &*(state as *const dyn Any as *const T) }
-    }
-
-    /// Always returns `true` in inline mode. The inline codegen runs the entire DAG
-    /// once per tick with no re-execution, so every subgraph is always on its first
-    /// (and only) run within each tick.
-    pub fn is_first_run_this_tick(&self) -> bool {
-        true
-    }
 
     /// Gets the current tick count.
     pub fn current_tick(&self) -> TickInstant {
@@ -174,15 +115,8 @@ impl Context {
         &self.metrics
     }
 
-    /// No-op: inline mode has no subgraph scheduling.
-    pub fn current_subgraph(&self) -> SubgraphId {
-        SubgraphId::from_raw(0)
-    }
-
-    /// In inline mode, every subgraph runs unconditionally each tick, so the `sg_id`
-    /// parameter is ignored. Only `is_external` matters: when `true`, it signals that
-    /// external data has arrived and a new tick should be started.
-    pub fn schedule_subgraph(&self, _sg_id: SubgraphId, is_external: bool) {
+    /// Signals that external data has arrived and a new tick should be started.
+    pub fn schedule_subgraph(&self, is_external: bool) {
         if is_external {
             self.wake_state.wake_by_ref();
         }
@@ -193,34 +127,24 @@ impl Context {
         std::task::Waker::from(self.wake_state.clone())
     }
 
-    /// Runs end-of-tick state hooks and increments the tick counter.
+    /// Increments the tick counter.
     /// Called by the generated tick closure at the end of each tick.
     #[doc(hidden)]
     pub fn __end_tick(&mut self) {
-        for state_data in self.states.values_mut() {
-            let StateData {
-                state,
-                lifespan_hook_fn: Some(lifespan_hook_fn),
-                lifespan: Some(StateLifespan::Tick),
-            } = state_data
-            else {
-                continue;
-            };
-            (lifespan_hook_fn)(Box::deref_mut(state));
-        }
         self.current_tick += crate::scheduled::ticks::TickDuration::SINGLE_TICK;
     }
 }
 
-/// A wrapper around an inline-codegen tick closure that provides [`Self::run`],
-/// [`Self::run_available`], and [`Self::run_tick`] methods — mirroring the [`Dfir`](super::context::Dfir)
-/// API.
+/// An executable DFIR dataflow, as created by
+/// [`dfir_syntax!`](crate::dfir_syntax). Provides the [`Self::run`],
+/// [`Self::run_available`], and [`Self::run_tick`] family of methods to
+/// execute the dataflow.
 ///
 /// # Design
 ///
 /// The inline codegen generates an `async move |df: &mut Context|` closure that captures
 /// dataflow-specific state (handoff buffers, source iterators) and receives the [`Context`]
-/// (operator accumulators, tick counter) by reference each tick. `Dfir` owns both the
+/// (tick counter, metrics) by reference each tick. `Dfir` owns both the
 /// closure and the context, and coordinates tick lifecycle and idle/wake behavior.
 ///
 /// We use a single opaque closure rather than generating a bespoke struct per dataflow because:
@@ -233,7 +157,6 @@ impl Context {
 /// support type erasure via [`TickClosureErased`] / [`DfirErased`] for heterogeneous
 /// collections (e.g., the sim runtime storing multiple locations in a `Vec`). The concrete
 /// (non-erased) path used by trybuild and embedded has zero overhead.
-#[doc(hidden)]
 pub struct Dfir<Tick> {
     /// Async closure which runs a single tick when called.
     tick_closure: Tick,
@@ -387,11 +310,23 @@ impl<Tick: TickClosure> Dfir<Tick> {
 }
 
 impl<Tick: TickClosure> Dfir<Tick> {
+    /// Spawns all tasks buffered via [`Context::request_task`].
+    ///
+    /// This drains the buffer, so subsequent calls are no-ops until new tasks are requested.
+    #[cfg(feature = "tokio")]
+    fn spawn_tasks(&mut self) {
+        for task in self.context.tasks_to_spawn.drain(..) {
+            tokio::task::spawn_local(task);
+        }
+    }
+
     /// Run a single tick. Returns `true` if any subgraph received input data.
     ///
     /// Checks both handoff buffers (via `work_done` flag set in generated recv port code)
     /// and external events (via `can_start_tick` set by wakers/schedule_subgraph).
     pub async fn run_tick(&mut self) -> bool {
+        #[cfg(feature = "tokio")]
+        self.spawn_tasks();
         let had_external = self
             .wake_state
             .can_start_tick
@@ -414,6 +349,7 @@ impl<Tick: TickClosure> Dfir<Tick> {
     }
 
     /// Run ticks as long as work is available, then return.
+    #[cfg(feature = "tokio")]
     pub async fn run_available(&mut self) {
         // Always run at least one tick.
         self.wake_state
@@ -451,6 +387,7 @@ impl<Tick: TickClosure> Dfir<Tick> {
     }
 
     /// Run forever, processing ticks when work is available and yielding when idle.
+    #[cfg(feature = "tokio")]
     pub async fn run(&mut self) -> crate::Never {
         loop {
             self.run_available().await;

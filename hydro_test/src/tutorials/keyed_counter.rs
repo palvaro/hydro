@@ -1,16 +1,15 @@
 use hydro_lang::live_collections::stream::NoOrder;
-use hydro_lang::location::{Location, NoTick};
+use hydro_lang::location::Location;
 use hydro_lang::prelude::*;
 
 pub struct CounterServer;
 
-#[expect(clippy::type_complexity, reason = "output types with orderings")]
-pub fn keyed_counter_service<'a, L: Location<'a> + NoTick>(
+pub fn keyed_counter_service<'a, L: Location<'a>>(
     increment_requests: KeyedStream<u32, String, L, Unbounded>,
     get_requests: KeyedStream<u32, String, L, Unbounded>,
 ) -> (
     KeyedStream<u32, String, L, Unbounded>,
-    KeyedStream<u32, (String, usize), L, Unbounded, NoOrder>,
+    KeyedStream<u32, (String, usize), L::DropConsistency, Unbounded, NoOrder>,
 ) {
     let increment_request_processing = increment_requests.atomic();
     let current_count = increment_request_processing
@@ -27,7 +26,7 @@ pub fn keyed_counter_service<'a, L: Location<'a> + NoTick>(
         .into_keyed();
 
     let get_lookup = sliced! {
-        let request_batch = use(requests_regrouped, nondet!(/** we never observe batch boundaries */));
+        let request_batch = use::batch(requests_regrouped, nondet!(/** we never observe batch boundaries */));
         let count_snapshot = use::atomic(current_count, nondet!(/** atomicity guarantees consistency wrt increments */));
 
         request_batch.join_keyed_singleton(count_snapshot)
@@ -43,8 +42,6 @@ pub fn keyed_counter_service<'a, L: Location<'a> + NoTick>(
 
 #[cfg(test)]
 mod tests {
-    use hydro_lang::prelude::*;
-
     use super::*;
 
     #[test]

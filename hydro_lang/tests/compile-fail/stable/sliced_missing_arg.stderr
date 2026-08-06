@@ -1,0 +1,106 @@
+error[E0425]: cannot find value `fake` in this scope
+  --> tests/compile-fail/stable/sliced_missing_arg.rs:13:21
+   |
+13 |         let e = use(fake, nondet!(/** test */));
+   |                     ^^^^ not found in this scope
+
+error[E0425]: cannot find value `fake` in this scope
+  --> tests/compile-fail/stable/sliced_missing_arg.rs:14:29
+   |
+14 |         let f = use::atomic(fake, nondet!(/** test */));
+   |                             ^^^^ not found in this scope
+
+warning: use of deprecated function `hydro_lang::live_collections::sliced::style::default`: use `use::batch(...)` for stream-like collections or `use::snapshot(...)` for singleton-like collections instead
+ --> tests/compile-fail/stable/sliced_missing_arg.rs:9:21
+  |
+9 |         let a = use(input);
+  |                     ^^^^^
+  |
+  = note: `#[warn(deprecated)]` on by default
+  = note: this warning originates in the macro `$crate::__sliced_parse_uses__` which comes from the expansion of the macro `sliced` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: use of deprecated function `hydro_lang::live_collections::sliced::style::default`: use `use::batch(...)` for stream-like collections or `use::snapshot(...)` for singleton-like collections instead
+  --> tests/compile-fail/stable/sliced_missing_arg.rs:11:21
+   |
+11 |         let c = use(input, 123);
+   |                     ^^^^^
+   |
+   = note: this warning originates in the macro `$crate::__sliced_parse_uses__` which comes from the expansion of the macro `sliced` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: use of deprecated function `hydro_lang::live_collections::sliced::style::default`: use `use::batch(...)` for stream-like collections or `use::snapshot(...)` for singleton-like collections instead
+  --> tests/compile-fail/stable/sliced_missing_arg.rs:13:21
+   |
+13 |         let e = use(fake, nondet!(/** test */));
+   |                     ^^^^
+   |
+   = note: this warning originates in the macro `$crate::__sliced_parse_uses__` which comes from the expansion of the macro `sliced` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0061]: this function takes 2 arguments but 1 argument was supplied
+  --> tests/compile-fail/stable/sliced_missing_arg.rs:9:21
+   |
+ 8 | /     sliced! {
+ 9 | |         let a = use(input);
+   | |                     ^^^^^
+10 | |         let b = use::atomic(input.atomic());
+11 | |         let c = use(input, 123);
+...  |
+15 | |         let g = use::foobar();
+16 | |     }
+   | |_____- argument #2 of type `NonDet` is missing
+   |
+note: function defined here
+  --> src/live_collections/sliced/style.rs
+   |
+   | pub fn default<T>(t: T, nondet: NonDet) -> Default<T> {
+   |        ^^^^^^^
+   = note: this error originates in the macro `$crate::__sliced_parse_uses__` which comes from the expansion of the macro `sliced` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0061]: this function takes 2 arguments but 1 argument was supplied
+  --> tests/compile-fail/stable/sliced_missing_arg.rs:10:22
+   |
+10 |         let b = use::atomic(input.atomic());
+   |                      ^^^^^^---------------- argument #2 of type `NonDet` is missing
+   |
+note: function defined here
+  --> src/live_collections/sliced/style.rs
+   |
+   | pub fn atomic<T>(t: T, nondet: NonDet) -> Atomic<T> {
+   |        ^^^^^^
+help: provide the argument
+   |
+10 |         let b = use::atomic(input.atomic(), /* NonDet */);
+   |                                           ++++++++++++++
+
+error[E0308]: mismatched types
+  --> tests/compile-fail/stable/sliced_missing_arg.rs:11:28
+   |
+11 |         let c = use(input, 123);
+   |                     -----  ^^^ expected `NonDet`, found integer
+   |                     |
+   |                     arguments to this function are incorrect
+   |
+note: function defined here
+  --> src/live_collections/sliced/style.rs
+   |
+   | pub fn default<T>(t: T, nondet: NonDet) -> Default<T> {
+   |        ^^^^^^^
+
+error[E0308]: mismatched types
+  --> tests/compile-fail/stable/sliced_missing_arg.rs:12:45
+   |
+12 |         let d = use::atomic(input.atomic(), 123);
+   |                      ------                 ^^^ expected `NonDet`, found integer
+   |                      |
+   |                      arguments to this function are incorrect
+   |
+note: function defined here
+  --> src/live_collections/sliced/style.rs
+   |
+   | pub fn atomic<T>(t: T, nondet: NonDet) -> Atomic<T> {
+   |        ^^^^^^
+
+error[E0425]: cannot find function `foobar` in this scope
+  --> tests/compile-fail/stable/sliced_missing_arg.rs:15:22
+   |
+15 |         let g = use::foobar();
+   |                      ^^^^^^ not found in this scope
