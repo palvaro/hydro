@@ -552,6 +552,27 @@ pub trait DfirBuilder {
         out_location: &LocationId,
     );
 
+    /// Un-windows an ident when it is produced inside a tick's `loop { ... }` context
+    /// (`in_location`) but is about to be consumed by an operator emitted at a location
+    /// (`out_location`) outside that loop. Returns the ident to use downstream.
+    ///
+    /// This is needed for operators (e.g. [`HydroNode::ReduceKeyedWatermark`]) that read an
+    /// input whose location differs from the operator's own location: without an explicit
+    /// [`HydroNode::YieldConcat`]/`Batch` boundary node, the raw edge would illegally cross the
+    /// loop boundary. Emitting an un-windowing operator (`all_iterations()`) makes the edge
+    /// legal.
+    ///
+    /// The default (simulation) implementation is the identity: simulation does not emit
+    /// production `loop { ... }` contexts, so no un-windowing operator is required.
+    fn unwindow_for_consume(
+        &mut self,
+        in_ident: syn::Ident,
+        _in_location: &LocationId,
+        _out_location: &LocationId,
+    ) -> syn::Ident {
+        in_ident
+    }
+
     fn begin_atomic(
         &mut self,
         in_ident: syn::Ident,
@@ -903,6 +924,33 @@ impl DfirBuilder for ProdDfirBuilder {
             None,
             None,
         );
+    }
+
+    fn unwindow_for_consume(
+        &mut self,
+        in_ident: syn::Ident,
+        in_location: &LocationId,
+        out_location: &LocationId,
+    ) -> syn::Ident {
+        // If the input lives inside a tick's loop context but the consumer is emitted outside
+        // that loop, the raw edge would illegally exit the loop. Insert an `all_iterations()`
+        // un-windowing operator (emitted at the root level of the input's graph, just like
+        // `yield_from_tick`) so the boundary crossing is explicit and legal.
+        let in_loop = self.loop_context(in_location);
+        let out_loop = self.loop_context(out_location);
+        if in_loop.is_some() && in_loop != out_loop {
+            let out_ident = self.intermediate_ident();
+            self.graph_mut(in_location).add_dfir(
+                parse_quote! {
+                    #out_ident = #in_ident -> all_iterations();
+                },
+                None,
+                None,
+            );
+            out_ident
+        } else {
+            in_ident
+        }
     }
 
     fn begin_atomic(
@@ -5411,17 +5459,18 @@ impl HydroNode {
                         ident_stack.push(reduce_ident);
                     }
 
-                    HydroNode::ReduceKeyedWatermark {
-                        f,
-                        input,
-                        metadata,
-                        ..
-                    } => {
+                      HydroNode::ReduceKeyedWatermark {
+                          f,
+                          input,
+                          watermark,
+                          metadata,
+                      } => {
 
-                        // watermark is processed second, so it's on top
-                        let watermark_ident = ident_stack.pop().unwrap();
-                        let input_ident = ident_stack.pop().unwrap();
-                        let f_tokens = f.emit_tokens(&mut ident_stack);
+                          // watermark is processed second, so it's on top
+                          let watermark_ident = ident_stack.pop().unwrap();
+                          let watermark_location = watermark.metadata().location_id.clone();
+                          let input_ident = ident_stack.pop().unwrap();
+                          let f_tokens = f.emit_tokens(&mut ident_stack);
 
                         let stmt_id = next_stmt_id.get_and_increment();
                         let chain_ident = syn::Ident::new(
@@ -5440,18 +5489,28 @@ impl HydroNode {
                             parse_quote!(fold)
                         };
 
-                        match builders_or_callback {
-                            BuildersOrCallback::Builders(graph_builders) => {
-                                let lifetime = if input.metadata().location_id.is_top_level() {
-                                    graph_builders.cross_tick_state_lifetime(&out_location)
-                                } else {
-                                    graph_builders.tick_state_lifetime(&out_location)
-                                };
+                          match builders_or_callback {
+                              BuildersOrCallback::Builders(graph_builders) => {
+                                  // The watermark lives at its own (tick) location; if that is a
+                                  // different loop context than where this reduce is emitted
+                                  // (`out_location`), un-window it so the edge does not illegally
+                                  // exit the loop.
+                                  let watermark_ident = graph_builders.unwindow_for_consume(
+                                      watermark_ident,
+                                      &watermark_location,
+                                      &out_location,
+                                  );
 
-                                if metadata.location_id.is_root()
-                                    && graph_builders.singleton_intermediates()
-                                    && !metadata.collection_kind.is_bounded()
-                                {
+                                  let lifetime = if input.metadata().location_id.is_top_level() {
+                                      graph_builders.cross_tick_state_lifetime(&out_location)
+                                  } else {
+                                      graph_builders.tick_state_lifetime(&out_location)
+                                  };
+
+                                  if metadata.location_id.is_root()
+                                      && graph_builders.singleton_intermediates()
+                                      && !metadata.collection_kind.is_bounded()
+                                  {
                                     todo!(
                                         "Reduce keyed watermarked on a top-level bounded collection is not yet supported"
                                     )
