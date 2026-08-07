@@ -224,11 +224,32 @@ watermark batch() (in L) -> all_iterations() -> map -> chain -> fold -> flat_map
 
 The coarse `#3048` heuristic ("an external sender must precede *every* node in the
 loop") is too strong once code-gen (a) bounces data in and out of the same loop and
-(b) has a top-level operator that both reads from and writes into the same tick. A
-correct fix needs to either keep tick-located operations in a single contiguous loop
-region (eliding redundant `batch*()`/`all_iterations()` pairs so data does not
-needlessly leave and re-enter the loop) and/or refine the `#3048` constraint to only
-order a sender before the loop nodes it can actually reach.
+(b) has a top-level operator that both reads from and writes into the same tick.
+
+Both failing shapes are **re-entrant ticks**: a value that was produced inside a tick
+(and therefore already left it) is fed *back into the same tick*. Semantically this is
+not representable as a single DFIR `loop { ... }` context, so it should not be allowed
+at the Hydro level in the first place.
+
+### Fix (implemented — resolves all three Class C tests)
+
+Re-entering a tick is avoided by consuming the top-level value in a **distinct** tick
+(`node.tick()` a second time) rather than the one that produced it:
+
+- `into_singleton_unbounded_top_level_none_cardinality`: the `.snapshot(...)`/`.batch(...)`
+  now target a new `consume_tick` instead of the `node_tick` that produced the value via
+  `.latest()`.
+- `reduce_watermark_filter` / `reduce_watermark_garbage_collect`: the post-reduce
+  `.snapshot(...)` now targets a new `snapshot_tick` instead of the `node_tick` that
+  supplies the reduce's watermark (and, for `garbage_collect`, its tick-triggered input).
+
+Because the producing tick is only ever *exited* and the consuming tick is only ever
+*entered*, no loop is re-entered, the `#3048` false cycle disappears, and (combined with
+the Class A fix) all three tests pass. The distinct tick is structurally identical, so
+the test assertions are unchanged.
+
+A natural follow-up is to detect and reject re-entrant ticks at the Hydro API level with
+a clear error, rather than only failing deep in DFIR partitioning.
 
 ---
 
@@ -261,23 +282,23 @@ insert windowing / un-windowing operators at loop boundaries. But:
   (`--features deploy,sim`): 4 failures → 3 failures, **no new failures / regressions**.
   Simulation behavior is unchanged (identity default).
 
-- **`reduce_watermark_filter` / `reduce_watermark_garbage_collect`** — the Class A fix
-  removes their windowing error, but they then hit the **Class C** false cycle (their
-  `.snapshot(&node_tick)` feeds the top-level reduce back into the same tick that
-  supplies the watermark). Not fixed here.
+- **`reduce_watermark_filter` / `reduce_watermark_garbage_collect`** — **fixed** (Class C).
+  Their `.snapshot(&node_tick)` re-entered the same tick that supplied the reduce's
+  watermark; snapshotting into a distinct `node.tick()` removes the re-entrancy, and with
+  the Class A fix both now pass.
 
-- **Class B (paxos)** and **Class C (`into_singleton` + the two watermark snapshot
-  cases)** — diagnosed but **not** fixed. They require reworking the loop-boundary
-  emission so that (1) cross-loop-context consumers (especially `Tee` fan-out and
-  singleton references) route through a windowing boundary on loop entry, (2) redundant
-  adjacent `batch*()` / `all_iterations()` pairs are elided so data does not needlessly
-  leave and re-enter the same loop, and (3) the `#3048` loop-ingress ordering constraint
-  in `flat_to_partitioned.rs` is refined so it does not manufacture false cycles when a
-  top-level operator both reads from and writes into the same tick. These touch shared
-  `dfir_lang` partitioning logic and the `Tee`/reference plumbing and carry a high risk
-  of regressing the currently-passing tests, so they are left as follow-ups.
-  `into_singleton_unbounded_top_level_none_cardinality` is already flagged as
-  known-broken by the WIP commit that introduced phase 1.
+- **Class C (`into_singleton` + the two watermark snapshot cases)** — **fixed** by
+  rewriting the tests to avoid re-entering a tick (consume the top-level value in a
+  second, distinct `node.tick()`). See the Class C *Fix* section. The whole `hydro_lang`
+  suite (`--features deploy,sim`) now passes (was 4 failures → 0).
+
+- **Class B (paxos)** — diagnosed but **not** fixed. It requires reworking the
+  loop-boundary emission so that cross-loop-context consumers (especially `Tee` fan-out
+  and singleton references fed by a `YieldFromTick`/`all_iterations()`) route through a
+  windowing boundary on loop entry, and/or eliding redundant adjacent
+  `batch*()`/`all_iterations()` pairs. This touches shared `Tee`/reference plumbing and
+  carries a higher risk of regressing currently-passing tests, so it is left as a
+  follow-up.
 
 ## Fix — code changes
 
