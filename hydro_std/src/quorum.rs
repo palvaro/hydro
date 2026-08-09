@@ -1,7 +1,7 @@
 use std::hash::Hash;
 
 use hydro_lang::live_collections::stream::{NoOrder, Ordering};
-use hydro_lang::location::Location;
+use hydro_lang::location::{Location, TopLevel};
 use hydro_lang::prelude::*;
 
 pub fn collect_quorum_with_response<
@@ -164,7 +164,7 @@ pub fn collect_quorum<'a, L: Location<'a>, Order: Ordering, K: Clone + Eq + Hash
 #[expect(clippy::type_complexity, reason = "stream types with ordering")]
 pub fn collect_dynamic_quorum<
     'a,
-    L: Location<'a> + NoTick,
+    L: Location<'a, DropConsistency = L> + TopLevel<'a>,
     K: Clone + Eq + Hash,
 >(
     acks: Stream<(K, Result<(), ()>), L, Unbounded, NoOrder>,

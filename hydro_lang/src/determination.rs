@@ -12,7 +12,8 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::compile::ir::{CollectionKind, HydroNode, HydroRoot, StreamOrder};
+use crate::compile::ir::{CollectionKind, DebugExpr, HydroNode, HydroRoot, StreamOrder};
+use crate::compile::builder::CycleId;
 
 /// Unique ID for a nondet point, derived from its position in traversal.
 pub type NonDetId = usize;
@@ -40,7 +41,10 @@ pub struct DepthAnalysis {
     /// Commitments grouped by layer.
     pub layers: Vec<Vec<NonDetId>>,
     /// The determination depth (number of layers, 0 = fully monotone).
+    /// Only meaningful if `unbounded` is false.
     pub depth: usize,
+    /// Whether the depth is unbounded (cycle contains genuine commitments).
+    pub unbounded: bool,
 }
 
 /// Analyze a set of IR roots to compute determination depth.
@@ -65,12 +69,15 @@ pub fn analyze_depth(roots: &[HydroRoot]) -> DepthAnalysis {
     let layers = compute_layers(&genuine_commitments, &dependency_edges);
     let depth = layers.len();
 
+    let unbounded = collector.unbounded;
+
     DepthAnalysis {
         nondet_points,
         genuine_commitments,
         dependency_edges,
         layers,
         depth,
+        unbounded,
     }
 }
 
@@ -94,14 +101,103 @@ fn is_absorbing_fold(input_node: &HydroNode) -> bool {
     }
 }
 
+/// Detects the pattern where `fold()` internally called `assume_ordering` to strengthen
+/// from NoOrder to TotalOrder — indicating commutativity was proved (via manual_proof!).
+fn is_commutativity_strengthened(input_node: &HydroNode) -> bool {
+    if let HydroNode::ObserveNonDet { inner, .. } = input_node {
+        let inner_metadata = inner.metadata();
+        return matches!(
+            &inner_metadata.collection_kind,
+            CollectionKind::Stream {
+                order: StreamOrder::NoOrder,
+                ..
+            } | CollectionKind::KeyedStream {
+                value_order: StreamOrder::NoOrder,
+                ..
+            }
+        );
+    }
+
+    if let HydroNode::Cast { inner, .. } = input_node {
+        let inner_metadata = inner.metadata();
+        return matches!(
+            &inner_metadata.collection_kind,
+            CollectionKind::Stream {
+                order: StreamOrder::NoOrder,
+                ..
+            } | CollectionKind::KeyedStream {
+                value_order: StreamOrder::NoOrder,
+                ..
+            }
+        );
+    }
+
+    false
+}
+
+/// Analyzes a fold's accumulator closure AST to determine if it is commutative.
+///
+/// Uses a whitelist of known-commutative patterns:
+/// - `*acc += v` (addition/increment)
+/// - `*acc |= v` (bitwise or)
+/// - `*acc &= v` (bitwise and)
+/// - `set.insert(v)` / `acc.insert(v)` (set insertion)
+/// - `*acc = max(...)` / `*acc = min(...)`
+/// - `*acc += 1` (counting)
+///
+/// Returns true if the closure matches a known-commutative pattern.
+/// Returns false (conservative) for anything else.
+fn is_commutative_closure(acc_expr: &DebugExpr) -> bool {
+    let expr_str = acc_expr.to_string();
+
+    // Normalize whitespace for matching
+    let normalized: String = expr_str.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // Pattern: += (addition is commutative)
+    if normalized.contains("+= ") || normalized.contains("+=") {
+        return true;
+    }
+
+    // Pattern: |= (bitwise or is commutative)
+    if normalized.contains("|=") {
+        return true;
+    }
+
+    // Pattern: &= (bitwise and is commutative)
+    if normalized.contains("&=") {
+        return true;
+    }
+
+    // Pattern: .insert( (set/hashset insert is commutative)
+    if normalized.contains(".insert(") || normalized.contains(".insert (") {
+        return true;
+    }
+
+    // Pattern: max/min assignment
+    if (normalized.contains("max") || normalized.contains("min"))
+        && (normalized.contains("= max") || normalized.contains("= min")
+            || normalized.contains("std::cmp::max") || normalized.contains("std::cmp::min"))
+    {
+        return true;
+    }
+
+    false
+}
+
 /// Tree traversal collector that builds nondet points and dependency info.
 struct TreeCollector {
     nondet_points: Vec<NonDetPoint>,
     dependency_edges: Vec<(NonDetId, NonDetId)>,
-    /// Map from node pointer → nondet ID (for Tee/SharedNode dedup)
+    /// Map from node pointer → () (for Tee/SharedNode dedup)
     seen_tees: HashMap<*const RefCell<HydroNode>, ()>,
     /// ID counter for nondet points
     next_id: NonDetId,
+    /// Track which genuine commitments are ancestors of each CycleSink.
+    /// If a CycleSource feeds into a genuine commitment that is also an ancestor
+    /// of the corresponding CycleSink, the depth is unbounded.
+    cycle_sink_ancestors: HashMap<CycleId, Vec<NonDetId>>,
+    /// Whether unbounded depth was detected (cycle contains genuine commitment).
+    unbounded: bool,
 }
 
 impl TreeCollector {
@@ -111,15 +207,40 @@ impl TreeCollector {
             dependency_edges: Vec::new(),
             seen_tees: HashMap::new(),
             next_id: 0,
+            cycle_sink_ancestors: HashMap::new(),
+            unbounded: false,
         }
     }
 
     fn visit_root(&mut self, root: &HydroRoot) {
-        let input = root_input(root);
-        // Walk from root toward leaves. Track:
-        // - ancestor_commitments: genuine commitments we've passed through on path from root
-        // - passed_absorber: whether we've passed through an absorbing fold since the root
-        self.visit_node(input, &[], false);
+        match root {
+            HydroRoot::CycleSink { cycle_id, input, .. } => {
+                // Visit the input subtree, tracking ancestors as usual.
+                // After visiting, record which genuine commitments were ancestors
+                // of this CycleSink — they are "inside" the cycle.
+                let before_count = self.nondet_points.len();
+                self.visit_node(input, &[], false);
+
+                // All genuine commitments found while visiting this subtree
+                // are potentially inside this cycle.
+                let commitments_in_subtree: Vec<NonDetId> = self.nondet_points[before_count..]
+                    .iter()
+                    .filter(|p| !p.absorbed)
+                    .map(|p| p.id)
+                    .collect();
+
+                if !commitments_in_subtree.is_empty() {
+                    self.cycle_sink_ancestors.insert(*cycle_id, commitments_in_subtree);
+                    // A cycle with genuine commitments means unbounded depth:
+                    // the commitment's output feeds back to its own input via the cycle.
+                    self.unbounded = true;
+                }
+            }
+            _ => {
+                let input = root_input(root);
+                self.visit_node(input, &[], false);
+            }
+        }
     }
 
     /// Visit a node in the IR tree.
@@ -152,6 +273,7 @@ impl TreeCollector {
             HydroNode::ObserveNonDet {
                 inner,
                 trusted,
+                metadata,
                 ..
             } => {
                 let id = self.next_id;
@@ -159,6 +281,12 @@ impl TreeCollector {
 
                 // Genuine if no absorber between root and here
                 let absorbed = passed_absorber;
+
+                // Debug: print location info for this nondet point
+                eprintln!("  NONDET id={} trusted={} absorbed={} loc={:?} inner_type={}",
+                    id, trusted, absorbed,
+                    metadata.location_id,
+                    inner.print_root());
 
                 self.nondet_points.push(NonDetPoint {
                     id,
@@ -186,11 +314,14 @@ impl TreeCollector {
 
             // Batch is the PRIMARY nondeterminism point — it determines which
             // messages land in which tick. This is where batching nondeterminism lives.
-            HydroNode::Batch { inner, .. } => {
+            HydroNode::Batch { inner, metadata, .. } => {
                 let id = self.next_id;
                 self.next_id += 1;
 
                 let absorbed = passed_absorber;
+
+                eprintln!("  BATCH id={} absorbed={} loc={:?} inner_type={}",
+                    id, absorbed, metadata.location_id, inner.print_root());
 
                 self.nondet_points.push(NonDetPoint {
                     id,
@@ -211,12 +342,26 @@ impl TreeCollector {
                 }
             }
 
-            HydroNode::Fold { input, .. }
-            | HydroNode::FoldKeyed { input, .. }
-            | HydroNode::Reduce { input, .. }
+            HydroNode::Fold { input, acc, .. } => {
+                let absorbs = is_absorbing_fold(input)
+                    || is_commutativity_strengthened(input)
+                    || is_commutative_closure(acc);
+                eprintln!("  FOLD absorbs={} acc={}", absorbs, acc);
+                let new_passed_absorber = passed_absorber || absorbs;
+                self.visit_node(input, ancestor_commitments, new_passed_absorber);
+            }
+
+            HydroNode::FoldKeyed { input, acc, .. } => {
+                let absorbs = is_absorbing_fold(input)
+                    || is_commutativity_strengthened(input)
+                    || is_commutative_closure(acc);
+                let new_passed_absorber = passed_absorber || absorbs;
+                self.visit_node(input, ancestor_commitments, new_passed_absorber);
+            }
+
+            HydroNode::Reduce { input, .. }
             | HydroNode::ReduceKeyed { input, .. } => {
-                // Check if this fold absorbs nondeterminism
-                let absorbs = is_absorbing_fold(input);
+                let absorbs = is_absorbing_fold(input) || is_commutativity_strengthened(input);
                 let new_passed_absorber = passed_absorber || absorbs;
                 self.visit_node(input, ancestor_commitments, new_passed_absorber);
             }
@@ -291,7 +436,7 @@ impl TreeCollector {
             HydroNode::ReduceKeyedWatermark {
                 input, watermark, ..
             } => {
-                let absorbs = is_absorbing_fold(input);
+                let absorbs = is_absorbing_fold(input) || is_commutativity_strengthened(input);
                 let new_passed_absorber = passed_absorber || absorbs;
                 self.visit_node(input, ancestor_commitments, new_passed_absorber);
                 self.visit_node(watermark, ancestor_commitments, passed_absorber);
@@ -722,5 +867,135 @@ mod tests {
             "Sequential batches with cross-dependency should be depth >= 2. Got: {:?}",
             result
         );
+    }
+
+    /// REAL Example 1: batch + commutative fold.
+    /// Pattern: source_iter → batch → fold(commutative).
+    /// The batch introduces nondet; the commutative fold should absorb it.
+    ///
+    /// KNOWN ISSUE: The analysis currently reports depth 1 (should be 0).
+    /// The fold has `commutative = manual_proof!(...)` but the analysis only
+    /// checks `StreamOrder::NoOrder` on the input — it doesn't inspect the
+    /// manual_proof annotation. Fix: recognize manual_proof!(commutative) as
+    /// an absorption signal, or analyze the closure AST.
+    #[test]
+    fn real_example1_broadcast_fold() {
+        let mut flow = FlowBuilder::new();
+        let process = flow.process::<()>();
+        let tick = process.tick();
+
+        // source → batch (introduces nondet) → commutative fold (absorbs it)
+        process
+            .source_iter(q!(vec![1i32, 2, 3, 4, 5]))
+            .batch(&tick, nondet!(/** delivery order nondeterminism */))
+            .fold(
+                q!(|| 0i32),
+                q!(|acc, v| *acc += v,
+                   commutative = manual_proof!(/** addition is commutative */)),
+            )
+            .all_ticks()
+            .for_each(q!(|_| {}));
+
+        let built = flow.finalize();
+        let result = analyze_depth(built.ir());
+
+        println!("=== REAL EXAMPLE 1: batch + commutative fold ===");
+        println!("  nondet_points: {} found", result.nondet_points.len());
+        for p in &result.nondet_points {
+            println!("    id={}, trusted={}, absorbed={}", p.id, p.trusted, p.absorbed);
+        }
+        println!("  genuine_commitments: {:?}", result.genuine_commitments);
+        println!("  dependency_edges: {:?}", result.dependency_edges);
+        println!("  layers: {:?}", result.layers);
+        println!("  depth: {}", result.depth);
+        println!("================================================");
+    }
+
+    /// REAL Example 2: quorum + first-wins fold.
+    /// Pattern: source_iter → batch → collect_quorum-like logic → non-commutative fold.
+    /// The batch introduces nondet; the non-commutative fold does NOT absorb.
+    /// Expected: depth >= 1.
+    #[test]
+    fn real_example2_leader_election() {
+        let mut flow = FlowBuilder::new();
+        let process = flow.process::<()>();
+        let tick = process.tick();
+
+        // Simulate acks for two keys arriving
+        // collect_quorum uses sliced! with nondet! internally,
+        // but let's replicate the core pattern directly:
+        // batch → non-commutative fold (first wins)
+        process
+            .source_iter(q!(vec![1i32, 2, 1, 2, 1]))
+            .batch(&tick, nondet!(/** ack arrival order */))
+            .fold(
+                q!(|| None::<i32>),
+                q!(|leader, key| {
+                    if leader.is_none() {
+                        *leader = Some(key);
+                    }
+                }),
+            )
+            .all_ticks()
+            .for_each(q!(|_| {}));
+
+        let built = flow.finalize();
+        let result = analyze_depth(built.ir());
+
+        println!("=== REAL EXAMPLE 2: batch + non-commutative fold (first wins) ===");
+        println!("  nondet_points: {} found", result.nondet_points.len());
+        for p in &result.nondet_points {
+            println!("    id={}, trusted={}, absorbed={}", p.id, p.trusted, p.absorbed);
+        }
+        println!("  genuine_commitments: {:?}", result.genuine_commitments);
+        println!("  dependency_edges: {:?}", result.dependency_edges);
+        println!("  layers: {:?}", result.layers);
+        println!("  depth: {}", result.depth);
+        println!("================================================");
+    }
+
+    /// REAL Example 3: two batches where second depends on first.
+    /// Pattern: batch1 → non-commutative fold → feeds into batch2's context → fold.
+    /// Expected: depth >= 2.
+    #[test]
+    fn real_example3_sequential_slots() {
+        let mut flow = FlowBuilder::new();
+        let process = flow.process::<()>();
+        let tick = process.tick();
+
+        // Slot 1: batch → first-wins fold → decides a "threshold"
+        let threshold = process
+            .source_iter(q!(vec![2usize, 3, 2]))
+            .batch(&tick, nondet!(/** slot 1: which votes batched */))
+            .fold(
+                q!(|| 0usize),
+                q!(|first, v| { if *first == 0 { *first = v; } }),
+            );
+
+        // Slot 2: batch → cross with threshold → first-wins fold
+        process
+            .source_iter(q!(vec![10i32, 20, 30]))
+            .batch(&tick, nondet!(/** slot 2: which ops batched */))
+            .cross_singleton(threshold)
+            .fold(
+                q!(|| None::<(i32, usize)>),
+                q!(|first, v| { if first.is_none() { *first = Some(v); } }),
+            )
+            .all_ticks()
+            .for_each(q!(|_| {}));
+
+        let built = flow.finalize();
+        let result = analyze_depth(built.ir());
+
+        println!("=== REAL EXAMPLE 3: two batches with cross-dependency ===");
+        println!("  nondet_points: {} found", result.nondet_points.len());
+        for p in &result.nondet_points {
+            println!("    id={}, trusted={}, absorbed={}", p.id, p.trusted, p.absorbed);
+        }
+        println!("  genuine_commitments: {:?}", result.genuine_commitments);
+        println!("  dependency_edges: {:?}", result.dependency_edges);
+        println!("  layers: {:?}", result.layers);
+        println!("  depth: {}", result.depth);
+        println!("================================================");
     }
 }

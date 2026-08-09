@@ -7,7 +7,7 @@ use serde::de::DeserializeOwned;
 use stageleft::{q, quote_type};
 use syn::parse_quote;
 
-use super::{ExactlyOnce, MinOrder, Ordering, Stream, TotalOrder};
+use super::{ExactlyOnce, MinOrder, NoOrder, Ordering, Stream, TotalOrder};
 use crate::compile::ir::{
     DebugInstantiate, HydroIrOpMetadata, HydroNode, HydroRoot, NetworkRecv, NetworkSend,
 };
@@ -1329,6 +1329,77 @@ impl<'a, T, L, B: Boundedness, C: Consistency, O: Ordering, R: Retries>
             port_id: external_port_id,
             _phantom: PhantomData,
         }
+    }
+
+    /// Broadcasts elements of this stream to all members of the same cluster,
+    /// assuming that only a single member (the leader) produces data.
+    ///
+    /// This is the intra-cluster equivalent of [`Process::broadcast_closed`]:
+    /// one source sends the same data to every member of a fixed cluster via a
+    /// transport whose failure model guarantees delivery to live members.
+    ///
+    /// # Consistency guarantee
+    ///
+    /// The output carries [`EventualConsistency`](crate::location::cluster::EventualConsistency)
+    /// (or [`NoConsistency`] for plain `lossy`) — inferred from the network's
+    /// failure policy, exactly like `broadcast_closed`.
+    ///
+    /// # Precondition
+    ///
+    /// The caller must ensure that only ONE member of the cluster produces
+    /// elements on this stream (the leader). If multiple members produce data,
+    /// the EC guarantee still holds (each member's broadcast is independently
+    /// EC), but the combined stream will interleave data from multiple sources —
+    /// which may not be the intended semantics for a single-leader protocol.
+    ///
+    /// # Example
+    /// ```text
+    /// // On the leader member: sequence requests, then broadcast to all
+    /// let proposals = /* ... sequencing logic, only runs on leader ... */;
+    /// let replicated = proposals.broadcast_from_member(&cluster, TCP.fail_stop().bincode());
+    /// // replicated: Stream<_, Cluster<_, _, EventualConsistency>, _>
+    /// ```
+    pub fn broadcast_from_member<N: NetworkFor<T>>(
+        self,
+        via: N,
+    ) -> Stream<
+        T,
+        Cluster<'a, L, N::ConsistencyGuarantee>,
+        Unbounded,
+        NoOrder,
+        R,
+    >
+    where
+        T: Clone + Serialize + DeserializeOwned,
+        O: MinOrder<N::OrderingGuarantee>,
+    {
+        let cluster_ids = ClusterIds {
+            key: self.location.key,
+            _phantom: PhantomData,
+        };
+        let member_ids = self.location.source_iter(q!(cluster_ids
+            .iter()
+            .map(|id| MemberId::from_tagless(id.clone()))));
+
+        // Cross-product data × all member IDs, then demux to route each copy.
+        // On non-leader members, the stream is empty so nothing is sent.
+        // On the leader, every element is paired with every member ID and sent.
+        let target = self.location.drop_consistency();
+        self.weaken_consistency()
+            .cross_product(member_ids)
+            .map(q!(|(data, member_id)| (member_id, data)))
+            .into_keyed()
+            .demux(&target, via)
+            .values()
+            .assert_has_consistency_of_trusted(manual_proof!(
+                /// A single source member sends the same data to every member of a
+                /// fixed cluster via a transport whose failure policy delivers the
+                /// same messages to every live member (tracked by
+                /// `NetworkFor::ConsistencyGuarantee`). This is semantically
+                /// identical to `broadcast_closed` from a Process — the source
+                /// being a cluster member rather than a separate Process does not
+                /// affect the consistency argument.
+            ))
     }
 
     #[cfg(feature = "sim")]

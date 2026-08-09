@@ -15,8 +15,8 @@ backend_fjall = ["dep:fjall"]
 backend_rusqlite = ["dep:rusqlite"]
 
 [dependencies]
-hydro_lang = { path = "../hydro_lang", version = "^0.15.0" }
-hydro_std = { path = "../hydro_std", version = "^0.15.0" }
+hydro_lang = { path = "../hydro_lang", version = "^0.17.0-alpha" }
+hydro_std = { path = "../hydro_std", version = "^0.17.0-alpha" }
 hydro_test = { path = "../hydro_test" }
 stageleft.workspace = true
 serde = { version = "1.0.197", features = ["derive"] }
@@ -38,5 +38,5 @@ stageleft_tool.workspace = true
 proptest = "1"
 tokio = { version = "1.29.0", features = ["full"] }
 futures = "0.3"
-hydro_lang = { path = "../hydro_lang", version = "^0.15.0", features = ["sim", "deploy", "runtime_support"] }
+hydro_lang = { path = "../hydro_lang", version = "^0.17.0-alpha", features = ["sim", "deploy", "runtime_support"] }
 hydro_deploy = { path = "../hydro_deploy/core" }
