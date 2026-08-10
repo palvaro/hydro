@@ -910,20 +910,43 @@ impl DfirBuilder for ProdDfirBuilder {
         in_location: &LocationId,
         _in_kind: &CollectionKind,
         out_ident: &syn::Ident,
-        _out_location: &LocationId,
+        out_location: &LocationId,
     ) {
-        // Exit the tick's loop back to the top level. `in_ident` is produced inside the loop;
-        // `all_iterations()` is the un-windowing operator, emitted at the root level.
+        // A `YieldConcat` may target either the top level (`latest`/`all_ticks`) or an atomic
+        // region wrapping the *same* tick (`latest_atomic`/`all_ticks_atomic`). The atomic region
+        // is fused with (runs synchronously inside) its tick's loop, so a yield into it stays in
+        // the loop and is emitted as identity — emitting `all_iterations()` there would illegally
+        // exit the loop even though the consumer lives inside it. This mirrors the simulation
+        // builder, which also emits identity for a same-tick atomic yield.
         //
-        // TODO(#2902 phase 2): singleton/optional yields need held-state semantics (observe the
-        // latest value *between* firings), not plain event semantics.
-        self.graph_mut(in_location).add_dfir(
-            parse_quote! {
-                #out_ident = #in_ident -> all_iterations();
-            },
-            None,
-            None,
-        );
+        // TODO(#2902 phase 2): singleton/optional yields to the top level need held-state
+        // semantics (observe the latest value *between* firings), not plain event semantics.
+        match (Self::tick_of(in_location), Self::tick_of(out_location)) {
+            (Some(in_tick), Some(out_tick)) => {
+                assert_eq!(
+                    in_tick, out_tick,
+                    "atomic yield to a different tick should have been unified"
+                );
+                self.add_dfir_in(
+                    out_location,
+                    parse_quote! {
+                        #out_ident = #in_ident;
+                    },
+                    None,
+                );
+            }
+            _ => {
+                // Exit the tick's loop back to the top level. `in_ident` is produced inside the
+                // loop; `all_iterations()` is the un-windowing operator, emitted at the root level.
+                self.graph_mut(in_location).add_dfir(
+                    parse_quote! {
+                        #out_ident = #in_ident -> all_iterations();
+                    },
+                    None,
+                    None,
+                );
+            }
+        }
     }
 
     fn unwindow_for_consume(
