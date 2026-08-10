@@ -785,28 +785,6 @@ impl DfirBuilder for ProdDfirBuilder {
         false
     }
 
-    // /// The DFIR persistence lifetime for tick-scoped operator state. Inside a tick's
-    // /// `loop { ... }` context (`'none`), state resets each loop execution (== each tick);
-    // /// at the top level (`'tick`), it resets each tick.
-    // fn tick_state_lifetime(&self, op_location: &LocationId) -> TokenStream {
-    //     if Self::tick_of(op_location).is_some() {
-    //         quote!('none)
-    //     } else {
-    //         quote!('tick)
-    //     }
-    // }
-
-    // /// The DFIR persistence lifetime for cross-tick operator state. Inside a tick's
-    // /// `loop { ... }` context (`'loop`), state persists across loop executions (== across ticks);
-    // /// at the top level (`'static`), it persists forever.
-    // fn cross_tick_state_lifetime(&self, op_location: &LocationId) -> TokenStream {
-    //     if Self::tick_of(op_location).is_some() {
-    //         quote!('loop)
-    //     } else {
-    //         quote!('static)
-    //     }
-    // }
-
     fn add_dfir_at(
         &mut self,
         location: &LocationId,
@@ -4138,7 +4116,7 @@ impl HydroNode {
                                             #source_ident = source_iter(#expr);
                                         }
                                     } else {
-                                        // TODO(shadaj): a more natural semantics would be to to re-evaluate the expression on each tick
+                                        // TODO(shadaj): a more natural semantics would be to re-evaluate the expression on each tick
                                         tick_source_rhs = Some(quote! { source_iter(#expr) });
                                         parse_quote! {
                                             #source_ident = source_iter(#expr) -> persist::<'static>();
