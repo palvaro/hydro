@@ -508,6 +508,30 @@ impl MaelstromDeployment {
     ///
     /// This will block until Maelstrom completes.
     pub fn run(self) -> Result<(), Error> {
+        self.run_repeated(1)
+    }
+
+    /// Run Maelstrom `count` times against the same compiled binary, each in
+    /// its own scratch working directory, returning `Ok(())` only if every
+    /// repetition's analysis is valid.
+    ///
+    /// This intentionally loops independent process invocations from Rust
+    /// rather than delegating repetition to Maelstrom/Jepsen's own
+    /// `--test-count N` CLI flag. `--test-count` is implemented as a plain
+    /// `doseq` in `jepsen.cli/single-test-cmd` that should in principle run
+    /// the full setup/run/analyze cycle `N` times inside one JVM process, but
+    /// empirically (verified against the pinned Maelstrom v0.2.3 release used
+    /// by this crate's tests) passing `--test-count 3` produced only a single
+    /// "Running test" / "Analysis complete" cycle and a single store
+    /// directory, not three. Rather than depend on that opaque,
+    /// version-sensitive internal behavior, we drive the repetition count
+    /// ourselves: each iteration is a fresh `maelstrom test` process, whose
+    /// stdout is fully drained and whose exit status is checked (see
+    /// `run_once`), so every repetition is independently verifiable (its own
+    /// store directory) and failures are attributed to a specific repetition.
+    pub fn run_repeated(self, count: usize) -> Result<(), Error> {
+        assert!(count > 0, "count must be at least 1");
+
         let binary_path = self.build()?;
 
         // Warm up the binary before handing it to Maelstrom. On macOS, the
@@ -517,7 +541,8 @@ impl MaelstromDeployment {
         // the `init` RPC, so a cold first exec (multiplied across concurrently
         // launched nodes) can cause spurious node-startup timeouts. The warmup
         // invocation sees EOF on stdin and exits immediately, priming the
-        // system's first-exec caches for the real run.
+        // system's first-exec caches for the real run. This only needs to
+        // happen once, before the first repetition.
         std::process::Command::new(&binary_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -525,6 +550,23 @@ impl MaelstromDeployment {
             .spawn()?
             .wait()?;
 
+        for i in 0..count {
+            self.run_once(&binary_path).map_err(|e| {
+                Error::other(format!(
+                    "Maelstrom repetition {}/{} failed: {}",
+                    i + 1,
+                    count,
+                    e
+                ))
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Run Maelstrom exactly once against `binary_path`, in a fresh scratch
+    /// working directory, returning `Ok(())` if the analysis was valid.
+    fn run_once(&self, binary_path: &Path) -> Result<(), Error> {
         // Use a unique working directory per run to avoid conflicts with concurrent tests.
         let run_dir = tempfile::tempdir().map_err(Error::other)?;
 
@@ -533,7 +575,7 @@ impl MaelstromDeployment {
             .arg("-w")
             .arg(&self.workload)
             .arg("--bin")
-            .arg(&binary_path)
+            .arg(binary_path)
             .arg("--node-count")
             .arg(self.node_count.to_string())
             .current_dir(run_dir.path())
@@ -547,11 +589,11 @@ impl MaelstromDeployment {
             cmd.arg("--rate").arg(rate.to_string());
         }
 
-        if let Some(availability) = self.availability {
+        if let Some(availability) = &self.availability {
             cmd.arg("--availability").arg(availability);
         }
 
-        if let Some(nemesis) = self.nemesis {
+        if let Some(nemesis) = &self.nemesis {
             cmd.arg("--nemesis").arg(nemesis);
         }
 
@@ -559,32 +601,52 @@ impl MaelstromDeployment {
             cmd.arg(arg);
         }
 
-        let spawned = cmd.spawn()?;
+        let mut spawned = cmd.spawn()?;
 
-        for line in BufReader::new(spawned.stdout.unwrap()).lines() {
+        // Drain stdout to EOF (rather than returning as soon as we see the
+        // first success line) and inspect the process's exit status as the
+        // final source of truth, instead of trusting only the first matching
+        // line. This avoids abandoning a still-running child before it
+        // actually exits.
+        let mut saw_invalid_analysis = false;
+        let mut saw_any_result = false;
+
+        for line in BufReader::new(spawned.stdout.take().unwrap()).lines() {
             let line = line?;
             eprintln!("{}", line);
 
             if line.starts_with("Analysis invalid!") {
-                let path = run_dir.keep();
-                dump_node_logs(&path);
-                return Err(Error::other(format!(
-                    "Analysis was invalid. Maelstrom store at: {}",
-                    path.display()
-                )));
+                saw_invalid_analysis = true;
+                saw_any_result = true;
             } else if line.starts_with("Errors occurred during analysis, but no anomalies found.")
                 || line.starts_with("Everything looks good!")
             {
-                return Ok(());
+                saw_any_result = true;
             }
         }
 
-        let path = run_dir.keep();
-        dump_node_logs(&path);
-        Err(Error::other(format!(
-            "Maelstrom produced an unexpected result. Store at: {}",
-            path.display()
-        )))
+        let status = spawned.wait()?;
+
+        if saw_invalid_analysis || !status.success() {
+            let path = run_dir.keep();
+            dump_node_logs(&path);
+            return Err(Error::other(format!(
+                "Analysis was invalid (or Maelstrom exited with {}). Maelstrom store at: {}",
+                status,
+                path.display()
+            )));
+        }
+
+        if !saw_any_result {
+            let path = run_dir.keep();
+            dump_node_logs(&path);
+            return Err(Error::other(format!(
+                "Maelstrom produced an unexpected result. Store at: {}",
+                path.display()
+            )));
+        }
+
+        Ok(())
     }
 
     /// Get the path to the compiled binary, building it if necessary.

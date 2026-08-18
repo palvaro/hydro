@@ -189,6 +189,318 @@ mod tests {
         );
     }
 
+    /// Per-`f` variants of [`create_paxos`] that pass a LITERAL fault tolerance
+    /// `f` (and literal `f+1`, quorum) into the staged bench. The value `f`
+    /// flows into `q!` staged code (e.g. `q!(num_received == f + 1)`), so it
+    /// must be a compile-time literal at the create site — a runtime `f` cannot
+    /// be captured. These mirror `create_paxos` exactly, differing only in the
+    /// literal `f`/`f+1`/acceptor sizing, so the sweep runs f=1/2/3 (→ 3/5/7
+    /// acceptors).
+    #[cfg(stageleft_runtime)]
+    fn create_paxos_f1<'a>(
+        proposers: &hydro_lang::location::Cluster<'a, crate::cluster::paxos::Proposer>,
+        acceptors: &hydro_lang::location::Cluster<'a, crate::cluster::paxos::Acceptor>,
+        clients: &hydro_lang::location::Cluster<'a, super::Client>,
+        client_aggregator: &hydro_lang::location::Process<'a, super::Aggregator>,
+        replicas: &hydro_lang::location::Cluster<'a, crate::cluster::kv_replica::Replica>,
+    ) {
+        use hydro_lang::location::Location;
+        use hydro_std::bench_client::pretty_print_bench_results;
+        use stageleft::q;
+
+        super::paxos_bench(
+            1000,
+            1usize,
+            2usize,
+            CorePaxos {
+                proposers: proposers.clone(),
+                acceptors: acceptors.clone(),
+                paxos_config: PaxosConfig {
+                    f: 1,
+                    i_am_leader_send_timeout: 5,
+                    i_am_leader_check_timeout: 10,
+                    i_am_leader_check_timeout_delay_multiplier: 15,
+                },
+            },
+            clients,
+            clients.singleton(q!(100usize)),
+            client_aggregator,
+            replicas,
+            100,
+            1000,
+            pretty_print_bench_results,
+        );
+    }
+
+    #[cfg(stageleft_runtime)]
+    fn create_paxos_f2<'a>(
+        proposers: &hydro_lang::location::Cluster<'a, crate::cluster::paxos::Proposer>,
+        acceptors: &hydro_lang::location::Cluster<'a, crate::cluster::paxos::Acceptor>,
+        clients: &hydro_lang::location::Cluster<'a, super::Client>,
+        client_aggregator: &hydro_lang::location::Process<'a, super::Aggregator>,
+        replicas: &hydro_lang::location::Cluster<'a, crate::cluster::kv_replica::Replica>,
+    ) {
+        use hydro_lang::location::Location;
+        use hydro_std::bench_client::pretty_print_bench_results;
+        use stageleft::q;
+
+        super::paxos_bench(
+            1000,
+            2usize,
+            3usize,
+            CorePaxos {
+                proposers: proposers.clone(),
+                acceptors: acceptors.clone(),
+                paxos_config: PaxosConfig {
+                    f: 2,
+                    i_am_leader_send_timeout: 5,
+                    i_am_leader_check_timeout: 10,
+                    i_am_leader_check_timeout_delay_multiplier: 15,
+                },
+            },
+            clients,
+            clients.singleton(q!(100usize)),
+            client_aggregator,
+            replicas,
+            100,
+            1000,
+            pretty_print_bench_results,
+        );
+    }
+
+    #[cfg(stageleft_runtime)]
+    fn create_paxos_f3<'a>(
+        proposers: &hydro_lang::location::Cluster<'a, crate::cluster::paxos::Proposer>,
+        acceptors: &hydro_lang::location::Cluster<'a, crate::cluster::paxos::Acceptor>,
+        clients: &hydro_lang::location::Cluster<'a, super::Client>,
+        client_aggregator: &hydro_lang::location::Process<'a, super::Aggregator>,
+        replicas: &hydro_lang::location::Cluster<'a, crate::cluster::kv_replica::Replica>,
+    ) {
+        use hydro_lang::location::Location;
+        use hydro_std::bench_client::pretty_print_bench_results;
+        use stageleft::q;
+
+        super::paxos_bench(
+            1000,
+            3usize,
+            4usize,
+            CorePaxos {
+                proposers: proposers.clone(),
+                acceptors: acceptors.clone(),
+                paxos_config: PaxosConfig {
+                    f: 3,
+                    i_am_leader_send_timeout: 5,
+                    i_am_leader_check_timeout: 10,
+                    i_am_leader_check_timeout_delay_multiplier: 15,
+                },
+            },
+            clients,
+            clients.singleton(q!(100usize)),
+            client_aggregator,
+            replicas,
+            100,
+            1000,
+            pretty_print_bench_results,
+        );
+    }
+
+    #[tokio::test]
+    async fn paxos_kv_throughput_f1() {
+        let mut builder = hydro_lang::compile::builder::FlowBuilder::new();
+        let proposers = builder.cluster();
+        let acceptors = builder.cluster();
+        let clients = builder.cluster();
+        let client_aggregator = builder.process();
+        let replicas = builder.cluster();
+
+        create_paxos_f1(
+            &proposers,
+            &acceptors,
+            &clients,
+            &client_aggregator,
+            &replicas,
+        );
+        let mut deployment = Deployment::new();
+
+        let nodes = builder
+            .with_cluster(
+                &proposers,
+                (0..2).map(|_| TrybuildHost::new(deployment.Localhost())),
+            )
+            .with_cluster(
+                &acceptors,
+                (0..3).map(|_| TrybuildHost::new(deployment.Localhost())),
+            )
+            .with_cluster(&clients, vec![TrybuildHost::new(deployment.Localhost())])
+            .with_process(
+                &client_aggregator,
+                TrybuildHost::new(deployment.Localhost()),
+            )
+            .with_cluster(
+                &replicas,
+                (0..2).map(|_| TrybuildHost::new(deployment.Localhost())),
+            )
+            .deploy(&mut deployment);
+
+        deployment.deploy().await.unwrap();
+
+        let client_node = &nodes.get_process(&client_aggregator);
+        let client_out = client_node.stdout_filter("Throughput:");
+
+        deployment.start().await.unwrap();
+
+        collect_and_report(client_out, "MultiPaxos KV (f=1, acceptors=3)").await;
+    }
+
+    #[tokio::test]
+    async fn paxos_kv_throughput_f2() {
+        let mut builder = hydro_lang::compile::builder::FlowBuilder::new();
+        let proposers = builder.cluster();
+        let acceptors = builder.cluster();
+        let clients = builder.cluster();
+        let client_aggregator = builder.process();
+        let replicas = builder.cluster();
+
+        create_paxos_f2(
+            &proposers,
+            &acceptors,
+            &clients,
+            &client_aggregator,
+            &replicas,
+        );
+        let mut deployment = Deployment::new();
+
+        let nodes = builder
+            .with_cluster(
+                &proposers,
+                (0..3).map(|_| TrybuildHost::new(deployment.Localhost())),
+            )
+            .with_cluster(
+                &acceptors,
+                (0..5).map(|_| TrybuildHost::new(deployment.Localhost())),
+            )
+            .with_cluster(&clients, vec![TrybuildHost::new(deployment.Localhost())])
+            .with_process(
+                &client_aggregator,
+                TrybuildHost::new(deployment.Localhost()),
+            )
+            .with_cluster(
+                &replicas,
+                (0..3).map(|_| TrybuildHost::new(deployment.Localhost())),
+            )
+            .deploy(&mut deployment);
+
+        deployment.deploy().await.unwrap();
+
+        let client_node = &nodes.get_process(&client_aggregator);
+        let client_out = client_node.stdout_filter("Throughput:");
+
+        deployment.start().await.unwrap();
+
+        collect_and_report(client_out, "MultiPaxos KV (f=2, acceptors=5)").await;
+    }
+
+    #[tokio::test]
+    async fn paxos_kv_throughput_f3() {
+        let mut builder = hydro_lang::compile::builder::FlowBuilder::new();
+        let proposers = builder.cluster();
+        let acceptors = builder.cluster();
+        let clients = builder.cluster();
+        let client_aggregator = builder.process();
+        let replicas = builder.cluster();
+
+        create_paxos_f3(
+            &proposers,
+            &acceptors,
+            &clients,
+            &client_aggregator,
+            &replicas,
+        );
+        let mut deployment = Deployment::new();
+
+        let nodes = builder
+            .with_cluster(
+                &proposers,
+                (0..4).map(|_| TrybuildHost::new(deployment.Localhost())),
+            )
+            .with_cluster(
+                &acceptors,
+                (0..7).map(|_| TrybuildHost::new(deployment.Localhost())),
+            )
+            .with_cluster(&clients, vec![TrybuildHost::new(deployment.Localhost())])
+            .with_process(
+                &client_aggregator,
+                TrybuildHost::new(deployment.Localhost()),
+            )
+            .with_cluster(
+                &replicas,
+                (0..4).map(|_| TrybuildHost::new(deployment.Localhost())),
+            )
+            .deploy(&mut deployment);
+
+        deployment.deploy().await.unwrap();
+
+        let client_node = &nodes.get_process(&client_aggregator);
+        let client_out = client_node.stdout_filter("Throughput:");
+
+        deployment.start().await.unwrap();
+
+        collect_and_report(client_out, "MultiPaxos KV (f=3, acceptors=7)").await;
+    }
+
+    /// Collects 15 throughput windows from a started deployment's `client_out`,
+    /// discards the first 3 warmup windows, and prints steady-state stats — the
+    /// same logic used inline in [`paxos_some_throughput`], factored so the
+    /// f=1/2/3 sweep tests do not duplicate it.
+    async fn collect_and_report(
+        mut client_out: tokio::sync::mpsc::UnboundedReceiver<String>,
+        label: &str,
+    ) {
+        use std::str::FromStr;
+
+        use regex::Regex;
+
+        let re = Regex::new(r"Throughput: ([^ ]+) requests/s").unwrap();
+        let mut readings: Vec<f64> = Vec::new();
+        while let Some(line) = client_out.recv().await {
+            if let Some(caps) = re.captures(&line)
+                && let Ok(v) = f64::from_str(&caps[1])
+                && 0.0 < v
+            {
+                readings.push(v);
+                if readings.len() >= 15 {
+                    break;
+                }
+            }
+        }
+        // Discard the first 3 warmup windows; report steady state so the number
+        // is comparable to the broadcast-transcript KVS bench sweep.
+        println!("{} raw throughput windows: {:?}", label, readings);
+        let steady: Vec<f64> = readings.iter().skip(3).copied().collect();
+        let sample = if steady.is_empty() {
+            &readings[..]
+        } else {
+            &steady[..]
+        };
+        if !sample.is_empty() {
+            let mut sorted = sample.to_vec();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let min = sorted.first().copied().unwrap();
+            let max = sorted.last().copied().unwrap();
+            let median = sorted[sorted.len() / 2];
+            let mean = sample.iter().sum::<f64>() / sample.len() as f64;
+            println!(
+                "{} STEADY-STATE req/s over {} windows: min={:.0} median={:.0} mean={:.0} max={:.0}",
+                label,
+                sample.len(),
+                min,
+                median,
+                mean,
+                max
+            );
+        }
+    }
+
     #[test]
     fn paxos_ir() {
         let mut builder = hydro_lang::compile::builder::FlowBuilder::new();
@@ -290,19 +602,35 @@ mod tests {
         use regex::Regex;
 
         let re = Regex::new(r"Throughput: ([^ ]+) requests/s").unwrap();
-        let mut found = 0;
+        let mut readings: Vec<f64> = Vec::new();
         let mut client_out = client_out;
         while let Some(line) = client_out.recv().await {
             if let Some(caps) = re.captures(&line)
-                && let Ok(lower) = f64::from_str(&caps[1])
-                && 0.0 < lower
+                && let Ok(v) = f64::from_str(&caps[1])
+                && 0.0 < v
             {
-                println!("Found throughput lower-bound: {}", lower);
-                found += 1;
-                if found == 2 {
+                readings.push(v);
+                if readings.len() >= 15 {
                     break;
                 }
             }
+        }
+        // Discard the first 3 warmup windows; report steady state so the number
+        // is comparable to the broadcast-transcript KVS bench.
+        println!("MultiPaxos raw throughput windows: {:?}", readings);
+        let steady: Vec<f64> = readings.iter().skip(3).copied().collect();
+        let sample = if steady.is_empty() { &readings[..] } else { &steady[..] };
+        if !sample.is_empty() {
+            let mut sorted = sample.to_vec();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let min = sorted.first().copied().unwrap();
+            let max = sorted.last().copied().unwrap();
+            let median = sorted[sorted.len() / 2];
+            let mean = sample.iter().sum::<f64>() / sample.len() as f64;
+            println!(
+                "MultiPaxos STEADY-STATE req/s over {} windows: min={:.0} median={:.0} mean={:.0} max={:.0}",
+                sample.len(), min, median, mean, max
+            );
         }
     }
 }
