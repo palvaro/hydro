@@ -214,7 +214,7 @@ mod tests {
 
         let out_recv = reliable_broadcast_closed(data, &cluster).sim_cluster_output();
 
-        flow.sim()
+        let count = flow.sim()
             .skip_consistency_assertions()
             .with_cluster_size(&cluster, 3)
             .exhaustive(async || {
@@ -225,6 +225,11 @@ mod tests {
                     assert_eq!(got, vec![42], "member {member} did not deliver 42");
                 }
             });
+        // Static RB explores exactly 1 execution even at 3 nodes: fail-stop
+        // delivery is deterministic and the echo cycle does not fork the search.
+        // (Contrast the dynamic-membership case, whose blowup is entirely the
+        // membership hook — see `reliable_broadcast_live_*`.)
+        assert_eq!(count, 1, "static RB should explore a single execution");
     }
 
     /// Full-protocol late-join catch-up (M2 payoff). Both the initial broadcast
@@ -235,14 +240,18 @@ mod tests {
     /// cluster-observed hook-keying branch (the echo observes the cluster's own
     /// membership, one `MembershipHook` per member).
     ///
-    /// Uses `fuzz` rather than `exhaustive`: this is a *cyclic* protocol (the echo
-    /// feedback loop), and the current `MembershipHook` forks join timing on every
-    /// scheduler round, so the number of interleavings grows quickly with cluster
-    /// size — n=2 exhaustive is ~294 executions, n=3 is large. Single executions
-    /// terminate fine (verified); the blowup is purely combinatorial, and the hook
-    /// could be made leaner (fork only at observable points) to make n=3 exhaustive
-    /// tractable. `fuzz` covers this model well in the meantime. (The non-cyclic
-    /// `broadcast_live_from_process_late_joiner_catches_up` test uses `exhaustive`.)
+    /// Uses `fuzz` rather than `exhaustive`. Measured cause: static RB explores
+    /// exactly 1 execution even at 3 nodes (fail-stop delivery is deterministic;
+    /// the echo cycle doesn't fork the search). Turning on dynamic membership
+    /// jumps a *2-node* run to 294 executions — so the blowup is entirely the
+    /// `MembershipHook`, which forks join timing on every scheduler round of the
+    /// echo cycle rather than only at observable points. 294 is already far more
+    /// than the handful of genuinely-distinct join orderings, and it compounds
+    /// with cluster size, so n=3 exhaustive is impractical *today*. This is a hook
+    /// defect, not a property of RB or of exhaustive search: a hook that forked
+    /// only when releasing a member changes an observable outcome would very
+    /// likely make n=3 exhaustive tractable. `fuzz` covers the 3-node model in the
+    /// meantime; single executions always terminate (verified).
     #[test]
     fn reliable_broadcast_live_delivers_under_dynamic_membership() {
         use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
