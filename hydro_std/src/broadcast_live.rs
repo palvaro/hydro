@@ -107,6 +107,55 @@ where
         ))
 }
 
+/// Like [`broadcast_live`], but broadcasts from a [`Process`] source instead of a
+/// cluster. Mirrors the two-impl split of `broadcast_closed`
+/// ([`Stream::broadcast_closed`](hydro_lang::live_collections::stream::Stream)):
+/// a process source has no source-member identity, so the output is a plain
+/// `Stream` (not a `KeyedStream<MemberId<L>, ...>`), and the member-id source
+/// needs no consistency re-assertion (a process is already consistent).
+///
+/// The body is otherwise identical to [`broadcast_live`]: fan out over the
+/// *live, monotone* membership relation (not a snapshot), so a member joining
+/// late is caught up when the join re-fires the accumulated data. EC is earned
+/// by construction from the network policy.
+pub fn broadcast_live_from_process<'a, T, L, L2, B, O, R, N>(
+    source: Stream<T, Process<'a, L>, B, O, R>,
+    to: &Cluster<'a, L2>,
+    via: N,
+) -> Stream<T, Cluster<'a, L2, N::ConsistencyGuarantee>, Unbounded, NoOrder, R>
+where
+    T: Clone + Serialize + DeserializeOwned + 'a,
+    L: 'a,
+    L2: 'a,
+    B: hydro_lang::live_collections::boundedness::Boundedness,
+    O: Ordering + MinOrder<N::OrderingGuarantee>,
+    R: Retries,
+    N: NetworkFor<T>,
+{
+    let members = source
+        .location()
+        .source_cluster_membership_stream(
+            to,
+            nondet!(/** dropped membership prefixes don't affect broadcast delivery */),
+        )
+        .entries()
+        .filter_map(q!(|(id, ev)| match ev {
+            MembershipEvent::Joined => Some(id),
+            MembershipEvent::Left => None,
+        }));
+
+    source
+        .cross_product(members)
+        .map(q!(|(data, member_id)| (member_id, data)))
+        .into_keyed()
+        .demux(to, via)
+        .assert_has_consistency_of::<Cluster<'a, L2, N::ConsistencyGuarantee>>(manual_proof!(
+            /// Live monotone membership + an EC-preserving network policy: every element
+            /// eventually crosses every member that ever joins and is delivered to it, so
+            /// all live destinations materialize the same elements.
+        ))
+}
+
 #[cfg(test)]
 mod tests {
     use hydro_lang::live_collections::keyed_stream::KeyedStream;
@@ -299,6 +348,52 @@ mod tests {
                 }
 
                 out_recv.assert_yields_only_unordered(expected).await
+            });
+
+        assert!(
+            instances > 1,
+            "expected multiple join timings to be explored, got {instances}"
+        );
+    }
+
+    /// Process-source late-join catch-up (via `broadcast_live_from_process`).
+    /// A process broadcasts three messages to a dynamically-joining cluster.
+    /// Across every explored join timing — including a member joining only after
+    /// all three messages exist — every member receives all three, because the
+    /// live join re-fires the accumulated data. Non-cyclic, so the exhaustive
+    /// search stays small.
+    #[test]
+    fn broadcast_live_from_process_late_joiner_catches_up() {
+        use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
+
+        use super::broadcast_live_from_process;
+
+        let mut flow = FlowBuilder::new();
+        let sender = flow.process::<()>();
+        let dest = flow.cluster::<()>();
+
+        let (in_send, data) = sender.sim_input::<u32, TotalOrder, ExactlyOnce>();
+
+        let out_recv = broadcast_live_from_process(data, &dest, TCP.fail_stop().bincode())
+            .sim_cluster_output();
+
+        let instances = flow
+            .sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&dest, 2)
+            .with_dynamic_membership(&dest)
+            .exhaustive(async || {
+                in_send.send(10);
+                in_send.send(20);
+                in_send.send(30);
+
+                // Every dest member delivers all three values, no matter when it
+                // joined — a member that joins after a send is caught up by the
+                // live join re-firing the accumulated data.
+                for member in 0..2u32 {
+                    let got: Vec<u32> = out_recv.collect_n_sorted(member, 3).await;
+                    assert_eq!(got, vec![10, 20, 30], "member {member} missing messages");
+                }
             });
 
         assert!(
