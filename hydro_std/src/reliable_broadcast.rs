@@ -189,3 +189,90 @@ where
     // Step 5: Deliver. new_messages is EC throughout. No manual_proof!
     new_messages
 }
+
+#[cfg(test)]
+mod tests {
+    use hydro_lang::prelude::*;
+
+    use super::{reliable_broadcast_closed, reliable_broadcast_live};
+
+    /// Baseline: `reliable_broadcast_closed` (static membership) delivers the
+    /// broadcast message to every cluster member.
+    #[test]
+    fn reliable_broadcast_closed_delivers_to_all() {
+        use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
+
+        let mut flow = FlowBuilder::new();
+        let sender = flow.process::<()>();
+        let cluster = flow.cluster::<()>();
+
+        let (in_send, data) = sender.sim_input::<u32, TotalOrder, ExactlyOnce>();
+
+        let out_recv = reliable_broadcast_closed(data, &cluster).sim_cluster_output();
+
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&cluster, 3)
+            .exhaustive(async || {
+                in_send.send(42);
+                // Every one of the 3 members must deliver the broadcast value.
+                for member in 0..3u32 {
+                    let got: Vec<u32> = out_recv.collect_n_sorted(member, 1).await;
+                    assert_eq!(got, vec![42], "member {member} did not deliver 42");
+                }
+            });
+    }
+
+    /// M2 payoff + cluster-observed dynamic membership. `reliable_broadcast_live`
+    /// re-broadcasts (the echo step) over the *live* membership of the cluster,
+    /// observed **on the cluster itself** — so this exercises the
+    /// `Some(__current_cluster_id)` hook-keying branch (each member gets its own
+    /// `MembershipHook`), which the process-observed `broadcast_live` tests do not.
+    ///
+    /// SCOPE / HONEST LIMITATION: this confirms (a) the cluster-observed rewrite
+    /// path compiles and installs a per-member hook, and (b) every member delivers
+    /// under dynamic membership. It does **not** exercise late-joiner *catch-up
+    /// through the echo*, because the initial fan-out is still a static
+    /// `broadcast_closed` that delivers to all members at tick 0 — so no member is
+    /// ever actually behind. A test that makes echo-driven catch-up observable
+    /// would need the initial broadcast to also be dynamic (a process→cluster
+    /// `broadcast_live`, which does not exist yet). The process-observed
+    /// `broadcast_live_late_joiner_catches_up_on_all_messages` test is currently
+    /// the one that genuinely tests catch-up.
+    #[test]
+    fn reliable_broadcast_live_delivers_under_dynamic_membership() {
+        use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
+
+        let mut flow = FlowBuilder::new();
+        let sender = flow.process::<()>();
+        let cluster = flow.cluster::<()>();
+
+        let (in_send, data) = sender.sim_input::<u32, TotalOrder, ExactlyOnce>();
+
+        let out_recv = reliable_broadcast_live(data, &cluster).sim_cluster_output();
+
+        let _instances = flow
+            .sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&cluster, 3)
+            .with_dynamic_membership(&cluster)
+            .exhaustive(async || {
+                in_send.send(42);
+                // Every member delivers the value regardless of when it joined.
+                for member in 0..3u32 {
+                    let got: Vec<u32> = out_recv.collect_n_sorted(member, 1).await;
+                    assert_eq!(got, vec![42], "member {member} did not deliver 42");
+                }
+            });
+
+        // NOTE: we do not assert `instances > 1` here. In `reliable_broadcast_live`
+        // the *initial* fan-out is still a static `broadcast_closed`, so all members
+        // receive the value at tick 0 regardless of when they later "join" the echo
+        // step's live-membership view. Echo-membership join timing is therefore not
+        // observable in the delivered output, and the exhaustive engine collapses to
+        // a single distinct execution. The property that matters — every member
+        // delivers under dynamic membership — is what we assert. The
+        // `broadcast_live` tests cover the case where join timing *is* observable
+        // and confirm the search forks on it.
+    }
+}
