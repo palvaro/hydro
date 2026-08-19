@@ -1060,18 +1060,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "broadcast_consensus"
-version = "0.1.0"
-dependencies = [
- "hydro_lang",
- "hydro_std",
- "serde",
- "stageleft",
- "stageleft_tool",
- "tokio",
-]
-
-[[package]]
 name = "brotli"
 version = "8.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

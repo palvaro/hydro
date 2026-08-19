@@ -122,3 +122,70 @@ where
     // Step 5: Deliver. new_messages is EC throughout. No manual_proof!
     new_messages
 }
+
+/// Reliable broadcast whose re-broadcast (echo) step fans out over the **live,
+/// monotone** membership relation via [`broadcast_live`], instead of static
+/// `broadcast_closed`.
+///
+/// This is the key M2 validation: it swaps *only* the cyclic echo step onto
+/// `broadcast_live` and leaves the `forward_ref` cycle otherwise identical to
+/// [`reliable_broadcast_closed`]. If EC still infers around the cycle, then
+/// `broadcast_live` is a genuine drop-in generalization of `broadcast_closed`:
+///
+/// - If membership turns out fixed, the live relation simply stops growing at
+///   the full set and this delivers exactly what `broadcast_closed` would — so
+///   it "just works," now over a dynamic-membership-capable primitive.
+/// - The `forward_ref` is still declared on an EC location, and the completing
+///   `echo` still passes through an EC-earning broadcast (now `broadcast_live` +
+///   `fail_stop`), so the cycle types match with no `manual_proof!` on
+///   consistency here — the single trusted step lives inside `broadcast_live`.
+///
+/// The initial process→cluster broadcast stays `broadcast_closed` (there is no
+/// process→cluster `broadcast_live` yet, and the initial fan-out is not the part
+/// exercising dynamic membership — the echo is).
+pub fn reliable_broadcast_live<
+    'a,
+    T: Clone + Eq + Hash + Serialize + DeserializeOwned + 'a,
+    L,
+    L2: 'a,
+    B: Boundedness,
+    O: hydro_lang::live_collections::stream::Ordering,
+    R: hydro_lang::live_collections::stream::Retries,
+>(
+    source: Stream<T, Process<'a, L>, B, O, R>,
+    cluster: &Cluster<'a, L2>,
+) -> Stream<T, Cluster<'a, L2, EventualConsistency>, Unbounded, NoOrder, ExactlyOnce>
+where
+    O: hydro_lang::live_collections::stream::MinOrder<
+        hydro_lang::live_collections::stream::TotalOrder,
+    >,
+{
+    // Step 1: Initial broadcast from process to cluster. EC inferred (static).
+    let initial = source.broadcast_closed(cluster, TCP.fail_stop().bincode());
+
+    // forward_ref on the EC location produced by the initial broadcast.
+    let (rebroadcast_handle, rebroadcast_fwd) =
+        initial.location().forward_ref::<Stream<T, _, Unbounded, NoOrder>>();
+
+    // Step 2: Merge initial delivery with re-broadcasts. Both EC → merge preserves EC.
+    let all_received = initial.merge_unordered(rebroadcast_fwd);
+
+    // Step 3: Deduplicate. EC preserved.
+    let new_messages = all_received.unique();
+
+    // Step 4: Re-broadcast newly-seen messages over the LIVE membership relation.
+    // `broadcast_live` + fail_stop earns EC on delivery — matching the EC
+    // forward_ref location, closing the cycle with no consistency manual_proof!.
+    let echo = crate::broadcast_live::broadcast_live(
+        new_messages.clone(),
+        cluster,
+        TCP.fail_stop().bincode(),
+    )
+    .values();
+
+    // Close the cycle. echo is EC, forward_ref is EC — types match.
+    rebroadcast_handle.complete(echo);
+
+    // Step 5: Deliver. new_messages is EC throughout. No manual_proof!
+    new_messages
+}

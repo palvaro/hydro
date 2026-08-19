@@ -2,6 +2,7 @@
 hydro_lang::setup!();
 
 pub mod bench_client;
+pub mod broadcast_live;
 pub mod compartmentalize;
 pub mod crdt_gossip;
 pub mod membership;

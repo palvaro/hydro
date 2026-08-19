@@ -432,6 +432,124 @@ impl<'a> Deploy<'a> for SimDeploy {
     }
 }
 
+/// Rewrite pass (M0): for each cluster opted into *dynamic membership* via
+/// [`SimFlow::with_dynamic_membership`](crate::sim::flow::SimFlow::with_dynamic_membership),
+/// replace its `ClusterMembers` source expression with a hook-backed one.
+///
+/// Normally `compile_network` fills a `ClusterMembers` node with the eager
+/// `deploy_runtime::cluster_membership_stream` expression (all `Joined` events
+/// up front). This pass runs *after* `compile_network` and swaps that expression
+/// — for dynamic clusters only — with a block that:
+///
+/// 1. creates an mpsc channel,
+/// 2. pre-seeds a `VecDeque` with one `(member_id, Joined)` per member of the
+///    target cluster (member ids come from sizing, already computed),
+/// 3. registers a [`MembershipHook`](crate::sim::runtime::MembershipHook) on
+///    `__hydro_hooks` keyed by the observing location, and
+/// 4. returns the receiver, which the shared code-gen wraps in
+///    `source_stream(..) -> tee()`.
+///
+/// The block is evaluated in the generated per-location scope where
+/// `__hydro_hooks` and `__current_cluster_id` are live (see
+/// `compile_sim_graph`), so a membership stream observed on a cluster gets one
+/// hook instance per observing member — exactly the behavior we want.
+///
+/// Clusters not opted in are left untouched (eager behavior), so existing tests
+/// are unaffected.
+pub(super) fn apply_dynamic_membership(
+    ir: &mut [crate::compile::ir::HydroRoot],
+    dynamic_membership: &std::collections::HashSet<LocationKey>,
+    cluster_member_ids: &BTreeMap<LocationId, Vec<u32>>,
+) {
+    use crate::compile::ir::{ClusterMembersState, HydroNode, HydroSource};
+
+    if dynamic_membership.is_empty() {
+        return;
+    }
+
+    let root = get_this_crate();
+
+    let mut rewrite_node = |n: &mut HydroNode| {
+        let HydroNode::Source {
+            source: HydroSource::ClusterMembers(target_loc, state),
+            metadata,
+        } = n
+        else {
+            return;
+        };
+
+        // Only the primary (`Stream`) instance carries the expression; `Tee`
+        // instances reference it and need no rewrite.
+        let ClusterMembersState::Stream(expr) = state else {
+            return;
+        };
+
+        if !dynamic_membership.contains(&target_loc.key()) {
+            return;
+        }
+
+        // Debug-formatting for the hook's logging; membership events are Debug.
+        let event_ty: syn::Type = syn::parse_quote! {
+            (#root::__staged::location::member_id::TaglessMemberId, #root::__staged::location::MembershipEvent)
+        };
+
+        // Pre-seed one `Joined` per member of the target cluster.
+        let member_ids = cluster_member_ids
+            .get(target_loc)
+            .cloned()
+            .unwrap_or_default();
+        let seed_elems = member_ids.iter().map(|id| {
+            syn::parse_quote! {
+                (
+                    #root::__staged::location::member_id::TaglessMemberId::from_raw_id(#id),
+                    #root::__staged::location::MembershipEvent::Joined,
+                )
+            }
+        }).collect::<Vec<syn::Expr>>();
+
+        // Key the hook by the observing location (the root of this node's
+        // location), matching how `add_hook` keys other per-location hooks.
+        let observer_loc = metadata.location_id.root().clone();
+        let observer_ser = serde_json::to_string(&observer_loc).unwrap();
+
+        // For a cluster observer, hooks are keyed by `(loc, Some(member))`; the
+        // generated per-member loop binds `__current_cluster_id`. For a process
+        // observer, the key is `(loc, None)`.
+        let member_key: syn::Expr = if matches!(observer_loc, LocationId::Cluster(_)) {
+            syn::parse_quote!(Some(__current_cluster_id))
+        } else {
+            syn::parse_quote!(None)
+        };
+
+        let hook_block: syn::Expr = syn::parse_quote! {{
+            let (__membership_send, __membership_recv) =
+                __root_dfir_rs::util::unsync::mpsc::unbounded::<#event_ty>();
+            let __membership_buf = ::std::rc::Rc::new(::std::cell::RefCell::new(
+                ::std::collections::VecDeque::from(::std::vec![ #(#seed_elems),* ])
+            ));
+            __hydro_hooks
+                .entry((#observer_ser, #member_key))
+                .or_default()
+                .push(::std::boxed::Box::new(
+                    #root::sim::runtime::MembershipHook::new_from_buffer(
+                        __membership_buf,
+                        __membership_send,
+                        (#observer_ser, "dynamic membership", ""),
+                        #root::__maybe_debug__!(#event_ty),
+                    )
+                ));
+            __membership_recv
+        }};
+
+        *expr = syn::Expr::from(hook_block).into();
+    };
+
+    let mut seen = HashMap::new();
+    for leaf in ir.iter_mut() {
+        leaf.transform_bottom_up(&mut |_root| {}, &mut rewrite_node, &mut seen, false);
+    }
+}
+
 pub(super) fn compile_sim(bin: String, trybuild: TrybuildConfig) -> Result<TempPath, ()> {
     compile_trybuild_example(ExampleBuildConfig {
         trybuild,

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::marker::PhantomData;
 
 use dfir_lang::graph::{
@@ -180,6 +181,7 @@ impl<'a> BuiltFlow<'a> {
             clusters,
             externals,
             cluster_max_sizes: SparseSecondaryMap::new(),
+            dynamic_membership: HashSet::new(),
             externals_port_registry: Default::default(),
             location_version: self.location_version,
             location_version_group_root: self.location_version_group_root,

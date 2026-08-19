@@ -33,6 +33,12 @@ pub struct SimFlow<'a> {
 
     /// Max size of each cluster.
     pub(crate) cluster_max_sizes: SparseSecondaryMap<LocationKey, usize>,
+    /// Clusters whose membership should be delivered *dynamically* in the
+    /// simulator: instead of emitting all `Joined` events up front, join timing
+    /// becomes a nondeterministic decision the exhaustive search explores (via
+    /// [`MembershipHook`](crate::sim::runtime::MembershipHook)). Clusters not in
+    /// this set keep the default eager behavior.
+    pub(crate) dynamic_membership: HashSet<LocationKey>,
     /// Handle to state handling `external`s' ports.
     pub(crate) externals_port_registry: Rc<RefCell<SimExternalPortRegistry>>,
 
@@ -63,6 +69,18 @@ impl<'a> SimFlow<'a> {
     /// Sets the maximum size of the given cluster in the simulation.
     pub fn with_cluster_size<C>(mut self, cluster: &Cluster<'a, C>, max_size: usize) -> Self {
         self.cluster_max_sizes.insert(cluster.key, max_size);
+        self
+    }
+
+    /// Opts in to *dynamic membership* for the given cluster: its members'
+    /// `Joined` events are delivered one at a time at nondeterministic moments
+    /// (explored by the simulator) rather than all up front. This is what lets
+    /// tests exercise a member joining *after* messages are already flowing.
+    ///
+    /// Clusters without this opt-in keep the default behavior (all members
+    /// present from the start), so existing tests are unaffected.
+    pub fn with_dynamic_membership<C>(mut self, cluster: &Cluster<'a, C>) -> Self {
+        self.dynamic_membership.insert(cluster.key);
         self
     }
 
@@ -180,6 +198,30 @@ impl<'a> SimFlow<'a> {
             );
         }
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "nondeterministic iteration order, fine for checks"
+        )]
+        for c in self.clusters.keys() {
+            assert!(
+                self.cluster_max_sizes.contains_key(c),
+                "Cluster {:?} missing max size; call with_cluster_size() before compiled()",
+                c
+            );
+        }
+
+        let (cluster_max_sizes, cluster_member_ids) = self.cluster_sizing();
+
+        // M0: rewrite dynamic-membership clusters' `ClusterMembers` sources to be
+        // hook-backed (join timing becomes a nondeterministic decision), before
+        // the IR is consumed by `emit`. No-op unless `with_dynamic_membership`
+        // was called.
+        super::graph::apply_dynamic_membership(
+            &mut self.ir,
+            &self.dynamic_membership,
+            &cluster_member_ids,
+        );
+
         let mut seen_tees = HashMap::new();
         let mut built_tees = HashMap::new();
         let mut next_stmt_id = crate::Counter::<StmtId>::default();
@@ -219,19 +261,6 @@ impl<'a> SimFlow<'a> {
         let process_tick_graphs = build_graphs(sim_emit.process_tick_dfirs);
         let cluster_tick_graphs = build_graphs(sim_emit.cluster_tick_dfirs);
 
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "nondeterministic iteration order, fine for checks"
-        )]
-        for c in self.clusters.keys() {
-            assert!(
-                self.cluster_max_sizes.contains_key(c),
-                "Cluster {:?} missing max size; call with_cluster_size() before compiled()",
-                c
-            );
-        }
-
-        let (cluster_max_sizes, cluster_member_ids) = self.cluster_sizing();
         drop(flow_build_span);
 
         let (bin, trybuild) = create_sim_graph_trybuild(

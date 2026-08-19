@@ -1478,6 +1478,153 @@ impl<T> SimHook for TopLevelStreamOrderHook<T> {
     }
 }
 
+/// Simulation hook for **dynamic cluster membership** (M0 spike).
+///
+/// Today the simulator sources cluster membership from an eager
+/// `futures::stream::iter([Joined, Joined, ...])` (see
+/// `deploy_runtime::cluster_membership_stream`), which the scheduler drains to
+/// completion *before* reaching its nondeterministic fork point — so every
+/// member appears to join at once and joins cannot interleave with message flow.
+///
+/// This hook fixes that by making join *timing* a nondeterministic decision the
+/// exhaustive engine forks on. It is the membership analog of
+/// [`TopLevelStreamOrderHook`]: the release logic (emit one queued event, or
+/// none, per round) is identical. The one structural difference is that a
+/// membership source has **no upstream DFIR** feeding it, so its queue is
+/// *pre-seeded* at construction with the cluster's `Joined` events rather than
+/// filled by an upstream `for_each(push_back)`.
+///
+/// `Left` events are deliberately out of scope for this spike (they make the
+/// membership relation non-monotone). They would be pushed into the same queue.
+pub struct MembershipHook<T> {
+    /// Pending membership events, pre-seeded at construction. Released one at a
+    /// time to let the engine explore join timing against message flow.
+    pub input: Rc<RefCell<VecDeque<T>>>,
+    pub to_release: Option<Vec<T>>,
+    pub output: Sender<T>,
+    pub location: HookLocationMeta,
+    pub format_item_debug: fn(&T) -> Option<String>,
+}
+
+impl<T> MembershipHook<T> {
+    /// Create a membership hook whose queue is pre-seeded with `events` (e.g. one
+    /// `(member_id, MembershipEvent::Joined)` per member of the cluster).
+    pub fn new(
+        events: impl IntoIterator<Item = T>,
+        output: Sender<T>,
+        location: HookLocationMeta,
+        format_item_debug: fn(&T) -> Option<String>,
+    ) -> Self {
+        Self::new_from_buffer(
+            Rc::new(RefCell::new(events.into_iter().collect())),
+            output,
+            location,
+            format_item_debug,
+        )
+    }
+
+    /// Create a membership hook from an already-constructed buffer of pending
+    /// events. Used by generated simulator code, which builds the `VecDeque`
+    /// inline.
+    pub fn new_from_buffer(
+        input: Rc<RefCell<VecDeque<T>>>,
+        output: Sender<T>,
+        location: HookLocationMeta,
+        format_item_debug: fn(&T) -> Option<String>,
+    ) -> Self {
+        Self {
+            input,
+            to_release: None,
+            output,
+            location,
+            format_item_debug,
+        }
+    }
+}
+
+impl<T> SimHook for MembershipHook<T> {
+    fn current_decision(&self) -> Option<bool> {
+        self.to_release.as_ref().map(|v| !v.is_empty())
+    }
+
+    fn can_make_nontrivial_decision(&self) -> bool {
+        !self.input.borrow().is_empty()
+    }
+
+    fn autonomous_decision<'a>(
+        &mut self,
+        driver: &mut Borrowed<'a>,
+        force_nontrivial: bool,
+    ) -> bool {
+        let mut current_input = self.input.borrow_mut();
+        let mut out = vec![];
+
+        // Release at most one event per round (like `TopLevelStreamOrderHook`),
+        // so join timing interleaves with message flow rather than all members
+        // appearing at once. `force_nontrivial` guarantees progress when the
+        // engine requires this hook to advance.
+        if !current_input.is_empty() {
+            let must_release = force_nontrivial && out.is_empty();
+            if !must_release && produce().generate(driver).unwrap() {
+                // don't release anything this round (member joins later)
+            } else {
+                let idx = (0..current_input.len()).generate(driver).unwrap();
+                let item = current_input.remove(idx).unwrap();
+                out.push(item);
+            }
+        }
+
+        let was_nontrivial = !out.is_empty();
+        self.to_release = Some(out);
+        was_nontrivial
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        if let Some(to_release) = self.to_release.take() {
+            if !to_release.is_empty()
+                && let Some(log_writer) = log_writer
+            {
+                let (batch_location, line, caret_indent) = self.location;
+                let note_str = format!(
+                    "^ observed non-deterministic membership timing: {:?}",
+                    TruncatedVecDebug(
+                        RefCell::new(Some(to_release.iter())),
+                        8,
+                        self.format_item_debug
+                    )
+                );
+
+                let _ = writeln!(
+                    log_writer,
+                    "\n{} {}",
+                    "-->".color(colored::Color::Blue),
+                    batch_location
+                );
+                let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+                let _ = writeln!(
+                    log_writer,
+                    " {}{}{}",
+                    "|".color(colored::Color::Blue),
+                    caret_indent,
+                    note_str.color(colored::Color::Green)
+                );
+            }
+
+            for item in to_release {
+                self.output.try_send(item).unwrap();
+            }
+        } else {
+            panic!("No decision to release");
+        }
+    }
+
+    /// Once all pre-seeded events have been released, the hook is exhausted and
+    /// need not participate in further ticks.
+    fn is_ready(&self) -> bool {
+        true
+    }
+}
+
 /// Hook for top-level folds. Selects a non-empty subset of buffered inputs to release,
 /// always permuting them to explore all orderings. Unselected elements remain
 /// in the buffer for future releases (modeling delayed/lossy inputs).
@@ -2213,5 +2360,75 @@ mod maybe_debug_tests {
     fn test_primitive_debug() {
         let fmt_fn: fn(&i32) -> Option<String> = crate::__maybe_debug__!(i32);
         assert_eq!(fmt_fn(&42), Some("42".to_owned()));
+    }
+}
+
+#[cfg(test)]
+mod membership_hook_tests {
+    use std::collections::VecDeque;
+    use std::task::{Context, Poll};
+
+    use dfir_rs::util::unsync::mpsc;
+    use futures::task::noop_waker_ref;
+
+    use super::{MembershipHook, SimHook};
+
+    fn drain<T>(recv: &mut mpsc::Receiver<T>) -> Vec<T> {
+        let mut out = Vec::new();
+        let cx = Context::from_waker(noop_waker_ref());
+        while let Poll::Ready(Some(item)) = recv.poll_recv(&cx) {
+            out.push(item);
+        }
+        out
+    }
+
+    /// The hook is pre-seeded from the member set (no upstream DFIR), reports it
+    /// can make nontrivial decisions while events remain, and reports exhaustion
+    /// once drained.
+    #[test]
+    fn preseeded_and_reports_readiness() {
+        let (send, _recv) = mpsc::unbounded::<u32>();
+        let hook = MembershipHook::new(
+            [10u32, 11, 12],
+            send,
+            ("loc", "line", "  "),
+            crate::__maybe_debug__!(u32),
+        );
+
+        assert_eq!(hook.input.borrow().len(), 3);
+        assert!(
+            hook.can_make_nontrivial_decision(),
+            "should be able to release while events remain"
+        );
+
+        // Drain the queue directly; when empty, no nontrivial decision remains.
+        hook.input.borrow_mut().clear();
+        assert!(!hook.can_make_nontrivial_decision());
+    }
+
+    /// `release_decision` forwards the staged events to the output channel — the
+    /// wiring that a `source_stream` would read from in real codegen.
+    #[test]
+    fn release_forwards_to_output_channel() {
+        let (send, mut recv) = mpsc::unbounded::<u32>();
+        let mut hook = MembershipHook::new(
+            VecDeque::from([10u32, 11, 12]),
+            send,
+            ("loc", "line", "  "),
+            crate::__maybe_debug__!(u32),
+        );
+
+        // Simulate the engine having chosen to release event `10` this round.
+        hook.to_release = Some(vec![10]);
+        assert_eq!(hook.current_decision(), Some(true));
+        hook.release_decision(None);
+        assert_eq!(drain(&mut recv), vec![10]);
+
+        // A round that releases nothing is a valid (trivial) decision: the member
+        // simply joins later.
+        hook.to_release = Some(vec![]);
+        assert_eq!(hook.current_decision(), Some(false));
+        hook.release_decision(None);
+        assert_eq!(drain(&mut recv), Vec::<u32>::new());
     }
 }
