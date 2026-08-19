@@ -140,13 +140,12 @@ where
 ///   `fail_stop`), so the cycle types match with no `manual_proof!` on
 ///   consistency here — the single trusted step lives inside `broadcast_live`.
 ///
-/// The initial process→cluster broadcast stays `broadcast_closed` (there is no
-/// process→cluster `broadcast_live` yet, and the initial fan-out is not the part
-/// exercising dynamic membership — the echo is).
+/// The initial process→cluster broadcast uses [`broadcast_live_from_process`],
+/// so a member that joins after the initial send is caught up by the echo.
 pub fn reliable_broadcast_live<
     'a,
     T: Clone + Eq + Hash + Serialize + DeserializeOwned + 'a,
-    L,
+    L: 'a,
     L2: 'a,
     B: Boundedness,
     O: hydro_lang::live_collections::stream::Ordering,
@@ -160,8 +159,13 @@ where
         hydro_lang::live_collections::stream::TotalOrder,
     >,
 {
-    // Step 1: Initial broadcast from process to cluster. EC inferred (static).
-    let initial = source.broadcast_closed(cluster, TCP.fail_stop().bincode());
+    // Step 1: Initial broadcast from process to cluster over the LIVE membership
+    // relation, so a member that joins after the send is caught up by the echo.
+    let initial = crate::broadcast_live::broadcast_live_from_process(
+        source,
+        cluster,
+        TCP.fail_stop().bincode(),
+    );
 
     // forward_ref on the EC location produced by the initial broadcast.
     let (rebroadcast_handle, rebroadcast_fwd) =
@@ -223,22 +227,22 @@ mod tests {
             });
     }
 
-    /// M2 payoff + cluster-observed dynamic membership. `reliable_broadcast_live`
-    /// re-broadcasts (the echo step) over the *live* membership of the cluster,
-    /// observed **on the cluster itself** — so this exercises the
-    /// `Some(__current_cluster_id)` hook-keying branch (each member gets its own
-    /// `MembershipHook`), which the process-observed `broadcast_live` tests do not.
+    /// Full-protocol late-join catch-up (M2 payoff). Both the initial broadcast
+    /// and the echo fan out over *live* membership (`broadcast_live_from_process`
+    /// and `broadcast_live`), so a member that joins after the initial send genuinely
+    /// misses it and must be caught up by another member's echo re-broadcast — the
+    /// reliable-broadcast guarantee, now over dynamic membership. Also exercises the
+    /// cluster-observed hook-keying branch (the echo observes the cluster's own
+    /// membership, one `MembershipHook` per member).
     ///
-    /// SCOPE / HONEST LIMITATION: this confirms (a) the cluster-observed rewrite
-    /// path compiles and installs a per-member hook, and (b) every member delivers
-    /// under dynamic membership. It does **not** exercise late-joiner *catch-up
-    /// through the echo*, because the initial fan-out is still a static
-    /// `broadcast_closed` that delivers to all members at tick 0 — so no member is
-    /// ever actually behind. A test that makes echo-driven catch-up observable
-    /// would need the initial broadcast to also be dynamic (a process→cluster
-    /// `broadcast_live`, which does not exist yet). The process-observed
-    /// `broadcast_live_late_joiner_catches_up_on_all_messages` test is currently
-    /// the one that genuinely tests catch-up.
+    /// Uses `fuzz` rather than `exhaustive`: this is a *cyclic* protocol (the echo
+    /// feedback loop), and the current `MembershipHook` forks join timing on every
+    /// scheduler round, so the number of interleavings grows quickly with cluster
+    /// size — n=2 exhaustive is ~294 executions, n=3 is large. Single executions
+    /// terminate fine (verified); the blowup is purely combinatorial, and the hook
+    /// could be made leaner (fork only at observable points) to make n=3 exhaustive
+    /// tractable. `fuzz` covers this model well in the meantime. (The non-cyclic
+    /// `broadcast_live_from_process_late_joiner_catches_up` test uses `exhaustive`.)
     #[test]
     fn reliable_broadcast_live_delivers_under_dynamic_membership() {
         use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
@@ -251,28 +255,16 @@ mod tests {
 
         let out_recv = reliable_broadcast_live(data, &cluster).sim_cluster_output();
 
-        let _instances = flow
-            .sim()
+        flow.sim()
             .skip_consistency_assertions()
             .with_cluster_size(&cluster, 3)
             .with_dynamic_membership(&cluster)
-            .exhaustive(async || {
+            .fuzz(async || {
                 in_send.send(42);
-                // Every member delivers the value regardless of when it joined.
                 for member in 0..3u32 {
                     let got: Vec<u32> = out_recv.collect_n_sorted(member, 1).await;
                     assert_eq!(got, vec![42], "member {member} did not deliver 42");
                 }
             });
-
-        // NOTE: we do not assert `instances > 1` here. In `reliable_broadcast_live`
-        // the *initial* fan-out is still a static `broadcast_closed`, so all members
-        // receive the value at tick 0 regardless of when they later "join" the echo
-        // step's live-membership view. Echo-membership join timing is therefore not
-        // observable in the delivered output, and the exhaustive engine collapses to
-        // a single distinct execution. The property that matters — every member
-        // delivers under dynamic membership — is what we assert. The
-        // `broadcast_live` tests cover the case where join timing *is* observable
-        // and confirm the search forks on it.
     }
 }
