@@ -123,25 +123,26 @@ where
     new_messages
 }
 
-/// Reliable broadcast whose re-broadcast (echo) step fans out over the **live,
+/// Reliable broadcast whose fan-out (initial and echo) goes over the **live,
 /// monotone** membership relation via [`broadcast_live`], instead of static
 /// `broadcast_closed`.
 ///
-/// This is the key M2 validation: it swaps *only* the cyclic echo step onto
-/// `broadcast_live` and leaves the `forward_ref` cycle otherwise identical to
-/// [`reliable_broadcast_closed`]. If EC still infers around the cycle, then
-/// `broadcast_live` is a genuine drop-in generalization of `broadcast_closed`:
-///
 /// - If membership turns out fixed, the live relation simply stops growing at
-///   the full set and this delivers exactly what `broadcast_closed` would — so
-///   it "just works," now over a dynamic-membership-capable primitive.
-/// - The `forward_ref` is still declared on an EC location, and the completing
-///   `echo` still passes through an EC-earning broadcast (now `broadcast_live` +
-///   `fail_stop`), so the cycle types match with no `manual_proof!` on
-///   consistency here — the single trusted step lives inside `broadcast_live`.
+///   the full set and this delivers exactly what `broadcast_closed` would.
+/// - A member that joins after the initial send is caught up by the echo: the
+///   live join re-fires accumulated messages on each `Joined` delta.
 ///
-/// The initial process→cluster broadcast uses [`broadcast_live_from_process`],
-/// so a member that joins after the initial send is caught up by the echo.
+/// # The single trusted EC step lives HERE, not in `broadcast_live`
+///
+/// `broadcast_live` is a mechanical `NoConsistency` fan-out — a single hop
+/// cannot promise delivery to every eventual member if the sender crashes
+/// mid-broadcast. The echo cycle is what discharges that: every member that
+/// receives a message re-broadcasts it over live membership before delivering.
+/// The whole cycle therefore runs at `NoConsistency`, and EC is asserted
+/// exactly once, on the delivered stream, by the `manual_proof!` below. That
+/// axiom is an unchecked human claim; it additionally rests on a *coverage*
+/// premise — each joiner is eventually known to at least one live node holding
+/// the message log — supplied (unverified) by the membership substrate.
 pub fn reliable_broadcast_live<
     'a,
     T: Clone + Eq + Hash + Serialize + DeserializeOwned + 'a,
@@ -161,25 +162,25 @@ where
 {
     // Step 1: Initial broadcast from process to cluster over the LIVE membership
     // relation, so a member that joins after the send is caught up by the echo.
+    // NoConsistency: broadcast_live makes no consistency claim.
     let initial = crate::broadcast_live::broadcast_live_from_process(
         source,
         cluster,
         TCP.fail_stop().bincode(),
     );
 
-    // forward_ref on the EC location produced by the initial broadcast.
+    // forward_ref on the NoConsistency location; the entire cycle runs at
+    // NoConsistency, no type-level EC trick needed to close it.
     let (rebroadcast_handle, rebroadcast_fwd) =
         initial.location().forward_ref::<Stream<T, _, Unbounded, NoOrder>>();
 
-    // Step 2: Merge initial delivery with re-broadcasts. Both EC → merge preserves EC.
+    // Step 2: Merge initial delivery with re-broadcasts from other members.
     let all_received = initial.merge_unordered(rebroadcast_fwd);
 
-    // Step 3: Deduplicate. EC preserved.
+    // Step 3: Deduplicate — only process each message once.
     let new_messages = all_received.unique();
 
     // Step 4: Re-broadcast newly-seen messages over the LIVE membership relation.
-    // `broadcast_live` + fail_stop earns EC on delivery — matching the EC
-    // forward_ref location, closing the cycle with no consistency manual_proof!.
     let echo = crate::broadcast_live::broadcast_live(
         new_messages.clone(),
         cluster,
@@ -187,11 +188,21 @@ where
     )
     .values();
 
-    // Close the cycle. echo is EC, forward_ref is EC — types match.
+    // Close the cycle (both sides NoConsistency).
     rebroadcast_handle.complete(echo);
 
-    // Step 5: Deliver. new_messages is EC throughout. No manual_proof!
-    new_messages
+    // Step 5: Deliver, asserting EC exactly once — the single trusted step.
+    new_messages.assert_has_consistency_of::<Cluster<'a, L2, EventualConsistency>>(manual_proof!(
+        /// UNCHECKED AXIOM (coverage-based): assuming each joiner is eventually
+        /// known to at least one live node holding the message log, the echo
+        /// cycle (every receiver re-broadcasts over live monotone membership
+        /// before delivering, with fail_stop networking) ensures every message
+        /// eventually reaches every member that ever joins — even if the
+        /// original sender crashes mid-broadcast. All members therefore
+        /// materialize the same delivered set in the limit. Nothing verifies
+        /// this claim; the coverage premise itself is an assumption about the
+        /// membership substrate (no join may be dropped by ALL observers).
+    ))
 }
 
 #[cfg(test)]

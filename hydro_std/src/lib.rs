@@ -6,6 +6,7 @@ pub mod broadcast_live;
 pub mod compartmentalize;
 pub mod crdt_gossip;
 pub mod membership;
+pub mod orchestrated_membership;
 pub mod quorum;
 pub mod reliable_broadcast;
 pub mod request_response;

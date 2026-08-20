@@ -1,58 +1,46 @@
 //! `broadcast_live`: fan out a cluster stream to all members of a destination
-//! cluster over the **live, monotone** membership relation, earning
-//! `EventualConsistency` (EC) by construction.
+//! cluster over the **live, monotone** membership relation. Purely mechanical
+//! fan-out: the output is `NoConsistency` — no consistency is asserted here.
 //!
 //! # Relationship to `broadcast_closed`
 //!
 //! [`Stream::broadcast_closed`](hydro_lang::live_collections::stream::Stream) fans
 //! out over `ClusterIds` — static, deploy-time-fixed membership — and asserts EC
-//! from the network policy. `broadcast_live` is the direct generalization: it
-//! fans out over the *live* membership stream
-//! (`source_cluster_membership_stream`), filtered to `Joined` ids and kept as a
-//! growing relation (no snapshot). `ClusterIds` is simply the limit of this
-//! monotone relation.
+//! from the network policy. `broadcast_live` generalizes the *fan-out* to the
+//! live membership stream (`source_cluster_membership_stream`), filtered to
+//! `Joined` ids and kept as a growing relation (no snapshot), but makes **no**
+//! EC claim: a single hop cannot guarantee "every element reaches every member
+//! that ever joins" if the sender crashes mid-broadcast. That guarantee — and
+//! the one trusted EC assertion — belongs to the layer that supplies it:
+//! [`crate::reliable_broadcast::reliable_broadcast_live`], whose echo cycle
+//! discharges delivery even across sender failure.
 //!
 //! Contrast [`Stream::broadcast`], which `use::snapshot`s the membership set
 //! inside a `sliced!` block. Snapshotting freezes one side of the data × members
-//! join, so `member` deltas never re-fire and late joiners are missed — which is
-//! exactly why its output is `NoConsistency`. Joining against the live relation
-//! keeps the delta symmetry: a new `Joined` id re-fires the cross-product against
-//! all accumulated data, catching the joiner up.
+//! join, so `member` deltas never re-fire and late joiners are missed. Joining
+//! against the live relation keeps the delta symmetry: a new `Joined` id
+//! re-fires the cross-product against all accumulated data, catching the joiner
+//! up. That live re-firing is the mechanical property this module provides.
 //!
-//! # EC argument (the single trusted step)
+//! # Retention caveat (bounds this to append-only data)
 //!
-//! The intermediate member-id stream is `NoConsistency` — correctly, since the
-//! *timing* of each member's join is per-member and nondeterministic. EC is
-//! re-earned on the *delivered* result: with an EC-preserving network policy
-//! (`fail_stop` / `lossy_delayed_forever`, tracked by
-//! [`NetworkFor::ConsistencyGuarantee`](hydro_lang::networking::NetworkFor)),
-//! every element eventually crosses every member that ever joins and is delivered
-//! to it, so all destinations materialize the same elements. That is the one
-//! `manual_proof!` in this combinator — the same fact `broadcast_closed`
-//! discharges, generalized from a static set to the monotone relation.
-//!
-//! # Soundness caveat (bounds this to append-only data)
-//!
-//! The argument needs *both* join sides retained. The symmetric-hash join over
-//! two `Unbounded` inputs keeps them, so a late joiner still crosses all prior
-//! data. Pruning the data side (bounded retention) breaks this — a joiner
-//! arriving after a prune misses data — which is a genuine consistency weakening,
-//! not covered here.
+//! Late-joiner catch-up needs *both* join sides retained. The symmetric-hash
+//! join over two `Unbounded` inputs keeps them, so a late joiner still crosses
+//! all prior data. Pruning the data side (bounded retention) breaks this — a
+//! joiner arriving after a prune misses data.
 
 use hydro_lang::live_collections::stream::{MinOrder, NoOrder, Ordering, Retries};
-use hydro_lang::location::{Location, MemberId, MembershipEvent};
+use hydro_lang::location::cluster::NoConsistency;
+use hydro_lang::location::MemberId;
 use hydro_lang::networking::NetworkFor;
 use hydro_lang::prelude::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 /// Broadcasts elements of a cluster stream to all members of a destination
-/// cluster over the live monotone membership relation, earning EC by
-/// construction from the network policy.
-///
-/// This is the dynamic-membership generalization of `broadcast_closed`: the
-/// static `ClusterIds` source is replaced by the live `Joined`-filtered
-/// membership stream, kept live (not snapshotted).
+/// cluster over the live monotone membership relation. Mechanical fan-out
+/// only: the output is `NoConsistency`. The EC assertion for reliable
+/// delivery lives in [`crate::reliable_broadcast::reliable_broadcast_live`].
 pub fn broadcast_live<'a, T, L, L2, C, O, R, N>(
     source: Stream<T, Cluster<'a, L, C>, Unbounded, O, R>,
     to: &Cluster<'a, L2>,
@@ -60,7 +48,7 @@ pub fn broadcast_live<'a, T, L, L2, C, O, R, N>(
 ) -> KeyedStream<
     MemberId<L>,
     T,
-    Cluster<'a, L2, N::ConsistencyGuarantee>,
+    Cluster<'a, L2, NoConsistency>,
     Unbounded,
     NoOrder,
     R,
@@ -74,55 +62,42 @@ where
     R: Retries,
     N: NetworkFor<T>,
 {
-    // The live membership relation of the destination cluster, observed at the
-    // source. Filtered to `Joined`, kept as a growing (monotone) stream — NOT
-    // snapshotted. Its consistency is `NoConsistency`: join *timing* is
-    // per-member and nondeterministic.
-    let members = source
-        .location()
-        .source_cluster_membership_stream(
-            to,
-            nondet!(/** dropped membership prefixes don't affect broadcast delivery */),
-        )
-        .entries()
-        .filter_map(q!(|(id, ev)| match ev {
-            MembershipEvent::Joined => Some(id),
-            MembershipEvent::Left => None,
-        }));
+    // The live membership envelope of the destination cluster, observed at the
+    // source: monotone (join ids only ever added), NOT snapshotted, honestly
+    // `NoConsistency`. See `orchestrated_membership::member_envelope`.
+    let members = crate::orchestrated_membership::member_envelope(
+        source.location(),
+        to,
+        nondet!(/** dropped membership prefixes don't affect broadcast delivery */),
+    );
 
     // Join data × live members at `NoConsistency` (both sides growing; the
     // symmetric-hash join re-fires on deltas to either input, so a late joiner
-    // crosses all accumulated data), then demux and re-earn EC on delivery.
+    // crosses all accumulated data), then demux. No consistency assertion:
+    // demux's output is naturally `NoConsistency`.
     source
         .weaken_consistency()
         .cross_product(members)
         .map(q!(|(data, member_id)| (member_id, data)))
         .into_keyed()
         .demux(to, via)
-        .assert_has_consistency_of::<Cluster<'a, L2, N::ConsistencyGuarantee>>(manual_proof!(
-            /// Live monotone membership + an EC-preserving network policy: every element
-            /// eventually crosses every member that ever joins and is delivered to it, so
-            /// all live destinations materialize the same elements. `ClusterIds` (the
-            /// `broadcast_closed` case) is the limit of this relation.
-        ))
 }
 
 /// Like [`broadcast_live`], but broadcasts from a [`Process`] source instead of a
 /// cluster. Mirrors the two-impl split of `broadcast_closed`
 /// ([`Stream::broadcast_closed`](hydro_lang::live_collections::stream::Stream)):
 /// a process source has no source-member identity, so the output is a plain
-/// `Stream` (not a `KeyedStream<MemberId<L>, ...>`), and the member-id source
-/// needs no consistency re-assertion (a process is already consistent).
+/// `Stream` (not a `KeyedStream<MemberId<L>, ...>`).
 ///
 /// The body is otherwise identical to [`broadcast_live`]: fan out over the
 /// *live, monotone* membership relation (not a snapshot), so a member joining
-/// late is caught up when the join re-fires the accumulated data. EC is earned
-/// by construction from the network policy.
+/// late is caught up when the join re-fires the accumulated data. Output is
+/// `NoConsistency`; no consistency assertion is made here.
 pub fn broadcast_live_from_process<'a, T, L, L2, B, O, R, N>(
     source: Stream<T, Process<'a, L>, B, O, R>,
     to: &Cluster<'a, L2>,
     via: N,
-) -> Stream<T, Cluster<'a, L2, N::ConsistencyGuarantee>, Unbounded, NoOrder, R>
+) -> Stream<T, Cluster<'a, L2, NoConsistency>, Unbounded, NoOrder, R>
 where
     T: Clone + Serialize + DeserializeOwned + 'a,
     L: 'a,
@@ -132,49 +107,35 @@ where
     R: Retries,
     N: NetworkFor<T>,
 {
-    let members = source
-        .location()
-        .source_cluster_membership_stream(
-            to,
-            nondet!(/** dropped membership prefixes don't affect broadcast delivery */),
-        )
-        .entries()
-        .filter_map(q!(|(id, ev)| match ev {
-            MembershipEvent::Joined => Some(id),
-            MembershipEvent::Left => None,
-        }));
+    let members = crate::orchestrated_membership::member_envelope(
+        source.location(),
+        to,
+        nondet!(/** dropped membership prefixes don't affect broadcast delivery */),
+    );
 
     source
         .cross_product(members)
         .map(q!(|(data, member_id)| (member_id, data)))
         .into_keyed()
         .demux(to, via)
-        .assert_has_consistency_of::<Cluster<'a, L2, N::ConsistencyGuarantee>>(manual_proof!(
-            /// Live monotone membership + an EC-preserving network policy: every element
-            /// eventually crosses every member that ever joins and is delivered to it, so
-            /// all live destinations materialize the same elements.
-        ))
 }
 
 #[cfg(test)]
 mod tests {
     use hydro_lang::live_collections::keyed_stream::KeyedStream;
-    use hydro_lang::location::cluster::{EventualConsistency, NoConsistency};
+    use hydro_lang::location::cluster::NoConsistency;
     use hydro_lang::location::{Cluster, MemberId};
     use hydro_lang::prelude::*;
 
     use super::broadcast_live;
 
-    /// Compile-time check that `broadcast_live`'s output consistency tracks the
-    /// network failure policy — the M1 core claim. `fail_stop` /
-    /// `lossy_delayed_forever` yield `EventualConsistency` over the *live*
-    /// membership relation; plain `lossy` yields only `NoConsistency`.
-    ///
-    /// The `lossy` arm's type annotation is what proves EC is genuinely *earned*
-    /// from the policy, not hard-coded: if `broadcast_live` always claimed EC,
-    /// this arm would fail to compile.
+    /// Compile-time check that `broadcast_live`'s output is `NoConsistency`
+    /// regardless of the network failure policy: it is a mechanical fan-out and
+    /// makes no consistency claim. The EC assertion lives in
+    /// `reliable_broadcast_live`, which supplies the echo cycle that actually
+    /// justifies it.
     #[test]
-    fn broadcast_live_consistency_tracks_failure_policy() {
+    fn broadcast_live_output_is_no_consistency() {
         use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
 
         let mut flow = FlowBuilder::new();
@@ -183,18 +144,13 @@ mod tests {
 
         // An unbounded live source stream at each source member.
         let (_send, data) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
-        let (_send2, data2) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
         let (_send3, data3) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
 
-        // fail_stop: same messages to every live member ⇒ EC over live membership.
-        let _: KeyedStream<MemberId<()>, u32, Cluster<'_, (), EventualConsistency>, _, _, _> =
+        // fail_stop: still NoConsistency — no EC is minted at the fan-out layer.
+        let _: KeyedStream<MemberId<()>, u32, Cluster<'_, (), NoConsistency>, _, _, _> =
             broadcast_live(data, &to, TCP.fail_stop().bincode());
 
-        // lossy_delayed_forever: drops modeled as indefinite delays ⇒ still EC.
-        let _: KeyedStream<MemberId<()>, u32, Cluster<'_, (), EventualConsistency>, _, _, _> =
-            broadcast_live(data2, &to, TCP.lossy_delayed_forever().bincode());
-
-        // plain lossy: permanent per-member drops ⇒ only NoConsistency.
+        // plain lossy: NoConsistency as well.
         let _: KeyedStream<MemberId<()>, u32, Cluster<'_, (), NoConsistency>, _, _, _> =
             broadcast_live(data3, &to, TCP.lossy(nondet!(/** test */)).bincode());
 
