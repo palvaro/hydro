@@ -240,18 +240,13 @@ mod tests {
     /// cluster-observed hook-keying branch (the echo observes the cluster's own
     /// membership, one `MembershipHook` per member).
     ///
-    /// Uses `fuzz` rather than `exhaustive`. Measured cause: static RB explores
-    /// exactly 1 execution even at 3 nodes (fail-stop delivery is deterministic;
-    /// the echo cycle doesn't fork the search). Turning on dynamic membership
-    /// jumps a *2-node* run to 294 executions — so the blowup is entirely the
-    /// `MembershipHook`, which forks join timing on every scheduler round of the
-    /// echo cycle rather than only at observable points. 294 is already far more
-    /// than the handful of genuinely-distinct join orderings, and it compounds
-    /// with cluster size, so n=3 exhaustive is impractical *today*. This is a hook
-    /// defect, not a property of RB or of exhaustive search: a hook that forked
-    /// only when releasing a member changes an observable outcome would very
-    /// likely make n=3 exhaustive tractable. `fuzz` covers the 3-node model in the
-    /// meantime; single executions always terminate (verified).
+    /// Runs `exhaustive` at 3 nodes. This is tractable because the
+    /// `MembershipHook` treats membership as an ordinary unordered stream: it
+    /// forks only on join *timing* (release the next member now, or defer it),
+    /// never on the *order* in which members are released — member order is
+    /// unobservable for a symmetric fan-out, so forking on it was pure redundancy
+    /// that previously multiplied the search to millions of executions. With that
+    /// removed, every genuine join-vs-message interleaving is still explored.
     #[test]
     fn reliable_broadcast_live_delivers_under_dynamic_membership() {
         use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
@@ -268,7 +263,7 @@ mod tests {
             .skip_consistency_assertions()
             .with_cluster_size(&cluster, 3)
             .with_dynamic_membership(&cluster)
-            .fuzz(async || {
+            .exhaustive(async || {
                 in_send.send(42);
                 for member in 0..3u32 {
                     let got: Vec<u32> = out_recv.collect_n_sorted(member, 1).await;

@@ -1478,24 +1478,40 @@ impl<T> SimHook for TopLevelStreamOrderHook<T> {
     }
 }
 
-/// Simulation hook for **dynamic cluster membership** (M0 spike).
+/// Simulation hook for **dynamic cluster membership**.
 ///
-/// Today the simulator sources cluster membership from an eager
+/// The simulator sources cluster membership from an eager
 /// `futures::stream::iter([Joined, Joined, ...])` (see
 /// `deploy_runtime::cluster_membership_stream`), which the scheduler drains to
 /// completion *before* reaching its nondeterministic fork point — so every
 /// member appears to join at once and joins cannot interleave with message flow.
 ///
-/// This hook fixes that by making join *timing* a nondeterministic decision the
-/// exhaustive engine forks on. It is the membership analog of
-/// [`TopLevelStreamOrderHook`]: the release logic (emit one queued event, or
-/// none, per round) is identical. The one structural difference is that a
-/// membership source has **no upstream DFIR** feeding it, so its queue is
-/// *pre-seeded* at construction with the cluster's `Joined` events rather than
-/// filled by an upstream `for_each(push_back)`.
+/// This hook makes join *timing* a nondeterministic decision the exhaustive
+/// engine forks on by treating cluster membership as an ordinary **unordered,
+/// unbounded stream** whose elements are the joining members. It is a direct
+/// analog of [`TopLevelStreamOrderHook`]: each round it either releases the next
+/// pending join or defers it, which is exactly what explores "does this member
+/// join now, or after more messages have flowed?".
 ///
-/// `Left` events are deliberately out of scope for this spike (they make the
-/// membership relation non-monotone). They would be pushed into the same queue.
+/// # Why release order is fixed (the fix for the historical blowup)
+///
+/// An earlier version forked on *which* member to release each round (a random
+/// index into the queue). Because membership is an *unordered* set, that order
+/// is not observable: releasing `{m0, m1}` versus `{m1, m0}` into a symmetric
+/// fan-out is the *same* execution. Forking on it multiplied the genuine
+/// join-vs-message timing interleavings by every permutation of the members,
+/// which — compounded across the multiple observers of a broadcast echo cycle —
+/// produced millions of executions for a state space of a couple dozen genuine
+/// behaviors.
+///
+/// The fix is to treat membership like any normal unordered stream: release in
+/// fixed (front) order, one at a time, and fork only on *timing*. This preserves
+/// every genuine join-vs-action interleaving (each member can still join early
+/// or late relative to message flow) while dropping the unobservable
+/// member-order permutations.
+///
+/// `Left` events are deliberately out of scope (they make the membership
+/// relation non-monotone). They would be pushed into the same queue.
 pub struct MembershipHook<T> {
     /// Pending membership events, pre-seeded at construction. Released one at a
     /// time to let the engine explore join timing against message flow.
@@ -1559,18 +1575,24 @@ impl<T> SimHook for MembershipHook<T> {
         let mut current_input = self.input.borrow_mut();
         let mut out = vec![];
 
-        // Release at most one event per round (like `TopLevelStreamOrderHook`),
-        // so join timing interleaves with message flow rather than all members
-        // appearing at once. `force_nontrivial` guarantees progress when the
-        // engine requires this hook to advance.
+        // Release at most one event per round, exactly like
+        // `TopLevelStreamOrderHook`: either emit the next pending join or defer
+        // it to a later round, which is what forks the search over join *timing*
+        // (does this member join now, or after more message flow?).
+        //
+        // Crucially we release in FIXED (front) order and do NOT fork on which
+        // member to release. Membership is an *unordered* stream, so the order in
+        // which members are released is not observable — releasing {m0, m1} vs
+        // {m1, m0} into a symmetric fan-out yields the same execution. Forking on
+        // member identity here was the dominant source of the historical blowup
+        // (it multiplied the genuine timing interleavings by every permutation of
+        // members); dropping it is what makes the search tractable while still
+        // exploring every genuine join-vs-message interleaving.
         if !current_input.is_empty() {
-            let must_release = force_nontrivial && out.is_empty();
-            if !must_release && produce().generate(driver).unwrap() {
-                // don't release anything this round (member joins later)
+            if !force_nontrivial && produce().generate(driver).unwrap() {
+                // Defer: this member joins later.
             } else {
-                let idx = (0..current_input.len()).generate(driver).unwrap();
-                let item = current_input.remove(idx).unwrap();
-                out.push(item);
+                out.push(current_input.pop_front().unwrap());
             }
         }
 

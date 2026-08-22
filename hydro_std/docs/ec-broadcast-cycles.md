@@ -5,13 +5,14 @@
 A class of cluster protocols — reliable broadcast, CRDT gossip, and (we
 conjecture) broadcast-transcript consensus — can carry an
 `EventualConsistency` (EC) type on their output **inferred entirely by the
-type system**, with zero `assert_has_consistency_of` and zero `manual_proof!`
+type system** — with no `assert_has_consistency_of` and no `manual_proof!`
 on the consistency label itself.
 
-This is stronger than it sounds. These protocols contain *feedback cycles*
+This would appear on the surface not to work. These protocols contain *feedback cycles*
 (a member's output depends on what it received from others), and cycles are
-exactly where naive consistency reasoning breaks. We show the inference is
-**always sound** because it rests on two facts the type system already
+exactly where Rust's type inference (and hence naive consistency)
+reasoning breaks. We show a workaround under which inference remains
+sound because it relies on two facts the type system already
 enforces, plus one structural discipline.
 
 ## The two facts the type system already gives us
@@ -19,7 +20,7 @@ enforces, plus one structural discipline.
 1. **`broadcast_closed` + `fail_stop` earns EC from the transport, not the
    input.** Its return type is `Cluster<'a, L, N::ConsistencyGuarantee>`,
    where `ConsistencyGuarantee` comes from the *network failure policy*
-   ([`NetworkFor`]). `fail_stop` → `EventualConsistency`; `lossy` →
+   (`NetworkFor`). `fail_stop` → `EventualConsistency`; `lossy` →
    `NoConsistency`. Crucially, the consistency of the *input* stream is
    irrelevant — a `NoConsistency` input broadcast over `fail_stop` yields an
    `EC` output. EC is *earned fresh* at every broadcast.
@@ -33,25 +34,31 @@ enforces, plus one structural discipline.
    accidentally keep an EC label across a nondeterministic step; the types
    forbid it.
 
-## The trick
+## The pattern: a broadcast-anchored cycle
+
+We call the reusable idea a **broadcast-anchored cycle**. The output of a
+`broadcast_closed` is EC-typed (fact 1); we call that stream the **anchor**.
+The feedback cycle's `forward_ref` is declared on the anchor's location, so
+the entire cycle inhabits the anchor's EC location and can only be closed by
+another EC stream.
 
 A feedback cycle in Hydro is built with `forward_ref`: you obtain a handle
 and a placeholder stream, use the placeholder, then `complete` the handle
 with the real stream later. The placeholder's **location type is fixed at
 declaration** — including its consistency parameter.
 
-The trick is to declare the `forward_ref` on the **EC location produced by an
-initial `broadcast_closed`**, rather than on the bare cluster (which defaults
-to `NoConsistency`):
+Declare the `forward_ref` on the **anchor's location** — the EC location
+produced by the initial `broadcast_closed` — rather than on the bare cluster
+(which defaults to `NoConsistency` and cannot subsequently be changed):
 
 ```rust
-let initial = source.broadcast_closed(cluster, TCP.fail_stop().bincode()); // EC
-let (handle, cycle) = initial.location().forward_ref::<Stream<_, _, …>>();  // EC placeholder
+let anchor = source.broadcast_closed(cluster, TCP.fail_stop().bincode()); // EC
+let (handle, cycle) = anchor.location().forward_ref::<Stream<_, _, …>>();  // EC placeholder
 ```
 
 Now the placeholder `cycle` is EC. To `complete` the handle, you must supply
-an EC stream — and the type checker enforces this. The completing stream is
-produced by *another* `broadcast_closed`, which (fact 1) independently earns
+an EC stream — and the type checker enforces this also. If, for example, the completing stream is
+produced by *another* `broadcast_closed`, this (fact 1) independently earns
 EC. The cycle closes with matching types.
 
 ## Why this is *always* sound
@@ -59,7 +66,7 @@ EC. The cycle closes with matching types.
 The soundness argument has exactly three clauses, and all three are checked
 by the compiler — none are assumed:
 
-1. **`initial` is genuinely EC.** It is the output of `broadcast_closed` +
+1. **The anchor is genuinely EC.** It is the output of `broadcast_closed` +
    `fail_stop`. This is the one place the *library* (not user code) uses a
    trusted assertion, justified once inside `hydro_lang`: a fail-stop network
    delivers the same messages to every live member. User code cannot forge
@@ -112,22 +119,6 @@ minimal, clearly-scoped obligations.
 
 ## Code
 
-All on branch [`eventual_consistency`](https://github.com/palvaro/hydro/tree/eventual_consistency)
-of `palvaro/hydro`.
+https://github.com/palvaro/hydro/blob/cf6964bb69/hydro_std/src/reliable_broadcast.rs
 
-- **Reliable broadcast** —
-  [`hydro_std/src/reliable_broadcast.rs`](https://github.com/palvaro/hydro/blob/eventual_consistency/hydro_std/src/reliable_broadcast.rs).
-  The cycle: `broadcast_closed` (line 92) → `forward_ref` on the EC location
-  (line 103) → `merge_unordered` (107) → `unique` (110) → re-`broadcast_closed`
-  (116) → `complete` (120).
-
-- **CRDT gossip (state-based G-Set)** —
-  [`hydro_std/src/crdt_gossip.rs`](https://github.com/palvaro/hydro/blob/eventual_consistency/hydro_std/src/crdt_gossip.rs).
-  Same skeleton, but folds into a `HashSet` (line 47), then
-  `sample_every` (58) downgrades and `broadcast_closed` (62) re-earns EC to
-  close the cycle.
-
-- **Soundness notes / abuse cases** —
-  [`hydro_std/src/crdt_gossip_soundness.rs`](https://github.com/palvaro/hydro/blob/eventual_consistency/hydro_std/src/crdt_gossip_soundness.rs).
-
-[`NetworkFor`]: https://github.com/palvaro/hydro/blob/eventual_consistency/hydro_lang/src/networking/mod.rs
+https://github.com/palvaro/hydro/blob/cf6964bb69/hydro_std/src/crdt_gossip.rs

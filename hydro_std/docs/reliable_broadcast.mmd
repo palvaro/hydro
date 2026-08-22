@@ -1,0 +1,25 @@
+flowchart TD
+    subgraph "Process (Sender)"
+        SRC[/"source: Stream&lt;T&gt;"/]
+    end
+
+    subgraph "Cluster (All Members)"
+        SRC -->|"broadcast_closed\n(TCP fail_stop bincode)"| INITIAL["initial\n(EC inferred)"]
+
+        INITIAL --> MERGE["merge_unordered"]
+        REFWD["rebroadcast_fwd\n(forward_ref)"] --> MERGE
+
+        MERGE --> UNIQUE["unique()\n(dedup)"]
+        UNIQUE --> NEW["new_messages"]
+
+        NEW -->|clone| ECHO_BC["broadcast_closed\n(Cluster→Cluster)\n(TCP fail_stop bincode)"]
+        ECHO_BC -->|".values()"| ECHO["echo"]
+        ECHO -->|"complete()"| REFWD
+
+        NEW --> DELIVER[/"Delivered Stream&lt;T, EC&gt;"/]
+    end
+
+    style SRC fill:#e1f5fe
+    style DELIVER fill:#c8e6c9
+    style UNIQUE fill:#fff3e0
+    style REFWD fill:#fce4ec

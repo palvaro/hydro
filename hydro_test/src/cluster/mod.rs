@@ -23,3 +23,15 @@ pub mod simple_cluster;
 pub mod two_pc;
 #[cfg(feature = "tokio")]
 pub mod two_pc_bench;
+
+// WIP: the following modules were written against an older hydro_lang API
+// (they call `broadcast_from_member`, which has since been renamed/removed,
+// and `typed_consensus` has a `T`/`usize` type mismatch at ~line 360).
+// The source is preserved in git; re-enable these `mod` declarations after
+// porting them to the current API (see `broadcast_closed`).
+// #[cfg(feature = "tokio")]
+// pub mod paxos_ec;
+// #[cfg(feature = "tokio")]
+// pub mod typed_consensus;
+// #[cfg(feature = "tokio")]
+// pub mod state_space_comparison;

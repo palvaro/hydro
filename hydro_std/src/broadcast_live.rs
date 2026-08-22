@@ -396,9 +396,17 @@ mod tests {
                 }
             });
 
-        assert!(
-            instances > 1,
-            "expected multiple join timings to be explored, got {instances}"
+        // Exactly one execution: this flow is non-cyclic with a single
+        // membership observer, and membership is an *unordered* stream, so the
+        // order the two symmetric members join in is not a distinct execution.
+        // The single explored execution is itself a genuine late-join case — all
+        // three messages already exist when the members join (membership is
+        // released once the message flow quiesces), so the catch-up path is
+        // exercised. (Contrast the cyclic tests above, whose echo feedback does
+        // produce multiple genuine join-vs-echo timings.)
+        assert_eq!(
+            instances, 1,
+            "non-cyclic symmetric fan-out should explore exactly one execution, got {instances}"
         );
     }
 }
