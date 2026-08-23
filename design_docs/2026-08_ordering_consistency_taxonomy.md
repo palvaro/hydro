@@ -193,7 +193,88 @@ invariant for *order-decisions*, with fencing to preserve slot-safety across
 leader changes. Type-theoretically: **consensus is the arrow
 `EC<F = {leader}> → EC<F = ∅>`** — a fault-dependency eraser.
 
-## 8. Implementation sketches
+## 8. Why the two F-clearings cost differently: observed vs. authored facts
+
+§7 says leader-merge, the echo, and phase-2 quorums are the *same* rule ("act
+only once the decision is held widely enough") at replication degrees 1,
+growing, and f+1. That invites a fair question: reliable broadcast strengthens
+plain broadcast against sender failure fairly cheaply — one echo cycle, EC still
+inferred, no `manual_proof!` on consistency. Multi-writer TO,EC has the *same*
+shape of hole (a single holder at first visibility) but its repair is the entire
+consensus apparatus. If the F-clearing mechanism is identical, why is the second
+repair so much more expensive?
+
+The mechanism is identical; the **fact being disseminated is a different kind of
+fact**, and that difference — not the dissemination — is the whole cost.
+
+**Dissemination is genuinely the same in both cases.** RB clears sender-F by
+re-broadcast-before-deliver (holder count grows before visibility). Relayed
+Paxos clears *convergence*-F by forwarding learns holder-to-holder — §6's claim
+that Paxos's convergence dependency is ∅ is precisely this: the same echo cycle,
+same cost. "Get an already-settled fact to every live member despite crashes" is
+not harder for the ordered-log case. So the extra cost of consensus is *not* in
+moving the fact around.
+
+**It is in the nature of the fact.** Distinguish two provenances:
+
+- **Observed facts** exist before dissemination. RB's message *m* existed the
+  instant the sender created it; RB's only job is delivery. The fact is
+  **witness-free and reconstruction-complete**: any single holder is a full,
+  authoritative copy. Lose the sender after one relay holds *m* and nothing is
+  lost — the survivor *is* the truth. This is the single-writer row of §2
+  reasserted: prefixes of one writer's history are stable facts *someone's
+  history determines*.
+- **Authored facts** do not exist until someone manufactures them. Per §3b, the
+  cross-writer interleaving is a fact that *does not exist until someone
+  generates it* — the leader is not relaying a pre-existing order, it is the
+  **sole author of a brand-new one**, chosen from exponentially many admissible
+  orders. That is exactly what the `nondet!` in the leader-merge program marks:
+  a run-contingent *choice*, not an *observation*.
+
+At holder-count-1 the two look identical (one location holds the fact). Under a
+crash they are categorically different:
+
+- RB survivor **reconstructs the truth** — it already holds a complete copy of an
+  observed fact.
+- Leader-merge survivors hold prefixes *p* and *q* of an authored order and
+  **can reconstruct nothing**, because the order was never a fact about the world
+  — it was a choice, and the chooser is gone. A nondeterministic choice has no
+  oracle: there is no ground truth to recover.
+
+This is what makes the repair costlier along two axes that RB never faces:
+
+1. **Pre-authorship replication is impossible.** RB can replicate the fact
+   *before* revealing it for free, because the fact pre-exists — replication is a
+   pure copy off the critical path (the background echo). You cannot copy a
+   decision before it is made, so "copy then act" must become "**agree then
+   act**": a quorum round *on the critical path* (phase 2), not a background
+   echo.
+2. **Rival authors must be serialized.** Two relays of the same observed message
+   cannot conflict — copying is idempotent. Two leaders can each author a
+   *different* order for the same slot — invention is not idempotent. So on top
+   of quorum-before-visibility, consensus needs **fencing** (ballots) to prevent
+   a second author from forking a slot across a leader change. RB has no analogue
+   because there is never a second author.
+
+So the §7 arrow `EC<F=…> → EC<F=∅>` is drawn twice, but it erases two different
+dependencies. RB's arrow erases a dependency on *a holder of an observed fact* —
+cleared by redundancy, cheap, because copies are free and cannot conflict.
+Consensus's arrow erases a dependency on *the author of a nondeterministic
+choice* — not clearable by redundancy at all (you cannot pre-copy a choice), only
+*preventable*, by never letting the choice become visible until it is already
+quorum-held and fenced. The lone `nondet!` in the leader-merge program is the
+exact marker of "authored, not observed"; it is why line-2 of the broadcast ↔
+merge parallel is a different order of problem from line-1, even though the
+dissemination machinery underneath both is the same echo cycle.
+
+Corollary for typed F: the `fault_dependency!` witness (§9) is really tracking
+*authorship-without-quorum*. An operator that disseminates an observed fact
+should not incur it (redundancy already clears F); an operator that makes a
+run-contingent choice visible below quorum replication should. That is the same
+`nondet!`-carrying edge the sketch already flags — the fault dependency is the
+shadow of an authored-but-under-replicated choice.
+
+## 9. Implementation sketches
 
 - **Cheap (witness genus):** alongside `nondet!` (run-contingent *choices*)
   and `manual_proof!` (human-discharged *facts*), a third witness for assumed
@@ -211,7 +292,7 @@ leader changes. Type-theoretically: **consensus is the arrow
   belongs to the liveness axis (Bounded/Unbounded territory), not the
   consistency label.
 
-## 9. Open questions
+## 10. Open questions
 
 - Does N × F subsume the sub-EC tier design (epistemic doc §4) entirely?
   (N handles retention/epochs; F handles fault assumptions; the label is
@@ -262,7 +343,7 @@ primary-backup from Raft":
    structural fact about the dataflow graph: *does a quorum-ack edge precede
    the commit-visibility edge?* Holders-at-first-visibility = 1 vs. f+1
    (§7) is readable off the wiring without executing a single fault. That is
-   why typed F (§8) is possible at all: fault injection is the *oracle* for
+   why typed F (§9) is possible at all: fault injection is the *oracle* for
    the property, but the property itself is derivable from the graph — the
    same way the echo cycle makes coverage derivable. The endgame is the
    usual division of labor pushed one axis further out: F in the types,
