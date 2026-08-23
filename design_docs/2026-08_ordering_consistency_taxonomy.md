@@ -226,3 +226,40 @@ leader changes. Type-theoretically: **consensus is the arrow
   `hydro_std/src/taxonomy_tests.rs` pins both the single-writer TO,EC fact
   and the leader-merge construction. When F lands, extend the test to assert
   the dependency is *tracked* (`EC<F = {leader}>`).
+
+## Footnote: how invisible the primary/backup ↔ Paxos distinction currently is
+
+Three closing observations on §5's "the label cannot distinguish
+primary-backup from Raft":
+
+1. **The visible trust ledger is inverted.** The primary/backup program (§4)
+   carries *zero* consistency proofs — one `nondet!` — while transcript-Paxos
+   carries a `manual_proof!` for slot-safety. To an auditor of witness
+   obligations, the SPOF program looks *cleaner* than the fault-tolerant one.
+   The ledger measures safety-under-contention (a problem primary/backup does
+   not have — it breaks instead of racing); the fault-tolerance axis is
+   simply unmeasured.
+
+2. **Today even fault injection cannot reveal the difference.** The sim
+   explores message timing, batching, and join timing — it never kills a
+   process. So the distinction currently lives nowhere mechanical: not in
+   the types, not in the sim; only in prose. And this is the label being
+   *honest about its run set*, not a soundness bug: a fault model is a
+   closure property on the set of runs (Halpern), and over the runs the
+   current model contains, the two programs are genuinely equivalent — they
+   diverge only on runs outside it (leader crashes). The failure mode is
+   Halpern & Moses's internal-knowledge-consistency criterion breaking at
+   the model boundary: acting as if the leader never crashes is safe exactly
+   until an observable history contradicts it, and a production leader crash
+   is that observation.
+
+3. **But the distinction is statically derivable — it need not wait for
+   fault injection.** The difference between the two programs is a
+   structural fact about the dataflow graph: *does a quorum-ack edge precede
+   the commit-visibility edge?* Holders-at-first-visibility = 1 vs. f+1
+   (§7) is readable off the wiring without executing a single fault. That is
+   why typed F (§8) is possible at all: fault injection is the *oracle* for
+   the property, but the property itself is derivable from the graph — the
+   same way the echo cycle makes coverage derivable. The endgame is the
+   usual division of labor pushed one axis further out: F in the types,
+   crash injection in the sim attacking the axioms F rests on.
