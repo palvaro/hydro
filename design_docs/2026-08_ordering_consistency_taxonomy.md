@@ -193,115 +193,127 @@ invariant for *order-decisions*, with fencing to preserve slot-safety across
 leader changes. Type-theoretically: **consensus is the arrow
 `EC<F = {leader}> → EC<F = ∅>`** — a fault-dependency eraser.
 
-## 8. Why the two F-clearings cost differently: observed vs. authored facts
+## 8. Why the two F-clearings cost differently — and where the cost actually lives
 
-§7 says leader-merge, the echo, and phase-2 quorums are the *same* rule ("act
-only once the decision is held widely enough") at replication degrees 1,
-growing, and f+1. That invites a fair question: reliable broadcast strengthens
-plain broadcast against sender failure fairly cheaply — one echo cycle, EC still
-inferred, no `manual_proof!` on consistency. Multi-writer TO,EC has the *same*
-shape of hole (a single holder at first visibility) but its repair is the entire
-consensus apparatus. If the F-clearing mechanism is identical, why is the second
-repair so much more expensive?
+There is an obvious parallel: plain broadcast passes the type system as EC but
+is not meaningfully fault tolerant, and reliable broadcast strengthens it
+against sender failure cheaply — one echo cycle, EC still inferred. Leader-merge
+(§4) passes the type system as TO,EC and is not fault tolerant *in exactly the
+same way* (one holder at first visibility, §7). Yet its usual repair is the
+entire consensus apparatus. If the F-clearing mechanism is the same rule at
+different replication degrees, why is the second repair so much more expensive?
 
-The mechanism is identical; the **fact being disseminated is a different kind of
-fact**, and that difference — not the dissemination — is the whole cost.
+Short answer: **it isn't — for what F measures.** Worked through carefully, the
+convergence hole in leader-merge is repairable at RB cost, and everything
+actually expensive in consensus turns out to sit on the liveness axis, which §6
+already ordered out of F. The long answer follows.
 
-**Dissemination is genuinely the same in both cases.** RB clears sender-F by
-re-broadcast-before-deliver (holder count grows before visibility). Relayed
-Paxos clears *convergence*-F by forwarding learns holder-to-holder — §6's claim
-that Paxos's convergence dependency is ∅ is precisely this: the same echo cycle,
-same cost. "Get an already-settled fact to every live member despite crashes" is
-not harder for the ordered-log case. So the extra cost of consensus is *not* in
-moving the fact around.
-
-**It is in the nature of the fact.** Distinguish two provenances:
+**Two kinds of facts.** Distinguish provenance:
 
 - **Observed facts** exist before dissemination. RB's message *m* existed the
-  instant the sender created it; RB's only job is delivery. The fact is
-  **witness-free and reconstruction-complete**: any single holder is a full,
-  authoritative copy. Lose the sender after one relay holds *m* and nothing is
-  lost — the survivor *is* the truth. This is the single-writer row of §2
-  reasserted: prefixes of one writer's history are stable facts *someone's
-  history determines*.
+  instant the sender created it; RB's only job is delivery. Any single holder is
+  a complete, authoritative copy, and copies cannot conflict. This is the
+  single-writer row of §2: stable facts someone's history determines.
 - **Authored facts** do not exist until someone manufactures them. Per §3b, the
-  cross-writer interleaving is a fact that *does not exist until someone
-  generates it* — the leader is not relaying a pre-existing order, it is the
-  **sole author of a brand-new one**, chosen from exponentially many admissible
-  orders. That is exactly what the `nondet!` in the leader-merge program marks:
-  a run-contingent *choice*, not an *observation*.
+  cross-writer interleaving is exactly this — the leader is not relaying a
+  pre-existing order, it is the sole author of a brand-new one, and the
+  `nondet!` in the leader-merge program marks the run-contingent *choice*. A
+  choice has no oracle: if it is lost before anyone else holds it, there is no
+  ground truth to recover. This is §5's fork.
 
-At holder-count-1 the two look identical (one location holds the fact). Under a
-crash they are categorically different:
+**But §4 already noted the escape: once made, the choice is data.** An authored
+fact is only unrecoverable *before it is disseminated*; the instant the leader
+has chosen, the choice is an ordinary observed fact from everyone else's
+perspective — and observed facts are what RB moves cheaply. Concretely, apply
+§3c's "make the order data" route in its degenerate single-author case:
 
-- RB survivor **reconstructs the truth** — it already holds a complete copy of an
-  observed fact.
-- Leader-merge survivors hold prefixes *p* and *q* of an authored order and
-  **can reconstruct nothing**, because the order was never a fact about the world
-  — it was a choice, and the chooser is gone. A nondeterministic choice has no
-  oracle: there is no ground truth to recover.
+1. the leader enumerates its merged TO stream into `(slot, value)` facts —
+   the order now rides in the slots, not in transit order;
+2. reliable-broadcast the facts to the replicas as a NoOrder,EC bag (the echo:
+   each replica re-broadcasts before delivering);
+3. each replica recovers the sequence locally by dense-prefix extraction
+   (monotone, hence EC-preserving, per §3c).
 
-This is what makes the repair costlier along two axes that RB never faces:
+Now rerun §5's fork scenario. The leader dies mid-fan-out; replica A received
+slot 5, replica B did not. The echo carries slot 5 to B: whatever *any* live
+member holds reaches *every* live member (§6's relay argument). The bags
+converge. A single author cannot assign one slot twice, so §3c's residue — slot
+uniqueness — is satisfied for free. Dense-prefix extraction is deterministic on
+the converged bag, so the delivered *sequences* converge, stalling at the same
+gap everywhere if some decision died with the leader — which §6 explicitly
+blesses: a stalled log identical at every live replica is converged.
 
-1. **Pre-authorship replication is impossible.** RB can replicate the fact
-   *before* revealing it for free, because the fact pre-exists — replication is a
-   pure copy off the critical path (the background echo). You cannot copy a
-   decision before it is made, so "copy then act" must become "**agree then
-   act**": a quorum round *on the critical path* (phase 2), not a background
-   echo.
-2. **Rival authors must be serialized.** Two relays of the same observed message
-   cannot conflict — copying is idempotent. Two leaders can each author a
-   *different* order for the same slot — invention is not idempotent. So on top
-   of quorum-before-visibility, consensus needs **fencing** (ballots) to prevent
-   a second author from forking a slot across a leader change. RB has no analogue
-   because there is never a second author.
+That is multi-writer TO,EC with **convergence-F = ∅, at RB cost: no quorum
+round, no ballots, no fencing.** And it is emphatically *not consensus* —
+nothing is agreed anywhere; slot assignment is unilateral; it is reliable
+broadcast applied to authored data.
 
-So the §7 arrow `EC<F=…> → EC<F=∅>` is drawn twice, but it erases two different
-dependencies. RB's arrow erases a dependency on *a holder of an observed fact* —
-cleared by redundancy, cheap, because copies are free and cannot conflict.
-Consensus's arrow erases a dependency on *the author of a nondeterministic
-choice* — not clearable by redundancy at all (you cannot pre-copy a choice), only
-*preventable*, by never letting the choice become visible until it is already
-quorum-held and fenced. The lone `nondet!` in the leader-merge program is the
-exact marker of "authored, not observed"; it is why line-2 of the broadcast ↔
-merge parallel is a different order of problem from line-1, even though the
-dissemination machinery underneath both is the same echo cycle.
+**So what does consensus actually buy?** The hardened log has one property
+nobody would ship: when the author dies, it freezes *forever*. Converged,
+consistent, and dead. Under §6's own discipline — progress is liveness and does
+not belong in F — the hardened primary/backup and relayed Paxos have the **same
+three-place signature**: same O, same Con, same N, same F = ∅. Every remaining
+difference between them lives on the liveness axis: Paxos's log keeps accepting
+entries after the author dies. That requires **author succession**, and
+succession is where the entire cost of consensus sits:
 
-The repo's own Paxos/Raft confirm this decomposition witness-for-witness. The
-authored-order `nondet!` is *present and identical* across all three: leader-merge
-publishes it via `entries_partially_ordered(nondet!(/** leader dictates the
-interleaving */))`, while `raft.rs` and `broadcast_transcript_consensus.rs` publish
-the same choice via `requests.assume_ordering::<TotalOrder>(nondet!(/** arrival
-order ... is inherently non-deterministic */))`; every batching `nondet!` in those
-protocols is careful to say it "only affects timing / which slot, but never the
-committed sequence itself." So consensus does *not* remove the choice's `nondet!` —
-it is irreducible (a choice has no oracle). What it changes is the ledger on the two
-axes above:
+1. a successor must be able to take over authorship (the liveness demand);
+2. admitting a successor admits *rival* authors, and invention — unlike copying
+   — is not idempotent: two authors can assign the same slot differently (the
+   safety shadow of the liveness demand);
+3. hence ballots/fencing and quorum intersection. This is also why phase 2
+   *waits for f+1 acks before visibility*, where RB's echo is fire-and-forget
+   (send, then deliver — no acks; one surviving copy suffices because copies
+   cannot conflict). The quorum round is not a convergence cost. It is the down
+   payment on **recoverable authorship**: a successor running phase 1 must be
+   able to *discover* every decision that might have become visible, and
+   quorum-held-before-visible is what makes discovery complete.
 
-- *Axis 1 (pre-authorship replication → inference).* Leader-merge's output EC rests
-  on a **trusted axiom** — the `assert_has_consistency_of_trusted` inside
-  `broadcast_closed`, publishing the choice at holder-count-1 (F = {leader}).
-  `paxos_ec` carries the *same* interleaving `nondet!`s but its output EC is
-  **inferred, not asserted**: the commit path commits only after a quorum holds the
-  entry, so by the time the order is visible it is already quorum-replicated, and the
-  code notes EC is derived "without any `assert_has_consistency_of` or
-  `manual_proof!`." The trusted axiom is gone precisely because the choice is never
-  revealed below quorum.
-- *Axis 2 (rival authors → fencing).* Paxos/Raft carry a `nondet!` that leader-merge
-  simply does not have — "which member wins an election is inherently
-  non-deterministic" (`raft.rs`, `paxos.rs`). That is the serialization machinery for
-  tolerating multiple would-be authors; single-leader-merge and RB never need it.
+**The factoring.** §7's arrow `EC<F = {leader}> → EC<F = ∅>` factors into two
+maps with wildly different price tags:
 
-So empirically: same `nondet!` on the authored order in all three; consensus adds
-inference-in-place-of-a-trusted-axiom (axis 1) plus an election `nondet!` (axis 2) —
-exactly the two costs the abstract argument predicts, and nothing more.
+> (convergence-eraser: the echo — cheap, identical to RB's)
+> ∘ (author-succession: quorums + fencing — expensive, liveness-motivated,
+> safety-constrained)
 
-Corollary for typed F: the `fault_dependency!` witness (§9) is really tracking
-*authorship-without-quorum*. An operator that disseminates an observed fact
-should not incur it (redundancy already clears F); an operator that makes a
-run-contingent choice visible below quorum replication should. That is the same
-`nondet!`-carrying edge the sketch already flags — the fault dependency is the
-shadow of an authored-but-under-replicated choice.
+The opening question dissolves: hardening the *convergence* of an authored
+order costs the same as hardening a broadcast, by the same mechanism. Consensus
+is more expensive because it is asked for more — nobody wants a log that stops.
+The hard part was never "get the order everywhere despite crashes"; it is "keep
+*making* order after the order-maker dies, without letting two order-makers
+fork a slot."
+
+**Ledger evidence from the repo's own programs.** The decomposition is visible
+witness-by-witness:
+
+- The authored-order `nondet!` is present and identical in all of them:
+  leader-merge's `entries_partially_ordered(nondet!(/** leader dictates the
+  interleaving */))`, and `raft.rs` / `broadcast_transcript_consensus.rs`'s
+  `requests.assume_ordering::<TotalOrder>(nondet!(/** arrival order ... is
+  inherently non-deterministic */))`. Consensus does not remove the choice's
+  witness — a choice has no oracle, so this witness is irreducible.
+- Naive leader-merge's EC rests on `broadcast_closed`'s trusted axiom,
+  publishing the choice at holder-count 1. `paxos_ec`'s *consistency label* is
+  inferred with no consistency assertion at all — the choice is never visible
+  below quorum. (No contradiction with the footnote's observation that
+  transcript-Paxos carries a `manual_proof!`: that proof discharges the
+  slot-safety residue, which §2 places *outside* the consistency label.)
+- The one witness the log-that-stops variants never need: Paxos/Raft's election
+  `nondet!` ("which member wins an election is inherently non-deterministic").
+  That is the succession machinery — the liveness purchase — showing up in the
+  ledger.
+
+**Corollary for typed F.** The `fault_dependency!` witness (§9) tracks *choices
+visible below survivable replication*: naive leader-merge incurs it; echoing
+the decisions clears it. But note the honest limit this section implies: typed
+F will distinguish naive primary/backup from Paxos, and will **never**
+distinguish echo-hardened primary/backup from Paxos — by §9's own refusal rule,
+their difference (progress after author death) is not F's to record. That is
+the label being *right*, not weak: F measures convergence, and a
+converged-but-frozen log genuinely converges. It also adds a third program to
+the footnote's indistinguishability observation, and pins where the residual
+distinction must eventually live: the liveness axis (Bounded/Unbounded
+territory), not the consistency label.
 
 ## 9. Implementation sketches
 
