@@ -90,6 +90,73 @@ where
     merged.broadcast_closed(replicas, via)
 }
 
+/// The **honest-type variant**: leader-merge from a distinguished cluster
+/// member, returning the keyed stream the type system natively produces —
+/// per-sender substreams, each TotalOrder + EC — rather than forcing a
+/// flattened signature.
+///
+/// [`leader_merge_slots_from_member`]'s docs explain why the naive member-leader
+/// port cannot output `Stream<T, Cluster<EC>, TotalOrder>`: member-locality is
+/// invisible to the types, so a cluster-source broadcast is a multi-writer
+/// broadcast and there is no safe door out of keyed-by-sender. This variant
+/// treats that refusal as a feature and stops one step earlier: the broadcast's
+/// own output type
+///
+/// ```text
+/// KeyedStream<MemberId<L2>, (writer, value), Cluster<L2, EC>, per-key TotalOrder>
+/// ```
+///
+/// is *already* the single-writer row of the taxonomy applied per sender: for
+/// each key, every member eventually holds the same sequence. EC inferred, the
+/// full merged order preserved (per key), zero consistency assertions, and —
+/// unlike the slot route — no `ExactlyOnce` requirement, since nothing is
+/// enumerated.
+///
+/// The interesting property is the one the types deliberately do not state:
+/// **all keys but the distinguished member's are empty.** That is a runtime
+/// invariant of this dataflow (only member 0 receives writer data), pinned by
+/// the behavior test, not by the signature. Consumers who know the leader pick
+/// its key; consumers who don't are forced by the type to confront the
+/// cross-key question — which is the correct default, because under leader
+/// *succession* this same signature keeps telling the truth: key 0's substream
+/// ends, key 1's begins, and how epochs splice across keys is exactly the
+/// fencing residue (taxonomy doc §8).
+pub fn leader_merge_keyed_from_member<'a, T, W, C, L2, R>(
+    local: Stream<T, Cluster<'a, W, C>, Unbounded, TotalOrder, R>,
+    cluster: &Cluster<'a, L2>,
+    nondet_interleaving: NonDet,
+) -> KeyedStream<
+    MemberId<L2>,
+    (MemberId<W>, T),
+    Cluster<'a, L2, EventualConsistency>,
+    Unbounded,
+    TotalOrder,
+    R,
+>
+where
+    T: Clone + Serialize + DeserializeOwned + 'a,
+    W: 'a,
+    C: hydro_lang::location::cluster::Consistency,
+    L2: 'a,
+    R: Retries,
+{
+    // Step 1: Route every writer's stream to the distinguished member.
+    let at_member = local
+        .map(q!(|item| (MemberId::from_raw_id(0), item)))
+        .into_keyed()
+        .demux(cluster, TCP.fail_stop().bincode());
+
+    // Step 2: The distinguished member manufactures THE interleaving (the one
+    // nondet!). TotalOrder at the cluster location, NoConsistency — honestly,
+    // since the types cannot see that only member 0 has data.
+    let merged = at_member.entries_partially_ordered(nondet_interleaving);
+
+    // Step 3: Broadcast, and stop. The keyed output is the honest type:
+    // per-sender TO,EC (the single-writer row, per key). At runtime every
+    // key but member 0's is empty — a fact for tests and consumers, not types.
+    merged.broadcast_closed(cluster, TCP.fail_stop().bincode())
+}
+
 /// The **slot route**: leader-merge where the leader is a *distinguished cluster
 /// member* rather than a separate `Process`, with the order shipped as data.
 ///
@@ -105,7 +172,9 @@ where
 /// `values()` keeps EC and surrenders order; `entries_partially_ordered` keeps
 /// order and — this time genuinely — strips consistency. That is taxonomy doc
 /// §3c's missing morphism, hit head-on: to the types, a distinguished member is
-/// a potential multi-writer.
+/// a potential multi-writer. (The refusal is a feature: see
+/// [`leader_merge_keyed_from_member`] for the variant that embraces the keyed
+/// output type instead of flattening at all.)
 ///
 /// # The slot route (taxonomy doc §3c / §8)
 ///
@@ -179,12 +248,15 @@ where
 
 #[cfg(test)]
 mod tests {
+    use hydro_lang::live_collections::keyed_stream::KeyedStream;
     use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
     use hydro_lang::location::MemberId;
     use hydro_lang::location::cluster::EventualConsistency;
     use hydro_lang::prelude::*;
 
-    use super::{leader_merge_broadcast, leader_merge_slots_from_member};
+    use super::{
+        leader_merge_broadcast, leader_merge_keyed_from_member, leader_merge_slots_from_member,
+    };
 
     /// Compile-time pin (taxonomy doc §4): the leader-merge construction is
     /// multi-writer TO,EC and type-checks with **zero consensus** — one
@@ -299,6 +371,86 @@ mod tests {
                 let mut values: Vec<u32> = member0.iter().map(|(_, (_, v))| *v).collect();
                 values.sort();
                 assert_eq!(values, vec![10, 20]);
+            });
+    }
+
+    /// Compile-time pin for the **honest-type variant**: the member-leader
+    /// merge outputs the keyed stream the type system natively produces —
+    /// `KeyedStream<MemberId<log>, (writer, value), Cluster<EC>, per-key
+    /// TotalOrder>` — EC inferred, full merged order preserved per key, zero
+    /// consistency assertions. The type deliberately does *not* state that all
+    /// keys but one are empty; that runtime property is pinned by the behavior
+    /// test below.
+    #[test]
+    fn member_leader_keyed_is_per_key_total_order_ec() {
+        let mut flow = FlowBuilder::new();
+        let writers = flow.cluster::<()>();
+        let log_cluster = flow.cluster::<()>();
+
+        let (_w, local) = writers.sim_input::<u32, TotalOrder, ExactlyOnce>();
+
+        let log: KeyedStream<
+            MemberId<()>,
+            (MemberId<()>, u32),
+            Cluster<'_, (), EventualConsistency>,
+            _,
+            TotalOrder,
+            _,
+        > = leader_merge_keyed_from_member(
+            local,
+            &log_cluster,
+            nondet!(/** the distinguished member dictates the interleaving */),
+        );
+
+        let _ = log;
+        let _ = flow.finalize();
+    }
+
+    /// Behavior test for the honest-type variant: every log member receives
+    /// the full merged log, and **every entry is keyed by the distinguished
+    /// member** — the "all keys but one are empty" runtime invariant the
+    /// signature deliberately does not claim.
+    #[test]
+    fn member_leader_keyed_all_data_under_distinguished_key() {
+        let mut flow = FlowBuilder::new();
+        let writers = flow.cluster::<()>();
+        let log_cluster = flow.cluster::<()>();
+
+        let (in_send, local) = writers.sim_input::<u32, TotalOrder, ExactlyOnce>();
+
+        let out_recv = leader_merge_keyed_from_member(
+            local,
+            &log_cluster,
+            nondet!(/** the distinguished member dictates the interleaving */),
+        )
+        .entries()
+        .sim_cluster_output();
+
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&writers, 2)
+            .with_cluster_size(&log_cluster, 2)
+            .exhaustive(async || {
+                // Two writers, one value each.
+                in_send.send(0, 10);
+                in_send.send(1, 20);
+
+                let distinguished = MemberId::<()>::from_raw_id(0);
+                for member in 0..2u32 {
+                    let got: Vec<(MemberId<()>, (MemberId<()>, u32))> =
+                        out_recv.collect_n_sorted(member, 2).await;
+
+                    // All entries keyed by the distinguished member — every
+                    // other sender's substream is empty.
+                    assert!(
+                        got.iter().all(|(sender, _)| *sender == distinguished),
+                        "member {member} saw entries from a non-distinguished sender: {got:?}"
+                    );
+                    // The full merged log arrived.
+                    let mut values: Vec<u32> = got.iter().map(|(_, (_, v))| *v).collect();
+                    values.sort();
+                    assert_eq!(values, vec![10, 20], "member {member} missing log entries");
+                }
             });
     }
 }

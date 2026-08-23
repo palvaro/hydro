@@ -20,7 +20,10 @@
 //!   pattern with a distinguished *cluster member* as leader, where the naive
 //!   port is type-refused (member-locality is invisible to the types) and
 //!   shipping the order as `(slot, value)` data earns EC with zero consistency
-//!   assertions.
+//!   assertions. A third variant embraces the refusal: return the keyed stream
+//!   itself (per-key TO,EC), with "all keys but one are empty" as a runtime
+//!   invariant the signature deliberately does not claim — succession-ready,
+//!   since a leader change is just a new live key.
 //! - [`reliable_broadcast`] — echo-based reliable broadcast; EC inferred around
 //!   the re-broadcast cycle via the `forward_ref`-on-an-EC-location trick.
 //! - [`crdt_gossip`] — state-based G-Set gossip; EC inferred around the
