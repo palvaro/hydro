@@ -348,7 +348,11 @@ territory), not the consistency label.
 - The holders-at-visibility invariant wants a static story: can "visibility
   only after k-fold holding" be a typed discipline (an `act_after_replication`
   combinator), making F-clearing inferable the way the echo cycle makes
-  coverage inferable?
+  coverage inferable? *Now being pursued:*
+  `2026-08_epoch_keyed_consensus_splice.md` designs exactly this combinator
+  (`succeed_key`) as the capstone of an epoch-keyed consensus construction —
+  keys as ballots, per-key TO,EC inferred, the entire safety residue localized
+  at key transitions.
 - Where does per-decision durability (client-facing "committed") attach? It
   is neither N nor F — it is a promise to an external observer, likely an
   `ExternalBincodeSink`-side obligation.
