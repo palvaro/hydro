@@ -36,7 +36,11 @@
 //! reliable broadcast (growing) and Paxos (`f+1`).
 
 use hydro_lang::live_collections::keyed_stream::KeyedStream;
-use hydro_lang::live_collections::stream::{IsOrdered, MinOrder, Ordering, Retries, TotalOrder};
+use hydro_lang::live_collections::stream::{
+    ExactlyOnce, IsOrdered, MinOrder, NoOrder, Ordering, Retries, TotalOrder,
+};
+use hydro_lang::location::MemberId;
+use hydro_lang::location::cluster::EventualConsistency;
 use hydro_lang::nondet::NonDet;
 use hydro_lang::prelude::*;
 use serde::Serialize;
@@ -86,14 +90,101 @@ where
     merged.broadcast_closed(replicas, via)
 }
 
+/// The **slot route**: leader-merge where the leader is a *distinguished cluster
+/// member* rather than a separate `Process`, with the order shipped as data.
+///
+/// # Why the naive port of [`leader_merge_broadcast`] does not type-check
+///
+/// The Process version's clean TO,EC typing is load-bearing on
+/// `Process::DropConsistency = Self`. On a `Cluster`,
+/// `DropConsistency = Cluster<NoConsistency>` — and "only member 0 has data" is
+/// member-locality, which the type system deliberately does not track (taxonomy
+/// doc §1: anything touching `CLUSTER_SELF_ID` is `NoConsistency`). So after the
+/// member's broadcast you hold `KeyedStream<MemberId<_>, T, Cluster<EC>, per-key
+/// TO>` and there is **no safe door** to `Stream<T, Cluster<EC>, TotalOrder>`:
+/// `values()` keeps EC and surrenders order; `entries_partially_ordered` keeps
+/// order and — this time genuinely — strips consistency. That is taxonomy doc
+/// §3c's missing morphism, hit head-on: to the types, a distinguished member is
+/// a potential multi-writer.
+///
+/// # The slot route (taxonomy doc §3c / §8)
+///
+/// Make the order *data* before broadcasting, so the cross-member flattening is
+/// never needed:
+///
+/// 1. route every writer's stream to the distinguished member (`demux` to raw
+///    id 0) — sharded receipt, TO,NC;
+/// 2. the member merges (`entries_partially_ordered`, the one `nondet!`) and
+///    `enumerate()`s the chosen sequence into `(slot, value)` facts — the order
+///    now rides in the slots, not in transit;
+/// 3. broadcast the facts to the whole cluster; `values()` keeps EC and drops
+///    only the transit order, which no longer matters.
+///
+/// Output: the NoOrder,EC bag of slot facts, with **zero consistency
+/// assertions** — EC is inferred end-to-end. Each member can recover the
+/// sequence locally by dense-prefix extraction (deterministic on the bag, and
+/// monotone, hence EC-preserving per §3c). Slot uniqueness — §3c's residue — is
+/// free here: a single author cannot assign one slot twice.
+///
+/// # Fault story (taxonomy doc §8)
+///
+/// Same SPOF as [`leader_merge_broadcast`] — F = {member 0}, still untracked —
+/// but two things moved: the leader is now itself a member of N (a beneficiary),
+/// and succession is at least *expressible* (re-route the demux to member 1),
+/// which is the first plank of §8's author-succession story and immediately
+/// raises the fencing residue if attempted. Composing this with the
+/// reliable-broadcast echo would clear convergence-F to ∅ (§8's hardened
+/// variant); the demo keeps the plain broadcast so its ledger stays comparable
+/// to the Process version's.
+pub fn leader_merge_slots_from_member<'a, T, W, C, L2>(
+    local: Stream<T, Cluster<'a, W, C>, Unbounded, TotalOrder, ExactlyOnce>,
+    cluster: &Cluster<'a, L2>,
+    nondet_interleaving: NonDet,
+) -> Stream<
+    (usize, (MemberId<W>, T)),
+    Cluster<'a, L2, EventualConsistency>,
+    Unbounded,
+    NoOrder,
+    ExactlyOnce,
+>
+where
+    T: Clone + Serialize + DeserializeOwned + 'a,
+    W: 'a,
+    C: hydro_lang::location::cluster::Consistency,
+    L2: 'a,
+{
+    // Step 1: Every writer routes its (locally ordered) stream to the
+    // distinguished member. Sharded receipt at the cluster: keyed by writer,
+    // per-key TotalOrder, NoConsistency (member-local data — §1's TO,NC).
+    let at_member = local
+        .map(q!(|item| (MemberId::from_raw_id(0), item)))
+        .into_keyed()
+        .demux(cluster, TCP.fail_stop().bincode());
+
+    // Step 2: The distinguished member manufactures THE interleaving (the one
+    // nondet!) and turns it into (slot, value) facts. The order is now data.
+    // Only member 0 has input, but the types cannot see that — which is
+    // exactly why the naive port fails and this one does not need it to.
+    let slotted = at_member
+        .entries_partially_ordered(nondet_interleaving)
+        .enumerate();
+
+    // Step 3: Broadcast the slot facts to the whole cluster. values() keeps
+    // EC and surrenders only the transit order — the slots carry the real one.
+    // Zero consistency assertions: EC inferred from the network policy.
+    slotted
+        .broadcast_closed(cluster, TCP.fail_stop().bincode())
+        .values()
+}
+
 #[cfg(test)]
 mod tests {
-    use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
+    use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
     use hydro_lang::location::MemberId;
     use hydro_lang::location::cluster::EventualConsistency;
     use hydro_lang::prelude::*;
 
-    use super::leader_merge_broadcast;
+    use super::{leader_merge_broadcast, leader_merge_slots_from_member};
 
     /// Compile-time pin (taxonomy doc §4): the leader-merge construction is
     /// multi-writer TO,EC and type-checks with **zero consensus** — one
@@ -132,5 +223,82 @@ mod tests {
 
         let _ = log;
         let _ = flow.finalize();
+    }
+
+    /// Compile-time pin for the **slot route** (taxonomy doc §3c / §8): with the
+    /// leader as a distinguished *cluster member*, the naive port cannot reach
+    /// TO,EC (no safe door out of keyed-by-sender on a cluster — the missing
+    /// morphism), but shipping the order as `(slot, value)` data type-checks to
+    /// a NoOrder,EC fact bag with zero consistency assertions. Same single
+    /// `nondet!` as the Process version; EC inferred end-to-end.
+    #[test]
+    fn member_leader_slot_route_is_ec_with_order_as_data() {
+        let mut flow = FlowBuilder::new();
+        let writers = flow.cluster::<()>();
+        let log_cluster = flow.cluster::<()>();
+
+        // Each writer: its own TO,NC stream.
+        let (_w, local) = writers.sim_input::<u32, TotalOrder, ExactlyOnce>();
+
+        // Route to member 0, merge there, slot, broadcast. NoOrder,EC out.
+        let facts: Stream<
+            (usize, (MemberId<()>, u32)),
+            Cluster<'_, (), EventualConsistency>,
+            _,
+            NoOrder,
+            _,
+        > = leader_merge_slots_from_member(
+            local,
+            &log_cluster,
+            nondet!(/** the distinguished member dictates the interleaving */),
+        );
+
+        let _ = facts;
+        let _ = flow.finalize();
+    }
+
+    /// Behavior test for the slot route: across every explored interleaving,
+    /// every member of the log cluster materializes the *same* set of slot
+    /// facts, with dense slots (0..n) — the bag from which each member can
+    /// deterministically extract the same sequence.
+    #[test]
+    fn member_leader_slot_route_delivers_same_dense_facts_to_all() {
+        let mut flow = FlowBuilder::new();
+        let writers = flow.cluster::<()>();
+        let log_cluster = flow.cluster::<()>();
+
+        let (in_send, local) = writers.sim_input::<u32, TotalOrder, ExactlyOnce>();
+
+        let out_recv = leader_merge_slots_from_member(
+            local,
+            &log_cluster,
+            nondet!(/** the distinguished member dictates the interleaving */),
+        )
+        .sim_cluster_output();
+
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&writers, 2)
+            .with_cluster_size(&log_cluster, 2)
+            .exhaustive(async || {
+                // Two writers, one value each.
+                in_send.send(0, 10);
+                in_send.send(1, 20);
+
+                // Each log member must deliver exactly 2 slot facts, and after
+                // sorting the two members' bags must be identical.
+                let member0: Vec<(usize, (MemberId<()>, u32))> =
+                    out_recv.collect_n_sorted(0, 2).await;
+                let member1: Vec<(usize, (MemberId<()>, u32))> =
+                    out_recv.collect_n_sorted(1, 2).await;
+                assert_eq!(member0, member1, "log members diverged");
+
+                // Dense slots {0, 1}; values are the two writers' inputs.
+                let slots: Vec<usize> = member0.iter().map(|(s, _)| *s).collect();
+                assert_eq!(slots, vec![0, 1], "slots not dense");
+                let mut values: Vec<u32> = member0.iter().map(|(_, (_, v))| *v).collect();
+                values.sort();
+                assert_eq!(values, vec![10, 20]);
+            });
     }
 }

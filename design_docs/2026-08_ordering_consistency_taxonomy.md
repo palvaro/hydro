@@ -246,7 +246,14 @@ blesses: a stalled log identical at every live replica is converged.
 That is multi-writer TO,EC with **convergence-F = ∅, at RB cost: no quorum
 round, no ballots, no fencing.** And it is emphatically *not consensus* —
 nothing is agreed anywhere; slot assignment is unilateral; it is reliable
-broadcast applied to authored data.
+broadcast applied to authored data. (The slot-shipping step — minus the echo —
+is now pinned in code:
+`ec_inference_demos/leader_merge.rs::leader_merge_slots_from_member`, with a
+distinguished cluster member as the author. That variant also pins a
+type-system fact: the *naive* member-leader port is refused — on a `Cluster`,
+`DropConsistency` genuinely bites and member-locality is invisible — so the
+Process version's clean TO,EC typing is revealed as load-bearing on the
+location kind. Making order data is what routes around the missing morphism.)
 
 **So what does consensus actually buy?** The hardened log has one property
 nobody would ship: when the author dies, it freezes *forever*. Converged,

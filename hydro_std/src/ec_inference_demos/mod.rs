@@ -16,7 +16,11 @@
 //!
 //! - [`leader_merge`] — multi-writer total-order EC via a single merging leader
 //!   (primary/backup), *zero consensus*. Pins taxonomy doc §4 and the untracked
-//!   `F = {leader}` motivation.
+//!   `F = {leader}` motivation. Also pins the **slot route** (§3c/§8): the same
+//!   pattern with a distinguished *cluster member* as leader, where the naive
+//!   port is type-refused (member-locality is invisible to the types) and
+//!   shipping the order as `(slot, value)` data earns EC with zero consistency
+//!   assertions.
 //! - [`reliable_broadcast`] — echo-based reliable broadcast; EC inferred around
 //!   the re-broadcast cycle via the `forward_ref`-on-an-EC-location trick.
 //! - [`crdt_gossip`] — state-based G-Set gossip; EC inferred around the
