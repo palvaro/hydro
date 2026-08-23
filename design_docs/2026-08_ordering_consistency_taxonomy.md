@@ -267,6 +267,35 @@ exact marker of "authored, not observed"; it is why line-2 of the broadcast ↔
 merge parallel is a different order of problem from line-1, even though the
 dissemination machinery underneath both is the same echo cycle.
 
+The repo's own Paxos/Raft confirm this decomposition witness-for-witness. The
+authored-order `nondet!` is *present and identical* across all three: leader-merge
+publishes it via `entries_partially_ordered(nondet!(/** leader dictates the
+interleaving */))`, while `raft.rs` and `broadcast_transcript_consensus.rs` publish
+the same choice via `requests.assume_ordering::<TotalOrder>(nondet!(/** arrival
+order ... is inherently non-deterministic */))`; every batching `nondet!` in those
+protocols is careful to say it "only affects timing / which slot, but never the
+committed sequence itself." So consensus does *not* remove the choice's `nondet!` —
+it is irreducible (a choice has no oracle). What it changes is the ledger on the two
+axes above:
+
+- *Axis 1 (pre-authorship replication → inference).* Leader-merge's output EC rests
+  on a **trusted axiom** — the `assert_has_consistency_of_trusted` inside
+  `broadcast_closed`, publishing the choice at holder-count-1 (F = {leader}).
+  `paxos_ec` carries the *same* interleaving `nondet!`s but its output EC is
+  **inferred, not asserted**: the commit path commits only after a quorum holds the
+  entry, so by the time the order is visible it is already quorum-replicated, and the
+  code notes EC is derived "without any `assert_has_consistency_of` or
+  `manual_proof!`." The trusted axiom is gone precisely because the choice is never
+  revealed below quorum.
+- *Axis 2 (rival authors → fencing).* Paxos/Raft carry a `nondet!` that leader-merge
+  simply does not have — "which member wins an election is inherently
+  non-deterministic" (`raft.rs`, `paxos.rs`). That is the serialization machinery for
+  tolerating multiple would-be authors; single-leader-merge and RB never need it.
+
+So empirically: same `nondet!` on the authored order in all three; consensus adds
+inference-in-place-of-a-trusted-axiom (axis 1) plus an election `nondet!` (axis 2) —
+exactly the two costs the abstract argument predicts, and nothing more.
+
 Corollary for typed F: the `fault_dependency!` witness (§9) is really tracking
 *authorship-without-quorum*. An operator that disseminates an observed fact
 should not incur it (redundancy already clears F); an operator that makes a
