@@ -310,4 +310,56 @@ mod tests {
 
         let _ = flow.finalize();
     }
+
+    /// Sim test of the axiom behind `EventuallyComplete` (premise 1 of the
+    /// minting rule): every observer's live view eventually contains every
+    /// member of the target cluster, across all explored join timings.
+    ///
+    /// This is the "sim as test oracle for the premise the types trust"
+    /// division of labor: the type system *assumes* coverage when
+    /// `MembershipView::live` mints `EventuallyComplete`; this test lets the
+    /// exhaustive search try to refute it. (Relocated from the retired
+    /// `orchestrated_membership` module, whose envelope-coverage test was
+    /// testing exactly this premise.)
+    #[test]
+    fn live_view_coverage_axiom_holds_under_dynamic_membership() {
+        let mut flow = FlowBuilder::new();
+        let observers = flow.cluster::<()>();
+        let target = flow.cluster::<()>();
+        let node = flow.process::<()>();
+
+        let view = MembershipView::live(&observers, &target);
+
+        let out_recv = view
+            .ids
+            .send(&node, TCP.fail_stop().bincode())
+            .entries()
+            .sim_output();
+
+        let instances = flow
+            .sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&observers, 2)
+            .with_cluster_size(&target, 2)
+            .with_dynamic_membership(&target)
+            .exhaustive(async || {
+                // Each of the 2 observers eventually sees both target members,
+                // regardless of join timing.
+                let mut expected = Vec::new();
+                for observer in [0u32, 1] {
+                    for member in [0u32, 1] {
+                        expected.push((
+                            MemberId::from_raw_id(observer),
+                            MemberId::<()>::from_raw_id(member),
+                        ));
+                    }
+                }
+                out_recv.assert_yields_only_unordered(expected).await
+            });
+
+        assert!(
+            instances > 1,
+            "expected the membership hook to explore multiple join timings, got {instances}"
+        );
+    }
 }

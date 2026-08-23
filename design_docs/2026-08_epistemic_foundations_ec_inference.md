@@ -234,21 +234,27 @@ as `broadcast_closed`'s — status-quo parity. Endgame: premise 2 hardens to
 replicate-cycle — so the crash-fault-honest EC mint attaches to the cycle
 (Tier 1), with `fan_out` demoted to a mechanical primitive.
 
-## 6. Salvage plan / next steps
+## 6. Supersession record / next steps
 
-1. Drop `orchestrator_view`'s EC claim; re-home `member_envelope` as a third
-   mint: `MembershipView::orchestrated(...) → EventuallyComplete`, its trust
-   obligation now the honest, minimal coverage axiom.
-2. Keep a current-set product only for protocols needing the agreed set
-   (quorums), tagged as epoch/C^T-tier (M3) — or ride incarnation ids.
-3. Promote the replicate-cycle rule into `hydro_lang` as the crash-fault-honest
+The orchestrated-membership module is **deleted, not salvaged**: `member_envelope`
+duplicated `MembershipView::live`'s internals line-for-line, and an
+"orchestrated" mint is not distinct from `live()` until a real deploy-mode
+substrate (ZK/ECS, with leaves and history compression) exists — when it does,
+it enters as simply another `EventuallyComplete` mint. The one carryover is its
+envelope-coverage test, relocated into `fan_out` as the coverage-axiom test
+(sim-as-oracle for premise 1). Everything else of value from the attempt
+survives as ideas recorded in §5, feeding the queue below.
+
+1. Current-set product for protocols needing the agreed set (quorums):
+   epoch/C^T-tier work (M3) — or incarnation ids.
+2. Promote the replicate-cycle rule into `hydro_lang` as the crash-fault-honest
    mint (subsuming `fan_out`'s EC under crash faults); `reliable_broadcast_live`
    becomes its test instance. Move `fan_out` to `hydro_lang` with
    `assert_has_consistency_of_trusted`; make `broadcast_closed` an instance;
    introduce `CompletenessProof`.
-4. Write the completeness conjecture's abuse cases
+3. Write the completeness conjecture's abuse cases
    (crdt_gossip_soundness.rs-style).
-5. Implement convergence-at-quiescence checking in the sim (replaces
+4. Implement convergence-at-quiescence checking in the sim (replaces
    `skip_consistency_assertions` for these constructs).
 
 ## 7. Reading map (code ↔ theory)
