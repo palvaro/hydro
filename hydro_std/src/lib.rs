@@ -10,3 +10,6 @@ pub mod membership;
 pub mod quorum;
 pub mod reliable_broadcast;
 pub mod request_response;
+
+#[cfg(test)]
+mod taxonomy_tests;

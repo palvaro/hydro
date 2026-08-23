@@ -100,7 +100,8 @@ which is monotone, hence EC-preserving; residue = slot uniqueness).
 ## 4. The leader-merge construction (compile-verified)
 
 Multi-writer TO,EC **without consensus** is expressible today and
-type-checks (verified as a scratch test against `391c6df8e6`, since removed):
+type-checks (pinned as a compile-time test:
+`hydro_std/src/taxonomy_tests.rs::multi_writer_leader_merge_is_total_order_ec_with_untracked_spof`):
 
 ```rust
 let at_leader = writer_stream.send(&leader, TCP.fail_stop().bincode());
@@ -221,6 +222,7 @@ leader changes. Type-theoretically: **consensus is the arrow
 - Where does per-decision durability (client-facing "committed") attach? It
   is neither N nor F — it is a promise to an external observer, likely an
   `ExternalBincodeSink`-side obligation.
-- Recording the leader-merge pattern as a pinned type test (documenting that
-  TO,EC-with-{leader}-dependency is expressible) vs. waiting until F exists
-  so the test can assert the dependency is *tracked*.
+- ~~Recording the leader-merge pattern as a pinned type test~~ Done:
+  `hydro_std/src/taxonomy_tests.rs` pins both the single-writer TO,EC fact
+  and the leader-merge construction. When F lands, extend the test to assert
+  the dependency is *tracked* (`EC<F = {leader}>`).
