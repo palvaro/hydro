@@ -40,11 +40,13 @@
 //! not covered here.
 
 use hydro_lang::live_collections::stream::{MinOrder, NoOrder, Ordering, Retries};
-use hydro_lang::location::{Location, MemberId, MembershipEvent};
+use hydro_lang::location::MemberId;
 use hydro_lang::networking::NetworkFor;
 use hydro_lang::prelude::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+
+use crate::fan_out::MembershipView;
 
 /// Broadcasts elements of a cluster stream to all members of a destination
 /// cluster over the live monotone membership relation, earning EC by
@@ -74,37 +76,11 @@ where
     R: Retries,
     N: NetworkFor<T>,
 {
-    // The live membership relation of the destination cluster, observed at the
-    // source. Filtered to `Joined`, kept as a growing (monotone) stream — NOT
-    // snapshotted. Its consistency is `NoConsistency`: join *timing* is
-    // per-member and nondeterministic.
-    let members = source
-        .location()
-        .source_cluster_membership_stream(
-            to,
-            nondet!(/** dropped membership prefixes don't affect broadcast delivery */),
-        )
-        .entries()
-        .filter_map(q!(|(id, ev)| match ev {
-            MembershipEvent::Joined => Some(id),
-            MembershipEvent::Left => None,
-        }));
-
-    // Join data × live members at `NoConsistency` (both sides growing; the
-    // symmetric-hash join re-fires on deltas to either input, so a late joiner
-    // crosses all accumulated data), then demux and re-earn EC on delivery.
-    source
-        .weaken_consistency()
-        .cross_product(members)
-        .map(q!(|(data, member_id)| (member_id, data)))
-        .into_keyed()
-        .demux(to, via)
-        .assert_has_consistency_of::<Cluster<'a, L2, N::ConsistencyGuarantee>>(manual_proof!(
-            /// Live monotone membership + an EC-preserving network policy: every element
-            /// eventually crosses every member that ever joins and is delivered to it, so
-            /// all live destinations materialize the same elements. `ClusterIds` (the
-            /// `broadcast_closed` case) is the limit of this relation.
-        ))
+    // The membership premise is now carried by the type of the view — the live
+    // oracle mints `EventuallyComplete` — and the coinductive EC argument lives
+    // once inside `fan_out`. No consistency proof here.
+    let members = MembershipView::live(source.location(), to);
+    crate::fan_out::fan_out(source, members, to, via)
 }
 
 /// Like [`broadcast_live`], but broadcasts from a [`Process`] source instead of a
@@ -132,28 +108,8 @@ where
     R: Retries,
     N: NetworkFor<T>,
 {
-    let members = source
-        .location()
-        .source_cluster_membership_stream(
-            to,
-            nondet!(/** dropped membership prefixes don't affect broadcast delivery */),
-        )
-        .entries()
-        .filter_map(q!(|(id, ev)| match ev {
-            MembershipEvent::Joined => Some(id),
-            MembershipEvent::Left => None,
-        }));
-
-    source
-        .cross_product(members)
-        .map(q!(|(data, member_id)| (member_id, data)))
-        .into_keyed()
-        .demux(to, via)
-        .assert_has_consistency_of::<Cluster<'a, L2, N::ConsistencyGuarantee>>(manual_proof!(
-            /// Live monotone membership + an EC-preserving network policy: every element
-            /// eventually crosses every member that ever joins and is delivered to it, so
-            /// all live destinations materialize the same elements.
-        ))
+    let members = MembershipView::live(source.location(), to);
+    crate::fan_out::fan_out_from_process(source, members, to, via)
 }
 
 #[cfg(test)]
