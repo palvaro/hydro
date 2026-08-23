@@ -3,7 +3,7 @@
 //! # The epistemic decomposition
 //!
 //! Today, `EventualConsistency` (EC) is minted by monolithic trusted combinators:
-//! `broadcast_closed` (in `hydro_lang`) and [`broadcast_live`](crate::broadcast_live)
+//! `broadcast_closed` (in `hydro_lang`) and [`broadcast_live`](crate::ec_inference_demos::broadcast_live)
 //! (in this crate) each carry their own bespoke `manual_proof!`. The knowledge-theoretic
 //! reading of EC — eventual common knowledge (C^◇) among the live members, per
 //! Halpern & Moses — shows that both proofs are instances of ONE rule with three
@@ -188,7 +188,7 @@ impl<'a, Target: 'a, Obs: Location<'a>> MembershipView<'a, Target, Obs, Eventual
 /// whose [`NetworkFor::ConsistencyGuarantee`] determines the output consistency.
 ///
 /// This subsumes `broadcast_closed` (static view) and
-/// [`broadcast_live`](crate::broadcast_live) (live view): both are thin clients.
+/// [`broadcast_live`](crate::ec_inference_demos::broadcast_live) (live view): both are thin clients.
 /// A protocol author who fans out over *any* `EventuallyComplete` view via an
 /// EC-preserving policy gets EC minted here — with the coinductive argument
 /// discharged once, below, instead of per-protocol.

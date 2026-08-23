@@ -46,7 +46,7 @@ use hydro_lang::prelude::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::fan_out::MembershipView;
+use crate::ec_inference_demos::fan_out::MembershipView;
 
 /// Broadcasts elements of a cluster stream to all members of a destination
 /// cluster over the live monotone membership relation, earning EC by
@@ -80,7 +80,7 @@ where
     // oracle mints `EventuallyComplete` — and the coinductive EC argument lives
     // once inside `fan_out`. No consistency proof here.
     let members = MembershipView::live(source.location(), to);
-    crate::fan_out::fan_out(source, members, to, via)
+    crate::ec_inference_demos::fan_out::fan_out(source, members, to, via)
 }
 
 /// Like [`broadcast_live`], but broadcasts from a [`Process`] source instead of a
@@ -109,7 +109,7 @@ where
     N: NetworkFor<T>,
 {
     let members = MembershipView::live(source.location(), to);
-    crate::fan_out::fan_out_from_process(source, members, to, via)
+    crate::ec_inference_demos::fan_out::fan_out_from_process(source, members, to, via)
 }
 
 #[cfg(test)]

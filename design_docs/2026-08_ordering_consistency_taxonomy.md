@@ -101,7 +101,8 @@ which is monotone, hence EC-preserving; residue = slot uniqueness).
 
 Multi-writer TO,EC **without consensus** is expressible today and
 type-checks (pinned as a compile-time test:
-`hydro_std/src/taxonomy_tests.rs::multi_writer_leader_merge_is_total_order_ec_with_untracked_spof`):
+`hydro_std/src/ec_inference_demos/leader_merge.rs::tests::multi_writer_leader_merge_is_total_order_ec_with_untracked_spof`,
+backing the `leader_merge_broadcast` demo function in that module):
 
 ```rust
 let at_leader = writer_stream.send(&leader, TCP.fail_stop().bincode());
@@ -222,10 +223,13 @@ leader changes. Type-theoretically: **consensus is the arrow
 - Where does per-decision durability (client-facing "committed") attach? It
   is neither N nor F — it is a promise to an external observer, likely an
   `ExternalBincodeSink`-side obligation.
-- ~~Recording the leader-merge pattern as a pinned type test~~ Done:
-  `hydro_std/src/taxonomy_tests.rs` pins both the single-writer TO,EC fact
-  and the leader-merge construction. When F lands, extend the test to assert
-  the dependency is *tracked* (`EC<F = {leader}>`).
+- ~~Recording the leader-merge pattern as a pinned type test~~ Done, and since
+  promoted to a real demo function: `hydro_std/src/ec_inference_demos/leader_merge.rs`
+  exposes `leader_merge_broadcast` and pins its type-fact test, grouped with the
+  other EC-inference demos (reliable broadcast, CRDT gossip). The single-writer
+  TO,EC fact stays pinned in `hydro_std/src/taxonomy_tests.rs`. When F lands,
+  extend the leader-merge test to assert the dependency is *tracked*
+  (`EC<F = {leader}>`).
 
 ## Footnote: how invisible the primary/backup ↔ Paxos distinction currently is
 

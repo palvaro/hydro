@@ -161,7 +161,7 @@ where
 {
     // Step 1: Initial broadcast from process to cluster over the LIVE membership
     // relation, so a member that joins after the send is caught up by the echo.
-    let initial = crate::broadcast_live::broadcast_live_from_process(
+    let initial = crate::ec_inference_demos::broadcast_live::broadcast_live_from_process(
         source,
         cluster,
         TCP.fail_stop().bincode(),
@@ -180,7 +180,7 @@ where
     // Step 4: Re-broadcast newly-seen messages over the LIVE membership relation.
     // `broadcast_live` + fail_stop earns EC on delivery — matching the EC
     // forward_ref location, closing the cycle with no consistency manual_proof!.
-    let echo = crate::broadcast_live::broadcast_live(
+    let echo = crate::ec_inference_demos::broadcast_live::broadcast_live(
         new_messages.clone(),
         cluster,
         TCP.fail_stop().bincode(),

@@ -70,7 +70,7 @@ pub fn g_set_gossip<
 
 /// G-Set CRDT gossip over **dynamic membership** — the "developer-invented
 /// protocol" demonstration for the factored EC-minting rule
-/// ([`fan_out`](crate::fan_out::fan_out)).
+/// ([`fan_out`](crate::ec_inference_demos::fan_out::fan_out)).
 ///
 /// Structurally this is [`g_set_gossip`] with both broadcasts swapped from
 /// `broadcast_closed` (static membership) onto the generic rule over the **live**
@@ -81,7 +81,7 @@ pub fn g_set_gossip<
 ///   fold's ACI obligations — a property of the *combiner*, orthogonal to EC).
 ///
 /// EC on the output is inferred from typed premises alone: the membership view is
-/// [`EventuallyComplete`](crate::fan_out::EventuallyComplete) (minted by the
+/// [`EventuallyComplete`](crate::ec_inference_demos::fan_out::EventuallyComplete) (minted by the
 /// runtime oracle), the fan-out join retains both sides, `fail_stop` is
 /// EC-preserving, and the `forward_ref` cycle closes coinductively on the EC
 /// location. Swap `fail_stop` for plain `lossy` and this function no longer
@@ -95,7 +95,7 @@ pub fn g_set_gossip_live<
     local_updates: Stream<T, Cluster<'a, L2>, Unbounded, NoOrder>,
 ) -> Singleton<HashSet<T>, Cluster<'a, L2, EventualConsistency>, Unbounded>
 {
-    use crate::fan_out::{MembershipView, fan_out};
+    use crate::ec_inference_demos::fan_out::{MembershipView, fan_out};
 
     // Step 1: Fan local updates out over the LIVE membership relation. EC minted
     // by the generic rule; a member that joins late crosses all prior updates.
