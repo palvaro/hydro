@@ -66,9 +66,16 @@ Sharpenings that make it implementable:
   ("All keys agree on the prefix" without the committed-qualifier would forbid
   truncation and is unachievable.)
 - **The splice reader:** fold keys in epoch order, taking key e's entries at
-  slots `[s_e, s_{e′})` where e′ is the next live epoch. Deterministic and
-  monotone in its inputs, hence EC-preserving (the same argument as §3c's
-  dense-prefix extraction).
+  slots `[s_e, s_{e′})` where e′ is the next live epoch. Equivalently: slot *i*
+  is owned by the largest declared epoch whose start is ≤ *i*; read slots
+  ascending from the owner, stalling at the first miss. Deterministic on the
+  fact bags — which is what EC needs: converged bags ⇒ converged logs. **The
+  raw splice is deliberately non-monotone**: a newly declared epoch retracts a
+  dead tail (truncation), so an already-derived suffix can shrink. Monotone
+  emission is exactly what the commit rule (M2) buys — restricted to committed
+  entries, the splice only grows. (Implemented and pinned:
+  `ec_inference_demos/epoch_splice.rs`, including a test that pins the
+  non-monotonicity itself.)
 - The invariant then reduces to: **no committed entry ever lies at or beyond
   any successor's declared start slot.**
 
@@ -163,9 +170,12 @@ The differences here:
 
 ## 8. Build ladder
 
-- **M1 — splice reader** (small). Pure function: epoch-keyed stream + declared
-  start slots → spliced log. Pin: EC-preservation, determinism; behavior test:
-  two keys with an overlap, truncation applied correctly.
+- **M1 — splice reader** (small). *Done:* `ec_inference_demos/epoch_splice.rs`.
+  Pure `SpliceState` (ownership/truncation semantics, unit-tested including the
+  deliberate non-monotonicity) + `splice_epoch_log` dataflow fold (EC preserved
+  via one commutativity `manual_proof!` — ACI genus, no consistency assertion)
+  + sim behavior test: two epochs, one dead tail, every member converges to the
+  same truncated log.
 - **M2 — commit certificates** (small). Per-entry acks as an EC bag +
   `collect_quorum`; gate visibility on quorum. Pin: the commit rule as a
   mechanical gate. This alone upgrades the single-key demo to §8's hardened

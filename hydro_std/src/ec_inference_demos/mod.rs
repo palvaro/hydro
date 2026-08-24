@@ -51,6 +51,7 @@
 
 pub mod broadcast_live;
 pub mod crdt_gossip;
+pub mod epoch_splice;
 pub mod fan_out;
 pub mod leader_merge;
 pub mod reliable_broadcast;
