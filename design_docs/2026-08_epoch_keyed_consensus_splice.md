@@ -2,9 +2,10 @@
 
 2026-08
 
-**Status:** design sketch, pre-implementation. Companion to
-`2026-08_ordering_consistency_taxonomy.md` (§3c, §7, §8, §10) and successor to
-the leader-merge demo ladder in `hydro_std/src/ec_inference_demos/leader_merge.rs`.
+**Status:** design sketch; **PAUSED after M1** (2026-08, see §10 Checkpoint).
+Companion to `2026-08_ordering_consistency_taxonomy.md` (§3c, §7, §8, §10) and
+successor to the leader-merge demo ladder in
+`hydro_std/src/ec_inference_demos/leader_merge.rs`.
 Records the construction plan for an inductively-built consensus protocol whose
 safety residue is localized at a single typed seam. The protocol family is not
 new (completed, it lands in Paxos / Viewstamped Replication / Raft territory);
@@ -215,3 +216,42 @@ The differences here:
   demo becomes its degenerate instance.
 - **Liveness of election** (livelock avoidance, timeout tuning) is
   deliberately unaddressed — the liveness axis again.
+
+## 10. Checkpoint (2026-08 — project paused here)
+
+Paused after M1 to clean up the broadcast primitives. State at pause:
+
+**Done.**
+- M1 — splice reader: `hydro_std/src/ec_inference_demos/epoch_splice.rs`.
+  `SpliceFact` / `SpliceState` (ownership rule: slot *i* is owned by the
+  largest declared epoch with start ≤ *i*; entries of non-owning epochs are
+  dead), `splice_epoch_log` (EC-preserving commutative fold, no consistency
+  assertion), 6 unit tests + compile pin + sim behavior test (2 epochs, dead
+  tail, 2 members converge). §3's original "monotone" claim was corrected: the
+  raw splice is deliberately non-monotone (truncation); monotone emission is
+  what M2's commit rule buys — there is a test pinning the non-monotonicity.
+- Prerequisite demos: `leader_merge_broadcast` (Process leader, TO,EC via
+  location kind), `leader_merge_slots_from_member` (order as data),
+  `leader_merge_keyed_from_member` (honest keyed type, succession-native).
+
+**Next decision, unmade.** M2 (commit certificates via `collect_quorum`,
+small, upgrades the splice to monotone-on-committed) vs. a de-risking spike of
+M4 (fencing — the rung most likely to break the residue-localization thesis,
+since per-member promise state was sketched as `sliced!` + `use::state`).
+The recommendation on the table was the M4 spike first.
+
+**Open interactions to resolve before resuming.**
+- The maxim recorded in `2026-08_slices_finalize_maxim`-era commits ("slices
+  are for finalizing, not combining") likely constrains M4's fencing design —
+  re-read it before choosing the M2-vs-M4 order; if it rules out
+  `sliced!`-centric fencing, M4 needs a different mechanism and the risk
+  assessment changes.
+- `2026-08_research_agenda.md` and `2026-08_nondet_vs_manual_proof.md` were
+  being revised at pause time; the ladder should be re-checked against both.
+- `collect_quorum`'s `manual_proof!(/** TODO */)` obligations become
+  load-bearing at M2 — discharging or absorbing them into `succeed_key`'s
+  axiom is part of that rung.
+- Per-member observation of an *unbounded* singleton in the sim (deferred from
+  M1's behavior test, which splices at the harness instead) is needed for
+  M2's read path — the tutorials' `sliced!`-snapshot pattern is the known
+  route, and is a *finalizing* use of slices, consistent with the maxim.
