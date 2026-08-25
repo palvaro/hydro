@@ -39,6 +39,16 @@ pub struct SimFlow<'a> {
     /// [`MembershipHook`](crate::sim::runtime::MembershipHook)). Clusters not in
     /// this set keep the default eager behavior.
     pub(crate) dynamic_membership: HashSet<LocationKey>,
+    /// Locations opted into crash-fault injection, mapped to their fault budget
+    /// (max crashes in the fault domain). Crashable senders' outgoing network
+    /// sends are staged so a [`CrashHook`](crate::sim::runtime::CrashHook) can
+    /// crash the location at a nondeterministically explored send boundary,
+    /// delivering only a per-recipient prefix of its in-flight sends (the
+    /// classical crash-stop model). For clusters, *which* member crashes (and
+    /// when) is a search dimension, and the budget bounds the total crashes in
+    /// the cluster — the `F` of the fault model. Locations not in this map
+    /// never crash.
+    pub(crate) crashable: HashMap<LocationKey, usize>,
     /// Handle to state handling `external`s' ports.
     pub(crate) externals_port_registry: Rc<RefCell<SimExternalPortRegistry>>,
 
@@ -81,6 +91,43 @@ impl<'a> SimFlow<'a> {
     /// present from the start), so existing tests are unaffected.
     pub fn with_dynamic_membership<C>(mut self, cluster: &Cluster<'a, C>) -> Self {
         self.dynamic_membership.insert(cluster.key);
+        self
+    }
+
+    /// Opts in to **crash-fault injection** for the given process: the exhaustive
+    /// search (or fuzzer) explores executions in which the process crash-stops at
+    /// a send boundary. A crash halts the process permanently and delivers only a
+    /// nondeterministically chosen per-recipient *prefix* of its undelivered
+    /// sends — so a broadcast can genuinely reach some recipients and not others,
+    /// the classical partial-broadcast crash state.
+    ///
+    /// Processes without this opt-in never crash, and no staging is added to
+    /// their sends, so existing tests are unaffected. Assertions in crash tests
+    /// should be phrased over *survivors* (e.g. agreement: all live members
+    /// deliver the same set), since the crashed process stops producing outputs.
+    pub fn with_crashable_process<P>(mut self, process: &crate::location::Process<'a, P>) -> Self {
+        self.crashable.insert(process.key, 1);
+        self
+    }
+
+    /// Opts in to **crash-fault injection** for the given cluster, with at most
+    /// `max_crashes` members crashing (the `F` of the fault model — e.g. `1` for
+    /// a minority-fault demo on a 3-member cluster). *Which* members crash,
+    /// *when* (at which of their send boundaries), and *which per-recipient
+    /// prefix* of their in-flight sends survives are all search dimensions: no
+    /// member is targeted, so assertions hold over every single-fault
+    /// configuration — the correct quantifier for non-blockingness claims.
+    ///
+    /// Crashed members halt permanently but their inbound channels stay open
+    /// (fail-stop: sends to failed members are wasted, not wrong). Phrase
+    /// assertions over survivors — e.g. "at least `N - max_crashes` members
+    /// commit" — since the test cannot know which members died.
+    pub fn with_crashable_cluster<C>(
+        mut self,
+        cluster: &Cluster<'a, C>,
+        max_crashes: usize,
+    ) -> Self {
+        self.crashable.insert(cluster.key, max_crashes);
         self
     }
 
@@ -166,6 +213,8 @@ impl<'a> SimFlow<'a> {
             test_safety_only: self.test_safety_only,
             skip_consistency_assertions: self.skip_consistency_assertions,
             channel_tables: BTreeMap::new(),
+            crashable: self.crashable.iter().map(|(k, v)| (*k, *v)).collect(),
+            crash_channel_vecs: BTreeMap::new(),
         };
 
         // Ensure the default (0) external is always present.

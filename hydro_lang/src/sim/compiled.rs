@@ -1044,6 +1044,7 @@ impl<'a> CompiledSimInstance<'a> {
                 LogKind::Null
             },
             quiescence,
+            halted: vec![],
         }
     }
 }
@@ -1880,9 +1881,32 @@ struct LaunchedSim<W: std::io::Write> {
     log: LogKind<W>,
     /// Represents quiescence state of the simulation.
     quiescence: Rc<QuiescenceState>,
+    /// Locations halted by crash-fault injection (see
+    /// [`CrashHook`](super::runtime::CrashHook)). Their async DFIRs are skipped
+    /// (but kept alive so inbound channels stay open), and their ticks and
+    /// observations have been removed.
+    halted: Vec<(LocationId, Option<u32>)>,
 }
 
 impl<W: std::io::Write> LaunchedSim<W> {
+    /// Permanently halts a crashed location: its async DFIR is skipped from now on
+    /// (but kept alive, so channels *into* it stay open and senders to it are
+    /// unaffected), and its tick DFIRs and observations are removed from
+    /// scheduling.
+    fn halt_location(&mut self, loc: &LocationId, c_id: Option<u32>) {
+        if self.halted.iter().any(|(l, c)| l == loc && *c == c_id) {
+            return;
+        }
+        self.halted.push((loc.clone(), c_id));
+        self.possibly_ready_ticks
+            .retain(|tick| !(tick.parent_location == *loc && tick.cluster_id == c_id));
+        self.not_ready_ticks
+            .retain(|tick| !(tick.parent_location == *loc && tick.cluster_id == c_id));
+        self.possibly_ready_observations
+            .retain(|obs| !(obs.location == *loc && obs.cluster_id == c_id));
+        self.not_ready_observations
+            .retain(|obs| !(obs.location == *loc && obs.cluster_id == c_id));
+    }
     /// Runs a single step of the simulation scheduler.
     ///
     /// A step first advances all async DFIRs; if none of them made progress, it instead runs
@@ -1896,6 +1920,11 @@ impl<W: std::io::Write> LaunchedSim<W> {
     async fn step(&mut self) {
         let mut any_made_progress = false;
         for (loc, c_id, dfir) in &mut self.async_dfirs {
+            if self.halted.iter().any(|(l, c)| l == loc && c == c_id) {
+                // Crashed location: its DFIR is never run again (but is kept
+                // alive so channels into it stay open).
+                continue;
+            }
             if dfir.run_tick().await {
                 any_made_progress = true;
 
@@ -2035,6 +2064,14 @@ impl<W: std::io::Write> LaunchedSim<W> {
                     log_writer,
                     &mut self.possibly_ready_observations[next_obs].hooks,
                 );
+
+                // A crash hook may have just fired: permanently halt the crashed
+                // location (removes this observation, among others).
+                let obs = &mut self.possibly_ready_observations[next_obs];
+                if obs.hooks.iter_mut().any(|hook| hook.take_halt()) {
+                    let (loc, c_id) = (obs.location.clone(), obs.cluster_id);
+                    self.halt_location(&loc, c_id);
+                }
             }
         }
     }

@@ -48,8 +48,8 @@ use hydro_lang::live_collections::boundedness::Boundedness;
 use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder};
 use hydro_lang::location::cluster::EventualConsistency;
 use hydro_lang::prelude::*;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::hash::Hash;
 
 /// Reliable broadcast from a Process to a Cluster.
@@ -85,8 +85,8 @@ pub fn reliable_broadcast_closed<
 ) -> Stream<T, Cluster<'a, L2, EventualConsistency>, Unbounded, NoOrder, ExactlyOnce>
 where
     O: hydro_lang::live_collections::stream::MinOrder<
-        hydro_lang::live_collections::stream::TotalOrder,
-    >,
+            hydro_lang::live_collections::stream::TotalOrder,
+        >,
 {
     // Step 1: Initial broadcast from process to cluster. EC inferred.
     let initial = source.broadcast_closed(cluster, TCP.fail_stop().bincode());
@@ -99,8 +99,9 @@ where
     //    etc.) returns L::DropConsistency, which would break the cycle types.
     //    The ops we use (merge, unique, clone) don't take nondet!, so they
     //    preserve L — and the type system would reject anything that doesn't.
-    let (rebroadcast_handle, rebroadcast_fwd) =
-        initial.location().forward_ref::<Stream<T, _, Unbounded, NoOrder>>();
+    let (rebroadcast_handle, rebroadcast_fwd) = initial
+        .location()
+        .forward_ref::<Stream<T, _, Unbounded, NoOrder>>();
 
     // Step 2: Merge initial delivery with re-broadcasts from other members.
     // Both are EC (same location type) — merge preserves EC.
@@ -124,8 +125,9 @@ where
 }
 
 /// Reliable broadcast whose re-broadcast (echo) step fans out over the **live,
-/// monotone** membership relation via [`broadcast_live`], instead of static
-/// `broadcast_closed`.
+/// monotone** membership relation via
+/// [`broadcast_live`](crate::ec_inference_demos::broadcast_live::broadcast_live),
+/// instead of static `broadcast_closed`.
 ///
 /// This is the key M2 validation: it swaps *only* the cyclic echo step onto
 /// `broadcast_live` and leaves the `forward_ref` cycle otherwise identical to
@@ -140,7 +142,8 @@ where
 ///   `fail_stop`), so the cycle types match with no `manual_proof!` on
 ///   consistency here — the single trusted step lives inside `broadcast_live`.
 ///
-/// The initial process→cluster broadcast uses [`broadcast_live_from_process`],
+/// The initial process→cluster broadcast uses
+/// [`broadcast_live_from_process`](crate::ec_inference_demos::broadcast_live::broadcast_live_from_process),
 /// so a member that joins after the initial send is caught up by the echo.
 pub fn reliable_broadcast_live<
     'a,
@@ -156,8 +159,8 @@ pub fn reliable_broadcast_live<
 ) -> Stream<T, Cluster<'a, L2, EventualConsistency>, Unbounded, NoOrder, ExactlyOnce>
 where
     O: hydro_lang::live_collections::stream::MinOrder<
-        hydro_lang::live_collections::stream::TotalOrder,
-    >,
+            hydro_lang::live_collections::stream::TotalOrder,
+        >,
 {
     // Step 1: Initial broadcast from process to cluster over the LIVE membership
     // relation, so a member that joins after the send is caught up by the echo.
@@ -168,8 +171,9 @@ where
     );
 
     // forward_ref on the EC location produced by the initial broadcast.
-    let (rebroadcast_handle, rebroadcast_fwd) =
-        initial.location().forward_ref::<Stream<T, _, Unbounded, NoOrder>>();
+    let (rebroadcast_handle, rebroadcast_fwd) = initial
+        .location()
+        .forward_ref::<Stream<T, _, Unbounded, NoOrder>>();
 
     // Step 2: Merge initial delivery with re-broadcasts. Both EC → merge preserves EC.
     let all_received = initial.merge_unordered(rebroadcast_fwd);
@@ -214,7 +218,8 @@ mod tests {
 
         let out_recv = reliable_broadcast_closed(data, &cluster).sim_cluster_output();
 
-        let count = flow.sim()
+        let count = flow
+            .sim()
             .skip_consistency_assertions()
             .with_cluster_size(&cluster, 3)
             .exhaustive(async || {
@@ -270,5 +275,139 @@ mod tests {
                     assert_eq!(got, vec![42], "member {member} did not deliver 42");
                 }
             });
+    }
+
+    /// **The distinguishing fault, part 1: plain broadcast is not reliable
+    /// broadcast.** In every crash-free execution, `broadcast_closed` and
+    /// `reliable_broadcast_closed` are observationally identical — the echo cycle
+    /// is pure redundancy. The *only* content of RB's agreement property is what
+    /// happens when the sender crashes mid-broadcast, which is exactly the state
+    /// crash injection explores: a per-recipient prefix of the sender's sends
+    /// survives.
+    ///
+    /// This test pins that plain `broadcast_closed` **violates agreement** under
+    /// a sender crash: the exhaustive search must find an execution where one
+    /// member delivered the message and the other never will (the sender is dead;
+    /// nobody echoes). Contrast [`reliable_broadcast_closed_agreement_under_sender_crash`],
+    /// which runs the identical fault against the echo protocol and finds no such
+    /// execution.
+    #[test]
+    fn broadcast_closed_violates_agreement_under_sender_crash() {
+        use hydro_lang::location::MemberId;
+
+        let mut flow = FlowBuilder::new();
+        let sender = flow.process::<()>();
+        let cluster = flow.cluster::<()>();
+        let node = flow.process::<()>();
+
+        let out_recv = sender
+            .source_iter(q!(vec![42u32]))
+            .broadcast_closed(&cluster, TCP.fail_stop().bincode())
+            .send(&node, TCP.fail_stop().bincode())
+            .entries()
+            .sim_output();
+
+        let mut saw_agreement_violation = false;
+        let mut saw_full_delivery = false;
+
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&cluster, 2)
+            .with_crashable_process(&sender)
+            .exhaustive(async || {
+                let received: Vec<(MemberId<()>, u32)> = out_recv.collect_sorted().await;
+                let delivered: Vec<bool> = (0..2u32)
+                    .map(|m| received.contains(&(MemberId::from_raw_id(m), 42)))
+                    .collect();
+
+                if delivered[0] != delivered[1] {
+                    saw_agreement_violation = true;
+                }
+                if delivered[0] && delivered[1] {
+                    saw_full_delivery = true;
+                }
+            });
+
+        assert!(
+            saw_agreement_violation,
+            "plain broadcast should violate agreement under a sender crash: some execution \
+             must deliver to one member but never the other"
+        );
+        assert!(
+            saw_full_delivery,
+            "sanity: the crash-free execution delivers to everyone"
+        );
+    }
+
+    /// **The distinguishing fault, part 2: the echo cycle is load-bearing.** The
+    /// identical harness and fault as
+    /// [`broadcast_closed_violates_agreement_under_sender_crash`] — sender
+    /// crashes mid-broadcast, reaching a nondeterministic per-member prefix — but
+    /// through `reliable_broadcast_closed`. Agreement now holds in **every**
+    /// explored execution: if any member delivers 42, its re-broadcast (the
+    /// members never crash) delivers it to everyone; if the sender dies before
+    /// reaching anyone, nobody delivers, which agreement permits.
+    ///
+    /// This is the first test in which the echo cycle does observable work: under
+    /// static membership and no faults, static RB explores a single execution
+    /// identical to plain broadcast (see `reliable_broadcast_closed_delivers_to_all`).
+    #[test]
+    fn reliable_broadcast_closed_agreement_under_sender_crash() {
+        use hydro_lang::location::MemberId;
+
+        let mut flow = FlowBuilder::new();
+        let sender = flow.process::<()>();
+        let cluster = flow.cluster::<()>();
+        let node = flow.process::<()>();
+
+        let source = sender.source_iter(q!(vec![42u32]));
+
+        let out_recv = reliable_broadcast_closed(source, &cluster)
+            .send(&node, TCP.fail_stop().bincode())
+            .entries()
+            .sim_output();
+
+        let mut saw_full_delivery = false;
+        let mut saw_no_delivery = false;
+
+        let count = flow
+            .sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&cluster, 2)
+            .with_crashable_process(&sender)
+            .exhaustive(async || {
+                let received: Vec<(MemberId<()>, u32)> = out_recv.collect_sorted().await;
+                let delivered: Vec<bool> = (0..2u32)
+                    .map(|m| received.contains(&(MemberId::from_raw_id(m), 42)))
+                    .collect();
+
+                // AGREEMENT, in every execution: if any member delivers, all do.
+                assert_eq!(
+                    delivered[0], delivered[1],
+                    "reliable broadcast must not let members diverge under a sender crash \
+                     (delivered: {delivered:?})"
+                );
+
+                if delivered[0] && delivered[1] {
+                    saw_full_delivery = true;
+                }
+                if !delivered[0] && !delivered[1] {
+                    saw_no_delivery = true;
+                }
+            });
+
+        assert!(
+            saw_full_delivery,
+            "some execution (e.g. crash-free) delivers to everyone"
+        );
+        assert!(
+            saw_no_delivery,
+            "some execution (sender dies before reaching anyone) delivers to no one — \
+             which agreement permits"
+        );
+        assert!(
+            count > 1,
+            "expected the crash hook to fork the search, got {count} execution(s)"
+        );
     }
 }

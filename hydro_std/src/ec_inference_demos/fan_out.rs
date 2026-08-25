@@ -1,13 +1,9 @@
 //! The generic EC-minting rule: fan out data over a typed membership view.
 //!
-//! # The epistemic decomposition
+//! # One rule, three premises
 //!
-//! Today, `EventualConsistency` (EC) is minted by monolithic trusted combinators:
-//! `broadcast_closed` (in `hydro_lang`) and [`broadcast_live`](crate::ec_inference_demos::broadcast_live)
-//! (in this crate) each carry their own bespoke `manual_proof!`. The knowledge-theoretic
-//! reading of EC — eventual common knowledge (C^◇) among the live members, per
-//! Halpern & Moses — shows that both proofs are instances of ONE rule with three
-//! independently-certifiable premises:
+//! `EventualConsistency` (EC) on a fanned-out stream rests on three
+//! independently-certifiable premises, each carried by a type:
 //!
 //! 1. **Membership completeness**: every `Joined` fact is eventually delivered to
 //!    every holder of data. This is a property of the membership *source* (the
@@ -27,10 +23,32 @@
 //!
 //! Given those three premises, the coinductive (greatest-fixed-point) argument is
 //! uniform: every element eventually crosses every member that ever joins, so all
-//! live destinations materialize the same elements. That argument appears exactly
-//! once, in [`fan_out`] / [`fan_out_from_process`]. Protocol libraries built on top
-//! (broadcast, gossip, transcript consensus) then carry **zero** consistency
-//! assertions of their own.
+//! live destinations materialize the same elements. That argument is discharged
+//! exactly once, by the single `manual_proof!` in [`fan_out`] /
+//! [`fan_out_from_process`]. Protocol libraries built on top (broadcast, gossip,
+//! transcript consensus) then carry **zero** consistency assertions of their own.
+//!
+//! (For the theory behind this decomposition — EC read as eventual common
+//! knowledge among the live members — see
+//! `design_docs/2026-08_epistemic_foundations_ec_inference.md`. Nothing in this
+//! module requires that background.)
+//!
+//! # History: the per-combinator mints this rule replaced (and the one survivor)
+//!
+//! EC used to be minted by monolithic per-combinator assertions:
+//! `broadcast_closed` (in `hydro_lang`) and
+//! [`broadcast_live`](crate::ec_inference_demos::broadcast_live) (in this crate)
+//! each carried a bespoke `manual_proof!`. When this module landed,
+//! `broadcast_live`'s was deleted — it is now a thin client of [`fan_out`] over
+//! [`MembershipView::live`], with no proof of its own.
+//!
+//! `broadcast_closed`'s mint **survives in parallel**, because `hydro_lang`
+//! cannot depend on this crate. Conceptually it is [`fan_out`] over
+//! [`MembershipView::static_members`] (the degenerate, complete-at-time-zero
+//! view) — and that instantiation is pinned by a compile test below — but its
+//! actual code path still runs its own `assert_has_consistency_of_trusted` in
+//! `hydro_lang`. Promoting this rule into `hydro_lang`'s trusted base would let
+//! `broadcast_closed` become a real client and retire that duplicate.
 //!
 //! # Why membership needs its own label (and it is NOT a consistency label)
 //!
@@ -53,14 +71,12 @@
 use std::marker::PhantomData;
 
 use hydro_lang::live_collections::boundedness::Boundedness;
-use hydro_lang::live_collections::stream::{
-    ExactlyOnce, MinOrder, NoOrder, Ordering, Retries,
-};
+use hydro_lang::live_collections::stream::{ExactlyOnce, MinOrder, NoOrder, Ordering, Retries};
 use hydro_lang::location::cluster::{ClusterIds, Consistency, NoConsistency};
 use hydro_lang::location::{Location, MemberId, MembershipEvent, TopLevel};
 use hydro_lang::networking::NetworkFor;
-use hydro_lang::properties::ConsistencyProof;
 use hydro_lang::prelude::*;
+use hydro_lang::properties::ConsistencyProof;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -141,9 +157,10 @@ impl<'a, Target: 'a, Obs: Location<'a>> MembershipView<'a, Target, Obs, Eventual
     /// The **static** membership relation, from deploy-time `ClusterIds`.
     ///
     /// The degenerate case of [`EventuallyComplete`]: the full member set is known
-    /// to every observer at time zero (it is model-level common knowledge), so
-    /// completeness holds trivially. `broadcast_closed` is [`fan_out`] over this
-    /// view.
+    /// to every observer at time zero by construction, so completeness holds
+    /// trivially. Conceptually, `broadcast_closed` is [`fan_out`] over this view
+    /// (though its actual code path in `hydro_lang` carries its own parallel
+    /// mint — see the module docs).
     pub fn static_members<Observer>(observer: &Observer, cluster: &Cluster<'a, Target>) -> Self
     where
         Observer: Location<'a, DropConsistency = Obs>,
@@ -309,6 +326,128 @@ mod tests {
         );
 
         let _ = flow.finalize();
+    }
+
+    /// **Premise 2, refuted under crash faults.** The epistemic doc's
+    /// correction predicted this: [`fan_out`]'s single trusted mint tacitly
+    /// assumes the data holder does not crash ("premise 2 hardens to *some
+    /// correct holder persists*, which is structural only in the
+    /// replicate-cycle"). With crash injection the prediction is now a
+    /// sim-found fact: crash a cluster-source member mid-fan-out (explored,
+    /// untargeted — `with_crashable_cluster(source, 1)`) and the exhaustive
+    /// search finds executions where the **live** destination members
+    /// permanently disagree: one delivered the element, the other never will,
+    /// and the only holder is dead. The EC label `fan_out` mints is refuted
+    /// under crash faults.
+    ///
+    /// This is the mechanical justification for the planned Tier-1 move
+    /// (`2026-08_orchestrated_membership_ec_dissemination.md`): demote
+    /// `fan_out` to a mechanical primitive and attach the crash-honest EC mint
+    /// to the replicate cycle — the echo is exactly what makes the holder set
+    /// self-perpetuating, and `reliable_broadcast_closed_agreement_under_sender_crash`
+    /// confirms the cycle survives the same fault.
+    #[test]
+    fn fan_out_ec_mint_refuted_under_source_crash() {
+        use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
+
+        let mut flow = FlowBuilder::new();
+        let source = flow.cluster::<()>();
+        let dest = flow.cluster::<()>();
+        let node = flow.process::<()>();
+
+        let (in_send, data) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+
+        let out_recv = fan_out(
+            data.clone(),
+            MembershipView::static_members(data.location(), &dest),
+            &dest,
+            TCP.fail_stop().bincode(),
+        )
+        .entries()
+        .send(&node, TCP.fail_stop().bincode())
+        .entries()
+        .sim_output();
+
+        let mut saw_divergence = false;
+        let mut saw_full_delivery = false;
+
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&source, 2)
+            .with_cluster_size(&dest, 2)
+            .with_crashable_cluster(&source, 1)
+            .exhaustive(async || {
+                in_send.send(0, 42);
+
+                let received: Vec<(MemberId<()>, (MemberId<()>, u32))> =
+                    out_recv.collect_sorted().await;
+
+                // The destination members never crash: any disagreement below
+                // is disagreement among LIVE members — precisely what the EC
+                // label asserts cannot persist.
+                let delivered: Vec<bool> = (0..2u32)
+                    .map(|d| {
+                        received.iter().any(|(dest_member, (src, v))| {
+                            *dest_member == MemberId::from_raw_id(d)
+                                && *src == MemberId::from_raw_id(0)
+                                && *v == 42
+                        })
+                    })
+                    .collect();
+
+                if delivered[0] != delivered[1] {
+                    saw_divergence = true;
+                }
+                if delivered[0] && delivered[1] {
+                    saw_full_delivery = true;
+                }
+            });
+
+        assert!(
+            saw_divergence,
+            "premise 2's crash-hole must be witnessed: a source-member crash mid-fan-out \
+             leaves live destinations permanently diverged (no echo, no second holder)"
+        );
+        assert!(
+            saw_full_delivery,
+            "sanity: the crash-free execution delivers to every destination"
+        );
+    }
+
+    /// Self-delivery edge case: `fan_out` over a live view must deliver a
+    /// member's element to ITSELF under dynamic membership. The RB-live tests
+    /// can't catch a broken self-send (any peer's echo masks it); gossip's
+    /// "own element" convergence depends on it. (n=1, exhaustive, tiny.)
+    #[test]
+    fn fan_out_live_self_delivery_under_dynamic_membership() {
+        use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
+
+        let mut flow = FlowBuilder::new();
+        let cluster = flow.cluster::<()>();
+
+        let (in_send, data) = cluster.sim_input::<u32, TotalOrder, ExactlyOnce>();
+
+        let out_recv = fan_out(
+            data.clone(),
+            MembershipView::live(data.location(), &cluster),
+            &cluster,
+            TCP.fail_stop().bincode(),
+        )
+        .entries()
+        .sim_cluster_output();
+
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&cluster, 1)
+            .with_dynamic_membership(&cluster)
+            .exhaustive(async || {
+                in_send.send(0, 7);
+                let got: Vec<(MemberId<()>, u32)> = out_recv.collect_sorted(0).await;
+                assert!(
+                    got.contains(&(MemberId::from_raw_id(0), 7)),
+                    "self-delivery failed, member 0 got: {got:?}"
+                );
+            });
     }
 
     /// Sim test of the axiom behind `EventuallyComplete` (premise 1 of the

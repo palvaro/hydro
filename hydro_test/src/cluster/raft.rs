@@ -2291,6 +2291,156 @@ mod tests {
             });
     }
 
+    /// **Crash demo — the complement: no single crash can block Raft.** The
+    /// closing panel of the triptych begun in
+    /// `hydro_std::ec_inference_demos::leader_merge`: (1) leader-merge over
+    /// plain broadcast violates *agreement* under a leader crash — a
+    /// dissemination defect; (2) leader-merge (in both its Process-leader and
+    /// distinguished-member forms) is **blocking** at F = 1 — there EXISTS a
+    /// single-crash execution from which no submitted write can ever commit.
+    /// This test asserts the complement with the quantifier flipped: with one
+    /// *explored* crash over the whole cluster (`with_crashable_cluster(_, 1)`
+    /// — which member dies, at which send boundary, and which per-recipient
+    /// prefix of its in-flight messages survives are all search dimensions, so
+    /// mid-tenure crashes with partially replicated entries are included),
+    /// there exists NO configuration in which killing one node blocks
+    /// progress: a client write eventually commits on at least N - F members,
+    /// and every member's committed log stays prefix-consistent throughout.
+    ///
+    /// The driver is deliberately **crash-agnostic** — it cannot know who (if
+    /// anyone) died, exactly like a real client and failure detector:
+    ///
+    /// - election timers fire round-robin, one member per round (a fair
+    ///   failure-detector oracle; one candidacy at a time avoids the dueling-
+    ///   candidates livelock that timeout randomization solves in production);
+    /// - heartbeat timers fire at every member each round (no-ops at
+    ///   followers, replication and commit-index pumps at whoever leads);
+    /// - the client retries the write to a different member each round until
+    ///   it observes a majority commit (duplicate committed entries are
+    ///   legal — deduplication is an application concern).
+    ///
+    /// Progress-within-MAX_ROUNDS is asserted; this is the bounded,
+    /// finite-witness form of non-blockingness that controlled quiescence
+    /// makes decidable — not an untimed liveness claim (FLP).
+    #[test]
+    fn any_single_crash_cannot_block_progress() {
+        const N: usize = 3;
+        const F: usize = 1;
+        const MAX_ROUNDS: usize = 24;
+
+        fn assert_prefix_consistent(histories: &[Vec<LogEntry<String>>]) {
+            for a in 0..histories.len() {
+                for b in (a + 1)..histories.len() {
+                    for (position, (entry_a, entry_b)) in
+                        histories[a].iter().zip(&histories[b]).enumerate()
+                    {
+                        assert_eq!(
+                            entry_a, entry_b,
+                            "committed logs forked: members {} and {} disagree at \
+                             committed position {}",
+                            a, b, position
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut flow = FlowBuilder::new();
+        let cluster = flow.cluster::<Replica>();
+
+        let (election_interrupt_send, election_timer_interrupts) = cluster.sim_input();
+        let (heartbeat_interrupt_send, heartbeat_timer_interrupts) = cluster.sim_input();
+        let (request_send, requests) = cluster.sim_input::<String, _, _>();
+
+        let (committed, redirected) = raft(
+            requests,
+            election_timer_interrupts,
+            heartbeat_timer_interrupts,
+            RaftConfig { cluster_size: N },
+            || TCP.fail_stop().bincode(),
+            nondet!(
+                /** which member leads and how requests are ordered is
+                non-deterministic; the committed sequence must not be */
+            ),
+        );
+
+        let committed_recv = committed.end_atomic().sim_cluster_output();
+        let redirected_recv = redirected.sim_cluster_output();
+
+        // The committed stream carries a consistency assertion (see log_replication);
+        // the simulator cannot validate those yet and asks tests to skip them.
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&cluster, N)
+            .with_crashable_cluster(&cluster, F)
+            .fuzz(async || {
+                let mut committed: Vec<Vec<LogEntry<String>>> = vec![Vec::new(); N];
+
+                let collect_and_check = async |committed: &mut Vec<Vec<LogEntry<String>>>| {
+                    hydro_lang::sim::quiesce().await;
+                    for member in 0..N as u32 {
+                        committed[member as usize]
+                            .extend(committed_recv.collect::<Vec<_>>(member).await);
+                        let _: Vec<(String, Option<MemberId<Replica>>)> =
+                            redirected_recv.collect(member).await;
+                    }
+                    assert_prefix_consistent(committed);
+                };
+
+                let mut committed_majority = false;
+                for round in 0..MAX_ROUNDS {
+                    let target = (round % N) as u32;
+
+                    // Fair failure-detector oracle: one candidacy attempt per
+                    // round, rotating over the members (a dead member ignores
+                    // it; a suppressed member just clears its flag and stands
+                    // on a later turn — nothing re-arms the flag once the
+                    // leader is dead). The barrier lets the election settle
+                    // before the request is sent, so the request cannot race
+                    // its own round's leadership change into a redirect.
+                    election_interrupt_send.send(target, ());
+                    collect_and_check(&mut committed).await;
+
+                    // Client retry: offer the write to this round's member. A
+                    // follower redirects, a dead member drops it, the leader
+                    // commits it. Duplicates across rounds are fine.
+                    request_send.send(target, "w".to_owned());
+
+                    // Replication pump, then a second pump after the barrier so
+                    // the advanced commit index also reaches the followers.
+                    for member in 0..N as u32 {
+                        heartbeat_interrupt_send.send(member, ());
+                    }
+                    collect_and_check(&mut committed).await;
+                    for member in 0..N as u32 {
+                        heartbeat_interrupt_send.send(member, ());
+                    }
+                    collect_and_check(&mut committed).await;
+
+                    let holders = committed
+                        .iter()
+                        .filter(|entries| entries.iter().any(|e| e.message == "w"))
+                        .count();
+                    if holders >= N - F {
+                        committed_majority = true;
+                        break;
+                    }
+                }
+
+                assert!(
+                    committed_majority,
+                    "a single crash blocked progress: the write never committed on \
+                     {} members within {} rounds; per-member counts: {:?}",
+                    N - F,
+                    MAX_ROUNDS,
+                    committed
+                        .iter()
+                        .map(|entries| entries.len())
+                        .collect::<Vec<_>>()
+                );
+            });
+    }
+
     /// **Regression net for a fixed cross-tick race.** Before the protocol state was
     /// unified into one tick, this test reliably reproduced a real safety bug (6/6
     /// fuzz runs, usually within the first few iterations): `leader_election` and

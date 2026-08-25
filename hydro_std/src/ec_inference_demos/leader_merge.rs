@@ -34,6 +34,17 @@
 //! the type is the open design item this demo exists to motivate: it is the
 //! `holders-at-first-visibility = 1` end of the spectrum whose other ends are
 //! reliable broadcast (growing) and Paxos (`f+1`).
+//!
+//! The two crash-injection demos below factor this precisely. Part 1
+//! (`leader_merge_dissemination_hole_*`): with plain broadcast, a leader crash
+//! violates agreement — but that is a *dissemination* defect, repaired without
+//! consensus by shipping order as data over reliable broadcast. Part 2
+//! (`leader_merge_plus_reliable_broadcast_agrees_but_blocks_at_f1`): the repaired
+//! construction agrees in every execution yet is **blocking** at `F = 1` — a
+//! reachable dead state where a post-crash write is permanently uncommittable.
+//! Non-blockingness under minority crashes (a possibility property with a finite
+//! witness, not an FLP-forbidden liveness claim) is the thing consensus actually
+//! buys: author succession.
 
 use hydro_lang::live_collections::keyed_stream::KeyedStream;
 use hydro_lang::live_collections::stream::{
@@ -372,6 +383,311 @@ mod tests {
                 values.sort();
                 assert_eq!(values, vec![10, 20]);
             });
+    }
+
+    /// **Crash demo, part 1 — the dissemination hole (fixable without
+    /// consensus).** The module docs state the caveat in prose: the stamped
+    /// TO,EC silently assumes the leader survives (`F = {leader}`), and "a
+    /// leader crash mid-broadcast leaves live replicas holding different
+    /// prefixes forever." This test makes that a sim-found fact: crash injection
+    /// lets the leader die at a send boundary, delivering an independent
+    /// per-replica prefix, and the exhaustive search finds an execution where
+    /// the replicas' logs diverge permanently.
+    ///
+    /// But note what this does and does not show. Divergence is an *agreement*
+    /// failure of the dissemination step, and dissemination fault-tolerance is
+    /// the cheap part: swap the leader's plain broadcast for reliable broadcast
+    /// (with order shipped as data) and this divergence disappears — see
+    /// [`leader_merge_plus_reliable_broadcast_agrees_but_blocks_at_f1`], which
+    /// pins the deeper hole that survives the swap: the construction is
+    /// **blocking** at F = 1. What consensus adds over leader_merge is not
+    /// better dissemination but *author succession*.
+    #[test]
+    fn leader_merge_dissemination_hole_leader_crash_diverges_replicas() {
+        let mut flow = FlowBuilder::new();
+        let writers = flow.cluster::<()>();
+        let leader = flow.process::<()>();
+        let replicas = flow.cluster::<()>();
+        let node = flow.process::<()>();
+
+        let (in_send, local) = writers.sim_input::<u32, TotalOrder, ExactlyOnce>();
+        let at_leader = local.send(&leader, TCP.fail_stop().bincode());
+
+        let log = leader_merge_broadcast(
+            at_leader,
+            &replicas,
+            TCP.fail_stop().bincode(),
+            nondet!(/** leader dictates the interleaving */),
+        );
+
+        let out_recv = log
+            .send(&node, TCP.fail_stop().bincode())
+            .entries()
+            .sim_output();
+
+        let mut saw_divergence = false;
+        let mut saw_full_delivery = false;
+
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&writers, 1)
+            .with_cluster_size(&replicas, 2)
+            .with_crashable_process(&leader)
+            .exhaustive(async || {
+                in_send.send(0, 10);
+                in_send.send(0, 20);
+
+                let received: Vec<(MemberId<()>, (MemberId<()>, u32))> =
+                    out_recv.collect_sorted().await;
+
+                let logs: Vec<Vec<u32>> = (0..2u32)
+                    .map(|replica| {
+                        received
+                            .iter()
+                            .filter(|(r, _)| *r == MemberId::from_raw_id(replica))
+                            .map(|(_, (_, v))| *v)
+                            .collect()
+                    })
+                    .collect();
+
+                // Safety in EVERY execution: each replica holds a prefix of the
+                // leader's chosen order (FIFO; the crash cuts a suffix, never
+                // reorders).
+                for (replica, log) in logs.iter().enumerate() {
+                    assert!(
+                        [vec![], vec![10], vec![10, 20]].contains(log),
+                        "replica {replica} holds a non-prefix log {log:?}"
+                    );
+                }
+
+                if logs[0] != logs[1] {
+                    saw_divergence = true;
+                }
+                if logs.iter().all(|log| log.len() == 2) {
+                    saw_full_delivery = true;
+                }
+            });
+
+        assert!(
+            saw_divergence,
+            "expected an execution where the leader crash leaves replicas holding \
+             different log prefixes forever — the agreement loss consensus prevents"
+        );
+        assert!(
+            saw_full_delivery,
+            "sanity: the crash-free execution replicates the full log everywhere"
+        );
+    }
+
+    /// **Crash demo, part 2 — the succession hole (this is what consensus is).**
+    /// Patch part 1's dissemination hole: the leader ships its chosen order *as
+    /// data* (slot indices, since the echo destroys FIFO) and disseminates via
+    /// [`reliable_broadcast_closed`]. Now, in **every** explored execution —
+    /// including every leader-crash timing — the replicas' delivered logs are
+    /// *identical dense prefixes* of the leader's order: agreement is fully
+    /// repaired without a whiff of consensus.
+    ///
+    /// What cannot be repaired by more dissemination: the construction is
+    /// **blocking** (in the Skeen sense) at F = 1. The exhaustive search finds a
+    /// reachable *dead state*: quiescent, fault budget respected, network
+    /// connected and fail-stop — and a write submitted after the crash is
+    /// permanently uncommittable, because the sole author is dead and nothing
+    /// can safely replace him. Note this is deliberately NOT phrased as a
+    /// liveness violation: "≤ F crashes ⇒ eventual commit" is unattainable
+    /// anyway (FLP). The property consensus actually adds is *non-blockingness*
+    /// — no reachable dead state under minority crashes — which has a finite
+    /// witness and is exactly what the sim's controlled quiescence can check.
+    /// A future Paxos counterpart (needs crashable cluster members) would assert
+    /// the complement: no dead state exists.
+    #[test]
+    fn leader_merge_plus_reliable_broadcast_agrees_but_blocks_at_f1() {
+        use crate::ec_inference_demos::reliable_broadcast::reliable_broadcast_closed;
+
+        let mut flow = FlowBuilder::new();
+        let writers = flow.cluster::<()>();
+        let leader = flow.process::<()>();
+        let replicas = flow.cluster::<()>();
+        let node = flow.process::<()>();
+
+        let (in_send, local) = writers.sim_input::<u32, TotalOrder, ExactlyOnce>();
+        let at_leader = local.send(&leader, TCP.fail_stop().bincode());
+
+        // The leader manufactures the interleaving and ships order AS DATA:
+        // (slot, entry). Reliable broadcast's echo re-delivers out of order, but
+        // slots let every replica reconstruct the leader's exact total order.
+        let slotted = at_leader
+            .entries_partially_ordered(nondet!(/** leader dictates the interleaving */))
+            .enumerate();
+
+        let log = reliable_broadcast_closed(slotted, &replicas);
+
+        let out_recv = log
+            .send(&node, TCP.fail_stop().bincode())
+            .entries()
+            .sim_output();
+
+        let mut saw_blocked = false;
+        let mut saw_full_delivery = false;
+
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&writers, 1)
+            .with_cluster_size(&replicas, 2)
+            .with_crashable_process(&leader)
+            .exhaustive(async || {
+                // Phase 1: two writes; run to the phase barrier (the leader may
+                // crash at any explored send boundary along the way).
+                in_send.send(0, 10);
+                in_send.send(0, 20);
+                hydro_lang::sim::quiesce().await;
+
+                // Phase 2: a write submitted after the phase-1 fixpoint. If the
+                // leader is dead, no protocol step can ever commit it.
+                in_send.send(0, 30);
+
+                let received: Vec<(MemberId<()>, (usize, (MemberId<()>, u32)))> =
+                    out_recv.collect_sorted().await;
+
+                let logs: Vec<Vec<(usize, u32)>> = (0..2u32)
+                    .map(|replica| {
+                        received
+                            .iter()
+                            .filter(|(r, _)| *r == MemberId::from_raw_id(replica))
+                            .map(|(_, (slot, (_, v)))| (*slot, *v))
+                            .collect()
+                    })
+                    .collect();
+
+                // AGREEMENT in every execution — the contrast with part 1: the
+                // echo makes per-entry delivery all-or-nothing across replicas.
+                assert_eq!(
+                    logs[0], logs[1],
+                    "reliable dissemination must not let replicas diverge"
+                );
+
+                // And the agreed log is a dense prefix of the leader's chosen
+                // order in every execution (FIFO staging + echo preserve
+                // prefix-closedness of the delivered slot set).
+                let expected = [(0, 10u32), (1, 20), (2, 30)];
+                assert!(
+                    logs[0].as_slice() == &expected[..logs[0].len()],
+                    "agreed log {:?} is not a dense prefix of the leader's order",
+                    logs[0]
+                );
+
+                // The dead-state witness: final quiescence, write 30 submitted,
+                // never committed anywhere — and nothing can ever change that.
+                if logs[0].len() < 3 {
+                    saw_blocked = true;
+                }
+                if logs[0].len() == 3 {
+                    saw_full_delivery = true;
+                }
+            });
+
+        assert!(
+            saw_blocked,
+            "expected a reachable dead state: leader crashed, replicas agree, and the \
+             post-crash write is permanently uncommittable — leader_merge + RB is blocking \
+             at F = 1, which is precisely the hole consensus (author succession) closes"
+        );
+        assert!(
+            saw_full_delivery,
+            "sanity: the crash-free execution commits all three writes everywhere"
+        );
+    }
+
+    /// **Crash demo, part 2b — the member-leader variant fails the same test
+    /// Raft passes, under the identical fault model.** The distinguished-member
+    /// route ([`leader_merge_slots_from_member`]: all writers' values funnel to
+    /// member 0 *of the log cluster*, which slots and broadcasts them to its
+    /// peers) is run under `with_crashable_cluster(log_cluster, 1)` — the
+    /// *same* opt-in as Raft's `any_single_crash_cannot_block_progress`: which
+    /// member dies, when, and with which per-recipient cut are all search
+    /// dimensions; nothing is targeted. The client is crash-agnostic, retrying
+    /// its write through every writer each phase.
+    ///
+    /// Raft's test asserts that under this fault model the write *always*
+    /// commits on a majority. This test pins that the member-leader merge
+    /// **fails** that property existentially: the search finds executions where
+    /// the retried write never reaches any log member — the crash landed on
+    /// member 0, the sole author, and no peer can take over the merge. There is
+    /// nothing to elect and no log to splice: single-author total order is
+    /// blocking at F = 1 no matter how the client retries.
+    #[test]
+    fn member_leader_single_crash_can_block_progress() {
+        const WRITERS: usize = 2;
+
+        let mut flow = FlowBuilder::new();
+        let writers = flow.cluster::<()>();
+        let log_cluster = flow.cluster::<()>();
+        let node = flow.process::<()>();
+
+        let (in_send, local) = writers.sim_input::<u32, TotalOrder, ExactlyOnce>();
+
+        let out_recv = leader_merge_slots_from_member(
+            local,
+            &log_cluster,
+            nondet!(/** the distinguished member dictates the interleaving */),
+        )
+        .send(&node, TCP.fail_stop().bincode())
+        .entries()
+        .sim_output();
+
+        let mut saw_blocked = false;
+        let mut saw_full_delivery = false;
+
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&writers, WRITERS)
+            .with_cluster_size(&log_cluster, 2)
+            .with_crashable_cluster(&log_cluster, 1)
+            .fuzz(async || {
+                // Phase 1: a first write, retried to every writer (the client
+                // does not know who is alive). The fault search may crash a
+                // writer at any of its send boundaries along the way.
+                for w in 0..WRITERS as u32 {
+                    in_send.send(w, 10);
+                }
+                hydro_lang::sim::quiesce().await;
+
+                // Phase 2: a second write, again retried to every writer. With
+                // F = 1, at least one recipient of the retry is alive.
+                for w in 0..WRITERS as u32 {
+                    in_send.send(w, 20);
+                }
+
+                let received: Vec<(MemberId<()>, (usize, (MemberId<()>, u32)))> =
+                    out_recv.collect_sorted().await;
+
+                let delivered_20 = (0..2u32)
+                    .filter(|replica| {
+                        received.iter().any(|(r, (_, (_, v)))| {
+                            *r == MemberId::from_raw_id(*replica) && *v == 20
+                        })
+                    })
+                    .count();
+
+                if delivered_20 == 0 {
+                    // The retried write reached no log member, ever — the sole
+                    // author is dead. This is the dead state Raft's test
+                    // proves unreachable under the same fault model.
+                    saw_blocked = true;
+                }
+                if delivered_20 == 2 {
+                    saw_full_delivery = true;
+                }
+            });
+
+        assert!(
+            saw_blocked,
+            "expected an execution where one crash (the distinguished member) blocks \
+             the retried write forever — the single-author dead state"
+        );
+        assert!(
+            saw_full_delivery,
+            "sanity: some execution delivers the second write to every log member"
+        );
     }
 
     /// Compile-time pin for the **honest-type variant**: the member-leader

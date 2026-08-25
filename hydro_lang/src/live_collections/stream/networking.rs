@@ -1863,6 +1863,76 @@ mod tests {
 
     #[cfg(feature = "sim")]
     #[test]
+    fn sim_crashable_sender_explores_partial_broadcasts() {
+        let mut flow = FlowBuilder::new();
+        let cluster = flow.cluster::<()>();
+        let node = flow.process::<()>();
+        let observer = flow.process::<()>();
+
+        let input = node.source_iter(q!(vec![1u32, 2]));
+
+        let out_recv = input
+            .broadcast_closed(&cluster, TCP.fail_stop().bincode())
+            .send(&observer, TCP.fail_stop().bincode())
+            .entries()
+            .sim_output();
+
+        // Crash-fault injection must explore the classical partial-broadcast
+        // states: per recipient, an independent *prefix* of the sender's
+        // messages survives the crash.
+        let mut saw_divergence = false;
+        let mut saw_complete = false;
+
+        let count = flow
+            .sim()
+            .with_cluster_size(&cluster, 2)
+            .with_crashable_process(&node)
+            .exhaustive(async || {
+                let received: Vec<(MemberId<()>, u32)> = out_recv.collect_sorted().await;
+
+                let per_member: Vec<Vec<u32>> = (0..2u32)
+                    .map(|member| {
+                        received
+                            .iter()
+                            .filter(|(m, _)| *m == MemberId::from_raw_id(member))
+                            .map(|(_, v)| *v)
+                            .collect()
+                    })
+                    .collect();
+
+                // Safety in every execution: each member receives a prefix of
+                // the sender's FIFO stream (a crash cannot reorder or corrupt).
+                for (member, seq) in per_member.iter().enumerate() {
+                    assert!(
+                        [vec![], vec![1], vec![1, 2]].contains(seq),
+                        "member {member} received non-prefix {seq:?}"
+                    );
+                }
+
+                if per_member[0] != per_member[1] {
+                    saw_divergence = true;
+                }
+                if per_member.iter().all(|seq| seq.len() == 2) {
+                    saw_complete = true;
+                }
+            });
+
+        assert!(
+            saw_divergence,
+            "expected some execution where the sender crash reaches one member but not the other"
+        );
+        assert!(
+            saw_complete,
+            "expected some execution with no crash (or a crash after full delivery)"
+        );
+        assert!(
+            count > 1,
+            "expected the crash hook to fork the search, got {count} execution(s)"
+        );
+    }
+
+    #[cfg(feature = "sim")]
+    #[test]
     fn sim_broadcast_closed_m2m() {
         let mut flow = FlowBuilder::new();
         let source = flow.cluster::<()>();

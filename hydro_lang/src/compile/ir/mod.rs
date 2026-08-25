@@ -4970,8 +4970,12 @@ impl HydroNode {
                                         let acc: syn::Expr = parse_quote!({
                                             let mut __inner = #acc_tokens;
                                             move |__state, __batch: Vec<_>| {
+                                                // `None` would terminate the scan (killing the fold
+                                                // state permanently), so an empty batch must never
+                                                // reach here: `TopLevelFoldHook::release_decision`
+                                                // skips sending empty (trivial) decisions.
                                                 if __batch.is_empty() {
-                                                    return None;
+                                                    panic!("sim: TopLevelFoldHook released an empty batch; this would terminate the fold's scan state");
                                                 }
                                                 for __value in __batch {
                                                     __inner(__state, __value);

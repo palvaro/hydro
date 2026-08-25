@@ -10,6 +10,7 @@ use crate::compile::ir::{
     CollectionKind, DebugExpr, DfirBuilder, HydroIrOpMetadata, KeyedSingletonBoundKind,
     StreamOrder, StreamRetry,
 };
+use crate::location::LocationKey;
 use crate::location::dynamic::LocationId;
 use crate::staging_util::get_this_crate;
 
@@ -39,6 +40,14 @@ pub struct SimBuilder {
     pub test_safety_only: bool,
     pub skip_consistency_assertions: bool,
     pub channel_tables: BTreeMap<u32, syn::Ident>,
+    /// Locations opted into crash-fault injection, mapped to their fault budget
+    /// (max crashes in the fault domain). For clusters the budget is shared
+    /// across all members; see [`Self::crash_channels_ident`]. Populated from
+    /// `SimFlow::with_crashable_process` / `SimFlow::with_crashable_cluster`.
+    pub crashable: BTreeMap<LocationKey, usize>,
+    /// Per crashable location: the ident of its staged-channel registry, emitted
+    /// (along with its `CrashHook` registration) on first use.
+    pub crash_channel_vecs: BTreeMap<LocationKey, syn::Ident>,
 }
 
 impl SimBuilder {
@@ -119,6 +128,73 @@ impl SimBuilder {
             },
             _ => unreachable!(),
         }
+    }
+
+    /// If `from` is a location opted into crash-fault injection, returns the
+    /// ident of its staged-channel registry
+    /// (`Rc<RefCell<Vec<Box<dyn StagedNetChannel>>>>`), emitting the registry,
+    /// the shared fault budget, and the
+    /// [`CrashHook`](crate::sim::runtime::CrashHook) registration on first use.
+    /// Returns `None` for non-crashable senders, in which case network sends are
+    /// emitted direct (unstaged), exactly as before.
+    ///
+    /// For a process, the registry and hook live in the global scope. For a
+    /// cluster, the emitted statements go into the per-member scope (where
+    /// `__current_cluster_id` is live), so **each member gets its own registry
+    /// and hook** — but all members share one budget cell, bounding the number
+    /// of crashes in the whole cluster (the `F` of the fault model).
+    fn crash_channels_ident(&mut self, from: &LocationId) -> Option<syn::Ident> {
+        let key = match from {
+            LocationId::Process(key) | LocationId::Cluster(key) => key,
+            _ => return None,
+        };
+        let Some(&budget) = self.crashable.get(key) else {
+            return None;
+        };
+        if let Some(ident) = self.crash_channel_vecs.get(key) {
+            return Some(ident.clone());
+        }
+
+        let root = get_this_crate();
+        let ident = syn::Ident::new(
+            &format!("__hydro_crash_channels_{}", key),
+            Span::call_site(),
+        );
+        let budget_ident = syn::Ident::new(
+            &format!("__hydro_crash_budget_{}", key),
+            Span::call_site(),
+        );
+        let loc_ser = serde_json::to_string(from).unwrap();
+
+        // One budget cell per fault domain, in the global scope (shared by all
+        // members of a crashable cluster).
+        self.extra_stmts_global.push(syn::parse_quote! {
+            let #budget_ident: ::std::rc::Rc<::std::cell::Cell<usize>> =
+                ::std::rc::Rc::new(::std::cell::Cell::new(#budget));
+        });
+
+        let member_key: syn::Expr = if matches!(from, LocationId::Cluster(_)) {
+            syn::parse_quote!(Some(__current_cluster_id))
+        } else {
+            syn::parse_quote!(None)
+        };
+
+        self.add_extra_stmt_internal(from, syn::parse_quote! {
+            let #ident: ::std::rc::Rc<::std::cell::RefCell<::std::vec::Vec<::std::boxed::Box<dyn #root::sim::runtime::StagedNetChannel>>>> =
+                ::std::rc::Rc::new(::std::cell::RefCell::new(::std::vec::Vec::new()));
+        });
+        self.add_extra_stmt_internal(from, syn::parse_quote! {
+            __hydro_hooks.entry((#loc_ser, #member_key)).or_default().push(::std::boxed::Box::new(
+                #root::sim::runtime::CrashHook::new(
+                    #ident.clone(),
+                    #budget_ident.clone(),
+                    (#loc_ser, "crash-fault injection", ""),
+                )
+            ));
+        });
+
+        self.crash_channel_vecs.insert(*key, ident.clone());
+        Some(ident)
     }
 
     fn channel_elem_ty(
@@ -1157,6 +1233,36 @@ impl DfirBuilder for SimBuilder {
                         None,
                     );
                 }
+                // A retry upgrade (AtLeastOnce -> ExactlyOnce) with the ordering
+                // unchanged — e.g. `fold`'s idempotence proof compiling to
+                // `assume_retries`. Unlike ordering assumptions, a retry relabel
+                // has no runtime content for the simulator to explore: whatever
+                // duplicates genuinely arise (protocol-level re-offers, or
+                // transports that actually retry) already flow through and are
+                // explored via their producers' own nondeterminism, while
+                // injecting synthetic duplicates would explore executions
+                // impossible under the configured transport. So: identity
+                // passthrough, no hook.
+                (
+                    CollectionKind::Stream {
+                        order: in_order,
+                        retry: StreamRetry::AtLeastOnce,
+                        ..
+                    },
+                    CollectionKind::Stream {
+                        order: out_order,
+                        retry: StreamRetry::ExactlyOnce,
+                        ..
+                    },
+                ) if in_order == out_order => {
+                    self.get_dfir_mut(location).add_dfir(
+                        parse_quote! {
+                            #out_ident = #in_ident -> map(|v| v);
+                        },
+                        None,
+                        None,
+                    );
+                }
                 _ => {
                     todo!(
                         "non-trusted observe_nondet not yet supported for kinds {:?} -> {:?} at top-level locations",
@@ -1498,10 +1604,40 @@ impl DfirBuilder for SimBuilder {
                     let (#sink, #source) = __root_dfir_rs::util::unsync::mpsc::unbounded::<#payload>();
                 });
 
+                // For a crashable sender, stage sends (recipient index 0) so the
+                // CrashHook can cut the undelivered suffix at a crash point.
+                let send_closure: syn::Expr = if let Some(chvec) = self.crash_channels_ident(from) {
+                    let stage = syn::Ident::new(
+                        &format!("__hydro_crash_stage_{}", tag_id),
+                        Span::call_site(),
+                    );
+                    self.extra_stmts_global.push(syn::parse_quote! {
+                        let #stage = ::std::rc::Rc::new(::std::cell::RefCell::new(
+                            ::std::vec::Vec::<::std::collections::VecDeque<#payload>>::new()
+                        ));
+                    });
+                    self.extra_stmts_global.push(syn::parse_quote! {
+                        {
+                            let __crash_sink = #sink.clone();
+                            #chvec.borrow_mut().push(::std::boxed::Box::new(
+                                #root::sim::runtime::StagedChannel {
+                                    buffers: #stage.clone(),
+                                    deliver: ::std::boxed::Box::new(move |_recipient, v| {
+                                        __crash_sink.try_send(v).unwrap()
+                                    }),
+                                }
+                            ));
+                        }
+                    });
+                    parse_quote!(|v| #root::sim::runtime::stage_push(&#stage, 0, v))
+                } else {
+                    parse_quote!(|v| #sink.try_send(v).unwrap())
+                };
+
                 if let Some(serialize_pipeline) = serialize {
                     self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(|v| #sink.try_send(v).unwrap());
+                            #input_ident -> map(#serialize_pipeline) -> for_each(#send_closure);
                         },
                         None,
                         Some(&format!("send{}", tag_id)),
@@ -1509,7 +1645,7 @@ impl DfirBuilder for SimBuilder {
                 } else {
                     self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #input_ident -> for_each(|v| #sink.try_send(v).unwrap());
+                            #input_ident -> for_each(#send_closure);
                         },
                         None,
                         Some(&format!("send{}", tag_id)),
@@ -1546,10 +1682,54 @@ impl DfirBuilder for SimBuilder {
                         let #sink = #sink.clone();
                     });
 
+                // For a crashable sending cluster, stage each member's sends so
+                // its CrashHook can cut the undelivered suffix at a crash point.
+                let send_closure: syn::Expr = if let Some(chvec) = self.crash_channels_ident(from) {
+                    let stage = syn::Ident::new(
+                        &format!("__hydro_crash_stage_{}", tag_id),
+                        Span::call_site(),
+                    );
+                    self.extra_stmts_cluster
+                        .entry(from.clone())
+                        .or_default()
+                        .push(syn::parse_quote! {
+                            let #stage = ::std::rc::Rc::new(::std::cell::RefCell::new(
+                                ::std::vec::Vec::<::std::collections::VecDeque<(#root::__staged::location::TaglessMemberId, #payload)>>::new()
+                            ));
+                        });
+                    self.extra_stmts_cluster
+                        .entry(from.clone())
+                        .or_default()
+                        .push(syn::parse_quote! {
+                            {
+                                let __crash_sink = #sink.clone();
+                                #chvec.borrow_mut().push(::std::boxed::Box::new(
+                                    #root::sim::runtime::StagedChannel {
+                                        buffers: #stage.clone(),
+                                        deliver: ::std::boxed::Box::new(move |_recipient, v| {
+                                            __crash_sink.try_send(v).unwrap()
+                                        }),
+                                    }
+                                ));
+                            }
+                        });
+                    parse_quote! {
+                        |v| #root::sim::runtime::stage_push(
+                            &#stage,
+                            0,
+                            (#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v),
+                        )
+                    }
+                } else {
+                    parse_quote! {
+                        |v| #sink.try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap()
+                    }
+                };
+
                 if let Some(serialize_pipeline) = serialize {
                     self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(|v| #sink.try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap());
+                            #input_ident -> map(#serialize_pipeline) -> for_each(#send_closure);
                         },
                         None,
                         Some(&format!("send{}", tag_id)),
@@ -1557,7 +1737,7 @@ impl DfirBuilder for SimBuilder {
                 } else {
                     self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #input_ident -> for_each(|v| #sink.try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap());
+                            #input_ident -> for_each(#send_closure);
                         },
                         None,
                         Some(&format!("send{}", tag_id)),
@@ -1606,10 +1786,50 @@ impl DfirBuilder for SimBuilder {
                         };
                     });
 
+                // For a crashable sender, stage sends per destination member so
+                // the CrashHook can cut an independent per-recipient suffix at a
+                // crash point — the partial-broadcast state a real sender crash
+                // produces.
+                let send_closure: syn::Expr = if let Some(chvec) = self.crash_channels_ident(from) {
+                    let stage = syn::Ident::new(
+                        &format!("__hydro_crash_stage_{}", tag_id),
+                        Span::call_site(),
+                    );
+                    self.extra_stmts_global.push(syn::parse_quote! {
+                        let #stage = ::std::rc::Rc::new(::std::cell::RefCell::new(
+                            ::std::vec::Vec::<::std::collections::VecDeque<#payload>>::new()
+                        ));
+                    });
+                    self.extra_stmts_global.push(syn::parse_quote! {
+                        {
+                            let __crash_sink = #sink.clone();
+                            #chvec.borrow_mut().push(::std::boxed::Box::new(
+                                #root::sim::runtime::StagedChannel {
+                                    buffers: #stage.clone(),
+                                    deliver: ::std::boxed::Box::new(move |__recipient, v| {
+                                        (__crash_sink.borrow())[__recipient].try_send(v).unwrap()
+                                    }),
+                                }
+                            ));
+                        }
+                    });
+                    parse_quote! {
+                        |(target_member_id, v)| #root::sim::runtime::stage_push(
+                            &#stage,
+                            #root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize,
+                            v,
+                        )
+                    }
+                } else {
+                    parse_quote! {
+                        |(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send(v).unwrap()
+                    }
+                };
+
                 if let Some(serialize_pipeline) = serialize {
                     self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(|(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send(v).unwrap());
+                            #input_ident -> map(#serialize_pipeline) -> for_each(#send_closure);
                         },
                         None,
                         Some(&format!("send{}", tag_id)),
@@ -1617,7 +1837,7 @@ impl DfirBuilder for SimBuilder {
                 } else {
                     self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #input_ident -> for_each(|(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send(v).unwrap());
+                            #input_ident -> for_each(#send_closure);
                         },
                         None,
                         Some(&format!("send{}", tag_id)),
@@ -1673,10 +1893,55 @@ impl DfirBuilder for SimBuilder {
                         };
                     });
 
+                // For a crashable sending cluster, stage each member's sends per
+                // destination member, so its CrashHook can cut an independent
+                // per-recipient suffix at a crash point (partial broadcast).
+                let send_closure: syn::Expr = if let Some(chvec) = self.crash_channels_ident(from) {
+                    let stage = syn::Ident::new(
+                        &format!("__hydro_crash_stage_{}", tag_id),
+                        Span::call_site(),
+                    );
+                    self.extra_stmts_cluster
+                        .entry(from.clone())
+                        .or_default()
+                        .push(syn::parse_quote! {
+                            let #stage = ::std::rc::Rc::new(::std::cell::RefCell::new(
+                                ::std::vec::Vec::<::std::collections::VecDeque<(#root::__staged::location::TaglessMemberId, #payload)>>::new()
+                            ));
+                        });
+                    self.extra_stmts_cluster
+                        .entry(from.clone())
+                        .or_default()
+                        .push(syn::parse_quote! {
+                            {
+                                let __crash_sink = #sink.clone();
+                                #chvec.borrow_mut().push(::std::boxed::Box::new(
+                                    #root::sim::runtime::StagedChannel {
+                                        buffers: #stage.clone(),
+                                        deliver: ::std::boxed::Box::new(move |__recipient, v| {
+                                            (__crash_sink.borrow())[__recipient].try_send(v).unwrap()
+                                        }),
+                                    }
+                                ));
+                            }
+                        });
+                    parse_quote! {
+                        |(target_member_id, v)| #root::sim::runtime::stage_push(
+                            &#stage,
+                            #root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize,
+                            (#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v),
+                        )
+                    }
+                } else {
+                    parse_quote! {
+                        |(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap()
+                    }
+                };
+
                 if let Some(serialize_pipeline) = serialize {
                     self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(|(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap());
+                            #input_ident -> map(#serialize_pipeline) -> for_each(#send_closure);
                         },
                         None,
                         Some(&format!("send{}", tag_id)),
@@ -1684,7 +1949,7 @@ impl DfirBuilder for SimBuilder {
                 } else {
                     self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #input_ident -> for_each(|(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap());
+                            #input_ident -> for_each(#send_closure);
                         },
                         None,
                         Some(&format!("send{}", tag_id)),

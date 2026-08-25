@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -77,6 +77,14 @@ pub trait SimHook {
     /// singleton whose producing tick hasn't run yet).
     fn is_ready(&self) -> bool {
         true
+    }
+
+    /// Whether this hook has just decided that its location crashed. The scheduler
+    /// checks this after releasing decisions and permanently halts the location
+    /// (its async DFIR, tick DFIRs, and observations). Consumed on read; the
+    /// default implementation (for all non-crash hooks) never signals a halt.
+    fn take_halt(&mut self) -> bool {
+        false
     }
 }
 
@@ -1647,6 +1655,264 @@ impl<T> SimHook for MembershipHook<T> {
     }
 }
 
+/// An outgoing network channel of a crashable location whose sends are *staged*
+/// (buffered per-recipient) instead of delivered immediately.
+///
+/// Staging exists so that a crash can cut a per-recipient **suffix** of the
+/// location's sends: messages a real crashed process would never have gotten onto
+/// the wire. Delivery of staged sends is otherwise deterministic and prompt (the
+/// [`CrashHook`] flushes every staged message whenever it is serviced and no
+/// crash fires), so staging adds no nondeterminism of its own to crash-free
+/// executions.
+///
+/// Sends within one DFIR run of the sender are atomic today (direct
+/// `try_send` into recipient queues), which makes the classical partial-broadcast
+/// crash state — reached recipient A but not B — unrepresentable without this
+/// interposition. See the crash-injection design discussion in
+/// `design_docs/2026-08_research_agenda.md` §2 (crash injection as the missing
+/// oracle).
+pub trait StagedNetChannel {
+    /// `(recipient index, staged message count)` for every recipient with staged
+    /// messages. Single-recipient channels use index 0.
+    fn staged_counts(&self) -> Vec<(usize, usize)>;
+
+    /// Deliver every staged message, in per-recipient FIFO order.
+    fn deliver_all(&mut self);
+
+    /// Deliver the first `prefix` staged messages to `recipient` and discard the
+    /// remainder for that recipient (the crash cut).
+    fn deliver_prefix(&mut self, recipient: usize, prefix: usize);
+}
+
+/// The concrete [`StagedNetChannel`]: per-recipient FIFO buffers plus a delivery
+/// closure that performs the real `try_send` into the recipient's queue.
+pub struct StagedChannel<T> {
+    /// Staged messages, indexed by recipient (index 0 for single-recipient
+    /// channels). Grown on demand by [`stage_push`].
+    pub buffers: Rc<RefCell<Vec<VecDeque<T>>>>,
+    /// Delivers one message to one recipient (the original network send).
+    pub deliver: Box<dyn Fn(usize, T)>,
+}
+
+impl<T> StagedNetChannel for StagedChannel<T> {
+    fn staged_counts(&self) -> Vec<(usize, usize)> {
+        self.buffers
+            .borrow()
+            .iter()
+            .enumerate()
+            .filter(|(_, buf)| !buf.is_empty())
+            .map(|(i, buf)| (i, buf.len()))
+            .collect()
+    }
+
+    fn deliver_all(&mut self) {
+        let mut buffers = self.buffers.borrow_mut();
+        for (i, buf) in buffers.iter_mut().enumerate() {
+            while let Some(item) = buf.pop_front() {
+                (self.deliver)(i, item);
+            }
+        }
+    }
+
+    fn deliver_prefix(&mut self, recipient: usize, prefix: usize) {
+        let mut buffers = self.buffers.borrow_mut();
+        if let Some(buf) = buffers.get_mut(recipient) {
+            for _ in 0..prefix {
+                if let Some(item) = buf.pop_front() {
+                    (self.deliver)(recipient, item);
+                }
+            }
+            buf.clear();
+        }
+    }
+}
+
+/// Stages a send on a crashable location's outgoing channel. Called by generated
+/// simulator code in place of the direct `try_send`.
+pub fn stage_push<T>(buffers: &Rc<RefCell<Vec<VecDeque<T>>>>, recipient: usize, item: T) {
+    let mut buffers = buffers.borrow_mut();
+    if buffers.len() <= recipient {
+        buffers.resize_with(recipient + 1, VecDeque::new);
+    }
+    buffers[recipient].push_back(item);
+}
+
+/// The decision a [`CrashHook`] makes when serviced with staged sends pending.
+enum CrashDecision {
+    /// No crash this round: flush every staged message (deterministic delivery).
+    Flush,
+    /// Crash: per channel, per recipient, deliver this prefix and discard the
+    /// rest; then halt the location permanently.
+    Crash(Vec<Vec<(usize, usize)>>),
+}
+
+/// Simulation hook for **crash-fault injection** on a location.
+///
+/// Crash points exist only at *send boundaries*: a crash between two points at
+/// which the location produced no output is observationally equivalent to
+/// crashing at the next boundary with an empty cut, so forking anywhere else
+/// would only dilate the search (the `MembershipHook` blowup lesson). The hook is
+/// therefore fork-eligible exactly while its location has staged, undelivered
+/// sends — it drains and drops out of the scheduler's ready set like any
+/// ordinary stream hook.
+///
+/// At each boundary the decision is: crash now, or flush? A flush delivers every
+/// staged message deterministically (no delivery-timing nondeterminism is
+/// added). A crash chooses, independently per outgoing channel and recipient, a
+/// prefix of the staged FIFO to deliver — the in-flight suffix a real crash
+/// would lose — then signals the scheduler (via [`SimHook::take_halt`]) to
+/// permanently halt the location's DFIRs. The crashed location's inbound
+/// channels stay open (senders to it are unaffected; their messages are simply
+/// never consumed), matching `fail_stop`'s "sends to failed members are wasted,
+/// not wrong" semantics.
+pub struct CrashHook {
+    /// The location's staged outgoing channels, registered by generated code as
+    /// each network edge is wired.
+    pub channels: Rc<RefCell<Vec<Box<dyn StagedNetChannel>>>>,
+    /// Remaining crash budget, shared among all crash hooks of the same fault
+    /// domain (every member of a crashable cluster shares one budget; a
+    /// crashable process has its own). Once spent, hooks only ever flush — and
+    /// stop drawing the crash coin, so they no longer fork the search.
+    pub budget: Rc<Cell<usize>>,
+    /// False after the crash has fired; the location is halted so no further
+    /// sends can be staged, but the hook stays registered.
+    alive: bool,
+    decision: Option<(CrashDecision, bool)>,
+    halt_pending: bool,
+    pub location: HookLocationMeta,
+}
+
+impl CrashHook {
+    /// Creates a crash hook drawing on the given shared crash budget.
+    pub fn new(
+        channels: Rc<RefCell<Vec<Box<dyn StagedNetChannel>>>>,
+        budget: Rc<Cell<usize>>,
+        location: HookLocationMeta,
+    ) -> Self {
+        Self {
+            channels,
+            budget,
+            alive: true,
+            decision: None,
+            halt_pending: false,
+            location,
+        }
+    }
+
+    fn any_staged(&self) -> bool {
+        self.channels
+            .borrow()
+            .iter()
+            .any(|c| !c.staged_counts().is_empty())
+    }
+}
+
+impl SimHook for CrashHook {
+    fn current_decision(&self) -> Option<bool> {
+        self.decision.as_ref().map(|(_, nontrivial)| *nontrivial)
+    }
+
+    fn can_make_nontrivial_decision(&self) -> bool {
+        self.alive && self.any_staged()
+    }
+
+    fn autonomous_decision<'a>(
+        &mut self,
+        driver: &mut Borrowed<'a>,
+        _force_nontrivial: bool,
+    ) -> bool {
+        if !self.alive || !self.any_staged() {
+            // Nothing staged: trivially flush (a no-op). No driver entropy is
+            // consumed, so this cannot fork the search.
+            self.decision = Some((CrashDecision::Flush, false));
+            return false;
+        }
+
+        // Fork: crash at this send boundary, or not? Only draw the coin while
+        // the shared budget remains, so exhausted fault domains never fork.
+        let do_crash = self.budget.get() > 0 && produce().generate(driver).unwrap();
+
+        if do_crash {
+            // Fork, independently per channel and recipient, the prefix of the
+            // staged FIFO that made it onto the wire before the crash.
+            let cuts = self
+                .channels
+                .borrow()
+                .iter()
+                .map(|channel| {
+                    channel
+                        .staged_counts()
+                        .into_iter()
+                        .map(|(recipient, count)| {
+                            let prefix = (0..=count).generate(driver).unwrap();
+                            (recipient, prefix)
+                        })
+                        .collect()
+                })
+                .collect();
+            self.decision = Some((CrashDecision::Crash(cuts), true));
+        } else {
+            // Releasing staged messages is a nontrivial action (it is what lets
+            // downstream locations make progress), mirroring the stream hooks.
+            self.decision = Some((CrashDecision::Flush, true));
+        }
+        true
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        let Some((decision, _)) = self.decision.take() else {
+            panic!("No decision to release");
+        };
+
+        match decision {
+            CrashDecision::Flush => {
+                for channel in self.channels.borrow_mut().iter_mut() {
+                    channel.deliver_all();
+                }
+            }
+            CrashDecision::Crash(cuts) => {
+                if let Some(log_writer) = log_writer {
+                    let (batch_location, line, caret_indent) = self.location;
+                    let note_str = format!(
+                        "^ CRASH: location halts; per-(channel, recipient) delivered prefixes: {:?}",
+                        cuts
+                    );
+
+                    let _ = writeln!(
+                        log_writer,
+                        "\n{} {}",
+                        "-->".color(colored::Color::Blue),
+                        batch_location
+                    );
+                    let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+                    let _ = writeln!(
+                        log_writer,
+                        " {}{}{}",
+                        "|".color(colored::Color::Blue),
+                        caret_indent,
+                        note_str.color(colored::Color::Red)
+                    );
+                }
+
+                let mut channels = self.channels.borrow_mut();
+                for (channel, channel_cuts) in channels.iter_mut().zip(cuts) {
+                    for (recipient, prefix) in channel_cuts {
+                        channel.deliver_prefix(recipient, prefix);
+                    }
+                }
+
+                self.alive = false;
+                self.budget.set(self.budget.get().saturating_sub(1));
+                self.halt_pending = true;
+            }
+        }
+    }
+
+    fn take_halt(&mut self) -> bool {
+        std::mem::take(&mut self.halt_pending)
+    }
+}
+
 /// Hook for top-level folds. Selects a non-empty subset of buffered inputs to release,
 /// always permuting them to explore all orderings. Unselected elements remain
 /// in the buffer for future releases (modeling delayed/lossy inputs).
@@ -1718,9 +1984,17 @@ impl<T> SimHook for TopLevelFoldHook<T> {
 
     fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
         if let Some(to_release) = self.to_release.take() {
-            if !to_release.is_empty()
-                && let Some(log_writer) = log_writer
-            {
+            // An empty (trivial) decision releases nothing. Crucially, do NOT
+            // send an empty batch downstream: the generated `scan` wrapping the
+            // fold treats an empty batch as scan termination (its closure
+            // returns `None`, which `scan` interprets as "the accumulator is
+            // done"), so an empty batch would permanently kill the fold state
+            // and silently drop every later element.
+            if to_release.is_empty() {
+                return;
+            }
+
+            if let Some(log_writer) = log_writer {
                 let (batch_location, line, caret_indent) = self.location;
                 let note_str = format!(
                     "^ fold input batch (permuted): {:?}",

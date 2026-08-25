@@ -46,7 +46,7 @@
 //!
 //! The static demos (`leader_merge`, the `*_closed` entry points,
 //! `g_set_gossip`) rest only on `broadcast_closed` from `hydro_lang`; the
-//! dynamic demos (`reliable_broadcast_live`, `g_set_gossip_dynamic`) route
+//! dynamic demos (`reliable_broadcast_live`, `g_set_gossip_live`) route
 //! through the tentative primitives above.
 
 pub mod broadcast_live;
