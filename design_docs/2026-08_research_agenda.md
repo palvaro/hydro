@@ -1,178 +1,102 @@
-# Research Agenda: Inferring Distributed Consistency Types
+# Inferring Distributed Consistency Types
+
+Goals and Progress
 
 2026-08
 
-**Status:** agenda and index. States the goals, records the concrete progress so
-far, notes the new understanding that has come out of it, and points to the code
-that constitutes evidence. The design docs it references contain a great deal of
-speculation; this doc deliberately restricts itself to what we have actually
-been able to build and to the ideas that are load-bearing for that work.
-
 ## 1. Goals
 
-Hydro claims to do for distributed systems what Rust did for memory safety and
-concurrency: make the hard cases tractable by pushing their invariants into the
-type system. For that claim to hold, the type system must **make it hard to
-write the wrong program** and give **compile-time confidence** that a correct
-one is correct — without the author reaching for escape hatches at every step.
+Hydro claims to do for distributed systems what Rust did for memory safety and concurrency: make the hard cases tractable by pushing their invariants into the type system. For that claim to hold, the type system must **make it hard to write the wrong program** and give **compile-time confidence** that a correct one is correct — without the author reaching for escape hatches at every step.
 
-The escape hatches are `assert_has_consistency_of` (assert a consistency label
-by hand) and `manual_proof!` (discharge a fact by human argument). They are the
-`unsafe` of Hydro. Some uses are legitimate and irreducible; the problem is
-their frequency and placement. The current ecosystem leans on them heavily —
-the reference Paxos (`hydro_test/src/cluster/paxos.rs`) asserts its consistency
-rather than deriving it, and there are few examples of **inferred**
-EventualConsistency (EC).
+The escape hatch is `manual_proof!` — an unchecked human claim that the compiler builds guarantees on — at its most dangerous in `assert_has_consistency_of(manual_proof!(…))`, which mints a consistency label that no mechanical oracle checks. The current ecosystem leans on it heavily: the reference Raft (`hydro_test/src/cluster/raft.rs`) asserts EC on its committed log with one monolithic `manual_proof!` bundling the election restriction, log matching, and majority commit into a single human argument — and there are few examples of **inferred** EventualConsistency (EC).
 
-The goal is to move that boundary: derive consistency labels from how a protocol
-is built, and shrink the manual obligations down to the places where a genuine,
-non-inferable fact actually lives. Two success criteria, both mechanical:
+The goal is to move that boundary: derive consistency labels from how a protocol is built, and shrink the manual obligations down to the places where a genuine, non-inferable fact actually lives. As in Rust, the endgame is sequestration: user protocols free of assertions, with trust concentrated in a few audited library mints. The goals are:
 
-1. **Inference** — EC appears on a protocol's output because the compiler
-   derived it from the composition, with zero consistency assertions in the
-   protocol body.
-2. **Residue localization** — where an obligation is genuinely irreducible, it
-   is a single, named, greppable seam rather than a proof smeared through the
-   protocol.
+1. **Inference** — when possible, EC appears on a protocol's output because the compiler derived it from the composition, with zero consistency assertions in the protocol body.
+2. **Residue localization** — where an obligation is genuinely irreducible, it is a single, named, greppable seam rather than a proof smeared through the protocol.
 
-The work targets two protocol classes: **EC, NoOrder** systems (broadcast and
-gossip, where agreement is on a set/bag) and **EC, TotalOrder** systems (agreed
-logs, where positions must be assigned). Each is studied under both static and
-dynamic cluster membership.
+The work targets two protocol classes: **EC, NoOrder** systems (exemplified by broadcast and gossip, where agreement is on a set/bag) and **EC, TotalOrder** systems (exemplified by replicated logs, where positions must be assigned). Each is studied under both static and dynamic cluster membership, and under crash-stop faults---both dynamic membership and crash faults are experimental simulator features described in more detail below.
 
 ## 2. Concrete progress
 
-These are the things we have actually been able to do with the type system.
-They are small but real: EC (and, where noted, total order) appears on the
-output because the compiler derived it, not because we asserted it.
+I have reached a few modest milestones.  The first are a handful of demo protocols in which the EC label is derived by construction rather than asserted by fiat.  These are intended to represent *protocols that a hydro user could have written* as opposed to trusted libraries.
 
-- **Static reliable broadcast** (`hydro_std/src/ec_inference_demos/reliable_broadcast.rs`)
-  — echo-based reliable broadcast over a static cluster. EC is inferred around
-  the re-broadcast cycle, with zero consistency assertions in the protocol.
+In each, when EC (and, where noted, TotalOrder) appears on an output, it is because the compiler derived it. Similarly, when a fault-tolerance claim is made, it is because the simulator found no counterexample (and found the counterexample for the protocols that lack it).
 
-- **CRDT (G-Set) gossip** (`.../crdt_gossip.rs`) — state-based grow-only-set
-  gossip over a static cluster. EC is inferred around the folded-state cycle;
-  the only `manual_proof!`s are the fold's associativity/commutativity/
-  idempotence obligations, which are honest lattice-merge facts, not consistency
-  assertions. A companion soundness file (`crdt_gossip_soundness.rs`) pins the
-  negative cases: swapping `fail_stop` for a lossy policy must fail to compile.
 
-- **Leader/merge "fake consensus"** (`.../leader_merge.rs`) — multi-writer,
-  total-order, EC output produced by a single merging leader (primary/backup),
-  with **no consensus machinery at all**. This is the most instructive result:
-  it shows that a large part of what is usually reached for as "consensus" is
-  not needed to *produce* a multi-writer total order — a single author suffices,
-  and the type system infers TO,EC on the broadcast of that author's chosen
-  order. It also pins where the type system *refuses* the naive port (a cluster
-  member as leader), which surfaces the exact spot the guarantee is load-bearing.
 
-Supporting infrastructure that also landed:
+| Construction | Consistency (how) | Order | Membership | Safety @ F=1 crash | Progress @ F=1 crash |
+| --- | --- | --- | --- | --- | --- |
+| `broadcast` (snapshot, legacy) | NC — honest | NO | dynamic | vacuous (no claim) | — |
+| `broadcast_closed` / `fan_out` / `broadcast_live` | EC — **minted** | per-sender TO / NO | static / dyn-joins | **✗ shown** (sender-crash divergence; `fan_out` refutation) | — |
+| `reliable_broadcast_closed` | EC — **inferred** | NO | static | **✓ shown** (all-or-nothing, exhaustive) | — |
+| `reliable_broadcast_live` | EC — inferred | NO | dyn-joins | *not yet shown* | — |
+| G-Set gossip (static & dyn) | EC — inferred | NO (set) | both | **✓ shown** (survivors converge, fuzz) | — |
+| leader_merge (Process leader) | TO,EC — inferred | TO | static | **✗ shown** (replicas diverge) | **✗ shown** (blocks) |
+| leader_merge + RB, order-as-data | EC — inferred | NO + slots | static | **✓ shown** (agreement ∀, exhaustive) | **✗ shown** (dead state ∃) |
+| member-leader merge (slots) | EC — inferred | NO + slots | static | — | **✗ shown** (blocks, same fault model as Raft) |
+| Raft | TO,EC — **asserted** (`manual_proof!`) | TO | static | **✓ shown** (prefix-consistent ∀, fuzz) | **✓ shown** (∀ fuzz) |
 
-- **Taxonomy pins** (`hydro_std/src/taxonomy_tests.rs`) — the ordering ×
-  consistency corners recorded as compile-time type facts.
-- **Simulator dynamic-membership support** — join-timing exploration in the sim
-  (`52fe248857`), with behavior tests for reliable broadcast and late-joiner
-  catch-up. A state-space blowup under dynamic membership was diagnosed to root
-  cause (`membership_hook_blowup_findings.md`).
+Each non-blank cell above cites a mechanical witness: a compile-time type fact, or a sim result ("shown" = exhaustive where feasible; fuzz for Raft and the gossip cycle, whose snapshot-fork × echo state space defeats exhaustive search even at n=2). Blank fault cells are untested, not believed-false — they are the cheap next work items.
 
-The division of labor these rest on: **the types assume the delivery axioms and
-do the induction; the simulator is the test oracle that refutes finite
-counterexamples.** One oracle we deliberately do not yet have is crash
-injection — the sim explores message, batch, and join timing but never kills a
-process — so any guarantee that turns on process failure currently lives only in
-the types and prose, not in the sim.
+The division of labor all of this rests on: **the types assume the delivery axioms and do the induction; the simulator is the test oracle that refutes finite counterexamples.** The sim deliberately distrusts the human witnesses on both sides — it explores the choices `nondet!` admits, permutes elements even when a fold claims commutativity via `manual_proof!` (`sim/runtime.rs`), and now attacks fault-tolerance claims with crashes.
 
-## 3. New understanding
+(A knowledge-theoretic reading — EC as Halpern & Moses's eventual common knowledge — guided several early choices: why `lossy → NoConsistency`, why EC dies at snapshots, why joins are tractable and leaves are not.)
 
-The concrete work above produced two pieces of clarity worth recording
-separately from the code.
+### 2.1 Static-membership inference demos
 
-### 3.1 The Halpern connection: EC is eventual common knowledge
+- **Static reliable broadcast** (`hydro_std/src/ec_inference_demos/reliable_broadcast.rs`) — echo-based reliable broadcast over a static cluster. EC is inferred around the re-broadcast cycle, with zero consistency assertions in the protocol.
+- **CRDT (G-Set) gossip** (`.../crdt_gossip.rs`) — state-based grow-only-set gossip over a static cluster. EC is inferred around the folded-state cycle; the only `manual_proof!`s are the fold's associativity/commutativity/ idempotence obligations, which are honest lattice-merge facts, not consistency assertions. A companion soundness file (`crdt_gossip_soundness.rs`) pins the negative cases: swapping `fail_stop` for a lossy policy must fail to compile.
+- **Leader/merge "fake consensus"** (`.../leader_merge.rs`) — multi-writer, total-order, EC output produced by a single merging leader (reminiscent of core primary/backup, and capturing the "single writer principle" in the type system). Its honest witness ledger: exactly one `nondet!` (the authored interleaving choice — irreducible, since the merge order is a fact that does not exist until the leader manufactures it) and zero consistency assertions. It also pins where the type system *refuses* the naive port (a cluster member as leader), which surfaces the exact spot the guarantee is load-bearing. What the type system does **not** see — the single point of failure inherent in this design — is now exhibited by the crash demos below.
 
-Hydro's `EventualConsistency` label — "every live member eventually converges to
-the same value" — lines up cleanly with **eventual common knowledge C^◇** from
-Halpern & Moses (*Knowledge and Common Knowledge in a Distributed Environment*,
-JACM 1990). This is not decoration; it explains and grounds design choices we
-had otherwise made by feel:
+### 2.2 Dynamic membership (joins-only) works end to end
 
-- True common knowledge C (needed for *simultaneous* coordination) is
-  unattainable over realistic channels; C^◇ (needed for *eventual* coordination)
-  is attainable exactly when every message is eventually delivered. So
-  `lossy → NoConsistency` is a theorem, not a policy call.
-- C^◇ holds only for **stable facts** (once true, stays true). This is why EC
-  propagates through monotone operators and mechanically dies at
-  `batch`/`snapshot`/`sample_every`.
-- The type system is the ledger of **model-level common knowledge**: everything
-  compile-time (protocol structure, failure policy, static membership) is common
-  knowledge for free because every member runs the same artifact. EC inference
-  is deriving which run-contingent facts get upgraded to C^◇ by riding on that
-  ledger. This is why inferring EC around a `forward_ref` cycle is legitimate
-  coinduction rather than circular reasoning — it is Halpern & Moses's induction
-  rule.
-- It fixes the boundary between joins and leaves: a `Joined` event is a stable
-  fact (C^◇-mintable), but a leave/"not a member" is a claim about the run's
-  future, which is unknowable in an asynchronous system (the failure-detector
-  impossibility in epistemic clothes). This is *why* the append-only,
-  joins-only case is the tractable one.
+- The **`EventuallyComplete` membership view** and the **`fan_out` minting rule** (`.../fan_out.rs`): fanning out over any eventually-complete view of the (monotone, joins-only) membership relation re-earns EC at delivery. `broadcast_live` is a thin client; static `broadcast_closed` is conceptually its degenerate instance.
+- **Live protocol demos with EC inferred**: `reliable_broadcast_live` (the echo cycle over live membership — zero consistency assertions in the protocol body) and dynamic G-Set gossip, whose late-joiner catch-up and crash-healing are now behavior-tested (fuzz; the n=1 case exhaustively).
+- **Join timing is meaningfully tested.** The sim's membership hook delivers joins one at a time at nondeterministically explored moments (`with_dynamic_membership`); to break symmetry, the hook forks on join *timing* only, never on unobservable member order (`membership_hook_blowup_findings.md`) — so late-joiner catch-up is exercised exhaustively through the real compiled dataflow at n=3.
 
-Fuller treatment: `2026-08_epistemic_foundations_ec_inference.md`.
+Honest caveats, tracked in §3's checklist: the mint lives in `hydro_std` as a research artifact behind a user-callable assert (not in `hydro_lang`'s trusted base), completeness borrows `ConsistencyProof` instead of having its own typed premise, no deploy-mode oracle anchors the `live()` axiom — and the mint's crash-hole is now sim-refuted (§2.4).
 
-### 3.2 The orchestrator factors the dynamic-membership problem
+### 2.3 Crash-fault injection in the simulator
 
-The other piece of clarity is practical. Any real deployment has an
-**orchestrator** — Kubernetes, ECS, ZooKeeper, a service mesh, etc. — that is
-already in the business of tracking membership. Recognizing this factors the
-dynamic-membership problem cleanly in two:
+The last missing oracle. The sim previously explored message, batch, and join timing but never killed a process, so every guarantee that turns on process failure lived only in types and prose — and the protocols above were observationally indistinguishable from their fault-intolerant counterparts in every execution the sim could run. Now (`2026-08_crash_injection_sim.md`):
 
-1. **The common case: an oracle hands the cluster its members.** In a real
-   deployment the orchestrator provides membership. From Hydro's point of view
-   this is an oracle delivering an EC view of the member set — and once
-   membership arrives as an EC input, the dynamic case reduces to the machinery
-   we already have: fan out over that view, re-earn EC at delivery. This is the
-   case that matters for anything anyone would actually ship, and it is the one
-   to build out.
+- **Staged sends + `CrashHook`**: a crashable location's sends are buffered per-recipient and delivered by a hook that, at each *send boundary*, forks crash-vs-flush; a crash delivers an independently chosen per-recipient **prefix** of the in-flight sends (the classical partial-broadcast state, previously unrepresentable because sends were atomic within a DFIR tick) and halts the location permanently. Inbound channels stay open — fail-stop semantics. Fork discipline follows the membership-hook lesson: crash points exist only at send boundaries, so the search never dilates.
+- **Fault domains with budgets**: `with_crashable_process(&p)` and `with_crashable_cluster(&c, F)`. For clusters, *which* member dies, *when*, and *which* cut survives are all untargeted search dimensions; `F` bounds total crashes via a budget shared across the members' hooks.
+- Crash-free flows compile and schedule byte-identically to before; the whole pre-existing sim suite passes unmodified.
 
-2. **Inventing the universe: bootstrapping the oracle in bare Hydro.** The other
-   branch is building such a membership oracle *from scratch* inside Hydro, with
-   no external orchestrator — deriving eventual agreement on the member set from
-   first principles. This is genuinely interesting and touches the hardest parts
-   of the theory (agreeing on a mutating set is not a stable-fact problem), but
-   it is **not urgent**: in practice the orchestrator already exists, so this is
-   a "fun, later" branch rather than a blocker.
+### 2.4 The separation demos crash injection unlocked
 
-This factoring is what earlier attempts (the deleted orchestrated-membership
-experiment) were groping toward without stating cleanly. The lesson from that
-attempt — recorded in the epistemic doc §5 — is that "the current set of members
-is EC" is not a stable fact and cannot be minted the way join events can; taking
-the member set as an EC input *from an oracle* sidesteps exactly that problem.
+Each sim test runs the *same* fault against two protocols; the quantifiers do the work (∃-witness that the weak protocol breaks; ∀ over explored fault configurations that the strong one doesn't):
 
-## 4. Where this leaves consensus, and other speculation
+- **Broadcast is not reliable broadcast.** Under an explored sender crash, `broadcast_closed` has an execution where one member delivered and another never will; `reliable_broadcast_closed` delivers all-or-nothing in every explored execution. The simulator crash capability has produced the first executions in which the echo cycle is load-bearing.
+- **leader_merge is not consensus, in two precise senses.** (a) Its *dissemination* hole: plain broadcast diverges under a leader crash — repairable without consensus by shipping order as data over reliable broadcast, after which replicas agree in every execution. (b) Its *succession* hole, which survives the repair: the search finds a reachable **dead state** — blocking at F = 1 in the Skeen sense — where a write submitted after the crash is permanently uncommittable. Both the Process-leader and distinguished-member forms are pinned; the latter under the identical fault model as the Raft test below.
+- **Raft is indeed consensus: no single crash blocks progress.** Under `with_crashable_cluster(_, 1)` and a crash-agnostic driver (round-robin election oracle, client retrying to a different member each round), the write commits on ≥ N−F members within bounded rounds in every explored execution, committed logs prefix-consistent throughout — including mid-tenure crashes with partially replicated entries. (Fuzz, 8192 executions/run, not exhaustive: Raft's schedule space at n=3 is too large. Same evidentiary standard as the existing Raft safety nets.)
+- **`fan_out`'s premise 2 is refuted.** Crash a cluster-source member mid-fan-out and *live* destinations permanently diverge: the EC label minted by single-hop fan-out is false under crash faults, exactly as the epistemic post-mortem predicted. This upgrades the planned Tier-1 restructure (§3 checklist item 3) from taste to a mechanical red/green pair.
 
-Much of the content of the referenced design docs is speculation and should be
-read as such. In particular:
+Progress claims are phrased as **non-blockingness** (a possibility property with a finite witness — the dead state — decidable at the sim's controlled quiescence), never as FLP-forbidden untimed liveness; the framing and driver discipline are recorded in `2026-08_crash_injection_sim.md` §3.
 
-- The **EC, TotalOrder / multi-writer** story beyond leader/merge — decomposing
-  consensus into a convergence part and an author-succession part, a typed
-  fault-dependency parameter `F`, and an epoch-keyed "consensus as a splice
-  invariant" construction (`succeed_key`) — is exploratory. The only *concrete*
-  TO,EC result so far is the single-writer leader/merge above; everything about
-  fault-tolerant multi-writer consensus remains a sketch on paper
-  (`2026-08_ordering_consistency_taxonomy.md`, `2026-08_epoch_keyed_consensus_splice.md`).
-- `paxos_ec.rs` is a partial data point in that direction (it infers EC on the
-  committed log and isolates slot-safety to one assertion) but is not a finished
-  result and should not be over-claimed.
+## 3. The orchestrator factors the dynamic-membership problem
 
-These are recorded to preserve the thinking, not because they are done.
+N.B.: Any real deployment has an **orchestrator** — Kubernetes, ECS, ZooKeeper, a service mesh, etc. — that is already in the business of tracking membership. Recognizing this factors the dynamic-membership problem cleanly in two:
 
-## 5. Near-term direction
+1. **The common case: an oracle feeds the cluster its membership events.** In a real deployment the orchestrator provides membership. The property our protocols actually consume from it is **completeness**, not consistency: every join fact is eventually delivered to every data-holder (an *eventually complete* view of a growing set). Observers may see joins at different times, in different orders, forever; completeness of the join-event stream is exactly sufficient. This is the case that matters for anything anyone would actually ship.
+2. **Inventing the universe: bootstrapping the oracle in bare Hydro.** The other branch is building such a membership oracle *from scratch* inside Hydro, with no external orchestrator — deriving eventual agreement on the member set from first principles. This is genuinely interesting and touches the hardest parts of the theory (agreeing on a mutating set is not a stable-fact problem), but it is **not urgent**: in practice the orchestrator already exists, so this is a "fun, later" branch rather than a blocker.
 
-- Build out **case (1)** of §3.2: dynamic membership via an oracle-supplied EC
-  member view, with reliable broadcast and gossip running over it and their EC
-  inferred. This is the practical payoff and the natural next step from the
-  static demos.
-- Finish the simulator's dynamic-membership testing path so late-joiner
-  convergence is exercised through the real compiled dataflow, not just under
-  static membership.
+#### What it takes to really fix dynamic membership, even for the simplest examples
 
-Deferred (interesting, not urgent): bootstrapping a membership oracle in bare
-Hydro (§3.2 case 2); the fault-tolerant multi-writer consensus program (§4).
+In dependency order; items 1–3 make the simplest dynamic examples sound, and the testing story (formerly item 4 here) is **done** — join timing is exhaustively explored through the compiled dataflow (§2.2):
+
+1. **Make completeness a first-class typed premise in `hydro_lang`.** Today the `EventuallyComplete` view type and the `fan_out` minting rule live in `hydro_std` as research artifacts, reusing `ConsistencyProof` for a property that isn't consistency. The fix: a `CompletenessProof` trait of its own, the audited mint promoted into `hydro_lang`, and `broadcast_closed` re-derived as its degenerate static instance (deploy-time `ClusterIds` = the trivially complete view).
+2. **Wire a real oracle behind `live()`.** The completeness axiom must be a property of an actual deploy-mode membership substrate (the orchestrator feed behind `source_cluster_membership_stream`), not an assertion satisfied by construction in the sim — the deleted experiment's unresolved gap ("deploy backing never wired"). Until an orchestrator integration exists, the axiom is honest but unanchored.
+3. **Crash-honest delivery — now sim-refuted, restructure pending.** Single-hop fan-out yields EC only if the data holder does not crash mid-fan-out; the sim now *exhibits* the diverging execution (`fan_out_ec_mint_refuted_under_source_crash`), and the RB crash demos confirm the echo cycle survives the same fault. The crash-honest EC mint therefore attaches to the replicate-cycle (reliable-broadcast) pattern, with bare `fan_out` demoted to a mechanical primitive carrying no consistency claim. This item and item 1 are the same restructuring, and it should also settle `broadcast_closed`'s honesty (its trusted mint has the same crash-hole: track `F = {sender}` in the label, or stop minting EC where F-independence is not structural).
+4. **Leaves are a separate tier — defer them explicitly.** Joins-only is the tractable cut (joins are stable facts). `Left` is a claim about the run's future, with exactly two doors: reclassify leave as crash (the indexical live-group already covers it) or epochs/versioned views. Note the upside of the orchestrator here: a ZK-style oracle *has* an internal total order, so it can serve **versioned** membership views — exactly the epoch structure that quorum-style protocols will eventually need for an agreed current set. Crash injection gives this tier its first concrete work item: crash → eventual `Left` in the membership hook, modeling the orchestrator's failure *detection* (`2026-08_crash_injection_sim.md` §6).
+
+## 4. Near-term direction
+
+- **The Tier-1 restructure** (checklist items 1 + 3, one piece of work): typed completeness premise in `hydro_lang`, the crash-honest EC mint attached to the replicate-cycle, `fan_out` demoted, `broadcast_closed`'s label made honest. Now motivated by a refutation rather than an argument, with the crash demos as its standing regression net.
+- **M-check: convergence-at-quiescence in the sim.** Replaces `skip_consistency_assertions` with an actual end-state equality check across live members — gives the remaining EC axioms an oracle, and gives crash tests the survivor-identification their positive counterparts need (e.g. RB's "any *correct* member" quantifier under echoing-member crashes).
+- **A real oracle substrate behind `live()`** (checklist item 2).
+
+Deferred (interesting, not urgent): leaves/versioned views and crash → `Left` (§3 checklist item 4); bootstrapping a membership oracle in bare Hydro (§3 case 2); the typed fault-dependency and epoch-splice program (`2026-08_ordering_consistency_taxonomy.md`, `2026-08_epoch_keyed_consensus_splice.md`).
+

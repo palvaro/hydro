@@ -1,6 +1,26 @@
 # MembershipHook exhaustive-search blowup: findings
 
-Status: root cause proven by measurement. Fix NOT yet implemented.
+Status: historical record. Root cause proven by measurement; the fix has since
+**landed** — see the Resolution addendum immediately below. The body of this
+doc is preserved as the diagnostic trail.
+
+## Resolution (addendum)
+
+The implemented fix follows the "treat like any unordered unbounded stream"
+direction locked below: `MembershipHook` releases pending joins **in fixed
+front order, one per servicing, forking only on timing** (release-now vs.
+defer), and drains — once its queue empties it drops out of the scheduler's
+ready set like a stock stream hook, eliminating the cross-round re-forking.
+Per-observer independent timelines are preserved (the LOCKED requirement):
+each observer forks its own join timing against its own message progress; the
+unobservable cross-observer and member-order interleavings are gone. Exhaustive
+search over `reliable_broadcast_live` at n=3 is tractable, and late-joiner
+catch-up is exercised through the compiled dataflow
+(`hydro_std/src/ec_inference_demos/reliable_broadcast.rs`,
+`broadcast_live.rs`). The `zzz_measure_*` scaffolding has been cleaned up.
+Mechanism description: `2026-08_crash_injection_sim.md` §2 (which also records
+the generalized fork-discipline rule this episode produced) and
+`MembershipHook`'s rustdoc (`hydro_lang/src/sim/runtime.rs`).
 
 ## The symptom
 

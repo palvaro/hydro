@@ -201,12 +201,21 @@ This is a different beast from the gates of §4. There is no unpinned-choice
 story and no dual `nondet!` door; the proof simply mints a stronger label, and
 the output type carries no record that it rests on an unchecked argument. A
 downstream consumer cannot distinguish an inferred `EventualConsistency` from a
-`/** TODO */`-asserted one. This is the `unsafe` of Hydro — and it is
-structurally the same move as §3(b)'s assumers (`assume_ordering`,
-`assume_retries`): an unchecked label strengthening. The difference is only
-which witness the API demands (`ManualProof` vs. `NonDet`), which axis the
-label lives on (consistency vs. order/retries), and that the assume-guards can
-be forwarded while the proof cannot.
+`/** TODO */`-asserted one. This is the `unsafe` of Hydro.
+
+It is *syntactically* similar to §3(b)'s assumers (`assume_ordering`,
+`assume_retries`) — both strengthen a label the compiler cannot check — but
+semantically they differ in kind. The assumer's label is **true in every run**:
+the stream really is consumed in some order; only *which* order varies run to
+run, and that variation is recorded on the `nondet!` ledger, forwardable to
+callers, and explored by the simulator. The mint's label is a **fact claim that
+may hold in no run**: if the proof is wrong, members genuinely diverge and
+nothing anywhere records the breakage. Recorded arbitrary choice vs.
+potentially-false unrecorded claim — only the second is `unsafe`. (The same
+line separates a justified `assume_ordering` from a *false* `commutative =`
+proof: both produce cross-run variation, but the first is on the books and the
+second cooks them — which is exactly why the sim permutes regardless of the
+claim.)
 
 (`hydro_lang` reserves `assert_has_consistency_of_trusted` for its own audited
 minting sites — `broadcast_closed`, the interval sources — so user-facing
