@@ -295,6 +295,45 @@ Plan amendment: build rung 3 *through* the extraction — `covering` first,
 ABD ported onto it (suite as regression oracle), synod as its second
 consumer, plus the RB echo-export refactor.
 
+## 3c. On the stack: static fault-tolerance refutation from location types
+
+Encoding fault tolerance in the type system looked hopeless while framed as
+quorum intersection — value-dependent, arithmetic, proof territory. The
+reframe: the *negative* claim is often structural. An operation's
+**capability set** is the set of nodes hosting its operator; a system is
+statically *potentially* fault tolerant only if no required operation's
+capability set is a singleton ("THERE MUST NOT BE JUST ONE"), and more
+strongly, only if a majority can perform every required operation. This is a
+**refutation analysis** — necessary conditions, never sufficient — which is
+exactly the side of the division of labor the compiler is allowed to take.
+It would make the portfolio table's ✗ cells compile-time verdicts while
+leaving every ✓ cell to the sim and the mints. Three tiers:
+
+1. **Location kind** (implementable today as an IR pass): `Process` = 
+   capability cardinality 1. `leader_merge` (Process form) is statically
+   incapable of tolerating F = 1 — the sim's dead-state finding, derived
+   without running anything.
+2. **Routing cardinality**: the member-leader variant defeats tier 1 (the
+   location is a Cluster; the concentration is in routing to a constant
+   `MemberId`). Static when the key is a constant, sim territory when
+   data-dependent — a stratified degradation.
+3. **Graph connectivity, B vs RB**: agreement propagation requires, for
+   every member pair (X, Y), an X→Y path avoiding the faulty set. Plain
+   broadcast's compiled graph has no member→member edges — every inter-
+   member path factors through the singleton sender → ✗ F = 1, statically.
+   RB's echo edges restore connectivity: "the echo cycle is load-bearing"
+   becomes a checkable connectivity fact. The analysis even sees RB's
+   uniformity hole (delivery-at-X depends on the singleton {X}); what it
+   cannot see is URB's fix, because k > F is a number — the static story
+   ends where thresholds begin, unless cluster sizes and thresholds become
+   type-level constants.
+
+This is the structural version of the agenda's "track F = {sender} in the
+label" item: fault-dependency sets computed from topology rather than
+asserted. Calibration requirement for any implementation: reproduce every ✗
+cell of the portfolio table and none of the ✓ cells, with member-leader
+(passes tier 1, fails tier 2) as the discriminating case.
+
 ## 4. Findings so far
 
 - The uniformity tests require observing a *crashed* member's pre-crash
