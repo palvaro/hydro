@@ -70,13 +70,41 @@ forcing function for versioned membership views (agenda §4 item 4).
   crash hole, found by the fuzzer; URB never exhibits it in any explored
   execution. Uniformity is precisely a safety claim that covers *faulty*
   members' outputs, a distinction the portfolio table now records.
-- **Rung 2 — ABD register** (NEXT). Write = certificate on (ts, v) at
-  majority; read = certificate on read-back + read-repair; timestamp = max
-  read + increment (an authored choice, `leader_merge`'s `nondet!` seam, now
-  client-side). Claim: no new mint — rung 0's certificate composes; if a new
-  assertion is forced, its location identifies what `Covering` needs beyond
-  `Durable`. Portfolio payoff: TO on a single cell with ✓ progress at F = 1
-  and no leader — succession is the cost of a *log*, not of TO.
+- **Rung 2 — ABD register** (DONE, `abd.rs`). Multi-writer: clients are a
+  cluster (symmetric logic replicated by the language; requester and replica
+  identity carried by channel keying, unforgeable). Write = covering read →
+  stamp `(max_round + 1, CLUSTER_SELF_ID)` (the authored choice,
+  `leader_merge`'s `nondet!` seam, now per-client) → phase 2 → rung-0
+  `Durable` certificate. Read = covering read → adopt max → write it back
+  through the same phase-2 path → certificate → return. Findings:
+  - **The replica register is EC, inferred and compiler-pinned**: a top-level
+    max-lattice fold over the EC write stream (gossip's pattern), zero
+    consistency assertions in the file. The price: acks are *gated* on a
+    register snapshot (`ts_applied ≥ ts_written`) instead of riding tick
+    atomicity — sound because snapshots of a monotone singleton are monotone.
+  - **Client-side streams are indexical, correctly un-EC**: quorum
+    request/response traffic does not converge across members and shouldn't.
+    Broadcast-shaped protocols are EC-shaped; quorum protocols are not.
+  - The covering read is inline (count + running max in ONE fold, so the
+    certificate's content is atomic with its trigger; fired once per rid).
+    Its `nondet!` is load-bearing and justified: which majority answers picks
+    which covering read this is; any majority dominates every completed
+    write. A general `Covering` mint = Durable's counting + a caller lattice
+    aggregation + exactly this nondet seam.
+  - **Linearizability is untyped** — enforced by protocol, attacked by sim
+    only. Whether an atomic register's output deserves a label (per-client
+    ts-monotone reads is close to the per-sender-TO machinery) is a rung-3+
+    taxonomy question.
+  - Sim results (all fuzz): write/read smoke; sequential cross-client ops
+    respect real time; **progress + latest-read under an untargeted replica
+    crash** (the portfolio row — no leader, no dead state at F = 1); and
+    reads stay ts-monotone under an untargeted *client* crash mid-phase-2
+    (the classic incomplete-write scenario, expressible only because clients
+    are a crashable cluster).
+  - Honest residue: one-outstanding-op-per-client is an unenforced caller
+    contract (violating it can mint duplicate timestamps, invalidating the
+    max-merge tie argument); `Ts` carries `TaglessMemberId` so writers never
+    tie.
 - **Rung 3 — single-decree synod.** ABD's skeleton + the splice rule: propose
   only after adopting the max-ballot value from a read certificate (the
   `Covering` snapshot feeding the splice invariant). Ideally zero new mints.

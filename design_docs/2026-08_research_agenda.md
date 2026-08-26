@@ -56,6 +56,7 @@ In each, when EC (and, where noted, TotalOrder) appears on an output, it is beca
 | `reliable_broadcast_live` | EC — inferred | NO | dyn-joins | *not yet shown* | — |
 | `uniform_reliable_broadcast_closed` | EC — inferred | NO | static | **✓ shown, incl. faulty deliverers** (uniform agreement, fuzz) | — |
 | G-Set gossip (static & dyn) | EC — inferred | NO (set) | both | **✓ shown** (survivors converge, fuzz) | — |
+| ABD register (quorums only) | replica state EC — **inferred**; linearizability — untyped (sim) | TO (one cell) | static | **✓ shown** (reads see latest write; ts-monotone under client crash; fuzz) | **✓ shown** (no leader, fuzz) |
 | leader_merge (Process leader) | TO,EC — inferred | TO | static | **✗ shown** (replicas diverge) | **✗ shown** (blocks) |
 | leader_merge + RB, order-as-data | EC — inferred | NO + slots | static | **✓ shown** (agreement ∀, exhaustive) | **✗ shown** (dead state ∃) |
 | member-leader merge (slots) | EC — inferred | NO + slots | static | — | **✗ shown** (blocks, same fault model as Raft) |
