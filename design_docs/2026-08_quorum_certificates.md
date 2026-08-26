@@ -105,13 +105,85 @@ forcing function for versioned membership views (agenda §4 item 4).
     contract (violating it can mint duplicate timestamps, invalidating the
     max-merge tie argument); `Ts` carries `TaglessMemberId` so writers never
     tie.
-- **Rung 3 — single-decree synod.** ABD's skeleton + the splice rule: propose
-  only after adopting the max-ballot value from a read certificate (the
-  `Covering` snapshot feeding the splice invariant). Ideally zero new mints.
-  Sim: dueling proposers for safety; progress under the rotating-oracle Ω
-  discipline already used by the Raft tests.
+- **Rung 3 — single-decree synod** (DESIGNED, not yet built). One slot of
+  Paxos: proposers (a cluster, ≥ 2 so they duel) race to get one value chosen
+  by acceptors. Construction claim: **synod = ABD's skeleton + one new
+  rule.** Ballot = `Ts` unchanged; phase 1 = the covering pattern unchanged
+  (promise carries highest accepted proposal; covering at majority); phase 2
+  = the rung-0 `Durable` mint unchanged (accepted-acks at majority = chosen).
+  The one new thing is **adopt-highest**: ABD's client may write its own
+  value over a covering (overwriting is legal register semantics); the synod
+  proposer must propose the covering's max-ballot value if one exists. That
+  conditional is the entire difference between a register and consensus, and
+  it is the splice invariant in miniature (ballot = epoch, adopt = splice).
+  - **The acceptor inverts ABD's typing story (hypothesis to verify).**
+    ABD's replica was a lattice (order-insensitive max-merge), hence a
+    top-level fold, hence EC inferred. The synod acceptor cannot be:
+    `promise(b)` exists to *refuse* future lower-ballot accepts, so
+    `(max_promised, accepted)` is order-sensitive — the same message set in
+    different orders ends in different states. Refusal is the mechanism, and
+    refusal does not commute. So the acceptor is a tick-serialized slice
+    with no EC label, *correctly*: the EC-inference boundary and the
+    needs-succession boundary appear to land in the same place. Whether
+    that is a theorem or a coincidence is a question this rung should
+    answer in prose.
+  - Ledger: zero new mints expected (same two combiner proofs as ABD); if a
+    third obligation appears, its location defines the `Covering` mint.
+  - Sim plan: smoke; agreement under dueling proposers (∀, fuzz, ±acceptor
+    crash); **RED: adopt-highest replaced by own-value must yield divergent
+    choices** (the splice rule is load-bearing — "the echo cycle is
+    load-bearing," one rung up); **RED: quorum size ⌊N/2⌋ must yield
+    divergent choices** — the first test that directly attacks the rung-0
+    mint's fault-model `manual_proof!` rather than a protocol; progress
+    under the rotating-oracle Ω discipline (driver owns ballot escalation,
+    like Raft's timer inputs — no in-protocol retry at this rung).
+  - Scope guards: no NACKs, no leases, no separate learners, single decree;
+    one-outstanding-attempt-per-proposer remains a caller contract.
 - **Rung 4 — multi-decree.** Epoch-keyed log of rung 3, consumed by the
-  existing M1 splice reader.
+  existing M1 splice reader; in-protocol ballot management arrives here.
+
+## 3a. Taint is not transitive: the monotone shell / non-monotone kernel
+
+A worry the acceptor hypothesis raises: if consensus's heart is un-EC, was
+the EC machinery bathwater? No — because **EC is re-earnable**. A label is a
+per-stream claim, not a purity discipline: `broadcast_closed` mints EC at
+delivery regardless of input consistency (the RB cycle types with exactly
+this), and a chosen certificate is a *stable fact* that re-enters the
+monotone world the moment it exists. Synod's shape is monotone shell
+(dissemination in), non-monotone kernel (the acceptor's conditional — a few
+dozen lines), monotone shell (certificates and learning out). By volume the
+protocol is mostly small EC pieces; the compiler draws the boundary around
+the part that isn't, and that boundary is a *map of where coordination is
+purchased*, not a defect report. Separately: a quorum-certified fact is
+arguably *stronger* than EC (agreed, F-independent) — `Durable` as a future
+label tier, per the fault-dependency thread in the ordering/consistency
+taxonomy, is the natural home for that observation.
+
+## 3b. Reuse scorecard, and where to cut the joints
+
+After three rungs: **mints reuse; protocol bodies do not.** `quorum` has
+three unmodified consumers. But URB restates RB's echo cycle and synod will
+restate ABD's phases, because sibling protocols differ in their *middles*
+and functions compose at their *edges* (RB exports deliveries, URB needed
+the echoes; ABD exports completions, synod interposes adopt-highest between
+covering and phase 2). Protocol-as-subroutine is the wrong joint for
+siblings; the right joints, read off from the duplication:
+
+1. **Extract `covering`** (threshold + caller lattice merge with proofs
+   passed through + the "any majority" nondet seam); rung-0 `quorum` becomes
+   its payload-free instance. Three shapes exist to generalize from.
+2. **RB should export its echo stream** — return (deliveries, echoes); URB
+   collapses to RB + `quorum(f+1, echoes)`, true in code not just prose.
+3. **A `quorum_round` helper** (request → member-keyed responses →
+   certificate → rid-keyed join back to continuation): the shape appears
+   four times across ABD and synod.
+4. **Do not** force synod to call ABD. Vertical reuse — consuming a
+   guarantee (RSM over any TO,EC log; rung 4 consuming the splice reader) —
+   is a separate, still-untested axis.
+
+Plan amendment: build rung 3 *through* the extraction — `covering` first,
+ABD ported onto it (suite as regression oracle), synod as its second
+consumer, plus the RB echo-export refactor.
 
 ## 4. Findings so far
 
