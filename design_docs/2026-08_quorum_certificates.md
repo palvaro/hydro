@@ -159,6 +159,23 @@ arguably *stronger* than EC (agreed, F-independent) — `Durable` as a future
 label tier, per the fault-dependency thread in the ordering/consistency
 taxonomy, is the natural home for that observation.
 
+**Determination/commitment (Hellerstein's terminology): the un-EC label
+marks exactly the points where a program acts on a determination.** A
+monotone operator may act on partial information — more input can only
+extend its output, so nothing is risked by emitting early. A non-monotone
+step must first *determine* that the facts it acts on are complete enough
+that no future input can revise the outcome, and then *commit* — produce an
+output whose correctness depends on that absence of future revision;
+coordination is the price of a safe determination. The acceptor's promise is
+a commitment in exactly this sense: `promise(b)` acts on the absence-so-far
+of any higher ballot and undertakes to refuse lower ones regardless of what
+arrives later. The compiler's refusal to carry EC through that step is not a
+defect report; it is a **mechanical map of where determinations are made** —
+the CALM boundary, surfaced as a type boundary. Corollary: acting on the
+*presence* of stable facts (a threshold crossing) is monotone and free;
+acting on *absence* (refusal, adopt-highest) is a commitment, and is exactly
+what the un-EC region contains.
+
 ## 3b. Reuse scorecard, and where to cut the joints
 
 After three rungs: **mints reuse; protocol bodies do not.** `quorum` has
@@ -166,8 +183,14 @@ three unmodified consumers. But URB restates RB's echo cycle and synod will
 restate ABD's phases, because sibling protocols differ in their *middles*
 and functions compose at their *edges* (RB exports deliveries, URB needed
 the echoes; ABD exports completions, synod interposes adopt-highest between
-covering and phase 2). Protocol-as-subroutine is the wrong joint for
-siblings; the right joints, read off from the duplication:
+covering and phase 2). The standard modular treatment
+(Cachin–Guerraoui–Rodrigues) in fact composes these protocols as call graphs
+— their URB *uses* an underlying best-effort broadcast — but it works
+because their modules expose wide event interfaces (deliveries as
+indications, not just final outputs). Our reuse failure was narrow
+interfaces, not sibling protocols being incomposable; the fixes below move
+toward CGR-style interfaces. The right joints, read off from the
+duplication:
 
 1. **Extract `covering`** (threshold + caller lattice merge with proofs
    passed through + the "any majority" nondet seam); rung-0 `quorum` becomes
