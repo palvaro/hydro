@@ -60,9 +60,20 @@
 use std::hash::Hash;
 
 use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, Retries};
-use hydro_lang::location::MemberId;
-use hydro_lang::location::cluster::EventualConsistency;
+use hydro_lang::location::member_id::TaglessMemberId;
+use hydro_lang::location::{Location, MemberId};
 use hydro_lang::prelude::*;
+use serde::{Deserialize, Serialize};
+
+/// Timestamp / ballot: `(round, writer)` lexicographic. `writer` is the
+/// minting member's id, so distinct writers never produce equal values and
+/// max-merge never has to tie-break on payloads. ABD uses these as register
+/// timestamps; synod uses them as ballots — they are the same object.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Ts {
+    pub round: u64,
+    pub writer: TaglessMemberId,
+}
 
 /// A fact certified crash-durable: at least `threshold` distinct members of
 /// the (static) cluster attested it, so it survives any crash pattern killing
@@ -99,17 +110,20 @@ impl<F> Durable<F> {
 /// emits a [`Durable`] certificate exactly once, when the count crosses
 /// `threshold`.
 ///
-/// `acks` carries `(fact, attestor)` pairs; duplicate attestations (retries,
-/// re-echoes) are deduplicated before counting, so a repeating member cannot
-/// forge a quorum. `threshold` must be chosen against the cluster's
-/// deploy-time size and fault budget by the caller: `F + 1` for durability,
-/// `N/2 + 1` for intersection (rung 2+).
-pub fn quorum<'a, F, L2, R>(
+/// The observer can be any location: a cluster member assembling echoes (URB)
+/// or a client `Process` assembling replica acks (ABD). `acks` carries
+/// `(fact, attestor)` pairs; duplicate attestations (retries, re-echoes) are
+/// deduplicated before counting, so a repeating member cannot forge a quorum.
+/// `threshold` must be chosen against the cluster's deploy-time size and
+/// fault budget by the caller: `F + 1` for durability, `N/2 + 1` for
+/// intersection (rung 2+).
+pub fn quorum<'a, F, L, L2, R>(
     threshold: usize,
-    acks: Stream<(F, MemberId<L2>), Cluster<'a, L2, EventualConsistency>, Unbounded, NoOrder, R>,
-) -> Stream<Durable<F>, Cluster<'a, L2, EventualConsistency>, Unbounded, NoOrder, ExactlyOnce>
+    acks: Stream<(F, MemberId<L2>), L, Unbounded, NoOrder, R>,
+) -> Stream<Durable<F>, L, Unbounded, NoOrder, ExactlyOnce>
 where
     F: Clone + Eq + Hash + 'a,
+    L: Location<'a>,
     L2: 'a,
     R: Retries,
 {
@@ -167,10 +181,121 @@ where
     ))
 }
 
+/// A covering certificate: `threshold` distinct members answered this
+/// request, so (by quorum intersection, when `threshold` is a majority) the
+/// aggregate dominates every fact that was `Durable` before the request.
+///
+/// Only [`covering_quorum`] mints these (same enforcement caveat as
+/// [`Durable`]). Unlike `Durable`, a covering's *content* is authored by the
+/// schedule — WHICH majority answered — so this mint deliberately does
+/// **not** restore a consistency label through its slice: certificate
+/// existence is deterministic, certificate content is honest nondeterminism.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Covering<A> {
+    aggregate: A,
+}
+
+impl<A> Covering<A> {
+    /// **Not public API.** See [`Durable`]'s constructor caveat.
+    #[doc(hidden)]
+    pub fn __mint_called_only_by_the_covering_combinator(aggregate: A) -> Self {
+        Covering { aggregate }
+    }
+
+    /// The aggregate the covering read observed.
+    pub fn aggregate(&self) -> &A {
+        &self.aggregate
+    }
+
+    /// Unwrap the observed aggregate.
+    pub fn into_aggregate(self) -> A {
+        self.aggregate
+    }
+}
+
+/// **The covering-read mint.** Per request key, counts distinct responders
+/// and folds the running max-by-[`Ts`] of their payloads in ONE accumulator
+/// (so the certificate's content is atomically consistent with its trigger),
+/// firing exactly once when the count crosses `threshold`.
+///
+/// `responses` carries `(key, (responder, payload))`; exact duplicates are
+/// deduplicated, and responders must answer each key at most once (both
+/// current consumers guarantee this structurally: replicas/acceptors answer
+/// each query exactly once over an exactly-once channel).
+///
+/// The aggregation is fixed to max-by-`Ts` over `Option<(Ts, X)>` — the
+/// shape shared by register timestamps and ballots. Generalizing to a
+/// caller-supplied lattice awaits a clean way to pass proof-annotated
+/// combiners through a library function; this covers the current family.
+///
+/// The `nondet!` inside is load-bearing and justified: which
+/// `threshold`-subset answers first picks WHICH covering read this is, and
+/// any majority intersects every write quorum, so any covering's max
+/// dominates every completed durable fact.
+pub fn covering_quorum<'a, K, X, L, L2, R>(
+    threshold: usize,
+    responses: Stream<(K, (MemberId<L2>, Option<(Ts, X)>)), L, Unbounded, NoOrder, R>,
+) -> Stream<(K, Covering<Option<(Ts, X)>>), L::DropConsistency, Unbounded, NoOrder, ExactlyOnce>
+where
+    K: Clone + Eq + Hash + 'a,
+    X: Clone + Eq + Hash + 'a,
+    L: Location<'a>,
+    L2: 'a,
+    R: Retries,
+{
+    let distinct = responses.unique();
+
+    let covered = sliced! {
+        let new_resps = use::batch(distinct, nondet!(
+            /// Which majority answers first (and where batch boundaries
+            /// fall) picks WHICH covering read this is. Any majority is a
+            /// valid covering: it intersects every write quorum, so its max
+            /// dominates every completed durable fact.
+        ));
+
+        let mut pending = use::state_null::<Stream<(K, (MemberId<L2>, Option<(Ts, X)>)), _, Bounded, NoOrder>>();
+        let mut fired = use::state_null::<Stream<K, _, Bounded, NoOrder>>();
+
+        let current = pending.chain(new_resps);
+
+        let per_key = current.clone().into_keyed().fold(
+            q!(|| (0usize, None)),
+            q!(|(count, max): &mut (usize, Option<(Ts, _)>), (_responder, payload)| {
+                *count += 1;
+                if let Some((ts, x)) = payload {
+                    if max.as_ref().map(|(m, _)| *m < ts).unwrap_or(true) {
+                        *max = Some((ts, x));
+                    }
+                }
+            }, commutative = manual_proof!(
+                /** counting is commutative; max by the total Ts order is
+                commutative (writer ids make ties impossible). */
+            )),
+        );
+
+        let reached = per_key
+            .filter(q!(move |(count, _max)| *count >= threshold))
+            .entries()
+            .map(q!(|(key, (_count, max))| (key, max)));
+
+        let newly = reached.clone().anti_join(fired.clone());
+
+        pending = current.anti_join(reached.map(q!(|(key, _)| key)));
+        fired = fired.chain(newly.clone().map(q!(|(key, _)| key)));
+
+        newly
+    };
+
+    covered.map(q!(|(key, max)| {
+        (key, Covering::__mint_called_only_by_the_covering_combinator(max))
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder};
     use hydro_lang::location::MemberId;
+    use hydro_lang::location::cluster::EventualConsistency;
     use hydro_lang::prelude::*;
 
     use super::quorum;
@@ -186,7 +311,7 @@ mod tests {
         let (ack_send, acks) =
             cluster.sim_input::<(u32, MemberId<()>), NoOrder, ExactlyOnce>();
 
-        let out_recv = quorum(2, acks.assert_has_consistency_of(manual_proof!(
+        let out_recv = quorum(2, acks.assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
             /// Test harness: the sim input plays an EC attestation stream.
         )))
         .map(q!(|cert| cert.into_fact()))

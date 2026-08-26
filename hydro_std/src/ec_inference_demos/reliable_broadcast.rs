@@ -88,6 +88,44 @@ where
             hydro_lang::live_collections::stream::TotalOrder,
         >,
 {
+    reliable_broadcast_closed_with_echoes(source, cluster).0
+}
+
+/// [`reliable_broadcast_closed`], with the echo stream exported: returns
+/// `(deliveries, echoes)`, where `echoes` is keyed by the echoing member.
+///
+/// The wide interface is what makes the echo cycle *reusable* (CGR-style
+/// module composition): an echo is an attestation "member m holds this
+/// message", which is exactly the input a quorum certificate mint wants.
+/// [`uniform_reliable_broadcast_closed`](crate::ec_inference_demos::uniform_broadcast::uniform_reliable_broadcast_closed)
+/// is a five-line client of this function.
+pub fn reliable_broadcast_closed_with_echoes<
+    'a,
+    T: Clone + Eq + Hash + Serialize + DeserializeOwned + 'a,
+    L,
+    L2: 'a,
+    B: Boundedness,
+    O: hydro_lang::live_collections::stream::Ordering,
+    R: hydro_lang::live_collections::stream::Retries,
+>(
+    source: Stream<T, Process<'a, L>, B, O, R>,
+    cluster: &Cluster<'a, L2>,
+) -> (
+    Stream<T, Cluster<'a, L2, EventualConsistency>, Unbounded, NoOrder, ExactlyOnce>,
+    hydro_lang::live_collections::keyed_stream::KeyedStream<
+        hydro_lang::location::MemberId<L2>,
+        T,
+        Cluster<'a, L2, EventualConsistency>,
+        Unbounded,
+        NoOrder,
+        ExactlyOnce,
+    >,
+)
+where
+    O: hydro_lang::live_collections::stream::MinOrder<
+            hydro_lang::live_collections::stream::TotalOrder,
+        >,
+{
     // Step 1: Initial broadcast from process to cluster. EC inferred.
     let initial = source.broadcast_closed(cluster, TCP.fail_stop().bincode());
 
@@ -110,18 +148,18 @@ where
     // Step 3: Deduplicate — only process each message once. EC preserved.
     let new_messages = all_received.unique();
 
-    // Step 4: Re-broadcast new messages to all members (the echo step).
-    // broadcast_closed infers EC — matches the forward_ref's EC location.
+    // Step 4: Re-broadcast new messages to all members (the echo step),
+    // KEEPING the keying by echoer. broadcast_closed infers EC — matches the
+    // forward_ref's EC location.
     let echo = new_messages
         .clone()
-        .broadcast_closed(cluster, TCP.fail_stop().bincode())
-        .values();
+        .broadcast_closed(cluster, TCP.fail_stop().bincode());
 
     // Close the cycle. echo is EC, forward_ref is EC — types match.
-    rebroadcast_handle.complete(echo);
+    rebroadcast_handle.complete(echo.clone().values());
 
     // Step 5: Deliver. new_messages is EC throughout. No manual_proof!
-    new_messages
+    (new_messages, echo)
 }
 
 /// Reliable broadcast whose re-broadcast (echo) step fans out over the **live,

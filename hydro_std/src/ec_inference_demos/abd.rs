@@ -78,21 +78,12 @@ use std::hash::Hash;
 use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
 use hydro_lang::location::MemberId;
 use hydro_lang::location::cluster::{CLUSTER_SELF_ID, EventualConsistency};
-use hydro_lang::location::member_id::TaglessMemberId;
 use hydro_lang::prelude::*;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use super::quorum::quorum;
-
-/// ABD timestamp: `(round, writer)` lexicographic. `writer` is the minting
-/// client's member id, so distinct writers never produce equal timestamps and
-/// max-merge never has to tie-break on values.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct Ts {
-    pub round: u64,
-    pub writer: TaglessMemberId,
-}
+use super::quorum::{covering_quorum, quorum};
+pub use super::quorum::Ts;
 
 /// Messages from clients to replicas. Requester identity rides on the channel
 /// keying (cluster→cluster broadcasts arrive keyed by sender), not in the
@@ -269,54 +260,11 @@ where
         _ => None,
     }));
 
-    // ---- The covering read (client side) -----------------------------------
+    // ---- The covering read (client side): the extracted mint --------------
     // At a majority of distinct responders per rid, adopt the max register
-    // seen, exactly once per rid. Inline for now; rung 3 decides what a
-    // general `Covering` mint looks like.
-    let covered = sliced! {
-        let new_resps = use::batch(query_resps, nondet!(
-            /// Which majority answers first (and where batch boundaries
-            /// fall) picks WHICH covering read this is. Any majority is a
-            /// valid covering read: it intersects every write quorum, so its
-            /// max dominates every completed write.
-        ));
-
-        let mut pending = use::state_null::<Stream<(u64, (MemberId<R>, Option<(Ts, T)>)), _, Bounded, NoOrder>>();
-        let mut fired = use::state_null::<Stream<u64, _, Bounded, NoOrder>>();
-
-        let current = pending.chain(new_resps);
-
-        // Count distinct responders and take the running max per rid in one
-        // fold: the certificate's content is atomically consistent with its
-        // trigger. (Replicas respond once per query over an exactly-once
-        // channel, so responses are already distinct per (rid, member).)
-        let per_rid = current.clone().into_keyed().fold(
-            q!(|| (0usize, None)),
-            q!(|(count, max): &mut (usize, Option<(Ts, _)>), (_replica, reg)| {
-                *count += 1;
-                if let Some((ts, v)) = reg {
-                    if max.as_ref().map(|(m, _)| *m < ts).unwrap_or(true) {
-                        *max = Some((ts, v));
-                    }
-                }
-            }, commutative = manual_proof!(
-                /** counting is commutative; max by the total Ts order is
-                commutative (ties impossible across writers). */
-            )),
-        );
-
-        let reached = per_rid
-            .filter(q!(move |(count, _max)| *count >= majority))
-            .entries()
-            .map(q!(|(rid, (_count, max))| (rid, max)));
-
-        let newly = reached.clone().anti_join(fired.clone());
-
-        pending = current.anti_join(reached.map(q!(|(rid, _)| rid)));
-        fired = fired.chain(newly.clone().map(q!(|(rid, _)| rid)));
-
-        newly
-    };
+    // seen, exactly once per rid (`covering_quorum`, shared with synod).
+    let covered = covering_quorum(majority, query_resps)
+        .map(q!(|(rid, cov)| (rid, cov.into_aggregate())));
 
     // ---- Phase transitions, as rid-keyed joins ------------------------------
     // "Having covered, THEN send phase 2" — the join is the phase transition,

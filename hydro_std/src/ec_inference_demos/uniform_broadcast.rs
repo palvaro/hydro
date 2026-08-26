@@ -65,29 +65,17 @@ where
             hydro_lang::live_collections::stream::TotalOrder,
         >,
 {
-    // Dissemination: the RB echo cycle, verbatim (see reliable_broadcast.rs
-    // for the EC-inference argument around the forward_ref).
-    let initial = source.broadcast_closed(cluster, TCP.fail_stop().bincode());
-
-    let (rebroadcast_handle, rebroadcast_fwd) = initial
-        .location()
-        .forward_ref::<Stream<T, _, Unbounded, NoOrder>>();
-
-    let all_received = initial.merge_unordered(rebroadcast_fwd);
-    let new_messages = all_received.unique();
-
-    // The echo, kept KEYED by echoer: each delivered echo is an attestation
-    // "member s holds m" — exactly the input the certificate mint wants.
-    let echo = new_messages.broadcast_closed(cluster, TCP.fail_stop().bincode());
-
-    rebroadcast_handle.complete(echo.clone().values());
+    // Dissemination: RB's echo cycle, CONSUMED rather than restated — the
+    // wide interface exports the echoes, and an echo is an attestation
+    // "member m holds this message".
+    let (_deliveries, echoes) =
+        crate::ec_inference_demos::reliable_broadcast::reliable_broadcast_closed_with_echoes(
+            source, cluster,
+        );
 
     // Delivery rule: deliver m only once `threshold` distinct members have
     // echoed it — i.e., only facts that are already crash-durable.
-    let attestations = echo
-        .entries()
-        .map(q!(|(echoer, m)| (m, echoer)));
-
+    let attestations = echoes.entries().map(q!(|(echoer, m)| (m, echoer)));
     quorum(threshold, attestations).map(q!(|cert| cert.into_fact()))
 }
 

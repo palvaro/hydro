@@ -57,4 +57,5 @@ pub mod leader_merge;
 pub mod abd;
 pub mod quorum;
 pub mod reliable_broadcast;
+pub mod synod;
 pub mod uniform_broadcast;
