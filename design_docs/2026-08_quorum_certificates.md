@@ -46,7 +46,35 @@ quarantined non-monotone rule, each with its own crash-sim oracle.
 ## 3. The ladder
 
 Per rung: what is typed (propagated), minted (trusted, one audited proof), and
-sim-tested (the oracle). Static membership throughout — "a majority of a set
+sim-tested (the oracle).
+
+**The ladder is ordered by conceptual escalation, not composition.** The
+actual dependency structure is a DAG with URB as a leaf:
+
+```
+            quorum (rung 0)
+             /           \
+      URB (rung 1)    ABD (rung 2)
+      [leaf]               |
+                      synod (rung 3)
+                           |
+                    multi-decree (rung 4)
+```
+
+ABD does **not** use URB, and shouldn't: partial delivery of a write is a
+legal register state (superseded or adopted-and-repaired later), so
+read-repair substitutes for reliable delivery. URB and ABD-write are
+siblings — both are "disseminate + count distinct holders + certificate at
+threshold" — differing only in where the certificate check sits: URB at
+every *receiver* (deliver-on-certificate, hence the echo cycle), ABD at the
+*initiator* (complete-on-certificate, no echo needed). URB's guarantee
+matters when delivery is an irrevocable side effect at each receiver; an ABD
+replica's register is soft state that quorum reads reconstruct. (CGR's
+module graph agrees: their registers sit on best-effort broadcast, not URB.)
+The broadcast family re-enters the consensus branch at **learning**:
+disseminating chosen certificates — stable facts — is broadcast-shaped work,
+and is where an EC label legitimately reappears on consensus's output
+(rung 4). Static membership throughout — "a majority of a set
 that is still growing" is not well-posed, which makes this ladder the concrete
 forcing function for versioned membership views (agenda §4 item 4).
 
