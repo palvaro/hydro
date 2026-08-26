@@ -60,6 +60,7 @@ In each, when EC (and, where noted, TotalOrder) appears on an output, it is beca
 | leader_merge (Process leader) | TO,EC — inferred | TO | static | **✗ shown** (replicas diverge) | **✗ shown** (blocks) |
 | leader_merge + RB, order-as-data | EC — inferred | NO + slots | static | **✓ shown** (agreement ∀, exhaustive) | **✗ shown** (dead state ∃) |
 | member-leader merge (slots) | EC — inferred | NO + slots | static | — | **✗ shown** (blocks, same fault model as Raft) |
+| single-decree synod (quorums + adopt-highest) | chosen = irrefutable — untyped (sim) | one decision | static | **✓ shown** (agreement ∀ under dueling ±crash; both red variants refuted, fuzz) | **✓ shown** (Ω discipline, fuzz) |
 | Raft | TO,EC — **asserted** (`manual_proof!`) | TO | static | **✓ shown** (prefix-consistent ∀, fuzz) | **✓ shown** (∀ fuzz) |
 
 Each non-blank cell above cites a mechanical witness: a compile-time type fact, or a sim result ("shown" = exhaustive where feasible; fuzz for Raft and the gossip cycle, whose snapshot-fork × echo state space defeats exhaustive search even at n=2). Blank fault cells are untested, not believed-false — they are the cheap next work items.

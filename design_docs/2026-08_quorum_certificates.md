@@ -133,7 +133,32 @@ forcing function for versioned membership views (agenda §4 item 4).
     contract (violating it can mint duplicate timestamps, invalidating the
     max-merge tie argument); `Ts` carries `TaglessMemberId` so writers never
     tie.
-- **Rung 3 — single-decree synod** (DESIGNED, not yet built). One slot of
+  - **Why ABD is linearizable (proof sketch, mapped to artifacts).** Every
+    operation owns a timestamp (writes mint, reads adopt); linearize by
+    timestamp, write-before-reads at equal ts. Everything reduces to one
+    lemma: *op₁ completes before op₂ begins ⇒ ts(op₂) ≥ ts(op₁), strict for
+    writes.* Proof: op₁'s Durable certificate means a majority's registers
+    dominate ts(op₁) — forever, by register monotonicity (the EC-inferred
+    fold, compiler-checked); op₂'s Covering intersects that majority (the
+    mint's one `manual_proof!`, sim-attacked by the sub-majority red test);
+    so op₂'s covering max ≥ ts(op₁), and a write strictly increments. Side
+    lemmas: ts uniqueness (writer-in-Ts across clients; within a client, the
+    second write's covering intersects the first's quorum — where the
+    one-outstanding-op contract is load-bearing for the PROOF), and value
+    integrity (only the minting write pairs a ts with a value). The
+    write-back is the non-optional step: without read-repair, a read that
+    observes an incomplete write permits a later read to regress (new-old
+    inversion) — regular register, not atomic; the write-back forces the
+    observed value onto a majority before returning. Assumption ledger of
+    the paper proof = our honest-ledger items, exactly. Current tests are
+    point tests of the lemma's corollaries; the mechanical version is a
+    **linearizability history checker at quiescence** (Wing–Gong /
+    Porcupine-style over recorded per-client intervals) — same family as
+    the M-check, a sim oracle for the one property the type system provably
+    cannot see.
+- **Rung 3 — single-decree synod** (DONE, `synod.rs`, built through the
+  §3b extraction: `covering_quorum` now lives in `quorum.rs` with ABD ported
+  onto it, and URB is a five-line client of RB's exported echo stream). One slot of
   Paxos: proposers (a cluster, ≥ 2 so they duel) race to get one value chosen
   by acceptors. Construction claim: **synod = ABD's skeleton + one new
   rule.** Ballot = `Ts` unchanged; phase 1 = the covering pattern unchanged
@@ -166,7 +191,41 @@ forcing function for versioned membership views (agenda §4 item 4).
     under the rotating-oracle Ω discipline (driver owns ballot escalation,
     like Raft's timer inputs — no in-protocol retry at this rung).
   - Scope guards: no NACKs, no leases, no separate learners, single decree;
-    one-outstanding-attempt-per-proposer remains a caller contract.
+    distinct rounds per proposer remain a caller contract.
+  - **Results (all fuzz, all green).** Agreement holds under concurrently
+    dueling proposers, with and without an untargeted acceptor crash. Both
+    red tests witness their violations: the no-adoption variant chooses two
+    different values (adopt-highest is load-bearing — the splice rule's
+    "echo cycle is load-bearing" moment), and quorum size ⌊N/2⌋ chooses two
+    different values (the first mechanical audit of the rung-0 mint's
+    intersection `manual_proof!`). Progress holds under the Ω discipline
+    with one acceptor crash. The acceptor-inverts-ABD hypothesis is
+    CONFIRMED in the implementation: the acceptor is a tick-serialized
+    slice (refusal against tick-start `max_promised`, batch relaxations
+    documented and safety-argued in the module docs), with no EC label
+    available or wanted. Zero new mints were needed — the covering and
+    Durable mints carried phase 1 and phase 2 unchanged, and the ledger's
+    prediction held: same two combiner obligations as ABD, both inside the
+    mints, zero assertions in the protocol body.
+  - **What rung 3 adds over rung 2 is irrefutability, and the separation is
+    theorem-grade.** Both objects are linearizable per-operation; they differ
+    in object semantics. ABD's register never refuses: every value is
+    `Durable` (cannot be lost) but never final (always supersedable by a
+    higher timestamp). Synod's chosen value is Durable AND unsupersedable:
+    every future covering intersects the choosing quorum and adopt-highest
+    conscripts every higher ballot into re-transmitting the chosen value —
+    revision becomes retransmission. The delta in guarantee maps exactly to
+    the delta in code (one conditional). Formally: registers have consensus
+    number 1 (Herlihy), so no composition of rung-2 objects can implement
+    rung 3 — a strict separation, not a matter of degree. In the
+    determination vocabulary: ABD's lattice kernel never determines anything
+    (hence EC-inferrable, hence unconditional progress); chosen-ness is a
+    claim about *absence* (no competing quorum can ever assemble), and
+    absence-claims are what refusal exists to enforce. The price appears in
+    the other portfolio column: ABD's progress is unconditional at F = 1,
+    synod's is conditional on the Ω discipline — the FLP tax stated as a
+    table row. The two columns moving in opposite directions between rungs 2
+    and 3 IS the theorem.
 - **Rung 4 — multi-decree.** Epoch-keyed log of rung 3, consumed by the
   existing M1 splice reader; in-protocol ballot management arrives here.
 
