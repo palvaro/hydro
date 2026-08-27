@@ -2,7 +2,7 @@
 
 2026-08. Written at the close of the session that built the ladder. Nothing
 is in flight; everything below is implemented, test-verified, committed, and
-pushed to `palvaro/hydro` branch `eventual_consistency` (HEAD `a2c33c94e8`).
+pushed to `palvaro/hydro` branch `eventual_consistency`.
 
 **Read `2026-08_quorum_certificates.md` first** — it is the ladder's home
 and carries all the session's determinations. This file is only the state
@@ -33,9 +33,8 @@ snapshot and resume pointers.
   no-adoption variant (two values chosen); RED sub-majority quorum (two
   values chosen — the first mechanical audit of a mint's `manual_proof!`);
   progress under the Ω discipline.
-- **Suite state**: hydro_std 59/59. hydro_lang sim (151/151) and raft
-  (16/16) last ran before the ladder work — the ladder only added to
-  hydro_std, but re-run cross-suite before the next big change.
+- **Suite state**: hydro_std 61/61 (incl. the two contract red tests);
+  hydro_lang sim 151/151 and raft 16/16 re-verified at session close.
 - **Portfolio table** (research agenda §3): gained URB, ABD, and synod
   rows; RB's row records its uniformity hole. The progress column across
   leader_merge ✗ / member-leader ✗ / ABD ✓ (no leader) / synod ✓ (Ω only) /
@@ -61,10 +60,46 @@ snapshot and resume pointers.
    `quorum_round` plumbing helper, dynamic-membership leader_merge variant,
    `reliable_broadcast_live` crash test.
 
+## For the next agent: picking up rung 4
+
+Read, in this order:
+1. This file (state + stack).
+2. `2026-08_quorum_certificates.md` — the ladder's home. Everything you
+   need is in §3 (the rung-4 entry and the DAG), §3a (determination/
+   commitment), §3b (the joint cuts you will consume), §3c (the Herlihy
+   dictionary — rung 4 IS the universal construction; learning is where EC
+   re-enters), §3d (deferred static-FT idea, do not build), §4 (findings,
+   incl. `collect_quorum`'s issues — do NOT build on it).
+3. `2026-08_epoch_keyed_consensus_splice.md` and
+   `2026-08_slices_finalize_not_combine.md` — the splice invariant and the
+   maxim; then `hydro_std/src/ec_inference_demos/epoch_splice.rs` (the M1
+   splice reader — built, tested, consumed by nothing yet: rung 4 is its
+   first consumer).
+4. The joints you compose: `quorum.rs` (both mints + `Ts` = ballot),
+   `synod.rs` (rung 4 = an epoch-keyed log of this; note the acceptor's
+   batch-serialization safety argument in its module docs), `abd.rs` (the
+   covering-consumption pattern), `reliable_broadcast.rs` (learning
+   dissemination — chosen certificates are stable facts; `Durable` is
+   deliberately not `Serialize`, so shipping certificates to learners
+   forces the transportable-certificate design decision).
+5. `2026-08_crash_injection_sim.md` §3 — the driver discipline for
+   progress tests (Ω as input, per-round quiesce barriers).
+
+Working rules that will save you a day: fuzz first, exhaustive only when
+small (the gossip-hang lesson); run tests under a watchdog
+(`perl -e 'alarm N; exec @ARGV' cargo test ...`); never name host generics
+inside `q!` (inference carries them); `sliced!` cannot parse multi-line
+turbofish; q! closures cannot capture host `bool`s (branch outside);
+red/green pairs are the house test style — every claimed guarantee gets a
+deliberately broken variant the search must refute. Update the portfolio
+table row and the ladder doc's rung-4 entry when done; commit conventional
+style; push to origin eventual_consistency.
+
 ## Known debts (documented, deliberate)
 
-- One-outstanding-op / distinct-rounds are UNENFORCED caller contracts, and
-  they are load-bearing for the ABD linearizability proof (ladder doc §3).
+- One-outstanding-op / distinct-rounds caller contracts are now
+  SIM-WITNESSED as load-bearing (red tests in abd.rs / synod.rs); still
+  structurally unenforced.
 - `Durable`/`Covering` unforgeability is by `#[doc(hidden)]` convention
   (staged code cannot see module privacy) until the mints are promoted into
   `hydro_lang`.

@@ -484,6 +484,47 @@ mod tests {
         );
     }
 
+    /// **RED: the distinct-rounds contract is load-bearing.** A proposer
+    /// that reuses a round mints the same ballot for two values; the ballot-
+    /// keyed covering fires once, joins against BOTH attempts, and both
+    /// values ride the same certificate to "chosen" — two chosen values for
+    /// one ballot, agreement destroyed. The search must witness it.
+    #[test]
+    fn synod_violating_distinct_rounds_violates_agreement() {
+        let mut flow = FlowBuilder::new();
+        let acceptors = flow.cluster::<()>();
+        let proposers = flow.cluster::<()>();
+
+        let (p_send, proposals) = proposers.sim_input::<(u64, u32), TotalOrder, ExactlyOnce>();
+        let chosen_recv = synod(&acceptors, MAJORITY, proposals).sim_cluster_output();
+
+        let mut saw_divergence = false;
+
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&acceptors, N)
+            .with_cluster_size(&proposers, 1)
+            .unit_test_fuzz_iterations(1024)
+            .fuzz(async || {
+                // CONTRACT VIOLATION: the same round twice, different values.
+                p_send.send(0, (1, 10u32));
+                p_send.send(0, (1, 20u32));
+
+                let got: Vec<(Ts, u32)> = chosen_recv.collect_sorted(0).await;
+                let values: std::collections::BTreeSet<u32> =
+                    got.iter().map(|(_b, v)| *v).collect();
+                if values.len() > 1 {
+                    saw_divergence = true;
+                }
+            });
+
+        assert!(
+            saw_divergence,
+            "violating distinct-rounds must let the search choose two different values \
+             under one ballot"
+        );
+    }
+
     /// **Progress under the Ω discipline.** A single designated proposer
     /// (no duel — that is the oracle's job) with one untargeted acceptor
     /// crash: the value is chosen in EVERY explored execution, asserted by

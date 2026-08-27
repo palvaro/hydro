@@ -145,9 +145,16 @@ forcing function for versioned membership views (agenda §4 item 4).
     (the classic incomplete-write scenario, expressible only because clients
     are a crashable cluster).
   - Honest residue: one-outstanding-op-per-client is an unenforced caller
-    contract (violating it can mint duplicate timestamps, invalidating the
-    max-merge tie argument); `Ts` carries `TaglessMemberId` so writers never
-    tie.
+    contract; `Ts` carries `TaglessMemberId` so writers never tie. The
+    contract is now **sim-witnessed as load-bearing**
+    (`abd_violating_one_outstanding_op_forges_timestamps`): violate it and
+    the search mints two completed writes with the SAME timestamp —
+    falsifying the fold's commutativity proof, found by the sim's standing
+    distrust of that very proof (it permutes fold batches because the claim
+    exists). Synod's distinct-rounds contract likewise
+    (`synod_violating_distinct_rounds_violates_agreement`: two chosen values
+    under one ballot). Structural enforcement remains future work; the
+    contracts are no longer prose-only.
   - **Why ABD is linearizable (proof sketch, mapped to artifacts).** Every
     operation owns a timestamp (writes mint, reads adopt); linearize by
     timestamp, write-before-reads at equal ts. Everything reduces to one

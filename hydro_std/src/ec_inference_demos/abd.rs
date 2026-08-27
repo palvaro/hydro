@@ -468,6 +468,52 @@ mod tests {
             });
     }
 
+    /// **RED: the one-outstanding-op contract is load-bearing.** A client
+    /// that issues a second write before the first completes can have both
+    /// phase-1 coverings observe the same max, minting the SAME timestamp
+    /// for two different values — falsifying the max-merge fold's
+    /// commutativity `manual_proof!` (equal timestamps no longer imply equal
+    /// values). The search must witness the forgery: two completed writes
+    /// with equal `Ts`. Fittingly, the machinery that finds it is the sim's
+    /// standing distrust of commutativity claims — it permutes fold batches
+    /// precisely because the proof exists, and the violation is what makes
+    /// the proof a lie.
+    #[test]
+    fn abd_violating_one_outstanding_op_forges_timestamps() {
+        let mut flow = FlowBuilder::new();
+        let replicas = flow.cluster::<()>();
+        let clients = flow.cluster::<()>();
+
+        let (w_send, writes) = clients.sim_input::<(u64, u32), TotalOrder, ExactlyOnce>();
+        let (_r_send, reads) = clients.sim_input::<u64, TotalOrder, ExactlyOnce>();
+
+        let outs = abd_register(&replicas, MAJORITY, writes, reads);
+        let done_recv = outs.write_done.sim_cluster_output();
+
+        let mut saw_forged_timestamp = false;
+
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&replicas, N)
+            .with_cluster_size(&clients, 1)
+            .fuzz(async || {
+                // CONTRACT VIOLATION: two writes in flight at once.
+                w_send.send(0, (1, 10u32));
+                w_send.send(0, (2, 20u32));
+
+                let done: Vec<(u64, Ts)> = done_recv.collect_sorted(0).await;
+                if done.len() == 2 && done[0].1 == done[1].1 {
+                    saw_forged_timestamp = true;
+                }
+            });
+
+        assert!(
+            saw_forged_timestamp,
+            "violating one-outstanding-op must let the search mint two completed writes \
+             with the SAME timestamp (the uniqueness lemma's premise, broken)"
+        );
+    }
+
     /// **The test the client-cluster design unlocks: an untargeted CLIENT
     /// crash.** A client may die mid-phase-2 — the classic incomplete write,
     /// stored on some replicas but never certified. Survivor-agnostic
