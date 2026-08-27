@@ -1,78 +1,84 @@
-# SESSION CHECKPOINT — crash injection / dynamic membership / demo portfolio
+# SESSION CHECKPOINT — the quorum→consensus ladder, rungs 0–3
 
-2026-08. Updated at the end of the follow-up session that verified the gossip
-behavior tests. Nothing is in flight; everything below is implemented,
-test-verified, and synced to this working copy.
+2026-08. Written at the close of the session that built the ladder. Nothing
+is in flight; everything below is implemented, test-verified, committed, and
+pushed to `palvaro/hydro` branch `eventual_consistency` (HEAD `a2c33c94e8`).
 
-## Landed and verified (all suites green at time of sync)
+**Read `2026-08_quorum_certificates.md` first** — it is the ladder's home
+and carries all the session's determinations. This file is only the state
+snapshot and resume pointers.
 
-- **Crash-fault injection in the simulator** (`hydro_lang/src/sim/`):
-  staged sends + `CrashHook` forking crash-vs-flush at send boundaries only,
-  per-recipient prefix cuts, halted locations skipped but kept alive.
-  APIs: `with_crashable_process(&p)`, `with_crashable_cluster(&c, F)`
-  (untargeted; budget shared across members). A scripted-crash API was built
-  and then deliberately removed (wrong quantifier). Crash-free flows compile
-  byte-identically. Full description: `2026-08_crash_injection_sim.md`.
-- **Demo suite** (all passing):
-  - `sim_crashable_sender_explores_partial_broadcasts` (hydro_lang, exhaustive)
-  - `broadcast_closed_violates_agreement_under_sender_crash` /
-    `reliable_broadcast_closed_agreement_under_sender_crash` (hydro_std, exhaustive)
-  - `leader_merge_dissemination_hole_leader_crash_diverges_replicas`,
-    `leader_merge_plus_reliable_broadcast_agrees_but_blocks_at_f1`,
-    `member_leader_single_crash_can_block_progress` (hydro_std)
-  - `any_single_crash_cannot_block_progress` (hydro_test raft, fuzz; crash-
-    agnostic rotating driver with per-round quiesce barriers — un-barriered
-    drivers livelock, see crash doc §3)
-  - `fan_out_ec_mint_refuted_under_source_crash` (hydro_std, exhaustive):
-    premise 2 of the fan_out EC mint refuted under source-member crash.
-- **CRDT gossip behavior tests** (formerly in flight, now verified —
-  `hydro_std/src/ec_inference_demos/crdt_gossip.rs`):
-  - `g_set_gossip_converges_static` (fuzz, n=2): every member converges to the
-    union.
-  - `g_set_gossip_live_late_joiner_converges` (fuzz, n=3, dynamic membership).
-  - `g_set_gossip_survivors_converge_under_member_crash` (fuzz 8192, n=3,
-    `with_crashable_cluster(_, 1)`, bounded pump rounds, survivor-agnostic
-    convergence check) — fills the gossip safety cell in the portfolio table.
-  - `g_set_gossip_live_n1_own_element_reaches_own_state` (exhaustive, n=1):
-    minimal regression net for the fold-hook bug below.
-  - `fan_out_live_self_delivery_under_dynamic_membership` (fan_out.rs,
-    exhaustive, n=1): self-delivery is not masked by peers' echoes.
-  - Fuzz, not exhaustive, for the n≥2 gossip tests: the snapshot hook inside
-    the `sliced!` pump forks on every state change and the echo cycle keeps
-    re-offering, so exhaustive search does not terminate even at n=2
-    (verified >5 min; this — not a livelock — was the previous session's
-    "hang").
-- **Two bugs found and fixed while verifying the gossip tests:**
-  1. **Sim codegen required `Hash` payloads through live fan-out.** A
-     top-level join compiles to `join_multiset -> multiset_delta()`, whose
-     delta map is keyed by the item — so fanning out a `HashSet` (not `Hash`)
-     failed to compile at sim-build time, invisibly until the first test run.
-     Gossip state is now a `BTreeSet` (which is `Hash`); rationale in the
-     module doc.
-  2. **`TopLevelFoldHook` empty batches permanently killed the fold**
-     (`hydro_lang/src/sim/runtime.rs` + `compile/ir/mod.rs`). The hook sent
-     `vec![]` on trivial (empty) decisions; the generated `scan` wrapper
-     returned `None` for an empty batch, which `scan` interprets as
-     terminating the accumulator — every later element silently dropped.
-     Symptom: a gossip member never absorbed its own element if its fold hook
-     was serviced before its input arrived; empty releases are unlogged, so
-     traces looked clean. Fix: the hook no longer sends empty batches, and the
-     generated wrapper now panics loudly if one ever arrives. Diagnosed via an
-     n=1 exhaustive repro plus temporary quiescence-state instrumentation in
-     `sim/compiled.rs` (since removed).
-- **Docs** (all in design_docs/): `2026-08_crash_injection_sim.md`,
-  `2026-08_completeness_vs_consistency.md`, the rewritten
-  `2026-08_research_agenda.md` (portfolio table in §2; gossip safety cell now
-  green), resolution addendum in `2026-08_membership_hook_blowup_findings.md`.
-- Verified at last full run: hydro_lang sim suite 151/151 (`--features sim`),
-  hydro_std 45/45, hydro_test raft 16/16.
+## Landed and verified this session
 
-## Pending (user-requested, not started)
+- **Rung 0/0.5, the mints** (`hydro_std/src/ec_inference_demos/quorum.rs`):
+  `quorum` → sealed `Durable` (distinct-attestor counting, fired-once);
+  `covering_quorum` → sealed `Covering` (count + max-by-`Ts` in one fold).
+  `Ts` (timestamp = ballot) lives here. Durable's mint asserts EC-through-
+  the-slice; Covering's deliberately does NOT (content is schedule-authored)
+  — the asymmetry is a finding (ladder doc §3b/§4).
+- **Rung 1, URB** (`uniform_broadcast.rs`): five-line client of RB's
+  exported echo stream (`reliable_broadcast_closed_with_echoes`).
+  Uniformity red/green pair under crashable sender + crashable member.
+- **Rung 2, ABD** (`abd.rs`): cluster of clients; replica register is a
+  top-level max-lattice fold, **EC inferred and compiler-pinned** (explicit
+  type annotation, zero consistency assertions in the file); ack gate on a
+  monotone register snapshot. Tests: smoke, cross-client real-time order,
+  progress + latest-read under replica crash, ts-monotone reads under
+  client crash (the incomplete-write case).
+- **Rung 3, synod** (`synod.rs`): phase 1 = Covering mint, phase 2 =
+  Durable mint, ballot = Ts, all unchanged; the one new thing is
+  adopt-highest. The acceptor is a tick-serialized refusal kernel, no EC
+  label, CONFIRMING the acceptor-inverts-ABD hypothesis. Tests: smoke;
+  agreement under concurrently dueling proposers ±acceptor crash; RED
+  no-adoption variant (two values chosen); RED sub-majority quorum (two
+  values chosen — the first mechanical audit of a mint's `manual_proof!`);
+  progress under the Ω discipline.
+- **Suite state**: hydro_std 59/59. hydro_lang sim (151/151) and raft
+  (16/16) last ran before the ladder work — the ladder only added to
+  hydro_std, but re-run cross-suite before the next big change.
+- **Portfolio table** (research agenda §3): gained URB, ABD, and synod
+  rows; RB's row records its uniformity hole. The progress column across
+  leader_merge ✗ / member-leader ✗ / ABD ✓ (no leader) / synod ✓ (Ω only) /
+  Raft ✓ is the "succession is the cost of a log" + FLP-tax story, all
+  cells mechanical.
 
-- Dynamic-membership leader_merge variant + tests.
-- Portfolio-table blank cells: `reliable_broadcast_live` crash test;
-  member-leader agreement assertion.
-- The Tier-1 restructure (agenda §4) remains the headline next work item.
-- `hydro_test/src/cluster/snapshots/typed_consensus_ir.snap.new` is an
-  unreviewed insta snapshot sitting in the working copy — review and accept
-  (or delete) before it goes stale.
+## The stack (pop in roughly this order)
+
+1. **Rung 4 — multi-decree**: epoch-keyed log of synod into the existing M1
+   splice reader (`epoch_splice.rs`); in-protocol ballot management and the
+   learning-dissemination EC story (chosen certificates are stable facts —
+   broadcast-shaped, where EC legitimately reappears on consensus output).
+2. **Static FT refutation from location types** (ladder doc §3c): capability
+   -set cardinality as a compile-time necessary condition. Tier 1 is an
+   afternoon-sized IR pass; calibration = reproduce the table's ✗ cells and
+   none of its ✓ cells (member-leader is the discriminating case).
+3. **Linearizability history checker at quiescence** (ladder doc §3, rung-2
+   proof-sketch bullet): Wing–Gong/Porcupine over per-client op intervals —
+   M-check-family sim oracle.
+4. Pre-existing agenda items: Tier-1 restructure (completeness premise into
+   hydro_lang), M-check, `live()` oracle substrate, `collect_quorum`
+   cleanup (distinctness/re-fire/TODO-proof issues, ladder doc §4),
+   `quorum_round` plumbing helper, dynamic-membership leader_merge variant,
+   `reliable_broadcast_live` crash test.
+
+## Known debts (documented, deliberate)
+
+- One-outstanding-op / distinct-rounds are UNENFORCED caller contracts, and
+  they are load-bearing for the ABD linearizability proof (ladder doc §3).
+- `Durable`/`Covering` unforgeability is by `#[doc(hidden)]` convention
+  (staged code cannot see module privacy) until the mints are promoted into
+  `hydro_lang`.
+- Certificates are not `Serialize` on purpose (wire-crossing = forgeable);
+  transportable certificates need their own design.
+- `urb_delivers_to_all` is the suite's slowest test (~140 s, exhaustive).
+- `hydro_test/src/cluster/snapshots/typed_consensus_ir.snap.new` remains
+  unreviewed and uncommitted in the working copy.
+
+## Earlier in this same working period (previous checkpoint's content)
+
+Crash-fault injection in the sim, the gossip behavior tests, and two sim
+bug fixes (multiset_delta `Hash` requirement → BTreeSet state; the
+TopLevelFoldHook empty-batch scan-kill) — all landed, committed, and
+described in `2026-08_crash_injection_sim.md` and the git history
+(`feb1da6e4a`..`a2c33c94e8` spans the ladder; earlier commits cover the
+gossip/crash work).
