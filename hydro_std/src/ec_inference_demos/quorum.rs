@@ -57,6 +57,7 @@
 //!   "deserialize a forgery." A transportable certificate needs its own design
 //!   (attestor set + re-verification, or a trusted channel type).
 
+use std::collections::BTreeMap;
 use std::hash::Hash;
 
 use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, Retries};
@@ -288,6 +289,98 @@ where
 
     covered.map(q!(|(key, max)| {
         (key, Covering::__mint_called_only_by_the_covering_combinator(max))
+    }))
+}
+
+/// A responder's per-slot accepted state on the wire: `(slot, (Ts, X))`
+/// pairs (the serialized form of its accepted map).
+pub type SlotMap<X> = Vec<(usize, (Ts, X))>;
+
+/// **The slotted covering-read mint** — [`covering_quorum`]'s multi-decree
+/// sibling (rung 4). Per request key, counts distinct responders and merges
+/// their *per-slot* payload maps under per-slot max-by-[`Ts`] in ONE
+/// accumulator, firing exactly once when the count crosses `threshold`.
+///
+/// `responses` carries `(key, (responder, accepted_map))` where the map is a
+/// responder's full per-slot accepted state (`Vec<(slot, (Ts, X))>` on the
+/// wire). The aggregate is the slot-indexed join of the responses: for every
+/// slot, the highest-ballot `(Ts, X)` any responder reported. This is the
+/// phase-1 read of multi-decree Paxos — one covering certificate amortized
+/// over every slot at once.
+///
+/// Same contracts and caveats as [`covering_quorum`]: exact duplicates are
+/// deduplicated, responders must answer each key at most once (structural in
+/// the consumers: acceptors answer each prepare exactly once over an
+/// exactly-once channel), and the `nondet!` inside is load-bearing — WHICH
+/// majority answers picks which covering this is; any majority intersects
+/// every per-slot write quorum, so the aggregate dominates, slot-wise, every
+/// completed durable fact. Like `covering_quorum`, this mint deliberately
+/// does not restore a consistency label: certificate existence is
+/// deterministic, content is honest (schedule-authored) nondeterminism.
+///
+/// (The two covering mints share their skeleton and differ only in the
+/// aggregation lattice; folding them into one combinator awaits a clean way
+/// to pass proof-annotated combiners through a library function — the same
+/// generalization debt recorded on `covering_quorum`.)
+pub fn covering_quorum_slotted<'a, K, X, L, L2, R>(
+    threshold: usize,
+    responses: Stream<(K, (MemberId<L2>, SlotMap<X>)), L, Unbounded, NoOrder, R>,
+) -> Stream<(K, Covering<BTreeMap<usize, (Ts, X)>>), L::DropConsistency, Unbounded, NoOrder, ExactlyOnce>
+where
+    K: Clone + Eq + Hash + 'a,
+    X: Clone + Eq + Hash + 'a,
+    L: Location<'a>,
+    L2: 'a,
+    R: Retries,
+{
+    let distinct = responses.unique();
+
+    let covered = sliced! {
+        let new_resps = use::batch(distinct, nondet!(
+            /// Which majority answers first (and where batch boundaries
+            /// fall) picks WHICH covering read this is. Any majority is a
+            /// valid covering: it intersects every per-slot write quorum, so
+            /// its per-slot max dominates every completed durable fact.
+        ));
+
+        let mut pending = use::state_null::<Stream<(K, (MemberId<L2>, SlotMap<X>)), _, Bounded, NoOrder>>();
+        let mut fired = use::state_null::<Stream<K, _, Bounded, NoOrder>>();
+
+        let current = pending.chain(new_resps);
+
+        let per_key = current.clone().into_keyed().fold(
+            q!(|| (0usize, BTreeMap::new())),
+            q!(|(count, map): &mut (usize, BTreeMap<usize, (Ts, _)>), (_responder, resp)| {
+                *count += 1;
+                for (slot, (ts, x)) in resp {
+                    let dominated = map.get(&slot).map(|(m, _)| *m < ts).unwrap_or(true);
+                    if dominated {
+                        map.insert(slot, (ts, x));
+                    }
+                }
+            }, commutative = manual_proof!(
+                /** counting is commutative; the per-slot merge is max by the
+                total Ts order slot-wise (writer ids make cross-proposer ties
+                impossible, and at most one value is proposed per (ballot,
+                slot) — caller contract), so map merges commute. */
+            )),
+        );
+
+        let reached = per_key
+            .filter(q!(move |(count, _map)| *count >= threshold))
+            .entries()
+            .map(q!(|(key, (_count, map))| (key, map)));
+
+        let newly = reached.clone().anti_join(fired.clone());
+
+        pending = current.anti_join(reached.map(q!(|(key, _)| key)));
+        fired = fired.chain(newly.clone().map(q!(|(key, _)| key)));
+
+        newly
+    };
+
+    covered.map(q!(|(key, map)| {
+        (key, Covering::__mint_called_only_by_the_covering_combinator(map))
     }))
 }
 

@@ -1,7 +1,7 @@
 // Depends-on structure of the EC-inference / quorum-ladder building blocks.
 // Render: dot -Tpng -Gdpi=150 building_blocks.dot -o building_blocks.png
 // Arrows point at dependencies. Legend: gold = sealed mint (trusted seam);
-// blue = composed protocol (leaf = product); dashed = planned (rung 4);
+// blue = composed protocol (leaf = product); dotted = conceptual/restated;
 // red = legacy debt; gray = hydro_lang trusted base.
 
 digraph building_blocks {
@@ -11,8 +11,8 @@ digraph building_blocks {
     node [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled", fillcolor=white];
     edge [fontname="Helvetica", fontsize=9];
 
-    // ---------------- rung 4 (planned) ----------------
-    multi_decree [label="multi-decree log + RSM\n(rung 4 — planned)\nHerlihy universal construction", style="rounded,filled,dashed", fillcolor="#eef6ff"];
+    // ---------------- rung 4 ----------------
+    multi_decree [label="multi-decree log (rung 4) ◆\nHerlihy universal construction\n(epoch-keyed synod → splice)", fillcolor="#dbeafe"];
 
     // ---------------- composed protocols (leaves = products) ----------------
     subgraph cluster_consensus {
@@ -20,9 +20,9 @@ digraph building_blocks {
         synod   [label="synod (rung 3) ◆\n+ its own refusal acceptor", fillcolor="#dbeafe"];
         abd     [label="ABD register (rung 2) ◆\nEC register (inferred)", fillcolor="#dbeafe"];
         urb     [label="URB (rung 1) ◆", fillcolor="#dbeafe"];
-        covering [label="covering_quorum (M)\n→ Covering   (uses Ts)", shape=hexagon, fillcolor="#fde68a"];
+        covering [label="covering_quorum /\ncovering_quorum_slotted (M)\n→ Covering   (uses Ts)", shape=hexagon, fillcolor="#fde68a"];
         quorum   [label="quorum (M)\n→ Durable   (uses Ts)", shape=hexagon, fillcolor="#fde68a"];
-        epoch_splice [label="epoch_splice\n(M1 reader — built, unconsumed)", fillcolor="#f3f4f6"];
+        epoch_splice [label="epoch_splice\n(M1 reader)", fillcolor="#f3f4f6"];
     }
 
     subgraph cluster_dissemination {
@@ -50,10 +50,13 @@ digraph building_blocks {
         channels [label="fail_stop channels / demux", fillcolor="#e5e7eb"];
     }
 
-    // ---------------- edges: rung 4 (planned, dashed) ----------------
-    multi_decree -> synod        [style=dashed, label="decrees"];
-    multi_decree -> epoch_splice [style=dashed, label="succession"];
-    multi_decree -> rb_closed    [style=dashed, label="learning\n(chosen certs are stable facts)"];
+    // ---------------- edges: rung 4 ----------------
+    multi_decree -> covering     [label="phase 1\n(slotted)"];
+    multi_decree -> quorum       [label="phase 2\n(per slot)"];
+    multi_decree -> epoch_splice [label="succession"];
+    multi_decree -> bcast_closed; multi_decree -> channels;
+    multi_decree -> synod     [style=dotted, label="restates\n(per slot)"];
+    multi_decree -> rb_closed [style=dotted, label="learning restates\nthe echo cycle\n(chosen certs are stable facts)"];
 
     // ---------------- edges: consensus branch ----------------
     synod -> covering; synod -> quorum;

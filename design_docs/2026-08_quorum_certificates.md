@@ -78,20 +78,20 @@ and is where an EC label legitimately reappears on consensus's output
 
 The full building-block graph (arrows point at dependencies; gold hexagons
 = sealed mints, blue = composed protocols with ◆ marking leaves/products,
-dashed = planned rung-4 edges, red = legacy debt):
+dotted = conceptual/restated relationships, red = legacy debt):
 
 ![building blocks](images/building_blocks.png)
 
 (Source: `images/building_blocks.dot`; re-render with
 `dot -Tpng -Gdpi=130 building_blocks.dot -o building_blocks.png`.)
 
-Visible at a glance: the leaves are *products*, not infrastructure; the two
-mints are the narrow waist; `epoch_splice` is built but unconsumed until
-rung 4; the learning edge is the only planned arrow from panel A into panel
-B; and `collect_quorum`'s three hydro_test callers are the migration surface
-for that cleanup. Static membership throughout — "a majority of a set
-that is still growing" is not well-posed, which makes this ladder the concrete
-forcing function for versioned membership views (agenda §4 item 4).
+Visible at a glance: the leaves are *products*, not infrastructure; the
+mints are the narrow waist; `epoch_splice` gained its first consumer at
+rung 4; the learning edge is the one arrow from panel A into panel B — now
+real; and `collect_quorum`'s three hydro_test callers are the migration
+surface for that cleanup. Static membership throughout — "a majority of a
+set that is still growing" is not well-posed, which makes this ladder the
+concrete forcing function for versioned membership views (agenda §4 item 4).
 
 - **Rung 0 — the `quorum` mint** (DONE). Distinct-attestor counting
   (deduplicated `(fact, attestor)` pairs), threshold gate, `Durable`
@@ -248,8 +248,77 @@ forcing function for versioned membership views (agenda §4 item 4).
     synod's is conditional on the Ω discipline — the FLP tax stated as a
     table row. The two columns moving in opposite directions between rungs 2
     and 3 IS the theorem.
-- **Rung 4 — multi-decree.** Epoch-keyed log of rung 3, consumed by the
-  existing M1 splice reader; in-protocol ballot management arrives here.
+- **Rung 4 — multi-decree** (DONE, `multi_paxos.rs`). Epoch-keyed log of
+  rung 3, consumed by the M1 splice reader — its first consumer, as planned.
+  Construction claim held: **synod per slot, phase 1 amortized per epoch.**
+  Ballot = `Ts` unchanged; epoch = round (caller contract: globally distinct
+  rounds — the deterministic epoch↦member map of the splice doc §2). One
+  prepare covers every slot: promises carry the acceptor's entire per-slot
+  accepted map, merged by **one new mint**, `covering_quorum_slotted`
+  (per-slot max-by-ballot — the covering-generalization debt now has two
+  data points sharing a skeleton). Phase 2 = the rung-0 `Durable` mint
+  unchanged, per (ballot, slot). The acceptor is synod's refusal kernel with
+  a map: a single `max_promised` fences *every* slot, which is the splice
+  doc's §4(b) fencing (endorsement-is-promise) falling out of the epoch
+  structure for free.
+  - **In-protocol ballot management is the leader kernel** — the second
+    authored slice (finalizing: `leader_merge`'s seam, epoch-scoped). On
+    covering: declared start `s_e` = the leader's locally learned chosen
+    prefix (a monotone lower bound; stale only widens re-proposal);
+    adopt-highest *per slot* at `[s_e, max_covered]`; covering holes
+    no-op-filled (free choice by intersection — a skipped slot would stall
+    the splice forever); fresh commands sequenced after. One phase 1 per
+    epoch, phase-2-only appends thereafter — the multi-Paxos amortization,
+    which is what distinguishes the rung from "synod in a loop".
+  - **Start facts ride chosen entries.** A learner absorbs `Start{e, s_e}`
+    only alongside a chosen entry of epoch `e`. This anchors splice
+    *ownership* to actual choices: a candidate that covers and dies having
+    chosen nothing leaves no ownership trace, so it can never orphan a slot
+    (a bare Start from a dead epoch would stall the splice permanently — a
+    design iteration the paper analysis caught before the sim had to).
+  - **Learning is the predicted DAG edge, realized.** Chosen certificates
+    are stable facts; the minting proposer unwraps and ships them, learners
+    run RB's echo cycle (merge + unique + re-broadcast through a
+    `forward_ref` on the EC location), and EC is **inferred and
+    compiler-pinned** on the learner fact stream and the spliced-log
+    singleton — the label legitimately re-enters on consensus output (§3a).
+    The transportable-certificate decision (deferred since rung 0) resolved
+    as: the certificate never crosses the wire; the *fact* does, and its
+    authority is the channel (only the audited chosen path feeds the
+    learning broadcast) — convention-grade sealing, same tier as the mints'
+    `#[doc(hidden)]`; attestor-set re-verification remains future design.
+    M2's prediction confirmed: restricted to chosen entries the splice only
+    grows — the truncation machinery never fires at learners, and learner
+    convergence at quiescence is asserted in the dueling tests.
+  - §3b's reuse scorecard held exactly: the two mints and the splice reader
+    are consumed unmodified; the acceptor and the echo cycle are *restated*
+    (sibling middles, composable edges). Zero consistency assertions in the
+    protocol body.
+  - **Results (all fuzz, all green; suite 73/73).** Smoke; **succession
+    splices the log** (epoch 2 declares start 1 and continues — slot 0 stays
+    owned by epoch 1: the splice reader doing real cross-epoch work);
+    per-slot agreement ∀ under concurrently dueling leaders, with and
+    without an untargeted acceptor crash, plus learner-set convergence at
+    quiescence; **RED: no-adoption** chooses two values at one slot (the
+    splice doc's §4(a) counterexample, mechanical); **RED: sub-majority
+    quorum** likewise (auditing the slotted covering's intersection
+    `manual_proof!`); progress under the Ω discipline with an acceptor
+    crash. Caller contracts recorded in the module docs: globally distinct
+    rounds, one outstanding lead, commands under stale epochs are lost-not-
+    corrupted (resubmission is the driver's job — progress remains a driver
+    discipline).
+  - Sim finding: `use::snapshot` of a top-level fold panics
+    (`PassthroughSingletonHook`, "No decision to release") when the same
+    slice also batches a direct `sim_input` — the observation can be
+    scheduled before the fold's first value exists. Worked around with the
+    in-slice state pattern (batch + `use::state`), which is arguably the
+    more honest shape anyway; the splice doc §10's deferred
+    "per-member observation of an unbounded singleton" item is now a
+    concrete bug report.
+  - **Universality reached (§3c): the ladder terminates here.** Agree on
+    each operation, apply to a state machine — the spliced TO,EC log at
+    every learner is Herlihy's universal construction, built from two mints,
+    one reader, and two authored kernels.
 
 ## 3a. Taint is not transitive: the monotone shell / non-monotone kernel
 
@@ -311,7 +380,8 @@ duplication:
    four times across ABD and synod.
 4. **Do not** force synod to call ABD. Vertical reuse — consuming a
    guarantee (RSM over any TO,EC log; rung 4 consuming the splice reader) —
-   is a separate, still-untested axis.
+   is a separate axis, and rung 4 is now its first data point: the splice
+   reader was consumed unmodified, exactly as the mints are.
 
 Plan amendment: build rung 3 *through* the extraction — `covering` first,
 ABD ported onto it (suite as regression oracle), synod as its second

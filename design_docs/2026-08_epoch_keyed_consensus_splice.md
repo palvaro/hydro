@@ -221,6 +221,21 @@ The differences here:
 
 Paused after M1 to clean up the broadcast primitives. State at pause:
 
+**Post-pause addendum (2026-08, rung 4).** The quorum→consensus ladder
+(`2026-08_quorum_certificates.md`) delivered this design's content through a
+different factoring: `ec_inference_demos/multi_paxos.rs` consumes the M1
+splice reader unmodified and realizes §4's two forced components — the
+commit rule as per-(ballot, slot) `Durable` certificates (M2), the election
+read as the slotted covering mint (M3), and fencing as the acceptor's
+single `max_promised` over all slots (M4) — with the residue concentrated
+in the two quorum mints rather than a `succeed_key` combinator (M5's
+factoring; unbuilt as such). Two of §3's predictions are now mechanical:
+monotone emission on committed entries (learner-side splices only grow;
+truncation never fires on the commit-gated feed), and the start-slot rule
+(starts ride chosen entries, anchored to actual choices). The deferred
+"per-member observation of an unbounded singleton" (§10 below) surfaced as
+a concrete sim bug — see the ladder doc's rung-4 entry.
+
 **Done.**
 - M1 — splice reader: `hydro_std/src/ec_inference_demos/epoch_splice.rs`.
   `SpliceFact` / `SpliceState` (ownership rule: slot *i* is owned by the
