@@ -295,7 +295,50 @@ Plan amendment: build rung 3 *through* the extraction — `covering` first,
 ABD ported onto it (suite as regression oracle), synod as its second
 consumer, plus the RB echo-export refactor.
 
-## 3c. On the stack: static fault-tolerance refutation from location types
+## 3c. The Herlihy dictionary
+
+The rung-2/3 separation maps onto Herlihy's consensus hierarchy as a
+dictionary, not an analogy:
+
+1. **ABD is the bridge theorem.** "Sharing Memory Robustly in
+   Message-Passing Systems": majority-correct async MP wait-free implements
+   atomic registers. Rung 2 is the simulation that imports the shared-memory
+   theory into our model; everything below flows through it.
+2. **Rung 2 = consensus number 1; rung 3 = ∞ — and the proof mechanism is
+   our kernel distinction.** Herlihy's valency argument kills registers
+   because their operations commute (reads are invisible) or overwrite (a
+   later write erases who was first) — "overwrite" is exactly the max-merge
+   lattice, always supersedable. What lifts consensus number is an operation
+   whose response says whether you were first — one that can REFUSE (TAS,
+   CAS). The acceptor is a quorum-replicated refusing primitive. So
+   commute/refuse = lattice-kernel/refusal-kernel = EC-inferable/un-EC: the
+   acceptor-inverts-ABD result is the message-passing shadow of the 1991
+   theorem.
+3. **FLP ≡ consensus-number-1, via ABD.** Async MP + 1 crash ≃ registers
+   (ABD); registers have number 1; hence FLP. The licensed escape is CHT: Ω
+   is the weakest detector for consensus — which is why the portfolio
+   table's progress column flips from unconditional (ABD) to Ω-conditional
+   (synod): the hierarchy gap and its minimal toll, one cell each.
+4. **Universality is rung 4's telos.** Herlihy's universal construction —
+   agree on each operation, apply to a state machine — IS multi-decree +
+   RSM. The ladder terminates exactly where the hierarchy does.
+
+**Why the ladder has no rung 2.5:** Herlihy's intermediate levels (TAS,
+queues — consensus number 2) are unimplementable in crash-prone async MP
+for the same reason consensus is: MP ≃ registers, and registers cannot
+build number-2 objects. In our model the hierarchy collapses to two levels —
+number 1 (lattice-shaped, wait-free, EC-inferable) and needs-Ω (everything
+that refuses) — so jumping from register to universal object is not a
+shortcut, it is the only ladder there is.
+
+Honest edges: Herlihy assumes wait-freedom, determinism, and incorruptible
+memory; we trade "memory never fails" for "a majority survives" and
+"wait-free" for per-operation completion under any minority crash (what the
+ABD progress test checks). Lean on the 1/∞ separation, the commute/refuse
+mechanism, and universality; not on the hierarchy's finer structure (its
+robustness is delicate — Jayanti).
+
+## 3d. On the stack: static fault-tolerance refutation from location types
 
 Encoding fault tolerance in the type system looked hopeless while framed as
 quorum intersection — value-dependent, arithmetic, proof territory. The
