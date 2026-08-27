@@ -1,0 +1,82 @@
+// Depends-on structure of the EC-inference / quorum-ladder building blocks.
+// Render: dot -Tpng -Gdpi=150 building_blocks.dot -o building_blocks.png
+// Arrows point at dependencies. Legend: gold = sealed mint (trusted seam);
+// blue = composed protocol (leaf = product); dashed = planned (rung 4);
+// red = legacy debt; gray = hydro_lang trusted base.
+
+digraph building_blocks {
+    rankdir=TB;
+    compound=true;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled", fillcolor=white];
+    edge [fontname="Helvetica", fontsize=9];
+
+    // ---------------- rung 4 (planned) ----------------
+    multi_decree [label="multi-decree log + RSM\n(rung 4 — planned)\nHerlihy universal construction", style="rounded,filled,dashed", fillcolor="#eef6ff"];
+
+    // ---------------- composed protocols (leaves = products) ----------------
+    subgraph cluster_consensus {
+        label="quorum / consensus branch"; fontsize=12; color="#bbbbbb";
+        synod   [label="synod (rung 3) ◆\n+ its own refusal acceptor", fillcolor="#dbeafe"];
+        abd     [label="ABD register (rung 2) ◆\nEC register (inferred)", fillcolor="#dbeafe"];
+        urb     [label="URB (rung 1) ◆", fillcolor="#dbeafe"];
+        covering [label="covering_quorum (M)\n→ Covering   (uses Ts)", shape=hexagon, fillcolor="#fde68a"];
+        quorum   [label="quorum (M)\n→ Durable   (uses Ts)", shape=hexagon, fillcolor="#fde68a"];
+        epoch_splice [label="epoch_splice\n(M1 reader — built, unconsumed)", fillcolor="#f3f4f6"];
+    }
+
+    subgraph cluster_dissemination {
+        label="dissemination / EC branch"; fontsize=12; color="#bbbbbb";
+        rb_closed [label="RB_closed / RB_with_echoes", fillcolor="#dbeafe"];
+        rb_live   [label="RB_live ◆", fillcolor="#dbeafe"];
+        gossip_s  [label="G-Set gossip (static) ◆", fillcolor="#dbeafe"];
+        gossip_l  [label="G-Set gossip (live) ◆", fillcolor="#dbeafe"];
+        bcast_live [label="broadcast_live", fillcolor="white"];
+        fan_out   [label="fan_out (M)\n+ EventuallyComplete", shape=hexagon, fillcolor="#fde68a"];
+    }
+
+    subgraph cluster_islands {
+        label="islands"; fontsize=12; color="#bbbbbb";
+        leader_merge [label="leader_merge family ◆\n(the statically-refutable ✗ rows)", fillcolor="#dbeafe"];
+        raft [label="Raft [hydro_test] ◆\ninline majority counting", fillcolor="#dbeafe"];
+        paxos_legacy [label="paxos / two_pc /\ncompartmentalized [hydro_test]", fillcolor="#dbeafe"];
+        collect_quorum [label="collect_quorum (L)\ndistinctness / re-fire / TODO-proof", fillcolor="#fecaca"];
+    }
+
+    // ---------------- hydro_lang trusted base ----------------
+    subgraph cluster_hl {
+        label="hydro_lang trusted base"; fontsize=12; color="#bbbbbb";
+        bcast_closed [label="broadcast_closed (M)", shape=hexagon, fillcolor="#fde68a"];
+        channels [label="fail_stop channels / demux", fillcolor="#e5e7eb"];
+    }
+
+    // ---------------- edges: rung 4 (planned, dashed) ----------------
+    multi_decree -> synod        [style=dashed, label="decrees"];
+    multi_decree -> epoch_splice [style=dashed, label="succession"];
+    multi_decree -> rb_closed    [style=dashed, label="learning\n(chosen certs are stable facts)"];
+
+    // ---------------- edges: consensus branch ----------------
+    synod -> covering; synod -> quorum;
+    synod -> bcast_closed; synod -> channels;
+    abd -> covering; abd -> quorum;
+    abd -> bcast_closed; abd -> channels;
+    urb -> quorum;
+    urb -> rb_closed [label="echoes"];
+    covering -> quorum [style=dotted, label="conceptually its\npayload-free degenerate", dir=back];
+
+    // ---------------- edges: dissemination branch ----------------
+    rb_closed -> bcast_closed;
+    gossip_s -> bcast_closed;
+    rb_live -> bcast_live;
+    gossip_l -> fan_out;
+    bcast_live -> fan_out;
+    fan_out -> channels;
+    bcast_closed -> channels;
+
+    // ---------------- edges: islands ----------------
+    leader_merge -> bcast_closed;
+    raft -> channels;
+    raft -> quorum [style=dotted, color="#b91c1c", label="should consume\n(cleanup)"];
+    paxos_legacy -> collect_quorum;
+    collect_quorum -> channels;
+}

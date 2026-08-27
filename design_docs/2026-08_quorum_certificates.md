@@ -74,7 +74,22 @@ module graph agrees: their registers sit on best-effort broadcast, not URB.)
 The broadcast family re-enters the consensus branch at **learning**:
 disseminating chosen certificates — stable facts — is broadcast-shaped work,
 and is where an EC label legitimately reappears on consensus's output
-(rung 4). Static membership throughout — "a majority of a set
+(rung 4).
+
+The full building-block graph (arrows point at dependencies; gold hexagons
+= sealed mints, blue = composed protocols with ◆ marking leaves/products,
+dashed = planned rung-4 edges, red = legacy debt):
+
+![building blocks](images/building_blocks.png)
+
+(Source: `images/building_blocks.dot`; re-render with
+`dot -Tpng -Gdpi=130 building_blocks.dot -o building_blocks.png`.)
+
+Visible at a glance: the leaves are *products*, not infrastructure; the two
+mints are the narrow waist; `epoch_splice` is built but unconsumed until
+rung 4; the learning edge is the only planned arrow from panel A into panel
+B; and `collect_quorum`'s three hydro_test callers are the migration surface
+for that cleanup. Static membership throughout — "a majority of a set
 that is still growing" is not well-posed, which makes this ladder the concrete
 forcing function for versioned membership views (agenda §4 item 4).
 
