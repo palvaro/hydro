@@ -33,13 +33,17 @@
 //! consequence: a member that re-campaigns while its own accepts are in
 //! flight fences *itself*, and the lost commands are never retried — a
 //! reachable dead state. So the wrapper holds submitted values and releases
-//! `submitted − completed` to the core **only on its own establishment
-//! events** (`MultiPaxosOutputs::established`, published by the core for
-//! exactly this purpose): a freshly established epoch immediately proposes
-//! everything still owed. Values may consequently appear at multiple slots
-//! (re-released work that was chosen but not yet observed, or resubmitted
-//! by a client); per-slot agreement is untouched, and collapsing duplicates
-//! is the state machine's job, as in any redo log.
+//! `submitted − completed` to the core **on its own establishment events**
+//! (`MultiPaxosOutputs::established`, published by the core for exactly
+//! this purpose): a freshly established epoch immediately proposes
+//! everything still owed. Once an epoch is held, newly arriving commands
+//! are released immediately — the steady state is phase-2-only (the
+//! multi-decree amortization; a release under a stale, fenced epoch is
+//! simply lost and comes back through the redo path). Values may
+//! consequently appear at multiple slots (re-released work that was chosen
+//! but not yet observed, or resubmitted by a client); per-slot agreement is
+//! untouched, and collapsing duplicates is the state machine's job, as in
+//! any redo log.
 //!
 //! # Structurally distinct rounds (a contract, discharged)
 //!
@@ -75,6 +79,39 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::multi_paxos::{MultiPaxosOutputs, multi_paxos};
+
+/// Per-member election-kernel state. Public because staged (`q!`) code is
+/// compiled outside this module in deploy mode; not part of the API.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct ElectionState<V> {
+    /// Highest campaign round seen anywhere (round allocation).
+    pub max_round: u64,
+    /// Admitted values not yet observed chosen — the redo queue. Bounded by
+    /// outstanding work: completed values are retired immediately, so
+    /// per-tick state cost does not grow with history.
+    pub pending: BTreeSet<V>,
+    /// Completions ever observed (stall detection).
+    pub completed: u64,
+    /// `completed` as of the last timer interrupt.
+    pub completed_at_last_timeout: u64,
+    /// Has this member ever established an epoch? (Gates steady-state
+    /// releases.)
+    pub have_epoch: bool,
+}
+
+impl<V> Default for ElectionState<V> {
+    // Manual impl: `derive` would demand `V: Default` for no reason.
+    fn default() -> Self {
+        ElectionState {
+            max_round: 0,
+            pending: BTreeSet::new(),
+            completed: 0,
+            completed_at_last_timeout: 0,
+            have_epoch: false,
+        }
+    }
+}
 
 /// [`multi_paxos`] with in-protocol leader election. `election_timeouts`
 /// carries member-local timer interrupts; `num_proposers` must match the
@@ -139,14 +176,8 @@ where
             /// batching only delays.
         ));
 
-        // (max round seen, submitted values, completed values,
-        //  completed set as of the last timer interrupt)
-        let mut state = use::state(|l| l.singleton(q!((
-            0u64,
-            BTreeSet::new(),
-            BTreeSet::new(),
-            BTreeSet::new()
-        ))));
+        // The kernel's state; see [`ElectionState`]'s field docs.
+        let mut state = use::state(|l| l.singleton(q!(ElectionState::default())));
 
         let batch_max_round = campaign_batch.fold(
             q!(|| 0u64),
@@ -178,43 +209,54 @@ where
             .zip(new_completions)
             .zip(n_est)
             .zip(n_timeouts)
-            .map(q!(move |(((((st, batch_max), cmds), comps), ests), touts)| {
-                let (mut max_round, mut submitted, mut completed, mut at_last) = st;
-                if batch_max > max_round {
-                    max_round = batch_max;
+            .map(q!(move |(((((mut st, batch_max), cmds), comps), ests), touts): (((((ElectionState<_>, u64), BTreeSet<_>), BTreeSet<_>), usize), usize)| {
+                if batch_max > st.max_round {
+                    st.max_round = batch_max;
                 }
-                submitted.extend(cmds);
-                completed.extend(comps);
+                // Retirement: completed values leave the pending set at
+                // once, keeping state proportional to outstanding work.
+                for v in comps {
+                    if st.pending.remove(&v) {
+                        st.completed += 1;
+                    }
+                }
 
                 let mut campaign = None;
                 if touts > 0 {
-                    let owed = submitted.iter().any(|v| !completed.contains(v));
-                    let stalled = owed && completed == at_last;
+                    let stalled =
+                        !st.pending.is_empty() && st.completed == st.completed_at_last_timeout;
                     if stalled {
                         // Smallest round in my residue class above max_round:
                         // distinct members can never collide (module docs).
                         let me = CLUSTER_SELF_ID.get_raw_id() as u64;
                         let n = num_proposers as u64;
-                        let r = (max_round / n + 1) * n + me;
-                        max_round = r;
+                        let r = (st.max_round / n + 1) * n + me;
+                        st.max_round = r;
                         campaign = Some(r);
                     }
-                    at_last = completed.clone();
+                    st.completed_at_last_timeout = st.completed;
                 }
 
-                // Redo-queue release: on establishment, propose everything
-                // still owed (deterministic order: the set's).
+                // Releases. On establishment: everything pending (the redo).
+                // Otherwise, if this member already holds an epoch:
+                // just-arrived commands go straight through — the steady
+                // state is phase-2-only, no election per batch (the
+                // multi-decree amortization; a release under a stale, fenced
+                // epoch is simply lost and comes back through the redo path).
                 let release: Vec<_> = if ests > 0 {
-                    submitted
-                        .iter()
-                        .filter(|v| !completed.contains(*v))
-                        .cloned()
-                        .collect()
+                    st.have_epoch = true;
+                    st.pending.extend(cmds);
+                    st.pending.iter().cloned().collect()
+                } else if st.have_epoch {
+                    let fresh: Vec<_> = cmds.iter().cloned().collect();
+                    st.pending.extend(cmds);
+                    fresh
                 } else {
+                    st.pending.extend(cmds);
                     Vec::new()
                 };
 
-                ((max_round, submitted, completed, at_last), campaign, release)
+                (st, campaign, release)
             }));
 
         state = decided.clone().map(q!(|(st, _, _)| st));
@@ -244,15 +286,34 @@ where
     // as its Ω input, redo-queue releases as its command stream.
     let outputs = multi_paxos(acceptors, learners, majority, leads, releases);
 
-    // Close the observation cycles from the core's public outputs.
+    // Close the observation cycles from the core's public outputs. Both go
+    // through a point-to-point network hop TO SELF: logically these edges
+    // are local, but a direct local edge would form a within-tick dataflow
+    // cycle (kernel → core → chosen/established → kernel) that the deploy
+    // partitioner rejects (and `defer_tick` cannot break it — lazy ticks
+    // strand deferred items at quiescence). The self-hop breaks the cycle
+    // at a real async boundary, and both edges are off the request critical
+    // path: they drive elections and redo-queue retirement, never client
+    // responses.
     completions_handle.complete(
         outputs
             .chosen
             .clone()
             .filter_map(q!(|(_epoch, _start, _slot, v)| v))
-            .weaken_ordering::<NoOrder>(),
+            .map(q!(move |v| (CLUSTER_SELF_ID.clone(), v)))
+            .into_keyed()
+            .demux(&proposers, TCP.fail_stop().bincode())
+            .values(),
     );
-    established_handle.complete(outputs.established.clone());
+    established_handle.complete(
+        outputs
+            .established
+            .clone()
+            .map(q!(move |e| (CLUSTER_SELF_ID.clone(), e)))
+            .into_keyed()
+            .demux(&proposers, TCP.fail_stop().bincode())
+            .values(),
+    );
 
     outputs
 }

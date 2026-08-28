@@ -118,9 +118,11 @@ use super::epoch_splice::{SpliceFact, SpliceState, splice_epoch_log};
 use super::quorum::{SlotMap, Ts, covering_quorum_slotted, quorum};
 
 /// Responses from acceptors to proposers (the acceptor's identity rides on
-/// the channel keying, as in synod).
+/// the channel keying, as in synod). Public because staged (`q!`) code is
+/// compiled outside this module in deploy mode; not part of the API.
+#[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-enum ToProposer<V> {
+pub enum ToProposer<V> {
     /// Phase-1 promise: the full per-slot accepted map.
     Promise {
         b: Ts,
