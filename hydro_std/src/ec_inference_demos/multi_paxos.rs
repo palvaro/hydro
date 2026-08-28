@@ -194,6 +194,11 @@ pub struct MultiPaxosOutputs<'a, P, LRN, V> {
     /// everyone's via the proposer-side learning broadcast) — indexical,
     /// correctly un-EC.
     pub chosen: Stream<(u64, usize, usize, Option<V>), Cluster<'a, P>, Unbounded, NoOrder, ExactlyOnce>,
+    /// Epoch establishments at each proposer (its own coverings firing):
+    /// `(round, next_free_slot)`. A fact the leader kernel already computes,
+    /// published for liveness shells (wide-interface lesson, ladder doc §3b);
+    /// no consumer inside the core.
+    pub established: Stream<(u64, usize), Cluster<'a, P>, Unbounded, NoOrder, ExactlyOnce>,
 }
 
 /// Multi-decree consensus over a static acceptor cluster, with uniform
@@ -427,8 +432,9 @@ where
     // ---- The leader kernel: establishment + sequencing ---------------------
     // The one authored slice at the proposer (finalizing: slot assignment and
     // start declaration are sealed one-shot choices — leader_merge's seam,
-    // epoch-scoped). Everything it emits is a proposal (b, start, slot, value).
-    let proposed = sliced! {
+    // epoch-scoped). Everything it emits is a proposal (b, start, slot, value),
+    // plus establishment events for liveness shells.
+    let (proposed, established) = sliced! {
         let cov_batch = use::batch(covered, nondet!(
             /// Establishment timing: which tick the covering certificate is
             /// acted on. Any covering is valid (mint), and the learned-prefix
@@ -484,6 +490,7 @@ where
 
         // The member's current epoch: max-by-ballot across establishments.
         let est_max = est
+            .clone()
             .map(q!(|(b, plan): (Ts, EpochPlan<_>)| (b, plan.start, plan.next)))
             .fold(
                 q!(|| None),
@@ -524,7 +531,12 @@ where
             c.map(|(b, start, next)| (b, start, next + n))
         }));
 
-        recovery.chain(assigned.weaken_ordering::<NoOrder>())
+        let est_events = est.map(q!(|(b, plan): (Ts, EpochPlan<_>)| (b.round, plan.next)));
+
+        (
+            recovery.chain(assigned.weaken_ordering::<NoOrder>()),
+            est_events.weaken_ordering::<NoOrder>(),
+        )
     };
 
     // ---- Phase 2 out: accepts to every acceptor, closing the cycle ---------
@@ -601,6 +613,7 @@ where
         learned,
         log,
         chosen,
+        established,
     }
 }
 

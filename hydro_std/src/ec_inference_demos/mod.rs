@@ -56,6 +56,7 @@ pub mod fan_out;
 pub mod leader_merge;
 pub mod abd;
 pub mod multi_paxos;
+pub mod multi_paxos_live;
 pub mod quorum;
 pub mod reliable_broadcast;
 pub mod synod;
