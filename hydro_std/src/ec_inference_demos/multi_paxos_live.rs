@@ -79,20 +79,22 @@ use super::multi_paxos::{MultiPaxosOutputs, multi_paxos};
 /// [`multi_paxos`] with in-protocol leader election. `election_timeouts`
 /// carries member-local timer interrupts; `num_proposers` must match the
 /// proposer cluster's deploy-time size (used for round residue classes).
-/// `V: Ord` because the redo queue is a set of values (module docs).
-pub fn multi_paxos_live<'a, V, P, A, LRN>(
+/// `V: Ord` because the redo queue is a set of values (module docs) — which
+/// is also why `commands` may arrive with any ordering.
+pub fn multi_paxos_live<'a, V, P, A, LRN, O>(
     acceptors: &Cluster<'a, A>,
     learners: &Cluster<'a, LRN>,
     majority: usize,
     num_proposers: usize,
     election_timeouts: Stream<(), Cluster<'a, P>, Unbounded, TotalOrder, ExactlyOnce>,
-    commands: Stream<V, Cluster<'a, P>, Unbounded, TotalOrder, ExactlyOnce>,
+    commands: Stream<V, Cluster<'a, P>, Unbounded, O, ExactlyOnce>,
 ) -> MultiPaxosOutputs<'a, P, LRN, V>
 where
     V: Clone + Eq + Ord + Hash + Serialize + DeserializeOwned + 'a,
     P: 'a,
     A: 'a,
     LRN: 'a,
+    O: hydro_lang::live_collections::stream::Ordering,
 {
     let proposers = commands.location().clone();
 
@@ -154,10 +156,12 @@ where
                 }
             }, commutative = manual_proof!(/** max is commutative */)),
         );
-        // TotalOrder inputs: no commutativity obligation on these two folds.
+        // Admission order is irrelevant: the redo queue is a set.
         let new_cmds = cmd_batch.fold(
-            q!(|| Vec::new()),
-            q!(|acc: &mut Vec<_>, v| acc.push(v)),
+            q!(|| BTreeSet::new()),
+            q!(|acc: &mut BTreeSet<_>, v| {
+                acc.insert(v);
+            }, commutative = manual_proof!(/** set insert is commutative */)),
         );
         let new_completions = completion_batch.fold(
             q!(|| BTreeSet::new()),
@@ -436,6 +440,149 @@ mod tests {
                 assert_eq!(
                     per_learner[0], per_learner[1],
                     "learners must converge at quiescence"
+                );
+            });
+    }
+
+    /// **Colocated deployment: every node is proposer + acceptor + learner.**
+    /// The Maelstrom/bench topology (one cluster of n nodes, all roles on
+    /// every node), pinned at the sim level: same cluster passed as all
+    /// three role arguments, self-election still commits, learners still
+    /// converge.
+    #[test]
+    fn live_colocated_smoke() {
+        let mut flow = FlowBuilder::new();
+        let nodes = flow.cluster::<()>();
+
+        let (timeout_send, timeouts) = nodes.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let (cmd_send, commands) = nodes.sim_input::<u32, TotalOrder, ExactlyOnce>();
+
+        let outs = multi_paxos_live(&nodes, &nodes, MAJORITY, N_ACCEPTORS, timeouts, commands);
+        let learned_recv = outs.learned.sim_cluster_output();
+
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&nodes, N_ACCEPTORS)
+            .unit_test_fuzz_iterations(1024)
+            .fuzz(async || {
+                cmd_send.send(0, 10u32);
+                cmd_send.send(0, 20u32);
+                hydro_lang::sim::quiesce().await;
+                timeout_send.send(0, ());
+
+                for member in 0..N_ACCEPTORS as u32 {
+                    let got: Vec<(u64, usize, usize, Option<u32>)> =
+                        learned_recv.collect_sorted(member).await;
+                    assert_eq!(
+                        splice_of(&got),
+                        vec![10, 20],
+                        "colocated node {member} must converge, got {got:?}"
+                    );
+                }
+            });
+    }
+
+    /// **Raft test parity, the headline: `any_single_crash_cannot_block_
+    /// progress`, identical topology.** One cluster of 3, every node all
+    /// three roles, untargeted crash budget F = 1 over the WHOLE node (its
+    /// proposer, acceptor, and learner die together — exactly what a real
+    /// node crash does), crash-agnostic round-robin driver. In every
+    /// explored execution, agreement holds and at least N − F nodes learn
+    /// the value. Same claim, fault model, and driver discipline as Raft's
+    /// `any_single_crash_cannot_block_progress`.
+    #[test]
+    fn live_colocated_any_single_crash_cannot_block_progress() {
+        const N: usize = 3;
+
+        let mut flow = FlowBuilder::new();
+        let nodes = flow.cluster::<()>();
+
+        let (timeout_send, timeouts) = nodes.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let (cmd_send, commands) = nodes.sim_input::<u32, TotalOrder, ExactlyOnce>();
+
+        let outs = multi_paxos_live(&nodes, &nodes, MAJORITY, N, timeouts, commands);
+        let learned_recv = outs.learned.sim_cluster_output();
+
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&nodes, N)
+            .with_crashable_cluster(&nodes, F)
+            .fuzz(async || {
+                for round in 0..4u32 {
+                    cmd_send.send(round % N as u32, 10u32);
+                    for member in 0..N as u32 {
+                        timeout_send.send(member, ());
+                    }
+                    hydro_lang::sim::quiesce().await;
+                }
+
+                // Crash-agnostic assertion: a crashed node's learner output
+                // simply ends; agreement must hold everywhere, and at least
+                // N − F nodes must have learned the value.
+                let mut deliverers = 0usize;
+                for member in 0..N as u32 {
+                    let got: Vec<(u64, usize, usize, Option<u32>)> =
+                        learned_recv.collect_sorted(member).await;
+                    assert!(
+                        slot_divergence(&got).is_none(),
+                        "node {member}: per-slot agreement must hold under the crash"
+                    );
+                    if got.iter().any(|(_, _, _, v)| *v == Some(10)) {
+                        deliverers += 1;
+                    }
+                }
+                assert!(
+                    deliverers >= N - F,
+                    "at least {} live nodes must learn the value; only {deliverers} did",
+                    N - F
+                );
+            });
+    }
+
+    /// **Safety beyond the crash budget** (raft-parity for
+    /// `leader_without_quorum_commits_nothing`, strengthened): with up to
+    /// TWO of three acceptors crashed — beyond the design budget — progress
+    /// may legitimately die, but per-slot agreement must still hold in
+    /// every explored execution. Only progress needs a majority; safety
+    /// needs nothing.
+    #[test]
+    fn live_safety_holds_beyond_crash_budget() {
+        let mut flow = FlowBuilder::new();
+        let acceptors = flow.cluster::<()>();
+        let proposers = flow.cluster::<()>();
+        let learners = flow.cluster::<()>();
+
+        let (timeout_send, timeouts) = proposers.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let (cmd_send, commands) = proposers.sim_input::<u32, TotalOrder, ExactlyOnce>();
+
+        let outs = multi_paxos_live(
+            &acceptors, &learners, MAJORITY, N_PROPOSERS, timeouts, commands,
+        );
+        let learned_recv = outs.learned.sim_cluster_output();
+
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&acceptors, N_ACCEPTORS)
+            .with_cluster_size(&proposers, N_PROPOSERS)
+            .with_cluster_size(&learners, LEARNERS)
+            .with_crashable_cluster(&acceptors, 2)
+            .fuzz(async || {
+                cmd_send.send(0, 10u32);
+                cmd_send.send(1, 20u32);
+                for member in 0..N_PROPOSERS as u32 {
+                    timeout_send.send(member, ());
+                    timeout_send.send(member, ());
+                }
+
+                let mut all: Vec<(u64, usize, usize, Option<u32>)> = Vec::new();
+                for member in 0..LEARNERS as u32 {
+                    let got: Vec<(u64, usize, usize, Option<u32>)> =
+                        learned_recv.collect_sorted(member).await;
+                    all.extend(got);
+                }
+                assert!(
+                    slot_divergence(&all).is_none(),
+                    "agreement must survive crashes beyond the budget: {all:?}"
                 );
             });
     }
