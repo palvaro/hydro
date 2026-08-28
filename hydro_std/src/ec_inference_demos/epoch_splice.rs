@@ -31,6 +31,8 @@
 //! stream.
 
 use std::collections::BTreeMap;
+use std::fmt;
+use std::sync::Arc;
 
 use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder};
 use hydro_lang::location::cluster::EventualConsistency;
@@ -60,42 +62,78 @@ pub enum SpliceFact<T> {
     },
 }
 
+/// One immutable node in the accumulated fact bag. Sharing the tail makes
+/// state snapshots and single-fact updates O(1), while the public reader
+/// remains a pure deterministic function of the same fact set.
+#[derive(Clone, PartialEq, Eq)]
+struct FactNode<T> {
+    fact: SpliceFact<T>,
+    previous: Option<Arc<FactNode<T>>>,
+}
+
 /// Accumulated splice state: all entry facts and start declarations seen so
 /// far. A pure value — `splice()` derives the current log from it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default)]
 pub struct SpliceState<T> {
-    /// epoch → (slot → value).
-    entries: BTreeMap<u64, BTreeMap<usize, T>>,
-    /// epoch → declared start slot.
-    starts: BTreeMap<u64, usize>,
+    facts: Option<Arc<FactNode<T>>>,
+}
+
+impl<T: PartialEq> PartialEq for SpliceState<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.materialize() == other.materialize()
+    }
+}
+
+impl<T: Eq> Eq for SpliceState<T> {}
+
+impl<T: fmt::Debug> fmt::Debug for SpliceState<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (entries, starts) = self.materialize();
+        f.debug_struct("SpliceState")
+            .field("entries", &entries)
+            .field("starts", &starts)
+            .finish()
+    }
 }
 
 impl<T> SpliceState<T> {
     /// Creates an empty state.
     pub fn new() -> Self {
-        Self {
-            entries: BTreeMap::new(),
-            starts: BTreeMap::new(),
-        }
+        Self { facts: None }
     }
 
-    /// Absorbs one fact. Insertion order does not matter (keyed inserts into
-    /// maps commute), which is what makes the enclosing fold commutative.
+    /// Absorbs one fact. Insertion order does not matter because readers
+    /// materialize under keyed map inserts, matching the original ACI state.
     pub fn absorb(&mut self, fact: SpliceFact<T>) {
-        match fact {
-            SpliceFact::Entry { epoch, slot, value } => {
-                self.entries.entry(epoch).or_default().insert(slot, value);
+        self.facts = Some(Arc::new(FactNode {
+            fact,
+            previous: self.facts.take(),
+        }));
+    }
+
+    fn materialize(&self) -> (BTreeMap<u64, BTreeMap<usize, &T>>, BTreeMap<u64, usize>) {
+        let mut entries = BTreeMap::<u64, BTreeMap<usize, &T>>::new();
+        let mut starts = BTreeMap::new();
+        let mut cursor = self.facts.as_deref();
+        while let Some(node) = cursor {
+            match &node.fact {
+                SpliceFact::Entry { epoch, slot, value } => {
+                    entries.entry(*epoch).or_default().insert(*slot, value);
+                }
+                SpliceFact::Start { epoch, start_slot } => {
+                    starts.insert(*epoch, *start_slot);
+                }
             }
-            SpliceFact::Start { epoch, start_slot } => {
-                self.starts.insert(epoch, start_slot);
-            }
+            cursor = node.previous.as_deref();
         }
+        (entries, starts)
     }
 
     /// The owning epoch of a slot: the largest declared epoch whose start is
     /// at or before the slot. `None` if no declared epoch covers it.
     pub fn owner(&self, slot: usize) -> Option<u64> {
-        self.starts
+        let (_, starts) = self.materialize();
+        starts
             .iter()
             .filter(|(_, start)| **start <= slot)
             .map(|(epoch, _)| *epoch)
@@ -108,15 +146,21 @@ impl<T> SpliceState<T> {
     /// Deterministic on the state. **Non-monotone** under truncation: a newly
     /// declared epoch may retract a dead tail (see module docs).
     pub fn splice(&self) -> Vec<&T> {
+        let (entries, starts) = self.materialize();
         let mut log = Vec::new();
         for slot in 0.. {
-            let Some(owner) = self.owner(slot) else {
+            let Some(owner) = starts
+                .iter()
+                .filter(|(_, start)| **start <= slot)
+                .map(|(epoch, _)| *epoch)
+                .next_back()
+            else {
                 break;
             };
-            let Some(value) = self.entries.get(&owner).and_then(|m| m.get(&slot)) else {
+            let Some(value) = entries.get(&owner).and_then(|m| m.get(&slot)) else {
                 break;
             };
-            log.push(value);
+            log.push(*value);
         }
         log
     }
@@ -131,7 +175,13 @@ impl<T> SpliceState<T> {
 /// `SpliceState` converges, and [`SpliceState::splice`] is deterministic on
 /// it, so every member derives the same log.
 pub fn splice_epoch_log<'a, T, L>(
-    facts: Stream<SpliceFact<T>, Cluster<'a, L, EventualConsistency>, Unbounded, NoOrder, ExactlyOnce>,
+    facts: Stream<
+        SpliceFact<T>,
+        Cluster<'a, L, EventualConsistency>,
+        Unbounded,
+        NoOrder,
+        ExactlyOnce,
+    >,
 ) -> Singleton<SpliceState<T>, Cluster<'a, L, EventualConsistency>, Unbounded>
 where
     T: Clone + Serialize + DeserializeOwned + 'a,
@@ -139,13 +189,17 @@ where
 {
     facts.fold(
         q!(|| SpliceState::new()),
-        q!(|state, fact| { state.absorb(fact); },
-           commutative = manual_proof!(
-               /// `absorb` performs keyed inserts into maps: entries are keyed
-               /// by (epoch, slot), starts by epoch, and each key is written
-               /// by a single author (its epoch), so inserts across distinct
-               /// facts commute.
-           )),
+        q!(
+            |state, fact| {
+                state.absorb(fact);
+            },
+            commutative = manual_proof!(
+                /// `absorb` performs keyed inserts into maps: entries are keyed
+                /// by (epoch, slot), starts by epoch, and each key is written
+                /// by a single author (its epoch), so inserts across distinct
+                /// facts commute.
+            )
+        ),
     )
 }
 
@@ -176,7 +230,12 @@ mod tests {
     /// Single epoch = the base case: the splice is that epoch's dense prefix.
     #[test]
     fn single_epoch_is_dense_prefix() {
-        let s = state_of([start(0, 0), entry(0, 0, 10), entry(0, 1, 11), entry(0, 3, 13)]);
+        let s = state_of([
+            start(0, 0),
+            entry(0, 0, 10),
+            entry(0, 1, 11),
+            entry(0, 3, 13),
+        ]);
         // Stalls at the gap (slot 2), exactly like dense-prefix extraction.
         assert_eq!(s.splice(), vec![&10, &11]);
     }
@@ -304,11 +363,29 @@ mod tests {
             .skip_consistency_assertions()
             .with_cluster_size(&cluster, 2)
             .exhaustive(async || {
-                in_send.send(SpliceFact::Start { epoch: 0, start_slot: 0 });
-                in_send.send(SpliceFact::Entry { epoch: 0, slot: 0, value: 10 });
-                in_send.send(SpliceFact::Entry { epoch: 0, slot: 1, value: 11 }); // dies
-                in_send.send(SpliceFact::Start { epoch: 1, start_slot: 1 });
-                in_send.send(SpliceFact::Entry { epoch: 1, slot: 1, value: 21 });
+                in_send.send(SpliceFact::Start {
+                    epoch: 0,
+                    start_slot: 0,
+                });
+                in_send.send(SpliceFact::Entry {
+                    epoch: 0,
+                    slot: 0,
+                    value: 10,
+                });
+                in_send.send(SpliceFact::Entry {
+                    epoch: 0,
+                    slot: 1,
+                    value: 11,
+                }); // dies
+                in_send.send(SpliceFact::Start {
+                    epoch: 1,
+                    start_slot: 1,
+                });
+                in_send.send(SpliceFact::Entry {
+                    epoch: 1,
+                    slot: 1,
+                    value: 21,
+                });
 
                 for member in 0..2u32 {
                     let facts: Vec<SpliceFact<u32>> = out_recv.collect_n_sorted(member, 5).await;

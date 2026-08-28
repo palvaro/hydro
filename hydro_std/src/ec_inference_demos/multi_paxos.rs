@@ -118,16 +118,20 @@ use super::epoch_splice::{SpliceFact, SpliceState, splice_epoch_log};
 use super::quorum::{SlotMap, Ts, covering_quorum_slotted, quorum};
 
 /// Responses from acceptors to proposers (the acceptor's identity rides on
-/// the channel keying, as in synod).
+/// the channel keying, as in synod). Public because staged (`q!`) code is
+/// compiled outside this module in deploy mode; not part of the API.
+#[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-enum ToProposer<V> {
+pub enum ToProposer<V> {
     /// Phase-1 promise: the full per-slot accepted map.
-    Promise {
-        b: Ts,
-        accepted: SlotMap<Option<V>>,
-    },
+    Promise { b: Ts, accepted: SlotMap<Option<V>> },
     /// Phase-2 ack for one slot.
-    Accepted { b: Ts, slot: usize },
+    Accepted {
+        b: Ts,
+        start: usize,
+        slot: usize,
+        value: Option<V>,
+    },
 }
 
 /// The new leader's plan for its epoch, computed once per covering: the
@@ -193,7 +197,13 @@ pub struct MultiPaxosOutputs<'a, P, LRN, V> {
     /// Chosen decrees observed at each proposer (its own ballots' mints plus
     /// everyone's via the proposer-side learning broadcast) — indexical,
     /// correctly un-EC.
-    pub chosen: Stream<(u64, usize, usize, Option<V>), Cluster<'a, P>, Unbounded, NoOrder, ExactlyOnce>,
+    pub chosen:
+        Stream<(u64, usize, usize, Option<V>), Cluster<'a, P>, Unbounded, NoOrder, ExactlyOnce>,
+    /// Epoch establishments at each proposer (its own coverings firing):
+    /// `(round, next_free_slot)`. A fact the leader kernel already computes,
+    /// published for liveness shells (wide-interface lesson, ladder doc §3b);
+    /// no consumer inside the core.
+    pub established: Stream<(u64, usize), Cluster<'a, P>, Unbounded, NoOrder, ExactlyOnce>,
 }
 
 /// Multi-decree consensus over a static acceptor cluster, with uniform
@@ -273,9 +283,12 @@ where
 
     // Phase-2 accepts close a cycle (they depend on promises, which depend on
     // the acceptor): forward_ref at the acceptor location, synod-style.
-    let (accepts_handle, accepts_fwd) = prepares
-        .location()
-        .forward_ref::<Stream<(MemberId<P>, (Ts, usize, Option<V>)), _, Unbounded, NoOrder>>();
+    let (accepts_handle, accepts_fwd) = prepares.location().forward_ref::<Stream<
+        (MemberId<P>, (Ts, usize, usize, Option<V>)),
+        _,
+        Unbounded,
+        NoOrder,
+    >>();
 
     // ---- The acceptor: synod's refusal kernel, with a per-slot map ---------
     // Order-sensitive by design (refusal does not commute): one slice,
@@ -296,97 +309,81 @@ where
             /// Arrival timing of accepts, same argument.
         ));
 
-        // Accepts, checked against tick-start max_promised.
-        let acc_checked = accept_batch.cross_singleton(max_promised.clone());
+        let tick = accept_batch.location().clone();
 
-        let acks = acc_checked.clone().filter_map(q!(
-            |((proposer, (b, slot, _v)), mp): ((_, (Ts, usize, _)), Option<Ts>)| {
-                if mp.as_ref().map(|m| b >= *m).unwrap_or(true) {
-                    Some((proposer, ToProposer::Accepted { b, slot }))
-                } else {
-                    None
-                }
-            }
-        ));
-
-        // Fold passing accepts into the per-slot accepted register (max by
-        // ballot per slot; no slot ever regresses).
-        let batch_accepted = acc_checked
-            .filter_map(q!(|((_proposer, (b, slot, v)), mp): ((_, (Ts, usize, _)), Option<Ts>)| {
-                if mp.as_ref().map(|m| b >= *m).unwrap_or(true) {
-                    Some((slot, (b, v)))
-                } else {
-                    None
-                }
-            }))
-            .fold(
-                q!(|| BTreeMap::new()),
-                q!(|acc: &mut BTreeMap<usize, (Ts, _)>, (slot, (b, v))| {
-                    let dominated = acc.get(&slot).map(|(a, _)| *a < b).unwrap_or(true);
-                    if dominated {
-                        acc.insert(slot, (b, v));
-                    }
-                }, commutative = manual_proof!(
-                    /** per-slot max by the total ballot order is commutative:
-                    writer ids make cross-proposer ties impossible, rounds are
-                    globally distinct (caller contract), and one value is
-                    proposed per (ballot, slot). */
-                )),
-            );
-
-        let new_accepted = accepted.zip(batch_accepted).map(q!(
-            |(mut old, batch): (BTreeMap<usize, (Ts, _)>, BTreeMap<usize, (Ts, _)>)| {
-                for (slot, (b, v)) in batch {
-                    let dominated = old.get(&slot).map(|(a, _)| *a < b).unwrap_or(true);
-                    if dominated {
-                        old.insert(slot, (b, v));
-                    }
-                }
-                old
-            }
-        ));
-        accepted = new_accepted.clone();
-
-        // Promises: checked against tick-start max_promised, reporting the
-        // post-batch accepted map (reporting MORE accepted history than a
-        // strict serialization is always safe — adopt-highest only becomes
-        // more conservative).
-        let proms = prepare_batch
-            .clone()
-            .cross_singleton(max_promised.clone())
-            .cross_singleton(new_accepted)
-            .filter_map(q!(
-                |(((proposer, b), mp), acc): (((_, Ts), Option<Ts>), BTreeMap<usize, (Ts, _)>)| {
-                    if mp.as_ref().map(|m| b > *m).unwrap_or(true) {
-                        Some((proposer, ToProposer::Promise {
-                            b,
-                            accepted: acc.into_iter().collect(),
-                        }))
-                    } else {
-                        None
-                    }
-                }
-            ));
-
-        // The commitment: max_promised advances by this batch's prepares and
-        // refuses lower ballots — at every slot — forever after.
-        let batch_max_prepare = prepare_batch.map(q!(|(_p, b)| b)).fold(
-            q!(|| None),
-            q!(|acc: &mut Option<Ts>, b| {
-                if acc.as_ref().map(|a| *a < b).unwrap_or(true) {
-                    *acc = Some(b);
-                }
-            }, commutative = manual_proof!(/** max is commutative (total order) */)),
+        // Materialize each unordered input batch once. The sequential step
+        // below is insensitive to the Vec order: accepts update a per-slot
+        // max register and responses are NoOrder; prepares are independently
+        // checked against the same snapshot and contribute only their max.
+        let accept_vec = accept_batch.fold(
+            q!(|| Vec::new()),
+            q!(|items, item| items.push(item), commutative = manual_proof!(
+                /** the consumer is order-insensitive: it computes per-slot
+                maxima and emits a NoOrder response bag */
+            )),
         );
-        max_promised = max_promised.zip(batch_max_prepare).map(q!(|(old, batch)| {
-            match (old, batch) {
-                (None, b) => b,
-                (a, None) => a,
-                (Some(a), Some(b)) => Some(if a >= b { a } else { b }),
-            }
-        }));
+        let prepare_vec = prepare_batch.fold(
+            q!(|| Vec::new()),
+            q!(|items, item| items.push(item), commutative = manual_proof!(
+                /** the consumer is order-insensitive: every prepare is checked
+                against one snapshot and the persistent update takes max */
+            )),
+        );
 
-        acks.chain(proms)
+        let max_promised_ref = max_promised.by_mut();
+        let accepted_ref = accepted.by_mut();
+        let accept_vec_ref = accept_vec.by_ref();
+        let prepare_vec_ref = prepare_vec.by_ref();
+
+        // One staged closure owns the entire acceptor transition. Growing
+        // state is mutated in place rather than moved through and cloned by
+        // the graph on every tick.
+        tick.singleton(q!(()))
+            .into_stream()
+            .flat_map_unordered(q!(move |_| {
+                let mp0 = max_promised_ref.clone();
+                let mut responses = Vec::new();
+
+                // Accepts are checked against tick-start max_promised and
+                // folded into the post-batch accepted map.
+                for (proposer, (b, start, slot, v)) in accept_vec_ref.iter().cloned() {
+                    if mp0.as_ref().map(|m| b >= *m).unwrap_or(true) {
+                        let dominated = accepted_ref
+                            .get(&slot)
+                            .map(|(a, _)| *a < b)
+                            .unwrap_or(true);
+                        if dominated {
+                            accepted_ref.insert(slot, (b.clone(), v.clone()));
+                        }
+                        responses.push((
+                            proposer,
+                            ToProposer::Accepted {
+                                b,
+                                start,
+                                slot,
+                                value: v,
+                            },
+                        ));
+                    }
+                }
+
+                // Promises use the same tick-start fence but report the
+                // post-accept map. The map clone is intentionally per
+                // successful prepare (rare), never per ordinary tick tee.
+                for (proposer, b) in prepare_vec_ref.iter().cloned() {
+                    if mp0.as_ref().map(|m| b > *m).unwrap_or(true) {
+                        responses.push((proposer, ToProposer::Promise {
+                            b: b.clone(),
+                            accepted: accepted_ref.clone().into_iter().collect(),
+                        }));
+                    }
+                    if max_promised_ref.as_ref().map(|m| b > *m).unwrap_or(true) {
+                        *max_promised_ref = Some(b);
+                    }
+                }
+
+                responses
+            }))
     };
 
     // Route responses back to their proposers.
@@ -395,19 +392,26 @@ where
         .demux(&proposer_cluster, TCP.fail_stop().bincode())
         .entries(); // (acceptor, ToProposer) at each proposer
 
-    let promises = from_acceptors.clone().filter_map(q!(|(acceptor, msg)| match msg {
-        ToProposer::Promise { b, accepted } => Some((b, (acceptor, accepted))),
-        _ => None,
-    }));
+    let promises = from_acceptors
+        .clone()
+        .filter_map(q!(|(acceptor, msg)| match msg {
+            ToProposer::Promise { b, accepted } => Some((b, (acceptor, accepted))),
+            _ => None,
+        }));
 
     let accepted_acks = from_acceptors.filter_map(q!(|(acceptor, msg)| match msg {
-        ToProposer::Accepted { b, slot } => Some(((b, slot), acceptor)),
+        ToProposer::Accepted {
+            b,
+            start,
+            slot,
+            value,
+        } => Some(((b, start, slot, value), acceptor)),
         _ => None,
     }));
 
     // ---- Phase 1 in: the slotted covering certificate ----------------------
-    let covered = covering_quorum_slotted(majority, promises)
-        .map(q!(|(b, cov)| (b, cov.into_aggregate())));
+    let covered =
+        covering_quorum_slotted(majority, promises).map(q!(|(b, cov)| (b, cov.into_aggregate())));
 
     let covered = if adopt_highest {
         covered
@@ -427,8 +431,9 @@ where
     // ---- The leader kernel: establishment + sequencing ---------------------
     // The one authored slice at the proposer (finalizing: slot assignment and
     // start declaration are sealed one-shot choices — leader_merge's seam,
-    // epoch-scoped). Everything it emits is a proposal (b, start, slot, value).
-    let proposed = sliced! {
+    // epoch-scoped). Everything it emits is a proposal (b, start, slot, value),
+    // plus establishment events for liveness shells.
+    let (proposed, established) = sliced! {
         let cov_batch = use::batch(covered, nondet!(
             /// Establishment timing: which tick the covering certificate is
             /// acted on. Any covering is valid (mint), and the learned-prefix
@@ -447,101 +452,111 @@ where
         ));
 
         let mut cur = use::state(|l| l.singleton(q!(None)));
-        let mut learned = use::state(|l| l.singleton(q!(BTreeSet::new())));
-        let mut pending = use::state_null::<Stream<V, _, Bounded, TotalOrder>>();
+        // Keep only learned slots beyond the dense prefix. Advancing the
+        // prefix incrementally avoids rescanning the entire chosen history on
+        // every hot-path tick.
+        let mut learned = use::state(|l| l.singleton(q!((BTreeSet::new(), 0usize))));
+        let mut pending = use::state(|l| l.singleton(q!(Vec::new())));
 
-        // Accumulate learned chosen slots (monotone set union).
-        let batch_learned = learned_batch.fold(
-            q!(|| BTreeSet::new()),
-            q!(|set: &mut BTreeSet<usize>, slot| {
-                set.insert(slot);
-            }, commutative = manual_proof!(/** set insert is commutative */)),
+        let tick = cmd_batch.location().clone();
+
+        // Materialize this tick's inputs. Coverings and learned slots arrive
+        // unordered, but their consumers are order-insensitive; commands keep
+        // their authored TotalOrder.
+        let cov_vec = cov_batch.fold(
+            q!(|| Vec::new()),
+            q!(|items, item| items.push(item), commutative = manual_proof!(
+                /** the consumer is order-insensitive: every covering emits its
+                recovery bag, while current epoch selection takes ballot max */
+            )),
         );
-        let new_learned = learned.zip(batch_learned).map(q!(
-            |(mut old, batch): (BTreeSet<usize>, BTreeSet<usize>)| {
-                old.extend(batch);
-                old
-            }
-        ));
-        learned = new_learned.clone();
+        let cmd_vec = cmd_batch.fold(
+            q!(|| Vec::new()),
+            q!(|items, item| items.push(item)),
+        );
+        let learned_vec = learned_batch.fold(
+            q!(|| Vec::new()),
+            q!(|items, item| items.push(item), commutative = manual_proof!(
+                /** the consumer is order-insensitive: inserting learned slots
+                into a set depends only on the batch set */
+            )),
+        );
 
-        // Epoch plans for this batch's coverings (normally at most one:
-        // one-outstanding-lead contract).
-        let est = cov_batch.cross_singleton(new_learned).map(q!(
-            |((b, adopted), learned): ((Ts, BTreeMap<usize, (Ts, _)>), BTreeSet<usize>)| {
-                let prefix = (0usize..).take_while(|s| learned.contains(s)).count();
-                (b, EpochPlan::new(adopted, prefix))
-            }
-        ));
+        let cur_ref = cur.by_mut();
+        let learned_ref = learned.by_mut();
+        let pending_ref = pending.by_mut();
+        let cov_vec_ref = cov_vec.by_ref();
+        let cmd_vec_ref = cmd_vec.by_ref();
+        let learned_vec_ref = learned_vec.by_ref();
 
-        // Recovery proposals: adopt-highest + no-op holes, at [start, next).
-        let recovery = est.clone().flat_map_unordered(q!(|(b, plan): (Ts, EpochPlan<_>)| {
-            let start = plan.start;
-            plan.recovery
-                .into_iter()
-                .map(move |(slot, v)| (b.clone(), start, slot, v))
-        }));
+        // Side-channel establishment events, populated by the one sequential
+        // closure along with its proposal return value.
+        let established: Stream<(u64, usize), _, Bounded> =
+            tick.source_iter(q!(Vec::new()));
+        let established_ref = established.by_mut();
 
-        // The member's current epoch: max-by-ballot across establishments.
-        let est_max = est
-            .map(q!(|(b, plan): (Ts, EpochPlan<_>)| (b, plan.start, plan.next)))
-            .fold(
-                q!(|| None),
-                q!(|acc: &mut Option<(Ts, usize, usize)>, (b, start, next)| {
-                    if acc.as_ref().map(|(a, _, _)| *a < b).unwrap_or(true) {
-                        *acc = Some((b, start, next));
+        // Apply coverings before sequencing this tick's commands. All growing
+        // state is mutated in place rather than cloned through graph tees.
+        let proposed = tick
+            .singleton(q!(()))
+            .into_stream()
+            .flat_map_unordered(q!(move |_| {
+                for slot in learned_vec_ref.iter().copied() {
+                    if slot >= learned_ref.1 {
+                        learned_ref.0.insert(slot);
                     }
-                }, commutative = manual_proof!(
-                    /** max by the total ballot order; rounds are globally
-                    distinct (caller contract), so no ties. */
-                )),
-            );
+                }
+                while learned_ref.0.remove(&learned_ref.1) {
+                    learned_ref.1 += 1;
+                }
+                let prefix = learned_ref.1;
 
-        let new_cur = cur.zip(est_max).map(q!(|(old, batch)| match (old, batch) {
-            (None, b) => b,
-            (a, None) => a,
-            (Some(a), Some(b)) => Some(if a.0 >= b.0 { a } else { b }),
-        }));
+                let mut proposals = Vec::new();
+                for (b, adopted) in cov_vec_ref.iter().cloned() {
+                    let plan = EpochPlan::new(adopted, prefix);
+                    established_ref.push((b.round, plan.next));
+                    for (slot, value) in plan.recovery {
+                        proposals.push((b.clone(), plan.start, slot, value));
+                    }
+                    let candidate = (b, plan.start, plan.next);
+                    if cur_ref
+                        .as_ref()
+                        .map(|(current, _, _)| *current < candidate.0)
+                        .unwrap_or(true)
+                    {
+                        *cur_ref = Some(candidate);
+                    }
+                }
 
-        // Sequence commands under the current epoch; queue if none yet.
-        let cmds = pending.chain(cmd_batch);
-        let n_cmds = cmds.clone().count();
-        let indexed = cmds.enumerate();
+                pending_ref.extend(cmd_vec_ref.iter().cloned());
+                if let Some((b, start, next)) = cur_ref.as_mut() {
+                    for value in pending_ref.drain(..) {
+                        proposals.push((b.clone(), *start, *next, Some(value)));
+                        *next += 1;
+                    }
+                }
 
-        let assigned = indexed.clone().cross_singleton(new_cur.clone()).filter_map(q!(
-            |((i, v), cur): ((usize, _), Option<(Ts, usize, usize)>)| {
-                cur.map(|(b, start, next)| (b, start, next + i, Some(v)))
-            }
-        ));
+                proposals
+            }));
 
-        pending = indexed.cross_singleton(new_cur.clone()).filter_map(q!(
-            |((_i, v), cur): ((usize, _), Option<(Ts, usize, usize)>)| {
-                if cur.is_none() { Some(v) } else { None }
-            }
-        ));
-
-        cur = new_cur.zip(n_cmds).map(q!(|(c, n): (Option<(Ts, usize, usize)>, usize)| {
-            c.map(|(b, start, next)| (b, start, next + n))
-        }));
-
-        recovery.chain(assigned.weaken_ordering::<NoOrder>())
+        (proposed, established.weaken_ordering::<NoOrder>())
     };
 
     // ---- Phase 2 out: accepts to every acceptor, closing the cycle ---------
     let accepts = proposed
         .clone()
-        .map(q!(|(b, _start, slot, v)| (b, slot, v)))
+        .map(q!(|(b, start, slot, v)| (b, start, slot, v)))
         .broadcast_closed(acceptors, TCP.fail_stop().bincode())
         .entries();
     accepts_handle.complete(accepts);
 
-    // ---- Chosen: a Durable certificate per (ballot, slot) -------------------
-    let certified = quorum(majority, accepted_acks).map(q!(|cert| cert.into_fact()));
-
-    let chosen = certified
-        .map(q!(|bs| (bs, ())))
-        .join(proposed.map(q!(|(b, start, slot, v)| ((b, slot), (start, v)))))
-        .map(q!(|((b, slot), ((), (start, v)))| (b.round, start, slot, v)))
+    // ---- Chosen: a Durable certificate carries the proposal payload --------
+    // All acceptors echo the exact accepted tuple, so a quorum certificate can
+    // emit the chosen decree directly without retaining every proposal in an
+    // unbounded join index.
+    let chosen = quorum(majority, accepted_acks)
+        .map(q!(|cert| cert.into_fact()))
+        .map(q!(|(b, start, slot, v)| (b.round, start, slot, v)))
         .weaken_ordering::<NoOrder>();
 
     // ---- Learning, leg 1: proposers' learned prefixes ----------------------
@@ -566,9 +581,10 @@ where
         .clone()
         .broadcast_closed(learners, TCP.fail_stop().bincode())
         .values();
-    let (echo_handle, echo_fwd) = initial
-        .location()
-        .forward_ref::<Stream<(u64, usize, usize, Option<V>), _, Unbounded, NoOrder>>();
+    let (echo_handle, echo_fwd) =
+        initial
+            .location()
+            .forward_ref::<Stream<(u64, usize, usize, Option<V>), _, Unbounded, NoOrder>>();
     let learned = initial.merge_unordered(echo_fwd).unique();
     let echo = learned
         .clone()
@@ -587,12 +603,17 @@ where
         Unbounded,
         NoOrder,
         ExactlyOnce,
-    > = learned.clone().flat_map_unordered(q!(|(epoch, start, slot, value)| {
-        [
-            SpliceFact::Start { epoch, start_slot: start },
-            SpliceFact::Entry { epoch, slot, value },
-        ]
-    }));
+    > = learned
+        .clone()
+        .flat_map_unordered(q!(|(epoch, start, slot, value)| {
+            [
+                SpliceFact::Start {
+                    epoch,
+                    start_slot: start,
+                },
+                SpliceFact::Entry { epoch, slot, value },
+            ]
+        }));
 
     let log: Singleton<SpliceState<Option<V>>, Cluster<'a, LRN, EventualConsistency>, Unbounded> =
         splice_epoch_log(facts);
@@ -601,6 +622,7 @@ where
         learned,
         log,
         chosen,
+        established,
     }
 }
 
@@ -634,7 +656,14 @@ mod tests {
     #[test]
     fn plan_fresh_log() {
         let plan = EpochPlan::<u32>::new(BTreeMap::new(), 0);
-        assert_eq!(plan, EpochPlan { start: 0, recovery: vec![], next: 0 });
+        assert_eq!(
+            plan,
+            EpochPlan {
+                start: 0,
+                recovery: vec![],
+                next: 0
+            }
+        );
     }
 
     /// Adopt-highest: covering slots at or beyond the learned prefix are
@@ -659,10 +688,7 @@ mod tests {
     fn plan_fills_holes_with_noops() {
         let adopted = BTreeMap::from([(0, (ts(1), Some(10u32))), (2, (ts(1), Some(12)))]);
         let plan = EpochPlan::new(adopted, 0);
-        assert_eq!(
-            plan.recovery,
-            vec![(0, Some(10)), (1, None), (2, Some(12))]
-        );
+        assert_eq!(plan.recovery, vec![(0, Some(10)), (1, None), (2, Some(12))]);
         assert_eq!(plan.next, 3);
     }
 
@@ -672,7 +698,14 @@ mod tests {
     fn plan_prefix_beyond_covering() {
         let adopted = BTreeMap::from([(0, (ts(1), Some(10u32)))]);
         let plan = EpochPlan::new(adopted, 2);
-        assert_eq!(plan, EpochPlan { start: 2, recovery: vec![], next: 2 });
+        assert_eq!(
+            plan,
+            EpochPlan {
+                start: 2,
+                recovery: vec![],
+                next: 2
+            }
+        );
     }
 
     /// An adopted no-op is re-proposed as a no-op (it is a value, not a hole
@@ -693,8 +726,15 @@ mod tests {
     fn splice_of(tuples: &[(u64, usize, usize, Option<u32>)]) -> Vec<u32> {
         let mut state = SpliceState::new();
         for (epoch, start, slot, v) in tuples {
-            state.absorb(SpliceFact::Start { epoch: *epoch, start_slot: *start });
-            state.absorb(SpliceFact::Entry { epoch: *epoch, slot: *slot, value: *v });
+            state.absorb(SpliceFact::Start {
+                epoch: *epoch,
+                start_slot: *start,
+            });
+            state.absorb(SpliceFact::Entry {
+                epoch: *epoch,
+                slot: *slot,
+                value: *v,
+            });
         }
         state.splice().into_iter().filter_map(|v| *v).collect()
     }
@@ -706,7 +746,10 @@ mod tests {
         for (_epoch, _start, slot, v) in tuples {
             per_slot.entry(*slot).or_default().insert(*v);
         }
-        per_slot.into_iter().find(|(_, vs)| vs.len() > 1).map(|(s, _)| s)
+        per_slot
+            .into_iter()
+            .find(|(_, vs)| vs.len() > 1)
+            .map(|(s, _)| s)
     }
 
     // ---- Sim tests -----------------------------------------------------------
@@ -914,8 +957,9 @@ mod tests {
         let (lead_send, leads) = proposers.sim_input::<u64, TotalOrder, ExactlyOnce>();
         let (cmd_send, commands) = proposers.sim_input::<u32, TotalOrder, ExactlyOnce>();
 
-        let outs =
-            multi_paxos_without_adoption_for_refutation(&acceptors, &learners, MAJORITY, leads, commands);
+        let outs = multi_paxos_without_adoption_for_refutation(
+            &acceptors, &learners, MAJORITY, leads, commands,
+        );
         let learned_recv = outs.learned.sim_cluster_output();
 
         let mut saw_divergence = false;

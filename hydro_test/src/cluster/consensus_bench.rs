@@ -144,6 +144,107 @@ pub fn raft_bench<'a>(
     pretty_print_bench_results(aggregate_results);
 }
 
+/// Benchmarks the quorum ladder's multi-decree consensus
+/// ([`multi_paxos_live`](hydro_std::ec_inference_demos::multi_paxos_live::multi_paxos_live))
+/// using `bench_client`.
+///
+/// Mirrors [`raft_bench`] exactly so the two are directly comparable: same
+/// client workload, same routing (requests to member 0, the pinned leader —
+/// only member 0's election timer fires fast, so it self-elects once and
+/// then runs phase-2-only appends), same cluster size, colocated roles.
+/// Protocol-intrinsic differences: no heartbeat timer at all (elections are
+/// stall-triggered, so a progressing leader never re-elects), and learning
+/// continues asynchronously as an O(n²) echo among learners (like
+/// broadcast-transcript, unlike Raft's O(n)). Responses are routed from member
+/// 0's leader-local `chosen` certificate, matching Raft's leader-local majority
+/// commit point instead of charging Paxos for replica dissemination. A
+/// `unique()` dedup still ensures exactly one response per request because the
+/// wrapper's redo queue may legitimately place a value at multiple slots.
+#[cfg(feature = "tokio")]
+pub fn multi_paxos_bench<'a>(
+    clients: &Cluster<'a, BenchClient>,
+    num_clients_per_node: Singleton<usize, Cluster<'a, BenchClient>, Bounded>,
+    client_aggregator: &Process<'a, BenchAggregator>,
+    replicas: &Cluster<'a, Replica>,
+    cluster_size: usize,
+    client_interval_millis: u64,
+    aggregate_interval_millis: u64,
+) {
+    use hydro_std::ec_inference_demos::multi_paxos_live::multi_paxos_live;
+
+    // Election timer: only member 0 fires. A two-second period is long enough
+    // that a saturated but progressing leader is not mistaken for a stalled
+    // one by the wrapper's timeout-to-timeout progress check.
+    let election_timeouts = replicas.source_interval(q!(std::time::Duration::from_millis(
+        if CLUSTER_SELF_ID.get_raw_id() == 0 {
+            2_000
+        } else {
+            60_000
+        }
+    )));
+
+    let latencies = bench_client(
+        clients,
+        num_clients_per_node,
+        inc_i32_workload_generator,
+        |input| {
+            // Tag requests with the originating client member's raw id (the
+            // wrapper's redo queue needs `V: Ord`, which `MemberId` does not
+            // provide) and route everything to the pinned leader.
+            let to_leader = input
+                .entries()
+                .map(q!(move |(virtual_id, payload)| {
+                    let leader: MemberId<Replica> = MemberId::from_raw_id(0);
+                    (leader, (CLUSTER_SELF_ID.get_raw_id(), virtual_id, payload))
+                }))
+                .into_keyed()
+                .demux(replicas, TCP.fail_stop().bincode());
+
+            let requests_on_replicas = to_leader.values();
+
+            let outs = multi_paxos_live(
+                replicas,
+                replicas,
+                cluster_size / 2 + 1,
+                cluster_size,
+                election_timeouts,
+                requests_on_replicas,
+            );
+
+            // Match Raft's completion semantics: respond from member 0 as
+            // soon as its local majority certificate marks the slot chosen.
+            // The learner EC broadcast/echo remains live in `outs.learned`,
+            // but replica dissemination is not part of client commit latency.
+            // Deduplicate because the redo queue may choose one request at
+            // multiple slots before observing its first completion.
+            outs.chosen
+                .filter_map(q!(|(_epoch, _start, _slot, v)| v))
+                .filter(q!(move |_| CLUSTER_SELF_ID.get_raw_id() == 0))
+                .unique()
+                .map(q!(|(client_raw, virtual_id, payload)| {
+                    let client: MemberId<BenchClient> = MemberId::from_raw_id(client_raw);
+                    (client, (virtual_id, payload))
+                }))
+                .into_keyed()
+                .demux(clients, TCP.fail_stop().bincode())
+                .values()
+                .into_keyed()
+        },
+    )
+    .entries()
+    .map(q!(|(_virtual_client_id, (_output, latency))| latency));
+
+    let bench_results = compute_throughput_latency(
+        clients,
+        latencies,
+        client_interval_millis,
+        nondet!(/** bench measurement window */),
+    );
+    let aggregate_results =
+        aggregate_bench_results(bench_results, client_aggregator, aggregate_interval_millis);
+    pretty_print_bench_results(aggregate_results);
+}
+
 /// Benchmarks the broadcast-transcript consensus protocol using `bench_client`.
 ///
 /// Mirrors [`raft_bench`] exactly so the two are directly comparable: same client
@@ -402,6 +503,26 @@ mod tests {
         use stageleft::q;
 
         super::broadcast_transcript_bench(
+            clients,
+            clients.singleton(q!(NUM_VIRTUAL_CLIENTS)),
+            client_aggregator,
+            replicas,
+            CLUSTER_SIZE,
+            CLIENT_INTERVAL_MILLIS,
+            AGGREGATE_INTERVAL_MILLIS,
+        );
+    }
+
+    #[cfg(stageleft_runtime)]
+    fn create_multi_paxos_bench<'a>(
+        clients: &hydro_lang::location::Cluster<'a, super::BenchClient>,
+        client_aggregator: &hydro_lang::location::Process<'a, super::BenchAggregator>,
+        replicas: &hydro_lang::location::Cluster<'a, super::Replica>,
+    ) {
+        use hydro_lang::location::Location;
+        use stageleft::q;
+
+        super::multi_paxos_bench(
             clients,
             clients.singleton(q!(NUM_VIRTUAL_CLIENTS)),
             client_aggregator,
@@ -891,6 +1012,59 @@ mod tests {
             }
         }
         report_throughput("Raft", &readings);
+    }
+
+    /// Same harness, workload, cluster size, and reporting as
+    /// [`raft_some_throughput`] — the apples-to-apples run for the quorum
+    /// ladder's multi-decree + liveness wrapper.
+    #[tokio::test]
+    async fn multi_paxos_some_throughput() {
+        let mut builder = hydro_lang::compile::builder::FlowBuilder::new();
+        let clients = builder.cluster();
+        let client_aggregator = builder.process();
+        let replicas = builder.cluster();
+
+        create_multi_paxos_bench(&clients, &client_aggregator, &replicas);
+
+        let mut deployment = Deployment::new();
+
+        let _nodes = builder
+            .with_cluster(&clients, vec![TrybuildHost::new(deployment.Localhost())])
+            .with_process(
+                &client_aggregator,
+                TrybuildHost::new(deployment.Localhost()),
+            )
+            .with_cluster(
+                &replicas,
+                (0..CLUSTER_SIZE).map(|_| TrybuildHost::new(deployment.Localhost())),
+            )
+            .deploy(&mut deployment);
+
+        deployment.deploy().await.unwrap();
+
+        let aggregator_node = &_nodes.get_process(&client_aggregator);
+        let client_out = aggregator_node.stdout_filter("Throughput:");
+
+        deployment.start().await.unwrap();
+
+        use std::str::FromStr;
+        use regex::Regex;
+
+        let re = Regex::new(r"Throughput: ([^ ]+) requests/s").unwrap();
+        let mut readings: Vec<f64> = Vec::new();
+        let mut client_out = client_out;
+        while let Some(line) = client_out.recv().await {
+            if let Some(caps) = re.captures(&line)
+                && let Ok(v) = f64::from_str(&caps[1])
+                && 0.0 < v
+            {
+                readings.push(v);
+                if readings.len() >= 15 {
+                    break;
+                }
+            }
+        }
+        report_throughput("Multi-Paxos (quorum ladder)", &readings);
     }
 
     #[tokio::test]

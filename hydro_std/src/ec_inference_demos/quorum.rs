@@ -57,7 +57,7 @@
 //!   "deserialize a forgery." A transportable certificate needs its own design
 //!   (attestor set + re-verification, or a trusted channel type).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
 
 use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, Retries};
@@ -139,36 +139,38 @@ where
             /// of batch boundaries (mint obligation 2 in the module docs).
         ));
 
-        // Attestations for facts that have not yet fired.
-        let mut pending = use::state_null::<Stream<(F, MemberId<L2>), _, Bounded, NoOrder>>();
-        // Facts that have already fired: nothing fires twice.
-        let mut fired = use::state_null::<Stream<F, _, Bounded, NoOrder>>();
-
-        let current = pending.chain(new_acks);
-
-        // Count distinct attestors per fact (inputs are globally deduplicated).
-        let count_per_fact = current.clone().into_keyed().fold(
-            q!(|| 0usize),
-            q!(|count, _attestor| {
-                *count += 1;
-            }, commutative = manual_proof!(/** counting is commutative */)),
+        let mut pending = use::state(|l| l.singleton(q!(HashMap::new())));
+        let mut fired = use::state(|l| l.singleton(q!(HashSet::new())));
+        let ack_vec = new_acks.fold(
+            q!(|| Vec::new()),
+            q!(|items, item| items.push(item), commutative = manual_proof!(
+                /** the consumer is order-insensitive: it inserts attestors into
+                per-fact sets and tests only their cardinalities */
+            )),
         );
+        let pending_ref = pending.by_mut();
+        let fired_ref = fired.by_mut();
+        let ack_vec_ref = ack_vec.by_ref();
+        let tick = ack_vec.location().clone();
 
-        let reached = count_per_fact
-            .filter(q!(move |count| *count >= threshold))
-            .keys();
-
-        // Fire each fact at most once, ever.
-        let newly_certified = reached.clone().filter_not_in(fired.clone());
-
-        // Persist: drop attestations for fired facts (their job is done, and
-        // late attestations must not re-accumulate toward a second firing);
-        // remember everything that ever fired.
-        pending = current.anti_join(reached);
-        fired = fired.chain(newly_certified.clone());
-
-        newly_certified
-            .map(q!(|fact| Durable::__mint_called_only_by_the_quorum_combinator(fact)))
+        tick.singleton(q!(()))
+            .into_stream()
+            .flat_map_unordered(q!(move |_| {
+                let mut newly = Vec::new();
+                for (fact, attestor) in ack_vec_ref.iter().cloned() {
+                    if fired_ref.contains(&fact) {
+                        continue;
+                    }
+                    let attestors = pending_ref.entry(fact.clone()).or_insert_with(HashSet::new);
+                    attestors.insert(attestor);
+                    if attestors.len() >= threshold {
+                        pending_ref.remove(&fact);
+                        fired_ref.insert(fact.clone());
+                        newly.push(Durable::__mint_called_only_by_the_quorum_combinator(fact));
+                    }
+                }
+                newly
+            }))
     };
 
     certified.assert_has_consistency_of(manual_proof!(
@@ -288,7 +290,10 @@ where
     };
 
     covered.map(q!(|(key, max)| {
-        (key, Covering::__mint_called_only_by_the_covering_combinator(max))
+        (
+            key,
+            Covering::__mint_called_only_by_the_covering_combinator(max),
+        )
     }))
 }
 
@@ -325,7 +330,13 @@ pub type SlotMap<X> = Vec<(usize, (Ts, X))>;
 pub fn covering_quorum_slotted<'a, K, X, L, L2, R>(
     threshold: usize,
     responses: Stream<(K, (MemberId<L2>, SlotMap<X>)), L, Unbounded, NoOrder, R>,
-) -> Stream<(K, Covering<BTreeMap<usize, (Ts, X)>>), L::DropConsistency, Unbounded, NoOrder, ExactlyOnce>
+) -> Stream<
+    (K, Covering<BTreeMap<usize, (Ts, X)>>),
+    L::DropConsistency,
+    Unbounded,
+    NoOrder,
+    ExactlyOnce,
+>
 where
     K: Clone + Eq + Hash + 'a,
     X: Clone + Eq + Hash + 'a,
@@ -380,7 +391,10 @@ where
     };
 
     covered.map(q!(|(key, map)| {
-        (key, Covering::__mint_called_only_by_the_covering_combinator(map))
+        (
+            key,
+            Covering::__mint_called_only_by_the_covering_combinator(map),
+        )
     }))
 }
 
@@ -401,12 +415,14 @@ mod tests {
         let mut flow = FlowBuilder::new();
         let cluster = flow.cluster::<()>();
 
-        let (ack_send, acks) =
-            cluster.sim_input::<(u32, MemberId<()>), NoOrder, ExactlyOnce>();
+        let (ack_send, acks) = cluster.sim_input::<(u32, MemberId<()>), NoOrder, ExactlyOnce>();
 
-        let out_recv = quorum(2, acks.assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
-            /// Test harness: the sim input plays an EC attestation stream.
-        )))
+        let out_recv = quorum(
+            2,
+            acks.assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+                /// Test harness: the sim input plays an EC attestation stream.
+            )),
+        )
         .map(q!(|cert| cert.into_fact()))
         .sim_cluster_output();
 
