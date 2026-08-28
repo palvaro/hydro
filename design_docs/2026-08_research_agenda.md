@@ -115,6 +115,7 @@ In dependency order; items 1–3 make the simplest dynamic examples sound, and t
 
 ## 5. Near-term direction
 
+- **Trust & complexity accounting** (`2026-08_trust_and_complexity_accounting.md`): the measurement framework for goals 1–2 themselves — per-seam antecedent/blast scopes, nondet observability classes, evidence grades, goal-attainment criteria, and trust mutation testing. Tier-0 census done; first full measurement pass (the three unread hydro_test consensus artifacts) is the next work item, and the M-check below is its Tier-2 oracle.
 - **The Tier-1 restructure** (§4 items 1 + 3, one piece of work): typed completeness premise in `hydro_lang`, the crash-honest EC mint attached to the replicate-cycle, `fan_out` demoted, `broadcast_closed`'s label made honest. Now motivated by a refutation rather than an argument, with the crash demos as its standing regression net.
 - **M-check: convergence-at-quiescence in the sim.** Replaces `skip_consistency_assertions` with an actual end-state equality check across live members — gives the remaining EC axioms an oracle, and gives crash tests the survivor-identification their positive counterparts need (e.g. RB's "any *correct* member" quantifier under echoing-member crashes).
 - **A real oracle substrate behind `live()`** (§4 item 2).
