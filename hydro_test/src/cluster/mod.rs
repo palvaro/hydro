@@ -3,9 +3,9 @@ pub mod broadcast_transcript_consensus;
 #[cfg(feature = "tokio")]
 pub mod compartmentalized_paxos;
 #[cfg(feature = "tokio")]
-pub mod consensus_bench;
-#[cfg(feature = "tokio")]
 pub mod compute_pi;
+#[cfg(feature = "tokio")]
+pub mod consensus_bench;
 pub mod kv_replica;
 pub mod many_to_many;
 pub mod map_reduce;

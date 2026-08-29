@@ -31,4 +31,3 @@ fn single_writer_broadcast_is_total_order_ec() {
 
     let _ = flow.finalize();
 }
-

@@ -160,10 +160,8 @@ impl SimBuilder {
             &format!("__hydro_crash_channels_{}", key),
             Span::call_site(),
         );
-        let budget_ident = syn::Ident::new(
-            &format!("__hydro_crash_budget_{}", key),
-            Span::call_site(),
-        );
+        let budget_ident =
+            syn::Ident::new(&format!("__hydro_crash_budget_{}", key), Span::call_site());
         let loc_ser = serde_json::to_string(from).unwrap();
 
         // One budget cell per fault domain, in the global scope (shared by all

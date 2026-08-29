@@ -168,8 +168,14 @@ impl<T: PartialEq, ClusterTag> PartialEq for TranscriptMsg<T, ClusterTag> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (
-                Self::Prepare { ballot: b1, from: f1 },
-                Self::Prepare { ballot: b2, from: f2 },
+                Self::Prepare {
+                    ballot: b1,
+                    from: f1,
+                },
+                Self::Prepare {
+                    ballot: b2,
+                    from: f2,
+                },
             ) => b1 == b2 && f1 == f2,
             (
                 Self::Promise {
@@ -388,7 +394,10 @@ impl<T: Clone + Eq, ClusterTag> DecisionState<T, ClusterTag> {
             TranscriptMsg::AcceptAck { ballot, slot, from } => {
                 // Insert sender into ack_sets[(slot, ballot)].
                 // HashSet::insert is naturally idempotent.
-                let ack_set = self.ack_sets.entry((slot, ballot)).or_insert_with(HashSet::new);
+                let ack_set = self
+                    .ack_sets
+                    .entry((slot, ballot))
+                    .or_insert_with(HashSet::new);
                 ack_set.insert(from);
 
                 // Check if quorum reached and slot not already committed.
@@ -724,10 +733,9 @@ impl<T: Clone + Eq, ClusterTag> MessageGenState<T, ClusterTag> {
                             let mut recovery_slots: HashMap<Slot, (Ballot, T)> = HashMap::new();
                             for p in promises.iter() {
                                 for (slot, accepted_ballot, value) in p.accepted.iter() {
-                                    let entry = recovery_slots.entry(*slot).or_insert((
-                                        *accepted_ballot,
-                                        value.clone(),
-                                    ));
+                                    let entry = recovery_slots
+                                        .entry(*slot)
+                                        .or_insert((*accepted_ballot, value.clone()));
                                     if *accepted_ballot > entry.0 {
                                         *entry = (*accepted_ballot, value.clone());
                                     }
@@ -1067,19 +1075,9 @@ where
     let (traffic_handle, traffic): (
         ForwardHandle<
             'a,
-            Stream<
-                TranscriptMsg<T, ClusterTag>,
-                Cluster<'a, ClusterTag>,
-                Unbounded,
-                NoOrder,
-            >,
+            Stream<TranscriptMsg<T, ClusterTag>, Cluster<'a, ClusterTag>, Unbounded, NoOrder>,
         >,
-        Stream<
-            TranscriptMsg<T, ClusterTag>,
-            Cluster<'a, ClusterTag>,
-            Unbounded,
-            NoOrder,
-        >,
+        Stream<TranscriptMsg<T, ClusterTag>, Cluster<'a, ClusterTag>, Unbounded, NoOrder>,
     ) = cluster.forward_ref();
 
     // The cluster membership list, resolved on each member at runtime.
@@ -1272,10 +1270,12 @@ where
     // Outbound messages are broadcast to all members via broadcast_closed.
     // TCP.fail_stop().bincode() earns EC on the output. This is the single
     // source of EC for the entire module.
-    let transcript_ec: Stream<TranscriptMsg<T, ClusterTag>, Cluster<'a, ClusterTag, EventualConsistency>, Unbounded, NoOrder> =
-        outbound_messages
-            .broadcast_closed(cluster, net())
-            .values();
+    let transcript_ec: Stream<
+        TranscriptMsg<T, ClusterTag>,
+        Cluster<'a, ClusterTag, EventualConsistency>,
+        Unbounded,
+        NoOrder,
+    > = outbound_messages.broadcast_closed(cluster, net()).values();
 
     // ─── Close the Forward-Ref Loop ──────────────────────────────────────
     //
@@ -1344,40 +1344,55 @@ mod tests {
     fn arb_transcript_msg() -> impl Strategy<Value = TranscriptMsg<String, TestCluster>> {
         prop::strategy::Union::new_weighted(vec![
             // Prepare: no-op for decision function but included for completeness (weight 1)
-            (1, (0..10usize, 0..5u32).prop_map(|(ballot, member)| {
-                TranscriptMsg::Prepare {
-                    ballot,
-                    from: test_member(member),
-                }
-            }).boxed()),
+            (
+                1,
+                (0..10usize, 0..5u32)
+                    .prop_map(|(ballot, member)| TranscriptMsg::Prepare {
+                        ballot,
+                        from: test_member(member),
+                    })
+                    .boxed(),
+            ),
             // Promise: no-op for decision function but included for completeness (weight 1)
-            (1, (0..10usize, 0..5u32, prop::collection::vec((0..5usize, 0..10usize, "[a-z]{1,3}"), 0..3))
-                .prop_map(|(ballot, member, accepted)| {
-                    TranscriptMsg::Promise {
+            (
+                1,
+                (
+                    0..10usize,
+                    0..5u32,
+                    prop::collection::vec((0..5usize, 0..10usize, "[a-z]{1,3}"), 0..3),
+                )
+                    .prop_map(|(ballot, member, accepted)| TranscriptMsg::Promise {
                         ballot,
                         from: test_member(member),
                         accepted: accepted
                             .into_iter()
                             .map(|(slot, bal, val)| (slot, bal, val))
                             .collect(),
-                    }
-                }).boxed()),
+                    })
+                    .boxed(),
+            ),
             // Accept: records accepted values per slot (weight 3)
-            (3, (0..10usize, 0..5usize, "[a-z]{1,3}").prop_map(|(ballot, slot, value)| {
-                TranscriptMsg::Accept {
-                    ballot,
-                    slot,
-                    value,
-                }
-            }).boxed()),
+            (
+                3,
+                (0..10usize, 0..5usize, "[a-z]{1,3}")
+                    .prop_map(|(ballot, slot, value)| TranscriptMsg::Accept {
+                        ballot,
+                        slot,
+                        value,
+                    })
+                    .boxed(),
+            ),
             // AcceptAck: triggers quorum counting and commits (weight 3)
-            (3, (0..10usize, 0..5usize, 0..5u32).prop_map(|(ballot, slot, member)| {
-                TranscriptMsg::AcceptAck {
-                    ballot,
-                    slot,
-                    from: test_member(member),
-                }
-            }).boxed()),
+            (
+                3,
+                (0..10usize, 0..5usize, 0..5u32)
+                    .prop_map(|(ballot, slot, member)| TranscriptMsg::AcceptAck {
+                        ballot,
+                        slot,
+                        from: test_member(member),
+                    })
+                    .boxed(),
+            ),
         ])
     }
 
@@ -1390,42 +1405,59 @@ mod tests {
     fn arb_valid_transcript_msg() -> impl Strategy<Value = TranscriptMsg<String, TestCluster>> {
         prop::strategy::Union::new_weighted(vec![
             // Prepare (weight 1)
-            (1, (0..10usize, 0..5u32).prop_map(|(ballot, member)| {
-                TranscriptMsg::Prepare {
-                    ballot,
-                    from: test_member(member),
-                }
-            }).boxed()),
+            (
+                1,
+                (0..10usize, 0..5u32)
+                    .prop_map(|(ballot, member)| TranscriptMsg::Prepare {
+                        ballot,
+                        from: test_member(member),
+                    })
+                    .boxed(),
+            ),
             // Promise (weight 1)
-            (1, (0..10usize, 0..5u32, prop::collection::vec((0..5usize, 0..10usize, "[a-z]{1,3}"), 0..3))
-                .prop_map(|(ballot, member, accepted)| {
-                    TranscriptMsg::Promise {
+            (
+                1,
+                (
+                    0..10usize,
+                    0..5u32,
+                    prop::collection::vec((0..5usize, 0..10usize, "[a-z]{1,3}"), 0..3),
+                )
+                    .prop_map(|(ballot, member, accepted)| TranscriptMsg::Promise {
                         ballot,
                         from: test_member(member),
                         accepted: accepted
                             .into_iter()
                             .map(|(slot, bal, val)| (slot, bal, val))
                             .collect(),
-                    }
-                }).boxed()),
+                    })
+                    .boxed(),
+            ),
             // Accept (weight 3): value derived deterministically from (slot, ballot)
             // to guarantee same (slot, ballot) always carries same value.
-            (3, (0..10usize, 0..5usize).prop_map(|(ballot, slot)| {
-                let value = format!("v{}_{}", slot, ballot);
-                TranscriptMsg::Accept {
-                    ballot,
-                    slot,
-                    value,
-                }
-            }).boxed()),
+            (
+                3,
+                (0..10usize, 0..5usize)
+                    .prop_map(|(ballot, slot)| {
+                        let value = format!("v{}_{}", slot, ballot);
+                        TranscriptMsg::Accept {
+                            ballot,
+                            slot,
+                            value,
+                        }
+                    })
+                    .boxed(),
+            ),
             // AcceptAck (weight 3)
-            (3, (0..10usize, 0..5usize, 0..5u32).prop_map(|(ballot, slot, member)| {
-                TranscriptMsg::AcceptAck {
-                    ballot,
-                    slot,
-                    from: test_member(member),
-                }
-            }).boxed()),
+            (
+                3,
+                (0..10usize, 0..5usize, 0..5u32)
+                    .prop_map(|(ballot, slot, member)| TranscriptMsg::AcceptAck {
+                        ballot,
+                        slot,
+                        from: test_member(member),
+                    })
+                    .boxed(),
+            ),
         ])
     }
 
@@ -1702,14 +1734,14 @@ mod tests {
         // We use up to 3 slots, each with its own ballot and value
         (
             prop::collection::vec(
-                (0..5usize, "[a-z]{1,3}"),  // (ballot, value) per slot
+                (0..5usize, "[a-z]{1,3}"), // (ballot, value) per slot
                 1..=3,
             ),
             // How many acks per slot (to sometimes exceed quorum)
             prop::collection::vec(0..=(cluster_size), 3),
             // Extra AcceptAck messages for different ballots (noise that respects invariants)
             prop::collection::vec(
-                (0..3usize, 5..10usize, 0..5u32),  // (slot, different_ballot, member)
+                (0..3usize, 5..10usize, 0..5u32), // (slot, different_ballot, member)
                 0..5,
             ),
         )
@@ -2709,30 +2741,54 @@ mod tests {
 
         // Commit slot 0.
         state.process(
-            TranscriptMsg::Accept { ballot: 1, slot: 0, value: "a".to_string() },
+            TranscriptMsg::Accept {
+                ballot: 1,
+                slot: 0,
+                value: "a".to_string(),
+            },
             quorum,
         );
         state.process(
-            TranscriptMsg::AcceptAck { ballot: 1, slot: 0, from: test_member(0) },
+            TranscriptMsg::AcceptAck {
+                ballot: 1,
+                slot: 0,
+                from: test_member(0),
+            },
             quorum,
         );
         state.process(
-            TranscriptMsg::AcceptAck { ballot: 1, slot: 0, from: test_member(1) },
+            TranscriptMsg::AcceptAck {
+                ballot: 1,
+                slot: 0,
+                from: test_member(1),
+            },
             quorum,
         );
         state.truncate(1);
 
         // Now commit slot 1.
         state.process(
-            TranscriptMsg::Accept { ballot: 1, slot: 1, value: "b".to_string() },
+            TranscriptMsg::Accept {
+                ballot: 1,
+                slot: 1,
+                value: "b".to_string(),
+            },
             quorum,
         );
         state.process(
-            TranscriptMsg::AcceptAck { ballot: 1, slot: 1, from: test_member(0) },
+            TranscriptMsg::AcceptAck {
+                ballot: 1,
+                slot: 1,
+                from: test_member(0),
+            },
             quorum,
         );
         state.process(
-            TranscriptMsg::AcceptAck { ballot: 1, slot: 1, from: test_member(1) },
+            TranscriptMsg::AcceptAck {
+                ballot: 1,
+                slot: 1,
+                from: test_member(1),
+            },
             quorum,
         );
 
@@ -2811,11 +2867,7 @@ mod tests {
             .iter()
             .filter(|m| matches!(m, TranscriptMsg::Prepare { .. }))
             .collect();
-        assert_eq!(
-            prepares.len(),
-            0,
-            "Leader should suppress election timer"
-        );
+        assert_eq!(prepares.len(), 0, "Leader should suppress election timer");
     }
 
     /// Req 4.2: Observe Prepare with higher ballot → Promise emitted
@@ -2843,7 +2895,10 @@ mod tests {
             })
             .collect();
         assert_eq!(promises.len(), 1, "Should emit exactly one Promise");
-        assert_eq!(*promises[0].0, 10, "Promise ballot should match Prepare ballot");
+        assert_eq!(
+            *promises[0].0, 10,
+            "Promise ballot should match Prepare ballot"
+        );
         assert_eq!(
             promises[0].1.len(),
             1,
@@ -3306,12 +3361,8 @@ mod tests {
         fn new(cluster_size: usize) -> Self {
             Self {
                 cluster_size,
-                msg_gen_states: (0..cluster_size)
-                    .map(|_| MessageGenState::new())
-                    .collect(),
-                decision_states: (0..cluster_size)
-                    .map(|_| DecisionState::new())
-                    .collect(),
+                msg_gen_states: (0..cluster_size).map(|_| MessageGenState::new()).collect(),
+                decision_states: (0..cluster_size).map(|_| DecisionState::new()).collect(),
                 in_flight: Vec::new(),
                 partitioned: vec![false; cluster_size],
             }

@@ -82,8 +82,8 @@ use hydro_lang::prelude::*;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use super::quorum::{covering_quorum, quorum};
 pub use super::quorum::Ts;
+use super::quorum::{covering_quorum, quorum};
 
 /// Messages from clients to replicas. Requester identity rides on the channel
 /// keying (cluster→cluster broadcasts arrive keyed by sender), not in the
@@ -137,20 +137,17 @@ where
     let queries: Stream<(MemberId<CL>, ToReplica<T>), _, Unbounded, NoOrder, ExactlyOnce> = reads
         .clone()
         .map(q!(|rid| ToReplica::Query { rid }))
-        .merge_unordered(
-            writes
-                .clone()
-                .map(q!(|(rid, _v)| ToReplica::Query { rid })),
-        )
+        .merge_unordered(writes.clone().map(q!(|(rid, _v)| ToReplica::Query { rid })))
         .broadcast_closed(replicas, TCP.fail_stop().bincode())
         .entries(); // (requester, Query) at each replica; EC minted by broadcast.
 
     // Phase-2 writes reach replicas the same way, but they close a cycle
     // (writes depend on phase-1 responses, which depend on the replica):
     // declare them as a forward_ref on the EC location, RB-style.
-    let (phase2_handle, phase2_fwd) = queries
-        .location()
-        .forward_ref::<Stream<(MemberId<CL>, ToReplica<T>), _, Unbounded, NoOrder>>();
+    let (phase2_handle, phase2_fwd) =
+        queries
+            .location()
+            .forward_ref::<Stream<(MemberId<CL>, ToReplica<T>), _, Unbounded, NoOrder>>();
 
     // ---- The register: a top-level lattice fold, EC INFERRED --------------
     // All replicas fold the same EC write stream through max-by-Ts, so "all
@@ -158,30 +155,33 @@ where
     // obligations are the combiner's, and they are honest lattice facts.
     // The explicit annotation makes the EC claim compiler-checked: if any
     // step of this pipeline failed to preserve/earn EC, this would not build.
-    let register: Singleton<Option<(Ts, T)>, Cluster<'a, R, EventualConsistency>, Unbounded> = phase2_fwd
-        .clone()
-        .filter_map(q!(|(_requester, w)| match w {
-            ToReplica::Write { ts, value, .. } => Some((ts, value)),
-            _ => None,
-        }))
-        .fold(
-            q!(|| None),
-            q!(|acc: &mut Option<(Ts, _)>, (ts, v)| {
-                if acc.as_ref().map(|(a, _)| *a < ts).unwrap_or(true) {
-                    *acc = Some((ts, v));
-                }
-            },
-            commutative = manual_proof!(
-                /** max by the total Ts order is commutative: writers never tie
-                (writer id is in the timestamp) and one client member has at
-                most one outstanding write (module-doc contract), so equal
-                timestamps imply equal values. */
-            ),
-            idempotent = manual_proof!(
-                /** max is idempotent: re-applying an element never changes
-                the maximum. */
-            )),
-        );
+    let register: Singleton<Option<(Ts, T)>, Cluster<'a, R, EventualConsistency>, Unbounded> =
+        phase2_fwd
+            .clone()
+            .filter_map(q!(|(_requester, w)| match w {
+                ToReplica::Write { ts, value, .. } => Some((ts, value)),
+                _ => None,
+            }))
+            .fold(
+                q!(|| None),
+                q!(
+                    |acc: &mut Option<(Ts, _)>, (ts, v)| {
+                        if acc.as_ref().map(|(a, _)| *a < ts).unwrap_or(true) {
+                            *acc = Some((ts, v));
+                        }
+                    },
+                    commutative = manual_proof!(
+                        /** max by the total Ts order is commutative: writers never tie
+                        (writer id is in the timestamp) and one client member has at
+                        most one outstanding write (module-doc contract), so equal
+                        timestamps imply equal values. */
+                    ),
+                    idempotent = manual_proof!(
+                        /** max is idempotent: re-applying an element never changes
+                        the maximum. */
+                    )
+                ),
+            );
 
     // ---- The replica: ack gate + query service ----------------------------
     // Acks must not outrun the register (a write is acked only once a
@@ -250,10 +250,12 @@ where
         .demux(writes.location(), TCP.fail_stop().bincode())
         .entries(); // (replica, ToClient) at each client member
 
-    let query_resps = from_replicas.clone().filter_map(q!(|(replica, msg)| match msg {
-        ToClient::QueryResp { rid, reg } => Some((rid, (replica, reg))),
-        _ => None,
-    }));
+    let query_resps = from_replicas
+        .clone()
+        .filter_map(q!(|(replica, msg)| match msg {
+            ToClient::QueryResp { rid, reg } => Some((rid, (replica, reg))),
+            _ => None,
+        }));
 
     let write_acks = from_replicas.filter_map(q!(|(replica, msg)| match msg {
         ToClient::WriteAck { rid } => Some((rid, replica)),
@@ -263,8 +265,8 @@ where
     // ---- The covering read (client side): the extracted mint --------------
     // At a majority of distinct responders per rid, adopt the max register
     // seen, exactly once per rid (`covering_quorum`, shared with synod).
-    let covered = covering_quorum(majority, query_resps)
-        .map(q!(|(rid, cov)| (rid, cov.into_aggregate())));
+    let covered =
+        covering_quorum(majority, query_resps).map(q!(|(rid, cov)| (rid, cov.into_aggregate())));
 
     // ---- Phase transitions, as rid-keyed joins ------------------------------
     // "Having covered, THEN send phase 2" — the join is the phase transition,
@@ -276,7 +278,14 @@ where
         .join(writes.map(q!(|(rid, v)| (rid, v))))
         .map(q!(move |(rid, (max, v))| {
             let round = max.map(|(ts, _)| ts.round).unwrap_or(0) + 1;
-            (rid, Ts { round, writer: CLUSTER_SELF_ID.clone().into_tagless() }, v)
+            (
+                rid,
+                Ts {
+                    round,
+                    writer: CLUSTER_SELF_ID.clone().into_tagless(),
+                },
+                v,
+            )
         }));
 
     let write_phase2 = write_stamped
@@ -292,8 +301,7 @@ where
 
     let read_empty = read_covered.clone().filter(q!(|(_rid, max)| max.is_none()));
 
-    let read_adopted =
-        read_covered.filter_map(q!(|(rid, max)| max.map(|tv| (rid, tv))));
+    let read_adopted = read_covered.filter_map(q!(|(rid, max)| max.map(|tv| (rid, tv))));
 
     let read_writeback = read_adopted
         .clone()
@@ -367,8 +375,7 @@ mod tests {
                 assert_eq!(done[0].0, 1, "write rid 1 must complete");
 
                 r_send.send(0, 2);
-                let got: Vec<(u64, Option<(Ts, u32)>)> =
-                    read_recv.collect_n_sorted(0, 1).await;
+                let got: Vec<(u64, Option<(Ts, u32)>)> = read_recv.collect_n_sorted(0, 1).await;
                 assert_eq!(got[0].0, 2);
                 assert_eq!(
                     got[0].1.as_ref().map(|(_, v)| *v),
@@ -458,8 +465,7 @@ mod tests {
                 let _: Vec<(u64, Ts)> = done_recv.collect_n_sorted(0, 1).await;
 
                 r_send.send(0, 3);
-                let got: Vec<(u64, Option<(Ts, u32)>)> =
-                    read_recv.collect_n_sorted(0, 1).await;
+                let got: Vec<(u64, Option<(Ts, u32)>)> = read_recv.collect_n_sorted(0, 1).await;
                 assert_eq!(
                     got[0].1.as_ref().map(|(_, v)| *v),
                     Some(20),

@@ -4,7 +4,7 @@
 
 use hydro_lang::location::MemberId;
 use hydro_test::cluster::broadcast_transcript_consensus::{
-    quorum_size, DecisionState, TranscriptMsg,
+    DecisionState, TranscriptMsg, quorum_size,
 };
 use proptest::prelude::*;
 

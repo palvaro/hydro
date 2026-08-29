@@ -49,12 +49,12 @@
 //! dynamic demos (`reliable_broadcast_live`, `g_set_gossip_live`) route
 //! through the tentative primitives above.
 
+pub mod abd;
 pub mod broadcast_live;
 pub mod crdt_gossip;
 pub mod epoch_splice;
 pub mod fan_out;
 pub mod leader_merge;
-pub mod abd;
 pub mod multi_paxos;
 pub mod multi_paxos_live;
 pub mod quorum;

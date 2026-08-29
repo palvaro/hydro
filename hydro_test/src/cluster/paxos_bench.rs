@@ -619,7 +619,11 @@ mod tests {
         // is comparable to the broadcast-transcript KVS bench.
         println!("MultiPaxos raw throughput windows: {:?}", readings);
         let steady: Vec<f64> = readings.iter().skip(3).copied().collect();
-        let sample = if steady.is_empty() { &readings[..] } else { &steady[..] };
+        let sample = if steady.is_empty() {
+            &readings[..]
+        } else {
+            &steady[..]
+        };
         if !sample.is_empty() {
             let mut sorted = sample.to_vec();
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -629,7 +633,11 @@ mod tests {
             let mean = sample.iter().sum::<f64>() / sample.len() as f64;
             println!(
                 "MultiPaxos STEADY-STATE req/s over {} windows: min={:.0} median={:.0} mean={:.0} max={:.0}",
-                sample.len(), min, median, mean, max
+                sample.len(),
+                min,
+                median,
+                mean,
+                max
             );
         }
     }

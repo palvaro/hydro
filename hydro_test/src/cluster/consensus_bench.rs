@@ -8,8 +8,8 @@
 //! 4. Latencies are computed and aggregated for throughput/latency reporting
 
 use hydro_lang::live_collections::stream::NoOrder;
-use hydro_lang::location::cluster::CLUSTER_SELF_ID;
 use hydro_lang::location::MemberId;
+use hydro_lang::location::cluster::CLUSTER_SELF_ID;
 use hydro_lang::prelude::*;
 use hydro_std::bench_client::{
     aggregate_bench_results, bench_client, compute_throughput_latency, pretty_print_bench_results,
@@ -43,14 +43,13 @@ pub fn raft_bench<'a>(
 ) {
     // Election timer: only member 0 fires quickly to guarantee it wins leadership.
     // Other members have very long timeouts so they never campaign.
-    let election_timer_interrupts =
-        replicas.source_interval(q!(std::time::Duration::from_millis(
-            if CLUSTER_SELF_ID.get_raw_id() == 0 {
-                200
-            } else {
-                60_000
-            }
-        )));
+    let election_timer_interrupts = replicas.source_interval(q!(std::time::Duration::from_millis(
+        if CLUSTER_SELF_ID.get_raw_id() == 0 {
+            200
+        } else {
+            60_000
+        }
+    )));
 
     // Heartbeat timer: only the leader (member 0) sends heartbeats.
     // NOTE: this interval directly paces raft's commit latency — entries
@@ -58,14 +57,13 @@ pub fn raft_bench<'a>(
     // closed-loop benchmark. Set aggressively (1ms) so raft is not artificially
     // throttled when compared against broadcast-transcript (which has no
     // heartbeat and reacts every tick).
-    let heartbeat_timer_interrupts =
-        replicas.source_interval(q!(std::time::Duration::from_millis(
-            if CLUSTER_SELF_ID.get_raw_id() == 0 {
-                1
-            } else {
-                60_000
-            }
-        )));
+    let heartbeat_timer_interrupts = replicas.source_interval(q!(
+        std::time::Duration::from_millis(if CLUSTER_SELF_ID.get_raw_id() == 0 {
+            1
+        } else {
+            60_000
+        })
+    ));
 
     let latencies = bench_client(
         clients,
@@ -265,14 +263,13 @@ pub fn broadcast_transcript_bench<'a>(
     // Election timer: only member 0 fires quickly to guarantee it wins leadership.
     // Other members have very long timeouts so they never campaign. No heartbeat
     // timer is needed — broadcast-transcript observes leader activity directly.
-    let election_timer_interrupts =
-        replicas.source_interval(q!(std::time::Duration::from_millis(
-            if CLUSTER_SELF_ID.get_raw_id() == 0 {
-                200
-            } else {
-                60_000
-            }
-        )));
+    let election_timer_interrupts = replicas.source_interval(q!(std::time::Duration::from_millis(
+        if CLUSTER_SELF_ID.get_raw_id() == 0 {
+            200
+        } else {
+            60_000
+        }
+    )));
 
     let latencies = bench_client(
         clients,
@@ -367,14 +364,13 @@ pub fn broadcast_transcript_kv_bench<'a>(
     // Election timer: only member 0 fires quickly to guarantee it wins leadership.
     // Other members have very long timeouts so they never campaign. No heartbeat
     // timer is needed — broadcast-transcript observes leader activity directly.
-    let election_timer_interrupts =
-        replicas.source_interval(q!(std::time::Duration::from_millis(
-            if CLUSTER_SELF_ID.get_raw_id() == 0 {
-                200
-            } else {
-                60_000
-            }
-        )));
+    let election_timer_interrupts = replicas.source_interval(q!(std::time::Duration::from_millis(
+        if CLUSTER_SELF_ID.get_raw_id() == 0 {
+            200
+        } else {
+            60_000
+        }
+    )));
 
     let latencies = bench_client(
         clients,
@@ -646,8 +642,8 @@ mod tests {
     fn create_btc_integration_impl<'a>(
         replicas: &hydro_lang::location::Cluster<'a, super::Replica>,
     ) {
-        use hydro_lang::location::cluster::CLUSTER_SELF_ID;
         use hydro_lang::location::Location;
+        use hydro_lang::location::cluster::CLUSTER_SELF_ID;
         use hydro_lang::nondet::nondet;
         use hydro_lang::prelude::TCP;
         use stageleft::q;
@@ -992,8 +988,8 @@ mod tests {
 
         deployment.start().await.unwrap();
 
-        use std::str::FromStr;
         use regex::Regex;
+        use std::str::FromStr;
 
         let re = Regex::new(r"Throughput: ([^ ]+) requests/s").unwrap();
         let mut readings: Vec<f64> = Vec::new();
@@ -1047,8 +1043,8 @@ mod tests {
 
         deployment.start().await.unwrap();
 
-        use std::str::FromStr;
         use regex::Regex;
+        use std::str::FromStr;
 
         let re = Regex::new(r"Throughput: ([^ ]+) requests/s").unwrap();
         let mut readings: Vec<f64> = Vec::new();
@@ -1097,8 +1093,8 @@ mod tests {
 
         deployment.start().await.unwrap();
 
-        use std::str::FromStr;
         use regex::Regex;
+        use std::str::FromStr;
 
         let re = Regex::new(r"Throughput: ([^ ]+) requests/s").unwrap();
         let mut readings: Vec<f64> = Vec::new();
@@ -1147,8 +1143,8 @@ mod tests {
 
         deployment.start().await.unwrap();
 
-        use std::str::FromStr;
         use regex::Regex;
+        use std::str::FromStr;
 
         let re = Regex::new(r"Throughput: ([^ ]+) requests/s").unwrap();
         let mut readings: Vec<f64> = Vec::new();

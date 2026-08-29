@@ -124,7 +124,13 @@ where
 
     // Each attempt gets its ballot: (round, own member id).
     let attempts = proposals.map(q!(move |(round, v)| {
-        (Ts { round, writer: CLUSTER_SELF_ID.clone().into_tagless() }, v)
+        (
+            Ts {
+                round,
+                writer: CLUSTER_SELF_ID.clone().into_tagless(),
+            },
+            v,
+        )
     }));
 
     // ---- Phase 1 out: prepare(b) to every acceptor -------------------------
@@ -136,9 +142,10 @@ where
 
     // Phase-2 accepts close a cycle (they depend on promises, which depend on
     // the acceptor): forward_ref at the acceptor location, ABD-style.
-    let (accepts_handle, accepts_fwd) = prepares
-        .location()
-        .forward_ref::<Stream<(MemberId<P>, (Ts, V)), _, Unbounded, NoOrder>>();
+    let (accepts_handle, accepts_fwd) =
+        prepares
+            .location()
+            .forward_ref::<Stream<(MemberId<P>, (Ts, V)), _, Unbounded, NoOrder>>();
 
     // ---- The acceptor: the determination kernel ----------------------------
     // Order-sensitive by design (refusal does not commute): one slice,
@@ -242,10 +249,12 @@ where
         .demux(&proposer_cluster, TCP.fail_stop().bincode())
         .entries(); // (acceptor, ToProposer) at each proposer
 
-    let promises = from_acceptors.clone().filter_map(q!(|(acceptor, msg)| match msg {
-        ToProposer::Promise { b, accepted } => Some((b, (acceptor, accepted))),
-        _ => None,
-    }));
+    let promises = from_acceptors
+        .clone()
+        .filter_map(q!(|(acceptor, msg)| match msg {
+            ToProposer::Promise { b, accepted } => Some((b, (acceptor, accepted))),
+            _ => None,
+        }));
 
     let accepted_acks = from_acceptors.filter_map(q!(|(acceptor, msg)| match msg {
         ToProposer::Accepted { b } => Some((b, acceptor)),
@@ -253,8 +262,7 @@ where
     }));
 
     // ---- Phase 1 in: the covering certificate ------------------------------
-    let covered = covering_quorum(majority, promises)
-        .map(q!(|(b, cov)| (b, cov.into_aggregate())));
+    let covered = covering_quorum(majority, promises).map(q!(|(b, cov)| (b, cov.into_aggregate())));
 
     // ---- The splice rule: adopt-highest, then phase 2 -----------------------
     // (rid-keyed join = the phase transition; the ballot is the continuation.)
@@ -406,9 +414,8 @@ mod tests {
         let proposers = flow.cluster::<()>();
 
         let (p_send, proposals) = proposers.sim_input::<(u64, u32), TotalOrder, ExactlyOnce>();
-        let chosen_recv =
-            synod_without_adoption_for_refutation(&acceptors, MAJORITY, proposals)
-                .sim_cluster_output();
+        let chosen_recv = synod_without_adoption_for_refutation(&acceptors, MAJORITY, proposals)
+            .sim_cluster_output();
 
         let mut saw_divergence = false;
 

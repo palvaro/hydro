@@ -498,14 +498,17 @@ pub(super) fn apply_dynamic_membership(
             .get(target_loc)
             .cloned()
             .unwrap_or_default();
-        let seed_elems = member_ids.iter().map(|id| {
-            syn::parse_quote! {
-                (
-                    #root::__staged::location::member_id::TaglessMemberId::from_raw_id(#id),
-                    #root::__staged::location::MembershipEvent::Joined,
-                )
-            }
-        }).collect::<Vec<syn::Expr>>();
+        let seed_elems = member_ids
+            .iter()
+            .map(|id| {
+                syn::parse_quote! {
+                    (
+                        #root::__staged::location::member_id::TaglessMemberId::from_raw_id(#id),
+                        #root::__staged::location::MembershipEvent::Joined,
+                    )
+                }
+            })
+            .collect::<Vec<syn::Expr>>();
 
         // Key the hook by the observing location (the root of this node's
         // location), matching how `add_hook` keys other per-location hooks.

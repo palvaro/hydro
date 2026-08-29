@@ -1434,6 +1434,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "consensus_gauntlet"
+version = "0.0.0"
+dependencies = [
+ "clap",
+ "hdrhistogram",
+ "hydro_deploy",
+ "hydro_lang",
+ "hydro_std",
+ "hydro_test",
+ "serde",
+ "serde_json",
+ "sha2",
+ "stageleft",
+ "stageleft_tool",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "console"
 version = "0.15.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"

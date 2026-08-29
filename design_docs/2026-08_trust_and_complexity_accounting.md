@@ -301,6 +301,24 @@ axes re-creates the LOC fallacy.
 
 Performance (throughput/latency) is a third axis, out of scope here — the
 benches exist (`paxos_bench`, `consensus_bench`) and are already principled.
+A 2026-08 audit nevertheless exposed a complexity/performance coupling worth
+recording: the ladder's `state.zip(batch).map(...)` + reassignment/clone style
+moves growing state through the graph every tick, whereas Raft's `by_mut`
+style mutates it in place. On the three-node/100-client consensus bench the
+old multi-Paxos path managed about 1,200 req/s while p50 rose from roughly
+12 to 97 ms. The completed refactor converts the acceptor, leader, wrapper,
+and quorum hot state to `by_mut`, makes splice-state snapshots structurally
+shared, and carries accepted proposal payloads through the quorum certificate
+instead of retaining an unbounded proposal join. On the same three-node,
+100-client localhost bench, multi-Paxos now sustains a steady median of about
+22,400 req/s with p50 flat at roughly 4.1–4.4 ms; the same-day Raft baseline
+is about 63,200 req/s at roughly 1.9 ms. The old zip/map/reassign discipline
+therefore had a measured asymptotic cost, and the remaining 2.8× constant
+factor is consistent with the ladder's extra quorum/echo traffic rather than
+history replay. The benchmark's pinned leader uses a two-second election
+period: the former 200 ms period mistook saturated progress for a stall and
+injected redo elections, which was a benchmark-driver artifact rather than a
+consensus cost.
 
 ## 7. Goal-attainment criteria, stated so they can fail
 

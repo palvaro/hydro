@@ -188,11 +188,13 @@ pub fn lin_kv_server<'a, C: 'a, Net>(
 ) -> KeyedStream<String, serde_json::Value, Cluster<'a, C>>
 where
     Net: hydro_lang::networking::NetworkFor<
-        crate::cluster::broadcast_transcript_consensus::TranscriptMsg<KvOp, C>,
-        ConsistencyGuarantee = hydro_lang::location::cluster::EventualConsistency,
-    >,
-    hydro_lang::live_collections::stream::NoOrder:
-        hydro_lang::live_collections::stream::MinOrder<Net::OrderingGuarantee, Min = hydro_lang::live_collections::stream::NoOrder>,
+            crate::cluster::broadcast_transcript_consensus::TranscriptMsg<KvOp, C>,
+            ConsistencyGuarantee = hydro_lang::location::cluster::EventualConsistency,
+        >,
+    hydro_lang::live_collections::stream::NoOrder: hydro_lang::live_collections::stream::MinOrder<
+            Net::OrderingGuarantee,
+            Min = hydro_lang::live_collections::stream::NoOrder,
+        >,
 {
     // The cluster membership list, resolved on each member at runtime. Used
     // to identify "the first member" in a deployment-agnostic way: Maelstrom
@@ -379,8 +381,10 @@ pub fn raft_lin_kv_server<'a, C: 'a, Net>(
 ) -> KeyedStream<String, serde_json::Value, Cluster<'a, C>>
 where
     Net: hydro_lang::networking::NetworkFor<raft::RaftRpc<KvOp, C>>,
-    hydro_lang::live_collections::stream::NoOrder:
-        hydro_lang::live_collections::stream::MinOrder<Net::OrderingGuarantee, Min = hydro_lang::live_collections::stream::NoOrder>,
+    hydro_lang::live_collections::stream::NoOrder: hydro_lang::live_collections::stream::MinOrder<
+            Net::OrderingGuarantee,
+            Min = hydro_lang::live_collections::stream::NoOrder,
+        >,
 {
     let LocationId::Cluster(cluster_key) = Location::id(cluster) else {
         unreachable!("raft_lin_kv_server always runs on a cluster")
@@ -530,7 +534,9 @@ mod tests {
         let cluster = flow.cluster::<()>();
 
         let (input, output_handle) = maelstrom_bidi_clients(&cluster);
-        output_handle.complete(lin_kv_server(&cluster, 1, input, || TCP.fail_stop().bincode()));
+        output_handle.complete(lin_kv_server(&cluster, 1, input, || {
+            TCP.fail_stop().bincode()
+        }));
 
         let mut deployment = MaelstromDeployment::new("lin-kv")
             .maelstrom_path(PathBuf::from_str(&std::env::var("MAELSTROM_PATH").expect(
@@ -565,13 +571,17 @@ mod tests {
         let cluster = flow.cluster::<()>();
 
         let (input, output_handle) = maelstrom_bidi_clients(&cluster);
-        output_handle.complete(lin_kv_server(&cluster, 3, input, || TCP.fail_stop().bincode()));
+        output_handle.complete(lin_kv_server(&cluster, 3, input, || {
+            TCP.fail_stop().bincode()
+        }));
 
         let mut deployment = MaelstromDeployment::new("lin-kv")
-            .maelstrom_path(PathBuf::from_str(&std::env::var("MAELSTROM_PATH").expect(
-                "MAELSTROM_PATH env var not set, set it to the maelstrom executable path",
-            ))
-            .unwrap())
+            .maelstrom_path(
+                PathBuf::from_str(&std::env::var("MAELSTROM_PATH").expect(
+                    "MAELSTROM_PATH env var not set, set it to the maelstrom executable path",
+                ))
+                .unwrap(),
+            )
             .node_count(3)
             .time_limit(20)
             .rate(10)
@@ -609,10 +619,12 @@ mod tests {
         }));
 
         let mut deployment = MaelstromDeployment::new("lin-kv")
-            .maelstrom_path(PathBuf::from_str(&std::env::var("MAELSTROM_PATH").expect(
-                "MAELSTROM_PATH env var not set, set it to the maelstrom executable path",
-            ))
-            .unwrap())
+            .maelstrom_path(
+                PathBuf::from_str(&std::env::var("MAELSTROM_PATH").expect(
+                    "MAELSTROM_PATH env var not set, set it to the maelstrom executable path",
+                ))
+                .unwrap(),
+            )
             .node_count(3)
             .time_limit(45)
             .rate(30)
@@ -647,10 +659,12 @@ mod tests {
         }));
 
         let mut deployment = MaelstromDeployment::new("lin-kv")
-            .maelstrom_path(PathBuf::from_str(&std::env::var("MAELSTROM_PATH").expect(
-                "MAELSTROM_PATH env var not set, set it to the maelstrom executable path",
-            ))
-            .unwrap())
+            .maelstrom_path(
+                PathBuf::from_str(&std::env::var("MAELSTROM_PATH").expect(
+                    "MAELSTROM_PATH env var not set, set it to the maelstrom executable path",
+                ))
+                .unwrap(),
+            )
             .node_count(3)
             .time_limit(45)
             .rate(30)
@@ -688,13 +702,17 @@ mod tests {
         let cluster = flow.cluster::<()>();
 
         let (input, output_handle) = maelstrom_bidi_clients(&cluster);
-        output_handle.complete(lin_kv_server(&cluster, 3, input, || TCP.fail_stop().bincode()));
+        output_handle.complete(lin_kv_server(&cluster, 3, input, || {
+            TCP.fail_stop().bincode()
+        }));
 
         let mut deployment = MaelstromDeployment::new("lin-kv")
-            .maelstrom_path(PathBuf::from_str(&std::env::var("MAELSTROM_PATH").expect(
-                "MAELSTROM_PATH env var not set, set it to the maelstrom executable path",
-            ))
-            .unwrap())
+            .maelstrom_path(
+                PathBuf::from_str(&std::env::var("MAELSTROM_PATH").expect(
+                    "MAELSTROM_PATH env var not set, set it to the maelstrom executable path",
+                ))
+                .unwrap(),
+            )
             .node_count(3)
             .time_limit(45)
             .rate(30)
@@ -729,10 +747,12 @@ mod tests {
         }));
 
         let mut deployment = MaelstromDeployment::new("lin-kv")
-            .maelstrom_path(PathBuf::from_str(&std::env::var("MAELSTROM_PATH").expect(
-                "MAELSTROM_PATH env var not set, set it to the maelstrom executable path",
-            ))
-            .unwrap())
+            .maelstrom_path(
+                PathBuf::from_str(&std::env::var("MAELSTROM_PATH").expect(
+                    "MAELSTROM_PATH env var not set, set it to the maelstrom executable path",
+                ))
+                .unwrap(),
+            )
             .node_count(3)
             .time_limit(45)
             .rate(30)
@@ -767,13 +787,17 @@ mod tests {
         let cluster = flow.cluster::<()>();
 
         let (input, output_handle) = maelstrom_bidi_clients(&cluster);
-        output_handle.complete(lin_kv_server(&cluster, 3, input, || TCP.fail_stop().bincode()));
+        output_handle.complete(lin_kv_server(&cluster, 3, input, || {
+            TCP.fail_stop().bincode()
+        }));
 
         let mut deployment = MaelstromDeployment::new("lin-kv")
-            .maelstrom_path(PathBuf::from_str(&std::env::var("MAELSTROM_PATH").expect(
-                "MAELSTROM_PATH env var not set, set it to the maelstrom executable path",
-            ))
-            .unwrap())
+            .maelstrom_path(
+                PathBuf::from_str(&std::env::var("MAELSTROM_PATH").expect(
+                    "MAELSTROM_PATH env var not set, set it to the maelstrom executable path",
+                ))
+                .unwrap(),
+            )
             .node_count(3)
             .time_limit(60)
             .rate(30)
@@ -801,10 +825,12 @@ mod tests {
         }));
 
         let mut deployment = MaelstromDeployment::new("lin-kv")
-            .maelstrom_path(PathBuf::from_str(&std::env::var("MAELSTROM_PATH").expect(
-                "MAELSTROM_PATH env var not set, set it to the maelstrom executable path",
-            ))
-            .unwrap())
+            .maelstrom_path(
+                PathBuf::from_str(&std::env::var("MAELSTROM_PATH").expect(
+                    "MAELSTROM_PATH env var not set, set it to the maelstrom executable path",
+                ))
+                .unwrap(),
+            )
             .node_count(3)
             .time_limit(60)
             .rate(30)

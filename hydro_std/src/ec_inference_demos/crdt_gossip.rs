@@ -27,16 +27,11 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 /// G-Set CRDT via state-based gossip. EC fully inferred, no manual_proof on consistency.
-pub fn g_set_gossip<
-    'a,
-    T: Clone + Ord + Hash + Serialize + DeserializeOwned + 'static,
-    L2: 'a,
->(
+pub fn g_set_gossip<'a, T: Clone + Ord + Hash + Serialize + DeserializeOwned + 'static, L2: 'a>(
     cluster: &Cluster<'a, L2>,
     local_updates: Stream<T, Cluster<'a, L2>, Unbounded, NoOrder>,
     gossip_ticks: Stream<(), Cluster<'a, L2>, Unbounded, TotalOrder, ExactlyOnce>,
-) -> Singleton<BTreeSet<T>, Cluster<'a, L2, EventualConsistency>, Unbounded>
-{
+) -> Singleton<BTreeSet<T>, Cluster<'a, L2, EventualConsistency>, Unbounded> {
     // Step 1: Broadcast local updates to all peers. EC inferred.
     let initial = local_updates
         .broadcast_closed(cluster, TCP.fail_stop().bincode())
@@ -51,7 +46,9 @@ pub fn g_set_gossip<
     //    The ops we use (merge, fold, clone) don't take nondet!, so they
     //    preserve L — and the type system would reject anything that doesn't.
     let (gossip_handle, gossip_from_peers) =
-        initial.location().forward_ref::<Stream<BTreeSet<T>, _, Unbounded, NoOrder, AtLeastOnce>>();
+        initial
+            .location()
+            .forward_ref::<Stream<BTreeSet<T>, _, Unbounded, NoOrder, AtLeastOnce>>();
 
     // Step 2: Merge initial element stream with full-state gossip from peers (flattened).
     let all_elements = initial.merge_unordered(gossip_from_peers.flatten_unordered());
@@ -59,9 +56,13 @@ pub fn g_set_gossip<
     // Step 3: Fold into G-Set state. Input is EC + NoOrder → commutative proof required.
     let gset_state = all_elements.fold(
         q!(|| BTreeSet::new()),
-        q!(|set, v| { set.insert(v); },
-           commutative = manual_proof!(/** set insert is commutative */),
-           idempotent = manual_proof!(/** set insert is idempotent */)),
+        q!(
+            |set, v| {
+                set.insert(v);
+            },
+            commutative = manual_proof!(/** set insert is commutative */),
+            idempotent = manual_proof!(/** set insert is idempotent */)
+        ),
     );
 
     // Step 4: Re-broadcast state to all peers on each gossip pump tick.
@@ -115,8 +116,7 @@ pub fn g_set_gossip_live<
     cluster: &Cluster<'a, L2>,
     local_updates: Stream<T, Cluster<'a, L2>, Unbounded, NoOrder>,
     gossip_ticks: Stream<(), Cluster<'a, L2>, Unbounded, TotalOrder, ExactlyOnce>,
-) -> Singleton<BTreeSet<T>, Cluster<'a, L2, EventualConsistency>, Unbounded>
-{
+) -> Singleton<BTreeSet<T>, Cluster<'a, L2, EventualConsistency>, Unbounded> {
     use crate::ec_inference_demos::fan_out::{MembershipView, fan_out};
 
     // Step 1: Fan local updates out over the LIVE membership relation. EC minted
@@ -130,7 +130,9 @@ pub fn g_set_gossip_live<
     .values();
 
     let (gossip_handle, gossip_from_peers) =
-        initial.location().forward_ref::<Stream<BTreeSet<T>, _, Unbounded, NoOrder, AtLeastOnce>>();
+        initial
+            .location()
+            .forward_ref::<Stream<BTreeSet<T>, _, Unbounded, NoOrder, AtLeastOnce>>();
 
     // Step 2: Merge fresh elements with full-state gossip from peers.
     let all_elements = initial.merge_unordered(gossip_from_peers.flatten_unordered());
@@ -138,9 +140,13 @@ pub fn g_set_gossip_live<
     // Step 3: Fold into G-Set state. ACI proofs are about the combiner, not EC.
     let gset_state = all_elements.fold(
         q!(|| BTreeSet::new()),
-        q!(|set, v| { set.insert(v); },
-           commutative = manual_proof!(/** set insert is commutative */),
-           idempotent = manual_proof!(/** set insert is idempotent */)),
+        q!(
+            |set, v| {
+                set.insert(v);
+            },
+            commutative = manual_proof!(/** set insert is commutative */),
+            idempotent = manual_proof!(/** set insert is idempotent */)
+        ),
     );
 
     // Step 4: Re-gossip state over the live relation on each pump tick.

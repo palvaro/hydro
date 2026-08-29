@@ -59,14 +59,7 @@ pub fn broadcast_live<'a, T, L, L2, C, O, R, N>(
     source: Stream<T, Cluster<'a, L, C>, Unbounded, O, R>,
     to: &Cluster<'a, L2>,
     via: N,
-) -> KeyedStream<
-    MemberId<L>,
-    T,
-    Cluster<'a, L2, N::ConsistencyGuarantee>,
-    Unbounded,
-    NoOrder,
-    R,
->
+) -> KeyedStream<MemberId<L>, T, Cluster<'a, L2, N::ConsistencyGuarantee>, Unbounded, NoOrder, R>
 where
     T: Clone + Serialize + DeserializeOwned + 'a,
     L: 'a,
@@ -223,7 +216,8 @@ mod tests {
             .entries()
             .sim_output();
 
-        let instances = flow.sim()
+        let instances = flow
+            .sim()
             .skip_consistency_assertions()
             .with_cluster_size(&source, 2)
             .with_cluster_size(&dest, 2)
