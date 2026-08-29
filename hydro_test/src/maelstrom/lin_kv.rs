@@ -41,7 +41,7 @@ use crate::cluster::raft::{self, RaftConfig};
 /// live run. Storing the value's canonical JSON *text* instead sidesteps
 /// this entirely: `String`'s `Deserialize` impl just reads a length-prefixed
 /// byte sequence, which every format (including `bincode`) supports.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct JsonValue(pub String);
 
 impl JsonValue {
@@ -70,14 +70,14 @@ type KvStore = HashMap<i64, JsonValue>;
 /// sends integer keys (confirmed by a live run — the doc's own tutorial
 /// example uses strings for pedagogical simplicity, but the actual generator
 /// does not).
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReadOp {
     pub msg_id: usize,
     pub key: i64,
 }
 
 /// `{"type": "write", "msg_id": .., "key": .., "value": ..}`
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WriteOp {
     pub msg_id: usize,
     pub key: i64,
@@ -85,7 +85,7 @@ pub struct WriteOp {
 }
 
 /// `{"type": "cas", "msg_id": .., "key": .., "from": .., "to": ..}`
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CasOp {
     pub msg_id: usize,
     pub key: i64,
@@ -99,7 +99,7 @@ pub struct CasOp {
 /// `broadcast_transcript_consensus` uses for its wire format): bincode is not
 /// self-describing and does not support `deserialize_any`, which internally-
 /// (and untagged-) enum representations require.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Request {
     Read(ReadOp),
     Write(WriteOp),
@@ -166,7 +166,7 @@ impl From<WireRequest> for Request {
 /// messages by their `dest` field regardless of which physical node emits
 /// them, so the member that originally received the request need not be the
 /// one that replies.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct KvOp {
     pub client_id: String,
     pub request: Request,
@@ -511,6 +511,184 @@ where
     .into_keyed()
 }
 
+/// The same Maelstrom `lin-kv` workload, backed by
+/// [`multi_paxos_live`](hydro_std::ec_inference_demos::multi_paxos_live::multi_paxos_live)
+/// — the quorum ladder's rung 4 plus its liveness wrapper — colocated
+/// (every Maelstrom node is proposer, acceptor, and learner at once; the
+/// topology pinned by `live_colocated_*` sim tests).
+///
+/// Differences from the other backends, both forced by this stack's design:
+///
+/// - **Apply order comes from the splice reader**, not a sort by index: the
+///   state machine absorbs learned facts into a
+///   [`SpliceState`](hydro_std::ec_inference_demos::epoch_splice::SpliceState)
+///   and applies the spliced log past a cursor. The splice's dense-prefix
+///   stall is exactly the "wait for the committed sequence" rule.
+/// - **At-most-once application is enforced here** by `(client_id, msg_id)`
+///   dedup: the liveness wrapper's redo queue may legitimately place the
+///   same op at multiple slots (re-released work), and `cas` is not
+///   idempotent. Raft's adapter gets to skip this only because its backend
+///   never duplicates.
+///
+/// Network policy is currently fixed to `fail_stop` inside the core, so
+/// this backend supports Maelstrom's smoke and `kill` nemesis runs;
+/// `partition` (which needs `lossy_delayed_forever`) is deferred until the
+/// core's network policy is parameterized.
+pub fn multi_paxos_lin_kv_server<'a, C: 'a>(
+    cluster: &Cluster<'a, C>,
+    cluster_size: usize,
+    input: KeyedStream<String, WireRequest, Cluster<'a, C>>,
+) -> KeyedStream<String, serde_json::Value, Cluster<'a, C>> {
+    use hydro_std::ec_inference_demos::epoch_splice::{SpliceFact, SpliceState};
+    use hydro_std::ec_inference_demos::multi_paxos_live::multi_paxos_live;
+
+    let LocationId::Cluster(cluster_key) = Location::id(cluster) else {
+        unreachable!("multi_paxos_lin_kv_server always runs on a cluster")
+    };
+    let cluster_members = ClusterIds {
+        key: cluster_key,
+        _phantom: PhantomData,
+    };
+
+    // Timer inputs are the failure detector (wrapper docs); every member
+    // fires symmetrically, like the other backends' election timers.
+    let election_timeouts = cluster.source_interval(q!(std::time::Duration::from_millis(300)));
+
+    let requests = input.entries().map(q!(|(client_id, request)| KvOp {
+        client_id,
+        request: request.into()
+    }));
+
+    let majority = cluster_size / 2 + 1;
+    let outs = multi_paxos_live(
+        cluster,
+        cluster,
+        majority,
+        cluster_size,
+        election_timeouts,
+        requests,
+    );
+
+    sliced! {
+        let learned_batch = use::batch(
+            outs.learned.weaken_consistency(),
+            nondet!(
+                /// Batching never changes apply order: facts are absorbed
+                /// into the splice state (whose absorb is commutative) and
+                /// entries are applied in spliced-log order past a cursor,
+                /// so tick boundaries are invisible to the KV state.
+            )
+        );
+        let mut splice = use::state(|l| l.singleton(q!(SpliceState::new())));
+        let mut cursor = use::state(|l| l.singleton(q!(0usize)));
+        let mut kv_state = use::state(|l| l.singleton(q!(KvStore::new())));
+        let mut applied = use::state(|l| l.singleton(q!(std::collections::BTreeSet::new())));
+
+        let batch_vec = learned_batch.fold(
+            q!(|| Vec::new()),
+            q!(
+                |acc, fact| { acc.push(fact); },
+                commutative = manual_proof!(
+                    /** The consumer absorbs this Vec into a `SpliceState`,
+                    whose absorb is commutative (epoch_splice's own proof),
+                    and applies entries in spliced-slot order — the fold's
+                    accumulation order never affects KV state or responses. */
+                )
+            ),
+        );
+
+        let tick = batch_vec.location().clone();
+        let splice_ref = splice.by_mut();
+        let cursor_ref = cursor.by_mut();
+        let kv_ref = kv_state.by_mut();
+        let applied_ref = applied.by_mut();
+        let batch_ref = batch_vec.by_ref();
+
+        let is_first_member_singleton = tick.singleton(q!(
+            cluster_members
+                .iter()
+                .next()
+                .map(|id| MemberId::from_tagless(id.clone()))
+                == Some(CLUSTER_SELF_ID.clone())
+        ));
+        let is_first_member_ref = is_first_member_singleton.by_ref();
+
+        tick.singleton(q!(())).into_stream().flat_map_ordered(q!(move |_| {
+            let is_first_member = *is_first_member_ref;
+
+            // Absorb this tick's learned facts; then apply the spliced log
+            // past the cursor. The splice is append-only here (commit-gated
+            // feed), so the cursor never has to move backwards.
+            for (epoch, start, slot, value) in batch_ref.clone() {
+                splice_ref.absorb(SpliceFact::Start { epoch, start_slot: start });
+                splice_ref.absorb(SpliceFact::Entry { epoch, slot, value });
+            }
+            let log: Vec<Option<KvOp>> =
+                splice_ref.splice().into_iter().cloned().collect();
+
+            let mut out = Vec::new();
+            for entry in &log[*cursor_ref..] {
+                let Some(op) = entry else {
+                    continue; // leader no-op filler
+                };
+                // At-most-once application: the redo queue may have placed
+                // this op at several slots; only the first occurrence acts.
+                let msg_id = match &op.request {
+                    Request::Read(r) => r.msg_id,
+                    Request::Write(w) => w.msg_id,
+                    Request::Cas(c) => c.msg_id,
+                };
+                if !applied_ref.insert((op.client_id.clone(), msg_id)) {
+                    continue;
+                }
+                let resp = match &op.request {
+                    Request::Read(r) => match kv_ref.get(&r.key) {
+                        Some(v) => serde_json::json!({
+                            "type": "read_ok",
+                            "value": v.to_value(),
+                            "in_reply_to": r.msg_id
+                        }),
+                        None => serde_json::json!({
+                            "type": "error",
+                            "code": 20,
+                            "text": "key does not exist",
+                            "in_reply_to": r.msg_id
+                        }),
+                    },
+                    Request::Write(w) => {
+                        kv_ref.insert(w.key.clone(), w.value.clone());
+                        serde_json::json!({ "type": "write_ok", "in_reply_to": w.msg_id })
+                    }
+                    Request::Cas(c) => match kv_ref.get(&c.key) {
+                        None => serde_json::json!({
+                            "type": "error",
+                            "code": 20,
+                            "text": "key does not exist",
+                            "in_reply_to": c.msg_id
+                        }),
+                        Some(cur) if cur == &c.from => {
+                            kv_ref.insert(c.key.clone(), c.to.clone());
+                            serde_json::json!({ "type": "cas_ok", "in_reply_to": c.msg_id })
+                        }
+                        Some(cur) => serde_json::json!({
+                            "type": "error",
+                            "code": 22,
+                            "text": format!("expected {:?}, had {:?}", c.from.0, cur.0),
+                            "in_reply_to": c.msg_id
+                        }),
+                    },
+                };
+                if is_first_member {
+                    out.push((op.client_id.clone(), resp));
+                }
+            }
+            *cursor_ref = log.len();
+            out
+        }))
+    }
+    .into_keyed()
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -831,6 +1009,72 @@ mod tests {
                 ))
                 .unwrap(),
             )
+            .node_count(3)
+            .time_limit(60)
+            .rate(30)
+            .nemesis("kill")
+            .extra_args(["--concurrency", "12n", "--nemesis-interval", "15"]);
+
+        let _ = flow
+            .with_cluster(&cluster, MaelstromClusterSpec)
+            .deploy(&mut deployment);
+
+        deployment.run_repeated(3).unwrap();
+    }
+
+    /// Maelstrom smoke test for the [`multi_paxos_lin_kv_server`] backend
+    /// (the quorum ladder's rung 4 + liveness wrapper, colocated): the
+    /// standard 3-node lin-kv workload under Jepsen/Knossos linearizability
+    /// checking, no nemesis. The entry ticket to the gauntlet.
+    #[tokio::test]
+    #[cfg_attr(not(maelstrom_available), ignore)]
+    async fn multi_paxos_lin_kv_3_node_maelstrom() {
+        let mut flow = FlowBuilder::new();
+        let cluster = flow.cluster::<()>();
+
+        let (input, output_handle) = maelstrom_bidi_clients(&cluster);
+        output_handle.complete(multi_paxos_lin_kv_server(&cluster, 3, input));
+
+        let mut deployment = MaelstromDeployment::new("lin-kv")
+            .maelstrom_path(PathBuf::from_str(&std::env::var("MAELSTROM_PATH").expect(
+                "MAELSTROM_PATH env var not set, set it to the maelstrom executable path",
+            ))
+            .unwrap())
+            .node_count(3)
+            .time_limit(20)
+            .rate(10)
+            .extra_args(["--concurrency", "6n"]);
+
+        let _ = flow
+            .with_cluster(&cluster, MaelstromClusterSpec)
+            .deploy(&mut deployment);
+
+        deployment.run().unwrap();
+    }
+
+    /// The kill-nemesis gauntlet against [`multi_paxos_lin_kv_server`]:
+    /// SIGKILL a random node every ~15s (it restarts with empty in-memory
+    /// state), 12 workers, 3 randomized repetitions — the identical config
+    /// the other backends run (`lin_kv_3_node_single_kill_failover` /
+    /// `raft_lin_kv_3_node_single_kill_failover`), so a failure separates
+    /// the protocol from the harness. `fail_stop` is correct here: the
+    /// fault is the process kill, not message loss. (The `partition`
+    /// nemesis needs `lossy_delayed_forever`, which awaits network-policy
+    /// parameterization of the multi_paxos core — deliberately deferred.)
+    #[tokio::test]
+    #[cfg_attr(not(maelstrom_available), ignore)]
+    async fn multi_paxos_lin_kv_3_node_single_kill_failover() {
+        let mut flow = FlowBuilder::new();
+        let cluster = flow.cluster::<()>();
+
+        let (input, output_handle) = maelstrom_bidi_clients(&cluster);
+        output_handle.complete(multi_paxos_lin_kv_server(&cluster, 3, input));
+
+        let mut deployment = MaelstromDeployment::new("lin-kv")
+            .maelstrom_path(PathBuf::from_str(&std::env::var("MAELSTROM_PATH").expect(
+                "MAELSTROM_PATH env var not set, set it to the maelstrom executable path",
+            ))
+            .unwrap())
             .node_count(3)
             .time_limit(60)
             .rate(30)
