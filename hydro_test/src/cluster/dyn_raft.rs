@@ -33,7 +33,7 @@ use super::raft::{LeaderView, RaftState};
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct Configuration<ClusterTag> {
-    voters: Vec<MemberId<ClusterTag>>,
+    pub voters: Vec<MemberId<ClusterTag>>,
 }
 
 impl<C> Configuration<C> {
@@ -58,7 +58,7 @@ impl<C> Configuration<C> {
         self.voters.len() / 2 + 1
     }
 
-    fn with_added(&self, member: MemberId<C>) -> Result<Self, ReconfigurationError> {
+    pub fn with_added(&self, member: MemberId<C>) -> Result<Self, ReconfigurationError> {
         if self.contains(&member) {
             return Err(ReconfigurationError::AlreadyVoter);
         }
@@ -67,7 +67,7 @@ impl<C> Configuration<C> {
         Self::new(voters)
     }
 
-    fn with_removed(&self, member: &MemberId<C>) -> Result<Self, ReconfigurationError> {
+    pub fn with_removed(&self, member: &MemberId<C>) -> Result<Self, ReconfigurationError> {
         if !self.contains(member) {
             return Err(ReconfigurationError::NotVoter);
         }
@@ -368,13 +368,15 @@ impl<T: Clone, C> Clone for DynRaftRpc<T, C> {
 }
 
 #[derive(Clone)]
-enum PendingStage {
+#[doc(hidden)]
+pub enum PendingStage {
     CatchingUp,
     AwaitingCommit { index: usize },
 }
-struct PendingReconfiguration<C> {
-    request: ReconfigurationRequest<C>,
-    stage: PendingStage,
+#[doc(hidden)]
+pub struct PendingReconfiguration<C> {
+    pub request: ReconfigurationRequest<C>,
+    pub stage: PendingStage,
 }
 impl<C> Clone for PendingReconfiguration<C> {
     fn clone(&self) -> Self {
@@ -398,8 +400,8 @@ pub struct DynRaftState<T, C> {
     pub emitted_index: usize,
     pub next_index: HashMap<MemberId<C>, usize>,
     pub match_index: HashMap<MemberId<C>, usize>,
-    initial_configuration: Configuration<C>,
-    pending: Option<PendingReconfiguration<C>>,
+    pub initial_configuration: Configuration<C>,
+    pub pending: Option<PendingReconfiguration<C>>,
 }
 
 impl<T, C> DynRaftState<T, C> {
@@ -432,7 +434,7 @@ impl<T, C> DynRaftState<T, C> {
             .unwrap_or_else(|| self.initial_configuration.clone())
     }
 
-    fn latest_configuration_index(&self) -> usize {
+    pub fn latest_configuration_index(&self) -> usize {
         self.log
             .iter()
             .rev()
@@ -440,13 +442,13 @@ impl<T, C> DynRaftState<T, C> {
             .map_or(0, |entry| entry.index)
     }
 
-    fn last_log_position(&self) -> (usize, usize) {
+    pub fn last_log_position(&self) -> (usize, usize) {
         self.log
             .last()
             .map_or((0, 0), |entry| (entry.term, entry.index))
     }
 
-    fn committed_current_term(&self) -> bool {
+    pub fn committed_current_term(&self) -> bool {
         self.commit_index > 0 && self.log[self.commit_index - 1].term == self.term
     }
 }
@@ -491,11 +493,13 @@ pub struct DynRaftStepOutput<T, C> {
     pub view_transition: Option<LeaderView<C>>,
 }
 
+#[doc(hidden)]
 #[derive(Clone, Copy)]
-struct StepPolicy {
-    require_current_term_commit: bool,
+pub struct StepPolicy {
+    pub require_current_term_commit: bool,
 }
-const SAFE_POLICY: StepPolicy = StepPolicy {
+#[doc(hidden)]
+pub const SAFE_POLICY: StepPolicy = StepPolicy {
     require_current_term_commit: true,
 };
 
@@ -508,9 +512,12 @@ pub fn dyn_raft_step<T: Clone, C>(
 
 /// Runs the dissertation's original, unsafe single-server-change rule.
 ///
-/// This exists only to let simulation demonstrate the 2015 counterexample. Normal
-/// callers must use [`dyn_raft_step`], which always enforces the current-term commit
-/// barrier.
+/// This exists only to let simulation demonstrate the 2015 counterexample: it omits the
+/// current-term commit barrier and, faithfully to the dissertation, truncates conflicting
+/// log suffixes unconditionally — even below the commit index — so the violation appears
+/// as divergent committed outputs rather than aborting inside the compiled simulation.
+/// Normal callers must use [`dyn_raft_step`], which always enforces the barrier and keeps
+/// the committed-entry truncation guard.
 #[doc(hidden)]
 pub fn dyn_raft_step_unpatched_for_simulation<T: Clone, C>(
     state: &mut DynRaftState<T, C>,
@@ -525,7 +532,8 @@ pub fn dyn_raft_step_unpatched_for_simulation<T: Clone, C>(
     )
 }
 
-fn dyn_raft_step_with_policy<T: Clone, C>(
+#[doc(hidden)]
+pub fn dyn_raft_step_with_policy<T: Clone, C>(
     state: &mut DynRaftState<T, C>,
     input: DynRaftStepInput<T, C>,
     policy: StepPolicy,
@@ -693,12 +701,20 @@ fn dyn_raft_step_with_policy<T: Clone, C>(
                 for entry in request.entries {
                     if state.log.len() >= entry.index {
                         if state.log[entry.index - 1].term != entry.term {
-                            assert!(
-                                entry.index > state.commit_index,
-                                "protocol violation: truncate committed entry {} (commit {})",
-                                entry.index,
-                                state.commit_index
-                            );
+                            // The dissertation algorithm truncates unconditionally. Keep
+                            // that behavior verbatim under the unpatched policy so the
+                            // 2015 violation surfaces as divergent committed outputs that
+                            // a simulation oracle can observe; under the safe policy this
+                            // guard asserts the situation is unreachable (a panic here
+                            // inside the compiled simulation aborts the whole process).
+                            if policy.require_current_term_commit {
+                                assert!(
+                                    entry.index > state.commit_index,
+                                    "protocol violation: truncate committed entry {} (commit {})",
+                                    entry.index,
+                                    state.commit_index
+                                );
+                            }
                             state.log.truncate(entry.index - 1);
                             state.log.push(entry);
                         }
@@ -1175,6 +1191,159 @@ where
     )
 }
 
+/// Simulation-only outputs for the *unpatched* dissertation server.
+///
+/// Unlike [`DynRaftOutputs`], this exposes every committed log **entry** (with its
+/// physical index and payload), not just application commands. A runtime safety
+/// oracle needs the physical index/payload of *all* committed entries — including
+/// `Noop` and `Configuration` entries — to detect the 2015 counterexample, in which
+/// two members commit different payloads at the same physical log index.
+#[doc(hidden)]
+pub struct DynRaftUnpatchedOutputs<'a, T, C> {
+    /// Every committed entry, tagged per member by `sim_cluster_output`.
+    pub committed_entries: Stream<DynLogEntry<T, C>, Cluster<'a, C>, Unbounded, TotalOrder>,
+    pub reconfiguration_results:
+        Stream<ReconfigurationResult<C>, Cluster<'a, C, NoConsistency>, Unbounded, TotalOrder>,
+    pub leader_views: Stream<LeaderView<C>, Cluster<'a, C>>,
+}
+
+/// Hosts the **unpatched** single-server reconfiguration rule
+/// ([`dyn_raft_step_unpatched_for_simulation`]) so that Hydro's simulator can *discover*
+/// Ongaro's 2015 membership-change counterexample on its own — choosing the batching,
+/// message, election, and (optionally) crash schedules — rather than replaying a
+/// hand-scripted execution.
+///
+/// This is wired identically to the production [`dyn_raft_server`], with two deliberate
+/// differences:
+///
+/// 1. It routes through [`dyn_raft_step_unpatched_for_simulation`], which omits the 2015
+///    current-term commit barrier. The production path in [`dyn_raft_server`] is
+///    unchanged and always enforces the barrier via [`dyn_raft_step`].
+/// 2. It exposes committed *entries* (physical index + payload) so a test can install an
+///    explicit safety oracle. Because this path is intentionally unsafe, it does not
+///    attach any `assert_has_consistency_of` guarantee.
+///
+/// Physical Hydro cluster membership stays static; logical Raft configurations remain
+/// subsets of that fixed universe, exactly as in the production server.
+#[doc(hidden)]
+pub fn dyn_raft_server_unpatched_for_simulation<'a, T, C, O, RO, Net>(
+    cluster: &Cluster<'a, C>,
+    commands: Stream<T, Cluster<'a, C>, Unbounded, O>,
+    reconfigurations: Stream<ReconfigurationRequest<C>, Cluster<'a, C>, Unbounded, RO>,
+    election_timer_interrupts: Stream<(), Cluster<'a, C>>,
+    heartbeat_timer_interrupts: Stream<(), Cluster<'a, C>>,
+    config: DynRaftConfig,
+    net: Net,
+    nondet_raft: NonDet,
+) -> DynRaftUnpatchedOutputs<'a, T, C>
+where
+    T: Clone + Serialize + DeserializeOwned + 'a,
+    C: 'a,
+    O: Ordering,
+    RO: Ordering,
+    Net: NetworkFor<DynRaftRpc<T, C>>,
+    NoOrder: MinOrder<Net::OrderingGuarantee, Min = NoOrder>,
+{
+    let commands = commands.assume_ordering::<TotalOrder>(nondet!(
+        /** Concurrent commands have an arbitrary but fixed log order. */
+        nondet_raft
+    ));
+    let reconfigurations = reconfigurations.assume_ordering::<TotalOrder>(nondet!(
+        /** Concurrent administrative requests have an arbitrary but fixed order. */
+        nondet_raft
+    ));
+    #[expect(clippy::type_complexity, reason = "protocol feedback channel")]
+    let (traffic_handle, traffic): (
+        ForwardHandle<
+            'a,
+            Stream<(MemberId<C>, DynRaftRpc<T, C>), Cluster<'a, C>, Unbounded, NoOrder>,
+        >,
+        Stream<(MemberId<C>, DynRaftRpc<T, C>), Cluster<'a, C>, Unbounded, NoOrder>,
+    ) = cluster.forward_ref();
+
+    let LocationId::Cluster(cluster_key) = Location::id(cluster) else {
+        unreachable!("dyn_raft_server_unpatched_for_simulation runs on a cluster")
+    };
+    let cluster_members = ClusterIds {
+        key: cluster_key,
+        _phantom: PhantomData,
+    };
+    let cluster_members_for_state = cluster_members.clone();
+    let initial_voter_count = config.initial_voter_count;
+
+    #[expect(clippy::type_complexity, reason = "explicit protocol outputs")]
+    let (outbound, committed_entries, results, views): (
+        Stream<(MemberId<C>, DynRaftRpc<T, C>), Cluster<'a, C>>,
+        Stream<DynLogEntry<T, C>, Cluster<'a, C>>,
+        Stream<ReconfigurationResult<C>, Cluster<'a, C>>,
+        Stream<LeaderView<C>, Cluster<'a, C>>,
+    ) = sliced! {
+        let command_batch = use::batch(commands, nondet!(/** batching changes latency only */ nondet_raft));
+        let reconfiguration_batch = use::batch(reconfigurations, nondet!(/** batching changes latency only */ nondet_raft));
+        let election_batch = use::batch(election_timer_interrupts, nondet!(/** election timing selects leaders */ nondet_raft));
+        let heartbeat_batch = use::batch(heartbeat_timer_interrupts, nondet!(/** heartbeat timing changes latency */ nondet_raft));
+        let traffic_batch = use::batch(traffic, nondet!(/** messages are canonicalized in the step function */ nondet_raft));
+        let mut state = use::state(|l| l.singleton(q!(DynRaftState::new(Configuration::new(cluster_members_for_state
+                .iter()
+                .take(initial_voter_count)
+                .map(|id| MemberId::from_tagless(id.clone()))
+                .collect()).expect("initial voter count must be non-zero and at most the physical cluster size")))));
+        let tick = command_batch.location().clone();
+        let commands = command_batch.fold(q!(|| Vec::new()), q!(|out, value| out.push(value)));
+        let reconfigurations = reconfiguration_batch.fold(q!(|| Vec::new()), q!(|out, value| out.push(value)));
+        let election = election_batch.count().map(q!(|count| count > 0));
+        let heartbeat = heartbeat_batch.count().map(q!(|count| count > 0));
+        let messages = traffic_batch.fold(
+            q!(|| Vec::new()),
+            q!(|out, value| out.push(value), commutative = manual_proof!(/** step canonicalizes the multiset */)),
+        );
+        let physical_members = tick.singleton(q!(cluster_members
+            .iter()
+            .map(|id| MemberId::from_tagless(id.clone()))
+            .collect::<Vec<_>>()));
+
+        let state_ref = state.by_mut();
+        let commands_ref = commands.by_ref();
+        let reconfigurations_ref = reconfigurations.by_ref();
+        let election_ref = election.by_ref();
+        let heartbeat_ref = heartbeat.by_ref();
+        let messages_ref = messages.by_ref();
+        let physical_members_ref = physical_members.by_ref();
+        let committed: Stream<DynLogEntry<T, C>, _, Bounded> = tick.source_iter(q!(Vec::new()));
+        let committed_ref = committed.by_mut();
+        let results: Stream<ReconfigurationResult<C>, _, Bounded> = tick.source_iter(q!(Vec::new()));
+        let results_ref = results.by_mut();
+        let views: Stream<LeaderView<C>, _, Bounded> = tick.source_iter(q!(Vec::new()));
+        let views_ref = views.by_mut();
+        let outbound = tick.singleton(q!(() )).into_stream().flat_map_ordered(q!(move |_| {
+            let output = crate::cluster::dyn_raft::dyn_raft_step_unpatched_for_simulation(
+                &mut *state_ref,
+                DynRaftStepInput {
+                    me: CLUSTER_SELF_ID.clone(),
+                    physical_members: physical_members_ref.clone(),
+                    election_timer_fired: *election_ref,
+                    heartbeat_timer_fired: *heartbeat_ref,
+                    commands: commands_ref.clone(),
+                    reconfigurations: reconfigurations_ref.clone(),
+                    messages: messages_ref.clone(),
+                },
+            );
+            for value in output.committed_entries { committed_ref.push(value); }
+            for value in output.reconfiguration_results { results_ref.push(value); }
+            if let Some(value) = output.view_transition { views_ref.push(value); }
+            output.outbound
+        }));
+        (outbound, committed, results, views)
+    };
+
+    traffic_handle.complete(outbound.into_keyed().demux(cluster, net).entries());
+    DynRaftUnpatchedOutputs {
+        committed_entries,
+        reconfiguration_results: results,
+        leader_views: views,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1388,7 +1557,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "truncate committed entry")]
+    #[should_panic(expected = "different commits at index")]
     fn unsafe_policy_reproduces_ongaro_two_removes_counterexample() {
         let mut cluster = StepCluster::new(4, &[0, 1, 2, 3]);
         cluster.policy = StepPolicy {
@@ -1434,15 +1603,17 @@ mod tests {
         assert_eq!(cluster.states[0].role, RaftState::Leader);
         assert_eq!(cluster.states[0].term, 3);
 
-        // Back nextIndex down against S1 until S0 sends its conflicting suffix.
-        // S1 must then reject truncation of its already-committed term-2 entry.
+        // Back nextIndex down against S1 until S0 sends its conflicting suffix. The
+        // dissertation algorithm silently truncates S1's already-committed term-2
+        // entry; the divergence then surfaces on the committed outputs.
         for _ in 0..4 {
             cluster.step(0, false, true, &[], vec![]);
             cluster.inboxes[2].clear();
             cluster.step(1, false, false, &[], vec![]);
             cluster.step(0, false, false, &[], vec![]);
         }
-        panic!("counterexample failed to reach committed-entry truncation");
+        cluster.check_commit_safety();
+        panic!("counterexample failed to produce divergent committed logs");
     }
 
     #[test]
@@ -1464,5 +1635,400 @@ mod tests {
             DynLogPayload::Configuration(_)
         ));
         assert_eq!(cluster.states[1].commit_index, 0);
+    }
+
+    /// Drives the **unpatched** dissertation server through Hydro's compiled simulator.
+    /// The workload is *staged*: two quiesced setup phases put the system at the doorstep
+    /// of Ongaro's 2015 counterexample, and the simulator then searches for the schedule
+    /// that actually breaks it. What is fixed and what is discovered:
+    ///
+    /// - Fixed by the test (inputs only, no injected protocol state): member 0 is elected
+    ///   first and receives `remove(3)`; member 1 later runs and receives `remove(2)`.
+    /// - Discovered by the simulator (the racy burst): batching the removal after member
+    ///   1's leadership, committing E={0,1,3} under the *new* quorum {1,3} while the
+    ///   replication to member 0 stays in flight, member 0's counter-candidacy under its
+    ///   stale D={0,1,2}, member 2's vote, and the nextIndex walk-down that replicates
+    ///   the conflicting prefix.
+    ///
+    /// See [`simulator_discovers_ongaro_membership_bug_unstaged`] for the blind-discovery
+    /// variant with symmetric inputs and no staging.
+    ///
+    /// Shape of the counterexample (cf. the hand-written
+    /// [`unsafe_policy_reproduces_ongaro_two_removes_counterexample`]):
+    ///
+    /// - Phase A (quiesced): member 0 wins term 1 uncontested.
+    /// - Phase B (quiesced): member 0 appends `remove(3)` → configuration `D={0,1,2}`.
+    ///   Without the current-term commit barrier this appends immediately, before any
+    ///   entry of term 1 has committed; no heartbeat is pumped, so `D` exists only on
+    ///   member 0.
+    /// - Phase C (one un-quiesced burst): member 1 runs for term 2 (votes from 2 and 3),
+    ///   appends `remove(2)` → `E={0,1,3}` before its own no-op commits, and commits `E`
+    ///   with the *new* quorum {1,3} — while its replication to member 0 stays in flight.
+    ///   Member 0 then runs for term 3 under `D`, wins with member 2's vote, and its
+    ///   heartbeats walk `nextIndex` down into member 1's already-committed prefix.
+    ///
+    /// Detection is an explicit runtime safety oracle in the test closure (Hydro's
+    /// simulator does not validate `assert_has_consistency_of`, which this unsafe path
+    /// omits anyway): across all members, no two committed entries at the same physical
+    /// log index may differ in term or payload ("committed log forked"). The unpatched
+    /// step function performs the dissertation's unconditional truncation, so the fork
+    /// surfaces on the committed outputs where the oracle can see it, rather than
+    /// aborting inside the compiled simulation.
+    ///
+    /// Success means the *simulator* drove the system into the safety violation. Discover
+    /// schedules with `cargo sim -p hydro_test -- simulator_discovers_ongaro_membership_bug`;
+    /// a found failure is saved as a minimized reproducer under `src/cluster/sim-failures/`,
+    /// which plain `cargo test` replays deterministically.
+    #[test]
+    #[should_panic(expected = "committed log forked")]
+    fn simulator_discovers_ongaro_membership_bug() {
+        use hydro_lang::location::MemberId;
+
+        const N: usize = 4;
+
+        let mut flow = FlowBuilder::new();
+        let cluster = flow.cluster::<Replica>();
+
+        let (election_send, election_timer_interrupts) = cluster.sim_input();
+        let (heartbeat_send, heartbeat_timer_interrupts) = cluster.sim_input();
+        let (_command_send, commands) = cluster.sim_input::<String, TotalOrder, _>();
+        let (reconfig_send, reconfigurations) =
+            cluster.sim_input::<ReconfigurationRequest<Replica>, TotalOrder, _>();
+
+        let outputs = dyn_raft_server_unpatched_for_simulation(
+            &cluster,
+            commands,
+            reconfigurations,
+            election_timer_interrupts,
+            heartbeat_timer_interrupts,
+            DynRaftConfig {
+                initial_voter_count: N,
+            },
+            TCP.fail_stop().bincode(),
+            nondet!(
+                /** elections, batching, and replication timing are nondeterministic; the
+                committed log must not fork regardless — and, on this deliberately
+                unpatched path, the simulator is expected to prove that it can. */
+            ),
+        );
+
+        let committed_recv = outputs.committed_entries.sim_cluster_output();
+        // Drain the administrative/leadership outputs so they cannot back-pressure.
+        let _results_recv = outputs.reconfiguration_results.sim_cluster_output();
+        let _views_recv = outputs.leader_views.sim_cluster_output();
+
+        flow.sim()
+            .with_cluster_size(&cluster, N)
+            .fuzz(async || {
+                // Phase A: member 0 wins term 1 uncontested. Quiescing here is safe and
+                // deterministic — only vote traffic is in flight.
+                election_send.send(0, ());
+                hydro_lang::sim::quiesce().await;
+
+                // Phase B: leader 0 accepts remove(3). Unpatched, the configuration
+                // D={0,1,2} is appended immediately (no current-term commit barrier). No
+                // heartbeat is pumped, so nothing is in flight and D stays local to 0.
+                reconfig_send.send(
+                    0,
+                    ReconfigurationRequest {
+                        request_id: 1,
+                        change: ConfigurationChange::Remove(MemberId::from_raw_id(3)),
+                    },
+                );
+                hydro_lang::sim::quiesce().await;
+
+                // Phase C: single un-quiesced burst; the simulator owns the schedule.
+                // Member 1's candidacy, its competing remove(2), its replication, member
+                // 0's counter-candidacy, and member 0's replication are all concurrently
+                // outstanding.
+                //
+                // The removal is sent several times with distinct request ids: copies that
+                // the simulator batches before member 1's leadership are rejected
+                // (NotLeader) and copies that arrive while a change is pending are rejected
+                // (ChangeInProgress) — both harmless — so at least one copy can land in the
+                // window where it appends the competing configuration E={0,1,3}.
+                election_send.send(1, ());
+                for request_id in 2..=4 {
+                    reconfig_send.send(
+                        1,
+                        ReconfigurationRequest {
+                            request_id,
+                            change: ConfigurationChange::Remove(MemberId::from_raw_id(2)),
+                        },
+                    );
+                }
+                heartbeat_send.send(1, ());
+                heartbeat_send.send(1, ());
+                election_send.send(0, ());
+                election_send.send(0, ());
+                // Member 0's heartbeats must walk nextIndex down (two rejections per
+                // follower) before the conflicting prefix is sent; extra pumps give the
+                // simulator room to interleave the rejections between them.
+                for _ in 0..6 {
+                    heartbeat_send.send(0, ());
+                }
+
+                // Single final quiescence: drain every member's committed entries and run
+                // the safety oracle.
+                hydro_lang::sim::quiesce().await;
+
+                // physical index -> the entry committed there (by the first member seen).
+                // Comparing whole entries (term + payload) also catches forks where both
+                // sides committed the same *kind* of payload (e.g. two no-ops) from
+                // different terms at one index.
+                let mut committed_at: HashMap<usize, DynLogEntry<String, Replica>> =
+                    HashMap::new();
+                for member in 0..N as u32 {
+                    for entry in committed_recv.collect::<Vec<_>>(member).await {
+                        if let Some(previous) = committed_at.get(&entry.index) {
+                            assert_eq!(
+                                previous, &entry,
+                                "committed log forked: physical index {} committed two \
+                                 different entries",
+                                entry.index
+                            );
+                        } else {
+                            committed_at.insert(entry.index, entry);
+                        }
+                    }
+                }
+            });
+    }
+
+    /// The **blind-discovery** variant of
+    /// [`simulator_discovers_ongaro_membership_bug`]: no staging whatsoever. Every member
+    /// receives the same inputs — election ticks, heartbeat ticks, and copies of both
+    /// removal requests — all sent up front with **no intermediate quiescence**, so the
+    /// simulator alone decides who leads which term, when each removal lands relative to
+    /// leadership, and which replication is delayed. Nothing about the counterexample's
+    /// structure is encoded in the workload; an operator asking to remove two nodes is
+    /// the whole scenario. Removals are sent as several copies with distinct request ids
+    /// because a copy processed by a non-leader is rejected (`NotLeader`) and consumed.
+    ///
+    /// The oracle is identical: no two members may commit different entries (term or
+    /// payload) at the same physical log index.
+    ///
+    /// This is ignored by default: without a checked-in reproducer, plain `cargo test`
+    /// runs a few thousand random schedules, which is known to be insufficient for this
+    /// search space. Run it under coverage-guided fuzzing:
+    /// `cargo sim -p hydro_test -- simulator_discovers_ongaro_membership_bug_unstaged --ignored`.
+    /// If a failure is found, the minimized reproducer lands in `src/cluster/sim-failures/`
+    /// and the `#[ignore]` can be removed.
+    #[test]
+    #[ignore = "blind-discovery experiment; run under `cargo sim` (see doc comment)"]
+    #[should_panic(expected = "committed log forked")]
+    fn simulator_discovers_ongaro_membership_bug_unstaged() {
+        use hydro_lang::location::MemberId;
+
+        const N: usize = 4;
+        const ELECTION_WAVES: usize = 3;
+        const HEARTBEAT_PUMPS: usize = 6;
+        const RECONFIG_COPIES: u64 = 3;
+
+        let mut flow = FlowBuilder::new();
+        let cluster = flow.cluster::<Replica>();
+
+        let (election_send, election_timer_interrupts) = cluster.sim_input();
+        let (heartbeat_send, heartbeat_timer_interrupts) = cluster.sim_input();
+        let (_command_send, commands) = cluster.sim_input::<String, TotalOrder, _>();
+        let (reconfig_send, reconfigurations) =
+            cluster.sim_input::<ReconfigurationRequest<Replica>, TotalOrder, _>();
+
+        let outputs = dyn_raft_server_unpatched_for_simulation(
+            &cluster,
+            commands,
+            reconfigurations,
+            election_timer_interrupts,
+            heartbeat_timer_interrupts,
+            DynRaftConfig {
+                initial_voter_count: N,
+            },
+            TCP.fail_stop().bincode(),
+            nondet!(
+                /** elections, batching, and replication timing are nondeterministic; the
+                committed log must not fork regardless — and, on this deliberately
+                unpatched path, the simulator is expected to prove that it can. */
+            ),
+        );
+
+        let committed_recv = outputs.committed_entries.sim_cluster_output();
+        let _results_recv = outputs.reconfiguration_results.sim_cluster_output();
+        let _views_recv = outputs.leader_views.sim_cluster_output();
+
+        flow.sim()
+            .with_cluster_size(&cluster, N)
+            .fuzz(async || {
+                // Everything up front, no `.await` until the final drain: the fuzzer owns
+                // the complete schedule. Sends are woven round-robin across members and
+                // input kinds only to avoid biasing the schedule via enqueue order.
+                for _ in 0..ELECTION_WAVES {
+                    for member in 0..N as u32 {
+                        election_send.send(member, ());
+                    }
+                }
+                let mut request_id = 0;
+                for _copy in 0..RECONFIG_COPIES {
+                    for member in 0..N as u32 {
+                        for target in [3u32, 2u32] {
+                            request_id += 1;
+                            reconfig_send.send(
+                                member,
+                                ReconfigurationRequest {
+                                    request_id,
+                                    change: ConfigurationChange::Remove(MemberId::from_raw_id(
+                                        target,
+                                    )),
+                                },
+                            );
+                        }
+                    }
+                }
+                for _ in 0..HEARTBEAT_PUMPS {
+                    for member in 0..N as u32 {
+                        heartbeat_send.send(member, ());
+                    }
+                }
+
+                // Single final quiescence, then the same fork oracle as the staged test.
+                hydro_lang::sim::quiesce().await;
+
+                let mut committed_at: HashMap<usize, DynLogEntry<String, Replica>> =
+                    HashMap::new();
+                for member in 0..N as u32 {
+                    for entry in committed_recv.collect::<Vec<_>>(member).await {
+                        if let Some(previous) = committed_at.get(&entry.index) {
+                            assert_eq!(
+                                previous, &entry,
+                                "committed log forked: physical index {} committed two \
+                                 different entries",
+                                entry.index
+                            );
+                        } else {
+                            committed_at.insert(entry.index, entry);
+                        }
+                    }
+                }
+            });
+    }
+
+    /// The **bootstrapped** middle tier between
+    /// [`simulator_discovers_ongaro_membership_bug`] (staged) and
+    /// [`simulator_discovers_ongaro_membership_bug_unstaged`] (blind): the only fixed step
+    /// is bootstrapping a first leader — one election tick to member 0, followed by one
+    /// quiescence. That step encodes nothing about the membership bug (every Raft cluster
+    /// needs a first leader before it can do anything). Everything else is symmetric and
+    /// un-quiesced: copies of *both* removals go to *every* member, and all
+    /// election/heartbeat ticks are outstanding concurrently. The simulator alone must
+    /// find the unsafe mechanism: a removal appended by the leader before any current-term
+    /// commit, a challenger elected and appending the competing removal, the new-quorum
+    /// commit with the old leader's replication delayed, and the conflicting prefix
+    /// committed by a re-elected leader.
+    ///
+    /// The oracle is identical: no two members may commit different entries (term or
+    /// payload) at the same physical log index.
+    ///
+    /// This is the strongest tier that has actually found the counterexample: coverage-
+    /// guided fuzzing hit it at 315,218 executions, forking `Noop@term 1` against
+    /// `Noop@term 4` at physical index 1 (see `docs/dyn_raft_simulator_discovery.md` for
+    /// the full writeup). Discover schedules with:
+    /// `cargo sim -p hydro_test -- simulator_discovers_ongaro_membership_bug_bootstrapped --ignored`.
+    #[test]
+    #[ignore = "discovery experiment; run under `cargo sim` (see doc comment)"]
+    #[should_panic(expected = "committed log forked")]
+    fn simulator_discovers_ongaro_membership_bug_bootstrapped() {
+        use hydro_lang::location::MemberId;
+
+        const N: usize = 4;
+        const ELECTION_WAVES: usize = 2;
+        const HEARTBEAT_PUMPS: usize = 6;
+        const RECONFIG_COPIES: u64 = 3;
+
+        let mut flow = FlowBuilder::new();
+        let cluster = flow.cluster::<Replica>();
+
+        let (election_send, election_timer_interrupts) = cluster.sim_input();
+        let (heartbeat_send, heartbeat_timer_interrupts) = cluster.sim_input();
+        let (_command_send, commands) = cluster.sim_input::<String, TotalOrder, _>();
+        let (reconfig_send, reconfigurations) =
+            cluster.sim_input::<ReconfigurationRequest<Replica>, TotalOrder, _>();
+
+        let outputs = dyn_raft_server_unpatched_for_simulation(
+            &cluster,
+            commands,
+            reconfigurations,
+            election_timer_interrupts,
+            heartbeat_timer_interrupts,
+            DynRaftConfig {
+                initial_voter_count: N,
+            },
+            TCP.fail_stop().bincode(),
+            nondet!(
+                /** elections, batching, and replication timing are nondeterministic; the
+                committed log must not fork regardless — and, on this deliberately
+                unpatched path, the simulator is expected to prove that it can. */
+            ),
+        );
+
+        let committed_recv = outputs.committed_entries.sim_cluster_output();
+        let _results_recv = outputs.reconfiguration_results.sim_cluster_output();
+        let _views_recv = outputs.leader_views.sim_cluster_output();
+
+        flow.sim()
+            .with_cluster_size(&cluster, N)
+            .fuzz(async || {
+                // The single staged step: some member (0, by symmetry) leads term 1.
+                election_send.send(0, ());
+                hydro_lang::sim::quiesce().await;
+
+                // Everything else is symmetric and concurrently outstanding; the fuzzer
+                // owns the complete schedule from here.
+                for _ in 0..ELECTION_WAVES {
+                    for member in 0..N as u32 {
+                        election_send.send(member, ());
+                    }
+                }
+                let mut request_id = 0;
+                for _copy in 0..RECONFIG_COPIES {
+                    for member in 0..N as u32 {
+                        for target in [3u32, 2u32] {
+                            request_id += 1;
+                            reconfig_send.send(
+                                member,
+                                ReconfigurationRequest {
+                                    request_id,
+                                    change: ConfigurationChange::Remove(MemberId::from_raw_id(
+                                        target,
+                                    )),
+                                },
+                            );
+                        }
+                    }
+                }
+                for _ in 0..HEARTBEAT_PUMPS {
+                    for member in 0..N as u32 {
+                        heartbeat_send.send(member, ());
+                    }
+                }
+
+                // Single final quiescence, then the same fork oracle as the other tests.
+                hydro_lang::sim::quiesce().await;
+
+                let mut committed_at: HashMap<usize, DynLogEntry<String, Replica>> =
+                    HashMap::new();
+                for member in 0..N as u32 {
+                    for entry in committed_recv.collect::<Vec<_>>(member).await {
+                        if let Some(previous) = committed_at.get(&entry.index) {
+                            assert_eq!(
+                                previous, &entry,
+                                "committed log forked: physical index {} committed two \
+                                 different entries",
+                                entry.index
+                            );
+                        } else {
+                            committed_at.insert(entry.index, entry);
+                        }
+                    }
+                }
+            });
     }
 }
