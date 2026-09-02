@@ -19,6 +19,8 @@ pub mod paxos_log_bench;
 #[cfg(feature = "tokio")]
 pub mod paxos_with_client;
 pub mod raft;
+#[cfg(feature = "tokio")]
+pub mod retry_storm;
 pub mod simple_cluster;
 #[cfg(feature = "tokio")]
 pub mod two_pc;
