@@ -19,7 +19,8 @@ use super::optional::Optional;
 use super::singleton::Singleton;
 use crate::compile::builder::{CycleId, FlowState};
 use crate::compile::ir::{
-    CollectionKind, HydroIrOpMetadata, HydroNode, HydroRoot, SharedNode, StreamOrder, StreamRetry,
+    CollectionKind, HydroIrOpMetadata, HydroNode, HydroRoot, HydroSource, SharedNode, StreamOrder,
+    StreamRetry,
 };
 #[cfg(stageleft_runtime)]
 use crate::forward_handle::{CycleCollection, CycleCollectionWithInitial, ReceiverComplete};
@@ -605,6 +606,20 @@ where
                     .new_node_metadata(Stream::<U, L, B, O, R>::collection_kind()),
             },
         )
+    }
+
+    pub(crate) fn with_source_kind_interval(self) -> Self {
+        let mut node = self.ir_node.borrow_mut();
+        let HydroNode::Source { source, .. } = &mut *node else {
+            unreachable!("source_stream must produce a source node")
+        };
+        let HydroSource::Stream(expr) = std::mem::replace(source, HydroSource::ExternalNetwork())
+        else {
+            unreachable!("source_stream must produce a stream source")
+        };
+        *source = HydroSource::Interval(expr);
+        drop(node);
+        self
     }
 
     /// For each item `i` in the input stream, transform `i` using `f` and then treat the

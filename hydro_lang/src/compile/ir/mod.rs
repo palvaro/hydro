@@ -452,6 +452,8 @@ pub enum ClusterMembersState {
 #[derive(Debug, Hash, Clone, serde::Serialize)]
 pub enum HydroSource {
     Stream(DebugExpr),
+    /// A wall-clock interval source created by `Location::source_interval`.
+    Interval(DebugExpr),
     ExternalNetwork(),
     Iter(DebugExpr),
     Spin(),
@@ -3841,7 +3843,7 @@ impl HydroNode {
                                 syn::Ident::new(&format!("stream_{}", stmt_id), Span::call_site());
 
                             let source_stmt = match source {
-                                HydroSource::Stream(expr) => {
+                                HydroSource::Stream(expr) | HydroSource::Interval(expr) => {
                                     debug_assert!(metadata.location_id.is_top_level());
                                     parse_quote! {
                                         #source_ident = source_stream(#expr);
@@ -3915,10 +3917,14 @@ impl HydroNode {
 
                             match builders_or_callback {
                                 BuildersOrCallback::Builders(graph_builders) => {
+                                    let operator_tag = match source {
+                                        HydroSource::Interval(_) => format!("interval__{stmt_id}"),
+                                        _ => stmt_id.to_string(),
+                                    };
                                     graph_builders.add_dfir_at(
                                         &out_location,
                                         source_stmt,
-                                        Some(&stmt_id.to_string()),
+                                        Some(&operator_tag),
                                     );
                                 }
                                 BuildersOrCallback::Callback(_, node_callback) => {
@@ -5533,7 +5539,7 @@ impl HydroNode {
             | HydroNode::UnboundSingleton { .. }
             | HydroNode::AssertIsConsistent { .. } => {}
             HydroNode::Source { source, .. } => match source {
-                HydroSource::Stream(expr) | HydroSource::Iter(expr) => transform(expr),
+                HydroSource::Stream(expr) | HydroSource::Interval(expr) | HydroSource::Iter(expr) => transform(expr),
                 HydroSource::ExternalNetwork()
                 | HydroSource::Spin()
                 | HydroSource::ClusterMembers(_, _)

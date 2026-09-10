@@ -10,6 +10,11 @@ use pin_project_lite::pin_project;
 use slotmap::SecondaryMap;
 use web_time::{Duration, Instant};
 
+#[cfg(feature = "meta")]
+use dfir_lang::graph::ops::DelayType;
+#[cfg(feature = "meta")]
+use dfir_lang::graph::DfirGraph;
+
 /// Metrics for a [`Dfir`](super::context::Dfir) graph instance.
 ///
 /// Call [`Dfir::metrics`](super::context::Dfir::metrics) for reference-counted continually-updated metrics,
@@ -164,6 +169,217 @@ define_metrics! {
     }
 }
 
+/// One handoff's item count as seen in a metrics interval.
+#[cfg(feature = "meta")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StageHandoffMetrics {
+    /// Runtime graph ID of the handoff.
+    pub handoff_id: GraphNodeId,
+    /// Items drained by the receiving stage during this interval.
+    pub items: usize,
+    /// Items present when the handoff was last inspected in this interval.
+    pub buffered_items: usize,
+    /// Tick/loop delay when this handoff is a feedback boundary.
+    pub delay: Option<DelayType>,
+}
+
+/// Static topology for one fused DFIR stage.
+#[cfg(feature = "meta")]
+#[derive(Clone, Debug)]
+pub struct StageTopologyEntry {
+    /// Runtime graph ID of the fused stage.
+    pub subgraph_id: GraphSubgraphId,
+    /// Compiler/debug tags of operators fused into the stage.
+    pub operator_tags: Vec<String>,
+    /// DFIR operator names fused into the stage.
+    pub operator_names: Vec<String>,
+    /// Number of retained handoff/state references read by the stage.
+    pub retained_state_reads: usize,
+    /// Number of retained handoff/state references mutated by the stage.
+    pub retained_state_writes: usize,
+    /// Input handoff IDs and their optional feedback delay.
+    pub inputs: Vec<(GraphNodeId, Option<DelayType>)>,
+    /// Output handoff IDs and their optional feedback delay.
+    pub outputs: Vec<(GraphNodeId, Option<DelayType>)>,
+}
+
+/// Owned stage topology captured once from a runtime meta-graph.
+#[cfg(feature = "meta")]
+#[derive(Clone, Debug)]
+pub struct StageTopology(pub Vec<StageTopologyEntry>);
+
+#[cfg(feature = "meta")]
+impl StageTopology {
+    /// Captures the stage/handoff structure needed to interpret metric windows.
+    pub fn from_graph(graph: &DfirGraph) -> Self {
+        let handoffs = graph.subgraph_handoffs();
+        Self(
+            graph
+                .subgraphs()
+                .map(|(subgraph_id, nodes)| {
+                    let (inputs, outputs) = handoffs
+                        .get(subgraph_id)
+                        .map(|(inputs, outputs)| {
+                            (
+                                inputs
+                                    .iter()
+                                    .map(|id| (*id, graph.handoff_delay_type(*id)))
+                                    .collect(),
+                                outputs
+                                    .iter()
+                                    .map(|id| (*id, graph.handoff_delay_type(*id)))
+                                    .collect(),
+                            )
+                        })
+                        .unwrap_or_default();
+                    StageTopologyEntry {
+                        subgraph_id,
+                        operator_tags: nodes
+                            .iter()
+                            .filter_map(|id| graph.operator_tag(*id).map(str::to_owned))
+                            .collect(),
+                        operator_names: nodes
+                            .iter()
+                            .map(|id| graph.node(*id).to_name_string().into_owned())
+                            .collect(),
+                        retained_state_reads: nodes
+                            .iter()
+                            .flat_map(|id| graph.node_handoff_references(*id))
+                            .filter(|reference| !reference.is_mut)
+                            .count(),
+                        retained_state_writes: nodes
+                            .iter()
+                            .flat_map(|id| graph.node_handoff_references(*id))
+                            .filter(|reference| reference.is_mut)
+                            .count(),
+                        inputs,
+                        outputs,
+                    }
+                })
+                .collect(),
+        )
+    }
+}
+
+/// Descriptive runtime metrics for one fused DFIR subgraph.
+#[cfg(feature = "meta")]
+#[derive(Clone, Debug)]
+pub struct StageMetrics {
+    /// Runtime graph ID of the fused stage.
+    pub subgraph_id: GraphSubgraphId,
+    /// Compiler/debug tags of operators fused into the stage.
+    pub operator_tags: Vec<String>,
+    /// DFIR operator names fused into the stage.
+    pub operator_names: Vec<String>,
+    /// Number of retained handoff/state references read by the stage.
+    pub retained_state_reads: usize,
+    /// Number of retained handoff/state references mutated by the stage.
+    pub retained_state_writes: usize,
+    /// Stage executions during this interval.
+    pub run_count: usize,
+    /// Polls during this interval.
+    pub poll_count: usize,
+    /// Time spent polling during this interval.
+    pub poll_duration: Duration,
+    /// Handoffs consumed by this stage.
+    pub inputs: Vec<StageHandoffMetrics>,
+    /// Handoffs produced by this stage.
+    pub outputs: Vec<StageHandoffMetrics>,
+}
+
+impl StageMetrics {
+    /// Whether this stage contains a compiler-identified interval source.
+    pub fn has_interval_source(&self) -> bool {
+        self.operator_tags
+            .iter()
+            .any(|tag| tag.starts_with("interval__"))
+    }
+
+    /// Total items consumed across input handoffs in the interval.
+    pub fn input_items(&self) -> usize {
+        self.inputs.iter().map(|input| input.items).sum()
+    }
+
+    /// Total items made visible at output handoffs in the interval.
+    pub fn output_items(&self) -> usize {
+        self.outputs.iter().map(|output| output.items).sum()
+    }
+
+    /// Items consumed from tick/loop feedback handoffs.
+    pub fn feedback_input_items(&self) -> usize {
+        self.inputs
+            .iter()
+            .filter(|input| input.delay.is_some())
+            .map(|input| input.items)
+            .sum()
+    }
+}
+
+/// Compares output per operational activation in paired windows.
+///
+/// Returns `None` when either window has no operational activation. This is a
+/// descriptive ratio difference, not a hazard classification.
+#[cfg(feature = "meta")]
+pub fn paired_gain_delta(
+    control_operational_inputs: usize,
+    control_outputs: usize,
+    triggered_operational_inputs: usize,
+    triggered_outputs: usize,
+) -> Option<f64> {
+    if control_operational_inputs == 0 || triggered_operational_inputs == 0 {
+        return None;
+    }
+    Some(
+        triggered_outputs as f64 / triggered_operational_inputs as f64
+            - control_outputs as f64 / control_operational_inputs as f64,
+    )
+}
+
+#[cfg(feature = "meta")]
+impl DfirMetrics {
+    /// Correlates an interval's counters with previously captured stage topology.
+    pub fn by_stage_topology(&self, topology: &StageTopology) -> Vec<StageMetrics> {
+        topology
+            .0
+            .iter()
+            .map(|stage| {
+                let counters = self.subgraphs.get(stage.subgraph_id);
+                let map_handoff = |(handoff_id, delay): &(GraphNodeId, Option<DelayType>)| {
+                    let metrics = self.handoffs.get(*handoff_id);
+                    StageHandoffMetrics {
+                        handoff_id: *handoff_id,
+                        items: metrics.map_or(0, HandoffMetrics::total_items_count),
+                        buffered_items: metrics.map_or(0, HandoffMetrics::curr_items_count),
+                        delay: *delay,
+                    }
+                };
+                StageMetrics {
+                    subgraph_id: stage.subgraph_id,
+                    operator_tags: stage.operator_tags.clone(),
+                    operator_names: stage.operator_names.clone(),
+                    retained_state_reads: stage.retained_state_reads,
+                    retained_state_writes: stage.retained_state_writes,
+                    run_count: counters.map_or(0, SubgraphMetrics::total_run_count),
+                    poll_count: counters.map_or(0, SubgraphMetrics::total_poll_count),
+                    poll_duration: counters
+                        .map_or(Duration::ZERO, SubgraphMetrics::total_poll_duration),
+                    inputs: stage.inputs.iter().map(map_handoff).collect(),
+                    outputs: stage.outputs.iter().map(map_handoff).collect(),
+                }
+            })
+            .collect()
+    }
+
+    /// Correlates an interval's counters with the runtime DFIR graph.
+    ///
+    /// This performs no hazard classification. It exposes enough structure for
+    /// research code to compare positive, control, and feedback activity across
+    /// paired executions.
+    pub fn by_stage(&self, graph: &DfirGraph) -> Vec<StageMetrics> {
+        self.by_stage_topology(&StageTopology::from_graph(graph))
+    }
+}
+
 pin_project! {
     /// Helper struct which instruments a future to track polling times.
     #[doc(hidden)]
@@ -227,6 +443,13 @@ mod test {
     use super::*;
 
     #[test]
+    fn paired_gain_distinguishes_fixed_from_history_dependent_work() {
+        assert_eq!(super::paired_gain_delta(4, 12, 4, 12), Some(0.0));
+        assert_eq!(super::paired_gain_delta(4, 12, 4, 28), Some(4.0));
+        assert_eq!(super::paired_gain_delta(0, 0, 4, 28), None);
+    }
+
+    #[test]
     fn test_dfir_metrics_intervals() {
         // Create slotmaps to generate valid keys.
         let mut sg_map: SlotMap<GraphSubgraphId, ()> = SlotMap::with_key();
@@ -288,11 +511,11 @@ mod test {
         assert_eq!(sg_metrics.total_run_count(), 7); // 12 - 5
         assert_eq!(sg_metrics.total_poll_count(), 15); // 25 - 10
         assert_eq!(sg_metrics.total_idle_count(), 5); // 7 - 2
-        //
+                                                      //
         let hoff_metrics = &second.handoffs[handoff_id];
         // total_items_count should be diffed
         assert_eq!(hoff_metrics.total_items_count(), 150); // 250 - 100
-        // curr_items_count should NOT be diffed (it's a current value, not cumulative)
+                                                           // curr_items_count should NOT be diffed (it's a current value, not cumulative)
         assert_eq!(hoff_metrics.curr_items_count(), 10);
     }
 }

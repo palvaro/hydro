@@ -1423,6 +1423,7 @@ pub trait Location<'a>: DynLocation {
             tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(interval)),
             |_| ()
         )))
+        .with_source_kind_interval()
         .assert_has_consistency_of_trusted(
             manual_proof!(/** interval does not reveal timestamps */),
         )
@@ -1450,6 +1451,7 @@ pub trait Location<'a>: DynLocation {
             )),
             |_| ()
         )))
+        .with_source_kind_interval()
         .assert_has_consistency_of_trusted(
             manual_proof!(/** interval does not reveal timestamps */),
         )
@@ -1517,9 +1519,27 @@ mod tests {
     use tokio_util::codec::LengthDelimitedCodec;
 
     use crate::compile::builder::FlowBuilder;
+    use crate::compile::ir::{HydroNode, HydroSource};
     use crate::live_collections::stream::{ExactlyOnce, TotalOrder};
     use crate::location::{Location, NetworkHint};
     use crate::nondet::nondet;
+
+    #[test]
+    fn interval_source_origin_survives_in_ir() {
+        let mut flow = FlowBuilder::new();
+        let node = flow.process::<()>();
+        node.source_interval(q!(std::time::Duration::from_millis(10)))
+            .for_each(q!(|_| {}));
+
+        let built = flow.finalize();
+        assert!(built.ir().iter().any(|root| matches!(
+            root.input(),
+            HydroNode::Source {
+                source: HydroSource::Interval(_),
+                ..
+            }
+        )));
+    }
 
     #[tokio::test]
     async fn top_level_singleton_replay_cardinality() {

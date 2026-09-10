@@ -227,13 +227,46 @@ pub fn timeout_retry<'a>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::pin::Pin;
 
+    use dfir_lang::graph::{GraphNode, GraphNodeId};
     use futures::{SinkExt, Stream, StreamExt};
     use hydro_deploy::Deployment;
     use hydro_lang::deploy::DeployCrateWrapper;
+    use hydro_lang::telemetry::emf::RecordMetricsSidecar;
 
     use super::*;
+
+    fn reaches_interval(
+        graph: &dfir_lang::graph::DfirGraph,
+        node_id: GraphNodeId,
+        seen: &mut HashSet<GraphNodeId>,
+    ) -> bool {
+        if !seen.insert(node_id) {
+            return false;
+        }
+        graph
+            .operator_tag(node_id)
+            .is_some_and(|tag| tag.starts_with("interval__"))
+            || graph
+                .node_predecessor_nodes(node_id)
+                .any(|predecessor| reaches_interval(graph, predecessor, seen))
+            || graph
+                .node_handoff_references(node_id)
+                .iter()
+                .filter_map(|reference| reference.node_id)
+                .any(|reference| reaches_interval(graph, reference, seen))
+    }
+
+    fn stage_records(path: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|record| record["MetricKind"] == "Stage")
+            .collect()
+    }
 
     async fn observe_for(
         events: &mut Pin<Box<dyn Stream<Item = RetryEvent>>>,
@@ -283,6 +316,101 @@ mod tests {
     /// healthy from a clean start cannot recover after a finite burst because
     /// timeout retries keep the finite-rate service saturated. Removing organic
     /// input eventually drains the finite request population.
+    #[test]
+    fn optimized_graph_exposes_interval_feedback_and_retained_state() {
+        let mut flow = FlowBuilder::new();
+        let client = flow.process::<Client>();
+        let service = flow.process::<Service>();
+        let requests = client.source_iter(q!([Request {
+            id: 1,
+            value: "work".to_owned(),
+        }]));
+        let outputs = timeout_retry(&client, &service, requests.into(), 80, 20);
+        outputs
+            .completed
+            .assume_ordering::<TotalOrder>(nondet!(/** only drives IR inspection */))
+            .for_each(q!(|_| {}));
+        outputs
+            .events
+            .assume_ordering::<TotalOrder>(nondet!(/** only drives IR inspection */))
+            .for_each(q!(|_| {}));
+
+        let mut built = flow
+            .with_default_optimize::<hydro_lang::compile::embedded::EmbeddedDeploy>();
+        let preview = built.preview_compile();
+        let client_graph = preview.dfir_for(&client).unwrap();
+        assert!(client_graph
+            .node_ids()
+            .any(|node_id| client_graph.operator_tag(node_id).is_some_and(|tag| tag.starts_with("interval__"))));
+        let interval_stateful_stages: Vec<_> = client_graph
+            .node_ids()
+            .filter(|node_id| {
+                client_graph
+                    .node_handoff_references(*node_id)
+                    .iter()
+                    .any(|reference| reference.is_mut)
+                    && reaches_interval(client_graph, *node_id, &mut HashSet::new())
+            })
+            .collect();
+        assert_eq!(interval_stateful_stages.len(), 1);
+        assert!(client_graph
+            .nodes()
+            .any(|(_, node)| matches!(node, GraphNode::Operator(op) if op.name_string() == "dest_sink")));
+    }
+
+    #[tokio::test]
+    async fn stage_trace_observes_interval_driven_retained_work() {
+        let trace_path = std::env::current_dir()
+            .unwrap()
+            .join(format!("target/retry-stage-trace-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&trace_path);
+        let mut deployment = Deployment::new();
+        let mut flow = FlowBuilder::new();
+        let external = flow.external::<()>();
+        let client = flow.process::<Client>();
+        let service = flow.process::<Service>();
+        let port = timeout_retry_external(&external, &client, &service, 40, 20);
+        let sidecar = RecordMetricsSidecar::builder()
+            .file_path(trace_path.to_string_lossy().into_owned())
+            .interval(Duration::from_millis(100))
+            .build();
+        let nodes = flow
+            .with_default_optimize()
+            .with_process(&client, deployment.Localhost())
+            .with_process(&service, deployment.Localhost())
+            .with_external(&external, deployment.Localhost())
+            .with_sidecar_all(&sidecar)
+            .deploy(&mut deployment);
+        deployment.deploy().await.unwrap();
+        let (_events, mut requests) = nodes.connect_bincode(port).await;
+        deployment.start().await.unwrap();
+
+        for id in 0..20 {
+            requests
+                .send(Request {
+                    id,
+                    value: "work".repeat(16),
+                })
+                .await
+                .unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(450)).await;
+        deployment.stop().await.unwrap();
+
+        let records = stage_records(&trace_path);
+        assert!(!records.is_empty(), "stage sidecar must emit activation windows");
+        assert!(records.iter().any(|record| {
+            record["HasIntervalSource"] == true
+                && record["OutputItems"].as_u64().unwrap_or(0) > 0
+        }));
+        assert!(records.iter().any(|record| {
+            record["RetainedStateWrites"].as_u64().unwrap_or(0) > 0
+                && record["RunCount"].as_u64().unwrap_or(0) > 0
+                && record["InputItems"].as_u64().unwrap_or(0) == 0
+                && record["OutputItems"].as_u64().unwrap_or(0) > 0
+        }));
+    }
+
     #[tokio::test]
     async fn finite_burst_enters_weakly_metastable_regime() {
         const TIMEOUT_MS: u64 = 80;

@@ -121,6 +121,14 @@ impl DfirGraph {
         self.node_varnames.get(node_id)
     }
 
+    /// Get the compiler/debug tag attached to an operator node.
+    ///
+    /// Hydro uses these tags to correlate lowered DFIR operators with the
+    /// corresponding Hydro IR statement. Handoff nodes generally have no tag.
+    pub fn operator_tag(&self, node_id: GraphNodeId) -> Option<&str> {
+        self.operator_tag.get(node_id).map(String::as_str)
+    }
+
     /// Get subgraph for node.
     pub fn node_subgraph(&self, node_id: GraphNodeId) -> Option<GraphSubgraphId> {
         self.node_subgraph.get(node_id).copied()
@@ -909,7 +917,7 @@ impl DfirGraph {
 
     /// Returns each subgraph's receive and send handoffs.
     /// `Map<GraphSubgraphId, (recv handoffs, send handoffs)>`
-    fn helper_collect_subgraph_handoffs(
+    pub fn subgraph_handoffs(
         &self,
     ) -> SecondaryMap<GraphSubgraphId, (Vec<GraphNodeId>, Vec<GraphNodeId>)> {
         // Get data on handoff src and dst subgraphs.
@@ -1327,7 +1335,7 @@ impl DfirGraph {
         }
 
         // 2. Collect per-subgraph recv & send handoffs.
-        let subgraph_handoffs = self.helper_collect_subgraph_handoffs();
+        let subgraph_handoffs = self.subgraph_handoffs();
 
         // 3. Use pre-computed subgraph topological order.
         let all_subgraphs: Vec<_> = self

@@ -2,6 +2,28 @@
 
 use dfir_rs::assert_graphvis_snapshots;
 
+/// Existing runtime counters can be joined back to producer/consumer stages.
+#[dfir_rs::test]
+pub async fn test_stage_metrics_correlate_handoff_inputs_and_outputs() {
+    let mut flow = dfir_rs::dfir_syntax! {
+        source_iter(0..5_i32) -> handoff() -> map(|x| x * 2) -> null();
+    };
+    flow.run_available().await;
+
+    let graph = flow.meta_graph().expect("meta graph enabled in tests");
+    let stages = flow.metrics().by_stage(graph);
+    let consumer = stages
+        .iter()
+        .find(|stage| stage.inputs.iter().any(|input| input.items == 5))
+        .expect("consumer stage should observe all five handoff items");
+    let input = consumer.inputs.iter().find(|input| input.items == 5).unwrap();
+    assert_eq!(consumer.input_items(), 5);
+    assert_eq!(consumer.feedback_input_items(), 0);
+    assert!(stages.iter().any(|stage| stage.outputs.iter().any(|output| {
+        output.handoff_id == input.handoff_id && output.items == 5
+    })));
+}
+
 /// Test: `handoff()` pseudo-operator forces a subgraph boundary.
 #[dfir_rs::test]
 pub async fn test_handoff_basic() {
