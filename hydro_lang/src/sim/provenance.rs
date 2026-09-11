@@ -201,6 +201,15 @@ mod serde_bytes {
 pub trait NetworkPayload: Sized {
     /// Bytes of the real (untagged) payload.
     fn payload_len(&self) -> usize;
+    /// Content hash of the real payload.
+    fn payload_hash(&self) -> u64 {
+        use std::hash::Hasher;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        h.write(self.payload_bytes());
+        h.finish()
+    }
+    /// The real payload bytes.
+    fn payload_bytes(&self) -> &[u8];
     /// The destination member for demuxed sends, if any.
     fn recipient(&self) -> Option<u32>;
     /// Attaches a lineage frame around the payload.
@@ -230,6 +239,10 @@ impl NetworkPayload for Bytes {
         self.len()
     }
 
+    fn payload_bytes(&self) -> &[u8] {
+        self
+    }
+
     fn recipient(&self) -> Option<u32> {
         None
     }
@@ -246,6 +259,10 @@ impl NetworkPayload for Bytes {
 impl NetworkPayload for (crate::location::TaglessMemberId, Bytes) {
     fn payload_len(&self) -> usize {
         self.1.len()
+    }
+
+    fn payload_bytes(&self) -> &[u8] {
+        &self.1
     }
 
     fn recipient(&self) -> Option<u32> {
@@ -298,6 +315,10 @@ pub struct EmissionRecord {
     pub coarse: bool,
     /// Serialized payload bytes (zero for cycle sinks).
     pub bytes: usize,
+    /// Hash of the serialized payload (zero for cycle sinks). Content identity, not lineage:
+    /// lets a test count *distinct* payloads on a channel when lineage downstream of opaque
+    /// state is too coarse to separate originals from duplicates.
+    pub payload_hash: u64,
 }
 
 impl EmissionRecord {
@@ -593,6 +614,7 @@ mod tests {
             tags: tags.iter().copied().collect(),
             coarse: false,
             bytes: 10,
+            payload_hash: 0,
         }
     }
 

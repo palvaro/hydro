@@ -51,7 +51,11 @@ mod tests {
                         hydro_lang::sim::provenance::TagKind::Data => "D",
                         hydro_lang::sim::provenance::TagKind::Operational => "T",
                     };
-                    format!("{k}{}.{}", t.port, t.seq)
+                    if t.member == u32::MAX {
+                        format!("{k}{}.{}", t.port, t.seq)
+                    } else {
+                        format!("{k}{}@{}.{}", t.port, t.member, t.seq)
+                    }
                 })
                 .collect();
             let _ = writeln!(
@@ -294,7 +298,10 @@ mod tests {
                         let all = classify(&history, false);
                         let (na, nb, nc) = (a.len(), b.len(), c.len());
                         dump("retry N=4, phase A: 4 requests, quiesce", &all[..na]);
-                        dump("retry N=4, phase B: one retry tick, quiesce", &all[na..na + nb]);
+                        dump(
+                            "retry N=4, phase B: one retry tick, quiesce",
+                            &all[na..na + nb],
+                        );
                         dump(
                             "retry N=4, phase C: one service pulse, quiesce",
                             &all[na + nb..na + nb + nc],
@@ -529,5 +536,391 @@ mod tests {
                 let got: Vec<(u32, u32)> = fact_recv.collect_n(expected_facts).await;
                 assert_eq!(got.len(), expected_facts);
             });
+    }
+
+    /// Appends a free-form line to the dump file.
+    fn dump_note(note: &str) {
+        use std::io::Write;
+        let path = std::env::var("HYDRO_PROVENANCE_DUMP")
+            .unwrap_or_else(|_| "target/provenance_dump.txt".to_string());
+        let _ = std::fs::create_dir_all("target");
+        if let Ok(mut out) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(out, "## {note}");
+        }
+    }
+
+    /// Loop gain: does reactivated *input* at a node cause wasted *output* from it?
+    ///
+    /// Retry, N=4 outstanding, k retry ticks before the service is allowed to drain. Each tick
+    /// puts N duplicates in the service queue; the service pops one item per pulse regardless,
+    /// so draining takes N(k+1) pulses. Measured on the `responses` channel:
+    ///
+    /// - physical emissions = N(k+1): every queued item, original or duplicate, costs a pulse;
+    /// - distinct payloads = N: only N responses carry new information.
+    ///
+    /// Waste = N·k grows with the number of reactivating inputs: the closed loop.
+    ///
+    /// This is measured by content, not by lineage label, because the service's queue is opaque
+    /// `by_mut` state: every response inherits the whole queue's lineage (coarse), so after the
+    /// first response all of them — originals included — are dominated and labelled
+    /// `Reactivated`. That is recorded here as a known limit of lineage downstream of opaque
+    /// state; the dump shows it.
+    #[test]
+    fn timeout_retry_loop_gain_grows_with_retry_ticks() {
+        use std::collections::BTreeSet;
+
+        use crate::distributed::timeout_retry::{Request, timeout_retry_with_timers};
+
+        const N: usize = 4;
+        // (k, physical responses, distinct payloads, reactivated-labelled, productive-labelled)
+        let observed = std::sync::Mutex::new(Vec::<(usize, usize, usize, usize, usize)>::new());
+
+        for k in 1usize..=3 {
+            let mut flow = FlowBuilder::new();
+            let client = flow.process();
+            let service = flow.process();
+            let (request_send, requests) = client.sim_input::<Request, TotalOrder, ExactlyOnce>();
+            let (retry_send, retry_ticks) =
+                client.sim_input_operational::<(), TotalOrder, ExactlyOnce>();
+            let (service_send, service_ticks) =
+                service.sim_input_operational::<(), TotalOrder, ExactlyOnce>();
+            let outputs = timeout_retry_with_timers(
+                &client,
+                &service,
+                requests,
+                retry_ticks,
+                service_ticks,
+                0,
+            );
+            // The program's own deduplicated completions: the logical-progress oracle.
+            let completed = outputs
+                .completed
+                .assume_ordering::<TotalOrder>(nondet!(/** observation only */))
+                .sim_output();
+            outputs.events.for_each(q!(
+                |_| {},
+                commutative = manual_proof!(/** observation only */)
+            ));
+
+            flow.sim()
+                .with_provenance()
+                .unit_test_fuzz_iterations(3)
+                .fuzz(async || {
+                    for i in 0..N as u64 {
+                        request_send.send(Request {
+                            id: i,
+                            value: format!("r{i}"),
+                        });
+                    }
+                    quiesce().await;
+                    let mut history = network_records(&take_emissions());
+                    for _ in 0..k {
+                        retry_send.send(());
+                        quiesce().await;
+                        history.extend(network_records(&take_emissions()));
+                    }
+                    // Drain: the queue holds N originals + N*k duplicates.
+                    for _ in 0..N * (k + 1) {
+                        service_send.send(());
+                        quiesce().await;
+                    }
+                    let drained = network_records(&take_emissions());
+                    let before = history.len();
+                    history.extend(drained.iter().cloned());
+
+                    let responses: Vec<_> = drained.iter().filter(|r| r.name == "responses").collect();
+                    let distinct: BTreeSet<u64> = responses.iter().map(|r| r.payload_hash).collect();
+                    assert_eq!(responses.len(), N * (k + 1), "k={k}: every queued item costs a pulse");
+                    assert_eq!(distinct.len(), N, "k={k}: only N distinct responses exist");
+                    // The program agrees: its deduplicated output has exactly N completions.
+                    let done: Vec<_> = completed.collect_n(N).await;
+                    assert_eq!(done.len(), N);
+
+                    let labelled: Vec<_> = classify(&history, false)
+                        .into_iter()
+                        .skip(before)
+                        .filter(|c| c.record.name == "responses")
+                        .collect();
+                    let reactivated = labelled.iter().filter(|c| c.label == Label::Reactivated).count();
+                    let productive = labelled.iter().filter(|c| c.label == Label::Productive).count();
+                    assert!(labelled.iter().all(|c| c.record.coarse), "responses inherit opaque queue state");
+                    observed
+                        .lock()
+                        .unwrap()
+                        .push((k, responses.len(), distinct.len(), reactivated, productive));
+                    if k == 2 {
+                        dump(
+                            "retry loop gain, N=4, k=2: drain phase (labels are coarse: see test doc)",
+                            &classify(&history, false)[before..],
+                        );
+                    }
+                });
+        }
+        let observed = observed.into_inner().unwrap();
+        dump_note(&format!(
+            "retry loop gain observations (k, physical responses, distinct payloads, reactivated-labelled, productive-labelled): {observed:?}"
+        ));
+        for (k, physical, distinct, _, _) in &observed {
+            assert_eq!(
+                physical - distinct,
+                N * k,
+                "waste grows with k: {observed:?}"
+            );
+        }
+    }
+
+    /// The same measurement on gossip, as an *observation* — gossip has no ground truth label.
+    /// N updates at member 0, k pumps at member 0, then one pump at member 1: how many
+    /// emissions does member 1 produce, and does that depend on k? Recorded, not asserted as a
+    /// class.
+    #[test]
+    fn gossip_loop_gain_measurement() {
+        use hydro_lang::live_collections::stream::NoOrder;
+        use hydro_std::ec_inference_demos::crdt_gossip::g_set_gossip;
+
+        const MEMBERS: usize = 3;
+        const N: u32 = 4;
+        let observed = std::sync::Mutex::new(Vec::<(usize, usize, usize, usize)>::new()); // (k, member1 msgs, reactivated, productive)
+
+        for k in [0usize, 1, 3] {
+            let mut flow = FlowBuilder::new();
+            let cluster = flow.cluster::<()>();
+            let (update_send, updates) = cluster.sim_input::<u32, NoOrder, ExactlyOnce>();
+            let (pump_send, pumps) = cluster.sim_input_operational::<(), TotalOrder, ExactlyOnce>();
+            let state = g_set_gossip(&cluster, updates, pumps);
+            state
+                .sample_eager(nondet!(/** observation only */))
+                .assume_ordering::<TotalOrder>(nondet!(/** observation only */))
+                .for_each(q!(
+                    |_| {},
+                    idempotent = manual_proof!(/** observation only */)
+                ));
+
+            flow.sim()
+                .with_cluster_size(&cluster, MEMBERS)
+                .skip_consistency_assertions()
+                .with_provenance()
+                .unit_test_fuzz_iterations(2)
+                .fuzz(async || {
+                    update_send.send_many_unordered((0..N).map(|v| (0u32, v)));
+                    quiesce().await;
+                    let mut history = network_records(&take_emissions());
+                    for _ in 0..k {
+                        pump_send.send(0, ());
+                        quiesce().await;
+                        history.extend(network_records(&take_emissions()));
+                    }
+                    pump_send.send(1, ());
+                    quiesce().await;
+                    let m1 = network_records(&take_emissions());
+                    let before = history.len();
+                    history.extend(m1.iter().cloned());
+                    let out: Vec<_> = classify(&history, false)
+                        .into_iter()
+                        .skip(before)
+                        .filter(|c| c.record.member == Some(1))
+                        .collect();
+                    let reactivated = out.iter().filter(|c| c.label == Label::Reactivated).count();
+                    let productive = out.iter().filter(|c| c.label == Label::Productive).count();
+                    observed
+                        .lock()
+                        .unwrap()
+                        .push((k, out.len(), reactivated, productive));
+                    dump(
+                        &format!("gossip loop gain, N=4, k={k}: member 1 pumps once"),
+                        &classify(&history, false)[before..],
+                    );
+                });
+        }
+        let observed = observed.into_inner().unwrap();
+        // Recorded for the report; the only thing checked is that the measurement is
+        // schedule-independent (same numbers across fuzz iterations for a given k).
+        for k in [0usize, 1, 3] {
+            let rows: Vec<_> = observed.iter().filter(|o| o.0 == k).collect();
+            assert!(rows.windows(2).all(|w| w[0] == w[1]), "{observed:?}");
+        }
+        dump_note(&format!(
+            "gossip loop gain observations (k, member1 msgs, reactivated, productive): {observed:?}"
+        ));
+    }
+
+    /// Raft (`raft_server`, timers already threaded as inputs). Barrier-separated:
+    ///
+    /// 1. election timer at member 0 -> RequestVote to the other two members. No requests have
+    ///    arrived, so even coarse lineage holds no data: `FixedOperational`.
+    /// 2. N requests at the leader -> nothing is sent (they only append to the log).
+    /// 3. heartbeat at the leader -> AppendEntries carrying the N-entry suffix to each follower:
+    ///    `Productive`, bytes grow with N. Followers ack, entries commit.
+    /// 4. heartbeat again -> AppendEntries with an empty suffix: bytes do not grow with N. The
+    ///    label is coarse (`by_mut` server state) and recorded, not asserted.
+    ///
+    /// Raft's replication is semi-naive by construction (`next_index`), so a heartbeat re-sends
+    /// only what a follower has not acknowledged; with fail-stop networking every follower acks
+    /// and the steady-state heartbeat is fixed-size work.
+    #[test]
+    fn raft_election_is_fixed_and_replication_is_productive() {
+        use std::collections::BTreeMap as Map;
+
+        use crate::cluster::raft::{RaftConfig, Replica, raft_server};
+
+        const MEMBERS: usize = 3;
+        // (N, vote-request msgs, hb1 msgs, hb1 bytes, hb2 msgs, hb2 bytes, hb2 labels)
+        type Row = (usize, usize, usize, usize, usize, usize, String);
+        let observed = std::sync::Mutex::new(Vec::<Row>::new());
+
+        for n in [1usize, 5] {
+            let mut flow = FlowBuilder::new();
+            let cluster = flow.cluster::<Replica>();
+            let (election_send, election_ticks) =
+                cluster.sim_input_operational::<(), TotalOrder, ExactlyOnce>();
+            let (heartbeat_send, heartbeat_ticks) =
+                cluster.sim_input_operational::<(), TotalOrder, ExactlyOnce>();
+            let (request_send, requests) = cluster.sim_input::<String, TotalOrder, ExactlyOnce>();
+            let outputs = raft_server(
+                &cluster,
+                requests,
+                election_ticks,
+                heartbeat_ticks,
+                RaftConfig {
+                    cluster_size: MEMBERS,
+                },
+                TCP.fail_stop().bincode(),
+                nondet!(/** only member 0's election timer fires, so the outcome is fixed */),
+            );
+            let committed = outputs.committed.end_atomic().sim_cluster_output();
+            outputs.redirected.for_each(q!(|_| {}));
+            outputs.leader_views.for_each(q!(|_| {}));
+
+            flow.sim()
+                .skip_consistency_assertions()
+                .with_cluster_size(&cluster, MEMBERS)
+                .with_provenance()
+                .unit_test_fuzz_iterations(3)
+                .fuzz(async || {
+                    // 1. Election.
+                    election_send.send(0, ());
+                    quiesce().await;
+                    let election = network_records(&take_emissions());
+                    let mut history = election.clone();
+                    let votes: Vec<_> = election
+                        .iter()
+                        .filter(|r| r.member == Some(0) && r.data_tags().count() == 0)
+                        .collect();
+                    assert!(votes.len() >= MEMBERS - 1, "leader asked every peer: {election:#?}");
+                    let election_labels = labels(&election);
+                    assert_eq!(
+                        election_labels.get(&Label::FixedOperational),
+                        Some(&election.len()),
+                        "no data exists yet, so all election traffic is fixed-operational: {election_labels:?}"
+                    );
+
+                    // 2. Requests at the leader: retained, not sent.
+                    for i in 0..n {
+                        request_send.send(0, format!("cmd{i}"));
+                    }
+                    quiesce().await;
+                    let after_requests = network_records(&take_emissions());
+                    assert!(
+                        after_requests.is_empty(),
+                        "requests only append to the log: {after_requests:?}"
+                    );
+
+                    // 3. Heartbeat: replication of the retained suffix.
+                    heartbeat_send.send(0, ());
+                    quiesce().await;
+                    let hb1 = network_records(&take_emissions());
+                    let hb1_sends: Vec<_> = hb1.iter().filter(|r| r.member == Some(0)).collect();
+                    assert_eq!(
+                        hb1_sends.len(),
+                        MEMBERS - 1,
+                        "one AppendEntries per follower: {hb1:#?}"
+                    );
+                    for r in &hb1_sends {
+                        assert!(r.data_tags().count() >= n, "carries the N retained entries' lineage");
+                        assert!(r.operational_tags().count() >= 1, "caused by the heartbeat");
+                    }
+                    let before = history.len();
+                    history.extend(hb1.iter().cloned());
+                    let hb1_labels: Map<Label, usize> = classify(&history, false)
+                        .into_iter()
+                        .skip(before)
+                        .filter(|c| c.record.member == Some(0))
+                        .fold(Map::new(), |mut m, c| {
+                            *m.entry(c.label).or_default() += 1;
+                            m
+                        });
+                    assert_eq!(
+                        hb1_labels.get(&Label::Productive),
+                        Some(&(MEMBERS - 1)),
+                        "{hb1_labels:?}"
+                    );
+                    let hb1_bytes: usize = hb1_sends.iter().map(|r| r.bytes).sum();
+                    // Acks arrive within the same quiescent phase, so the leader commits now;
+                    // followers learn `leader_commit` from the next AppendEntries.
+                    let mut got = 0;
+                    while committed.try_next(0).await.is_some() {
+                        got += 1;
+                    }
+                    assert_eq!(got, n, "leader committed all N entries");
+
+                    // 4. Heartbeat with nothing to replicate.
+                    heartbeat_send.send(0, ());
+                    quiesce().await;
+                    let hb2 = network_records(&take_emissions());
+                    let hb2_sends: Vec<_> = hb2.iter().filter(|r| r.member == Some(0)).collect();
+                    assert_eq!(hb2_sends.len(), MEMBERS - 1);
+                    let hb2_bytes: usize = hb2_sends.iter().map(|r| r.bytes).sum();
+                    assert!(hb2_bytes < hb1_bytes, "empty suffix is smaller than the replication");
+                    for member in 1..MEMBERS as u32 {
+                        let mut got = 0;
+                        while committed.try_next(member).await.is_some() {
+                            got += 1;
+                        }
+                        assert_eq!(got, n, "follower {member} committed all N entries");
+                    }
+                    let before = history.len();
+                    history.extend(hb2.iter().cloned());
+                    let hb2_labels: Map<Label, usize> = classify(&history, false)
+                        .into_iter()
+                        .skip(before)
+                        .filter(|c| c.record.member == Some(0))
+                        .fold(Map::new(), |mut m, c| {
+                            *m.entry(c.label).or_default() += 1;
+                            m
+                        });
+                    observed.lock().unwrap().push((
+                        n,
+                        votes.len(),
+                        hb1_sends.len(),
+                        hb1_bytes,
+                        hb2_sends.len(),
+                        hb2_bytes,
+                        format!("{hb2_labels:?}"),
+                    ));
+                    if n == 5 {
+                        let all = classify(&history, false);
+                        dump(
+                            "raft N=5: election, replication heartbeat, empty heartbeat (leader's sends only)",
+                            &all
+                                .into_iter()
+                                .filter(|c| c.record.member == Some(0))
+                                .collect::<Vec<_>>(),
+                        );
+                    }
+                });
+        }
+        let observed = observed.into_inner().unwrap();
+        dump_note(&format!(
+            "raft observations (N, vote msgs, hb1 msgs, hb1 bytes, hb2 msgs, hb2 bytes, hb2 labels): {observed:?}"
+        ));
+        let small = observed.iter().find(|o| o.0 == 1).unwrap();
+        let large = observed.iter().find(|o| o.0 == 5).unwrap();
+        assert_eq!(small.2, large.2, "replication message count is per follower, not per entry");
+        assert!(large.3 > small.3, "replication bytes grow with the retained log");
+        assert_eq!(small.5, large.5, "steady-state heartbeat bytes do not grow with the log");
     }
 }

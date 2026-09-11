@@ -178,20 +178,31 @@ fn member_u32_expr(loc: &LocationId) -> TokenStream {
 
 /// Everything needed to splice a user closure that may read Hydro state through references.
 struct RefShadow {
-    /// `let` statements that shadow each `__hydro_singleton_ref_i` with the untagged view and
-    /// bind `__prov_rt_i` / `__prov_rc_i` to the reference's tags and coarse flag.
-    bindings: TokenStream,
+    /// Per-run `let`s (evaluated once per subgraph run, alongside DFIR's own
+    /// `let __hydro_singleton_ref_i = #{g} ref;`): bind `__prov_rt_i` / `__prov_rc_i` to the
+    /// reference's tags and coarse flag and, for immutable refs, shadow the local with an
+    /// untagged view.
+    per_run: TokenStream,
+    /// Per-item `let`s run before the user closure is constructed: reborrow the shadows so the
+    /// user closure can `move` them.
+    per_item: TokenStream,
     /// Statements merging the reference tags into `__prov_t` / `__prov_c` (per item).
     absorb: TokenStream,
-    /// Statements writing item lineage back into mutable references (per item).
+    /// Statements writing item lineage into mutable references, run *after* the user closure
+    /// was called for this item.
     writeback: TokenStream,
+    /// Whether the user closure must be constructed per item (needed when it captures a
+    /// mutable `Vec`/`Optional` shadow that we must read back after each call).
+    per_item_closure: bool,
 }
 
 fn ref_shadow(f: &ClosureExpr) -> RefShadow {
     let p = prov();
-    let mut bindings = TokenStream::new();
+    let mut per_run = TokenStream::new();
+    let mut per_item = TokenStream::new();
     let mut absorb = TokenStream::new();
     let mut writeback = TokenStream::new();
+    let mut per_item_closure = false;
     for (i, (node, is_mut)) in f.singleton_refs.iter().enumerate() {
         let HydroNode::Reference { kind, .. } = node else {
             panic!("closure singleton_refs must be Reference nodes");
@@ -199,111 +210,203 @@ fn ref_shadow(f: &ClosureExpr) -> RefShadow {
         let local = handoff_ref_ident(i);
         let rt = quote::format_ident!("__prov_rt_{i}");
         let rc = quote::format_ident!("__prov_rc_{i}");
+        let real = quote::format_ident!("__prov_real_{i}");
+        let owned = quote::format_ident!("__prov_owned_{i}");
+        let seen = quote::format_ident!("__prov_seen_{i}");
         match (kind, is_mut) {
-            (HandoffRefKind::Singleton, false) => bindings.extend(quote! {
+            (HandoffRefKind::Singleton, false) => per_run.extend(quote! {
                 let #rt = &#local.tags;
                 let #rc = &#local.coarse;
                 let #local = &#local.value;
             }),
             (HandoffRefKind::Singleton, true) => {
-                bindings.extend(quote! {
-                    let #p::Tagged { tags: #rt, coarse: #rc, value: #local } = &mut *#local;
+                per_run.extend(quote! {
+                    let #p::Tagged { tags: #rt, coarse: #rc, value: #real } = &mut *#local;
+                });
+                per_item.extend(quote! {
+                    let #local = &mut *#real;
                 });
                 writeback.extend(quote! {
                     #rt.extend(__prov_t.iter().copied());
                     *#rc = true;
                 });
             }
-            (HandoffRefKind::Optional, false) => bindings.extend(quote! {
-                let __prov_owned = ::core::option::Option::as_ref(#local).map(|__t| ::core::clone::Clone::clone(&__t.value));
+            (HandoffRefKind::Optional, false) => per_run.extend(quote! {
+                let #owned = ::core::option::Option::as_ref(#local).map(|__t| ::core::clone::Clone::clone(&__t.value));
                 let #rt: #p::TagSet = ::core::option::Option::as_ref(#local).map(|__t| __t.tags.clone()).unwrap_or_default();
                 let #rc: bool = ::core::option::Option::as_ref(#local).map(|__t| __t.coarse).unwrap_or(false);
-                let #rt = &#rt;
-                let #rc = &#rc;
-                let #local = &__prov_owned;
+                let #local = &#owned;
             }),
-            (HandoffRefKind::Vec, false) => bindings.extend(quote! {
-                let __prov_owned: ::std::vec::Vec<_> = #local.iter().map(|__t| ::core::clone::Clone::clone(&__t.value)).collect();
+            (HandoffRefKind::Vec, false) => per_run.extend(quote! {
+                let #owned: ::std::vec::Vec<_> = #local.iter().map(|__t| ::core::clone::Clone::clone(&__t.value)).collect();
                 let #rt: #p::TagSet = #local.iter().flat_map(|__t| __t.tags.iter().copied()).collect();
                 let #rc: bool = #local.iter().any(|__t| __t.coarse);
-                let #rt = &#rt;
-                let #rc = &#rc;
-                let #local = &__prov_owned;
+                let #local = &#owned;
             }),
-            (HandoffRefKind::Optional | HandoffRefKind::Vec, true) => {
-                panic!("provenance: mutable Optional/Vec references are not supported yet")
+            (HandoffRefKind::Optional, true) => {
+                // The user sees an owned `Option<V>`; after each call the real slot is
+                // rewritten with the current item's lineage.
+                per_item_closure = true;
+                per_run.extend(quote! {
+                    let #real = #local;
+                    let mut #owned: ::core::option::Option<_> = ::core::option::Option::as_ref(&*#real).map(|__t| ::core::clone::Clone::clone(&__t.value));
+                    let #rt: #p::TagSet = ::core::option::Option::as_ref(&*#real).map(|__t| __t.tags.clone()).unwrap_or_default();
+                    let #rc: bool = true;
+                });
+                per_item.extend(quote! {
+                    let #local = &mut #owned;
+                });
+                writeback.extend(quote! {
+                    *#real = ::core::clone::Clone::clone(&#owned)
+                        .map(|__v| #p::Tagged::from_parts(::core::clone::Clone::clone(&__prov_t), true, __v));
+                });
+            }
+            (HandoffRefKind::Vec, true) => {
+                // The user sees an owned `Vec<V>` mirroring the real `Vec<Tagged<V>>`; items it
+                // appends are tagged with the current item's lineage and pushed to the real
+                // vector after each call. (In-place edits of pre-existing items are not
+                // reflected; Hydro's stream refs are append-only in practice.)
+                per_item_closure = true;
+                per_run.extend(quote! {
+                    let #real = #local;
+                    let mut #owned: ::std::vec::Vec<_> = #real.iter().map(|__t| ::core::clone::Clone::clone(&__t.value)).collect();
+                    let mut #seen: usize = #owned.len();
+                    let #rt: #p::TagSet = #real.iter().flat_map(|__t| __t.tags.iter().copied()).collect();
+                    let #rc: bool = true;
+                });
+                per_item.extend(quote! {
+                    let #local = &mut #owned;
+                });
+                writeback.extend(quote! {
+                    for __v in #owned[#seen..].iter() {
+                        #real.push(#p::Tagged::from_parts(::core::clone::Clone::clone(&__prov_t), true, ::core::clone::Clone::clone(__v)));
+                    }
+                    #seen = #owned.len();
+                });
             }
         }
         absorb.extend(quote! {
             __prov_t.extend(#rt.iter().copied());
             __prov_c = true;
-            let _ = *#rc;
+            let _ = &#rc;
         });
     }
     RefShadow {
-        bindings,
+        per_run,
+        per_item,
         absorb,
         writeback,
+        per_item_closure,
     }
 }
 
-/// Builds a new closure expression around `f`. `body` receives `__prov_f` (the original
-/// closure) already bound and must produce the wrapper closure.
-fn wrap_closure(f: &ClosureExpr, build: impl FnOnce(&RefShadow) -> TokenStream) -> ClosureExpr {
+/// The pieces of a wrapper closure body, assembled by [`wrap_closure`].
+struct Body {
+    /// Closure parameter list, e.g. `|__prov_item: T|`.
+    params: TokenStream,
+    /// Statements run before the user closure is invoked (must bind `__prov_t`, `__prov_c`).
+    pre: TokenStream,
+    /// The invocation of the user closure, binding whatever `result` needs.
+    call: TokenStream,
+    /// The wrapper's result expression.
+    result: TokenStream,
+}
+
+/// Builds a new closure expression around `f`. The user closure is available as `__prov_f`
+/// inside `call`. Reference shadows, lineage absorption and write-back are spliced around it.
+fn wrap_closure(f: &ClosureExpr, build: impl FnOnce(&RefShadow) -> Body) -> ClosureExpr {
     let shadow = ref_shadow(f);
     let orig = &f.expr.0;
-    let bindings = &shadow.bindings;
-    let wrapper = build(&shadow);
-    let expr: syn::Expr = parse_quote!({
-        #bindings
+    let per_run = &shadow.per_run;
+    let per_item = &shadow.per_item;
+    let absorb = &shadow.absorb;
+    let writeback = &shadow.writeback;
+    let Body {
+        params,
+        pre,
+        call,
+        result,
+    } = build(&shadow);
+    let bind_f = quote! {
         #[allow(unused_mut)]
         let mut __prov_f = #orig;
-        #wrapper
-    });
+    };
+    let expr: syn::Expr = if shadow.per_item_closure {
+        // The user closure captures mutable shadows we must read back after every call, so
+        // it is constructed per item (Hydro closures are stateless across items already).
+        parse_quote!({
+            #per_run
+            move |#params| {
+                #per_item
+                #bind_f
+                #pre
+                #absorb
+                #call
+                // The user closure is an opaque `impl FnMut` (via stageleft's type hints), which
+                // rustc treats as possibly having drop glue; drop it explicitly so its `&mut`
+                // captures of the shadows end before write-back.
+                ::core::mem::drop(__prov_f);
+                #writeback
+                #result
+            }
+        })
+    } else {
+        parse_quote!({
+            #per_run
+            #per_item
+            #bind_f
+            move |#params| {
+                #pre
+                #absorb
+                #call
+                #writeback
+                #result
+            }
+        })
+    };
     ClosureExpr::new(DebugExpr::from(expr), f.clone().singleton_refs)
 }
 
 fn wrap_map(f: &ClosureExpr, in_repr: Repr, in_ty: &syn::Type, out_repr: Repr) -> ClosureExpr {
-    wrap_closure(f, |s| {
+    wrap_closure(f, |_| {
         let untag = untag(in_repr, quote!(__prov_item));
-        let absorb = &s.absorb;
-        let writeback = &s.writeback;
-        let retag = retag(
-            out_repr,
-            quote!(__prov_t),
-            quote!(__prov_c),
-            quote!(__prov_y),
-        );
-        quote!(move |__prov_item: #in_ty| {
-            #[allow(unused_mut)]
-            let (mut __prov_t, mut __prov_c, __prov_x) = #untag;
-            #absorb
-            #writeback
-            let __prov_y = __prov_f(__prov_x);
-            #retag
-        })
+        Body {
+            params: quote!(__prov_item: #in_ty),
+            pre: quote! {
+                #[allow(unused_mut)]
+                let (mut __prov_t, mut __prov_c, __prov_x) = #untag;
+            },
+            call: quote!(let __prov_y = __prov_f(__prov_x);),
+            result: retag(out_repr, quote!(__prov_t), quote!(__prov_c), quote!(__prov_y)),
+        }
     })
 }
 
-fn wrap_flat_map(f: &ClosureExpr, in_repr: Repr, in_ty: &syn::Type, out_repr: Repr) -> ClosureExpr {
-    wrap_closure(f, |s| {
+fn wrap_flat_map(
+    f: &ClosureExpr,
+    in_repr: Repr,
+    in_ty: &syn::Type,
+    out_repr: Repr,
+) -> ClosureExpr {
+    wrap_closure(f, |_| {
         let untag = untag(in_repr, quote!(__prov_item));
-        let absorb = &s.absorb;
-        let writeback = &s.writeback;
         let retag = retag(
             out_repr,
             quote!(::core::clone::Clone::clone(&__prov_t)),
             quote!(__prov_c),
             quote!(__prov_y),
         );
-        quote!(move |__prov_item: #in_ty| {
-            #[allow(unused_mut)]
-            let (mut __prov_t, mut __prov_c, __prov_x) = #untag;
-            #absorb
-            #writeback
-            let __prov_out = __prov_f(__prov_x);
-            ::core::iter::IntoIterator::into_iter(__prov_out).map(move |__prov_y| #retag)
-        })
+        Body {
+            params: quote!(__prov_item: #in_ty),
+            pre: quote! {
+                #[allow(unused_mut)]
+                let (mut __prov_t, mut __prov_c, __prov_x) = #untag;
+            },
+            call: quote!(let __prov_out = __prov_f(__prov_x);),
+            result: quote! {
+                ::core::iter::IntoIterator::into_iter(__prov_out).map(move |__prov_y| #retag)
+            },
+        }
     })
 }
 
@@ -313,81 +416,95 @@ fn wrap_filter_map(
     in_ty: &syn::Type,
     out_repr: Repr,
 ) -> ClosureExpr {
-    wrap_closure(f, |s| {
+    wrap_closure(f, |_| {
         let untag = untag(in_repr, quote!(__prov_item));
-        let absorb = &s.absorb;
-        let writeback = &s.writeback;
-        let retag = retag(
-            out_repr,
-            quote!(__prov_t),
-            quote!(__prov_c),
-            quote!(__prov_y),
-        );
-        quote!(move |__prov_item: #in_ty| {
-            #[allow(unused_mut)]
-            let (mut __prov_t, mut __prov_c, __prov_x) = #untag;
-            #absorb
-            #writeback
-            ::core::option::Option::map(__prov_f(__prov_x), move |__prov_y| #retag)
-        })
+        let retag = retag(out_repr, quote!(__prov_t), quote!(__prov_c), quote!(__prov_y));
+        Body {
+            params: quote!(__prov_item: #in_ty),
+            pre: quote! {
+                #[allow(unused_mut)]
+                let (mut __prov_t, mut __prov_c, __prov_x) = #untag;
+            },
+            call: quote!(let __prov_opt = __prov_f(__prov_x);),
+            result: quote!(::core::option::Option::map(__prov_opt, move |__prov_y| #retag)),
+        }
     })
 }
 
 /// For closures taking `&T` (filter, inspect, partition). The item's own lineage is untouched.
 fn wrap_by_ref(f: &ClosureExpr, in_repr: Repr, in_ty: &syn::Type) -> ClosureExpr {
+    let p = prov();
     wrap_closure(f, |_| {
         let (prep, view) = untag_ref(in_repr, quote!(__prov_item));
-        quote!(move |__prov_item: &#in_ty| {
-            #prep
-            __prov_f(#view)
-        })
+        Body {
+            params: quote!(__prov_item: &#in_ty),
+            pre: quote! {
+                #[allow(unused_mut, unused_variables)]
+                let (mut __prov_t, mut __prov_c) = (#p::TagSet::new(), false);
+                #prep
+            },
+            call: quote!(let __prov_y = __prov_f(#view);),
+            result: quote!(__prov_y),
+        }
     })
 }
 
 fn wrap_init(f: &ClosureExpr) -> ClosureExpr {
     let p = prov();
-    wrap_closure(f, |_| quote!(move || #p::Tagged::pristine(__prov_f())))
+    wrap_closure(f, |_| Body {
+        params: quote!(),
+        pre: quote! {
+            #[allow(unused_mut, unused_variables)]
+            let (mut __prov_t, mut __prov_c) = (#p::TagSet::new(), false);
+        },
+        call: quote!(let __prov_y = __prov_f();),
+        result: quote!(#p::Tagged::pristine(__prov_y)),
+    })
 }
 
 /// `|acc: &mut Tagged<A>, item|` for fold / fold_keyed / reduce / reduce_keyed.
 fn wrap_acc(f: &ClosureExpr, in_repr: Repr, in_ty: &syn::Type) -> ClosureExpr {
-    wrap_closure(f, |s| {
+    let p = prov();
+    wrap_closure(f, |_| {
         let untag = untag(in_repr, quote!(__prov_item));
-        let absorb = &s.absorb;
-        let writeback = &s.writeback;
-        let p = prov();
-        quote!(move |__prov_acc: &mut #p::Tagged<_>, __prov_item: #in_ty| {
-            #[allow(unused_mut)]
-            let (mut __prov_t, mut __prov_c, __prov_x) = #untag;
-            #absorb
-            #writeback
-            __prov_acc.absorb(&__prov_t, __prov_c);
-            __prov_f(&mut __prov_acc.value, __prov_x)
-        })
+        Body {
+            params: quote!(__prov_acc: &mut #p::Tagged<_>, __prov_item: #in_ty),
+            pre: quote! {
+                #[allow(unused_mut)]
+                let (mut __prov_t, mut __prov_c, __prov_x) = #untag;
+            },
+            call: quote! {
+                __prov_acc.absorb(&__prov_t, __prov_c);
+                let __prov_y = __prov_f(&mut __prov_acc.value, __prov_x);
+            },
+            result: quote!(__prov_y),
+        }
     })
 }
 
 /// `|acc: &mut Tagged<A>, item| -> Option<Tagged<U>>` for scan.
 fn wrap_scan(f: &ClosureExpr, in_repr: Repr, in_ty: &syn::Type, out_repr: Repr) -> ClosureExpr {
-    wrap_closure(f, |s| {
+    let p = prov();
+    wrap_closure(f, |_| {
         let untag = untag(in_repr, quote!(__prov_item));
-        let absorb = &s.absorb;
-        let writeback = &s.writeback;
         let retag = retag(
             out_repr,
             quote!(::core::clone::Clone::clone(&__prov_acc.tags)),
             quote!(__prov_acc.coarse),
             quote!(__prov_u),
         );
-        let p = prov();
-        quote!(move |__prov_acc: &mut #p::Tagged<_>, __prov_item: #in_ty| {
-            #[allow(unused_mut)]
-            let (mut __prov_t, mut __prov_c, __prov_x) = #untag;
-            #absorb
-            #writeback
-            __prov_acc.absorb(&__prov_t, __prov_c);
-            ::core::option::Option::map(__prov_f(&mut __prov_acc.value, __prov_x), |__prov_u| #retag)
-        })
+        Body {
+            params: quote!(__prov_acc: &mut #p::Tagged<_>, __prov_item: #in_ty),
+            pre: quote! {
+                #[allow(unused_mut)]
+                let (mut __prov_t, mut __prov_c, __prov_x) = #untag;
+            },
+            call: quote! {
+                __prov_acc.absorb(&__prov_t, __prov_c);
+                let __prov_opt = __prov_f(&mut __prov_acc.value, __prov_x);
+            },
+            result: quote!(::core::option::Option::map(__prov_opt, |__prov_u| #retag)),
+        }
     })
 }
 
@@ -510,6 +627,7 @@ fn ty_of(node: &HydroNode) -> syn::Type {
     item_type(&node.metadata().collection_kind)
 }
 
+#[expect(clippy::too_many_arguments, reason = "one field per EmissionRecord member")]
 fn emission_record(
     kind: TokenStream,
     point: u32,
@@ -518,6 +636,7 @@ fn emission_record(
     destination: &str,
     recipient: TokenStream,
     bytes: TokenStream,
+    payload_hash: TokenStream,
 ) -> TokenStream {
     let p = prov();
     quote!(#p::record(#p::EmissionRecord {
@@ -530,6 +649,7 @@ fn emission_record(
         tags: ::core::clone::Clone::clone(&__prov_t),
         coarse: __prov_c,
         bytes: #bytes,
+        payload_hash: #payload_hash,
     }))
 }
 
@@ -857,6 +977,7 @@ fn transform_node(node: &mut HydroNode, ctx: &Ctx<'_>) {
                 &destination,
                 quote!(#p::NetworkPayload::recipient(&__prov_out)),
                 quote!(#p::NetworkPayload::payload_len(&__prov_out)),
+                quote!(#p::NetworkPayload::payload_hash(&__prov_out)),
             );
             let orig_ser = &ser.0;
             let wrapped_ser: syn::Expr = parse_quote!(
@@ -905,10 +1026,15 @@ fn transform_root(root: &mut HydroRoot, ctx: &Ctx<'_>) {
             let in_ty = ty_of(input);
             *f = wrap_closure(f, |_| {
                 let untag = untag(in_repr, quote!(__prov_item));
-                quote!(move |__prov_item: #in_ty| {
-                    let (_, _, __prov_x) = #untag;
-                    __prov_f(__prov_x)
-                })
+                Body {
+                    params: quote!(__prov_item: #in_ty),
+                    pre: quote! {
+                        #[allow(unused_mut)]
+                        let (mut __prov_t, mut __prov_c, __prov_x) = #untag;
+                    },
+                    call: quote!(let __prov_y = __prov_f(__prov_x);),
+                    result: quote!(__prov_y),
+                }
             });
         }
         HydroRoot::SendExternal {
@@ -933,6 +1059,7 @@ fn transform_root(root: &mut HydroRoot, ctx: &Ctx<'_>) {
                 &label,
                 quote!(::core::option::Option::None),
                 quote!(#p::NetworkPayload::payload_len(&__prov_out)),
+                quote!(#p::NetworkPayload::payload_hash(&__prov_out)),
             );
             let orig = &ser.0;
             let wrapped: syn::Expr = parse_quote!(
@@ -959,6 +1086,7 @@ fn transform_root(root: &mut HydroRoot, ctx: &Ctx<'_>) {
                 &label,
                 quote!(::core::option::Option::None),
                 quote!(0usize),
+                quote!(0u64),
             );
             let in_ty = ty_of(input);
             let f = match kind_of(input) {
