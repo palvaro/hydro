@@ -72,10 +72,32 @@ pub struct SimFlow<'a> {
     /// Number of iterations to use for fuzzing, defaults to 8192
     pub(crate) unit_test_fuzz_iterations: usize,
 
+    /// When true, the program is compiled with provenance tracking
+    /// (see [`crate::sim::provenance`]).
+    pub(crate) provenance: bool,
+
+    /// Sim input ports declared as operational stimuli via `sim_input_operational`.
+    pub(crate) operational_ports:
+        std::collections::BTreeSet<crate::compile::builder::ExternalPortId>,
+
     pub(crate) _phantom: Invariant<'a>,
 }
 
 impl<'a> SimFlow<'a> {
+    /// Compiles the program with forward provenance tracking. Every item carries the set of
+    /// source events it descends from, and every network send, sim output and cycle sink is
+    /// logged with its lineage. Read the log with [`crate::sim::provenance::take_emissions`]
+    /// and interpret it with [`crate::sim::provenance::classify`].
+    ///
+    /// Tracking is passive: it does not add or remove nondeterministic decisions, so recorded
+    /// executions replay identically. Sources must be `sim_input`s (wall-clock timers cannot be
+    /// simulated); declare stimuli such as timer ticks with `sim_input_operational` so their
+    /// lineage is distinguished from application data.
+    pub fn with_provenance(mut self) -> Self {
+        self.provenance = true;
+        self
+    }
+
     /// Sets the maximum size of the given cluster in the simulation.
     pub fn with_cluster_size<C>(mut self, cluster: &Cluster<'a, C>, max_size: usize) -> Self {
         self.cluster_max_sizes.insert(cluster.key, max_size);
@@ -270,6 +292,10 @@ impl<'a> SimFlow<'a> {
             &self.dynamic_membership,
             &cluster_member_ids,
         );
+
+        if self.provenance {
+            super::provenance_ir::apply_provenance(&mut self.ir, &self.operational_ports);
+        }
 
         let mut seen_tees = HashMap::new();
         let mut built_tees = HashMap::new();

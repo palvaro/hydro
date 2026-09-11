@@ -895,6 +895,16 @@ fn compile_sim_graph_trybuild(
         }
 
         #[unsafe(no_mangle)]
+        unsafe extern "Rust" fn __hydro_provenance_drain() -> Vec<u8> {
+            #root::sim::provenance::drain_serialized()
+        }
+
+        #[unsafe(no_mangle)]
+        unsafe extern "Rust" fn __hydro_provenance_reset() {
+            #root::sim::provenance::reset_instance()
+        }
+
+        #[unsafe(no_mangle)]
         unsafe extern "Rust" fn __hydro_runtime(
             should_color: bool,
             __hydro_external_out: &mut ::std::collections::HashMap<usize, __root_dfir_rs::util::unsync::mpsc::Receiver<__root_dfir_rs::bytes::Bytes>>,

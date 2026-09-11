@@ -189,6 +189,35 @@ impl<'a, C> Cluster<'a, C> {
             stream,
         )
     }
+
+    /// Like [`Cluster::sim_input`], but declares the input to be an operational stimulus (see
+    /// [`Location::sim_input_operational`](crate::location::Location::sim_input_operational)).
+    pub fn sim_input_operational<
+        T,
+        O: crate::live_collections::stream::Ordering,
+        R: crate::live_collections::stream::Retries,
+    >(
+        &self,
+    ) -> (
+        crate::sim::SimClusterSender<T, O, R>,
+        crate::live_collections::Stream<
+            T,
+            Self,
+            crate::live_collections::boundedness::Unbounded,
+            O,
+            R,
+        >,
+    )
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let (sender, stream) = self.sim_input::<T, O, R>();
+        self.flow_state
+            .borrow_mut()
+            .operational_sim_ports
+            .insert(sender.0);
+        (sender, stream)
+    }
 }
 
 /// A free variable that resolves to the list of member IDs in a cluster at runtime.

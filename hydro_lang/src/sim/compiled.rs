@@ -532,6 +532,14 @@ impl CompiledSim {
         always_log: bool,
     ) -> T {
         let func: SimLoaded<'_> = unsafe { self.lib.get(b"__hydro_runtime").unwrap() };
+        // The provenance drain is exported by every generated dylib; it is only meaningful when
+        // the flow was compiled with `with_provenance()`, but looking it up is harmless otherwise.
+        let drain: Option<libloading::Symbol<'_, super::provenance::DrainFn>> =
+            unsafe { self.lib.get(b"__hydro_provenance_drain").ok() };
+        let drain_fn: Option<super::provenance::DrainFn> = drain.map(|d| *d);
+        let reset: Option<libloading::Symbol<'_, super::provenance::ResetFn>> =
+            unsafe { self.lib.get(b"__hydro_provenance_reset").ok() };
+        let reset_fn: Option<super::provenance::ResetFn> = reset.map(|d| *d);
         let log = always_log || std::env::var("HYDRO_SIM_LOG").is_ok_and(|v| v == "1");
         thunk(
             &(|| CompiledSimInstance {
@@ -540,6 +548,8 @@ impl CompiledSim {
                 dylib_result: None,
                 log,
                 exhaustive: false,
+                provenance_drain: drain_fn,
+                provenance_reset: reset_fn,
             }),
         )
     }
@@ -808,6 +818,8 @@ pub struct CompiledSimInstance<'a> {
     dylib_result: Option<DylibResult>,
     log: bool,
     exhaustive: bool,
+    provenance_drain: Option<super::provenance::DrainFn>,
+    provenance_reset: Option<super::provenance::ResetFn>,
 }
 
 impl<'a> CompiledSimInstance<'a> {
@@ -828,6 +840,12 @@ impl<'a> CompiledSimInstance<'a> {
             HashMap::new();
         let mut cluster_external_in: HashMap<usize, HashMap<u32, UnsyncSender<Bytes>>> =
             HashMap::new();
+
+        // Fresh provenance state for this instance (the dylib's thread-locals persist across
+        // instances on the same thread).
+        if let Some(reset) = self.provenance_reset {
+            unsafe { reset() };
+        }
 
         let dylib_result = unsafe {
             (self.func)(
@@ -894,6 +912,10 @@ impl<'a> CompiledSimInstance<'a> {
         }
 
         self.dylib_result = Some(dylib_result);
+
+        // Make the dylib's provenance log reachable from `provenance::take_emissions()`. The
+        // simulation is single-threaded, so a thread-local is sufficient.
+        super::provenance::HOST_DRAIN.with(|d| *d.borrow_mut() = self.provenance_drain);
 
         CURRENT_SIM_CONNECTIONS
             .scope(

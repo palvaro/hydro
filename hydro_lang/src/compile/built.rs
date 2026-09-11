@@ -40,6 +40,10 @@ pub struct BuiltFlow<'a> {
     #[cfg(feature = "sim")]
     pub(super) location_version_group_root: SecondaryMap<LocationKey, LocationKey>,
 
+    /// Sim input ports declared as operational stimuli (see `sim_input_operational`).
+    #[cfg(feature = "sim")]
+    pub(super) operational_sim_ports: std::collections::BTreeSet<super::builder::ExternalPortId>,
+
     pub(super) _phantom: Invariant<'a>,
 }
 
@@ -189,6 +193,8 @@ impl<'a> BuiltFlow<'a> {
             test_safety_only: false,
             skip_consistency_assertions: false,
             unit_test_fuzz_iterations: 8192,
+            provenance: false,
+            operational_ports: self.operational_sim_ports,
             _phantom: PhantomData,
         }
     }

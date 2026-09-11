@@ -56,6 +56,12 @@ pub mod flow;
 pub(crate) mod versioned_network;
 
 #[cfg(stageleft_runtime)]
+pub mod provenance;
+
+#[cfg(stageleft_runtime)]
+mod provenance_ir;
+
+#[cfg(stageleft_runtime)]
 #[doc(hidden)]
 pub mod runtime;
 

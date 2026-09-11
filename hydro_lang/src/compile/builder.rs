@@ -107,6 +107,9 @@ pub(crate) struct FlowStateInner {
     /// so that dataflow with side effects (e.g. `inspect`) is not silently lost just
     /// because the collection was dropped after finalization.
     pub(crate) live_collection_nodes: Vec<Weak<RefCell<HydroNode>>>,
+
+    /// Sim input ports declared as operational stimuli (see `sim_input_operational`).
+    pub(crate) operational_sim_ports: std::collections::BTreeSet<ExternalPortId>,
 }
 
 impl FlowStateInner {
@@ -214,6 +217,7 @@ impl<'a> FlowBuilder<'a> {
                 next_sidecar_id: crate::Counter::default(),
                 sidecars: Vec::new(),
                 live_collection_nodes: Vec::new(),
+                operational_sim_ports: Default::default(),
             })),
             locations: SlotMap::with_key(),
             location_names: SecondaryMap::new(),
@@ -315,6 +319,8 @@ impl<'a> FlowBuilder<'a> {
 
         let mut ir = flow_state.roots.take().unwrap();
         let sidecars = std::mem::take(&mut flow_state.sidecars);
+        #[cfg(feature = "sim")]
+        let operational_sim_ports = std::mem::take(&mut flow_state.operational_sim_ports);
         drop(flow_state);
 
         super::ir::unify_atomic_ticks(&mut ir);
@@ -329,6 +335,8 @@ impl<'a> FlowBuilder<'a> {
             location_version: std::mem::take(&mut self.location_version),
             #[cfg(feature = "sim")]
             location_version_group_root: std::mem::take(&mut self.location_version_group_root),
+            #[cfg(feature = "sim")]
+            operational_sim_ports,
             _phantom: PhantomData,
         }
     }
@@ -411,6 +419,7 @@ impl<'a> FlowBuilder<'a> {
                 next_sidecar_id: crate::Counter::default(),
                 sidecars: Vec::new(),
                 live_collection_nodes: Vec::new(),
+                operational_sim_ports: Default::default(),
             })),
             locations: built.locations.clone(),
             location_names: built.location_names.clone(),

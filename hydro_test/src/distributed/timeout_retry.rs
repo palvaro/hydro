@@ -8,7 +8,7 @@
 
 use std::time::{Duration, Instant};
 
-use hydro_lang::live_collections::stream::{NoOrder, TotalOrder};
+use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
 use hydro_lang::location::external_process::{ExternalBincodeBidi, NotMany};
 use hydro_lang::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -97,6 +97,31 @@ pub fn timeout_retry<'a>(
     timeout_millis: u64,
     service_interval_millis: u64,
 ) -> TimeoutRetryOutputs<'a> {
+    let service_ticks = service.source_interval(q!(Duration::from_millis(service_interval_millis)));
+    let retry_ticks = client.source_interval(q!(Duration::from_millis(timeout_millis)));
+    timeout_retry_with_timers(
+        client,
+        service,
+        requests,
+        retry_ticks,
+        service_ticks,
+        timeout_millis,
+    )
+}
+
+/// The same program with its two timers supplied by the caller, so that a simulation can
+/// drive them as explicit (operational) inputs. `retry_ticks` fires the client's retry scan;
+/// `service_ticks` pumps the service queue, one request per tick. `timeout_millis` is the
+/// deadline a request must have been outstanding before a retry scan re-sends it (use `0` to
+/// re-send everything outstanding on every scan).
+pub fn timeout_retry_with_timers<'a>(
+    client: &Process<'a, Client>,
+    service: &Process<'a, Service>,
+    requests: Stream<Request, Process<'a, Client>, Unbounded>,
+    retry_ticks: Stream<(), Process<'a, Client>, Unbounded, TotalOrder, ExactlyOnce>,
+    service_ticks: Stream<(), Process<'a, Service>, Unbounded, TotalOrder, ExactlyOnce>,
+    timeout_millis: u64,
+) -> TimeoutRetryOutputs<'a> {
     let (send_attempts, attempts) =
         client.forward_ref::<Stream<Request, Process<'a, Client>, Unbounded, NoOrder>>();
 
@@ -107,7 +132,6 @@ pub fn timeout_retry<'a>(
         .clone()
         .map(q!(|request| RetryEvent::LogicalRequest(request.id)));
 
-    let service_ticks = service.source_interval(q!(Duration::from_millis(service_interval_millis)));
     let requests_at_service = attempts.send(service, TCP.fail_stop().bincode().name("requests"));
     let serviced = sliced! {
         let arrivals = use::batch(requests_at_service, nondet!(
@@ -153,7 +177,6 @@ pub fn timeout_retry<'a>(
         .clone()
         .map(q!(|response| RetryEvent::LogicalCompletion(response.id)));
 
-    let retry_ticks = client.source_interval(q!(Duration::from_millis(timeout_millis)));
     let attempts_next_tick = sliced! {
         let new_requests = use::batch(requests, nondet!(
             /** Application arrivals may fall in any client tick. */
@@ -235,8 +258,8 @@ mod tests {
     use hydro_deploy::Deployment;
     use hydro_lang::telemetry::emf::RecordMetricsSidecar;
 
-    use crate::stage_telemetry::{StageWindow, parse_stage_windows};
     use super::*;
+    use crate::stage_telemetry::{StageWindow, parse_stage_windows};
 
     /// Measured shape: a stateful stage that emits network work in a window
     /// where it drained no ordinary handoff items. This describes what was
@@ -344,13 +367,15 @@ mod tests {
             .assume_ordering::<TotalOrder>(nondet!(/** only drives IR inspection */))
             .for_each(q!(|_| {}));
 
-        let mut built = flow
-            .with_default_optimize::<hydro_lang::compile::embedded::EmbeddedDeploy>();
+        let mut built =
+            flow.with_default_optimize::<hydro_lang::compile::embedded::EmbeddedDeploy>();
         let preview = built.preview_compile();
         let client_graph = preview.dfir_for(&client).unwrap();
-        assert!(client_graph
-            .node_ids()
-            .any(|node_id| client_graph.operator_tag(node_id).is_some_and(|tag| tag.starts_with("interval__"))));
+        assert!(client_graph.node_ids().any(|node_id| {
+            client_graph
+                .operator_tag(node_id)
+                .is_some_and(|tag| tag.starts_with("interval__"))
+        }));
         let interval_stateful_stages: Vec<_> = client_graph
             .node_ids()
             .filter(|node_id| {
@@ -362,16 +387,17 @@ mod tests {
             })
             .collect();
         assert_eq!(interval_stateful_stages.len(), 1);
-        assert!(client_graph
-            .nodes()
-            .any(|(_, node)| matches!(node, GraphNode::Operator(op) if op.name_string() == "dest_sink")));
+        assert!(client_graph.nodes().any(
+            |(_, node)| matches!(node, GraphNode::Operator(op) if op.name_string() == "dest_sink")
+        ));
     }
 
     #[tokio::test]
     async fn stage_trace_observes_interval_driven_retained_work() {
-        let trace_path = std::env::current_dir()
-            .unwrap()
-            .join(format!("target/retry-stage-trace-{}.jsonl", std::process::id()));
+        let trace_path = std::env::current_dir().unwrap().join(format!(
+            "target/retry-stage-trace-{}.jsonl",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&trace_path);
         let mut deployment = Deployment::new();
         let mut flow = FlowBuilder::new();
@@ -407,10 +433,15 @@ mod tests {
         deployment.stop().await.unwrap();
 
         let records = stage_records(&trace_path);
-        assert!(!records.is_empty(), "stage sidecar must emit activation windows");
-        assert!(records.iter().any(|record| {
-            record.has_interval_source && record.output_items > 0
-        }));
+        assert!(
+            !records.is_empty(),
+            "stage sidecar must emit activation windows"
+        );
+        assert!(
+            records
+                .iter()
+                .any(|record| { record.has_interval_source && record.output_items > 0 })
+        );
         // Directly observe the measured shape: at least one retained-state
         // stage emitted physical network work in a window with no ordinary
         // handoff input. This is the raw evidence; the hazard interpretation is
@@ -437,13 +468,7 @@ mod tests {
         let external = flow.external::<()>();
         let client = flow.process::<Client>();
         let service = flow.process::<Service>();
-        let port = timeout_retry_external(
-            &external,
-            &client,
-            &service,
-            TIMEOUT_MS,
-            SERVICE_MS,
-        );
+        let port = timeout_retry_external(&external, &client, &service, TIMEOUT_MS, SERVICE_MS);
         let nodes = flow
             .with_default_optimize()
             .with_process(&client, deployment.Localhost())
@@ -499,7 +524,10 @@ mod tests {
         let post = observe_for(&mut events, Duration::from_millis(300)).await;
         let (post_logical, post_attempts, _, _post_completed) = count(&post);
         assert_eq!(post_logical, 12);
-        assert!(post_attempts > post_logical * 2, "retries must amplify work");
+        assert!(
+            post_attempts > post_logical * 2,
+            "retries must amplify work"
+        );
         let post_baseline_completions = logical_completion_ids(&post)
             .into_iter()
             .filter(|id| (38..50).contains(id))
@@ -552,13 +580,7 @@ mod tests {
         let external = flow.external::<()>();
         let client = flow.process::<Client>();
         let service = flow.process::<Service>();
-        let port = timeout_retry_external(
-            &external,
-            &client,
-            &service,
-            TIMEOUT_MS,
-            SERVICE_MS,
-        );
+        let port = timeout_retry_external(&external, &client, &service, TIMEOUT_MS, SERVICE_MS);
         let nodes = flow
             .with_default_optimize()
             .with_process(&client, deployment.Localhost())

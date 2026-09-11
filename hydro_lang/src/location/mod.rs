@@ -630,6 +630,30 @@ pub trait Location<'a>: DynLocation {
         (SimSender(external.port_id, PhantomData), stream)
     }
 
+    /// Like [`Location::sim_input`], but declares the input to be an *operational stimulus*
+    /// (a timer tick, a timeout, an election trigger): an event that drives work without
+    /// carrying application data. Under [`crate::sim::flow::SimFlow::with_provenance`], items
+    /// from this port are tagged [`crate::sim::provenance::TagKind::Operational`] rather than
+    /// [`crate::sim::provenance::TagKind::Data`]. Behavior is otherwise identical.
+    #[cfg(feature = "sim")]
+    fn sim_input_operational<T, O: Ordering, R: Retries>(
+        &self,
+    ) -> (
+        SimSender<T, O, R>,
+        Stream<T, Self::DropConsistency, Unbounded, O, R>,
+    )
+    where
+        Self: TopLevel<'a> + Sized,
+        T: Serialize + DeserializeOwned,
+    {
+        let (sender, stream) = self.sim_input::<T, O, R>();
+        self.flow_state()
+            .borrow_mut()
+            .operational_sim_ports
+            .insert(sender.0);
+        (sender, stream)
+    }
+
     /// Creates an external input stream for embedded deployment mode.
     ///
     /// The `name` parameter specifies the name of the generated function parameter
