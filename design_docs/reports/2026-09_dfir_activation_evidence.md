@@ -11,6 +11,14 @@ DFIR block activations can distinguish:
 
 This is a dynamic hypothesis about block activations and data crossing block boundaries. It is not a static proof of safety and does not require tuple-level lineage.
 
+**Scope (recovery pass).** This hypothesis is scoped to distinguishing the two
+programs measured here, and only as a *telemetry shape*, not as a stability
+verdict. Reusable "smell" predicates that once accompanied this evidence were
+unsound and have been quarantined; see
+`2026-09_hydro_feedback_smell_inventory.md` for the refined, falsifiable
+statement (H1) and its known counterexamples (queue drainage, byte growth from
+larger state, multi-window finite work, completion-authorized work).
+
 ## What is measured
 
 DFIR already records, per interval:
@@ -52,7 +60,7 @@ The optimized block containing the interval also contains the network sink. It h
 
 ### Dynamic observation
 
-In actual deployed 100 ms windows, the interval/network block activated repeatedly. A representative run observed 5–10 block runs per window. Handoff output count is zero because the network sink is fused into the same block; block activations, rather than an inter-block item count, are the observable here.
+In actual deployed 100 ms windows, the interval/network block activated repeatedly. A representative run observed 5–10 block runs per window. The sidecar directly records nonzero serialized network message and payload-byte totals for this block.
 
 A separate exhaustive simulator test establishes cardinality: each supplied timer event emits exactly one fixed-size heartbeat to every member. Therefore gain is fixed and membership-bounded.
 
@@ -77,9 +85,24 @@ Actual deployed stage windows showed two relevant blocks:
 1. an interval block with approximately seven activations/outputs per observed window; and
 2. a retained-state block with three reads, one write, and physical output despite zero ordinary handoff input in that window.
 
-Representative retained-state output counts across successive windows were 12, 0, and 1 while interval activity continued. The exact values are schedule-dependent; the significant observation is that the stateful block can emit work with no new ordinary handoff input, funded by retained data and operational activation.
+The stage sidecar now reports exact serialized network message and payload-byte counts for internally serialized Hydro channels. Counting occurs after serialization and immediately before the transport sink; keyed sends extract the byte payload from `(destination, bytes)` without counting the destination wrapper. Transport framing is excluded.
+
+Representative retained-state output counts across successive windows were 12, 0, and 1 while interval activity continued. The exact values are schedule-dependent; the significant observation is that the stateful block can emit work with no new ordinary handoff input, funded by retained data and operational activation. Subsequent trace tests directly observed nonzero serialized messages and bytes on this path.
 
 The existing ground-truth deployment independently confirms that these emissions are physical retry attempts and that a finite overload produces work amplification.
+
+## Gossip boundary result
+
+Applying the same trace to state-based G-Set gossip demonstrates why direct byte accounting matters. Two real deployments used identical three-member membership, pump rate, and duration, but retained 4 versus 400 elements. Filtering to interval-origin pump stages excluded initial organic update dissemination.
+
+Observed pump-only totals:
+
+| Retained elements | Messages | Serialized payload bytes | Poll time |
+|---:|---:|---:|---:|
+| 4 | 63 | 1,512 | 3,891 us |
+| 400 | 63 | 101,304 | 29,602 us |
+
+Message gain was exactly fixed, while byte volume grew about 67x and poll time about 7.6x. Thus stage item/message counts alone would classify gossip as constant work even though retained state substantially increases physical work. Gossip remains a potentially hazardous feedback pattern; whether it becomes unstable requires a capacity/workload experiment.
 
 ## Conclusion
 

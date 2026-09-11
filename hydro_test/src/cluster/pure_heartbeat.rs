@@ -40,10 +40,24 @@ pub fn pure_heartbeat<'a, Node: 'a>(
 mod tests {
     use dfir_lang::graph::GraphNode;
     use hydro_deploy::Deployment;
-    use hydro_lang::deploy::DeployCrateWrapper;
     use hydro_lang::telemetry::emf::RecordMetricsSidecar;
 
+    use crate::stage_telemetry::{StageWindow, parse_stage_windows};
     use super::*;
+
+    /// A window that would previously have been flagged as "retained-state
+    /// network work without ordinary input": a stateful stage that emits
+    /// network work in a window where it drained no ordinary handoff items.
+    /// This is a *description of a measured shape*, not a hazard verdict. Pure
+    /// heartbeat, having no retained state on its work path, should never
+    /// exhibit it.
+    fn retained_state_stage_emits_network_without_ordinary_input(window: &StageWindow) -> bool {
+        window.run_count > 0
+            && (window.retained_state_reads > 0 || window.retained_state_writes > 0)
+            && window.input_items == 0
+            && window.network_message_count > 0
+            && window.network_byte_count > 0
+    }
 
     #[test]
     fn interval_drives_network_without_feedback_handoff() {
@@ -103,27 +117,49 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(350)).await;
         deployment.stop().await.unwrap();
 
-        let records: Vec<serde_json::Value> = std::fs::read_to_string(&trace_path)
-            .unwrap()
+        let contents = std::fs::read_to_string(&trace_path).unwrap();
+        let windows = parse_stage_windows(&contents);
+        let records: Vec<serde_json::Value> = contents
             .lines()
             .filter_map(|line| serde_json::from_str(line).ok())
             .filter(|record: &serde_json::Value| record["MetricKind"] == "Stage")
             .collect();
+        for record in &records {
+            if record["NetworkMessageCount"].as_u64().unwrap_or(0) > 0
+                || record["HasIntervalSource"] == true
+            {
+                eprintln!(
+                    "NETWORK_STAGE interval={} messages={} bytes={} runs={} names={}",
+                    record["HasIntervalSource"],
+                    record["NetworkMessageCount"],
+                    record["NetworkByteCount"],
+                    record["RunCount"],
+                    record["OperatorNames"],
+                );
+            }
+        }
         assert!(records.iter().any(|record| {
             record["HasIntervalSource"] == true
                 && record["RunCount"].as_u64().unwrap_or(0) > 0
+                && record["NetworkMessageCount"].as_u64().unwrap_or(0) > 0
+                && record["NetworkByteCount"].as_u64().unwrap_or(0) > 0
                 && record["OperatorNames"]
                     .as_array()
                     .is_some_and(|names| names.iter().any(|name| name == "dest_sink"))
         }));
-        assert!(records
+        // Pure heartbeat has no retained state on its work path, so no window
+        // should show a stateful stage emitting network work with zero ordinary
+        // input. This asserts the measured shape directly rather than delegating
+        // to a reusable (and unsound) classifier.
+        let retained_state_windows: Vec<_> = windows
             .iter()
-            .filter(|record| record["HasIntervalSource"] == true)
-            .all(|record| {
-                record["RetainedStateReads"].as_u64().unwrap_or(0) == 0
-                    && record["RetainedStateWrites"].as_u64().unwrap_or(0) == 0
-                    && record["FeedbackInputItems"].as_u64().unwrap_or(0) == 0
-            }));
+            .filter(|window| retained_state_stage_emits_network_without_ordinary_input(window))
+            .collect();
+        eprintln!("HEARTBEAT_RETAINED_STATE_WINDOWS {retained_state_windows:?}");
+        assert!(
+            retained_state_windows.is_empty(),
+            "pure heartbeat must not show a retained-state stage emitting network work without ordinary input"
+        );
     }
 
     #[test]

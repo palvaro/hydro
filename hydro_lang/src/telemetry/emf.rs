@@ -268,6 +268,8 @@ where
             "RunCount": stage.run_count,
             "PollCount": stage.poll_count,
             "PollDurationMicros": stage.poll_duration.as_micros(),
+            "NetworkMessageCount": stage.network_message_count,
+            "NetworkByteCount": stage.network_byte_count,
             "InputItems": stage.input_items(),
             "FeedbackInputItems": stage.feedback_input_items(),
             "OutputItems": stage.output_items(),

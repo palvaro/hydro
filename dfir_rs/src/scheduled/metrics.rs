@@ -163,9 +163,42 @@ define_metrics! {
         #[diff(total)]
         total_idle_duration: Cell<Duration>,
 
+        /// Number of serialized network messages emitted by this subgraph.
+        #[diff(total)]
+        network_message_count: Cell<usize>,
+
+        /// Number of serialized payload bytes emitted by this subgraph.
+        #[diff(total)]
+        network_byte_count: Cell<usize>,
+
         /// Number of times the subgraph has been idle.
         #[diff(total)]
         total_idle_count: Cell<usize>,
+    }
+}
+
+/// Extracts the serialized byte payload from Hydro's internal network-send shapes.
+#[doc(hidden)]
+pub trait SerializedPayload {
+    /// Exact serialized payload length, excluding transport framing.
+    fn serialized_payload_len(&self) -> usize;
+}
+
+impl SerializedPayload for bytes::Bytes {
+    fn serialized_payload_len(&self) -> usize {
+        self.len()
+    }
+}
+
+impl SerializedPayload for bytes::BytesMut {
+    fn serialized_payload_len(&self) -> usize {
+        self.len()
+    }
+}
+
+impl<T, B: SerializedPayload> SerializedPayload for (T, B) {
+    fn serialized_payload_len(&self) -> usize {
+        self.1.serialized_payload_len()
     }
 }
 
@@ -281,6 +314,10 @@ pub struct StageMetrics {
     pub poll_count: usize,
     /// Time spent polling during this interval.
     pub poll_duration: Duration,
+    /// Serialized network messages emitted during this interval.
+    pub network_message_count: usize,
+    /// Serialized network payload bytes emitted during this interval.
+    pub network_byte_count: usize,
     /// Handoffs consumed by this stage.
     pub inputs: Vec<StageHandoffMetrics>,
     /// Handoffs produced by this stage.
@@ -363,6 +400,9 @@ impl DfirMetrics {
                     poll_count: counters.map_or(0, SubgraphMetrics::total_poll_count),
                     poll_duration: counters
                         .map_or(Duration::ZERO, SubgraphMetrics::total_poll_duration),
+                    network_message_count: counters
+                        .map_or(0, SubgraphMetrics::network_message_count),
+                    network_byte_count: counters.map_or(0, SubgraphMetrics::network_byte_count),
                     inputs: stage.inputs.iter().map(map_handoff).collect(),
                     outputs: stage.outputs.iter().map(map_handoff).collect(),
                 }
@@ -443,6 +483,13 @@ mod test {
     use super::*;
 
     #[test]
+    fn serialized_payload_lengths_cover_keyed_and_unkeyed_sends() {
+        let bytes = bytes::Bytes::from_static(b"hello");
+        assert_eq!(bytes.serialized_payload_len(), 5);
+        assert_eq!((7u32, bytes).serialized_payload_len(), 5);
+    }
+
+    #[test]
     fn paired_gain_distinguishes_fixed_from_history_dependent_work() {
         assert_eq!(super::paired_gain_delta(4, 12, 4, 12), Some(0.0));
         assert_eq!(super::paired_gain_delta(4, 12, 4, 28), Some(4.0));
@@ -466,6 +513,8 @@ mod test {
                 total_idle_count: Cell::new(2),
                 total_poll_duration: Cell::new(Duration::from_millis(500)),
                 total_idle_duration: Cell::new(Duration::from_millis(200)),
+                network_message_count: Cell::new(0),
+                network_byte_count: Cell::new(0),
             },
         );
         metrics.handoffs.insert(

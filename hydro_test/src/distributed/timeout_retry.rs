@@ -233,10 +233,24 @@ mod tests {
     use dfir_lang::graph::{GraphNode, GraphNodeId};
     use futures::{SinkExt, Stream, StreamExt};
     use hydro_deploy::Deployment;
-    use hydro_lang::deploy::DeployCrateWrapper;
     use hydro_lang::telemetry::emf::RecordMetricsSidecar;
 
+    use crate::stage_telemetry::{StageWindow, parse_stage_windows};
     use super::*;
+
+    /// Measured shape: a stateful stage that emits network work in a window
+    /// where it drained no ordinary handoff items. This describes what was
+    /// observed; it is not, on its own, proof of a metastable hazard (ordinary
+    /// queue drainage can also produce this shape). The surrounding
+    /// ground-truth deployment separately establishes that these emissions are
+    /// physical retry attempts.
+    fn retained_state_stage_emits_network_without_ordinary_input(window: &StageWindow) -> bool {
+        window.run_count > 0
+            && (window.retained_state_reads > 0 || window.retained_state_writes > 0)
+            && window.input_items == 0
+            && window.network_message_count > 0
+            && window.network_byte_count > 0
+    }
 
     fn reaches_interval(
         graph: &dfir_lang::graph::DfirGraph,
@@ -259,13 +273,8 @@ mod tests {
                 .any(|reference| reaches_interval(graph, reference, seen))
     }
 
-    fn stage_records(path: &std::path::Path) -> Vec<serde_json::Value> {
-        std::fs::read_to_string(path)
-            .unwrap()
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .filter(|record| record["MetricKind"] == "Stage")
-            .collect()
+    fn stage_records(path: &std::path::Path) -> Vec<StageWindow> {
+        parse_stage_windows(&std::fs::read_to_string(path).unwrap())
     }
 
     async fn observe_for(
@@ -400,15 +409,21 @@ mod tests {
         let records = stage_records(&trace_path);
         assert!(!records.is_empty(), "stage sidecar must emit activation windows");
         assert!(records.iter().any(|record| {
-            record["HasIntervalSource"] == true
-                && record["OutputItems"].as_u64().unwrap_or(0) > 0
+            record.has_interval_source && record.output_items > 0
         }));
-        assert!(records.iter().any(|record| {
-            record["RetainedStateWrites"].as_u64().unwrap_or(0) > 0
-                && record["RunCount"].as_u64().unwrap_or(0) > 0
-                && record["InputItems"].as_u64().unwrap_or(0) == 0
-                && record["OutputItems"].as_u64().unwrap_or(0) > 0
-        }));
+        // Directly observe the measured shape: at least one retained-state
+        // stage emitted physical network work in a window with no ordinary
+        // handoff input. This is the raw evidence; the hazard interpretation is
+        // argued in the design doc, not asserted by a reusable predicate.
+        let retained_state_windows: Vec<_> = records
+            .iter()
+            .filter(|window| retained_state_stage_emits_network_without_ordinary_input(window))
+            .collect();
+        assert!(
+            !retained_state_windows.is_empty(),
+            "expected at least one retained-state stage emitting network work without ordinary input"
+        );
+        eprintln!("RETRY_RETAINED_STATE_WINDOWS {retained_state_windows:?}");
     }
 
     #[tokio::test]

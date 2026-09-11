@@ -845,7 +845,7 @@ impl DfirBuilder for ProdDfirBuilder {
         if let Some(serialize_pipeline) = serialize {
             sender_builder.add_dfir(
                 parse_quote! {
-                    #input_ident -> map(#serialize_pipeline) -> dest_sink(#sink);
+                    #input_ident -> map(#serialize_pipeline) -> _network_metrics() -> dest_sink(#sink);
                 },
                 None,
                 // operator tag separates send and receive, which otherwise have the same next_stmt_id
@@ -921,7 +921,7 @@ impl DfirBuilder for ProdDfirBuilder {
         if let Some(serialize_fn) = serialize {
             sender_builder.add_dfir(
                 parse_quote! {
-                    #input_ident -> map(#serialize_fn) -> dest_sink(#sink_expr);
+                    #input_ident -> map(#serialize_fn) -> _network_metrics() -> dest_sink(#sink_expr);
                 },
                 None,
                 // operator tag separates send and receive, which otherwise have the same next_stmt_id

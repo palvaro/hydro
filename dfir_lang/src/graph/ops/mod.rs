@@ -11,7 +11,7 @@ use quote::quote_spanned;
 use serde::{Deserialize, Serialize};
 use slotmap::Key;
 use syn::punctuated::Punctuated;
-use syn::{Expr, Token, parse_quote_spanned};
+use syn::{parse_quote_spanned, Expr, Token};
 
 use super::{
     GraphLoopId, GraphNode, GraphNodeId, GraphSubgraphId, OpInstGenerics, OperatorInstance,
@@ -280,6 +280,7 @@ declare_ops![
     chain::CHAIN,
     chain_first_n::CHAIN_FIRST_N,
     _counter::_COUNTER,
+    _network_metrics::_NETWORK_METRICS,
     cross_join::CROSS_JOIN,
     cross_join_multiset::CROSS_JOIN_MULTISET,
     cross_singleton::CROSS_SINGLETON,
