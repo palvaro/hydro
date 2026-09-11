@@ -924,14 +924,18 @@ mod tests {
         assert_eq!(small.5, large.5, "steady-state heartbeat bytes do not grow with the log");
     }
 
-    /// Retry under *request* loss (ground truth): the service discards the first arrival of every
-    /// odd-id request. With N=4: requests 1 and 3 are lost. One retry tick re-sends all four
-    /// outstanding requests. Since history advances on *receipt*, the retries of 0 and 2 are
-    /// `Reactivated` (the service already has them) and the retries of 1 and 3 are `Productive`
-    /// (the service never received them). The retry was necessary for half the messages, and the
-    /// classifier says which half. Four pulses then complete everything: the loop drains.
+    /// Retry under *request* loss: the service discards the first arrival of every odd-id
+    /// request, so with N=4 the retries of requests 1 and 3 are *necessary* — they are the first
+    /// copies the service ever acts on — and all four requests complete only because of them.
+    ///
+    /// The classifier labels all four retries `Reactivated` anyway, and that is the intended
+    /// answer. The labels describe mechanism, not utility: a timer fired and the client re-sent
+    /// retained state, exactly as it would have had nothing been lost. The client cannot tell a
+    /// lost copy from a slow one, and that blindness is what makes the loop amplify under
+    /// overload. Whether a particular re-send turned out to be useful is a property of the
+    /// scenario, not of the code, and the vulnerability analysis must be invariant to it.
     #[test]
-    fn timeout_retry_under_request_loss_marks_necessary_retries_productive() {
+    fn timeout_retry_under_request_loss_is_still_reactivated() {
         use crate::distributed::timeout_retry::{
             LossPolicy, Request, timeout_retry_lossy_with_timers,
         };
@@ -977,9 +981,6 @@ mod tests {
                 }
                 quiesce().await;
                 let mut history = take_emissions();
-                // All four were sent and all four were *received*; the service discarded two
-                // after receipt, which lineage cannot see — so by receipt-history every retry
-                // is Reactivated. Assert that first, then show what the black-box view misses.
                 let a_sends = history.iter().filter(|r| r.kind == EmissionPointKind::Network).count();
                 assert_eq!(a_sends, N);
 
@@ -996,21 +997,18 @@ mod tests {
                     .collect();
                 assert_eq!(retries.len(), N, "one retry per outstanding request");
                 let reactivated = retries.iter().filter(|c| c.label == Label::Reactivated).count();
-                // The drop happens *inside* the service after the network delivered the message,
-                // so receipt-history sees all four as delivered and all four retries as
-                // Reactivated. This is correct about the network and wrong about the service:
-                // loss inside opaque state is invisible to lineage.
                 assert_eq!(reactivated, N, "{:?}", retries.iter().map(|c| c.label).collect::<Vec<_>>());
                 let _ = before;
 
-                // The program itself needed those retries: only after them can all N complete.
+                // Half of those retries were necessary: only after them can all N complete. The
+                // label does not, and should not, change because of it.
                 for _ in 0..(N + N / 2) {
                     service_send.send(());
                     quiesce().await;
                 }
                 let done: Vec<_> = completed.collect_n(N).await;
                 assert_eq!(done.len(), N, "all requests eventually complete under request loss");
-                dump_note("request loss: 4 sent, 2 discarded inside the service after receipt; all 4 retries labelled Reactivated (receipt-history cannot see loss inside opaque state); all 4 complete after retry");
+                dump_note("request loss: 4 sent, 2 discarded by the service; all 4 retries labelled Reactivated (mechanism, not utility); all 4 complete only after the retries");
             });
     }
 

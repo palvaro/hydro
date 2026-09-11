@@ -41,7 +41,7 @@ Start with:
 - Retry: N requests → N `Productive`; one retry tick → N `Reactivated` funded by N data tags; one
   service pulse → 1 `Productive`; second tick → N−1 (N ∈ {1,4,9}). Loop gain N·k for k ∈ {1,2,3}.
   Black-holed responses: constant per-tick waste, never drains. Request loss inside the service:
-  necessary retries mislabelled `Reactivated` (the method's recorded negative result).
+  retries still `Reactivated` — labels describe the sender's mechanism, not a send's utility.
 - Transitive closure: all output facts `Productive` with exact combination lineage; drains.
 - Heartbeat: all `FixedOperational`, gain = cluster size, no data lineage.
 - Gossip (unlabelled): first pump `Productive`, subsequent pumps `Reactivated`; messages constant
@@ -54,9 +54,8 @@ Start with:
 Sim-time only; timers must be `sim_input_operational`. Lineage cannot distinguish "join derived a
 new tuple" from "fold batched old tuples" — recurrence does. Coarse lineage downstream of opaque
 state collapses labels to "first productive, rest reactivated"; `payload_hash` and the program's
-own dedup gates are the fallback, and under application-level loss there is no fallback. History
-advances on network *receipt*; the simulator's network is reliable, so loss must be modelled in
-the program for now. Several node kinds unsupported (panic with a clear message).
+own dedup gates are the fallback. History is the sender's own emission record (mechanism, not utility);
+receipts are logged but not consulted by the classifier. Several node kinds unsupported (panic with a clear message).
 
 ## Environment note
 

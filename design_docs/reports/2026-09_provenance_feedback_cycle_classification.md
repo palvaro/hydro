@@ -54,9 +54,8 @@ All in `hydro_lang`, behind `SimFlow::with_provenance()`; the untagged path is u
 - `EmissionRecord::payload_hash`: content identity, explicitly not lineage, for counting distinct
   payloads where lineage is too coarse (see limits).
 - Receipts: every network edge also logs an `EmissionPointKind::Receive` at the deserialize side,
-  on the same channel as the send. Network sends are judged against what the recipient has
-  *received*, and only receipts advance network history. Lossless: no change. Under network
-  loss: the retry of a message that never arrived is `Productive`.
+  on the same channel as the send. The classifier ignores them (see "mechanism, not utility"
+  below); they are kept so a per-run utility analysis can ask what a recipient already held.
 - `timeout_retry_lossy_with_timers` with a `LossPolicy`: deterministic program-level faults
   (the simulator's network is reliable) — drop the first arrival of odd-id requests at the
   service, and/or black-hole odd-id responses at the client.
@@ -101,11 +100,10 @@ requests complete, each of 3 retry ticks re-sends exactly the 2 black-holed requ
 `Reactivated`, and costs the service 2 pulses whose responses are discarded. Per-tick waste
 (2, 2, 2): constant and never drains. Nothing further ever completes.
 
-**Retry under request loss** (ground truth: necessary retry) — a negative result. The service
-discards the first arrival of odd-id requests; all four retries are labelled `Reactivated`
-although two were the first copy the service ever processed. The discard happens inside the
-service *after* the network delivered, so receipt-history advances and the opaque `by_mut` queue
-hides it. All four complete only after the retries. See lesson 6.
+**Retry under request loss** (ground truth: necessary retry). The service discards the first
+arrival of odd-id requests, so half the retries are the first copies the service ever acts on,
+and all four requests complete only because of them. All four retries are labelled
+`Reactivated`, and that is the intended answer — see lesson 6.
 
 **Transitive closure** (ground truth), edges admitted one per input in reverse topological order,
 steps as operational input: 6 facts out, all `Productive`, exact lineage; derived facts carry
@@ -147,12 +145,19 @@ data yet). N requests → no traffic. Heartbeat → 2 AppendEntries carrying the
    node waste capacity (responses N(k+1) for N distinct). With gossip, a member's output is
    independent of how many pumps it received. Whether the second pattern is safe is not
    established — gossip is unlabelled — but the probe separates the two mechanisms.
-6. **Coarseness can produce a wrong answer with no fallback.** Under request loss inside the
-   service, the necessary retries are labelled `Reactivated`, and neither bytes nor payload
-   identity corrects it (a retry is byte-identical to its original). This is the first case where
-   opaque state costs the answer, not just the route to it, and it motivates either
-   network-level loss in the simulator (drops before the deserialize wrapper, which receipts
-   would see) or finer lineage through the common queue/outstanding-set shapes behind `by_mut`.
+6. **The labels describe mechanism, not utility.** There are two questions one can ask of a
+   message. *What caused this send, and what funded it?* is a fact about the program's structure
+   as exercised by the run: in retry, a timer fired and the node re-emitted retained state, and it
+   would have done exactly that whether the first copy had arrived, been delayed, or been lost,
+   because the node cannot see the difference. *Did this send carry anything the recipient
+   lacked?* depends on the recipient's state and on network luck, and varies between runs of the
+   same code. A vulnerability analysis asks the first question, and its answer must be invariant
+   to the second: a retry loop that saves you under loss is the same loop that buries you under
+   load. History is therefore the sender's own record of what it has emitted to each peer. An
+   earlier revision judged novelty by what the recipient had *received*, which made the label
+   depend on whether a message happened to arrive; that was the wrong sensitivity and was
+   reverted. The loop-gain probe uses the recipient's behaviour, but as a measurement of
+   amplification in a scenario, kept separate from the label.
 7. **Program-level findings from driving the ground truth through barriers.** The TC program
    drops its frontier if admissions straddle ticks without a step, and joins only the current
    frontier on the left against base edges, so incremental admission discovers the closure only
@@ -173,8 +178,8 @@ that need no new instrumentation, run through quiescence barriers:
   a rates-and-capacity question this tool does not answer.
 
 Ground truth now covers retry (lossless), retry under a black hole (sustained closed-loop
-waste, never drains), retry under request loss (the method's negative result), and TC. Gossip
-and Raft remain observations. The classes should be treated as a hypothesis with a few anchors,
+waste, never drains), retry under request loss (same mechanism label, scenario-dependent
+utility), and TC. Gossip and Raft remain observations. The classes should be treated as a hypothesis with a few anchors,
 not a result.
 
 ## Limits and non-goals
@@ -185,9 +190,9 @@ not a result.
 - Unsupported nodes panic with `provenance: unsupported ...`: `resolve_futures*`,
   `flat_map_stream_blocking`, `scan_async_blocking`, `reduce_keyed_watermark`, versioned
   networks, raw-bytes channels and external ports.
-- The simulator's network is reliable; "lossy" channels only relax the liveness check. Loss
-  must be modelled in the program, where it lands inside opaque state (lesson 6). Network-level
-  loss in the simulator is the natural next step.
+- The simulator's network is reliable; "lossy" channels only relax the liveness check. Loss is
+  modelled in the program for the two lossy retry variants. Because labels describe the sender's
+  mechanism, this does not affect them.
 - Interleaved schedules (a timer firing while a response is in flight) are not driven here;
   barriers serialize phases. Lineage stays exact under interleaving; only the experimental
   protocol changes.

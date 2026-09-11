@@ -289,8 +289,8 @@ pub enum EmissionPointKind {
     /// A message serialized onto a network channel.
     Network,
     /// A message deserialized off a network channel: the recipient now holds this lineage. Not
-    /// physical work; used to advance per-channel history so that novelty is judged against
-    /// what was *received*, which differs from what was sent under message loss.
+    /// physical work and not consulted by [`classify`] (which describes the sender's mechanism);
+    /// recorded so a per-run utility analysis can ask what the recipient already held.
     Receive,
     /// An item serialized to a sim output port.
     Output,
@@ -465,10 +465,15 @@ impl EmissionRecord {
 /// network edge and repeats it over another has done redundant physical work; a node
 /// forwarding to a peer that has not heard it has not.
 ///
-/// **History advances on receipt, not on send.** A network send is judged against the lineage
-/// its recipient has already *received* ([`EmissionPointKind::Receive`] records), so a retry of
-/// a message that was lost is `Productive`, while a retry of one that arrived is `Reactivated`.
-/// Sim outputs and cycle sinks have no receiver and advance history themselves.
+/// **History is the sender's own record of what it has emitted**, and advances on send.
+/// [`EmissionPointKind::Receive`] records are ignored here. The labels describe *mechanism* —
+/// what the emitting node did with the information it had — not *utility*. A retry of a request
+/// whose first copy was lost in the network is still `Reactivated`: the node re-emitted retained
+/// state on a timer, and it would have done exactly the same had the first copy arrived. That
+/// invariance to network luck is the point; the shape that amplifies under overload is present
+/// whether or not a given run wastes anything. Receipts are kept in the log for a separate,
+/// per-run utility analysis ("how much of this traffic was redundant from the recipient's point
+/// of view"), which is not this function's business.
 ///
 /// **Runs of identical *coarse* lineage are one causal unit.** A closure reading opaque state
 /// stamps every item it emits in one invocation with the same (over-approximate) tag set, so
@@ -504,13 +509,7 @@ pub fn classify(records: &[EmissionRecord], include_cycles: bool) -> Vec<Classif
     let mut i = 0;
     while i < records.len() {
         if records[i].kind == EmissionPointKind::Receive {
-            let data: TagSet = records[i].data_tags().copied().collect();
-            seen.entry(records[i].channel())
-                .or_insert_with(|| History {
-                    maximal: Vec::new(),
-                    union: TagSet::new(),
-                })
-                .add(&data);
+            // Utility information, not mechanism; see the doc comment.
             i += 1;
             continue;
         }
@@ -551,10 +550,7 @@ pub fn classify(records: &[EmissionRecord], include_cycles: bool) -> Vec<Classif
             });
         }
         for r in run {
-            // Network sends advance history only when received (see above).
-            if r.kind != EmissionPointKind::Network {
-                seen.get_mut(&r.channel()).unwrap().add(&data);
-            }
+            seen.get_mut(&r.channel()).unwrap().add(&data);
         }
         i = j;
     }
@@ -716,7 +712,7 @@ mod tests {
     }
 
     #[test]
-    fn network_history_advances_on_receipt_not_send() {
+    fn labels_describe_mechanism_and_ignore_receipts() {
         let d1 = tag(TagKind::Data, 1);
         let t1 = tag(TagKind::Operational, 1);
         let send = |tags: &[Tag]| {
@@ -729,14 +725,13 @@ mod tests {
             r.kind = EmissionPointKind::Receive;
             r
         };
-        // Sent, lost (no receipt), retried: the retry is the first thing the recipient gets.
+        // Whether or not the first copy arrived, the retry is the same mechanism.
         let lost = vec![send(&[d1]), send(&[d1, t1])];
-        let labels: Vec<Label> = classify(&lost, false).into_iter().map(|c| c.label).collect();
-        assert_eq!(labels, vec![Label::Productive, Label::Productive]);
-        // Sent, received, retried: the retry is redundant work.
         let delivered = vec![send(&[d1]), receive(&[d1]), send(&[d1, t1])];
-        let labels: Vec<Label> = classify(&delivered, false).into_iter().map(|c| c.label).collect();
-        assert_eq!(labels, vec![Label::Productive, Label::Reactivated]);
+        for log in [lost, delivered] {
+            let labels: Vec<Label> = classify(&log, false).into_iter().map(|c| c.label).collect();
+            assert_eq!(labels, vec![Label::Productive, Label::Reactivated]);
+        }
     }
 
     #[test]
