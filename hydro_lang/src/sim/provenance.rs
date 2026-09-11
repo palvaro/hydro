@@ -288,6 +288,10 @@ impl NetworkPayload for (crate::location::TaglessMemberId, Bytes) {
 pub enum EmissionPointKind {
     /// A message serialized onto a network channel.
     Network,
+    /// A message deserialized off a network channel: the recipient now holds this lineage. Not
+    /// physical work; used to advance per-channel history so that novelty is judged against
+    /// what was *received*, which differs from what was sent under message loss.
+    Receive,
     /// An item serialized to a sim output port.
     Output,
     /// An item crossing a cycle sink (includes per-tick state carry; usually ignored).
@@ -303,7 +307,8 @@ pub struct EmissionRecord {
     pub point: u32,
     /// Human-readable name of the emission point (channel name if given, else a location pair).
     pub name: String,
-    /// The emitting cluster member, if the emitter is a cluster.
+    /// The sending cluster member, if the sender is a cluster (for `Receive` records this is
+    /// recovered from the channel's demux id, so send and receipt share a [`Channel`]).
     pub member: Option<u32>,
     /// The receiving location (a location for network sends, the port for sim outputs).
     pub destination: String,
@@ -460,6 +465,11 @@ impl EmissionRecord {
 /// network edge and repeats it over another has done redundant physical work; a node
 /// forwarding to a peer that has not heard it has not.
 ///
+/// **History advances on receipt, not on send.** A network send is judged against the lineage
+/// its recipient has already *received* ([`EmissionPointKind::Receive`] records), so a retry of
+/// a message that was lost is `Productive`, while a retry of one that arrived is `Reactivated`.
+/// Sim outputs and cycle sinks have no receiver and advance history themselves.
+///
 /// **Runs of identical *coarse* lineage are one causal unit.** A closure reading opaque state
 /// stamps every item it emits in one invocation with the same (over-approximate) tag set, so
 /// consecutive coarse emissions with identical tags are classified against the history as it
@@ -493,6 +503,17 @@ pub fn classify(records: &[EmissionRecord], include_cycles: bool) -> Vec<Classif
     let mut out = Vec::with_capacity(records.len());
     let mut i = 0;
     while i < records.len() {
+        if records[i].kind == EmissionPointKind::Receive {
+            let data: TagSet = records[i].data_tags().copied().collect();
+            seen.entry(records[i].channel())
+                .or_insert_with(|| History {
+                    maximal: Vec::new(),
+                    union: TagSet::new(),
+                })
+                .add(&data);
+            i += 1;
+            continue;
+        }
         let mut j = i + 1;
         while records[i].coarse
             && j < records.len()
@@ -530,7 +551,10 @@ pub fn classify(records: &[EmissionRecord], include_cycles: bool) -> Vec<Classif
             });
         }
         for r in run {
-            seen.get_mut(&r.channel()).unwrap().add(&data);
+            // Network sends advance history only when received (see above).
+            if r.kind != EmissionPointKind::Network {
+                seen.get_mut(&r.channel()).unwrap().add(&data);
+            }
         }
         i = j;
     }
@@ -555,7 +579,10 @@ pub struct Attribution {
 pub fn attribute(records: &[EmissionRecord]) -> BTreeMap<(String, Option<Tag>), Attribution> {
     let mut out: BTreeMap<(String, Option<Tag>), Attribution> = BTreeMap::new();
     for record in records {
-        if record.kind == EmissionPointKind::Cycle {
+        if matches!(
+            record.kind,
+            EmissionPointKind::Cycle | EmissionPointKind::Receive
+        ) {
             continue;
         }
         let ops: Vec<Option<Tag>> = {
@@ -605,7 +632,7 @@ mod tests {
 
     fn rec(tags: &[Tag], point: u32) -> EmissionRecord {
         EmissionRecord {
-            kind: EmissionPointKind::Network,
+            kind: EmissionPointKind::Output,
             point,
             name: format!("edge{point}"),
             member: None,
@@ -686,6 +713,30 @@ mod tests {
                 Label::Productive,
             ]
         );
+    }
+
+    #[test]
+    fn network_history_advances_on_receipt_not_send() {
+        let d1 = tag(TagKind::Data, 1);
+        let t1 = tag(TagKind::Operational, 1);
+        let send = |tags: &[Tag]| {
+            let mut r = rec(tags, 0);
+            r.kind = EmissionPointKind::Network;
+            r
+        };
+        let receive = |tags: &[Tag]| {
+            let mut r = rec(tags, 0);
+            r.kind = EmissionPointKind::Receive;
+            r
+        };
+        // Sent, lost (no receipt), retried: the retry is the first thing the recipient gets.
+        let lost = vec![send(&[d1]), send(&[d1, t1])];
+        let labels: Vec<Label> = classify(&lost, false).into_iter().map(|c| c.label).collect();
+        assert_eq!(labels, vec![Label::Productive, Label::Productive]);
+        // Sent, received, retried: the retry is redundant work.
+        let delivered = vec![send(&[d1]), receive(&[d1]), send(&[d1, t1])];
+        let labels: Vec<Label> = classify(&delivered, false).into_iter().map(|c| c.label).collect();
+        assert_eq!(labels, vec![Label::Productive, Label::Reactivated]);
     }
 
     #[test]

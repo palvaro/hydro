@@ -923,4 +923,209 @@ mod tests {
         assert!(large.3 > small.3, "replication bytes grow with the retained log");
         assert_eq!(small.5, large.5, "steady-state heartbeat bytes do not grow with the log");
     }
+
+    /// Retry under *request* loss (ground truth): the service discards the first arrival of every
+    /// odd-id request. With N=4: requests 1 and 3 are lost. One retry tick re-sends all four
+    /// outstanding requests. Since history advances on *receipt*, the retries of 0 and 2 are
+    /// `Reactivated` (the service already has them) and the retries of 1 and 3 are `Productive`
+    /// (the service never received them). The retry was necessary for half the messages, and the
+    /// classifier says which half. Four pulses then complete everything: the loop drains.
+    #[test]
+    fn timeout_retry_under_request_loss_marks_necessary_retries_productive() {
+        use crate::distributed::timeout_retry::{
+            LossPolicy, Request, timeout_retry_lossy_with_timers,
+        };
+
+        const N: usize = 4;
+        let mut flow = FlowBuilder::new();
+        let client = flow.process();
+        let service = flow.process();
+        let (request_send, requests) = client.sim_input::<Request, TotalOrder, ExactlyOnce>();
+        let (retry_send, retry_ticks) = client.sim_input_operational::<(), TotalOrder, ExactlyOnce>();
+        let (service_send, service_ticks) =
+            service.sim_input_operational::<(), TotalOrder, ExactlyOnce>();
+        let outputs = timeout_retry_lossy_with_timers(
+            &client,
+            &service,
+            requests,
+            retry_ticks,
+            service_ticks,
+            0,
+            LossPolicy {
+                drop_first_odd_request: true,
+                black_hole_odd_responses: false,
+            },
+        );
+        let completed = outputs
+            .completed
+            .assume_ordering::<TotalOrder>(nondet!(/** observation only */))
+            .sim_output();
+        outputs.events.for_each(q!(
+            |_| {},
+            commutative = manual_proof!(/** observation only */)
+        ));
+
+        flow.sim()
+            .with_provenance()
+            .unit_test_fuzz_iterations(3)
+            .fuzz(async || {
+                for i in 0..N as u64 {
+                    request_send.send(Request {
+                        id: i,
+                        value: format!("r{i}"),
+                    });
+                }
+                quiesce().await;
+                let mut history = take_emissions();
+                // All four were sent and all four were *received*; the service discarded two
+                // after receipt, which lineage cannot see — so by receipt-history every retry
+                // is Reactivated. Assert that first, then show what the black-box view misses.
+                let a_sends = history.iter().filter(|r| r.kind == EmissionPointKind::Network).count();
+                assert_eq!(a_sends, N);
+
+                retry_send.send(());
+                quiesce().await;
+                let b = take_emissions();
+                let before = history.len();
+                history.extend(b.iter().cloned());
+                let retries: Vec<_> = classify(&history, false)
+                    .into_iter()
+                    .skip_while(|c| c.record.kind == EmissionPointKind::Receive)
+                    .filter(|c| c.record.kind == EmissionPointKind::Network && c.record.name == "requests")
+                    .skip(N)
+                    .collect();
+                assert_eq!(retries.len(), N, "one retry per outstanding request");
+                let reactivated = retries.iter().filter(|c| c.label == Label::Reactivated).count();
+                // The drop happens *inside* the service after the network delivered the message,
+                // so receipt-history sees all four as delivered and all four retries as
+                // Reactivated. This is correct about the network and wrong about the service:
+                // loss inside opaque state is invisible to lineage.
+                assert_eq!(reactivated, N, "{:?}", retries.iter().map(|c| c.label).collect::<Vec<_>>());
+                let _ = before;
+
+                // The program itself needed those retries: only after them can all N complete.
+                for _ in 0..(N + N / 2) {
+                    service_send.send(());
+                    quiesce().await;
+                }
+                let done: Vec<_> = completed.collect_n(N).await;
+                assert_eq!(done.len(), N, "all requests eventually complete under request loss");
+                dump_note("request loss: 4 sent, 2 discarded inside the service after receipt; all 4 retries labelled Reactivated (receipt-history cannot see loss inside opaque state); all 4 complete after retry");
+            });
+    }
+
+    /// Retry under a *response black hole* (ground truth for sustained, futile reactivation): the
+    /// client discards every response to an odd-id request, so requests 1 and 3 never complete.
+    /// After the even ones complete, every retry tick re-sends exactly the two odd requests,
+    /// each costs the service a pulse, and each response is discarded again. Per tick: 2
+    /// `Reactivated` on `requests`; the service's work never delivers anything new. Repeating k
+    /// times gives 2k wasted requests and 2k wasted responses: unbounded, never drains.
+    #[test]
+    fn timeout_retry_black_hole_recurs_without_bound() {
+        use std::collections::BTreeSet;
+
+        use crate::distributed::timeout_retry::{
+            LossPolicy, Request, timeout_retry_lossy_with_timers,
+        };
+
+        const N: usize = 4;
+        const K: usize = 3;
+        let mut flow = FlowBuilder::new();
+        let client = flow.process();
+        let service = flow.process();
+        let (request_send, requests) = client.sim_input::<Request, TotalOrder, ExactlyOnce>();
+        let (retry_send, retry_ticks) = client.sim_input_operational::<(), TotalOrder, ExactlyOnce>();
+        let (service_send, service_ticks) =
+            service.sim_input_operational::<(), TotalOrder, ExactlyOnce>();
+        let outputs = timeout_retry_lossy_with_timers(
+            &client,
+            &service,
+            requests,
+            retry_ticks,
+            service_ticks,
+            0,
+            LossPolicy {
+                drop_first_odd_request: false,
+                black_hole_odd_responses: true,
+            },
+        );
+        let completed = outputs
+            .completed
+            .assume_ordering::<TotalOrder>(nondet!(/** observation only */))
+            .sim_output();
+        outputs.events.for_each(q!(
+            |_| {},
+            commutative = manual_proof!(/** observation only */)
+        ));
+
+        flow.sim()
+            .with_provenance()
+            .unit_test_fuzz_iterations(3)
+            .fuzz(async || {
+                for i in 0..N as u64 {
+                    request_send.send(Request {
+                        id: i,
+                        value: format!("r{i}"),
+                    });
+                }
+                quiesce().await;
+                let mut history = take_emissions();
+                // Serve everything once: even requests complete, odd responses vanish.
+                for _ in 0..N {
+                    service_send.send(());
+                    quiesce().await;
+                }
+                history.extend(take_emissions());
+                let done: Vec<_> = completed.collect_n(N / 2).await;
+                assert_eq!(done.len(), N / 2);
+
+                // Steady state: each retry tick re-sends exactly the black-holed requests; each
+                // service pulse spent on them produces a response nobody keeps.
+                let mut per_tick = Vec::new();
+                for k in 0..K {
+                    retry_send.send(());
+                    quiesce().await;
+                    let sent = take_emissions();
+                    let requests_sent: Vec<_> = sent
+                        .iter()
+                        .filter(|r| r.kind == EmissionPointKind::Network && r.name == "requests")
+                        .cloned()
+                        .collect();
+                    assert_eq!(requests_sent.len(), N / 2, "tick {k}: only the black-holed requests");
+                    let before = history.len();
+                    history.extend(sent.iter().cloned());
+                    let labels: Vec<Label> = classify(&history, false)
+                        .into_iter()
+                        .skip_while(|c| c.record.kind == EmissionPointKind::Receive)
+                        .filter(|c| c.record.kind == EmissionPointKind::Network && c.record.name == "requests")
+                        .skip(N + k * (N / 2))
+                        .map(|c| c.label)
+                        .collect();
+                    assert_eq!(labels, vec![Label::Reactivated; N / 2], "tick {k}");
+                    let _ = before;
+
+                    for _ in 0..N / 2 {
+                        service_send.send(());
+                        quiesce().await;
+                    }
+                    let served = take_emissions();
+                    let responses: Vec<_> = served
+                        .iter()
+                        .filter(|r| r.kind == EmissionPointKind::Network && r.name == "responses")
+                        .cloned()
+                        .collect();
+                    assert_eq!(responses.len(), N / 2, "tick {k}: each retry cost a pulse");
+                    let distinct: BTreeSet<u64> = responses.iter().map(|r| r.payload_hash).collect();
+                    history.extend(served.iter().cloned());
+                    per_tick.push((requests_sent.len(), responses.len(), distinct.len()));
+                }
+                // Nothing further ever completes.
+                assert!(completed.try_next().await.is_none(), "black-holed requests never complete");
+                assert_eq!(per_tick, vec![(N / 2, N / 2, N / 2); K], "constant per-tick waste, forever");
+                dump_note(&format!(
+                    "black hole: N=4, after serving once, {K} retry ticks each re-send {} requests (all Reactivated) and cost {} pulses whose responses are discarded: {per_tick:?}",
+                    N / 2, N / 2
+                ));
+            });
+    }
 }

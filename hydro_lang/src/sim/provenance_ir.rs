@@ -993,10 +993,30 @@ fn transform_node(node: &mut HydroNode, ctx: &Ctx<'_>) {
             let out = repr_of(&metadata.collection_kind);
             let retag = retag(out, quote!(__prov_t), quote!(__prov_c), quote!(__prov_x));
             let orig_deser = &deser.0;
+            // On the receive side the demux id (if any) is the *sender*; the recipient is us.
+            let sender = if matches!(from.root(), LocationId::Cluster(_)) {
+                quote!(#p::NetworkPayload::recipient(&__prov_inner))
+            } else {
+                quote!(::core::option::Option::None)
+            };
+            let receiver = member_expr(&metadata.location_id);
+            let receipt = quote!(#p::record(#p::EmissionRecord {
+                kind: #p::EmissionPointKind::Receive,
+                point: #point,
+                name: ::std::string::String::from(#label),
+                member: #sender,
+                destination: ::std::string::String::from(#destination),
+                recipient: #receiver,
+                tags: ::core::clone::Clone::clone(&__prov_t),
+                coarse: __prov_c,
+                bytes: #p::NetworkPayload::payload_len(&__prov_inner),
+                payload_hash: #p::NetworkPayload::payload_hash(&__prov_inner),
+            }));
             let wrapped_deser: syn::Expr = parse_quote!(
                 move |__prov_res| {
                     let __prov_raw = ::core::result::Result::unwrap(__prov_res);
                     let (__prov_t, __prov_c, __prov_inner) = #p::NetworkPayload::unframe(__prov_raw);
+                    #receipt;
                     let __prov_x = #p::apply1(#orig_deser, ::core::result::Result::<_, ()>::Ok(__prov_inner));
                     #retag
                 }

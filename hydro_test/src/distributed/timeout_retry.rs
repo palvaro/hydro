@@ -122,6 +122,44 @@ pub fn timeout_retry_with_timers<'a>(
     service_ticks: Stream<(), Process<'a, Service>, Unbounded, TotalOrder, ExactlyOnce>,
     timeout_millis: u64,
 ) -> TimeoutRetryOutputs<'a> {
+    timeout_retry_lossy_with_timers(
+        client,
+        service,
+        requests,
+        retry_ticks,
+        service_ticks,
+        timeout_millis,
+        LossPolicy::default(),
+    )
+}
+
+/// Deterministic, program-level message loss for ground-truth experiments. The simulator's
+/// network is reliable; these faults make specific messages disappear so the retry loop's
+/// behaviour under loss can be measured exactly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LossPolicy {
+    /// The service discards the *first* arrival of every odd-id request. The retry of such a
+    /// request is the first copy the service ever processes: a necessary retry.
+    pub drop_first_odd_request: bool,
+    /// The client discards every response to an odd-id request. Those requests never complete,
+    /// so every retry scan re-sends them forever: a futile retry that recurs unboundedly.
+    pub black_hole_odd_responses: bool,
+}
+
+/// [`timeout_retry_with_timers`] with a [`LossPolicy`] applied at the receiving ends of the two
+/// network edges. With the default policy this is exactly the lossless program.
+pub fn timeout_retry_lossy_with_timers<'a>(
+    client: &Process<'a, Client>,
+    service: &Process<'a, Service>,
+    requests: Stream<Request, Process<'a, Client>, Unbounded>,
+    retry_ticks: Stream<(), Process<'a, Client>, Unbounded, TotalOrder, ExactlyOnce>,
+    service_ticks: Stream<(), Process<'a, Service>, Unbounded, TotalOrder, ExactlyOnce>,
+    timeout_millis: u64,
+    loss: LossPolicy,
+) -> TimeoutRetryOutputs<'a> {
+    // `q!` closures can capture integers but not `bool`s.
+    let drop_first_odd_request: u64 = loss.drop_first_odd_request as u64;
+    let black_hole_odd_responses: u64 = loss.black_hole_odd_responses as u64;
     let (send_attempts, attempts) =
         client.forward_ref::<Stream<Request, Process<'a, Client>, Unbounded, NoOrder>>();
 
@@ -143,6 +181,10 @@ pub fn timeout_retry_with_timers<'a>(
         let mut queue = use::state(|location| {
             location.singleton(q!(std::collections::VecDeque::<Request>::new()))
         });
+        // Ids whose first arrival has already been discarded (only used under loss).
+        let mut dropped_once = use::state(|location| {
+            location.singleton(q!(std::collections::BTreeSet::<u64>::new()))
+        });
         let arrival_vec = arrivals.assume_ordering::<TotalOrder>(nondet!(
             /** Any network arrival order is a valid FIFO service order. */
         )).fold(q!(|| Vec::new()), q!(|out, request| out.push(request)));
@@ -151,11 +193,19 @@ pub fn timeout_retry_with_timers<'a>(
         let arrivals_ref = arrival_vec.by_ref();
         let pulses_ref = pulse_count.by_ref();
         let queue_ref = queue.by_mut();
+        let dropped_ref = dropped_once.by_mut();
 
         tick.singleton(q!(()))
             .into_stream()
             .flat_map_ordered(q!(move |_| {
-                queue_ref.extend(arrivals_ref.iter().cloned());
+                for request in arrivals_ref.iter() {
+                    let lose = drop_first_odd_request != 0
+                        && request.id % 2 == 1
+                        && dropped_ref.insert(request.id);
+                    if !lose {
+                        queue_ref.push_back(request.clone());
+                    }
+                }
                 (0..*pulses_ref)
                     .filter_map(|_| queue_ref.pop_front())
                     .collect::<Vec<_>>()
@@ -167,7 +217,8 @@ pub fn timeout_retry_with_timers<'a>(
             id: request.id,
             value: request.value.to_uppercase(),
         }))
-        .send(client, TCP.fail_stop().bincode().name("responses"));
+        .send(client, TCP.fail_stop().bincode().name("responses"))
+        .filter(q!(move |response| !(black_hole_odd_responses != 0 && response.id % 2 == 1)));
 
     let completed = responses.clone().unique();
     let service_completion_events = responses
