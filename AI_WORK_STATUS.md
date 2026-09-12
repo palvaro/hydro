@@ -30,6 +30,9 @@ Start with:
 - `hydro_test/src/cluster/provenance_ground_truth.rs` — 9 tests: heartbeat, timeout/retry (+ loop
   gain, + black hole, + request loss), gossip (+ loop gain, observation only), transitive
   closure, Raft.
+- `design_docs/reports/microbus_probe/` — probe of the MicroBus catchup v2 client (MicroBus
+  commit `b7f18651bccd33582a8957d37e29408012a2eeda`, branch `hydro`); our test file and its
+  output only, no MicroBus source.
 - `hydro_test/src/cluster/provenance_survey.rs` — 4 tests: reliable broadcast, uniform
   broadcast, Multi-Paxos (`hydro_std`), dynamic-membership Raft. `paxos.rs` deferred (needs its
   election timer threaded out).
@@ -56,6 +59,8 @@ Start with:
   commands — the Paxos reactivation mechanism, bounded by the uncheckpointed log.
 - Reliable / uniform broadcast: all network sends `Productive`, one per (sender, recipient,
   message); drains; duplicate input does not echo.
+- MicroBus catchup client: open and timeout/reopen `FixedOperational` (44 B); gap keepalive
+  `Reactivated`, fixed 44 B per interval while stalled; loop closure depends on the C++ server.
 
 ## Known limits (see report §Limits)
 

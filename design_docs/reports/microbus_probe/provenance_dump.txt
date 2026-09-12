@@ -1,0 +1,27 @@
+== microbus catchup client: open, timeout/reopen, accept+slots, 3 gap keepalives
+FixedOperational  output 4   {T0.0,T1.0}                                      coarse 44B
+FixedOperational  output 4   {T0.0,T0.1,T0.2,T1.0}                            coarse 44B
+Productive        output 5   {D2.0,D3.0,T0.0,T0.1,T0.2,T1.0}                  coarse 42B
+Productive        output 5   {D2.0,D3.0,D3.1,T0.0,T0.1,T0.2,T1.0}             coarse 42B
+Productive        output 4   {D2.0,D3.0,D3.1,T0.0,T0.1,T0.2,T0.3,T1.0}        coarse 44B
+Reactivated       output 4   {D2.0,D3.0,D3.1,T0.0,T0.1,T0.2,T0.3,T0.4,T1.0}   coarse 44B
+Reactivated       output 4   {D2.0,D3.0,D3.1,T0.0,T0.1,T0.2,T0.3,T0.4,T0.5,T1.0} coarse 44B
+## open {"output 4": {FixedOperational: 1}}; reopen {"output 4": {FixedOperational: 1}}; accept+slots {"output 5": {Productive: 2}}; keepalives per tick [1, 1, 1] {"output 4": {Productive: 1, Reactivated: 2}}
+== microbus catchup client: open, timeout/reopen, accept+slots, 3 gap keepalives
+FixedOperational  output 4   {T0.0,T1.0}                                      coarse 44B
+FixedOperational  output 4   {T0.0,T0.1,T0.2,T1.0}                            coarse 44B
+Productive        output 5   {D2.0,D3.0,T0.0,T0.1,T0.2,T1.0}                  coarse 42B
+Productive        output 5   {D2.0,D3.0,D3.1,T0.0,T0.1,T0.2,T1.0}             coarse 42B
+Productive        output 4   {D2.0,D3.0,D3.1,T0.0,T0.1,T0.2,T0.3,T1.0}        coarse 44B
+Reactivated       output 4   {D2.0,D3.0,D3.1,T0.0,T0.1,T0.2,T0.3,T0.4,T1.0}   coarse 44B
+Reactivated       output 4   {D2.0,D3.0,D3.1,T0.0,T0.1,T0.2,T0.3,T0.4,T0.5,T1.0} coarse 44B
+## open {"output 4": {FixedOperational: 1}}; reopen {"output 4": {FixedOperational: 1}}; accept+slots {"output 5": {Productive: 2}}; keepalives per tick [1, 1, 1] {"output 4": {Productive: 1, Reactivated: 2}}
+== microbus catchup client: open, timeout/reopen, accept+slots, 3 gap keepalives
+FixedOperational  output 4   {T0.0,T1.0}                                      coarse 44B
+FixedOperational  output 4   {T0.0,T0.1,T0.2,T1.0}                            coarse 44B
+Productive        output 5   {D2.0,D3.0,T0.0,T0.1,T0.2,T1.0}                  coarse 42B
+Productive        output 5   {D2.0,D3.0,D3.1,T0.0,T0.1,T0.2,T1.0}             coarse 42B
+Productive        output 4   {D2.0,D3.0,D3.1,T0.0,T0.1,T0.2,T0.3,T1.0}        coarse 44B
+Reactivated       output 4   {D2.0,D3.0,D3.1,T0.0,T0.1,T0.2,T0.3,T0.4,T1.0}   coarse 44B
+Reactivated       output 4   {D2.0,D3.0,D3.1,T0.0,T0.1,T0.2,T0.3,T0.4,T0.5,T1.0} coarse 44B
+## open {"output 4": {FixedOperational: 1}}; reopen {"output 4": {FixedOperational: 1}}; accept+slots {"output 5": {Productive: 2}}; keepalives per tick [1, 1, 1] {"output 4": {Productive: 1, Reactivated: 2}}

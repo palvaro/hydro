@@ -431,16 +431,27 @@ fn wrap_filter_map(
     })
 }
 
-/// For closures taking `&T` (filter, inspect, partition). The item's own lineage is untouched.
+/// For closures taking `&T` (filter, inspect, partition). The item's own lineage is untouched,
+/// but it is made available as `__prov_t` so that a closure writing state through `by_mut`
+/// (the `inspect`-as-side-effect idiom) carries the item's lineage into that state.
 fn wrap_by_ref(f: &ClosureExpr, in_repr: Repr, in_ty: &syn::Type) -> ClosureExpr {
-    let p = prov();
     wrap_closure(f, |_| {
         let (prep, view) = untag_ref(in_repr, quote!(__prov_item));
+        let item_tags = match in_repr {
+            Repr::Flat => quote!((
+                ::core::clone::Clone::clone(&__prov_item.tags),
+                __prov_item.coarse
+            )),
+            Repr::Keyed => quote!((
+                ::core::clone::Clone::clone(&__prov_item.1.tags),
+                __prov_item.1.coarse
+            )),
+        };
         Body {
             params: quote!(__prov_item: &#in_ty),
             pre: quote! {
                 #[allow(unused_mut, unused_variables)]
-                let (mut __prov_t, mut __prov_c) = (#p::TagSet::new(), false);
+                let (mut __prov_t, mut __prov_c) = #item_tags;
                 #prep
             },
             call: quote!(let __prov_y = __prov_f(#view);),

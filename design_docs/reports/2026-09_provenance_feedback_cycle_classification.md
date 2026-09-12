@@ -150,10 +150,23 @@ where both messages certify in one tick the second delivery inherits the first's
   the uncheckpointed log — the reactivation mechanism in Paxos, and the reason implementations
   checkpoint.
 
+The MicroBus probe also exposed a defect in the pass, since fixed: closures taking `&T`
+(`inspect`, `filter`) that write state through `by_mut` did not carry the item's lineage into that
+state, so a config latched inside `inspect` was invisible downstream.
+
 **Dynamic-membership Raft** (`dyn_raft_server`, 4 members): election 6 `FixedOperational`;
 replicating 3 commands 3 × 168 B `Productive`; after `remove(3)` the next heartbeat fans out to
 2 followers, 208 B, `Productive`; steady heartbeat 2 × 52 B, `Reactivated` by coarse lineage
 exactly as in Raft.
+
+**MicroBus catchup v2 client** (Amazon-internal package, branch `hydro`, commit
+`b7f18651bccd33582a8957d37e29408012a2eeda`; probe and results in `microbus_probe/`, no MicroBus
+source copied here). Ticks and config operational; server status and slot data are data. Open and
+timeout/reopen: `FixedOperational`, 44 B each — an open carries no application data, so the
+reopen loop is heartbeat-shaped, not retry-shaped. Gap keepalive on a stalled stream:
+`Reactivated`, one fixed 44 B ack per interval for as long as the gap persists — bounded on the
+client side. Whether the loop is closed depends on the (non-Hydro) server's response to a repeated
+gap ack. All lineage coarse (one `by_mut` state machine).
 
 `paxos.rs` (`paxos_core`) is deferred: its `leader_election` creates a wall-clock timer
 internally and needs the same timers-as-inputs refactor `timeout_retry` received.
