@@ -40,6 +40,34 @@ pub struct SimClusterSender<T: Serialize + DeserializeOwned, O: Ordering, R: Ret
     pub(crate) PhantomData<(T, O, R)>,
 );
 
+impl<T: Serialize + DeserializeOwned, O: Ordering, R: Retries> SimSender<T, O, R> {
+    /// Numeric ID of this input port in the simulator boundary manifest.
+    pub fn port_id(&self) -> usize {
+        self.0.into_inner()
+    }
+}
+
+impl<T: Serialize + DeserializeOwned, O: Ordering, R: Retries> SimClusterSender<T, O, R> {
+    /// Numeric ID of this cluster input port in the simulator boundary manifest.
+    pub fn port_id(&self) -> usize {
+        self.0.into_inner()
+    }
+}
+
+impl<T: Serialize + DeserializeOwned, O: Ordering, R: Retries> SimReceiver<T, O, R> {
+    /// Numeric ID of this output port in the simulator boundary manifest.
+    pub fn port_id(&self) -> usize {
+        self.0.into_inner()
+    }
+}
+
+impl<T: Serialize + DeserializeOwned, O: Ordering, R: Retries> SimClusterReceiver<T, O, R> {
+    /// Numeric ID of this cluster output port in the simulator boundary manifest.
+    pub fn port_id(&self) -> usize {
+        self.0.into_inner()
+    }
+}
+
 #[cfg(stageleft_runtime)]
 mod builder;
 
@@ -57,6 +85,9 @@ pub(crate) mod versioned_network;
 
 #[cfg(stageleft_runtime)]
 pub mod provenance;
+
+#[cfg(stageleft_runtime)]
+pub mod feedback_campaign;
 
 #[cfg(stageleft_runtime)]
 mod provenance_ir;

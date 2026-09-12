@@ -36,6 +36,16 @@ Start with:
 - `hydro_test/src/cluster/provenance_survey.rs` — 4 tests: reliable broadcast, uniform
   broadcast, Multi-Paxos (`hydro_std`), dynamic-membership Raft. `paxos.rs` deferred (needs its
   election timer threaded out).
+- `hydro_test/src/cluster/provenance_buffers.rs` — 3 tests emitting the per-buffer admission
+  table for the three archetypes (retry work buffer, TC fixpoint buffer, gossip fixed-rate
+  buffer); the tables are dumped to `provenance_dump.txt`.
+- `hydro_lang/src/sim/feedback_campaign.rs` and
+  `hydro_test/src/cluster/provenance_generic_campaign.rs` — deterministic generic retained-state
+  campaign. The runner owns scales (1/8/32), repeated operational firing, quiescence, stable-output
+  stopping, provenance analysis, and bounded witnesses; adapters supply only legal typed values
+  and typed input handles. One unchanged campaign separates heartbeat, retry, gossip, and TC.
+  `SimFlow::feedback_boundary_manifest()` inventories all external inputs/roles/outputs/cycles,
+  and adapter coverage is checked by numeric port ID.
 - `design_docs/reports/2026-09_dfir_feedback_cycle_analysis_outcome.md` — why the telemetry
   approach failed (still accurate; the provenance work is its answer, not its rescue).
 
@@ -62,15 +72,18 @@ Start with:
 - MicroBus catchup client: open and timeout/reopen `FixedOperational` (44 B); gap keepalive
   `Reactivated`, fixed 44 B per interval while stalled; loop closure depends on the C++ server.
 
-## Where this is going (see report §"Which buffers to bound")
+## Where this is going (see report §"Which buffers to bound" / §"The per-buffer table")
 
-The deliverable is a decision per buffer, not a warning per program: for each buffer, does it
-re-admit already-admitted lineage under an operational stimulus, does that grow with retained
-state, and is a dedup gate on the path. TC is the fixpoint-buffer archetype (never re-admits);
-retry's service queue is the work-buffer archetype (re-admits ∝ backlog, no gate). Next step:
-classify admissions at cycle sinks and node inputs and emit the per-buffer table for the surveyed
-programs. Also re-examine dominance vs union novelty with reliable broadcast as the productive
-control; TC alone forces dominance. `paxos.rs` still needs its election timer threaded out.
+The deliverable is a deterministic decision process per buffer, not a warning per program. The
+first generic campaign now exists: it discovers the graph boundary, rejects adapters that omit an
+input, grows typed data at fixed scales, repeats one operational input, waits for stable output or
+drain, and emits bounded witnesses. Applied unchanged, it finds operational-only heartbeat work,
+state-scaled retry replay, state-scaled gossip replay, and productive TC scaling without ancestry
+replay. This is the first evidence that the distinction is not wholly defined by bespoke phase
+scripts. Remaining blockers to “any dataflow”: rewrite internal intervals as controllable sim
+inputs; make adapters declarative over every discovered port; run scales and control/trigger pairs
+in fresh instances; apply unchanged to held-out broadcast/Paxos/Raft examples; infer gates and
+downstream causal gain. `paxos.rs` still needs its timer exposed until interval rewriting exists.
 
 ## Known limits (see report §Limits)
 

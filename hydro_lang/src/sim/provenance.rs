@@ -609,6 +609,251 @@ pub fn label_counts(classified: &[Classified]) -> BTreeMap<String, BTreeMap<Labe
     out
 }
 
+// ---------------------------------------------------------------------------------------------
+// Per-buffer admission table.
+//
+// The per-emission label is the primitive; the deliverable is a decision *per buffer*. A buffer
+// is anything that admits lineage and can hold it across time: a network edge feeding a node's
+// input, a cycle sink carrying state to the next tick, a sim output. The classifier on the edge
+// that *feeds* a buffer is exactly the admission classifier for that buffer, so the three facts
+// the report asks of every buffer are read straight off the emission log with no new
+// instrumentation:
+//
+//   1. does it re-admit lineage it has already admitted (a `Reactivated` or `Redundant`
+//      admission), and only under an operational stimulus?
+//   2. does that re-admission grow with retained state, or stay fixed per stimulus?
+//   3. is a dedup gate on the path from the operational source? — structural, supplied by the
+//      caller since it cannot be read from the log.
+//
+// The expected reading of the surveyed programs (report §"Next step"): retry's service queue is
+// the one buffer that re-admits with backlog-proportional growth and no gate; transitive
+// closure's frontier never re-admits; Paxos's covering re-admits at fixed size.
+// ---------------------------------------------------------------------------------------------
+
+/// Identifies one buffer: the emission point (kind + name) whose admissions this row summarises,
+/// together with the channel over which "already admitted" is judged. Distinct channels of the
+/// same emission point (e.g. a fan-out to several recipients) are separate rows, because whether
+/// a recipient has already been told is a per-channel fact.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BufferId {
+    /// Network edge, cycle sink, or sim output.
+    pub kind: EmissionPointKind,
+    /// Human-readable name of the emission point (channel name or cycle id).
+    pub name: String,
+    /// The (sender, destination, recipient) the admissions travelled along.
+    pub channel: Channel,
+}
+
+/// How the re-admitted work at a buffer scales with the retained state that funds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Growth {
+    /// The buffer never re-admits lineage it has already admitted (a fixpoint/draining buffer:
+    /// transitive closure's frontier, reliable broadcast). Nothing to bound.
+    None,
+    /// Every re-admission carries the same amount of data lineage (fixed per stimulus: a Paxos
+    /// covering, a gossip pump, a steady-state heartbeat, a MicroBus keepalive). Cost is bounded
+    /// per firing; a rate limit is the remedy, not a gate.
+    Fixed,
+    /// Re-admission carries progressively more data lineage as retained state accumulates (a
+    /// retry service queue growing with the backlog). Unbounded without a gate; this is the
+    /// collapse-candidate shape.
+    WithState,
+}
+
+/// What is known about a dedup gate (`unique`, `anti_join`) on the path from the operational
+/// source to this buffer. Structural, so it must be supplied by the caller from the program's
+/// shape; the log cannot reveal it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Gate {
+    /// A dedup gate is known to be on the path (the source of a re-admission cannot reach the
+    /// buffer without passing a `unique`/`anti_join`).
+    Present,
+    /// No dedup gate is on the path (retry's service queue admits whatever arrives).
+    Absent,
+    /// The caller did not say. The default when a buffer is discovered from the log alone.
+    Unknown,
+}
+
+/// One buffer's admission summary: the three facts the report asks of every buffer, plus the raw
+/// counts that back them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BufferAdmissions {
+    /// Which buffer this row describes.
+    pub id: BufferId,
+    /// Total admissions carrying data lineage (excludes pure-operational and constant crossings:
+    /// a heartbeat admits no data, so it funds no buffer).
+    pub admissions: usize,
+    /// Admissions whose data lineage was new on this channel (`Productive`).
+    pub novel: usize,
+    /// Re-admissions under an operational stimulus (`Reactivated`): retained state turned back
+    /// into work by a timer.
+    pub reactivated: usize,
+    /// Re-admissions with no operational stimulus (`Redundant`): a data-driven repeat.
+    pub redundant: usize,
+    /// How re-admitted lineage scales with retained state.
+    pub growth: Growth,
+    /// Whether a dedup gate is on the path (caller-supplied; see [`Gate`]).
+    pub gate: Gate,
+}
+
+impl BufferAdmissions {
+    /// Does this buffer ever re-admit lineage it has already admitted?
+    pub fn re_admits(&self) -> bool {
+        self.reactivated + self.redundant > 0
+    }
+
+    /// Does every re-admission happen only under an operational stimulus? True when the buffer
+    /// re-admits and never does so without a timer (no `Redundant` admissions). Vacuously false
+    /// for a buffer that never re-admits.
+    pub fn re_admits_only_operationally(&self) -> bool {
+        self.re_admits() && self.redundant == 0
+    }
+
+    /// The collapse-candidate shape: re-admits under a stimulus, grows with retained state, and
+    /// has no dedup gate on the path. This is the one row the report expects retry's service
+    /// queue — and only it — to match among the surveyed programs.
+    pub fn is_unbounded_reactivation(&self) -> bool {
+        self.re_admits_only_operationally()
+            && self.growth == Growth::WithState
+            && self.gate == Gate::Absent
+    }
+}
+
+/// Builds the per-buffer admission table from an emission log.
+///
+/// Each network/output emission point, split per channel, is one buffer. Its admissions are
+/// classified exactly as [`classify`] does — same per-channel dominance history, same coarse-run
+/// grouping — so the counts here agree with the per-emission labels. `gates` supplies the
+/// structural [`Gate`] fact per emission-point *name* (the finest granularity a static shape
+/// analysis works at); names absent from the map are [`Gate::Unknown`].
+///
+/// [`Growth`] is read from the sizes of the re-admitted data lineages on each channel: a buffer
+/// whose reactivations all carry the same number of data tags is [`Growth::Fixed`]; one whose
+/// reactivations carry ever-larger lineages is [`Growth::WithState`]; one that never re-admits is
+/// [`Growth::None`]. Growth is the property that separates the work-buffer archetype (retry's
+/// service queue, whose re-admission tracks a backlog that itself grows) from the fixed-rate
+/// archetype (a gossip pump or Paxos covering, whose re-admission is the same bounded set every
+/// stimulus); it is therefore read *within one run* from successive re-admissions on a channel,
+/// and a run whose backlog does not change between re-admissions will read [`Growth::Fixed`] even
+/// for a work buffer — vary the retained state across the run (or across runs) to expose it.
+///
+/// Cycle-sink crossings are excluded unless `include_cycles` is set, matching [`classify`]: the
+/// cross-tick carry of a fixpoint accumulator re-emits its whole retained set every tick by
+/// construction, which is the accumulator working as intended, not physical re-admission of new
+/// work. The buffers that matter for bounding are the network/output edges out of a node.
+pub fn buffer_table(
+    records: &[EmissionRecord],
+    gates: &BTreeMap<String, Gate>,
+    include_cycles: bool,
+) -> Vec<BufferAdmissions> {
+    // Per channel history, identical to `classify`'s, but we also remember the data-lineage size
+    // of each re-admission so we can read growth.
+    struct History {
+        maximal: Vec<TagSet>,
+    }
+    impl History {
+        fn dominates(&self, data: &TagSet) -> bool {
+            self.maximal.iter().any(|m| data.is_subset(m))
+        }
+        fn add(&mut self, data: &TagSet) {
+            if self.dominates(data) {
+                return;
+            }
+            self.maximal.retain(|m| !m.is_subset(data));
+            self.maximal.push(data.clone());
+        }
+    }
+
+    #[derive(Default)]
+    struct Acc {
+        admissions: usize,
+        novel: usize,
+        reactivated: usize,
+        redundant: usize,
+        // Data-lineage sizes of re-admissions, in order, to detect growth.
+        readmit_sizes: Vec<usize>,
+    }
+
+    // Receipts are not admissions by the sender (see `classify`); cycle carries are the fixpoint
+    // accumulator's own state, excluded unless asked for.
+    let records: Vec<&EmissionRecord> = records
+        .iter()
+        .filter(|r| {
+            r.kind != EmissionPointKind::Receive
+                && (include_cycles || r.kind != EmissionPointKind::Cycle)
+        })
+        .collect();
+
+    let mut history: BTreeMap<Channel, History> = BTreeMap::new();
+    let mut acc: BTreeMap<BufferId, Acc> = BTreeMap::new();
+    let mut i = 0;
+    while i < records.len() {
+        // Group a run of identical coarse lineage into one causal unit, exactly as `classify`.
+        let mut j = i + 1;
+        while records[i].coarse
+            && j < records.len()
+            && records[j].coarse
+            && records[j].tags == records[i].tags
+        {
+            j += 1;
+        }
+        let run = &records[i..j];
+        let data: TagSet = run[0].data_tags().copied().collect();
+        let has_operational = run[0].operational_tags().next().is_some();
+        for r in run {
+            let h = history
+                .entry(r.channel())
+                .or_insert_with(|| History { maximal: Vec::new() });
+            let id = BufferId {
+                kind: r.kind,
+                name: r.name.clone(),
+                channel: r.channel(),
+            };
+            let entry = acc.entry(id).or_default();
+            // Pure-operational and constant crossings admit no data, so they fund no buffer.
+            if data.is_empty() {
+                continue;
+            }
+            entry.admissions += 1;
+            if !h.dominates(&data) {
+                entry.novel += 1;
+            } else if has_operational {
+                entry.reactivated += 1;
+                entry.readmit_sizes.push(data.len());
+            } else {
+                entry.redundant += 1;
+                entry.readmit_sizes.push(data.len());
+            }
+        }
+        for r in run {
+            history.get_mut(&r.channel()).unwrap().add(&data);
+        }
+        i = j;
+    }
+
+    acc.into_iter()
+        .map(|(id, a)| {
+            let growth = if a.readmit_sizes.is_empty() {
+                Growth::None
+            } else if a.readmit_sizes.windows(2).all(|w| w[0] == w[1]) {
+                Growth::Fixed
+            } else {
+                Growth::WithState
+            };
+            let gate = gates.get(&id.name).copied().unwrap_or(Gate::Unknown);
+            BufferAdmissions {
+                admissions: a.admissions,
+                novel: a.novel,
+                reactivated: a.reactivated,
+                redundant: a.redundant,
+                growth,
+                gate,
+                id,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -738,6 +983,122 @@ mod tests {
         let coarse_receipt = coarse(receive(&[d1]));
         let out = classify(&[coarse_send, coarse_receipt], false);
         assert_eq!(out.len(), 1, "receipts are never labelled");
+    }
+
+    #[test]
+    fn buffer_table_reads_the_three_facts() {
+        let d1 = tag(TagKind::Data, 1);
+        let d2 = tag(TagKind::Data, 2);
+        let t1 = tag(TagKind::Operational, 1);
+        // A retry-shaped buffer on one channel: first the originals arrive and the queue's coarse
+        // state accumulates their combined lineage as a single maximal set; then timer-driven
+        // reactivations re-send subsets of that state, growing as the backlog is re-read.
+        let net = |tags: &[Tag]| {
+            let mut r = rec(tags, 0);
+            r.kind = EmissionPointKind::Network;
+            r.name = "requests".into();
+            r.destination = "service".into();
+            r
+        };
+        let records = vec![
+            net(&[d1]),         // Productive
+            net(&[d2]),         // Productive (novel: not dominated by {d1})
+            net(&[d1, d2]),     // Productive (novel combination) — the queue now holds both
+            net(&[d1, t1]),     // Reactivated, 1 data tag (dominated by {d1,d2})
+            net(&[d1, d2, t1]), // Reactivated, 2 data tags (dominated) -> grows with state
+        ];
+        let mut gates = BTreeMap::new();
+        gates.insert("requests".to_string(), Gate::Absent);
+        let table = buffer_table(&records, &gates, false);
+        assert_eq!(table.len(), 1);
+        let b = &table[0];
+        assert_eq!(b.admissions, 5);
+        assert_eq!(b.novel, 3);
+        assert_eq!(b.reactivated, 2);
+        assert_eq!(b.redundant, 0);
+        assert!(b.re_admits());
+        assert!(b.re_admits_only_operationally());
+        assert_eq!(b.growth, Growth::WithState);
+        assert_eq!(b.gate, Gate::Absent);
+        assert!(
+            b.is_unbounded_reactivation(),
+            "backlog-growing, timer-driven, ungated: the collapse-candidate shape"
+        );
+    }
+
+    #[test]
+    fn buffer_table_fixpoint_buffer_never_re_admits() {
+        // Transitive-closure shape: every crossing is a novel combination, none dominated.
+        let ab = tag(TagKind::Data, 1);
+        let bc = tag(TagKind::Data, 2);
+        let t = tag(TagKind::Operational, 1);
+        let out = |tags: &[Tag]| {
+            let mut r = rec(tags, 0);
+            r.name = "facts".into();
+            r.destination = "sink".into();
+            r
+        };
+        let records = vec![out(&[ab]), out(&[bc]), out(&[ab, bc, t])];
+        let table = buffer_table(&records, &BTreeMap::new(), false);
+        assert_eq!(table.len(), 1);
+        let b = &table[0];
+        assert_eq!(b.novel, 3);
+        assert!(!b.re_admits());
+        assert_eq!(b.growth, Growth::None);
+        assert_eq!(b.gate, Gate::Unknown, "not supplied");
+        assert!(!b.is_unbounded_reactivation());
+    }
+
+    #[test]
+    fn buffer_table_fixed_re_admission_is_not_a_collapse_candidate() {
+        // Gossip/Paxos-covering shape: re-admits under a timer, but always the same lineage size.
+        let d1 = tag(TagKind::Data, 1);
+        let d2 = tag(TagKind::Data, 2);
+        let t1 = tag(TagKind::Operational, 1);
+        let net = |tags: &[Tag]| {
+            let mut r = rec(tags, 0);
+            r.kind = EmissionPointKind::Network;
+            r.name = "gossip".into();
+            r.destination = "peer".into();
+            r
+        };
+        let records = vec![
+            net(&[d1, d2]),     // Productive: first full-state pump (novel combination)
+            net(&[d1, d2, t1]), // Reactivated, 2 data tags
+            net(&[d1, d2, t1]), // Reactivated, 2 data tags -> fixed
+        ];
+        let table = buffer_table(&records, &BTreeMap::new(), false);
+        let b = &table[0];
+        assert_eq!(b.reactivated, 2);
+        assert_eq!(b.growth, Growth::Fixed);
+        assert!(b.re_admits_only_operationally());
+        assert!(
+            !b.is_unbounded_reactivation(),
+            "fixed-size re-admission is rate-limited, not gated"
+        );
+    }
+
+    #[test]
+    fn buffer_table_separates_channels_of_one_edge() {
+        // The same edge name fanning out to two recipients is two buffers.
+        let d1 = tag(TagKind::Data, 1);
+        let mk = |recipient: u32| {
+            let mut r = rec(&[d1], 0);
+            r.kind = EmissionPointKind::Network;
+            r.name = "fanout".into();
+            r.destination = "peers".into();
+            r.recipient = Some(recipient);
+            r
+        };
+        let records = vec![mk(0), mk(1), mk(0)];
+        let table = buffer_table(&records, &BTreeMap::new(), false);
+        assert_eq!(table.len(), 2, "one row per recipient channel");
+        let to0 = table.iter().find(|b| b.id.channel.2 == Some(0)).unwrap();
+        let to1 = table.iter().find(|b| b.id.channel.2 == Some(1)).unwrap();
+        assert_eq!(to0.novel, 1);
+        assert_eq!(to0.redundant, 1, "the third send repeats what recipient 0 got");
+        assert_eq!(to1.novel, 1);
+        assert!(!to1.re_admits());
     }
 
     #[test]

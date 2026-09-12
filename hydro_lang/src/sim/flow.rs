@@ -98,6 +98,84 @@ impl<'a> SimFlow<'a> {
         self
     }
 
+    /// Inventories the simulator-visible boundary for a deterministic feedback campaign.
+    ///
+    /// This discovers input/output port IDs, input roles, locations, debug type descriptions, and
+    /// cycle sinks directly from Hydro IR. It intentionally does not manufacture typed values:
+    /// adapters must register deterministic generators for the discovered input ports and can use
+    /// [`crate::sim::feedback_campaign::BoundaryManifest::assert_inputs_covered`] to prove that no
+    /// boundary input was silently ignored.
+    pub fn feedback_boundary_manifest(
+        &mut self,
+    ) -> crate::sim::feedback_campaign::BoundaryManifest {
+        use crate::compile::ir::{HydroNode, HydroRoot};
+        use crate::sim::feedback_campaign::{
+            BoundaryCycle, BoundaryDirection, BoundaryManifest, BoundaryPort, InputRole,
+        };
+
+        let ports = RefCell::new(Vec::new());
+        let cycles = RefCell::new(Vec::new());
+        crate::compile::ir::transform_bottom_up(
+            &mut self.ir,
+            &mut |root| match root {
+                HydroRoot::SendExternal {
+                    to_port_id,
+                    to_many,
+                    input,
+                    ..
+                } => ports.borrow_mut().push(BoundaryPort {
+                    port: to_port_id.into_inner(),
+                    direction: BoundaryDirection::Output,
+                    role: None,
+                    location: format!("{:?}", input.metadata().location_id),
+                    type_name: format!("{:?}", input.metadata().collection_kind),
+                    many: *to_many,
+                }),
+                HydroRoot::CycleSink {
+                    cycle_id, input, ..
+                } => cycles.borrow_mut().push(BoundaryCycle {
+                    cycle: cycle_id.into_inner(),
+                    location: format!("{:?}", input.metadata().location_id),
+                    collection: format!("{:?}", input.metadata().collection_kind),
+                }),
+                _ => {}
+            },
+            &mut |node| {
+                if let HydroNode::ExternalInput {
+                    from_port_id,
+                    from_many,
+                    codec_type,
+                    metadata,
+                    ..
+                } = node
+                {
+                    ports.borrow_mut().push(BoundaryPort {
+                        port: from_port_id.into_inner(),
+                        direction: BoundaryDirection::Input,
+                        role: Some(if self.operational_ports.contains(from_port_id) {
+                            InputRole::Operational
+                        } else {
+                            InputRole::Data
+                        }),
+                        location: format!("{:?}", metadata.location_id),
+                        type_name: format!("{codec_type:?}"),
+                        many: *from_many,
+                    });
+                }
+            },
+            false,
+        );
+        let mut manifest = BoundaryManifest {
+            ports: ports.into_inner(),
+            cycles: cycles.into_inner(),
+        };
+        manifest.ports.sort();
+        manifest.ports.dedup();
+        manifest.cycles.sort();
+        manifest.cycles.dedup();
+        manifest
+    }
+
     /// Sets the maximum size of the given cluster in the simulation.
     pub fn with_cluster_size<C>(mut self, cluster: &Cluster<'a, C>, max_size: usize) -> Self {
         self.cluster_max_sizes.insert(cluster.key, max_size);
