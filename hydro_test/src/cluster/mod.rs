@@ -21,6 +21,7 @@ pub mod paxos_with_client;
 pub mod provenance_ground_truth;
 pub mod pure_heartbeat;
 pub mod raft;
+pub mod provenance_survey;
 pub mod simple_cluster;
 #[cfg(feature = "tokio")]
 pub mod two_pc;

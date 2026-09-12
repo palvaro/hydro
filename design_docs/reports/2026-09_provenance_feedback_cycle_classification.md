@@ -60,7 +60,8 @@ All in `hydro_lang`, behind `SimFlow::with_provenance()`; the untagged path is u
   (the simulator's network is reliable) — drop the first arrival of odd-id requests at the
   service, and/or black-hole odd-id responses at the client.
 
-Tests: `hydro_test/src/cluster/provenance_ground_truth.rs` (9 tests). `timeout_retry` gained a
+Tests: `hydro_test/src/cluster/provenance_ground_truth.rs` (9 tests) and
+`hydro_test/src/cluster/provenance_survey.rs` (4 tests). `timeout_retry` gained a
 `timeout_retry_with_timers` variant that takes its two timers as inputs, the convention `raft.rs`
 already used; the deployment-facing API is unchanged.
 
@@ -120,6 +121,43 @@ data yet). N requests → no traffic. Heartbeat → 2 AppendEntries carrying the
 `Productive`, 160 B → 384 B. Second heartbeat → 2 AppendEntries, 104 B for both N; labelled
 `Reactivated` (coarse), payload fixed-size.
 
+## Survey beyond the ground truth
+
+`hydro_test/src/cluster/provenance_survey.rs` (4 tests, all passing across random schedules).
+Sends are counted on the network only; labels are per (channel, label).
+
+**Reliable broadcast** (`hydro_std`, 3 members, 2 messages): 24 sends — 6 initial fan-out, 18
+echoes — all `Productive`; every (sender, recipient) pair carries each message exactly once.
+Re-injecting message 0 causes the 3 initial sends (a new source event) and zero echoes: `unique`
+compares by value. Drains.
+
+**Uniform reliable broadcast** (threshold 2): identical network structure, all `Productive`. The
+*delivery output* passes through `quorum`'s `sliced!` block with `by_mut` HashMaps; in schedules
+where both messages certify in one tick the second delivery inherits the first's lineage and reads
+`Redundant`. Recorded as coarse lineage from our own `quorum` module, not asserted.
+
+**Multi-Paxos** (`hydro_std`, 3 acceptors, 1 proposer, 1 learner):
+- `lead(1)`: 3 prepares and 3 promises, all `FixedOperational`, 16 B / 28 B, no data lineage.
+- two commands: phase-2 accepts and acks `Productive`. The per-slot notifications for the
+  *second* decree (acceptor→acceptor 8 B, acceptor→learner 29 B, learner output) read
+  `Reactivated` with *exact* lineage {D10, D20}: acceptor and learner state is a structural
+  `fold` over all accepted values, so every fact emitted from it carries the whole set's lineage
+  and the second decree's notification is dominated by the first's.
+- `lead(2)`, no new commands: 3 prepares `FixedOperational` (16 B); then each acceptor returns
+  its covering to the leader, 86 B, lineage {D10, D20, T₁, T₂}, `Reactivated`. `lead(3)`: the
+  same 3 × 86 B again. The leader does not re-propose (the values were already chosen). This is
+  phase-1 replay — retained accepted values re-emitted on every election, size proportional to
+  the uncheckpointed log — the reactivation mechanism in Paxos, and the reason implementations
+  checkpoint.
+
+**Dynamic-membership Raft** (`dyn_raft_server`, 4 members): election 6 `FixedOperational`;
+replicating 3 commands 3 × 168 B `Productive`; after `remove(3)` the next heartbeat fans out to
+2 followers, 208 B, `Productive`; steady heartbeat 2 × 52 B, `Reactivated` by coarse lineage
+exactly as in Raft.
+
+`paxos.rs` (`paxos_core`) is deferred: its `leader_election` creates a wall-clock timer
+internally and needs the same timers-as-inputs refactor `timeout_retry` received.
+
 ## What was learned
 
 1. **Novelty is dominance, not "an unseen tag".** A transitive-closure fact (a,c) from edges ab
@@ -133,7 +171,11 @@ data yet). N requests → no traffic. Heartbeat → 2 AppendEntries carrying the
    combination of separately-received elements — exactly the shape of a TC fact. What separates
    gossip from TC is recurrence: the second pump re-emits identical lineage with no new data. The
    cycle-level verdict must rest on recurrence after data stops, which is also what the original
-   definition says ("repeatedly turns retained state back into work").
+   definition says ("repeatedly turns retained state back into work"). The survey found the
+   mirror image in `hydro_std`'s Multi-Paxos with no `sliced!` involved: a structural `fold` over
+   accepted values stamps every fact later emitted from it with the whole set's lineage, so the
+   second decree's notification is dominated by the first's. Keyed folds keep per-key lineage;
+   plain folds over collections do not, and this is exact lineage, not coarse.
 4. **Coarse lineage is the method's boundary, and it is where `sliced!` programs live.** The
    retry service's queue is a `VecDeque` behind `by_mut`; every response inherits the whole
    queue's lineage, so after the first response every one — originals included — is dominated and

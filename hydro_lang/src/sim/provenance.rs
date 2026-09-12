@@ -516,6 +516,7 @@ pub fn classify(records: &[EmissionRecord], include_cycles: bool) -> Vec<Classif
         let mut j = i + 1;
         while records[i].coarse
             && j < records.len()
+            && records[j].kind != EmissionPointKind::Receive
             && records[j].coarse
             && records[j].tags == records[i].tags
         {
@@ -732,6 +733,11 @@ mod tests {
             let labels: Vec<Label> = classify(&log, false).into_iter().map(|c| c.label).collect();
             assert_eq!(labels, vec![Label::Productive, Label::Reactivated]);
         }
+        // A receipt with the same coarse tags as the preceding send is not part of its run.
+        let coarse_send = coarse(send(&[d1]));
+        let coarse_receipt = coarse(receive(&[d1]));
+        let out = classify(&[coarse_send, coarse_receipt], false);
+        assert_eq!(out.len(), 1, "receipts are never labelled");
     }
 
     #[test]

@@ -30,6 +30,9 @@ Start with:
 - `hydro_test/src/cluster/provenance_ground_truth.rs` — 9 tests: heartbeat, timeout/retry (+ loop
   gain, + black hole, + request loss), gossip (+ loop gain, observation only), transitive
   closure, Raft.
+- `hydro_test/src/cluster/provenance_survey.rs` — 4 tests: reliable broadcast, uniform
+  broadcast, Multi-Paxos (`hydro_std`), dynamic-membership Raft. `paxos.rs` deferred (needs its
+  election timer threaded out).
 - `design_docs/reports/2026-09_dfir_feedback_cycle_analysis_outcome.md` — why the telemetry
   approach failed (still accurate; the provenance work is its answer, not its rescue).
 
@@ -46,8 +49,13 @@ Start with:
 - Heartbeat: all `FixedOperational`, gain = cluster size, no data lineage.
 - Gossip (unlabelled): first pump `Productive`, subsequent pumps `Reactivated`; messages constant
   in N, bytes grow; a member's output independent of pumps received.
-- Raft: election `FixedOperational`; replication `Productive`, bytes ∝ log; steady heartbeat
-  fixed-size.
+- Raft and dyn_raft: election `FixedOperational`; replication `Productive`, bytes ∝ log; steady
+  heartbeat fixed-size (labelled `Reactivated` by coarse lineage).
+- Multi-Paxos: election `FixedOperational`; replication `Productive`; phase-1 covering replay on
+  every new lead is `Reactivated`, 86 B per acceptor, recurring at constant size with no new
+  commands — the Paxos reactivation mechanism, bounded by the uncheckpointed log.
+- Reliable / uniform broadcast: all network sends `Productive`, one per (sender, recipient,
+  message); drains; duplicate input does not echo.
 
 ## Known limits (see report §Limits)
 
