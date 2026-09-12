@@ -218,6 +218,46 @@ internally and needs the same timers-as-inputs refactor `timeout_retry` received
    frontier on the left against base edges, so incremental admission discovers the closure only
    in reverse topological order.
 
+## Reframing: which buffers to bound
+
+The starting intuition of the whole project, restated after the survey: buffers that hold
+intermediate results of a fixpoint computation are fundamentally different from buffers that
+absorb potentially amplified work. TC is in the ground-truth set not as a cycle example but as the
+archetype of the first kind: its frontier admits only lineage that has never been admitted (the
+`anti_join` against `known` is the gate), so its contents are bounded by the size of the closure
+and it drains when the closure is reached; bounding it artificially would only break the fixpoint.
+Retry's service queue is the archetype of the second kind: it admits whatever arrives, including
+lineage it has already processed, so a timer can refill it without limit and nothing intrinsic to
+the computation bounds it. The question was never "is this emission useful" but "which kind of
+buffer is this".
+
+That makes the end goal sharper than a linter: **a decision per buffer**, not a warning per
+program. For every buffer — a network edge feeding a node's queue, a cycle sink feeding the next
+tick, a fold accumulating state — three facts:
+
+1. Does it ever re-admit lineage it has already admitted, and only under an operational stimulus?
+2. Does re-admission grow with retained state (retry: yes, ∝ backlog) or stay fixed per stimulus
+   (Paxos covering, gossip pump, MicroBus keepalive: yes, fixed)?
+3. Is a dedup gate (`unique`, `anti_join`) already on the path from the operational source?
+
+The classifier on the edge that feeds a buffer *is* the admission classifier for that buffer, so
+(1) and (2) are readable today; cycle-sink admissions are already logged (and currently ignored).
+(3) is structural and is exactly the shape a static analysis should look for: an operational
+source reaching a buffer with no gate in between. The remedies differ by row: gate it (retry's
+service queue lacks the `unique` on request id that the client already applies to completions),
+rate-limit it (fixed-size re-admission), or leave it alone (fixpoint buffers).
+
+Consequence for the novelty rule: TC is the only program that forces dominance-based novelty over
+the simpler union rule, and every networked program in the survey classifies the same or more
+intuitively under union (gossip's first pump would read `Reactivated`). Since TC's role is to be
+the fixpoint-buffer archetype, not a distributed anchor, the rule should be re-examined with
+reliable broadcast as the productive control.
+
+**Next step:** make buffers first-class — classify admissions at stream cycle sinks and node
+inputs, emit a per-buffer table (re-admits? grows? gated?) for the programs already in the
+survey. Expected: retry's service queue is the one buffer that re-admits with backlog-proportional
+growth and no gate; TC's frontier never re-admits; Paxos's covering re-admits at fixed size.
+
 ## Toward a cycle-level classifier
 
 Per-emission labels are the primitive, not the verdict. Four classes fall out of two experiments

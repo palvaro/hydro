@@ -62,6 +62,16 @@ Start with:
 - MicroBus catchup client: open and timeout/reopen `FixedOperational` (44 B); gap keepalive
   `Reactivated`, fixed 44 B per interval while stalled; loop closure depends on the C++ server.
 
+## Where this is going (see report §"Which buffers to bound")
+
+The deliverable is a decision per buffer, not a warning per program: for each buffer, does it
+re-admit already-admitted lineage under an operational stimulus, does that grow with retained
+state, and is a dedup gate on the path. TC is the fixpoint-buffer archetype (never re-admits);
+retry's service queue is the work-buffer archetype (re-admits ∝ backlog, no gate). Next step:
+classify admissions at cycle sinks and node inputs and emit the per-buffer table for the surveyed
+programs. Also re-examine dominance vs union novelty with reliable broadcast as the productive
+control; TC alone forces dominance. `paxos.rs` still needs its election timer threaded out.
+
 ## Known limits (see report §Limits)
 
 Sim-time only; timers must be `sim_input_operational`. Lineage cannot distinguish "join derived a
