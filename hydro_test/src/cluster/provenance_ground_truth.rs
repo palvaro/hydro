@@ -958,6 +958,7 @@ mod tests {
             LossPolicy {
                 drop_first_odd_request: true,
                 black_hole_odd_responses: false,
+                dedup_requests_at_service: false,
             },
         );
         let completed = outputs
@@ -1045,6 +1046,7 @@ mod tests {
             LossPolicy {
                 drop_first_odd_request: false,
                 black_hole_odd_responses: true,
+                dedup_requests_at_service: false,
             },
         );
         let completed = outputs

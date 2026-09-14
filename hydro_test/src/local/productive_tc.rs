@@ -46,6 +46,32 @@ pub fn productive_transitive_closure<'a>(
     Stream<(u32, u32), Process<'a>, Unbounded, NoOrder>,
     Stream<TcTrace, Process<'a>, Unbounded, TotalOrder>,
 ) {
+    transitive_closure_impl(graphs, steps, true)
+}
+
+/// [`productive_transitive_closure`] with the known-fact gate removed: candidates are no longer
+/// anti-joined against established facts, so the frontier is simply "everything derived this
+/// step". On an acyclic graph every path still has a unique length and the computation drains;
+/// on a graph with a cycle the frontier never empties. This exists as a paired mutation for the
+/// feedback evidence matrix; it is not a useful TC implementation.
+pub fn ungated_transitive_closure<'a>(
+    graphs: Stream<Vec<(u32, u32)>, Process<'a>, Unbounded, TotalOrder, ExactlyOnce>,
+    steps: Stream<(), Process<'a>, Unbounded, TotalOrder, ExactlyOnce>,
+) -> (
+    Stream<(u32, u32), Process<'a>, Unbounded, NoOrder>,
+    Stream<TcTrace, Process<'a>, Unbounded, TotalOrder>,
+) {
+    transitive_closure_impl(graphs, steps, false)
+}
+
+fn transitive_closure_impl<'a>(
+    graphs: Stream<Vec<(u32, u32)>, Process<'a>, Unbounded, TotalOrder, ExactlyOnce>,
+    steps: Stream<(), Process<'a>, Unbounded, TotalOrder, ExactlyOnce>,
+    gate_known: bool,
+) -> (
+    Stream<(u32, u32), Process<'a>, Unbounded, NoOrder>,
+    Stream<TcTrace, Process<'a>, Unbounded, TotalOrder>,
+) {
     sliced! {
         let admitted_graphs = use::batch(
             graphs,
@@ -83,16 +109,23 @@ pub fn productive_transitive_closure<'a>(
         let candidate_unique = candidates
             .map(q!(|fact| (fact, ())))
             .unique();
-        let candidate_novel = candidate_unique
-            .anti_join(known.clone().map(q!(|(fact, ())| fact)));
+        let candidate_novel = if gate_known {
+            candidate_unique.anti_join(known.clone().map(q!(|(fact, ())| fact)))
+        } else {
+            candidate_unique
+        };
         let candidate_novel_count = candidate_novel.clone().count();
 
         // Newly admitted edges seed the first frontier. The same anti-join also
         // permits later graph admission without re-emitting established facts.
-        let seed_novel = admitted
-            .clone()
-            .map(q!(|fact| (fact, ())))
-            .anti_join(known.clone().map(q!(|(fact, ())| fact)));
+        let seed_novel = if gate_known {
+            admitted
+                .clone()
+                .map(q!(|fact| (fact, ())))
+                .anti_join(known.clone().map(q!(|(fact, ())| fact)))
+        } else {
+            admitted.clone().map(q!(|fact| (fact, ())))
+        };
         let novel = seed_novel.chain(candidate_novel).unique();
         let novel_count = novel.clone().count();
         let next_known = known.chain(novel.clone()).unique();

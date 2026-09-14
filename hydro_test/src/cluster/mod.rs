@@ -19,7 +19,7 @@ pub mod paxos_log_bench;
 #[cfg(feature = "tokio")]
 pub mod paxos_with_client;
 pub mod provenance_ground_truth;
-pub mod provenance_generic_campaign;
+pub mod provenance_evidence_matrix;
 pub mod pure_heartbeat;
 pub mod raft;
 pub mod provenance_survey;

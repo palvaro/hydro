@@ -128,9 +128,9 @@ Hydro closures can read or mutate arbitrary Rust state through `by_ref` and `by_
 
 This approximation is important. It preserves causal coverage, but it can merge unrelated items. In the retry service, for example, every response may inherit the lineage of the entire queue. The tool can still show that retained requests and a service pulse contributed to the response, but it may not identify the one request that was popped. Similar loss of precision appears in Raft state machines and `sliced!` blocks.
 
-### 5.4 Generic post-processing
+### 5.4 Generic causal comparisons
 
-The emission classifier compares a send with earlier sends from the same sender to the same recipient. Its API labels are:
+The emission analysis compares a send with earlier sends from the same sender to the same recipient. Its API labels are:
 
 | Label | Plain-language interpretation |
 |---|---|
@@ -140,13 +140,13 @@ The emission classifier compares a send with earlier sends from the same sender 
 | `Reactivated` | An earlier send already carried that application ancestry, and an operational event contributed to the new send. |
 | `Redundant` | An earlier send already carried that application ancestry, without an operational event contributing to the repeat. |
 
-The comparison uses whole ancestry sets rather than asking whether each individual source tag has appeared before. This matters for derived facts. If `(a,b)` and `(b,c)` were sent separately, the derived path `(a,c)` depends on a combination no earlier message carried. The classifier treats that combination as new, even though both input edges have appeared individually.
+The comparison uses whole ancestry sets rather than asking whether each individual source tag has appeared before. This matters for derived facts. If `(a,b)` and `(b,c)` were sent separately, the derived path `(a,c)` depends on a combination no earlier message carried. The comparison treats that combination as new, even though both input edges have appeared individually.
 
 This is a causal rule, not a universal definition of semantic progress. A fold that summarizes two old items can produce the same lineage shape as a join that derives a new fact. Recurrence and program behavior are needed to distinguish those cases.
 
 ## 6. How the experiments were conducted
 
-The instrumentation and emission classifier are generic over supported IR. The experiments are not generic. Each program has a hand-written driver that chooses inputs, isolates events, waits for the dataflow to become quiet, and asserts protocol-specific outcomes.
+The instrumentation and emission-level causal comparisons are generic over supported IR. The experiments are not generic. Each program has a hand-written driver that chooses inputs, isolates events, waits for the dataflow to become quiet, and asserts protocol-specific outcomes.
 
 Quiescence barriers are central to these experiments. The driver supplies one class of stimulus, waits until the simulator has no more work, and then reads the emission log. This makes the tested phase easy to interpret. It does not automatically discover the right phases for an arbitrary program.
 
@@ -228,30 +228,25 @@ The current drivers deliberately manufacture interpretable phases. They know whi
 
 Automation is possible along two axes. A programmer could declare operational inputs and progress outputs, allowing a generic harness to sweep retained state and repeat operational events. Alternatively, the compiler could synthesize candidate experiments from timer sources, feedback edges, and quiescence.
 
-### 8.4 Deterministic generic campaign prototype
+### 8.4 Protocol-blind evidence matrix
 
-A first generic campaign now exists in `hydro_lang::sim::feedback_campaign`. It does not read prose, protocol names, or test assertions. For every registered flow it executes the same deterministic algorithm:
+The first attempt at a shared campaign still selected one operational port per program and validated its output with different program-specific assertions. That did not establish generic checking: the adapters retained the semantic choices that the experiment was supposed to discover.
 
-1. grow a data input through cumulative scales 1, 8, and 32;
-2. wait for the dataflow to quiesce after each growth action;
-3. fire one selected operational input repeatedly;
-4. stop after two identical physical-emission signatures, or after a common maximum of 64 firings;
-5. derive bounded witnesses for operational-only traffic, replayed application ancestry, recurring payloads, input-driven scaling, and operational scaling with retained data.
+The current prototype has a narrower and mechanically checkable goal. It produces evidence, not a class. `SimFlow::feedback_boundary_manifest()` enumerates every external input and records whether it is data or operational, its process or cluster location, its type description, outputs, and cycle sinks. A typed registry must cover every discovered input. For cluster inputs it must enumerate every legal member target. The adapter supplies only a deterministic value generator for each data type and a fixed value for each operational type.
 
-The program adapter is limited to typed boundary mechanics: it maps integer indices to legal input values and fires a typed operational handle. Existing tests are used as executable specifications for these mechanics. For example, they establish that the transitive-closure input value is a `Vec<Edge>`, that retry requests require stable identifiers, and that gossip updates target a cluster member. They do not provide phases, expected provenance labels, or conclusions to the runner.
+`run_evidence_matrix()` then constructs the experiment matrix without program-specific choices. For each deterministic scheduler seed it:
 
-`SimFlow::feedback_boundary_manifest()` independently inventories external inputs, input roles, outputs, locations, debug type descriptions, and cycle sinks from Hydro IR. Typed simulator handles expose their numeric port IDs, and `assert_inputs_covered()` rejects an adapter that silently omits a discovered input. The retry evaluation exercises this with all three of its inputs: requests, retry ticks, and service ticks. The current campaign selects one operational port as its probe while explicitly accounting for the others.
+1. runs an empty-state probe for every operational port and target;
+2. crosses every data port and target with every operational port and target;
+3. runs input scales 1, 8, and 32 in fresh simulator instances;
+4. repeatedly fires the operational input until the normalized physical-emission signature repeats twice or the common event budget is exhausted; and
+5. emits one row per physical edge with the same columns.
 
-One unchanged campaign was run on four flows:
+The columns are literal observations: data-phase messages and bytes; the first-operational-firing message/byte curve by scale; total operational work; counts of empty-data ancestry, data ancestry not contained in an earlier channel emission, operationally triggered ancestry contained in an earlier emission, and data-triggered contained ancestry; exact versus coarse lineage; repeated payloads; whether operational work increased with scale; and the terminal empty/non-empty/unresolved tail. A separate section lists exactly which columns changed across scheduler seeds. No row is assigned a semantic class.
 
-| Flow | Evidence produced by the generic runner |
-|---|---|
-| Pure heartbeat | Operational-only physical work; no replay of application ancestry and no data-scale effect. |
-| Timeout/retry | Repeated application ancestry after retry events; physical work from one retry grows with the outstanding population. |
-| G-Set gossip | Repeated application ancestry after pump events; serialized work grows with retained set size. |
-| Transitive closure | Data-admission work grows with graph size, but established output ancestry is not replayed; operational steps drain to two empty epochs. |
+The complete output for the current four-flow corpus is checked in as `design_docs/reports/2026-09_protocol_blind_feedback_evidence.tsv`. The matrix includes both retry operational inputs rather than selecting the retry timer, and all nine data-member/operational-member combinations for the three-member gossip flow. It also exposes limits directly. Retry and gossip both contain edges with operationally triggered dominated ancestry and state-scaled work; those columns do not distinguish capacity-consuming retry amplification from periodic state publication. Retry's service-response scale curve and transitive closure's productive output volume also vary across the two deterministic scheduler seeds. These facts are input to a future decision model, not decisions already made.
 
-This is the first result in which the workload pattern and witness extraction are shared across implementations. It reduces the risk that a hand-authored phase script defines the observed distinction. It does not eliminate adaptation: legal typed values, target members, and one selected operational port are still registered per flow. Internal wall-clock timers are still not controllable, and independent control/trigger instances are not yet part of the campaign.
+The remaining adaptation is real but explicit: Rust cannot manufacture meaningful values from type names, so the registry still contains per-type legal value generators. The transitive-closure generator produces chain edges because arbitrary unrelated edges would exercise no recursion. Such generators define the input domain and can bias coverage; the matrix removes port, target, schedule, scale, and interpretation choices from adapters, but it does not remove value-generation bias.
 
 ### 8.5 Buffer-level analysis is promising but incomplete
 
@@ -265,7 +260,7 @@ A prototype `buffer_table` groups emission records by edge and sender-recipient 
 
 This prototype is a report over a chosen experiment, not a complete buffer decision procedure. The test currently supplies gate information rather than deriving it from IR. A “grows with state” result depends on a driver that actually varies retained state. Cycle-sink records are available, but interpreting an accumulator carrying state across ticks requires care: repeated state carry is not automatically repeated external work. These are the next analysis problems, not details already solved by the table.
 
-### 8.5 Collapse prediction remains a separate model
+### 8.6 Collapse prediction remains a separate model
 
 The presence of retry-shaped replay establishes a possible source of extra work. It does not determine whether that work overwhelms a deployment. Collapse depends on at least:
 
@@ -317,8 +312,9 @@ The principal implementation files are:
 
 - `hydro_lang/src/sim/provenance.rs`: tagged values, network framing, the emission log, emission classification, attribution, and the prototype buffer table;
 - `hydro_lang/src/sim/provenance_ir.rs`: the compiler pass that propagates lineage through Hydro IR;
-- `hydro_lang/src/sim/feedback_campaign.rs`: boundary-manifest types, the deterministic retained-state campaign, epoch measurements, and bounded witness extraction;
-- `hydro_test/src/cluster/provenance_generic_campaign.rs`: one unchanged campaign applied to heartbeat, retry, gossip, and transitive closure;
+- `hydro_lang/src/sim/feedback_campaign.rs`: boundary-manifest types, typed input registry, exhaustive port/target/schedule matrix, epoch measurements, and uniform edge evidence;
+- `hydro_test/src/cluster/provenance_evidence_matrix.rs`: adapters containing only typed value generators and legal targets for the four-flow evidence matrix;
+- `design_docs/reports/2026-09_protocol_blind_feedback_evidence.tsv`: the complete raw evidence and cross-schedule variation tables;
 - `hydro_test/src/cluster/provenance_ground_truth.rs`: nine program-specific experiments for heartbeat, retry variants, transitive closure, gossip, and Raft;
 - `hydro_test/src/cluster/provenance_survey.rs`: experiments for reliable broadcast, uniform broadcast, Multi-Paxos, and dynamic Raft;
 - `hydro_test/src/cluster/provenance_buffers.rs`: three scenarios exercising the prototype per-edge report;
@@ -345,11 +341,11 @@ The next milestone should turn the current experimental substrate into a more au
 
 1. **Control internal timers.** Rewrite simulator builds of internal interval sources into hidden operational inputs and list them in the boundary manifest. Until then, programs must expose timers through `sim_input_operational` to participate.
 2. **Generalize deterministic adapters.** Register a typed value generator, target-member policy, and explicit waiver or probe policy for every discovered input. Keep the adapter declarative: it may define legal values, but not phases or expected findings.
-3. **Add independent campaign instances.** Run geometric scales and paired control/trigger suffixes in fresh simulator instances rather than accumulating every scale in one state. Preserve both workload inputs and scheduler decisions for replay.
-4. **Evaluate held-out programs.** Apply the unchanged campaign to reliable broadcast, Multi-Paxos recovery, Raft catch-up, and at least one additional retry-like system. Declare expected path-level evidence before inspecting the results.
+3. **Add paired control/trigger suffixes.** Scales already run in fresh instances under explicit deterministic scheduler seeds; add paired histories with an identical post-trigger input suffix.
+4. **Evaluate held-out programs.** Apply the same evidence matrix to reliable broadcast, Multi-Paxos recovery, Raft catch-up, and at least one additional retry-like system. Declare expected path-level evidence before inspecting the results.
 5. **Infer gates from IR.** For each candidate emission edge, determine whether every path from an operational source passes through a relevant `unique`, set difference, acknowledgement check, or other state-advance condition. The analysis must identify the actual feedback path rather than merely notice that such an operator exists somewhere in the program.
 6. **Improve precision through state.** Preserve per-key or per-element lineage through common state containers, and use payload identity where arbitrary closures prevent that precision.
-7. **Measure downstream gain.** Extend the generic witness vocabulary from repeated sends to the physical work those sends causally induce at recipients. This separates fixed publication from capacity-consuming feedback.
+7. **Measure downstream gain.** Extend the uniform evidence columns from repeated sends to the physical work those sends causally induce at recipients. This separates fixed publication from capacity-consuming feedback.
 8. **Model collapse separately.** Feed measured work gain into workload and capacity experiments. A mechanism report should identify where extra work can arise; a behavior model should determine whether it is enough to sustain overload.
 
 The immediate opportunity is therefore concrete. Hydro can provide causally precise execution evidence about feedback-driven work. With structural gate analysis and a declared experiment interface, that evidence can plausibly become a practical per-buffer diagnostic. Predicting metastability will still require a quantitative model above it, but the causal layer no longer has to guess why a message was sent from aggregate counters.

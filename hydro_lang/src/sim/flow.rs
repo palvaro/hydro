@@ -100,11 +100,14 @@ impl<'a> SimFlow<'a> {
 
     /// Inventories the simulator-visible boundary for a deterministic feedback campaign.
     ///
-    /// This discovers input/output port IDs, input roles, locations, debug type descriptions, and
-    /// cycle sinks directly from Hydro IR. It intentionally does not manufacture typed values:
-    /// adapters must register deterministic generators for the discovered input ports and can use
+    /// Port IDs, locations, debug type descriptions, output ports and cycle sinks are read from
+    /// Hydro IR. The input *role* is **not** discovered: it is whatever the program author
+    /// declared by choosing `sim_input_operational` over `sim_input`. The manifest only makes that
+    /// declaration visible. It does not manufacture typed values: adapters must register
+    /// deterministic generators for the listed input ports and can use
     /// [`crate::sim::feedback_campaign::BoundaryManifest::assert_inputs_covered`] to prove that no
-    /// boundary input was silently ignored.
+    /// boundary input was silently ignored. Locations are rendered as root locations so they
+    /// compare equal to `source`/`destination` on emission records.
     pub fn feedback_boundary_manifest(
         &mut self,
     ) -> crate::sim::feedback_campaign::BoundaryManifest {
@@ -127,7 +130,7 @@ impl<'a> SimFlow<'a> {
                     port: to_port_id.into_inner(),
                     direction: BoundaryDirection::Output,
                     role: None,
-                    location: format!("{:?}", input.metadata().location_id),
+                    location: format!("{:?}", input.metadata().location_id.root()),
                     type_name: format!("{:?}", input.metadata().collection_kind),
                     many: *to_many,
                 }),
@@ -135,7 +138,7 @@ impl<'a> SimFlow<'a> {
                     cycle_id, input, ..
                 } => cycles.borrow_mut().push(BoundaryCycle {
                     cycle: cycle_id.into_inner(),
-                    location: format!("{:?}", input.metadata().location_id),
+                    location: format!("{:?}", input.metadata().location_id.root()),
                     collection: format!("{:?}", input.metadata().collection_kind),
                 }),
                 _ => {}
@@ -157,7 +160,7 @@ impl<'a> SimFlow<'a> {
                         } else {
                             InputRole::Data
                         }),
-                        location: format!("{:?}", metadata.location_id),
+                        location: format!("{:?}", metadata.location_id.root()),
                         type_name: format!("{codec_type:?}"),
                         many: *from_many,
                     });

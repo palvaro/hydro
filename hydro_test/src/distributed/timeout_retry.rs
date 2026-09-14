@@ -144,6 +144,11 @@ pub struct LossPolicy {
     /// The client discards every response to an odd-id request. Those requests never complete,
     /// so every retry scan re-sends them forever: a futile retry that recurs unboundedly.
     pub black_hole_odd_responses: bool,
+    /// The service ignores any arriving request whose id it has already admitted to its queue.
+    /// This is the request-ID deduplication gate a retry service would need in order to stop a
+    /// retried copy from consuming a second service pulse. Not a loss; a mechanism change used as
+    /// a paired mutation.
+    pub dedup_requests_at_service: bool,
 }
 
 /// [`timeout_retry_with_timers`] with a [`LossPolicy`] applied at the receiving ends of the two
@@ -160,6 +165,7 @@ pub fn timeout_retry_lossy_with_timers<'a>(
     // `q!` closures can capture integers but not `bool`s.
     let drop_first_odd_request: u64 = loss.drop_first_odd_request as u64;
     let black_hole_odd_responses: u64 = loss.black_hole_odd_responses as u64;
+    let dedup_requests_at_service: u64 = loss.dedup_requests_at_service as u64;
     let (send_attempts, attempts) =
         client.forward_ref::<Stream<Request, Process<'a, Client>, Unbounded, NoOrder>>();
 
@@ -185,6 +191,10 @@ pub fn timeout_retry_lossy_with_timers<'a>(
         let mut dropped_once = use::state(|location| {
             location.singleton(q!(std::collections::BTreeSet::<u64>::new()))
         });
+        // Ids already admitted to the queue (only consulted under `dedup_requests_at_service`).
+        let mut admitted_ids = use::state(|location| {
+            location.singleton(q!(std::collections::BTreeSet::<u64>::new()))
+        });
         let arrival_vec = arrivals.assume_ordering::<TotalOrder>(nondet!(
             /** Any network arrival order is a valid FIFO service order. */
         )).fold(q!(|| Vec::new()), q!(|out, request| out.push(request)));
@@ -194,11 +204,15 @@ pub fn timeout_retry_lossy_with_timers<'a>(
         let pulses_ref = pulse_count.by_ref();
         let queue_ref = queue.by_mut();
         let dropped_ref = dropped_once.by_mut();
+        let admitted_ref = admitted_ids.by_mut();
 
         tick.singleton(q!(()))
             .into_stream()
             .flat_map_ordered(q!(move |_| {
                 for request in arrivals_ref.iter() {
+                    if dedup_requests_at_service != 0 && !admitted_ref.insert(request.id) {
+                        continue;
+                    }
                     let lose = drop_first_odd_request != 0
                         && request.id % 2 == 1
                         && dropped_ref.insert(request.id);

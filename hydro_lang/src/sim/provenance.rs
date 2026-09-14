@@ -307,6 +307,9 @@ pub struct EmissionRecord {
     pub point: u32,
     /// Human-readable name of the emission point (channel name if given, else a location pair).
     pub name: String,
+    /// Debug rendering of the root location that emitted the item (`Process(..)`/`Cluster(..)`).
+    /// Together with `member` this identifies the emitting node.
+    pub source: String,
     /// The sending cluster member, if the sender is a cluster (for `Receive` records this is
     /// recovered from the channel's demux id, so send and receipt share a [`Channel`]).
     pub member: Option<u32>,
@@ -877,6 +880,7 @@ mod tests {
             kind: EmissionPointKind::Output,
             point,
             name: format!("edge{point}"),
+            source: "Process(test)".into(),
             member: None,
             destination: format!("dest{point}"),
             recipient: None,

@@ -643,6 +643,7 @@ fn emission_record(
     kind: TokenStream,
     point: u32,
     name: &str,
+    source: &str,
     member: TokenStream,
     destination: &str,
     recipient: TokenStream,
@@ -654,6 +655,7 @@ fn emission_record(
         kind: #p::EmissionPointKind::#kind,
         point: #point,
         name: ::std::string::String::from(#name),
+        source: ::std::string::String::from(#source),
         member: #member,
         destination: ::std::string::String::from(#destination),
         recipient: #recipient,
@@ -980,10 +982,12 @@ fn transform_node(node: &mut HydroNode, ctx: &Ctx<'_>) {
             let in_ty = ty_of(input);
             let untag = untag(in_repr, quote!(__prov_item));
             let destination = format!("{:?}", metadata.location_id.root());
+            let source = format!("{:?}", from.root());
             let record = emission_record(
                 quote!(Network),
                 point,
                 &label,
+                &source,
                 member,
                 &destination,
                 quote!(#p::NetworkPayload::recipient(&__prov_out)),
@@ -1015,6 +1019,7 @@ fn transform_node(node: &mut HydroNode, ctx: &Ctx<'_>) {
                 kind: #p::EmissionPointKind::Receive,
                 point: #point,
                 name: ::std::string::String::from(#label),
+                source: ::std::string::String::from(#source),
                 member: #sender,
                 destination: ::std::string::String::from(#destination),
                 recipient: #receiver,
@@ -1079,6 +1084,7 @@ fn transform_root(root: &mut HydroRoot, ctx: &Ctx<'_>) {
             };
             let point = ctx.next_point();
             let label = format!("output {}", to_port_id);
+            let source = format!("{:?}", input.metadata().location_id.root());
             let member = member_expr(&input.metadata().location_id);
             let in_ty = ty_of(input);
             let untag = untag(kind_of(input), quote!(__prov_item));
@@ -1086,6 +1092,7 @@ fn transform_root(root: &mut HydroRoot, ctx: &Ctx<'_>) {
                 quote!(Output),
                 point,
                 &label,
+                &source,
                 member,
                 &label,
                 quote!(::core::option::Option::None),
@@ -1108,11 +1115,13 @@ fn transform_root(root: &mut HydroRoot, ctx: &Ctx<'_>) {
         } => {
             let point = ctx.next_point();
             let label = format!("cycle {}", cycle_id);
+            let source = format!("{:?}", input.metadata().location_id.root());
             let member = member_expr(&input.metadata().location_id);
             let record = emission_record(
                 quote!(Cycle),
                 point,
                 &label,
+                &source,
                 member,
                 &label,
                 quote!(::core::option::Option::None),

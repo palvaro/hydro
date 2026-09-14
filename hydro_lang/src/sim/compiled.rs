@@ -587,7 +587,7 @@ impl CompiledSim {
             let corpus_dir = std::env::current_dir().unwrap().join(".fuzz-corpus");
             std::fs::create_dir_all(&corpus_dir).unwrap();
             let libfuzzer_args = format!(
-                "{} {} -artifact_prefix={}/ -handle_abrt=0",
+                "{} {} -artifact_prefix={}/ -handle_abrt=0 -rss_limit_mb=8192",
                 corpus_dir.to_str().unwrap(),
                 corpus_dir.to_str().unwrap(),
                 corpus_dir.to_str().unwrap(),
@@ -1585,6 +1585,11 @@ impl<T: Serialize + DeserializeOwned, O: Ordering, R: Retries> SimSender<T, O, R
 }
 
 impl<T: Serialize + DeserializeOwned, O: Ordering> SimSender<T, O, ExactlyOnce> {
+    /// Sends one value without requiring the matrix to branch on type-level ordering.
+    pub fn send_indexed(&self, value: T) {
+        self.with_sink(|send| send(value));
+    }
+
     /// Sends several messages to the external bincode sink. The messages will be asynchronously
     /// processed as part of the simulation, in non-deterministic order.
     pub fn send_many_unordered<I: IntoIterator<Item = T>>(&self, iter: I) {
@@ -1773,6 +1778,11 @@ impl<T: Serialize + DeserializeOwned, O: Ordering, R: Retries> SimClusterSender<
 }
 
 impl<T: Serialize + DeserializeOwned, O: Ordering> SimClusterSender<T, O, ExactlyOnce> {
+    /// Sends one value without requiring the matrix to branch on type-level ordering.
+    pub fn send_indexed(&self, member_id: u32, value: T) {
+        self.with_sink(|send| send(member_id, value));
+    }
+
     /// Sends multiple values to specific cluster members. The messages will be asynchronously
     /// processed as part of the simulation, in non-deterministic order.
     pub fn send_many_unordered<I: IntoIterator<Item = (u32, T)>>(&self, iter: I) {
