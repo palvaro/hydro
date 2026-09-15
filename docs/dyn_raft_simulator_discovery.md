@@ -1,5 +1,35 @@
 # Report: the Hydro simulator discovering Ongaro's 2015 membership-change bug
 
+## TL;DR
+
+**Claim.** Hydro's compiled simulator, given only an operator-plausible workload, finds
+Ongaro's 2015 single-server membership-change bug in a Raft implementation lacking the
+current-term-commit barrier.
+
+**The test** (`simulator_explores_concurrent_double_leave` in
+`hydro_test/src/cluster/dyn_raft.rs`): a 4-node cluster elects a leader; two operators,
+contacting two different nodes, concurrently submit `Remove(1)` and `Remove(2)`; election
+and heartbeat timers fire. Safety oracle: no two members may commit different payloads at
+the same log index. Nothing in the test encodes the bug's mechanism.
+
+**Result.** Coverage-guided fuzzing (`cargo sim`, 8 parallel seeds on a 96-vCPU EC2 box)
+violated the oracle **4 times independently**, first find within ~1.8M executions
+(~90 min). The discovered fork: `Configuration({0,2,3})` and `Configuration({0,1,3})` —
+*both* concurrent removals durably committed at the same log index by different quorums.
+A 121-byte reproducer is checked in; plain `cargo test` replays it deterministically in
+~14s, including cross-platform (found on x86_64 Linux, replays on aarch64 macOS).
+
+**Open.** The same scenario with a learner join (`Add`) instead of a second remove found
+no violation in ~26M executions/seed × 8 seeds — inconclusive, plausibly protected by the
+Add path's catch-up gate.
+
+**Caveats.** One implementation, one oracle-author who knew the bug (multi-version
+differential testing would strengthen this); an earlier version of the test was
+structurally unable to express the bug and burned 543M executions proving nothing —
+detailed below, along with every other misstep.
+
+---
+
 This document describes, precisely, what was tested, what the simulator was and was not
 told, what it found, and how the finding was verified. It also corrects an earlier
 overclaim made in conversation about this work (see "A correction" below).
@@ -30,6 +60,225 @@ flag:
   suffixes unconditionally, matching the dissertation's original, unbarricaded behavior
   verbatim. This exists only so simulation can demonstrate the counterexample; it is never
   reachable from the production API.
+
+## Delta from `raft.rs`: what was added, why, and against what specification
+
+`hydro_test/src/cluster/raft.rs` (pre-existing, not modified by this work) implements
+plain Raft with **static membership**: `RaftConfig { cluster_size }` is a single integer,
+and the protocol's voting set *is* the physical Hydro cluster — there is no notion of a
+subset, no membership log entries, and therefore no membership-change algorithm at all.
+Its `LogEntry<T>` carries only an application payload `T`; there is no no-op and no
+configuration variant. Consequently `raft.rs` cannot exhibit the 2015 bug — the bug is
+specifically about *changing* the voting set, and `raft.rs` has no mechanism to change it.
+
+`dyn_raft.rs` (added in this branch's prior commit, `191fdeb1bf`, and extended in this
+session) adds exactly the machinery Raft's membership-change chapter requires, and nothing
+beyond it:
+
+- **A fixed physical universe, a variable logical configuration.** The Hydro `Cluster`'s
+  physical membership is still static (same as `raft.rs`) — `dyn_raft_server` reads it
+  once, at startup, as `physical_members`. What varies is `Configuration<C>`, a set of
+  `MemberId`s drawn from that fixed physical universe, computed by scanning the log for
+  the most recent `DynLogPayload::Configuration` entry
+  (`DynRaftState::effective_configuration`). This matches the dissertation's model: a
+  fixed universe of servers that *could* serve, with the *current configuration* being
+  whichever subset is currently voting — Raft's cluster-membership chapter never grows or
+  shrinks the set of machines a deployment provisions, only the set that counts toward
+  quorum. (This report cites the dissertation's mechanisms as described in this module's
+  own top-of-file doc comment, quoted below; dissertation section numbers were not
+  independently re-verified against the source PDF as part of this report and are
+  intentionally not cited here.)
+- **A three-way log payload.** `DynLogPayload::{Command, Noop, Configuration}` replaces
+  `raft.rs`'s bare `T`. `Noop` is appended once, unconditionally, on every leader accession
+  (`become_leader`) — in **both** policies; `become_leader` is shared code, not part of
+  what `require_current_term_commit` toggles. This is ordinary Raft leader-accession
+  behavior (a new leader needs an entry of its own current term in the log at all,
+  independent of membership), not something introduced by the 2015 fix. What the fix
+  actually does is *consume* the fact that a no-op exists: `committed_current_term()`
+  checks whether the leader's *own* current-term entry (which will always be at least the
+  no-op) has committed, and the barrier below refuses to append a configuration until it
+  has. `raft.rs` has no no-op and no equivalent check because, with static membership,
+  there is nothing to gate on a current-term commit — this report's earlier draft
+  described the no-op as belonging to the fix, which was inaccurate; it is present in the
+  unpatched policy exactly as much as the patched one, and its presence alone does not
+  imply the barrier is active.
+- **The single-server add/remove protocol.** `ReconfigurationRequest`,
+  `ConfigurationChange::{Add, Remove}`, and the `pending`/`PendingStage` state machine in
+  `DynRaftState` implement the dissertation's one-change-at-a-time algorithm, per the
+  module's own doc comment: "Additions first replicate to the prospective server as a
+  non-voting learner. The catch-up test here is deliberately the simple `matchIndex ==
+  leader last index` safety-oriented criterion; the dissertation's multi-round/time-bound
+  heuristic is an availability refinement." Removals append immediately once the prior
+  configuration is committed. Neither operation is reachable from `raft.rs` at all.
+- **The 2015 current-term-commit barrier itself**, `StepPolicy::require_current_term_commit`,
+  gating exactly one line: whether `latest_configuration_index() <= commit_index` also
+  requires `committed_current_term()` before a new configuration may be appended. Per the
+  module's doc comment, this is "the 2015 safety correction: a newly elected leader appends
+  a no-op and may not append a configuration until it has committed an entry from its
+  current term." This barrier is the entire subject of that correction — it is not an
+  invention added to make a bug appear; it is the fix being tested for.
+- **The doc-hidden unpatched path**, `dyn_raft_step_unpatched_for_simulation`, is
+  `dyn_raft_step_with_policy` with that one gate condition dropped, plus (added in this
+  session) the change described next.
+
+### The one behavioral change made *in this session*, and why
+
+Before this session, the truncation branch (an `AppendEntries` recipient asked to
+overwrite a log entry with a same-index, different-term entry) carried a hand-added
+assertion — not present in the dissertation — that panicked if the entry being overwritten
+was already committed: `assert!(entry.index > state.commit_index, "protocol violation:
+truncate committed entry ...")`. This assertion is Hydro-specific defensive code, not part
+of Raft or the dissertation; the dissertation's actual `AppendEntries` receiver
+(Figure 2, and the description in §3.5/§3.6) truncates conflicting suffixes
+unconditionally, with no such guard, because the barrier is supposed to make truncating a
+committed entry *unreachable*, not caught.
+
+That guard interacted badly with the simulator specifically: when it fired inside the
+dlopen'd sim dylib, the resulting panic crossed the dylib boundary as a foreign exception,
+which Rust cannot catch (`fatal runtime error: Rust cannot catch foreign exceptions,
+aborting` → `SIGABRT`) — not a normal, catchable panic, so `#[should_panic]` could not
+observe it, and it always pre-empted the host-side oracle from ever seeing the forked
+commit outputs. The fix made in this session was to make the *unpatched* policy truncate
+conflicting suffixes unconditionally, with no guard — matching the description in this
+module's own doc comment of "the single-server algorithm in Ongaro's dissertation" without
+the 2015 correction — while leaving the guard in place on the *safe*, barrier-enforcing
+policy (where, if the barrier is doing its job, it should indeed be unreachable, and a
+panic there is a legitimate internal-consistency check on the production path). This is a
+change to make the unsafe path behave as the dissertation-derived algorithm is documented
+to behave, not a change to make the bug easier to find — the guard's presence or absence
+does not affect whether the fork occurs, only whether it surfaces as an uncatchable
+process abort or as an observable divergence in the committed output streams.
+
+### Is there a danger of overfitting to a known-a-priori bug?
+
+Partially, and this report tries to draw that line explicitly rather than paper over it:
+
+- **The step function's mechanics (`dyn_raft_step_with_policy`, both policies) are not
+  overfit on the parts shared with `raft.rs`.** `raft.rs`'s own top-of-file comment cites
+  specific sections of the *original* Raft paper (Ongaro & Ousterhout) for the election
+  restriction (§5.4.1), log matching (§5.3), and leader-only current-term commit counting
+  (§5.4.2); `dyn_raft_step_with_policy` reimplements those same three mechanisms, and they
+  were not written by working backward from the desired counterexample — they are the
+  same logic as the pre-existing, unmodified `raft.rs`. The *2015-dissertation-specific*
+  material — the barrier, the single-server add/remove state machine, and the no-op-as-
+  barrier-target device — is described only in prose in `dyn_raft.rs`'s own doc comments
+  (quoted above), without section numbers. This report does not independently verify
+  those citations against the dissertation text, and does not know whether the author of
+  `dyn_raft.rs` (in the prior commit `191fdeb1bf`, not part of this session) read the
+  dissertation directly or worked from secondary knowledge of the well-known bug; either
+  way, the resulting mechanism (append-then-gate-on-current-term-commit) matches the
+  documented shape of the correction. Separately, the `#[should_panic(expected =
+  "truncate committed entry")]` unit test that predates this session
+  (`unsafe_policy_reproduces_ongaro_two_removes_counterexample`, in `dyn_raft.rs`'s prior
+  commit) *is* a hand-scripted replay of the specific counterexample from that prior
+  agent's writeup, driven step-by-step with full knowledge of the target shape — it was
+  never claimed to be a blind discovery, and the task behind this session's tests was
+  explicitly to go beyond it using the simulator's own search.
+- **The fully-staged simulator test is overfit, and says so.** Its first two phases
+  script the first two steps of the known counterexample (see "A correction" below).
+- **The bootstrapped simulator test is the one built specifically to minimize this risk**:
+  the only fixed step (a first election) is not specific to membership changes at all, and
+  every subsequent choice was left to search. It is not *zero*-knowledge — the choice to
+  send `Remove` requests for members 2 and 3 in particular, and the choice of workload
+  sizes (2 election waves, 3 redundant copies per removal, 6 heartbeat waves), reflects
+  knowing that *some* two-removal, multi-term scenario was the target, even though no
+  particular leader/term assignment was scripted. A fully blind workload with no removal
+  targets chosen by a bug-aware author is closer to what the `_unstaged` test attempts,
+  and it has not (yet, at the budgets tried) found the fork.
+- **This is a threat to validity that multi-version programming could address later.**
+  Every test here checks one implementation (`dyn_raft_step_with_policy`, unpatched
+  policy) against an oracle written by the same people who wrote the implementation and
+  who knew the target bug. A stronger design would implement the single-server
+  reconfiguration algorithm a second time, independently (ideally by an author blind to
+  the counterexample, or derived mechanically from a TLA+/Ivy spec of the dissertation
+  algorithm), and use *differential* testing — the two implementations must agree on every
+  committed entry — as an oracle that does not itself encode knowledge of the specific
+  fork. That is not done here; the current oracle (no two members commit different entries
+  at the same index) is correct and independent of the implementation, but the *workload*
+  that drives it to the fork is not independent of implementer knowledge, for the reasons
+  above.
+
+## Update: the operator-scenario tests, a broken first attempt, and the EC2 discovery
+
+Everything below this heading was added after the sections above were written, and
+supersedes parts of them.
+
+### The operator scenarios
+
+After the bootstrapped test's discovery, two further tests were written to model the
+scenario an operator would actually create, with no tuning toward the known bug:
+
+- `simulator_explores_concurrent_double_leave`: elect a leader (one election tick +
+  quiesce), then submit **one** `Remove(1)` and **one** `Remove(2)` — each sent exactly
+  once — followed by a symmetric batch of election/heartbeat ticks (the same 2-wave /
+  6-wave shape as `raft.rs`'s own fully-concurrent test).
+- `simulator_explores_concurrent_join_and_leave`: same shape, but with member 3 starting
+  as a non-voting learner and the two requests being `Add(3)` and `Remove(1)`.
+
+### The broken first attempt (a cautionary result)
+
+The first version of both tests sent **both** requests to member 0 only. That version ran
+on a 96-vCPU EC2 instance (`c7i.24xlarge`), 16 parallel coverage-guided fuzzers (8
+independent seeds per scenario), for over two days and **543 million total executions —
+and found nothing.** On review, that null result was structural, not evidence of safety:
+Ongaro's counterexample requires two *different* leaders to each append a *different*
+configuration entry, and since only member 0 was ever sent any reconfiguration request,
+no other member could ever have a configuration to append. The search space simply did
+not contain the bug. The 543M-execution run measured nothing beyond the cost of not
+re-deriving reachability from first principles before scaling up.
+
+Two fixes followed:
+
+1. **Endpoints:** the second request now goes to member 1 (two concurrent operators
+   contacting two different endpoints). The scheduler can deliver member 1's request while
+   it is a follower (harmlessly rejected) or delay it until member 1 leads a later term —
+   making a second configuration-appending leader structurally reachable with exactly one
+   copy of each request.
+2. **Oracle precision:** all the simulator oracles now compare committed **payloads** at
+   each physical index rather than whole entries. Two same-payload no-ops from different
+   terms no longer count as "the fork" (addressing the index-1 weakness discussed above);
+   two incompatible committed configurations do.
+
+Both existing checked-in reproducers (staged and bootstrapped) were re-verified to still
+replay green under the payload-only oracle — confirming behaviorally that those replays
+reach the *configuration* fork at index 2, not just the no-op term mismatch at index 1.
+
+### The result
+
+With the corrected tests, the same EC2 setup (fresh instance, 16 parallel fuzzers, 8
+seeds per scenario, `-rss_limit_mb=8192`) produced, within roughly 45 million total
+executions:
+
+- **Three independent discoveries** of the safety violation in the double-leave scenario
+  (seeds 4, 5, and 8), each from a different random search trajectory:
+  - seeds 4 and 8: `Configuration({0,2,3})` vs `Configuration({0,1,3})` committed at
+    physical index 2 — **both concurrent removals durably committed at the same log slot
+    by different quorums**. One member's committed log says "member 1 was removed"; another
+    member's committed log says "member 2 was removed". This is the dissertation
+    counterexample in its literal form, discovered from an un-tuned two-operator workload.
+  - seed 5: `Configuration({0,2,3})` vs `Noop` at index 2.
+- **No violation (yet) in the join+leave scenario** across 8 seeds and 3.2M+ executions
+  each at the time of the find — a real asymmetry, consistent with the `Add` path's
+  learner catch-up requirement (`matchIndex` must reach the leader's last index before the
+  configuration is appended) narrowing the unsafe window. This is reported as
+  inconclusive, not as safety.
+
+The seed-4 reproducer (121 bytes) is checked in at
+`hydro_test/src/cluster/sim-failures/simulator_explores_concurrent_double_leave.bin`, and
+the test now carries `#[should_panic(expected = "committed log forked")]`. Notably, the
+reproducer was **discovered on x86_64 Linux and replays deterministically on aarch64
+macOS** (~14s under plain `cargo test`) — the schedule encoding is platform-independent.
+
+`simulator_explores_concurrent_join_and_leave` remains `#[ignore]`d and exploratory.
+
+**Post-trim note:** after the double-leave discovery, the staged, bootstrapped, and
+unstaged tests (and the staged/bootstrapped reproducers) were **removed from the test
+file** as superseded rungs of the ladder this report documents: the double-leave test
+demonstrates everything they demonstrated, from an honest workload, with its own
+deterministic reproducer. The hand-scripted `StepCluster` unit test remains (it tests
+step-function mechanics and never claimed discovery), as do the double-leave and
+join+leave tests. The sections below describing the removed tests are retained as the
+historical record of the methodology, including its missteps.
 
 ## Three tests, three different amounts of staging
 
@@ -93,13 +342,54 @@ assertion `left == right` failed: committed log forked: physical index 1 committ
  right: DynLogEntry { payload: Noop, term: 4, index: 1 }
 ```
 
-Two members committed different entries at physical log index 1: one member's committed
-history has a no-op from term 1 at that position; another member's committed history has a
-*different* no-op, from term 4, at the same position. That is the fork — two members
-permanently disagree about what is in slot 1 of the log, which is exactly the safety
-violation the barrier exists to prevent. The cluster went through at least four terms to
-get there, i.e. this took more than the minimal two-term counterexample from the
-dissertation; the simulator found a longer path than the textbook one.
+The oracle asserts on the *first* index where it observes two members' `DynLogEntry`
+values disagree (`PartialEq` compares payload, term, *and* index), so this is where
+execution stopped. Taken alone, this specific instance is a weaker finding than the rest
+of this report first claimed, and it deserves scrutiny rather than being read as
+self-evidently catastrophic: both sides committed a `Noop` — an inert payload with no
+application-visible content — at index 1, and the two entries differ only in `term` (1 vs
+4). A term number differing on an otherwise-identical no-op is a real, structural
+inequality (the `assert_eq!` correctly fired on unequal structs), but by itself it is not
+obviously a *content* disagreement in the sense that matters to a client of the system.
+
+To check whether the fork actually goes anywhere, we re-ran the same saved reproducer with
+the oracle temporarily replaced by one that logs every member's full committed history
+instead of asserting on the first mismatch (this was a diagnostic-only, reverted edit; the
+committed test file is unchanged). The full committed histories were:
+
+```
+member 0: [Noop@term1/idx1, Configuration({0,1,2})@term1/idx2, Noop@term6/idx3]
+member 1: [Noop@term4/idx1, Configuration({0,1,3})@term4/idx2]
+member 2: []
+member 3: [Noop@term4/idx1, Configuration({0,1,3})@term4/idx2]
+```
+
+This is where the actual, content-meaningful fork is: at physical index **2**, member 0
+committed `Configuration({0,1,2})` (voters 0, 1, 2 — server 3 removed) while members 1 and
+3 committed `Configuration({0,1,3})` (voters 0, 1, 3 — server 2 removed). Those are two
+different, mutually incompatible cluster configurations, each durably committed by a
+different majority. A client asking "is server 2 currently a voter?" gets opposite answers
+depending on which member it asks, and both answers are backed by a committed log entry —
+this is Ongaro's counterexample in its literal form (two configurations racing to commit
+under different quorums), and it is not vacuous the way the index-1 mismatch alone would
+be.
+
+The index-1 mismatch is a *consequence* of the same fork, not a separate or weaker
+instance of it: it is exactly what you'd expect to see immediately upstream of two
+divergent configurations — each leader's own no-op, at its own term, is the entry each
+leader committed for itself before appending its (different) configuration on top. The
+oracle's choice to report the first divergent index means this report's earlier framing
+(quoting only the index-1 mismatch and describing it as "the fork," full stop) understated
+what was actually found and did not check what happened past that point before making the
+claim. That is corrected here: the finding is the index-2 configuration fork; the index-1
+no-op mismatch is real but, in isolation, not the interesting part.
+
+**Caveat this raises about the oracle itself:** because `assert_eq!` panics on the first
+mismatch, an oracle like this one will report whichever index diverges *first*, which is
+not necessarily the index at which the divergence is *meaningful*. A version of this
+oracle that continued past the first mismatch (collecting all of them, or specifically
+checking whether any *non-Noop* payload disagrees) would be a strictly better artifact,
+and was not built here. This is noted as a limitation, not fixed in this session.
 
 ### Lineage: the scheduler trace
 
@@ -191,21 +481,21 @@ no fuzzing required after the fact.
 
 ## How to reproduce this yourself
 
+The earlier fully staged and bootstrapped tests described above were research steps. They
+were removed after the operator-scenario test superseded them; their fixture names and
+commands remain in the historical narrative only.
+
 ```bash
-# Deterministic replay of the saved failure (fast, no fuzzing):
-cargo test --lib \
-  cluster::dyn_raft::tests::simulator_discovers_ongaro_membership_bug_bootstrapped \
-  -- --ignored
+# Deterministic replay of the saved concurrent-double-leave failure. This needs no fuzzing.
+cargo test -p hydro_test --lib \
+  cluster::dyn_raft::tests::simulator_explores_concurrent_double_leave -- --nocapture
 
-# The same, with the simulator's scheduler trace on stderr
-# (produces output like docs/dyn_raft_bootstrapped_trace.txt):
-HYDRO_SIM_LOG=1 cargo test --lib \
-  cluster::dyn_raft::tests::simulator_discovers_ongaro_membership_bug_bootstrapped \
-  -- --ignored --nocapture
-
-# Re-run coverage-guided discovery from scratch (deletes the saved reproducer's
-# effect by fuzzing fresh; requires a libFuzzer/sancov-capable toolchain):
-rm hydro_test/src/cluster/sim-failures/simulator_discovers_ongaro_membership_bug_bootstrapped.bin
+# Re-run coverage-guided discovery from scratch. Move the checked-in reproducer aside first
+# if the goal is to search rather than replay it; this requires a libFuzzer/sancov toolchain.
+mv hydro_test/src/cluster/sim-failures/simulator_explores_concurrent_double_leave.bin \
+  hydro_test/src/cluster/sim-failures/simulator_explores_concurrent_double_leave.bin.saved
 ./cargo-sim sim -p hydro_test -- \
-  simulator_discovers_ongaro_membership_bug_bootstrapped --ignored
+  simulator_explores_concurrent_double_leave
+mv hydro_test/src/cluster/sim-failures/simulator_explores_concurrent_double_leave.bin.saved \
+  hydro_test/src/cluster/sim-failures/simulator_explores_concurrent_double_leave.bin
 ```

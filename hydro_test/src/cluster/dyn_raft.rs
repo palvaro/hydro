@@ -1637,193 +1637,40 @@ mod tests {
         assert_eq!(cluster.states[1].commit_index, 0);
     }
 
-    /// Drives the **unpatched** dissertation server through Hydro's compiled simulator.
-    /// The workload is *staged*: two quiesced setup phases put the system at the doorstep
-    /// of Ongaro's 2015 counterexample, and the simulator then searches for the schedule
-    /// that actually breaks it. What is fixed and what is discovered:
+    /// Membership churn under concurrent administration, with a learner joining: four
+    /// physical members; three start as voters, one (member 3) starts outside the voting
+    /// configuration as a non-voting learner. Two operators, contacting two different
+    /// nodes, concurrently ask to add the learner and remove a voter while election and
+    /// heartbeat timers fire. Whatever schedule occurs, the committed log must never
+    /// fork: no two members may commit different payloads at the same log index.
     ///
-    /// - Fixed by the test (inputs only, no injected protocol state): member 0 is elected
-    ///   first and receives `remove(3)`; member 1 later runs and receives `remove(2)`.
-    /// - Discovered by the simulator (the racy burst): batching the removal after member
-    ///   1's leadership, committing E={0,1,3} under the *new* quorum {1,3} while the
-    ///   replication to member 0 stays in flight, member 0's counter-candidacy under its
-    ///   stale D={0,1,2}, member 2's vote, and the nextIndex walk-down that replicates
-    ///   the conflicting prefix.
+    /// The test fixes only the workload:
     ///
-    /// See [`simulator_discovers_ongaro_membership_bug_unstaged`] for the blind-discovery
-    /// variant with symmetric inputs and no staging.
+    /// 1. Elect a leader (one election tick to member 0, one quiescence).
+    /// 2. Two concurrent operators: one join (`Add(3)`) sent once to member 0, one leave
+    ///    (`Remove(1)`) sent once to member 1.
+    /// 3. A modest, symmetric batch of election and heartbeat ticks, sent to every
+    ///    member with no `.await` in between — the same shape `raft.rs`'s own
+    ///    `fully_concurrent_run_never_forks_the_committed_log` test uses (2 election
+    ///    waves, 6 heartbeat waves).
     ///
-    /// Shape of the counterexample (cf. the hand-written
-    /// [`unsafe_policy_reproduces_ongaro_two_removes_counterexample`]):
+    /// Everything else — who leads which term, whether the join or the leave (or
+    /// neither, or both) lands, and every message/batch ordering decision — is the
+    /// simulator's.
     ///
-    /// - Phase A (quiesced): member 0 wins term 1 uncontested.
-    /// - Phase B (quiesced): member 0 appends `remove(3)` → configuration `D={0,1,2}`.
-    ///   Without the current-term commit barrier this appends immediately, before any
-    ///   entry of term 1 has committed; no heartbeat is pumped, so `D` exists only on
-    ///   member 0.
-    /// - Phase C (one un-quiesced burst): member 1 runs for term 2 (votes from 2 and 3),
-    ///   appends `remove(2)` → `E={0,1,3}` before its own no-op commits, and commits `E`
-    ///   with the *new* quorum {1,3} — while its replication to member 0 stays in flight.
-    ///   Member 0 then runs for term 3 under `D`, wins with member 2's vote, and its
-    ///   heartbeats walk `nextIndex` down into member 1's already-committed prefix.
-    ///
-    /// Detection is an explicit runtime safety oracle in the test closure (Hydro's
-    /// simulator does not validate `assert_has_consistency_of`, which this unsafe path
-    /// omits anyway): across all members, no two committed entries at the same physical
-    /// log index may differ in term or payload ("committed log forked"). The unpatched
-    /// step function performs the dissertation's unconditional truncation, so the fork
-    /// surfaces on the committed outputs where the oracle can see it, rather than
-    /// aborting inside the compiled simulation.
-    ///
-    /// Success means the *simulator* drove the system into the safety violation. Discover
-    /// schedules with `cargo sim -p hydro_test -- simulator_discovers_ongaro_membership_bug`;
-    /// a found failure is saved as a minimized reproducer under `src/cluster/sim-failures/`,
-    /// which plain `cargo test` replays deterministically.
+    /// **Status (post-run note):** no violation found so far (tens of millions of
+    /// coverage-guided executions across 8 parallel seeds); reported as inconclusive,
+    /// not as safety — see `docs/dyn_raft_simulator_discovery.md`. `#[ignore]`d until a
+    /// conclusive result exists.
     #[test]
-    #[should_panic(expected = "committed log forked")]
-    fn simulator_discovers_ongaro_membership_bug() {
+    #[ignore = "exploratory: run under `cargo sim` (see doc comment); result not yet conclusive"]
+    fn simulator_explores_concurrent_join_and_leave() {
         use hydro_lang::location::MemberId;
 
         const N: usize = 4;
-
-        let mut flow = FlowBuilder::new();
-        let cluster = flow.cluster::<Replica>();
-
-        let (election_send, election_timer_interrupts) = cluster.sim_input();
-        let (heartbeat_send, heartbeat_timer_interrupts) = cluster.sim_input();
-        let (_command_send, commands) = cluster.sim_input::<String, TotalOrder, _>();
-        let (reconfig_send, reconfigurations) =
-            cluster.sim_input::<ReconfigurationRequest<Replica>, TotalOrder, _>();
-
-        let outputs = dyn_raft_server_unpatched_for_simulation(
-            &cluster,
-            commands,
-            reconfigurations,
-            election_timer_interrupts,
-            heartbeat_timer_interrupts,
-            DynRaftConfig {
-                initial_voter_count: N,
-            },
-            TCP.fail_stop().bincode(),
-            nondet!(
-                /** elections, batching, and replication timing are nondeterministic; the
-                committed log must not fork regardless — and, on this deliberately
-                unpatched path, the simulator is expected to prove that it can. */
-            ),
-        );
-
-        let committed_recv = outputs.committed_entries.sim_cluster_output();
-        // Drain the administrative/leadership outputs so they cannot back-pressure.
-        let _results_recv = outputs.reconfiguration_results.sim_cluster_output();
-        let _views_recv = outputs.leader_views.sim_cluster_output();
-
-        flow.sim()
-            .with_cluster_size(&cluster, N)
-            .fuzz(async || {
-                // Phase A: member 0 wins term 1 uncontested. Quiescing here is safe and
-                // deterministic — only vote traffic is in flight.
-                election_send.send(0, ());
-                hydro_lang::sim::quiesce().await;
-
-                // Phase B: leader 0 accepts remove(3). Unpatched, the configuration
-                // D={0,1,2} is appended immediately (no current-term commit barrier). No
-                // heartbeat is pumped, so nothing is in flight and D stays local to 0.
-                reconfig_send.send(
-                    0,
-                    ReconfigurationRequest {
-                        request_id: 1,
-                        change: ConfigurationChange::Remove(MemberId::from_raw_id(3)),
-                    },
-                );
-                hydro_lang::sim::quiesce().await;
-
-                // Phase C: single un-quiesced burst; the simulator owns the schedule.
-                // Member 1's candidacy, its competing remove(2), its replication, member
-                // 0's counter-candidacy, and member 0's replication are all concurrently
-                // outstanding.
-                //
-                // The removal is sent several times with distinct request ids: copies that
-                // the simulator batches before member 1's leadership are rejected
-                // (NotLeader) and copies that arrive while a change is pending are rejected
-                // (ChangeInProgress) — both harmless — so at least one copy can land in the
-                // window where it appends the competing configuration E={0,1,3}.
-                election_send.send(1, ());
-                for request_id in 2..=4 {
-                    reconfig_send.send(
-                        1,
-                        ReconfigurationRequest {
-                            request_id,
-                            change: ConfigurationChange::Remove(MemberId::from_raw_id(2)),
-                        },
-                    );
-                }
-                heartbeat_send.send(1, ());
-                heartbeat_send.send(1, ());
-                election_send.send(0, ());
-                election_send.send(0, ());
-                // Member 0's heartbeats must walk nextIndex down (two rejections per
-                // follower) before the conflicting prefix is sent; extra pumps give the
-                // simulator room to interleave the rejections between them.
-                for _ in 0..6 {
-                    heartbeat_send.send(0, ());
-                }
-
-                // Single final quiescence: drain every member's committed entries and run
-                // the safety oracle.
-                hydro_lang::sim::quiesce().await;
-
-                // physical index -> the entry committed there (by the first member seen).
-                // Comparing whole entries (term + payload) also catches forks where both
-                // sides committed the same *kind* of payload (e.g. two no-ops) from
-                // different terms at one index.
-                let mut committed_at: HashMap<usize, DynLogEntry<String, Replica>> =
-                    HashMap::new();
-                for member in 0..N as u32 {
-                    for entry in committed_recv.collect::<Vec<_>>(member).await {
-                        if let Some(previous) = committed_at.get(&entry.index) {
-                            assert_eq!(
-                                previous, &entry,
-                                "committed log forked: physical index {} committed two \
-                                 different entries",
-                                entry.index
-                            );
-                        } else {
-                            committed_at.insert(entry.index, entry);
-                        }
-                    }
-                }
-            });
-    }
-
-    /// The **blind-discovery** variant of
-    /// [`simulator_discovers_ongaro_membership_bug`]: no staging whatsoever. Every member
-    /// receives the same inputs — election ticks, heartbeat ticks, and copies of both
-    /// removal requests — all sent up front with **no intermediate quiescence**, so the
-    /// simulator alone decides who leads which term, when each removal lands relative to
-    /// leadership, and which replication is delayed. Nothing about the counterexample's
-    /// structure is encoded in the workload; an operator asking to remove two nodes is
-    /// the whole scenario. Removals are sent as several copies with distinct request ids
-    /// because a copy processed by a non-leader is rejected (`NotLeader`) and consumed.
-    ///
-    /// The oracle is identical: no two members may commit different entries (term or
-    /// payload) at the same physical log index.
-    ///
-    /// This is ignored by default: without a checked-in reproducer, plain `cargo test`
-    /// runs a few thousand random schedules, which is known to be insufficient for this
-    /// search space. Run it under coverage-guided fuzzing:
-    /// `cargo sim -p hydro_test -- simulator_discovers_ongaro_membership_bug_unstaged --ignored`.
-    /// If a failure is found, the minimized reproducer lands in `src/cluster/sim-failures/`
-    /// and the `#[ignore]` can be removed.
-    #[test]
-    #[ignore = "blind-discovery experiment; run under `cargo sim` (see doc comment)"]
-    #[should_panic(expected = "committed log forked")]
-    fn simulator_discovers_ongaro_membership_bug_unstaged() {
-        use hydro_lang::location::MemberId;
-
-        const N: usize = 4;
-        const ELECTION_WAVES: usize = 3;
+        const INITIAL_VOTERS: usize = 3;
+        const ELECTION_WAVES: usize = 2;
         const HEARTBEAT_PUMPS: usize = 6;
-        const RECONFIG_COPIES: u64 = 3;
 
         let mut flow = FlowBuilder::new();
         let cluster = flow.cluster::<Replica>();
@@ -1841,13 +1688,13 @@ mod tests {
             election_timer_interrupts,
             heartbeat_timer_interrupts,
             DynRaftConfig {
-                initial_voter_count: N,
+                initial_voter_count: INITIAL_VOTERS,
             },
             TCP.fail_stop().bincode(),
             nondet!(
                 /** elections, batching, and replication timing are nondeterministic; the
                 committed log must not fork regardless — and, on this deliberately
-                unpatched path, the simulator is expected to prove that it can. */
+                unpatched path, the simulator is expected to explore whether it can. */
             ),
         );
 
@@ -1855,93 +1702,84 @@ mod tests {
         let _results_recv = outputs.reconfiguration_results.sim_cluster_output();
         let _views_recv = outputs.leader_views.sim_cluster_output();
 
-        flow.sim()
-            .with_cluster_size(&cluster, N)
-            .fuzz(async || {
-                // Everything up front, no `.await` until the final drain: the fuzzer owns
-                // the complete schedule. Sends are woven round-robin across members and
-                // input kinds only to avoid biasing the schedule via enqueue order.
-                for _ in 0..ELECTION_WAVES {
-                    for member in 0..N as u32 {
-                        election_send.send(member, ());
-                    }
-                }
-                let mut request_id = 0;
-                for _copy in 0..RECONFIG_COPIES {
-                    for member in 0..N as u32 {
-                        for target in [3u32, 2u32] {
-                            request_id += 1;
-                            reconfig_send.send(
-                                member,
-                                ReconfigurationRequest {
-                                    request_id,
-                                    change: ConfigurationChange::Remove(MemberId::from_raw_id(
-                                        target,
-                                    )),
-                                },
-                            );
-                        }
-                    }
-                }
-                for _ in 0..HEARTBEAT_PUMPS {
-                    for member in 0..N as u32 {
-                        heartbeat_send.send(member, ());
-                    }
-                }
+        flow.sim().with_cluster_size(&cluster, N).fuzz(async || {
+            // Step 1: elect a leader.
+            election_send.send(0, ());
+            hydro_lang::sim::quiesce().await;
 
-                // Single final quiescence, then the same fork oracle as the staged test.
-                hydro_lang::sim::quiesce().await;
+            // Step 2: two operators concurrently submit one join and one leave, each
+            // contacting a different node.
+            reconfig_send.send(
+                0,
+                ReconfigurationRequest {
+                    request_id: 1,
+                    change: ConfigurationChange::Add(MemberId::from_raw_id(3)),
+                },
+            );
+            reconfig_send.send(
+                1,
+                ReconfigurationRequest {
+                    request_id: 2,
+                    change: ConfigurationChange::Remove(MemberId::from_raw_id(1)),
+                },
+            );
 
-                let mut committed_at: HashMap<usize, DynLogEntry<String, Replica>> =
-                    HashMap::new();
+            // Step 3: a modest, symmetric batch of further ticks (same shape as
+            // raft.rs's fully_concurrent_run_never_forks_the_committed_log), with no
+            // `.await` in between — the simulator owns the entire schedule from here.
+            for _ in 0..ELECTION_WAVES {
                 for member in 0..N as u32 {
-                    for entry in committed_recv.collect::<Vec<_>>(member).await {
-                        if let Some(previous) = committed_at.get(&entry.index) {
-                            assert_eq!(
-                                previous, &entry,
-                                "committed log forked: physical index {} committed two \
-                                 different entries",
-                                entry.index
-                            );
-                        } else {
-                            committed_at.insert(entry.index, entry);
-                        }
+                    election_send.send(member, ());
+                }
+            }
+            for _ in 0..HEARTBEAT_PUMPS {
+                for member in 0..N as u32 {
+                    heartbeat_send.send(member, ());
+                }
+            }
+
+            // Single final quiescence, then the same fork oracle as the other tests.
+            hydro_lang::sim::quiesce().await;
+
+            let mut committed_at: HashMap<usize, DynLogPayload<String, Replica>> = HashMap::new();
+            for member in 0..N as u32 {
+                for entry in committed_recv.collect::<Vec<_>>(member).await {
+                    if let Some(previous) = committed_at.get(&entry.index) {
+                        assert_eq!(
+                            previous, &entry.payload,
+                            "committed log forked: physical index {} committed two \
+                                 different payloads",
+                            entry.index
+                        );
+                    } else {
+                        committed_at.insert(entry.index, entry.payload);
                     }
                 }
-            });
+            }
+        });
     }
 
-    /// The **bootstrapped** middle tier between
-    /// [`simulator_discovers_ongaro_membership_bug`] (staged) and
-    /// [`simulator_discovers_ongaro_membership_bug_unstaged`] (blind): the only fixed step
-    /// is bootstrapping a first leader — one election tick to member 0, followed by one
-    /// quiescence. That step encodes nothing about the membership bug (every Raft cluster
-    /// needs a first leader before it can do anything). Everything else is symmetric and
-    /// un-quiesced: copies of *both* removals go to *every* member, and all
-    /// election/heartbeat ticks are outstanding concurrently. The simulator alone must
-    /// find the unsafe mechanism: a removal appended by the leader before any current-term
-    /// commit, a challenger elected and appending the competing removal, the new-quorum
-    /// commit with the old leader's replication delayed, and the conflicting prefix
-    /// committed by a re-elected leader.
+    /// Membership churn under concurrent administration: two operators, contacting two
+    /// different nodes, concurrently ask to remove two different members while election
+    /// and heartbeat timers fire. Whatever schedule occurs — whichever requests are
+    /// accepted, rejected, or retried, and whoever leads — the committed log must never
+    /// fork: no two members may commit different payloads at the same log index.
     ///
-    /// The oracle is identical: no two members may commit different entries (term or
-    /// payload) at the same physical log index.
+    /// The test fixes only the workload (steps 1–3 below); the simulator owns every
+    /// batching, delivery, and leadership decision.
     ///
-    /// This is the strongest tier that has actually found the counterexample: coverage-
-    /// guided fuzzing hit it at 315,218 executions, forking `Noop@term 1` against
-    /// `Noop@term 4` at physical index 1 (see `docs/dyn_raft_simulator_discovery.md` for
-    /// the full writeup). Discover schedules with:
-    /// `cargo sim -p hydro_test -- simulator_discovers_ongaro_membership_bug_bootstrapped --ignored`.
+    /// **Result (post-discovery note):** coverage-guided fuzzing (`cargo sim`) found
+    /// schedules violating this property; the checked-in reproducer under `sim-failures/`
+    /// replays one deterministically, hence `#[should_panic]`. Analysis in
+    /// `docs/dyn_raft_simulator_discovery.md`.
     #[test]
-    #[ignore = "discovery experiment; run under `cargo sim` (see doc comment)"]
     #[should_panic(expected = "committed log forked")]
-    fn simulator_discovers_ongaro_membership_bug_bootstrapped() {
+    fn simulator_explores_concurrent_double_leave() {
         use hydro_lang::location::MemberId;
 
         const N: usize = 4;
         const ELECTION_WAVES: usize = 2;
         const HEARTBEAT_PUMPS: usize = 6;
-        const RECONFIG_COPIES: u64 = 3;
 
         let mut flow = FlowBuilder::new();
         let cluster = flow.cluster::<Replica>();
@@ -1965,7 +1803,7 @@ mod tests {
             nondet!(
                 /** elections, batching, and replication timing are nondeterministic; the
                 committed log must not fork regardless — and, on this deliberately
-                unpatched path, the simulator is expected to prove that it can. */
+                unpatched path, the simulator is expected to explore whether it can. */
             ),
         );
 
@@ -1973,62 +1811,60 @@ mod tests {
         let _results_recv = outputs.reconfiguration_results.sim_cluster_output();
         let _views_recv = outputs.leader_views.sim_cluster_output();
 
-        flow.sim()
-            .with_cluster_size(&cluster, N)
-            .fuzz(async || {
-                // The single staged step: some member (0, by symmetry) leads term 1.
-                election_send.send(0, ());
-                hydro_lang::sim::quiesce().await;
+        flow.sim().with_cluster_size(&cluster, N).fuzz(async || {
+            // Step 1: elect a leader.
+            election_send.send(0, ());
+            hydro_lang::sim::quiesce().await;
 
-                // Everything else is symmetric and concurrently outstanding; the fuzzer
-                // owns the complete schedule from here.
-                for _ in 0..ELECTION_WAVES {
-                    for member in 0..N as u32 {
-                        election_send.send(member, ());
-                    }
-                }
-                let mut request_id = 0;
-                for _copy in 0..RECONFIG_COPIES {
-                    for member in 0..N as u32 {
-                        for target in [3u32, 2u32] {
-                            request_id += 1;
-                            reconfig_send.send(
-                                member,
-                                ReconfigurationRequest {
-                                    request_id,
-                                    change: ConfigurationChange::Remove(MemberId::from_raw_id(
-                                        target,
-                                    )),
-                                },
-                            );
-                        }
-                    }
-                }
-                for _ in 0..HEARTBEAT_PUMPS {
-                    for member in 0..N as u32 {
-                        heartbeat_send.send(member, ());
-                    }
-                }
+            // Step 2: two operators concurrently submit removals of two different
+            // members, each contacting a different node.
+            reconfig_send.send(
+                0,
+                ReconfigurationRequest {
+                    request_id: 1,
+                    change: ConfigurationChange::Remove(MemberId::from_raw_id(1)),
+                },
+            );
+            reconfig_send.send(
+                1,
+                ReconfigurationRequest {
+                    request_id: 2,
+                    change: ConfigurationChange::Remove(MemberId::from_raw_id(2)),
+                },
+            );
 
-                // Single final quiescence, then the same fork oracle as the other tests.
-                hydro_lang::sim::quiesce().await;
-
-                let mut committed_at: HashMap<usize, DynLogEntry<String, Replica>> =
-                    HashMap::new();
+            // Step 3: a modest, symmetric batch of further ticks (same shape as
+            // raft.rs's fully_concurrent_run_never_forks_the_committed_log), with no
+            // `.await` in between — the simulator owns the entire schedule from here.
+            for _ in 0..ELECTION_WAVES {
                 for member in 0..N as u32 {
-                    for entry in committed_recv.collect::<Vec<_>>(member).await {
-                        if let Some(previous) = committed_at.get(&entry.index) {
-                            assert_eq!(
-                                previous, &entry,
-                                "committed log forked: physical index {} committed two \
-                                 different entries",
-                                entry.index
-                            );
-                        } else {
-                            committed_at.insert(entry.index, entry);
-                        }
+                    election_send.send(member, ());
+                }
+            }
+            for _ in 0..HEARTBEAT_PUMPS {
+                for member in 0..N as u32 {
+                    heartbeat_send.send(member, ());
+                }
+            }
+
+            // Single final quiescence, then the same fork oracle as the other tests.
+            hydro_lang::sim::quiesce().await;
+
+            let mut committed_at: HashMap<usize, DynLogPayload<String, Replica>> = HashMap::new();
+            for member in 0..N as u32 {
+                for entry in committed_recv.collect::<Vec<_>>(member).await {
+                    if let Some(previous) = committed_at.get(&entry.index) {
+                        assert_eq!(
+                            previous, &entry.payload,
+                            "committed log forked: physical index {} committed two \
+                                 different payloads",
+                            entry.index
+                        );
+                    } else {
+                        committed_at.insert(entry.index, entry.payload);
                     }
                 }
-            });
+            }
+        });
     }
 }
