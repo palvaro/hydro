@@ -726,6 +726,35 @@ impl CompiledSim {
         }
     }
 
+    /// Executes the given closure with a single instance of the compiled simulation, drawing
+    /// every scheduling decision from the provided driver instead of a fuzzer. See
+    /// [`super::prompt_schedule`] for a deterministic driver.
+    ///
+    /// The closure receives the instance without the scheduler running; use
+    /// [`CompiledSimInstance::run_with_scheduler_and_logger`] (or a receiver's methods, which
+    /// drive the scheduler while they wait) inside it. Tick logging follows `HYDRO_SIM_LOG`.
+    pub fn run_with_driver<D: bolero::bolero_engine::driver::Driver + 'static>(
+        &self,
+        driver: D,
+        thunk: impl AsyncFnOnce(CompiledSimInstance<'_>) + RefUnwindSafe,
+    ) {
+        self.with_instantiator(
+            |instantiator| {
+                let instance = instantiator();
+                bolero::bolero_engine::any::scope::with(
+                    Box::new(bolero::bolero_engine::driver::object::Object(driver)),
+                    || {
+                        tokio::runtime::Builder::new_current_thread()
+                            .build()
+                            .unwrap()
+                            .block_on(async { instance.run_without_launching(thunk).await })
+                    },
+                );
+            },
+            false,
+        );
+    }
+
     /// Exhaustively searches all possible executions of the simulation. The provided
     /// closure will be repeatedly executed with instances of the Hydro program where the
     /// batching boundaries, order of messages, and retries are varied.
@@ -921,7 +950,7 @@ impl<'a> CompiledSimInstance<'a> {
     /// with respect to the future: it is re-polled between every pair of scheduler steps, but
     /// never while a step is in flight. The [`LaunchedSim`] state struct lives across steps,
     /// in this function's frame.
-    async fn run_with_scheduler(self, thunk: impl Future<Output = ()>) {
+    pub(crate) async fn run_with_scheduler(self, thunk: impl Future<Output = ()>) {
         self.run_with_scheduler_and_maybe_logger::<std::io::Empty>(None, thunk)
             .await;
     }
