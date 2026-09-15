@@ -498,3 +498,118 @@ Three findings:
   structure (or a scheduler change that lets a tick run empty under a policy that asks for it).
 - The `sliced!`-level location and the `()` collision in Raft argue for an operator id in the
   hook metadata before E4 names moves by edge.
+
+## E3: design
+
+Status: design, not started. Everything above is measured; nothing below is.
+
+### The verdict is derivations per goal
+
+E2 and E2b together fix what the checker must compute. A **goal** is a data item the program
+exists to produce: an output record, identified by the input data it answers (the completion for
+request $k$; the committed entry for client request $r$). Everything else the program derives
+along the way (a response in flight, a leader, a vote, a heartbeat) is a **sub-derivation**: work
+done toward some goal. A leader is not a goal; the protocol needs one in order to commit an
+entry, so an election is work attributed to whatever entries were waiting for a leader.
+
+The **derivation count** of goal $g$ under schedule $\sigma$, $D_g(\sigma)$, is the number of
+records, over the edges of interest, that were derived toward $g$. The program amplifies on $g$
+if $D_g$ varies with $\sigma$; gain is $\max_\sigma D_g / \min_\sigma D_g$; it is unbounded if
+the gain grows with run length. This replaces E2's $W_e$, which E2b showed can *fall* while the
+program storms (heartbeats displaced by election traffic on the same edge). A goal that is never
+reached (Raft under the storm never commits) still accumulates derivations; that is the case the
+checker most needs to report.
+
+Expected on the two ground truths, to be hand-computed before measuring:
+
+- `rpc_retry`, hold $d$ on responses: $D_k = 1$ under prompt; $1 + \min(2, \lceil (l+d)/\tau
+  \rceil - 1)$ sends toward $k$ under hold, i.e. the E2 table, now per goal, with the second and
+  third response to $k$ *recorded* as dropped at `responded_ids.unique()` and at the join against
+  `outstanding`, not lost. E2's edge counts and the per-goal counts agree here because retries
+  add records without displacing any.
+- Raft with $R$ client requests submitted before the delay begins, election timer every $E$:
+  under prompt each entry commits with one election (shared) and one `AppendEntries` per
+  follower; under a constant delay $d \ge E$ nothing commits and every period adds an election
+  attributed to the $R$ pending entries, so $D_r$ grows with the run while $W_e$ on the traffic
+  edge falls (E2b: 804 → 334). This is the case where the two metrics must disagree; if the E3
+  instrument does not show it, E3 has failed.
+
+### Goals are named by the perturbation, not by labels
+
+The previous branch labelled sources (data vs timer) to decide what counts as identity. That is
+rejected here, as before. Instead: run $\sigma$ (prompt) and $\sigma'$ (adversarial) on the
+same inputs; a record in $\sigma'$ is a re-derivation toward $g$ if its ancestry contains $g$'s
+input record *and* a delivery the adversary held (as a negative leaf, see below). The adversary's
+move names the goal: a held response names its request; a held heartbeat names the entries
+waiting on the leader it would have confirmed. No program declares anything.
+
+### Representation: a side log of derivation records
+
+Constraints carried from the previous branch and confirmed by E2:
+
+- Derivation records live in a **side log keyed by record id**, never as root sets carried in
+  payloads (fold accumulation swamped those).
+- **State carry is reported separately.** `use::state` re-derives every entry every tick;
+  `outstanding` has gain $d$ under hold. Ancestry through state is followed at analysis time
+  but state-carry edges are not counted as work.
+- **Anti-join, `unique` and `first` record what they drop.** `filter_key_not_in(responded_ids)`
+  is where a retry is born; `unique()` and the join against `outstanding` are where the
+  duplicate answers die. Both must appear in the log.
+- **The negative leaf is the held delivery.** When an anti-join fires at a tick, the records
+  that would have suppressed it are sitting in a hook's buffer, unreleased. The scheduler knows
+  them (`buffered_len` is already in `HookContext`; their ids are one step further). Recording
+  them as the negative support of the retry's derivation record is what links the extra work to
+  the adversary's move without any label.
+
+The log is produced inside the compiled dylib (it is the program's operators that know their
+parents) and must be shipped to the host: the dylib's statics are not shared (E2 note). Follow
+the existing `println_handler` pattern: a host-provided sink function passed through
+`__hydro_runtime`, or a dedicated output channel.
+
+### Mechanism: an IR pass, staged
+
+Parents cannot be correlated through a `q!` closure without wrapping the value, so E3 needs an
+IR rewrite before codegen (precedent: `apply_dynamic_membership`, `splice_versioned_networks`)
+that turns `Stream<T>` into `Stream<(RecordId, T)>` and each operator into one that computes the
+payload as before and appends `(child id, operator id, tick, parents)` to the log. Rules:
+
+| operator | derivation record |
+|----------|-------------------|
+| source, `sim_input`, timer | fresh id, no parents (a leaf) |
+| map, filter, flat_map | child ← input |
+| join, cross | child ← both inputs |
+| fold, reduce, `use::state` | state version ← previous version + inputs this tick (state-carry edge, flagged) |
+| `filter_key_not_in`, anti-join | child ← positive input, plus negative: the buffer contents of the hook feeding the negative side (held deliveries) |
+| `unique`, `first`, keyed dedup | the surviving record as usual, plus a **drop record** for each dropped input, pointing at the survivor |
+| `batch` (hook) | child ← input, plus the tick and the release decision (already counted by E2) |
+| `send` / network | child ← input, crossing locations (the edges E2 counted) |
+
+Do it in three steps, each ending with a run:
+
+1. **E3.1, ids at the boundary only.** Wrap records at `batch` and at network receive
+   (both already have hooks), assign ids there, and log (edge, tick, member, id, held ids). No
+   intra-tick lineage. Attribution by the harness supplying an extractor for the goal key
+   (`|r: &Request<T>| r.id`), as the E2 tests already do from `sim_output`. This gives per-goal
+   counts for `rpc_retry` and for Raft's `AppendEntries` (they carry entries) but not for
+   election traffic, and it is not generic. It is a week's insurance that the analysis and the
+   Raft harness are right before the pass is written.
+2. **E3.2, the pass.** Rules above; verify on `rpc_retry` that per-goal counts equal E2's
+   per-request sends at every $d$ and that the drops at `unique`/join are recorded; verify on
+   Raft that pending entries accumulate elections under the storm.
+3. **E3.3, the perturbation link.** Negative leaves from held buffers; show that in `rpc_retry`
+   every extra record's ancestry contains a held response, and in Raft every election's
+   ancestry contains a held heartbeat. That is the report E4 will use as its gradient.
+
+### Open questions for E3
+
+- Operator ids: hooks are keyed `file:line:col#index <type>` (E2b). The pass should assign a
+  stable operator id in `HydroIrOpMetadata` and the hooks should carry it; retire the index.
+- Coverage: E2's counting sees `batch` hooks only. The pass observes every edge, which also
+  closes E2's blind spot (reliable broadcast, network sends, `TopLevelFoldHook`).
+- Cost: the previous branch's instrument was unusable at scale. Log per firing, not per
+  ancestor; compute closure at analysis time; measure the slowdown on the 800-round E0 run.
+- The forcing rule (E2): the adversary can only hold when another hook in the tick releases.
+  E4 will need either the metered-clock structure or a scheduler option that lets a tick run
+  empty under an explicit policy. Decide during E3.3, when the negative leaves make the
+  interaction concrete.
+
