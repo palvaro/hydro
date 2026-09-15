@@ -48,6 +48,8 @@ pub struct SimBuilder {
     /// Per crashable location: the ident of its staged-channel registry, emitted
     /// (along with its `CrashHook` registration) on first use.
     pub crash_channel_vecs: BTreeMap<LocationKey, syn::Ident>,
+    /// Whether the IR was rewritten by the lineage pass (every element carries a record id).
+    pub lineage: bool,
 }
 
 impl SimBuilder {
@@ -440,6 +442,17 @@ impl DfirBuilder for SimBuilder {
                     let hoff_recv_ident =
                         syn::Ident::new(&format!("__hoff_recv_{hoff_id}"), Span::call_site());
 
+                    // With the lineage pass, every element is `(u64, T)`; the edge is still
+                    // keyed by `T`.
+                    let (format_item_id, named_type): (syn::Expr, syn::Type) = if self.lineage {
+                        (
+                            parse_quote!(|__v| ::std::option::Option::Some(__v.0)),
+                            super::lineage_pass::unwrap_element_type(element_type),
+                        )
+                    } else {
+                        (parse_quote!(|_| ::std::option::Option::None), (**element_type).clone())
+                    };
+
                     self.add_extra_stmt_internal(in_location, syn::parse_quote! {
                         let (#hoff_send_ident, #hoff_recv_ident) = __root_dfir_rs::util::unsync::mpsc::unbounded();
                     });
@@ -456,9 +469,10 @@ impl DfirBuilder for SimBuilder {
                                 released_positions: ::std::vec::Vec::new(),
                                 output: #hoff_send_ident,
                                 batch_location: (#batch_location, #line, #caret),
-                                element_type: ::std::any::type_name::<#element_type>(),
+                                element_type: ::std::any::type_name::<#named_type>(),
                                 format_item_debug: #root::__maybe_debug__!(#element_type),
                                 format_item_serialize: #root::__maybe_serialize__!(#element_type),
+                                format_item_id: #format_item_id,
                                 _order: std::marker::PhantomData,
                             })
                         ),
@@ -488,6 +502,13 @@ impl DfirBuilder for SimBuilder {
                     ..
                 } => {
                     debug_assert!(in_location.is_top_level());
+
+                    // With the lineage pass the value is `(u64, V)`; the edge is keyed by `(K, V)`.
+                    let named_value_type: syn::Type = if self.lineage {
+                        super::lineage_pass::unwrap_element_type(value_type)
+                    } else {
+                        (**value_type).clone()
+                    };
 
                     let order_ty: syn::Type = match value_order {
                         StreamOrder::TotalOrder => {
@@ -522,7 +543,7 @@ impl DfirBuilder for SimBuilder {
                                 to_release: None,
                                 output: #hoff_send_ident,
                                 batch_location: (#batch_location, #line, #caret),
-                                element_type: ::std::any::type_name::<(#key_type, #value_type)>(),
+                                element_type: ::std::any::type_name::<(#key_type, #named_value_type)>(),
                                 format_item_debug: #root::__maybe_debug__!((#key_type, #value_type)),
                                 _order: std::marker::PhantomData,
                             })
@@ -2293,7 +2314,7 @@ impl DfirBuilder for SimBuilder {
 ///
 /// The return type mirrors `HookLocationMeta`, but with owned `String` that will be inlined
 /// into the generated sources.
-fn location_for_op(op_meta: &HydroIrOpMetadata) -> (String, String, String) {
+pub(crate) fn location_for_op(op_meta: &HydroIrOpMetadata) -> (String, String, String) {
     op_meta
         .backtrace
         .elements()

@@ -73,6 +73,13 @@ pub mod lineage;
 
 #[cfg(stageleft_runtime)]
 #[doc(hidden)]
+pub mod lineage_rt;
+
+#[cfg(stageleft_runtime)]
+mod lineage_pass;
+
+#[cfg(stageleft_runtime)]
+#[doc(hidden)]
 pub use compiled::continue_if_impl;
 #[cfg(stageleft_runtime)]
 pub use compiled::quiesce;

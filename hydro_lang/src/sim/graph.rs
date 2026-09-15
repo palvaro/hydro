@@ -833,12 +833,15 @@ fn compile_sim_graph_trybuild(
             __hydro_cluster_external_in: &mut ::std::collections::HashMap<usize, ::std::collections::HashMap<u32, __root_dfir_rs::util::unsync::mpsc::Sender<__root_dfir_rs::bytes::Bytes>>>,
             __println_handler: fn(::std::fmt::Arguments<'_>),
             __eprintln_handler: fn(::std::fmt::Arguments<'_>),
+            __lineage_sink: #root::sim::lineage_rt::LineageSink,
         ) -> (
             Vec<(&'static str, Option<u32>, __root_dfir_rs::scheduled::context::DfirErased)>,
             Vec<(&'static str, Option<u32>, __root_dfir_rs::scheduled::context::DfirErased)>,
             #root::sim::runtime::Hooks<&'static str>,
             #root::sim::runtime::InlineHooks<&'static str>,
         ) {
+            #root::sim::lineage_rt::set_sink(__lineage_sink);
+
             macro_rules! println {
                 ($($arg:tt)*) => ({
                     __println_handler(::std::format_args!($($arg)*));
@@ -903,6 +906,7 @@ fn compile_sim_graph_trybuild(
             __hydro_cluster_external_in: &mut ::std::collections::HashMap<usize, ::std::collections::HashMap<u32, __root_dfir_rs::util::unsync::mpsc::Sender<__root_dfir_rs::bytes::Bytes>>>,
             __println_handler: fn(::std::fmt::Arguments<'_>),
             __eprintln_handler: fn(::std::fmt::Arguments<'_>),
+            __lineage_sink: #root::sim::lineage_rt::LineageSink,
         ) -> (
             Vec<(&'static str, Option<u32>, __root_dfir_rs::scheduled::context::DfirErased)>,
             Vec<(&'static str, Option<u32>, __root_dfir_rs::scheduled::context::DfirErased)>,
@@ -910,7 +914,7 @@ fn compile_sim_graph_trybuild(
             #root::sim::runtime::InlineHooks<&'static str>,
         ) {
             #root::runtime_support::colored::control::set_override(should_color);
-            __hydro_runtime_core(__hydro_external_out, __hydro_external_in, __hydro_cluster_external_out, __hydro_cluster_external_in, __println_handler, __eprintln_handler)
+            __hydro_runtime_core(__hydro_external_out, __hydro_external_in, __hydro_cluster_external_out, __hydro_cluster_external_in, __println_handler, __eprintln_handler, __lineage_sink)
         }
     };
     source_ast

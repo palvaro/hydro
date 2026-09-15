@@ -31,10 +31,57 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use serde::de::DeserializeOwned;
 
 use super::edge_counts::{EdgeLocation, edge_key};
+pub use super::lineage_pass::OperatorInfo;
+use super::lineage_rt::LineageEvent;
 use super::runtime::ReleasedRecord;
 
 /// The id of a record crossing an edge, unique within a run.
 pub type RecordId = u64;
+
+/// Ids the host assigns itself (when the program was not compiled with the lineage pass) start
+/// here, so they never collide with the program's own ids.
+const HOST_ID_BASE: RecordId = 1 << 63;
+
+/// One derivation record from the instrumented program (E3.2): operator `op` produced `record`
+/// from `parents` (none for a leaf).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Derivation {
+    /// The produced record.
+    pub record: RecordId,
+    /// The operator, an index into [`Lineage::operators`].
+    pub op: u32,
+    /// The records it was computed from.
+    pub parents: Vec<RecordId>,
+    /// How many hook releases had been logged when this derivation happened; derivations of a
+    /// tick follow the releases of that tick's hooks.
+    pub after_release: u64,
+    /// Whether this is a new version of a state a closure mutated in place (`by_mut`), rather
+    /// than a record the operator emitted. State-carry edges are followed or not at analysis
+    /// time (see [`Lineage::children_with`]).
+    pub state_version: bool,
+}
+
+/// A record an operator discarded (E3.2): a duplicate at `unique`, with the survivor named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Drop {
+    /// The discarded record.
+    pub record: RecordId,
+    /// The operator that discarded it.
+    pub op: u32,
+    /// The record kept in its place, if any.
+    pub survivor: Option<RecordId>,
+    /// See [`Derivation::after_release`].
+    pub after_release: u64,
+}
+
+/// A record that left the program through an external output (`sim_output`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Output {
+    /// The record.
+    pub record: RecordId,
+    /// The output operator.
+    pub op: u32,
+}
 
 /// One record released by a hook.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,11 +133,24 @@ pub struct Release {
     pub held: Vec<RecordId>,
 }
 
-/// The log of one run: every release of every edge hook, in scheduler order.
+/// The log of one run: every release of every edge hook, in scheduler order (E3.1), and, when
+/// the program was compiled with the lineage pass (`SimFlow::with_lineage`), every derivation,
+/// drop and output the operators reported (E3.2) with the operator table.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Lineage {
     /// Every release of every edge hook, in scheduler order.
     pub releases: Vec<Release>,
+    /// Whether the program was compiled with the lineage pass (the fields below are populated
+    /// and record ids are the program's own).
+    pub instrumented: bool,
+    /// Every derivation the operators reported, in execution order.
+    pub derivations: Vec<Derivation>,
+    /// Every record an operator discarded.
+    pub drops: Vec<Drop>,
+    /// Every record that left through an external output.
+    pub outputs: Vec<Output>,
+    /// The operator table; `Derivation::op` indexes it.
+    pub operators: Vec<OperatorInfo>,
 }
 
 impl Lineage {
@@ -158,11 +218,69 @@ struct HookIds {
     buffered: VecDeque<(RecordId, u64)>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Recorder {
     log: Lineage,
     next_id: RecordId,
     hooks: HashMap<(String, Option<u32>), HookIds>,
+}
+
+impl Default for Recorder {
+    fn default() -> Self {
+        Self {
+            log: Lineage::default(),
+            next_id: HOST_ID_BASE,
+            hooks: HashMap::new(),
+        }
+    }
+}
+
+/// Called by the host's lineage sink for every event the instrumented program reports.
+pub(crate) fn record_event(event: LineageEvent) {
+    RECORDER.with(|r| {
+        let mut borrow = r.borrow_mut();
+        let Some(recorder) = borrow.as_mut() else {
+            return;
+        };
+        let after_release = recorder.log.releases.len() as u64;
+        match event {
+            LineageEvent::Derived {
+                record,
+                op,
+                parents,
+            } => recorder.log.derivations.push(Derivation {
+                record,
+                op,
+                parents,
+                after_release,
+                state_version: false,
+            }),
+            LineageEvent::StateVersion {
+                record,
+                op,
+                parents,
+            } => recorder.log.derivations.push(Derivation {
+                record,
+                op,
+                parents,
+                after_release,
+                state_version: true,
+            }),
+            LineageEvent::Dropped {
+                record,
+                op,
+                survivor,
+            } => recorder.log.drops.push(Drop {
+                record,
+                op,
+                survivor,
+                after_release,
+            }),
+            LineageEvent::Output { record, op } => {
+                recorder.log.outputs.push(Output { record, op })
+            }
+        }
+    });
 }
 
 thread_local! {
@@ -192,6 +310,10 @@ pub(crate) fn recording() -> bool {
 /// positions the decision releases, in the buffer as it stood before (see
 /// [`super::runtime::SimHook::pending_release_positions`]); `records` produces the released
 /// records' contents in the same order.
+///
+/// `ids` and `held_ids` are the program's own ids for the released and the still-buffered
+/// records, when it was compiled with the lineage pass; then they replace the host's ids and the
+/// 8-byte id prefix is stripped from each payload.
 pub(crate) fn record_release(
     location: EdgeLocation,
     index: usize,
@@ -199,6 +321,8 @@ pub(crate) fn record_release(
     buffered_after: usize,
     positions: Vec<usize>,
     records: impl FnOnce() -> Vec<ReleasedRecord>,
+    ids: Option<Vec<u64>>,
+    held_ids: Option<Vec<u64>>,
 ) {
     RECORDER.with(|r| {
         let mut borrow = r.borrow_mut();
@@ -226,9 +350,26 @@ pub(crate) fn record_release(
 
         let contents = records();
         assert_eq!(contents.len(), positions.len(), "{edge}: released records and positions differ");
+        if let Some(ids) = &ids {
+            assert_eq!(ids.len(), positions.len(), "{edge}: released ids and positions differ");
+        }
         let mut released = Vec::with_capacity(positions.len());
-        for (&position, (payload, debug)) in positions.iter().zip(contents) {
-            let (id, arrived) = hook.buffered[position];
+        for (i, (&position, (payload, debug))) in positions.iter().zip(contents).enumerate() {
+            let (host_id, arrived) = hook.buffered[position];
+            let (id, payload) = match &ids {
+                Some(ids) => {
+                    let id = ids[i];
+                    // The payload is bincode of `(u64, T)`: a fixed 8-byte little-endian id, then `T`.
+                    let payload = payload.map(|bytes| {
+                        assert!(bytes.len() >= 8, "{edge}: instrumented payload without an id prefix");
+                        let prefix = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+                        assert_eq!(prefix, id, "{edge}: payload id prefix and hook id differ");
+                        bytes[8..].to_vec()
+                    });
+                    (id, payload)
+                }
+                None => (host_id, payload),
+            };
             released.push(Record {
                 id,
                 arrived,
@@ -244,7 +385,13 @@ pub(crate) fn record_release(
         for position in sorted.into_iter().rev() {
             hook.buffered.remove(position);
         }
-        let held = hook.buffered.iter().map(|(id, _)| *id).collect();
+        let held = match held_ids {
+            Some(held) => {
+                assert_eq!(held.len(), hook.buffered.len(), "{edge}: held ids and positions differ");
+                held
+            }
+            None => hook.buffered.iter().map(|(id, _)| *id).collect(),
+        };
 
         let serial = recorder.log.releases.len() as u64;
         recorder.log.releases.push(Release {
@@ -256,4 +403,118 @@ pub(crate) fn record_release(
             held,
         });
     });
+}
+
+/// Analysis over the derivation records (E3.2): reachability from a goal's input record to the
+/// records derived toward it.
+impl Lineage {
+    /// The operator a derivation record refers to.
+    pub fn operator(&self, op: u32) -> &OperatorInfo {
+        &self.operators[op as usize]
+    }
+
+    /// Operators whose table row satisfies `pred`.
+    pub fn operators_where<'a>(
+        &'a self,
+        pred: impl Fn(&OperatorInfo) -> bool + 'a,
+    ) -> impl Iterator<Item = &'a OperatorInfo> + 'a {
+        self.operators.iter().filter(move |o| pred(o))
+    }
+
+    /// Every record with a derivation record, mapped to its parents.
+    pub fn parents(&self) -> HashMap<RecordId, &[RecordId]> {
+        self.derivations
+            .iter()
+            .map(|d| (d.record, d.parents.as_slice()))
+            .collect()
+    }
+
+    /// Every record mapped to the records derived directly from it.
+    pub fn children(&self) -> HashMap<RecordId, Vec<RecordId>> {
+        self.children_with(true)
+    }
+
+    /// [`Self::children`], optionally without the state chain: when `follow_state` is false, a
+    /// state version is not a child of the previous version, so a record reaches only the
+    /// inputs of the tick that produced it and of the tick that last changed the state, not
+    /// everything the state ever absorbed.
+    pub fn children_with(&self, follow_state: bool) -> HashMap<RecordId, Vec<RecordId>> {
+        let versions: std::collections::HashSet<RecordId> = self
+            .derivations
+            .iter()
+            .filter(|d| d.state_version)
+            .map(|d| d.record)
+            .collect();
+        let mut children: HashMap<RecordId, Vec<RecordId>> = HashMap::new();
+        for d in &self.derivations {
+            for parent in &d.parents {
+                if !follow_state && d.state_version && versions.contains(parent) {
+                    continue;
+                }
+                children.entry(*parent).or_default().push(d.record);
+            }
+        }
+        children
+    }
+
+    /// Every record derived, directly or transitively, from `root` (not including `root`), given
+    /// a children index from [`Self::children`].
+    pub fn descendants(
+        &self,
+        root: RecordId,
+        children: &HashMap<RecordId, Vec<RecordId>>,
+    ) -> std::collections::HashSet<RecordId> {
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            if let Some(kids) = children.get(&id) {
+                for kid in kids {
+                    if seen.insert(*kid) {
+                        stack.push(*kid);
+                    }
+                }
+            }
+        }
+        seen
+    }
+
+    /// Derivations per goal by ancestry: `goals` names each goal by the id of its input record
+    /// (e.g. the record on the requests edge that carries request `k`); the count for a goal is
+    /// the number of records released on the edges matching `pred` whose ancestry contains that
+    /// record. A record descending from several goals counts toward each.
+    pub fn per_goal_by_ancestry<G: Ord + Clone>(
+        &self,
+        pred: impl Fn(&str) -> bool,
+        goals: &BTreeMap<RecordId, G>,
+    ) -> BTreeMap<G, u64> {
+        self.per_goal_by_ancestry_with(pred, goals, true)
+    }
+
+    /// [`Self::per_goal_by_ancestry`] with or without the state chain (see
+    /// [`Self::children_with`]).
+    pub fn per_goal_by_ancestry_with<G: Ord + Clone>(
+        &self,
+        pred: impl Fn(&str) -> bool,
+        goals: &BTreeMap<RecordId, G>,
+        follow_state: bool,
+    ) -> BTreeMap<G, u64> {
+        let children = self.children_with(follow_state);
+        let on_edge: std::collections::HashSet<RecordId> =
+            self.records_on(pred).map(|(_, r)| r.id).collect();
+        let mut counts = BTreeMap::new();
+        for (root, goal) in goals {
+            let reached = self.descendants(*root, &children);
+            let n = on_edge.iter().filter(|id| reached.contains(id)).count() as u64;
+            counts.insert(goal.clone(), n);
+        }
+        counts
+    }
+
+    /// Drops reported by operators whose table row satisfies `pred`.
+    pub fn drops_at<'a>(
+        &'a self,
+        pred: impl Fn(&OperatorInfo) -> bool + 'a,
+    ) -> impl Iterator<Item = &'a Drop> + 'a {
+        self.drops.iter().filter(move |d| pred(self.operator(d.op)))
+    }
 }

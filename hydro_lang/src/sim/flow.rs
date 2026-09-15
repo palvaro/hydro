@@ -72,6 +72,9 @@ pub struct SimFlow<'a> {
     /// Number of iterations to use for fuzzing, defaults to 8192
     pub(crate) unit_test_fuzz_iterations: usize,
 
+    /// When true, the IR is rewritten by the lineage pass before codegen (see `with_lineage`).
+    pub(crate) lineage: bool,
+
     pub(crate) _phantom: Invariant<'a>,
 }
 
@@ -157,6 +160,15 @@ impl<'a> SimFlow<'a> {
     /// the default value of 8192
     pub fn unit_test_fuzz_iterations(mut self, iterations: usize) -> Self {
         self.unit_test_fuzz_iterations = iterations;
+        self
+    }
+
+    /// Compiles the program with the lineage pass (see `hydro_lang::sim::lineage`): every record
+    /// carries an id, every operator reports how it derived its outputs, and a traced run
+    /// ([`Self::run_traced`]) returns the derivation records and the operator table along with
+    /// the boundary log.
+    pub fn with_lineage(mut self) -> Self {
+        self.lineage = true;
         self
     }
 
@@ -251,6 +263,7 @@ impl<'a> SimFlow<'a> {
             channel_tables: BTreeMap::new(),
             crashable: self.crashable.iter().map(|(k, v)| (*k, *v)).collect(),
             crash_channel_vecs: BTreeMap::new(),
+            lineage: self.lineage,
         };
 
         // Ensure the default (0) external is always present.
@@ -306,6 +319,12 @@ impl<'a> SimFlow<'a> {
             &self.dynamic_membership,
             &cluster_member_ids,
         );
+
+        // E3: rewrite every collection to carry record ids and every operator to report its
+        // derivations (see `lineage_pass`). No-op unless `with_lineage` was called.
+        let operators = self
+            .lineage
+            .then(|| super::lineage_pass::apply_lineage(&mut self.ir));
 
         let mut seen_tees = HashMap::new();
         let mut built_tees = HashMap::new();
@@ -371,6 +390,7 @@ impl<'a> SimFlow<'a> {
             lib,
             externals_port_registry: self.externals_port_registry.take(),
             unit_test_fuzz_iterations: self.unit_test_fuzz_iterations,
+            operators,
         }
     }
 

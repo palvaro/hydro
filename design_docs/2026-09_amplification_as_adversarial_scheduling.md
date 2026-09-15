@@ -501,7 +501,7 @@ Three findings:
 
 ## E3: design
 
-Status: design. E3.1 is done and measured ("E3: results" below); E3.2 and E3.3 are not started.
+Status: design. E3.1 and E3.2 are done and measured ("E3: results" below); E3.3 is not started.
 
 ### The verdict is derivations per goal
 
@@ -710,3 +710,107 @@ Decisions taken in E3.1 that E3.2 inherits: the edge key is still E2's `file:lin
 release, with the held set per release rather than per record; `Record::decode` panics on a type
 mismatch rather than returning `None`, so a harness that names the wrong type for an edge fails
 loudly.
+
+### E3.2: the pass
+
+Done. Tests: `rpc_retry::amplification_tests::lineage_pass_attributes_by_ancestry_what_e31_attributes_by_payload`,
+`tracing_the_e0_collapse_attributes_every_send_and_costs_little` (now also instrumented),
+`raft::amplification_tests::lineage_pass_attributes_elections_through_state`. Every number below
+is asserted by one of them, except where marked "printed".
+
+**The pass** (`hydro_lang/src/sim/lineage_pass.rs`, on by `SimFlow::with_lineage()`). An IR
+rewrite between `apply_dynamic_membership` and codegen. `Stream<T>` (and singletons, optionals)
+become `(u64, T)`; keyed collections `(K, V)` become `(K, (u64, V))` so the keyed operators still
+key on `K`, and a `Cast` between the two layouts re-nests. Every staged closure is *wrapped*, not
+rewritten: `{ let __f = <staged closure>; move |__w| { unwrap; __y = __f(__x); derive; wrap } }`,
+so the `q!` code and its type hints are untouched. The rules are the design's table:
+
+| operator | as implemented |
+|----------|----------------|
+| source, `sim_input`, timer, `singleton(..)` | a `Map` after the leaf assigns a fresh id, no parents |
+| `map`, `filter_map`, `flat_map`, `enumerate` | child ← input |
+| `filter`, `inspect`, `batch`, `chain`, `defer_tick`/cycle (state carry), the positive side of `anti_join` | pass-through, same id |
+| `join`, `join_keyed_singleton`, `cross_singleton`, `cross_product` | child ← both inputs; **and** a `Tee` on both inputs feeds an `anti_join` beside the join whose `for_each` reports every probe-side record with no partner as dropped |
+| `fold`, `fold_keyed`, `reduce`, `count`, `max` | the accumulator becomes `(Vec<u64>, A)` and collects every input id of the tick; a `Map` after the aggregate derives the output from them (`reduce` becomes a fold over `Option<T>`) |
+| `scan` (behind `KeyedStream::first`) | keyed input and `Option<(K, U)>` output: parents are the inputs of that key alone (any other scan: every input so far in the tick) |
+| `unique` | a `scan` over a `HashMap<T, id>`: the first record of each payload survives under its id, every later one is reported dropped naming the survivor, then flattened |
+| `sort` | sorts `(T, id)`, so by payload, id along |
+| `anti_join` negative side | stripped to keys (`filter_key_not_in`); `difference` becomes an anti-join keyed by the payload |
+| network (`send`, `broadcast`, `demux`) | the serializer's output gets the id in front (8 bytes, little-endian; `PrependId` for `Bytes` and `(member, Bytes)`), the deserializer splits it off (`SplitId`); the record keeps its id across locations |
+| `sim_output` | reports `Output { record, op }` and strips the id |
+| a closure with `by_ref`/`by_mut` handles (`raft_step`) | the closure is constructed per input with the handles shadowed: a singleton by a reference into its payload, a `by_mut` stream by a `LineageVec` that ids every pushed record, a `by_ref` stream by a clone of the payloads; parents of everything it produces = the input + every referenced singleton's id; and every `by_mut` singleton gets a **new version** after the call, derived from those parents (`StateVersion`, flagged) |
+
+The program reports through `hydro_lang::sim::lineage_rt` (its own copy in the dylib) to a sink
+function pointer the host passes as a new `__hydro_runtime` parameter, like `println_handler`;
+the host appends `Derivation { record, op, parents, after_release, state_version }`, `Drop` and
+`Output` records to the same `Lineage` as E3.1's boundary log. The boundary hooks read the id out
+of the wrapped element (`format_item_id`) and report the held set's ids too, so the E3.1 log and
+the derivation records share one id space; the E3.1 host ids are only used when the pass is off
+(they start at $2^{63}$). Operators are numbered in traversal order and the table `(id, kind,
+file:line:col, source line, element type)` is stored in the log (`Lineage::operators`; the
+operator id the E2b open question asked for, though the hooks' edge keys are still E2's). The
+edge keys are unchanged under the pass (the hook names its type by `T`, not `(u64, T)`), so every
+E2/E3.1 predicate and every hold policy works unmodified on an instrumented program.
+Attribution: `Lineage::per_goal_by_ancestry(edge, goals)` counts, per goal (named by the id of
+its input record, e.g. the record carrying request $k$ on the requests edge), the records on the
+edge whose ancestry contains it, by reachability over a children index; `children_with(false)`
+cuts the state chain (a state version is then not a child of the previous version). Anything the
+pass cannot wrap panics at compile time with the operator's location.
+
+**`rpc_retry`** (E2 configuration; hold $d \in \{0, 40, 80, 120\}$). On every work edge and for
+every one of the 600 requests, $D_k$ by ancestry equals $D_k$ by payload (E3.1) equals the
+hand-computed sends; the completion edge has exactly one record per completed request by
+ancestry as well; every E2 edge count is unchanged by the instrumentation. The duplicate answers
+are now *recorded*, not inferred: every response record is a completion, or a drop at `unique()`
+(the survivor named), or a drop at the join against `outstanding`, with nothing else dropped
+anywhere; and every dropped record descends from a request.
+
+| $d$ | responses | completions | dropped at `unique` | dropped at the join | derivation records |
+|-----|-----------|-------------|---------------------|---------------------|--------------------|
+| 0   | 600  | 600 | 0   | 0    | 17,566 |
+| 40  | 1120 | 600 | 0   | 520  | 178,526 |
+| 80  | 1560 | 600 | 160 | 800  | 316,286 |
+| 120 | 1560 | 240 | 320 | 1000 | 424,706 |
+
+The derivation count grows with $d$ because `outstanding` is re-derived every tick a request
+waits (the design's "`use::state` re-derives every entry every tick"): 268 operators, 17.5k
+derivations at $d = 0$, 425k at $d = 120$. On the E0 collapse (800 rounds, backlog up to 1237
+re-enumerated every server tick): 3,614,402 derivations, 2,718 drops (= 3700 responses − 982
+completions), 11,397 outputs; by ancestry the sends per request are E2's {1: 619, 2: 425, 3:
+1156} exactly; wall time 1.73 s against 0.77 s untraced (2.26×; E3.1 alone 1.06×). Usable, but
+the state re-derivation is where the log's volume comes from.
+
+**Raft** ($R = 5$ entries, $E = 4$, 200 ticks; 80 operators, ~7k derivations, 606–611 state
+versions). `raft_step` is one staged closure over the member's whole state through `by_mut`, so
+every message a member sends descends from its state, and the state from everything the member
+ever absorbed. Per entry:
+
+| schedule | traffic $W_e$ | elections | $D_r$ by payload (E3.1) | $D_r$ by ancestry | by ancestry, state chain cut | what descends from $r_0$ (printed) |
+|----------|---------------|-----------|--------------------------|-------------------|------------------------------|------------------------------------|
+| prompt | 804 | 0 | 2 | 800 | 800 | 2 `AppendEntries` with entries, 398 heartbeats, 400 acks |
+| constant delay $d = 4$ | 332 | 50 | 16 | 324 | 8 | 292 `RequestVote`, 16 `AppendEntries`, 16 acks |
+
+Reading. The pass does what E3.1 could not: under the storm the 292 election records (all but
+the 6 `RequestVote`s sent before any follower had received an entry, and the initial election)
+are attributed to the five pending entries, and $D_r$ grows with the run (324 in 200 ticks, and
+every further period adds 6). But the same attribution gives 800 under prompt: the leader's
+heartbeats and their acks also descend from the entries, through the state, so by ancestry
+alone the storm is *less* work toward the entries than the steady state, the same wrong sign as
+$W_e$. This is not a defect of the pass; it is what "derived from" means for a state machine.
+Cutting the state chain does not help: it gives 8 under the storm and still 800 under prompt,
+because under prompt the lineage does not need the chain: each heartbeat's parents include this
+tick's messages, i.e. the previous heartbeat's acks, whose parents include that heartbeat, and so
+on back to the first `AppendEntries` that carried the entries. The exchange itself carries the
+ancestry forward. So the discriminator the design named is necessary: a record is a re-derivation toward
+$g$ if its ancestry contains $g$'s input **and** a delivery the adversary held. Under prompt
+nothing is held, so the 800 are steady-state work by construction; under the storm the question
+E3.3 must answer is which of the 324 have a held `AppendEntries` (the one that would have
+suppressed the timeout) as a negative ancestor. The information is in the log already: the
+`held` set of every release (E3.1) and the tick association of every derivation
+(`after_release`).
+
+Decisions taken in E3.2 that E3.3 inherits: the join-drop observer reports the probe side only;
+a `scan` other than `first()` gets cumulative parents; a `by_mut` singleton is assumed mutated on
+every call (a new version per tick, parents = the closure's inputs); the negative side of an
+anti-join contributes nothing to the positive record's lineage (E3.3's negative leaf goes there);
+the E2 edge key is kept for the hooks and the operator table carries the operator id.

@@ -165,6 +165,19 @@ pub trait SimHook {
     fn pending_release_records(&self) -> Option<Vec<ReleasedRecord>> {
         None
     }
+
+    /// The record ids the current decision will release, in release order, when the program was
+    /// compiled with the lineage pass (every element is `(u64, T)`); `None` otherwise, and the
+    /// host assigns ids itself.
+    fn pending_release_ids(&self) -> Option<Vec<u64>> {
+        None
+    }
+
+    /// The ids of the records still buffered (after the current decision), when the program was
+    /// compiled with the lineage pass.
+    fn buffered_ids(&self) -> Option<Vec<u64>> {
+        None
+    }
 }
 
 /// A hook that can make inline decisions during the execution of a tick.
@@ -282,6 +295,9 @@ pub struct StreamHook<T, Order: Ordering> {
     pub format_item_debug: fn(&T) -> Option<String>,
     /// bincode serialization of an element for the host's lineage log, when `T: Serialize`.
     pub format_item_serialize: fn(&T) -> Option<Vec<u8>>,
+    /// The record id an element carries when the program was compiled with the lineage pass
+    /// (`|(id, _)| Some(*id)`); `|_| None` otherwise.
+    pub format_item_id: fn(&T) -> Option<u64>,
     pub _order: std::marker::PhantomData<Order>,
 }
 
@@ -293,6 +309,23 @@ impl<T, Order: Ordering> StreamHook<T, Order> {
                 .map(|item| ((self.format_item_serialize)(item), (self.format_item_debug)(item)))
                 .collect()
         })
+    }
+
+    fn ids_of<'a>(&self, items: impl Iterator<Item = &'a T>) -> Option<Vec<u64>>
+    where
+        T: 'a,
+    {
+        items.map(|item| (self.format_item_id)(item)).collect()
+    }
+
+    fn released_ids(&self) -> Option<Vec<u64>> {
+        self.to_release
+            .as_ref()
+            .and_then(|items| self.ids_of(items.iter()))
+    }
+
+    fn held_ids(&self) -> Option<Vec<u64>> {
+        self.ids_of(self.input.borrow().iter())
     }
 }
 
@@ -319,6 +352,14 @@ impl<T> SimHook for StreamHook<T, TotalOrder> {
 
     fn pending_release_records(&self) -> Option<Vec<ReleasedRecord>> {
         self.released_records()
+    }
+
+    fn pending_release_ids(&self) -> Option<Vec<u64>> {
+        self.released_ids()
+    }
+
+    fn buffered_ids(&self) -> Option<Vec<u64>> {
+        self.held_ids()
     }
 
     fn can_make_nontrivial_decision(&self) -> bool {
@@ -407,6 +448,14 @@ impl<T> SimHook for StreamHook<T, NoOrder> {
 
     fn pending_release_records(&self) -> Option<Vec<ReleasedRecord>> {
         self.released_records()
+    }
+
+    fn pending_release_ids(&self) -> Option<Vec<u64>> {
+        self.released_ids()
+    }
+
+    fn buffered_ids(&self) -> Option<Vec<u64>> {
+        self.held_ids()
     }
 
     fn can_make_nontrivial_decision(&self) -> bool {

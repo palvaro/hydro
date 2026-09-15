@@ -884,6 +884,19 @@ mod amplification_tests {
         ticks: usize,
         driver: impl FnOnce(HoldScheduleDriver) -> HoldScheduleDriver,
     ) -> (Run, Lineage) {
+        run_traced_with(policy, server_config, per_tick, ticks, driver, false)
+    }
+
+    /// [`run_traced`], with the program compiled by the lineage pass when `instrumented` (E3.2:
+    /// every record carries an id and every operator reports its derivations).
+    fn run_traced_with(
+        policy: RetryPolicy,
+        server_config: ServerConfig,
+        per_tick: u32,
+        ticks: usize,
+        driver: impl FnOnce(HoldScheduleDriver) -> HoldScheduleDriver,
+        instrumented: bool,
+    ) -> (Run, Lineage) {
         let (flow, (clock_send, request_send), ports) = wire(policy, server_config);
         let driver = driver(
             HoldScheduleDriver::new()
@@ -893,7 +906,8 @@ mod amplification_tests {
 
         let mut run = Run::default();
         let run_ref = &mut run;
-        let (counts, lineage) = flow.sim().run_traced(driver, async move || {
+        let sim = if instrumented { flow.sim().with_lineage() } else { flow.sim() };
+        let (counts, lineage) = sim.run_traced(driver, async move || {
             for tick in 0..ticks as u64 {
                 clock_send.send(());
                 for _ in 0..per_tick {
@@ -1209,6 +1223,117 @@ mod amplification_tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
+    /// E3.2 (`design_docs/2026-09_amplification_as_adversarial_scheduling.md`, "E3: design"): the
+    /// lineage pass. The program is compiled with every record carrying an id and every operator
+    /// reporting its derivations; a request's goal is named by its record on the `requests` edge
+    /// and the derivations toward it are the records on an edge whose ancestry contains that
+    /// record. Those counts must equal E3.1's (attribution by decoding the payload) and the hand
+    /// computation, request by request, at every hold; and the duplicate responses must be
+    /// recorded as dropped at `unique()` rather than lost.
+    #[test]
+    fn lineage_pass_attributes_by_ancestry_what_e31_attributes_by_payload() {
+        let n = (TICKS as u64) * PER_TICK as u64;
+        let tau = POLICY.timeout_ticks;
+        let mut failures = vec![];
+        println!("== E3.2 (rpc_retry): derivations per request by ancestry");
+        let mut baseline: Option<Run> = None;
+        for d in [0, tau, 2 * tau, 3 * tau] {
+            let (run, log) = run_traced_with(POLICY, SERVER, PER_TICK, TICKS, hold_driver(d), true);
+            assert!(log.instrumented);
+            if d == 0 {
+                run.print("baseline, instrumented");
+                println!(
+                    "  {} operators, {} derivations, {} drops, {} outputs, {} releases",
+                    log.operators.len(),
+                    log.derivations.len(),
+                    log.drops.len(),
+                    log.outputs.len(),
+                    log.releases.len()
+                );
+                for o in &log.operators {
+                    println!("    op {:>3} {:<16} {} :: {}", o.id, o.kind, o.location, o.source_line.chars().take(70).collect::<String>());
+                }
+            }
+            // E3.1's view of the same run must be unchanged by the instrumentation.
+            for (key, e) in &run.counts.0 {
+                assert_eq!(log.record_count(|k| k == key), e.records, "record count on {key}");
+            }
+            let expected: BTreeMap<u64, u64> = match &baseline {
+                None => run.sends.keys().map(|id| (*id, 1)).collect(),
+                Some(b) => b
+                    .completions
+                    .iter()
+                    .map(|(id, l)| (*id, expected(b.issued_at[id], *l, d, &POLICY, TICKS as u64).0 as u64))
+                    .collect(),
+            };
+            // Goals: the record carrying request `k` on the requests edge (`(index, body)` after
+            // `enumerate`; the index is the request id).
+            let goals: BTreeMap<u64, u64> = log
+                .records_on(edge_named("requests (client)"))
+                .map(|(_, r)| (r.id, r.decode::<(usize, u64)>().unwrap().0 as u64))
+                .collect();
+            assert_eq!(goals.len() as u64, n);
+            let mut hist = BTreeMap::new();
+            for edge in WORK_EDGES.iter().chain(["completions (client metrics)"].iter()) {
+                let by_payload = per_request(&log, edge);
+                let by_ancestry = log.per_goal_by_ancestry(edge_named(edge), &goals);
+                if *edge == WORK_EDGES[0] {
+                    hist = histogram(by_ancestry.values().copied());
+                }
+                let mismatched: Vec<_> = by_payload
+                    .iter()
+                    .filter(|(id, c)| by_ancestry.get(*id) != Some(*c))
+                    .map(|(id, c)| (*id, *c, by_ancestry.get(id).copied()))
+                    .take(5)
+                    .collect();
+                if !mismatched.is_empty() || by_ancestry.len() != by_payload.len() && *edge != "completions (client metrics)" {
+                    failures.push(format!("d = {d}, {edge}: ancestry and payload attribution differ, e.g. (id, by payload, by ancestry) {mismatched:?}; {} vs {} requests", by_ancestry.len(), by_payload.len()));
+                }
+                if WORK_EDGES.contains(edge) {
+                    let mismatched: Vec<_> = expected
+                        .iter()
+                        .filter(|(id, s)| by_ancestry.get(*id) != Some(*s))
+                        .take(5)
+                        .collect();
+                    if !mismatched.is_empty() {
+                        failures.push(format!("d = {d}, {edge}: ancestry attribution differs from the hand computation, e.g. (id, expected) {mismatched:?}"));
+                    }
+                }
+            }
+            // Duplicate answers: every response record either completes its request, or is
+            // dropped at `unique()` (a duplicate within the tick, the survivor named), or dies at
+            // the join against `outstanding` (no longer outstanding); both drops are recorded.
+            let responses = log.record_count(edge_named("server -> client (responses)"));
+            let completions = log.record_count(edge_named("completions (client metrics)"));
+            let unique_drops = log.drops_at(|o| o.kind == "Unique" && o.source_line.contains("responded_ids")).count() as u64;
+            let join_drops = log.drops_at(|o| o.kind == "JoinHalf" && o.source_line.contains("join_keyed_singleton")).count() as u64;
+            let all_drops = log.drops.len() as u64;
+            println!(
+                "  d = {d:>3}: derivations/request {hist:?} (hand-computed {:?}); responses {responses} = completions {completions} + dropped at unique {unique_drops} + dropped at the join {join_drops}; drops in total {all_drops}; derivations {}",
+                histogram(expected.values().copied()),
+                log.derivations.len(),
+            );
+            if responses != completions + unique_drops + join_drops {
+                failures.push(format!("d = {d}: {responses} responses, but {completions} completions + {unique_drops} dropped at unique + {join_drops} dropped at the join"));
+            }
+            if all_drops != unique_drops + join_drops {
+                failures.push(format!("d = {d}: {all_drops} drops in total, expected only the two response drop sites"));
+            }
+            // Every dropped duplicate descends from some request, like the survivor does.
+            let children = log.children();
+            let from_some_request: std::collections::HashSet<u64> =
+                goals.keys().flat_map(|root| log.descendants(*root, &children)).collect();
+            let unattributed_drops = log.drops.iter().filter(|drop| !from_some_request.contains(&drop.record)).count();
+            if unattributed_drops > 0 {
+                failures.push(format!("d = {d}: {unattributed_drops} dropped records descend from no request"));
+            }
+            if baseline.is_none() {
+                baseline = Some(run);
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
     /// The E0 collapse under the E0 harness (one clock element and that tick's requests per
     /// round, then `quiesce()`), every hook releasing everything (the prompt driver), counted
     /// per edge.
@@ -1218,22 +1343,25 @@ mod amplification_tests {
         server_config: ServerConfig,
         rounds: usize,
     ) -> Run {
-        run_e0(workload, policy, server_config, rounds, false).0.0
+        run_e0(workload, policy, server_config, rounds, false, false).0.0
     }
 
-    /// [`run_e0_counted`], optionally traced (E3.1), with the wall time of the run itself (the
-    /// compiled simulation is built before the clock starts).
+    /// [`run_e0_counted`], optionally traced (E3.1) and compiled with the lineage pass (E3.2),
+    /// with the wall time of the run itself (the compiled simulation is built before the clock
+    /// starts).
     fn run_e0(
         workload: Workload,
         policy: RetryPolicy,
         server_config: ServerConfig,
         rounds: usize,
         traced: bool,
+        instrumented: bool,
     ) -> ((Run, Option<Lineage>), Duration) {
         use hydro_lang::sim::prompt_schedule::PromptScheduleDriver;
 
         let (flow, (clock_send, request_send), ports) = wire(policy, server_config);
-        let compiled = flow.sim().compiled();
+        let sim = if instrumented { flow.sim().with_lineage() } else { flow.sim() };
+        let compiled = sim.compiled();
         let mut run = Run::default();
         let run_ref = &mut run;
         let thunk = async move || {
@@ -1267,9 +1395,11 @@ mod amplification_tests {
         let workload = sim_tests::WORKLOAD;
         let policy = sim_tests::POLICY;
         let rounds = sim_tests::ROUNDS;
-        let ((untraced, _), untraced_time) = run_e0(workload, policy, sim_tests::SERVER, rounds, false);
-        let ((traced, lineage), traced_time) = run_e0(workload, policy, sim_tests::SERVER, rounds, true);
+        let ((untraced, _), untraced_time) = run_e0(workload, policy, sim_tests::SERVER, rounds, false, false);
+        let ((traced, lineage), traced_time) = run_e0(workload, policy, sim_tests::SERVER, rounds, true, false);
+        let ((instrumented, full), instrumented_time) = run_e0(workload, policy, sim_tests::SERVER, rounds, true, true);
         let lineage = lineage.unwrap();
+        let full = full.unwrap();
         traced.print("E0 trigger, prompt driver, E0 harness, traced");
         let records: usize = lineage.releases.iter().map(|r| r.released.len()).sum();
         println!(
@@ -1279,8 +1409,34 @@ mod amplification_tests {
             traced_time.as_secs_f64() / untraced_time.as_secs_f64(),
             lineage.releases.len()
         );
+        println!(
+            "== E3.2 cost on the E0 run: instrumented and traced {:.2?} ({:.2}x untraced), {} derivations, {} drops, {} outputs",
+            instrumented_time,
+            instrumented_time.as_secs_f64() / untraced_time.as_secs_f64(),
+            full.derivations.len(),
+            full.drops.len(),
+            full.outputs.len()
+        );
         assert_eq!(traced.counts, untraced.counts, "tracing changed the run");
+        assert_eq!(instrumented.counts, untraced.counts, "the lineage pass changed the run");
         assert_eq!(traced.sends, untraced.sends);
+        assert_eq!(instrumented.sends, untraced.sends);
+        // E3.2 on the collapse: by ancestry, every request's sends, exactly as by payload.
+        let goals: BTreeMap<u64, u64> = full
+            .records_on(edge_named("requests (client)"))
+            .map(|(_, r)| (r.id, r.decode::<(usize, u64)>().unwrap().0 as u64))
+            .collect();
+        let by_ancestry = full.per_goal_by_ancestry(edge_named("client -> server (arrivals)"), &goals);
+        let mismatched: Vec<_> = instrumented.sends.iter().filter(|(id, s)| by_ancestry.get(*id) != Some(&(**s as u64))).take(5).collect();
+        assert!(mismatched.is_empty(), "E0, by ancestry: derivations per request differ from the client's send count, e.g. {mismatched:?}");
+        let responses = full.record_count(edge_named("server -> client (responses)"));
+        let completions = full.record_count(edge_named("completions (client metrics)"));
+        println!(
+            "  E0 instrumented: sends per request by ancestry {:?}; responses {responses} = completions {completions} + drops {}",
+            histogram(by_ancestry.values().copied()),
+            full.drops.len()
+        );
+        assert_eq!(responses, completions + full.drops.len() as u64);
         for edge in ["client -> server (arrivals)", "outgoing (client metrics)"] {
             let per_goal = per_request(&lineage, edge);
             assert_eq!(per_goal.len(), traced.sends.len(), "{edge}: requests attributed");

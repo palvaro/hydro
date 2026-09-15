@@ -2917,6 +2917,11 @@ mod amplification_tests {
     /// `requests` client requests (`"r0"`, `"r1"`, ...) are submitted to member 0, the leader,
     /// after the first election settles and before the timers start (E3.1).
     fn run(traffic_policy: EdgePolicy, election_every: Option<(Timers, u64)>, requests: usize) -> Outcome {
+        run_with(traffic_policy, election_every, requests, false)
+    }
+
+    /// [`run`], with the program compiled by the lineage pass when `instrumented` (E3.2).
+    fn run_with(traffic_policy: EdgePolicy, election_every: Option<(Timers, u64)>, requests: usize, instrumented: bool) -> Outcome {
         let mut flow = FlowBuilder::new();
         let cluster = flow.cluster::<Replica>();
 
@@ -2959,11 +2964,9 @@ mod amplification_tests {
         let transitions_ref = &mut transitions;
         let mut committed: Vec<Vec<LogEntry<String>>> = vec![Vec::new(); CLUSTER_SIZE];
         let committed_ref = &mut committed;
-        let (counts, lineage) = flow
-            .sim()
-            .skip_consistency_assertions()
-            .with_cluster_size(&cluster, CLUSTER_SIZE)
-            .run_traced(driver, async move || {
+        let sim = flow.sim().skip_consistency_assertions().with_cluster_size(&cluster, CLUSTER_SIZE);
+        let sim = if instrumented { sim.with_lineage() } else { sim };
+        let (counts, lineage) = sim.run_traced(driver, async move || {
                 // Phase 1: an uncontested election, settled.
                 interrupt_send.send(0, ());
                 quiesce().await;
@@ -3277,5 +3280,84 @@ mod amplification_tests {
         assert!(storm.committed.iter().all(|c| c.is_empty()), "nothing commits under the storm");
         // What E3.1 cannot do: the storm's work is election traffic, which carries no entry.
         assert!(storm_traffic.request_vote + storm_traffic.vote > prompt_traffic.request_vote + prompt_traffic.vote);
+    }
+
+    /// Traffic records descending from `root`, by kind of RPC.
+    fn descendants_by_kind(outcome: &Outcome, root: u64, children: &std::collections::HashMap<u64, Vec<u64>>) -> TrafficBreakdown {
+        let reached = outcome.lineage.descendants(root, children);
+        let mut b = TrafficBreakdown::default();
+        for (_, record) in outcome.lineage.records_on(traffic) {
+            if !reached.contains(&record.id) {
+                continue;
+            }
+            let (_, rpc): Traffic = record.decode().unwrap();
+            match rpc {
+                RaftRpc::RequestVote(_) => b.request_vote += 1,
+                RaftRpc::RequestVoteResponse(_) => b.vote += 1,
+                RaftRpc::AppendEntries(ae) if ae.entries.is_empty() => b.heartbeats += 1,
+                RaftRpc::AppendEntries(_) => b.append_entries_with_entries += 1,
+                RaftRpc::AppendEntriesReply(_) => b.acks += 1,
+            }
+        }
+        b
+    }
+
+    /// E3.2 on Raft: the same two runs as E3.1, with the program compiled by the lineage pass.
+    /// A pending entry is named by its record on the leader's `requests` edge; the derivations
+    /// toward it are the traffic records whose ancestry contains that record. `raft_step` is one
+    /// staged closure over the member's whole state, so every outbound message descends from the
+    /// state, and the state from everything the member ever saw: the measurement below is what
+    /// that gives, prompt and storm, against E3.1's payload attribution (2 and 16).
+    #[test]
+    fn lineage_pass_attributes_elections_through_state() {
+        let (_, timers) = control();
+        let entries: Vec<String> = (0..REQUESTS).map(|r| format!("r{r}")).collect();
+        let d = ELECTION_EVERY;
+        let mut summary = vec![];
+        for (name, policy) in [("prompt", EdgePolicy::Prompt), ("constant delay d = 4", EdgePolicy::Hold(d))] {
+            let outcome = run_with(policy, Some((timers.clone(), ELECTION_EVERY)), REQUESTS, true);
+            assert!(outcome.lineage.instrumented);
+            outcome.print(&format!("raft, {REQUESTS} requests, instrumented, {name}"));
+            let by_payload = breakdown(&outcome.lineage);
+            println!(
+                "  {} operators, {} derivations, {} drops, {} outputs; traffic by payload: {by_payload:?}",
+                outcome.lineage.operators.len(),
+                outcome.lineage.derivations.len(),
+                outcome.lineage.drops.len(),
+                outcome.lineage.outputs.len()
+            );
+            // E3.1's numbers are unchanged by the instrumentation.
+            assert_eq!(outcome.lineage.record_count(traffic), outcome.traffic());
+            assert_eq!(by_payload.per_entry.keys().cloned().collect::<Vec<_>>(), entries);
+            // Goals: the request records on member 0's requests edge.
+            let goals: std::collections::BTreeMap<u64, String> = outcome
+                .lineage
+                .records_on(|k| in_server_slice(k) && k.ends_with("<alloc::string::String>"))
+                .map(|(_, r)| (r.id, r.decode::<String>().unwrap()))
+                .collect();
+            assert_eq!(goals.values().cloned().collect::<Vec<_>>(), entries, "the five requests on the requests edge");
+            let by_ancestry = outcome.lineage.per_goal_by_ancestry(traffic, &goals);
+            let direct = outcome.lineage.per_goal_by_ancestry_with(traffic, &goals, false);
+            let children = outcome.lineage.children();
+            let (root0, _) = goals.iter().next().unwrap();
+            let kinds = descendants_by_kind(&outcome, *root0, &children);
+            let state_versions = outcome.lineage.derivations.iter().filter(|d| d.state_version).count();
+            let committed: Vec<usize> = outcome.committed.iter().map(|c| c.len()).collect();
+            println!(
+                "  derivations per entry: by payload {:?}, by ancestry {:?}, by ancestry without the state chain {:?}; traffic descending from r0 by kind: {kinds:?}; {state_versions} state versions; traffic total {}; committed per member {committed:?}",
+                by_payload.per_entry.values().collect::<Vec<_>>(),
+                by_ancestry.values().collect::<Vec<_>>(),
+                direct.values().collect::<Vec<_>>(),
+                outcome.traffic()
+            );
+            summary.push((name, by_payload.per_entry["r0"], by_ancestry["r0"], direct["r0"], kinds, outcome.traffic(), outcome.elections()));
+            // Every entry is attributed alike (they were appended together).
+            assert!(by_ancestry.values().all(|c| *c == by_ancestry["r0"]), "{by_ancestry:?}");
+            assert!(direct.values().all(|c| *c == direct["r0"]), "{direct:?}");
+        }
+        println!("== E3.2 summary (raft, {REQUESTS} entries): schedule / traffic / elections / per entry by payload / by ancestry / by ancestry without the state chain / descending from r0 by kind");
+        for (name, payload, ancestry, direct, kinds, traffic, elections) in &summary {
+            println!("  {name}: {traffic} / {elections} / {payload} / {ancestry} / {direct} / {kinds:?}");
+        }
     }
 }

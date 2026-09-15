@@ -470,6 +470,8 @@ pub struct CompiledSim {
     pub(super) lib: Library,
     pub(super) externals_port_registry: SimExternalPortRegistry,
     pub(super) unit_test_fuzz_iterations: usize,
+    /// The lineage pass's operator table, when the program was compiled with it.
+    pub(super) operators: Option<Vec<super::lineage::OperatorInfo>>,
 }
 
 #[sealed::sealed]
@@ -505,6 +507,7 @@ type SimLoaded<'a> = libloading::Symbol<
         cluster_external_in: &mut HashMap<usize, HashMap<u32, UnsyncSender<Bytes>>>,
         println_handler: fn(fmt::Arguments<'_>),
         eprintln_handler: fn(fmt::Arguments<'_>),
+        lineage_sink: super::lineage_rt::LineageSink,
     ) -> (
         Vec<(&'static str, Option<u32>, DfirErased)>,
         Vec<(&'static str, Option<u32>, DfirErased)>,
@@ -512,6 +515,12 @@ type SimLoaded<'a> = libloading::Symbol<
         InlineHooks<&'static str>,
     ),
 >;
+
+/// The host's lineage sink, handed to the compiled program: every derivation the instrumented
+/// program reports lands in the run's log (see [`super::lineage`]).
+fn lineage_sink(event: super::lineage_rt::LineageEvent) {
+    super::lineage::record_event(event);
+}
 
 impl CompiledSim {
     /// Executes the given closure with a single instance of the compiled simulation.
@@ -778,8 +787,12 @@ impl CompiledSim {
         driver: D,
         thunk: impl AsyncFnOnce() + RefUnwindSafe,
     ) -> (super::edge_counts::EdgeCounts, super::lineage::Lineage) {
-        let (counts, lineage) =
+        let (counts, mut lineage) =
             super::lineage::trace_lineage(|| self.run_counted(driver, thunk));
+        if let Some(operators) = &self.operators {
+            lineage.operators = operators.clone();
+            lineage.instrumented = true;
+        }
         (counts, lineage)
     }
 
@@ -903,6 +916,7 @@ impl<'a> CompiledSimInstance<'a> {
                 } else {
                     null_handler
                 },
+                lineage_sink,
             )
         };
 
@@ -2184,10 +2198,19 @@ fn run_hooks<W: std::fmt::Write>(
                     && let (Some(after), Some(positions)) =
                         (hook.buffered_len(), hook.pending_release_positions())
                 {
-                    lineage::record_release(location, index, member, after, positions, || {
-                        hook.pending_release_records()
-                            .expect("a hook that reports positions reports records")
-                    });
+                    lineage::record_release(
+                        location,
+                        index,
+                        member,
+                        after,
+                        positions,
+                        || {
+                            hook.pending_release_records()
+                                .expect("a hook that reports positions reports records")
+                        },
+                        hook.pending_release_ids(),
+                        hook.buffered_ids(),
+                    );
                 }
             }
 
