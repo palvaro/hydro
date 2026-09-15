@@ -453,10 +453,12 @@ impl DfirBuilder for SimBuilder {
                             Box::new(#root::sim::runtime::StreamHook::<_, #order_ty> {
                                 input: #buffered_ident.clone(),
                                 to_release: None,
+                                released_positions: ::std::vec::Vec::new(),
                                 output: #hoff_send_ident,
                                 batch_location: (#batch_location, #line, #caret),
                                 element_type: ::std::any::type_name::<#element_type>(),
                                 format_item_debug: #root::__maybe_debug__!(#element_type),
+                                format_item_serialize: #root::__maybe_serialize__!(#element_type),
                                 _order: std::marker::PhantomData,
                             })
                         ),

@@ -187,13 +187,18 @@ impl<'a> SimFlow<'a> {
         driver: D,
         thunk: impl AsyncFnOnce() + RefUnwindSafe,
     ) -> super::edge_counts::EdgeCounts {
-        let compiled = self.compiled();
-        let ((), counts) = super::edge_counts::count_edges(|| {
-            compiled.run_with_driver(driver, async |instance| {
-                instance.run_with_scheduler(thunk()).await
-            })
-        });
-        counts
+        self.compiled().run_counted(driver, thunk)
+    }
+
+    /// Like [`Self::run_with_driver`], and additionally keeps the lineage log of the run: every
+    /// record each tick-boundary hook released, under a record id, with what the hook held back
+    /// (see [`super::lineage`]).
+    pub fn run_traced<D: bolero::bolero_engine::driver::Driver + 'static>(
+        self,
+        driver: D,
+        thunk: impl AsyncFnOnce() + RefUnwindSafe,
+    ) -> (super::edge_counts::EdgeCounts, super::lineage::Lineage) {
+        self.compiled().run_traced(driver, thunk)
     }
 
     /// Uses a fuzzing strategy to explore possible executions of the simulation. The provided

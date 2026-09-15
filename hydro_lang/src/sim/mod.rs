@@ -69,6 +69,9 @@ pub mod edge_counts;
 pub mod hold_schedule;
 
 #[cfg(stageleft_runtime)]
+pub mod lineage;
+
+#[cfg(stageleft_runtime)]
 #[doc(hidden)]
 pub use compiled::continue_if_impl;
 #[cfg(stageleft_runtime)]

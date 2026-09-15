@@ -18,7 +18,7 @@ stageleft::stageleft_no_entry_crate!();
 #[cfg_attr(docsrs, doc(cfg(feature = "runtime_support")))]
 #[doc(hidden)]
 pub mod runtime_support {
-    pub use ::{bincode, dfir_rs, slotmap, stageleft};
+    pub use ::{bincode, dfir_rs, serde, slotmap, stageleft};
     #[cfg(feature = "sim")]
     pub use colored;
     #[cfg(feature = "deploy_integration")]

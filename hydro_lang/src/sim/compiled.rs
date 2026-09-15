@@ -755,6 +755,34 @@ impl CompiledSim {
         );
     }
 
+    /// Runs a single execution under `driver` with the scheduler running alongside `thunk`, and
+    /// returns the number of records each tick-boundary hook released, per edge (see
+    /// [`super::edge_counts`]). What [`super::flow::SimFlow::run_with_driver`] does after
+    /// compiling.
+    pub fn run_counted<D: bolero::bolero_engine::driver::Driver + 'static>(
+        &self,
+        driver: D,
+        thunk: impl AsyncFnOnce() + RefUnwindSafe,
+    ) -> super::edge_counts::EdgeCounts {
+        let ((), counts) = super::edge_counts::count_edges(|| {
+            self.run_with_driver(driver, async |instance| {
+                instance.run_with_scheduler(thunk()).await
+            })
+        });
+        counts
+    }
+
+    /// [`Self::run_counted`], also keeping the lineage log of the run (see [`super::lineage`]).
+    pub fn run_traced<D: bolero::bolero_engine::driver::Driver + 'static>(
+        &self,
+        driver: D,
+        thunk: impl AsyncFnOnce() + RefUnwindSafe,
+    ) -> (super::edge_counts::EdgeCounts, super::lineage::Lineage) {
+        let (counts, lineage) =
+            super::lineage::trace_lineage(|| self.run_counted(driver, thunk));
+        (counts, lineage)
+    }
+
     /// Exhaustively searches all possible executions of the simulation. The provided
     /// closure will be repeatedly executed with instances of the Hydro program where the
     /// batching boundaries, order of messages, and retries are varied.
@@ -2114,6 +2142,7 @@ fn run_hooks<W: std::fmt::Write>(
     hooks: &mut [Box<dyn SimHook>],
 ) {
     use super::edge_counts::{record_release, with_current_hook};
+    use super::lineage;
 
     let context = |hook: &dyn SimHook| hook.edge_location().zip(hook.buffered_len());
 
@@ -2151,6 +2180,15 @@ fn run_hooks<W: std::fmt::Write>(
                 (hook.edge_location(), hook.pending_release_len())
             {
                 record_release(location, index, released);
+                if lineage::recording()
+                    && let (Some(after), Some(positions)) =
+                        (hook.buffered_len(), hook.pending_release_positions())
+                {
+                    lineage::record_release(location, index, member, after, positions, || {
+                        hook.pending_release_records()
+                            .expect("a hook that reports positions reports records")
+                    });
+                }
             }
 
             hook.release_decision(

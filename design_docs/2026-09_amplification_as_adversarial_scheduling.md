@@ -501,7 +501,7 @@ Three findings:
 
 ## E3: design
 
-Status: design, not started. Everything above is measured; nothing below is.
+Status: design. E3.1 is done and measured ("E3: results" below); E3.2 and E3.3 are not started.
 
 ### The verdict is derivations per goal
 
@@ -613,3 +613,100 @@ Do it in three steps, each ending with a run:
   empty under an explicit policy. Decide during E3.3, when the negative leaves make the
   interaction concrete.
 
+
+## E3: results
+
+### E3.1: ids at the boundary
+
+Done. Tests: `rpc_retry::amplification_tests::boundary_ids_attribute_every_extra_record_to_its_request`
+and `tracing_the_e0_collapse_attributes_every_send_and_costs_little`,
+`raft::amplification_tests::boundary_ids_attribute_append_entries_to_their_entries`. Every number
+below is asserted by one of them.
+
+**Instrument** (`hydro_lang/src/sim/lineage.rs`). The ids are kept on the host, not in the program.
+A `batch` buffer only grows at its back (the DFIR `for_each` that feeds it) and only shrinks
+through a decision the scheduler sees, so the host keeps, per hook, a list of `(id, arrival
+tick)` parallel to the buffer: before each decision it extends the list with fresh ids for
+whatever arrived since the last one; after the decision it asks the hook which *positions* of the
+pre-decision buffer it is releasing (`SimHook::pending_release_positions`, new; the unordered
+hook's `remove(idx)` sequence is monotone, so a position is `idx` plus the removals so far) and
+removes those. What remains is the held set. Record contents come across as bincode when the
+element type is `Serialize` and as a `Debug` string when it is `Debug`, through two function
+pointers the generated code stores in the hook (`__maybe_serialize__!`, the `__maybe_debug__!`
+shadowing trick with a `Serialize` bound); the host decodes with its own copy of the type, as
+`sim_output` does. This is the "function pointer passed in" pattern the E2 note prescribes, with
+nothing stored on the dylib side. `SimFlow::run_traced` (and `CompiledSim::run_traced`) return
+`(EdgeCounts, Lineage)`; the log is a `Vec<Release>`, one per hook decision: edge key, member,
+the hook's tick (its decision index, the same count `Hold` uses), a run-wide serial, the released
+records (`id`, `arrived`, `payload`, `debug`) and the ids still held. Attribution is by the
+harness: `Lineage::per_goal::<T, G>(edge, |record: T| goals)`. Keyed batches report no positions
+and are not logged (the hold driver does not support them either). Nothing is recorded unless the
+run is wrapped in `trace_lineage`, and the hooks are only asked to serialize when it is.
+
+**`rpc_retry`, hold $d$ on responses** ($b = 2$, $\tau = 40$, $A = 3$, $T = 300$, $N = 600$; the
+E2 configuration). $D_k$ is the number of records carrying request $k$ on an edge. On all four
+work edges (client→server, `processed`, responses, `outgoing`) $D_k$ equals, request by request,
+the hand-computed sends of E2's step function *and* the client's own count of sends of $k$ from
+the `outgoing` output; the goal edge (`completions`) has $D_k = 1$ for every completed $k$ and no
+record for an abandoned one; `abandoned` has one record per abandoned $k$. The log's record count
+equals the E2 counter on every edge. Every record on every edge came across as bincode.
+
+| $d$ | $D_k$ histogram, measured = hand-computed | completions / abandoned | responses held exactly $d$ / flushed at end |
+|-----|-------------------------------------------|-------------------------|---------------------------------------------|
+| 0   | {1: 600}                                   | 600 / 0 | — (no hold to check) |
+| 39  | {1: 340, 2: 260}                           | 600 / 0 | 740 / 120 |
+| 40  | {1: 80, 2: 520}                            | 600 / 0 | 960 / 160 |
+| 80  | {1: 80, 2: 80, 3: 440}                     | 600 / 0 | 1080 / 480 |
+| 120 | {1: 80, 2: 80, 3: 440}                     | 240 / 360 | 840 / 720 |
+
+The per-record arrival ticks show the hold itself: every response released by the client's
+`responses` hook was released exactly $d$ ticks after it arrived, except those in the hook's last
+release (the end-of-run flush, when the clock runs dry and the forcing rule fires), which were
+held less. And at every release before the flush, the ids the release reports as *held* are
+exactly (by count and by id) the responses that arrived within the last $d$ ticks. That is the
+negative-leaf information E3.3 needs, already in the log; what is missing is the link from the
+retry's derivation to it, which needs intra-tick lineage (E3.2).
+
+**`rpc_retry`, the E0 collapse** (800 rounds, E0 harness, prompt driver; 24,971 records over
+12,570 releases). Per request, $D_k$ on client→server and `outgoing` equals the client's own send
+count for every one of the 2200 requests (the load-perturbation gain of E2, now per goal);
+`processed` carries each id as often as the server served it, and client→server minus `processed`
+is the final backlog (1237). Cost: 775 ms untraced, 811 ms traced, 1.05×, so the "log per firing,
+compute closure at analysis time" rule holds at this scale.
+
+**Raft, $R = 5$ entries** appended at the leader after the first election and before the timers
+start, election timer every $E = 4$, 200 ticks (the E2b configuration; `raft_server` unchanged).
+Attribution: a traffic record decodes as `(MemberId, RaftRpc)`; an `AppendEntries` is a derivation
+toward each entry it carries; nothing else carries an entry.
+
+| schedule | traffic $W_e$ | `AppendEntries` per entry $D_r$ | elections | committed per member | records carrying no entry |
+|----------|---------------|---------------------------------|-----------|----------------------|---------------------------|
+| prompt | 804 | 2 (all five entries) | 0 | 5, 5, 5 | 4 (the first election) + 398 heartbeats + 400 acks |
+| constant delay $d = 4$ | 332 | 16 (all five entries) | 50 | 0, 0, 0 | 298 `RequestVote` + 2 votes + 16 acks |
+
+Hand computations, both matched: under prompt the leader's first heartbeat carries all five
+entries to each follower and the acks are processed before its next heartbeat (visible in the
+log: `AppendEntries(5 entries)` at follower tick 1, both acks at the leader's next decision, then
+`AppendEntries(0 entries, commit 5)`), so $D_r = C - 1 = 2$, one per follower, and every entry
+commits once on every member; $804 = 4 + 2 + 398 + 400$. Under the delay the term-1 leader
+re-sends all five entries at every heartbeat until it is deposed, which takes $E$ ticks (the
+followers' first timeout finds no heartbeat, since the first one is delivered at tick $1 + d$)
+plus $d$ ticks for their `RequestVote` to reach it: $D_r = (C - 1)(E + d) = 16$; no leader lives
+long enough to send an empty heartbeat (0), nothing commits.
+
+So the disagreement the design demands is visible already at the boundary: $W_e$ falls 804 → 332
+while $D_r$ rises 2 → 16. But E3.1 sees only the part of the storm's work that carries an entry.
+The 16 re-sends stop when the leader is deposed; the 300 election records that follow, which
+*are* the storm and grow with the run (E2b: 50 elections in 200 ticks), carry no entry and are
+attributed to nothing. In E3.1's accounting $D_r$ saturates at 16 while the program keeps working
+toward the five pending entries for another 190 ticks. Attributing an election to the entries
+waiting for a leader needs the election's ancestry (timer, plus the *absence* of a heartbeat,
+whose would-be suppressor is a held `AppendEntries` carrying those entries), i.e. E3.2's
+derivation records and E3.3's negative leaves. That is the gap E3.1 was meant to make concrete,
+and it is the case E3.2 must be measured on.
+
+Decisions taken in E3.1 that E3.2 inherits: the edge key is still E2's `file:line:col#index
+<type>` (the operator id is E3.2's, where the pass has the IR); the log is host-side and per
+release, with the held set per release rather than per record; `Record::decode` panics on a type
+mismatch rather than returning `None`, so a harness that names the wrong type for an edge fails
+loudly.

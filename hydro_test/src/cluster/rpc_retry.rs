@@ -676,6 +676,7 @@ mod amplification_tests {
 
     use hydro_lang::sim::edge_counts::EdgeCounts;
     use hydro_lang::sim::hold_schedule::HoldScheduleDriver;
+    use hydro_lang::sim::lineage::Lineage;
     use hydro_lang::sim::quiesce;
 
     use super::*;
@@ -871,6 +872,18 @@ mod amplification_tests {
         ticks: usize,
         driver: impl FnOnce(HoldScheduleDriver) -> HoldScheduleDriver,
     ) -> Run {
+        run_traced(policy, server_config, per_tick, ticks, driver).0
+    }
+
+    /// [`run_counted`], also returning the lineage log of the run (E3.1: every record released
+    /// by a hook, under an id, with what the hook held back).
+    fn run_traced(
+        policy: RetryPolicy,
+        server_config: ServerConfig,
+        per_tick: u32,
+        ticks: usize,
+        driver: impl FnOnce(HoldScheduleDriver) -> HoldScheduleDriver,
+    ) -> (Run, Lineage) {
         let (flow, (clock_send, request_send), ports) = wire(policy, server_config);
         let driver = driver(
             HoldScheduleDriver::new()
@@ -880,7 +893,7 @@ mod amplification_tests {
 
         let mut run = Run::default();
         let run_ref = &mut run;
-        let counts = flow.sim().run_with_driver(driver, async move || {
+        let (counts, lineage) = flow.sim().run_traced(driver, async move || {
             for tick in 0..ticks as u64 {
                 clock_send.send(());
                 for _ in 0..per_tick {
@@ -891,7 +904,7 @@ mod amplification_tests {
             drain(ports, run_ref).await;
         });
         run.counts = counts;
-        run
+        (run, lineage)
     }
 
     fn hold_driver(d: u64) -> impl FnOnce(HoldScheduleDriver) -> HoldScheduleDriver {
@@ -1046,6 +1059,156 @@ mod amplification_tests {
         }
     }
 
+    /// Derivations toward request `id` on `edge`, from the lineage log: every record crossing
+    /// the edge is decoded as the harness's type for it and attributed to the request id it
+    /// carries. This is E3.1's attribution: by the harness, at the boundary, no parents.
+    fn per_request(log: &Lineage, edge: &str) -> BTreeMap<u64, u64> {
+        let pred = edge_named(edge);
+        match edge {
+            "server -> client (responses)" => log.per_goal::<Response<u64>, u64>(pred, |r| vec![r.id]),
+            "completions (client metrics)" => log.per_goal::<Completion, u64>(pred, |c| vec![c.id]),
+            "abandoned (client metrics)" => log.per_goal::<u64, u64>(pred, |id| vec![id]),
+            _ => log.per_goal::<Request<u64>, u64>(pred, |r| vec![r.id]),
+        }
+    }
+
+    /// The edges whose records answer a request, i.e. where a re-derivation toward request
+    /// `id` shows up as another record carrying `id`.
+    const WORK_EDGES: &[&str] = &[
+        "client -> server (arrivals)",
+        "server processed",
+        "server -> client (responses)",
+        "outgoing (client metrics)",
+    ];
+
+    /// E3.1 (`design_docs/2026-09_amplification_as_adversarial_scheduling.md`, "E3: design"):
+    /// record ids assigned at the hooks, attribution by the harness. Under every hold `d`, the
+    /// number of records carrying request `id` on each location-crossing edge must equal the
+    /// hand-computed sends for `id` (E1's step function, per request), and the goal itself (the
+    /// completion for `id`) must be derived once. The log's per-record arrival ticks must show
+    /// every response held exactly `d` ticks except the end-of-run flush, and the ids a release
+    /// reports as held must be exactly the responses that arrived in the last `d` ticks.
+    #[test]
+    fn boundary_ids_attribute_every_extra_record_to_its_request() {
+        let n = (TICKS as u64) * PER_TICK as u64;
+        let (baseline, baseline_log) = run_traced(POLICY, SERVER, PER_TICK, TICKS, |d| d);
+        baseline.print("baseline (traced)");
+
+        // The log and E2's counter agree on every edge, and every record came across as bincode.
+        for (key, e) in &baseline.counts.0 {
+            assert_eq!(baseline_log.record_count(|k| k == key), e.records, "record count on {key}");
+        }
+        assert!(
+            baseline_log.releases.iter().flat_map(|r| &r.released).all(|r| r.payload.is_some()),
+            "every batch in rpc_retry buffers a Serialize type"
+        );
+        println!("  log: {} releases, {} records, edges {:?}", baseline_log.releases.len(), baseline_log.releases.iter().map(|r| r.released.len()).sum::<usize>(), baseline_log.edges());
+
+        // Prompt: one derivation per request on every work edge, one completion per request.
+        for edge in WORK_EDGES.iter().chain(["completions (client metrics)"].iter()) {
+            let per_goal = per_request(&baseline_log, edge);
+            assert_eq!(per_goal.len() as u64, n, "{edge}: requests seen");
+            assert!(per_goal.values().all(|c| *c == 1), "{edge}: every request derived once under prompt");
+        }
+
+        let tau = POLICY.timeout_ticks;
+        let mut failures = vec![];
+        println!("== E3.1 per-goal derivations (rpc_retry), hold d on responses");
+        for d in [tau - 1, tau, 2 * tau, 3 * tau] {
+            let (run, log) = run_traced(POLICY, SERVER, PER_TICK, TICKS, hold_driver(d));
+            let expected: BTreeMap<u64, u64> = baseline
+                .completions
+                .iter()
+                .map(|(id, l)| (*id, expected(baseline.issued_at[id], *l, d, &POLICY, TICKS as u64).0 as u64))
+                .collect();
+
+            // Per goal on every work edge: the hand computation, request by request, and E2's
+            // own per-request count from the `outgoing` output.
+            let mut hist = BTreeMap::new();
+            for edge in WORK_EDGES {
+                let per_goal = per_request(&log, edge);
+                hist = histogram(per_goal.values().copied());
+                if per_goal.len() as u64 != n {
+                    failures.push(format!("d = {d}, {edge}: {} requests attributed, expected {n}", per_goal.len()));
+                }
+                let mismatched: Vec<_> = expected
+                    .iter()
+                    .filter(|(id, s)| per_goal.get(*id) != Some(*s))
+                    .map(|(id, s)| (*id, *s, per_goal.get(id).copied()))
+                    .take(5)
+                    .collect();
+                if !mismatched.is_empty() {
+                    failures.push(format!("d = {d}, {edge}: derivations per request differ from hand-computed sends, e.g. (id, expected, measured) {mismatched:?}"));
+                }
+                let mismatched: Vec<_> = run
+                    .sends
+                    .iter()
+                    .filter(|(id, s)| per_goal.get(*id) != Some(&(**s as u64)))
+                    .take(5)
+                    .collect();
+                if !mismatched.is_empty() {
+                    failures.push(format!("d = {d}, {edge}: derivations per request differ from the client's own send count, e.g. {mismatched:?}"));
+                }
+                if log.record_count(edge_named(edge)) != run.records(edge) {
+                    failures.push(format!("d = {d}, {edge}: log has {} records, counter {}", log.record_count(edge_named(edge)), run.records(edge)));
+                }
+            }
+            // The goal: derived once per completed request, never for an abandoned one.
+            let completions = per_request(&log, "completions (client metrics)");
+            let abandoned = per_request(&log, "abandoned (client metrics)");
+            if completions.keys().ne(run.completions.keys()) || completions.values().any(|c| *c != 1) {
+                failures.push(format!("d = {d}: completion derivations are not one per completed request"));
+            }
+            if abandoned.keys().ne(run.abandoned.iter()) || abandoned.values().any(|c| *c != 1) {
+                failures.push(format!("d = {d}: abandon records are not one per abandoned request"));
+            }
+
+            // The hold, per record: released `d` ticks after arrival, except the end-of-run flush
+            // (the last release of the hook), and the held ids at each release are exactly the
+            // records that arrived within the last `d` ticks.
+            let responses = edge_named("server -> client (responses)");
+            let arrived: BTreeMap<u64, u64> = log.records_on(responses.clone()).map(|(_, r)| (r.id, r.arrived)).collect();
+            let last_serial = log.releases_on(responses.clone()).map(|r| r.serial).max().unwrap();
+            let mut held_exactly_d = 0u64;
+            let mut flushed = 0u64;
+            let mut max_held = 0usize;
+            for release in log.releases_on(responses.clone()) {
+                for record in &release.released {
+                    let held_for = release.tick - record.arrived;
+                    if held_for == d {
+                        held_exactly_d += 1;
+                    } else if release.serial == last_serial && held_for < d {
+                        flushed += 1;
+                    } else {
+                        failures.push(format!("d = {d}: response {} held {held_for} ticks (arrived {}, released {})", record.id, record.arrived, release.tick));
+                    }
+                }
+                max_held = max_held.max(release.held.len());
+                if release.serial != last_serial {
+                    let wrong: Vec<_> = release
+                        .held
+                        .iter()
+                        .filter(|id| !(arrived[id] + d > release.tick && arrived[id] <= release.tick))
+                        .collect();
+                    if !wrong.is_empty() {
+                        failures.push(format!("d = {d}: release at tick {} holds ids not within the last {d} ticks: {wrong:?}", release.tick));
+                    }
+                    let due: usize = arrived.values().filter(|a| **a + d > release.tick && **a <= release.tick).count();
+                    if due != release.held.len() {
+                        failures.push(format!("d = {d}: release at tick {} holds {} ids, {due} arrived within the last {d} ticks", release.tick, release.held.len()));
+                    }
+                }
+            }
+            println!(
+                "  d = {d:>3}: derivations/request {hist:?} (hand-computed {:?}); completions {} abandoned {}; responses held exactly d: {held_exactly_d}, flushed at end: {flushed}, max held at once: {max_held}",
+                histogram(expected.values().copied()),
+                completions.len(),
+                abandoned.len()
+            );
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
     /// The E0 collapse under the E0 harness (one clock element and that tick's requests per
     /// round, then `quiesce()`), every hook releasing everything (the prompt driver), counted
     /// per edge.
@@ -1055,25 +1218,84 @@ mod amplification_tests {
         server_config: ServerConfig,
         rounds: usize,
     ) -> Run {
+        run_e0(workload, policy, server_config, rounds, false).0.0
+    }
+
+    /// [`run_e0_counted`], optionally traced (E3.1), with the wall time of the run itself (the
+    /// compiled simulation is built before the clock starts).
+    fn run_e0(
+        workload: Workload,
+        policy: RetryPolicy,
+        server_config: ServerConfig,
+        rounds: usize,
+        traced: bool,
+    ) -> ((Run, Option<Lineage>), Duration) {
         use hydro_lang::sim::prompt_schedule::PromptScheduleDriver;
 
         let (flow, (clock_send, request_send), ports) = wire(policy, server_config);
+        let compiled = flow.sim().compiled();
         let mut run = Run::default();
         let run_ref = &mut run;
-        let counts = flow
-            .sim()
-            .run_with_driver(PromptScheduleDriver::default(), async move || {
-                for tick in 0..rounds as u64 {
-                    clock_send.send(());
-                    for _ in 0..workload.requests_at(tick) {
-                        request_send.send(tick);
-                    }
-                    quiesce().await;
-                    drain(ports, run_ref).await;
+        let thunk = async move || {
+            for tick in 0..rounds as u64 {
+                clock_send.send(());
+                for _ in 0..workload.requests_at(tick) {
+                    request_send.send(tick);
                 }
-            });
+                quiesce().await;
+                drain(ports, run_ref).await;
+            }
+        };
+        let start = std::time::Instant::now();
+        let (counts, lineage) = if traced {
+            let (counts, lineage) = compiled.run_traced(PromptScheduleDriver::default(), thunk);
+            (counts, Some(lineage))
+        } else {
+            (compiled.run_counted(PromptScheduleDriver::default(), thunk), None)
+        };
+        let elapsed = start.elapsed();
         run.counts = counts;
-        run
+        ((run, lineage), elapsed)
+    }
+
+    /// E3.1's cost and coverage on the long run: the E0 collapse (800 rounds, ~15k records
+    /// across the hooks) traced and untraced. The traced log must attribute every record on the
+    /// work edges to its request with exactly the client's own send counts, and the slowdown is
+    /// reported (the design asks for it to be measured, not for a bound).
+    #[test]
+    fn tracing_the_e0_collapse_attributes_every_send_and_costs_little() {
+        let workload = sim_tests::WORKLOAD;
+        let policy = sim_tests::POLICY;
+        let rounds = sim_tests::ROUNDS;
+        let ((untraced, _), untraced_time) = run_e0(workload, policy, sim_tests::SERVER, rounds, false);
+        let ((traced, lineage), traced_time) = run_e0(workload, policy, sim_tests::SERVER, rounds, true);
+        let lineage = lineage.unwrap();
+        traced.print("E0 trigger, prompt driver, E0 harness, traced");
+        let records: usize = lineage.releases.iter().map(|r| r.released.len()).sum();
+        println!(
+            "== E3.1 cost on the E0 run: untraced {:.2?}, traced {:.2?} ({:.2}x), {} releases, {records} records logged",
+            untraced_time,
+            traced_time,
+            traced_time.as_secs_f64() / untraced_time.as_secs_f64(),
+            lineage.releases.len()
+        );
+        assert_eq!(traced.counts, untraced.counts, "tracing changed the run");
+        assert_eq!(traced.sends, untraced.sends);
+        for edge in ["client -> server (arrivals)", "outgoing (client metrics)"] {
+            let per_goal = per_request(&lineage, edge);
+            assert_eq!(per_goal.len(), traced.sends.len(), "{edge}: requests attributed");
+            let mismatched: Vec<_> = traced.sends.iter().filter(|(id, s)| per_goal[*id] != **s as u64).take(5).collect();
+            assert!(mismatched.is_empty(), "{edge}: derivations per request differ from the client's send count, e.g. {mismatched:?}");
+        }
+        // The server's edges see only what was delivered: sends minus the final backlog.
+        let arrivals = per_request(&lineage, "client -> server (arrivals)");
+        let processed = per_request(&lineage, "server processed");
+        let processed_total: u64 = processed.values().sum();
+        let arrivals_total: u64 = arrivals.values().sum();
+        assert_eq!(arrivals_total, processed_total + traced.final_backlog as u64);
+        let served_total: u64 = traced.served.values().map(|s| *s as u64).sum();
+        assert_eq!(processed_total, served_total);
+        assert!(processed.iter().all(|(id, c)| traced.served.get(id).copied().unwrap_or(0) as u64 == *c));
     }
 
     /// The other perturbation axis (E1, last bullet): same prompt policy, no held delivery,

@@ -58,6 +58,50 @@ macro_rules! __maybe_debug__ {
     }};
 }
 
+/// Like [`__maybe_debug__`], but yields `fn(&T) -> Option<Vec<u8>>` that bincode-serializes the
+/// value when `T: serde::Serialize` and returns `None` otherwise. The simulator's lineage log
+/// (see [`super::lineage`]) uses it to ship a hook's records to the host, which deserializes
+/// them with its own copy of the type (the compiled program is a separate crate).
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __maybe_serialize__ {
+    ($type:ty) => {{
+        #[expect(clippy::allow_attributes, reason = "macro codegen")]
+        #[allow(dead_code, reason = "shadowing trick")]
+        fn no_serialize<T>(_: &T) -> Option<Vec<u8>> {
+            None
+        }
+        fn yes_serialize<T: $crate::runtime_support::serde::Serialize>(v: &T) -> Option<Vec<u8>> {
+            Some($crate::runtime_support::bincode::serialize(v).unwrap())
+        }
+
+        trait __Fallback {
+            const MAYBE_SERIALIZE_FN: *const () = no_serialize::<()> as *const ();
+        }
+        impl<T: ?Sized> __Fallback for T {}
+
+        struct __Wrap<T>(std::marker::PhantomData<T>);
+
+        #[expect(clippy::allow_attributes, reason = "macro codegen")]
+        #[allow(dead_code, reason = "shadowing trick")]
+        impl<T: $crate::runtime_support::serde::Serialize> __Wrap<T> {
+            const MAYBE_SERIALIZE_FN: *const () = yes_serialize::<T> as *const ();
+        }
+
+        // SAFETY: as in `__maybe_debug__`: the pointer is `no_serialize::<()>`, which ignores
+        // its argument, or `yes_serialize::<$type>`.
+        unsafe {
+            std::mem::transmute::<*const (), fn(&$type) -> Option<Vec<u8>>>(
+                <__Wrap<$type>>::MAYBE_SERIALIZE_FN,
+            )
+        }
+    }};
+}
+
+/// One record a hook is about to release, as the host's lineage log sees it: its bincode
+/// serialization (if the element type is `Serialize`) and its `Debug` rendering (if `Debug`).
+pub type ReleasedRecord = (Option<Vec<u8>>, Option<String>);
+
 pub trait SimHook {
     fn current_decision(&self) -> Option<bool>;
     fn can_make_nontrivial_decision(&self) -> bool;
@@ -104,6 +148,21 @@ pub trait SimHook {
 
     /// How many records are buffered and awaiting a decision, when the hook stands for an edge.
     fn buffered_len(&self) -> Option<usize> {
+        None
+    }
+
+    /// Positions, in the buffer as it stood before the current decision, of the records that
+    /// decision will release, in release order. Records only ever join the buffer at its back
+    /// and only leave it through a decision, so a host that has seen every decision can keep a
+    /// parallel list of record ids without the program's help (see [`super::lineage`]). `None`
+    /// for hooks that do not stand for an edge or do not report positions (keyed batches).
+    fn pending_release_positions(&self) -> Option<Vec<usize>> {
+        None
+    }
+
+    /// The records the current decision will release, in release order, serialized for the
+    /// host (see [`ReleasedRecord`]). Only called by the host when a lineage log is being kept.
+    fn pending_release_records(&self) -> Option<Vec<ReleasedRecord>> {
         None
     }
 }
@@ -211,6 +270,9 @@ type HookLocationMeta = (&'static str, &'static str, &'static str);
 pub struct StreamHook<T, Order: Ordering> {
     pub input: Rc<RefCell<VecDeque<T>>>,
     pub to_release: Option<Vec<T>>,
+    /// Positions of `to_release` in the buffer as it stood before the decision (see
+    /// [`SimHook::pending_release_positions`]).
+    pub released_positions: Vec<usize>,
     pub output: Sender<T>,
     pub batch_location: HookLocationMeta,
     /// `std::any::type_name` of the buffered element, which together with `batch_location`
@@ -218,7 +280,20 @@ pub struct StreamHook<T, Order: Ordering> {
     /// a location).
     pub element_type: &'static str,
     pub format_item_debug: fn(&T) -> Option<String>,
+    /// bincode serialization of an element for the host's lineage log, when `T: Serialize`.
+    pub format_item_serialize: fn(&T) -> Option<Vec<u8>>,
     pub _order: std::marker::PhantomData<Order>,
+}
+
+impl<T, Order: Ordering> StreamHook<T, Order> {
+    fn released_records(&self) -> Option<Vec<ReleasedRecord>> {
+        self.to_release.as_ref().map(|items| {
+            items
+                .iter()
+                .map(|item| ((self.format_item_serialize)(item), (self.format_item_debug)(item)))
+                .collect()
+        })
+    }
 }
 
 impl<T> SimHook for StreamHook<T, TotalOrder> {
@@ -238,6 +313,14 @@ impl<T> SimHook for StreamHook<T, TotalOrder> {
         Some(self.input.borrow().len())
     }
 
+    fn pending_release_positions(&self) -> Option<Vec<usize>> {
+        self.to_release.as_ref().map(|_| self.released_positions.clone())
+    }
+
+    fn pending_release_records(&self) -> Option<Vec<ReleasedRecord>> {
+        self.released_records()
+    }
+
     fn can_make_nontrivial_decision(&self) -> bool {
         !self.input.borrow().is_empty()
     }
@@ -253,6 +336,7 @@ impl<T> SimHook for StreamHook<T, TotalOrder> {
             .unwrap();
 
         self.to_release = Some(current_input.drain(0..count).collect());
+        self.released_positions = (0..count).collect();
         count > 0
     }
 
@@ -317,6 +401,14 @@ impl<T> SimHook for StreamHook<T, NoOrder> {
         Some(self.input.borrow().len())
     }
 
+    fn pending_release_positions(&self) -> Option<Vec<usize>> {
+        self.to_release.as_ref().map(|_| self.released_positions.clone())
+    }
+
+    fn pending_release_records(&self) -> Option<Vec<ReleasedRecord>> {
+        self.released_records()
+    }
+
     fn can_make_nontrivial_decision(&self) -> bool {
         !self.input.borrow().is_empty()
     }
@@ -328,6 +420,7 @@ impl<T> SimHook for StreamHook<T, NoOrder> {
     ) -> bool {
         let mut current_input = self.input.borrow_mut();
         let mut out = vec![];
+        let mut positions = vec![];
         let mut min_index = 0;
         while !current_input.is_empty() {
             let must_release = force_nontrivial && out.is_empty();
@@ -337,6 +430,9 @@ impl<T> SimHook for StreamHook<T, NoOrder> {
 
             let idx = (min_index..current_input.len()).generate(driver).unwrap();
             let item = current_input.remove(idx).unwrap();
+            // Every earlier removal was at an index `<= idx` of the then-current buffer, so the
+            // item's position in the buffer before the decision is `idx` plus the removals so far.
+            positions.push(idx + out.len());
             out.push(item);
 
             min_index = idx;
@@ -351,6 +447,7 @@ impl<T> SimHook for StreamHook<T, NoOrder> {
 
         let was_nontrivial = !out.is_empty();
         self.to_release = Some(out);
+        self.released_positions = positions;
         was_nontrivial
     }
 

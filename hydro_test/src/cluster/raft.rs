@@ -2820,12 +2820,14 @@ mod tests {
 #[cfg(test)]
 mod amplification_tests {
     use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
+    use hydro_lang::location::MemberId;
     use hydro_lang::prelude::*;
     use hydro_lang::sim::edge_counts::EdgeCounts;
     use hydro_lang::sim::hold_schedule::{EdgePolicy, HoldScheduleDriver};
+    use hydro_lang::sim::lineage::Lineage;
     use hydro_lang::sim::quiesce;
 
-    use super::{LeaderView, RaftConfig, Replica, raft_server};
+    use super::{LeaderView, LogEntry, RaftConfig, RaftRpc, Replica, raft_server};
 
     const CLUSTER_SIZE: usize = 3;
     const TICKS: usize = 200;
@@ -2869,6 +2871,10 @@ mod amplification_tests {
         counts: EdgeCounts,
         /// Leader-view transitions per member after the initial election.
         transitions: Vec<Vec<LeaderView<Replica>>>,
+        /// Entries committed per member (E3.1: the goals).
+        committed: Vec<Vec<LogEntry<String>>>,
+        /// Every record released at every hook, under an id (E3.1).
+        lineage: Lineage,
     }
 
     impl Outcome {
@@ -2908,16 +2914,18 @@ mod amplification_tests {
 
     /// `election_every`: `None` sends no election interrupts after the first election (the
     /// heartbeats-only control); `Some((timers, e))` sends one every `e` ticks to every member.
-    fn run(traffic_policy: EdgePolicy, election_every: Option<(Timers, u64)>) -> Outcome {
+    /// `requests` client requests (`"r0"`, `"r1"`, ...) are submitted to member 0, the leader,
+    /// after the first election settles and before the timers start (E3.1).
+    fn run(traffic_policy: EdgePolicy, election_every: Option<(Timers, u64)>, requests: usize) -> Outcome {
         let mut flow = FlowBuilder::new();
         let cluster = flow.cluster::<Replica>();
 
         let (interrupt_send, election_timer_interrupts) = cluster.sim_input();
         let (heartbeat_send, heartbeat_timer_interrupts) = cluster.sim_input();
-        let (_request_send, requests) = cluster.sim_input::<String, TotalOrder, ExactlyOnce>();
+        let (request_send, request_stream) = cluster.sim_input::<String, TotalOrder, ExactlyOnce>();
         let outputs = raft_server(
             &cluster,
-            requests,
+            request_stream,
             election_timer_interrupts,
             heartbeat_timer_interrupts,
             RaftConfig {
@@ -2927,6 +2935,7 @@ mod amplification_tests {
             nondet!(/** which member wins an election is inherently non-deterministic */),
         );
         let view_recv = outputs.leader_views.sim_cluster_output();
+        let committed_recv = outputs.committed.end_atomic().sim_cluster_output();
 
         let mut driver = HoldScheduleDriver::new().with_policy(traffic, traffic_policy);
         let elections_per_member = match &election_every {
@@ -2948,15 +2957,17 @@ mod amplification_tests {
 
         let mut transitions: Vec<Vec<LeaderView<Replica>>> = vec![Vec::new(); CLUSTER_SIZE];
         let transitions_ref = &mut transitions;
-        let counts = flow
+        let mut committed: Vec<Vec<LogEntry<String>>> = vec![Vec::new(); CLUSTER_SIZE];
+        let committed_ref = &mut committed;
+        let (counts, lineage) = flow
             .sim()
             .skip_consistency_assertions()
             .with_cluster_size(&cluster, CLUSTER_SIZE)
-            .run_with_driver(driver, async move || {
+            .run_traced(driver, async move || {
                 // Phase 1: an uncontested election, settled.
                 interrupt_send.send(0, ());
                 quiesce().await;
-                let member_0 = hydro_lang::location::MemberId::<Replica>::from_raw_id(0);
+                let member_0 = MemberId::<Replica>::from_raw_id(0);
                 for member in 0..CLUSTER_SIZE as u32 {
                     let views: Vec<LeaderView<Replica>> = view_recv.collect(member).await;
                     assert_eq!(
@@ -2968,6 +2979,12 @@ mod amplification_tests {
                         assert_eq!(views.last().unwrap().leader, Some(member_0.clone()));
                     }
                 }
+                // Client requests to the leader, appended to its log before any timer runs
+                // (replication happens on the heartbeat timer).
+                for r in 0..requests {
+                    request_send.send(0, format!("r{r}"));
+                }
+                quiesce().await;
                 // Phase 2: timers for `TICKS` ticks, all up front; the driver paces them.
                 for member in 0..CLUSTER_SIZE as u32 {
                     for _ in 0..TICKS {
@@ -2980,9 +2997,10 @@ mod amplification_tests {
                 quiesce().await;
                 for member in 0..CLUSTER_SIZE as u32 {
                     transitions_ref[member as usize].extend(view_recv.collect::<Vec<_>>(member).await);
+                    committed_ref[member as usize].extend(committed_recv.collect::<Vec<_>>(member).await);
                 }
             });
-        Outcome { counts, transitions }
+        Outcome { counts, transitions, committed, lineage }
     }
 
     /// Control (E2): heartbeats only, no election timer. Constant delay changes no count.
@@ -2990,7 +3008,7 @@ mod amplification_tests {
     /// went through the election hook. (No method calls on `Outcome` here: staging drops
     /// `impl` blocks but keeps non-test functions.)
     fn control() -> (Outcome, Timers) {
-        let baseline = run(EdgePolicy::Prompt, None);
+        let baseline = run(EdgePolicy::Prompt, None, 0);
         let timer_keys: Vec<(&String, u64)> = baseline
             .counts
             .0
@@ -3014,7 +3032,7 @@ mod amplification_tests {
         assert_eq!(baseline.traffic(), expected);
         assert_eq!(baseline.elections(), 0);
         for d in [1, 5, 20] {
-            let held = run(EdgePolicy::Hold(d), None);
+            let held = run(EdgePolicy::Hold(d), None, 0);
             held.print(&format!("raft, heartbeats only, traffic held d = {d}"));
             assert_eq!(held.traffic(), expected, "traffic under hold d = {d}");
             assert_eq!(held.elections(), 0);
@@ -3034,7 +3052,7 @@ mod amplification_tests {
         baseline.print("raft, heartbeats only, no hold");
         let expected_prompt = (2 * (CLUSTER_SIZE - 1) + 2 * (CLUSTER_SIZE - 1) * TICKS) as u64;
 
-        let prompt = run(EdgePolicy::Prompt, Some((timers.clone(), ELECTION_EVERY)));
+        let prompt = run(EdgePolicy::Prompt, Some((timers.clone(), ELECTION_EVERY)), 0);
         prompt.print(&format!("raft, election timer every {ELECTION_EVERY} ticks, prompt delivery"));
         assert_eq!(prompt.traffic(), expected_prompt, "prompt delivery: heartbeats suppress every election");
         assert_eq!(prompt.max_term(), 1);
@@ -3043,11 +3061,12 @@ mod amplification_tests {
         println!("  prompt: {} / {} / {}", prompt.traffic(), prompt.elections(), prompt.max_term());
         let mut results = vec![];
         for d in [1, 2, 3, 4, 5, 6, 12, 24] {
-            let held = run(EdgePolicy::Hold(d), Some((timers.clone(), ELECTION_EVERY)));
+            let held = run(EdgePolicy::Hold(d), Some((timers.clone(), ELECTION_EVERY)), 0);
             held.print(&format!("raft, election timer, constant delay d = {d}"));
             let burst = run(
                 EdgePolicy::Periodic { period: d, count: None },
                 Some((timers.clone(), ELECTION_EVERY)),
+                0,
             );
             burst.print(&format!("raft, election timer, bursty delivery every {d} ticks"));
             println!(
@@ -3098,5 +3117,165 @@ mod amplification_tests {
                 );
             }
         }
+    }
+
+    /// A traffic record, decoded with the host's copy of the wire type.
+    type Traffic = (MemberId<Replica>, RaftRpc<String, Replica>);
+
+    /// What the traffic edge carried, by kind of RPC, and how many `AppendEntries` records
+    /// carried each entry (the derivations toward that entry that E3.1 can see).
+    #[derive(Debug, Default)]
+    struct TrafficBreakdown {
+        request_vote: u64,
+        vote: u64,
+        append_entries_with_entries: u64,
+        heartbeats: u64,
+        acks: u64,
+        per_entry: std::collections::BTreeMap<String, u64>,
+    }
+
+    fn breakdown(lineage: &Lineage) -> TrafficBreakdown {
+        let mut b = TrafficBreakdown::default();
+        for (_, record) in lineage.records_on(traffic) {
+            let (_, rpc): Traffic = record.decode().expect("traffic is Serialize");
+            match rpc {
+                RaftRpc::RequestVote(_) => b.request_vote += 1,
+                RaftRpc::RequestVoteResponse(_) => b.vote += 1,
+                RaftRpc::AppendEntries(ae) if ae.entries.is_empty() => b.heartbeats += 1,
+                RaftRpc::AppendEntries(ae) => {
+                    b.append_entries_with_entries += 1;
+                    for entry in ae.entries {
+                        *b.per_entry.entry(entry.message).or_default() += 1;
+                    }
+                }
+                RaftRpc::AppendEntriesReply(_) => b.acks += 1,
+            }
+        }
+        b
+    }
+
+    /// Prints the traffic releases in scheduler order: which member's hook released what at
+    /// which tick of its slice. `limit` releases with records, then stops.
+    fn print_traffic_timeline(lineage: &Lineage, limit: usize) {
+        let mut shown = 0;
+        for release in lineage.releases_on(traffic) {
+            if release.released.is_empty() {
+                continue;
+            }
+            let summary: Vec<String> = release
+                .released
+                .iter()
+                .map(|r| {
+                    let (from, rpc): Traffic = r.decode().unwrap();
+                    let kind = match rpc {
+                        RaftRpc::RequestVote(dto) => format!("RequestVote(term {})", dto.term),
+                        RaftRpc::RequestVoteResponse(dto) => format!("Vote(term {})", dto.term),
+                        RaftRpc::AppendEntries(ae) => format!(
+                            "AppendEntries(term {}, {} entries, commit {})",
+                            ae.term,
+                            ae.entries.len(),
+                            ae.leader_commit
+                        ),
+                        RaftRpc::AppendEntriesReply(reply) => {
+                            format!("Ack(term {}, match {}, ok {})", reply.term, reply.match_index, reply.success)
+                        }
+                    };
+                    format!("#{} from {} {kind} (arrived tick {})", r.id, from.get_raw_id(), r.arrived)
+                })
+                .collect();
+            println!(
+                "    serial {:>4} member {} tick {:>3}: {} held {:?}",
+                release.serial,
+                release.member.unwrap(),
+                release.tick,
+                summary.join(", "),
+                release.held
+            );
+            shown += 1;
+            if shown >= limit {
+                break;
+            }
+        }
+    }
+
+    const REQUESTS: usize = 5;
+
+    /// E3.1 on Raft (`design_docs/2026-09_amplification_as_adversarial_scheduling.md`, "E3:
+    /// design"): with `REQUESTS` entries appended at the leader before the timers start, the
+    /// boundary log attributes every `AppendEntries` record to the entries it carries, and the
+    /// harness reads the goals (committed entries) per member. Under prompt delivery every entry
+    /// is carried the same number of times and commits once on every member. Under a constant
+    /// delay of the election period (E2b's storm) the same attribution is made, and what E3.1
+    /// cannot attribute is printed: the election traffic, which carries no entry.
+    #[test]
+    fn boundary_ids_attribute_append_entries_to_their_entries() {
+        let (_, timers) = control();
+        let entries: Vec<String> = (0..REQUESTS).map(|r| format!("r{r}")).collect();
+
+        let prompt = run(EdgePolicy::Prompt, Some((timers.clone(), ELECTION_EVERY)), REQUESTS);
+        prompt.print(&format!("raft, {REQUESTS} requests, election timer every {ELECTION_EVERY}, prompt delivery"));
+        let prompt_traffic = breakdown(&prompt.lineage);
+        println!("  traffic breakdown: {prompt_traffic:?}");
+        println!("  committed per member: {:?}", prompt.committed.iter().map(|c| c.iter().map(|e| e.message.as_str()).collect::<Vec<_>>()).collect::<Vec<_>>());
+        println!("  first traffic releases:");
+        print_traffic_timeline(&prompt.lineage, 12);
+
+        // The log agrees with E2's counter; every traffic record decodes.
+        assert_eq!(prompt.lineage.record_count(traffic), prompt.traffic());
+        assert_eq!(
+            prompt_traffic.request_vote + prompt_traffic.vote + prompt_traffic.append_entries_with_entries + prompt_traffic.heartbeats + prompt_traffic.acks,
+            prompt.traffic()
+        );
+        // Goals: every entry committed exactly once on every member, in order.
+        for (member, committed) in prompt.committed.iter().enumerate() {
+            assert_eq!(committed.iter().map(|e| e.message.clone()).collect::<Vec<_>>(), entries, "member {member} committed");
+        }
+        // Attribution: the entries are appended together and travel together, so every entry is
+        // carried by every `AppendEntries` that carries any, once per follower per heartbeat
+        // until that follower's ack is processed.
+        assert_eq!(prompt_traffic.per_entry.keys().cloned().collect::<Vec<_>>(), entries);
+        let carried = prompt_traffic.per_entry["r0"];
+        assert!(prompt_traffic.per_entry.values().all(|c| *c == carried), "entries carried unevenly: {:?}", prompt_traffic.per_entry);
+        assert_eq!(carried, prompt_traffic.append_entries_with_entries);
+        // Measured: exactly one per follower (the acks come back before the next heartbeat).
+        assert_eq!(carried, (CLUSTER_SIZE - 1) as u64);
+        assert_eq!(prompt.max_term(), 1);
+
+        let d = ELECTION_EVERY;
+        let storm = run(EdgePolicy::Hold(d), Some((timers.clone(), ELECTION_EVERY)), REQUESTS);
+        storm.print(&format!("raft, {REQUESTS} requests, election timer every {ELECTION_EVERY}, constant delay d = {d}"));
+        let storm_traffic = breakdown(&storm.lineage);
+        println!("  traffic breakdown: {storm_traffic:?}");
+        println!("  committed per member: {:?}", storm.committed.iter().map(|c| c.iter().map(|e| e.message.as_str()).collect::<Vec<_>>()).collect::<Vec<_>>());
+        println!("  first traffic releases:");
+        print_traffic_timeline(&storm.lineage, 24);
+        println!(
+            "== E3.1 summary (raft, {REQUESTS} entries): prompt: {} AppendEntries per entry, {} elections, committed per member {:?}, unattributable election records {}; d = {d}: {:?} AppendEntries per entry, {} elections, committed per member {:?}, unattributable election records {}",
+            carried,
+            prompt.elections(),
+            prompt.committed.iter().map(|c| c.len()).collect::<Vec<_>>(),
+            prompt_traffic.request_vote + prompt_traffic.vote,
+            storm_traffic.per_entry.values().collect::<std::collections::BTreeSet<_>>(),
+            storm.elections(),
+            storm.committed.iter().map(|c| c.len()).collect::<Vec<_>>(),
+            storm_traffic.request_vote + storm_traffic.vote,
+        );
+        assert_eq!(storm.lineage.record_count(traffic), storm.traffic());
+        assert!(storm.elections() >= TICKS / ELECTION_EVERY as usize - 1, "the E2b storm");
+        // Hand computation for the pending entries: the term-1 leader re-sends all of them to
+        // both followers at every heartbeat until it is deposed, which takes the followers'
+        // first timeout (`ELECTION_EVERY` ticks; the first heartbeat is delivered at `1 + d`,
+        // too late) plus `d` ticks for their `RequestVote` to reach it.
+        let expected_carried = (CLUSTER_SIZE as u64 - 1) * (ELECTION_EVERY + d);
+        assert_eq!(storm_traffic.per_entry.keys().cloned().collect::<Vec<_>>(), entries);
+        assert!(
+            storm_traffic.per_entry.values().all(|c| *c == expected_carried),
+            "AppendEntries per pending entry under the storm: {:?}, hand-computed {expected_carried}",
+            storm_traffic.per_entry
+        );
+        assert_eq!(storm_traffic.heartbeats, 0, "no leader lives long enough to send an empty heartbeat");
+        assert!(storm.committed.iter().all(|c| c.is_empty()), "nothing commits under the storm");
+        // What E3.1 cannot do: the storm's work is election traffic, which carries no entry.
+        assert!(storm_traffic.request_vote + storm_traffic.vote > prompt_traffic.request_vote + prompt_traffic.vote);
     }
 }
