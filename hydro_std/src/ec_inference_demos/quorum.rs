@@ -184,6 +184,102 @@ where
     ))
 }
 
+/// Request-scoped quorum mint for protocols whose request IDs are never reused.
+///
+/// Unlike [`quorum`], this combinator does not retain a permanent `unique` set
+/// or fired tombstone for every historical request. `active` opens a request;
+/// after `threshold` distinct acknowledgers arrive, the accumulator and active
+/// marker are both removed. Replies for inactive (completed or not-yet-opened)
+/// requests are ignored. This is appropriate for ABD's unique request IDs and
+/// bounds memory by the number of operations currently in flight.
+pub fn quorum_retiring<'a, F, M, L, L2>(
+    threshold: usize,
+    active: Stream<(F, M), L, Unbounded, NoOrder, ExactlyOnce>,
+    acks: Stream<(F, MemberId<L2>), L, Unbounded, NoOrder, ExactlyOnce>,
+) -> Stream<(Durable<F>, M), L::DropConsistency, Unbounded, NoOrder, ExactlyOnce>
+where
+    F: Clone + Eq + Hash + 'a,
+    M: Clone + 'a,
+    L: Location<'a>,
+    L2: 'a,
+{
+    sliced! {
+        let active_batch = use::batch(active, nondet!(
+            /// Activation and reply batching only affects latency. A reply can
+            /// count only while its unique request ID is active.
+        ));
+        let ack_batch = use::batch(acks, nondet!(
+            /// Which threshold distinct responders arrive first determines the
+            /// certificate timing, not its fact.
+        ));
+        let mut active_ids = use::state(|l| l.singleton(q!(HashMap::new())));
+        let mut pending = use::state(|l| l.singleton(q!(HashMap::new())));
+
+        let active_vec = active_batch.fold(
+            q!(|| Vec::new()),
+            q!(|items, item| items.push(item), commutative = manual_proof!(
+                /** request activation order is irrelevant */
+            )),
+        );
+        let ack_vec = ack_batch.fold(
+            q!(|| Vec::new()),
+            q!(|items, item| items.push(item), commutative = manual_proof!(
+                /** acknowledgements are accumulated in per-request sets */
+            )),
+        );
+        let active_ids_ref = active_ids.by_mut();
+        let pending_ref = pending.by_mut();
+        let active_vec_ref = active_vec.by_ref();
+        let ack_vec_ref = ack_vec.by_ref();
+        let tick = ack_vec.location().clone();
+
+        tick.singleton(q!(()))
+            .into_stream()
+              .flat_map_unordered(q!(move |_| {
+                  if !active_vec_ref.is_empty() {
+                      let newly_active: HashSet<_> = active_vec_ref
+                          .iter()
+                          .map(|(fact, _metadata)| fact.clone())
+                          .collect();
+                      pending_ref.retain(|fact, _| {
+                          active_ids_ref.contains_key(fact) || newly_active.contains(fact)
+                      });
+                  }
+                  for (fact, metadata) in active_vec_ref.iter().cloned() {
+                      active_ids_ref.insert(fact, metadata);
+                  }
+                  // Buffer early acknowledgements. If they belong to a completed
+                  // request, they are discarded at the next activation; under
+                  // ABD's one-outstanding-operation contract this is O(replicas),
+                  // not O(history).
+                  for (fact, attestor) in ack_vec_ref.iter().cloned() {
+                      pending_ref
+                          .entry(fact)
+                          .or_insert_with(HashSet::new)
+                          .insert(attestor);
+                  }
+                  let reached: Vec<_> = active_ids_ref
+                      .keys()
+                      .filter(|fact| {
+                          pending_ref.get(*fact).map(HashSet::len).unwrap_or(0) >= threshold
+                      })
+                      .cloned()
+                      .collect();
+                  let mut newly = Vec::new();
+                  for fact in reached {
+                      pending_ref.remove(&fact);
+                      if let Some(metadata) = active_ids_ref.remove(&fact) {
+                          newly.push((
+                              Durable::__mint_called_only_by_the_quorum_combinator(fact),
+                              metadata,
+                          ));
+                      }
+                  }
+                  newly
+              }))
+    }
+}
+
 /// A covering certificate: `threshold` distinct members answered this
 /// request, so (by quorum intersection, when `threshold` is a majority) the
 /// aggregate dominates every fact that was `Durable` before the request.
@@ -297,6 +393,109 @@ where
     }))
 }
 
+/// Request-scoped covering quorum with bounded history.
+///
+/// `active` opens a unique request and carries the metadata needed after phase
+/// 1. At quorum, the aggregate and metadata are emitted together and all
+/// per-request state is removed. Late replies are ignored because completed
+/// request IDs are never reused.
+pub fn covering_quorum_retiring<'a, K, M, X, L, L2>(
+    threshold: usize,
+    active: Stream<(K, M), L, Unbounded, NoOrder, ExactlyOnce>,
+    responses: Stream<(K, (MemberId<L2>, Option<(Ts, X)>)), L, Unbounded, NoOrder, ExactlyOnce>,
+) -> Stream<(K, (M, Covering<Option<(Ts, X)>>)), L::DropConsistency, Unbounded, NoOrder, ExactlyOnce>
+where
+    K: Clone + Eq + Hash + 'a,
+    M: Clone + 'a,
+    X: Clone + Eq + Hash + 'a,
+    L: Location<'a>,
+    L2: 'a,
+{
+    sliced! {
+        let active_batch = use::batch(active, nondet!(
+            /// Activation batching affects latency only; request IDs are unique.
+        ));
+        let response_batch = use::batch(responses, nondet!(
+            /// Which majority answers first selects the valid covering.
+        ));
+        let mut active_requests = use::state(|l| l.singleton(q!(HashMap::new())));
+        let mut pending = use::state(|l| l.singleton(q!(HashMap::new())));
+
+        let active_vec = active_batch.fold(
+            q!(|| Vec::new()),
+            q!(|items, item| items.push(item), commutative = manual_proof!(
+                /** distinct request activations commute */
+            )),
+        );
+        let response_vec = response_batch.fold(
+            q!(|| Vec::new()),
+            q!(|items, item| items.push(item), commutative = manual_proof!(
+                /** responses are merged into per-request responder maps */
+            )),
+        );
+        let active_ref = active_requests.by_mut();
+        let pending_ref = pending.by_mut();
+        let active_vec_ref = active_vec.by_ref();
+        let response_vec_ref = response_vec.by_ref();
+        let tick = response_vec.location().clone();
+
+        tick.singleton(q!(()))
+            .into_stream()
+            .flat_map_unordered(q!(move |_| {
+                if !active_vec_ref.is_empty() {
+                    let newly_active: HashSet<_> = active_vec_ref
+                        .iter()
+                        .map(|(key, _metadata)| key.clone())
+                        .collect();
+                    pending_ref.retain(|key, _| {
+                        active_ref.contains_key(key) || newly_active.contains(key)
+                    });
+                }
+                for (key, metadata) in active_vec_ref.iter().cloned() {
+                    active_ref.insert(key, metadata);
+                }
+                for (key, (responder, payload)) in response_vec_ref.iter().cloned() {
+                    pending_ref
+                        .entry(key)
+                        .or_insert_with(HashMap::new)
+                        .entry(responder)
+                        .or_insert(payload);
+                }
+                let reached: Vec<_> = active_ref
+                    .keys()
+                    .filter(|key| {
+                        pending_ref.get(*key).map(HashMap::len).unwrap_or(0) >= threshold
+                    })
+                    .cloned()
+                    .collect();
+                let mut newly = Vec::new();
+                for key in reached {
+                    let responders = pending_ref.remove(&key).unwrap_or_default();
+                    let mut max = None;
+                    for payload in responders.values().flatten() {
+                        let dominated = match max.as_ref() {
+                            Some((ts, _)) => ts < &payload.0,
+                            None => true,
+                        };
+                        if dominated {
+                            max = Some(payload.clone());
+                        }
+                    }
+                    if let Some(metadata) = active_ref.remove(&key) {
+                        newly.push((
+                            key,
+                            (
+                                metadata,
+                                Covering::__mint_called_only_by_the_covering_combinator(max),
+                            ),
+                        ));
+                    }
+                }
+                newly
+            }))
+    }
+}
+
 /// A responder's per-slot accepted state on the wire: `(slot, (Ts, X))`
 /// pairs (the serialized form of its accepted map).
 pub type SlotMap<X> = Vec<(usize, (Ts, X))>;
@@ -403,9 +602,17 @@ mod tests {
     use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder};
     use hydro_lang::location::MemberId;
     use hydro_lang::location::cluster::EventualConsistency;
+    use hydro_lang::location::member_id::TaglessMemberId;
     use hydro_lang::prelude::*;
 
-    use super::quorum;
+    use super::{Ts, covering_quorum, quorum};
+
+    fn ts(round: u64) -> Ts {
+        Ts {
+            round,
+            writer: TaglessMemberId::from_raw_id(0),
+        }
+    }
 
     /// The mint's functional contract, exhaustively at n=1: certificates fire
     /// exactly at the distinct-attestor threshold, duplicates from one member
@@ -447,6 +654,181 @@ mod tests {
                     vec![9],
                     "exactly one certificate, for the fact with 2 distinct attestors"
                 );
+            });
+    }
+
+    /// Counts are isolated per fact even when their attestations interleave.
+    #[test]
+    fn quorum_keeps_independent_facts_separate() {
+        let mut flow = FlowBuilder::new();
+        let cluster = flow.cluster::<()>();
+        let (ack_send, acks) = cluster.sim_input::<(u32, MemberId<()>), NoOrder, ExactlyOnce>();
+
+        let out_recv = quorum(
+            2,
+            acks.assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+                /// Test harness: the sim input plays an EC attestation stream.
+            )),
+        )
+        .map(q!(|cert| cert.into_fact()))
+        .sim_cluster_output();
+
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&cluster, 1)
+            .exhaustive(async || {
+                ack_send.send_many_unordered([
+                    (0, (7u32, MemberId::from_raw_id(0))),
+                    (0, (9u32, MemberId::from_raw_id(0))),
+                    (0, (7u32, MemberId::from_raw_id(1))),
+                    (0, (9u32, MemberId::from_raw_id(1))),
+                ]);
+
+                let got: Vec<u32> = out_recv.collect_sorted(0).await;
+                assert_eq!(got, vec![7, 9]);
+            });
+    }
+
+    /// With exactly the threshold responses, the covering aggregate is their
+    /// maximum and the certificate fires exactly once.
+    #[test]
+    fn covering_quorum_aggregates_exact_threshold() {
+        let mut flow = FlowBuilder::new();
+        let cluster = flow.cluster::<()>();
+        let (resp_send, responses) =
+            cluster.sim_input::<(u32, (MemberId<()>, Option<(Ts, u32)>)), NoOrder, ExactlyOnce>();
+
+        let out_recv = covering_quorum(2, responses)
+            .map(q!(|(key, covering)| (key, covering.into_aggregate())))
+            .sim_cluster_output();
+
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&cluster, 1)
+            .exhaustive(async || {
+                resp_send.send_many_unordered([
+                    (0, (5, (MemberId::from_raw_id(0), Some((ts(1), 10))))),
+                    (0, (5, (MemberId::from_raw_id(1), Some((ts(2), 20))))),
+                ]);
+
+                let got: Vec<(u32, Option<(Ts, u32)>)> = out_recv.collect_sorted(0).await;
+                assert_eq!(got, vec![(5, Some((ts(2), 20)))]);
+            });
+    }
+
+    /// An empty replica response still counts toward the covering threshold;
+    /// the aggregate remains the maximum non-empty response.
+    #[test]
+    fn covering_quorum_counts_none_and_aggregates_some() {
+        let mut flow = FlowBuilder::new();
+        let cluster = flow.cluster::<()>();
+        let (resp_send, responses) =
+            cluster.sim_input::<(u32, (MemberId<()>, Option<(Ts, u32)>)), NoOrder, ExactlyOnce>();
+
+        let out_recv = covering_quorum(2, responses)
+            .map(q!(|(key, covering)| (key, covering.into_aggregate())))
+            .sim_cluster_output();
+
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&cluster, 1)
+            .exhaustive(async || {
+                resp_send.send_many_unordered([
+                    (0, (5, (MemberId::from_raw_id(0), None))),
+                    (0, (5, (MemberId::from_raw_id(1), Some((ts(2), 20))))),
+                ]);
+
+                let got: Vec<(u32, Option<(Ts, u32)>)> = out_recv.collect_sorted(0).await;
+                assert_eq!(got, vec![(5, Some((ts(2), 20)))]);
+            });
+    }
+
+    /// Exact duplicate responses do not forge a covering.
+    #[test]
+    fn covering_quorum_deduplicates_responses() {
+        let mut flow = FlowBuilder::new();
+        let cluster = flow.cluster::<()>();
+        let (resp_send, responses) =
+            cluster.sim_input::<(u32, (MemberId<()>, Option<(Ts, u32)>)), NoOrder, ExactlyOnce>();
+
+        let out_recv = covering_quorum(2, responses)
+            .map(q!(|(key, covering)| (key, covering.into_aggregate())))
+            .sim_cluster_output();
+
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&cluster, 1)
+            .exhaustive(async || {
+                let response = (5, (MemberId::from_raw_id(0), Some((ts(1), 10))));
+                resp_send.send_many_unordered([(0, response.clone()), (0, response)]);
+
+                let got: Vec<(u32, Option<(Ts, u32)>)> = out_recv.collect_sorted(0).await;
+                assert!(
+                    got.is_empty(),
+                    "one responder must not form a threshold-2 covering"
+                );
+            });
+    }
+
+    /// Which threshold-sized subset arrives first is a declared freedom. With
+    /// timestamps 1, 2, and 3 at threshold 2, a covering may aggregate to 2
+    /// or 3, but it must fire once and can never aggregate to 1.
+    #[test]
+    fn covering_quorum_first_majority_is_schedule_authored_and_fires_once() {
+        let mut flow = FlowBuilder::new();
+        let cluster = flow.cluster::<()>();
+        let (resp_send, responses) =
+            cluster.sim_input::<(u32, (MemberId<()>, Option<(Ts, u32)>)), NoOrder, ExactlyOnce>();
+
+        let out_recv = covering_quorum(2, responses)
+            .map(q!(|(key, covering)| (key, covering.into_aggregate())))
+            .sim_cluster_output();
+
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&cluster, 1)
+            .exhaustive(async || {
+                resp_send.send_many_unordered([
+                    (0, (5, (MemberId::from_raw_id(0), Some((ts(1), 10))))),
+                    (0, (5, (MemberId::from_raw_id(1), Some((ts(2), 20))))),
+                    (0, (5, (MemberId::from_raw_id(2), Some((ts(3), 30))))),
+                ]);
+
+                let got: Vec<(u32, Option<(Ts, u32)>)> = out_recv.collect_sorted(0).await;
+                assert_eq!(got.len(), 1, "a key must cover exactly once");
+                let round = got[0].1.as_ref().expect("non-empty covering").0.round;
+                assert!(
+                    round == 2 || round == 3,
+                    "aggregate must be the max of a legal first majority, got {round}"
+                );
+            });
+    }
+
+    /// Pending responses and fired state are partitioned by request key.
+    #[test]
+    fn covering_quorum_keeps_request_keys_separate() {
+        let mut flow = FlowBuilder::new();
+        let cluster = flow.cluster::<()>();
+        let (resp_send, responses) =
+            cluster.sim_input::<(u32, (MemberId<()>, Option<(Ts, u32)>)), NoOrder, ExactlyOnce>();
+
+        let out_recv = covering_quorum(2, responses)
+            .map(q!(|(key, covering)| (key, covering.into_aggregate())))
+            .sim_cluster_output();
+
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&cluster, 1)
+            .exhaustive(async || {
+                resp_send.send_many_unordered([
+                    (0, (5, (MemberId::from_raw_id(0), Some((ts(1), 10))))),
+                    (0, (6, (MemberId::from_raw_id(0), Some((ts(2), 20))))),
+                    (0, (5, (MemberId::from_raw_id(1), Some((ts(3), 30))))),
+                    (0, (6, (MemberId::from_raw_id(1), Some((ts(4), 40))))),
+                ]);
+
+                let got: Vec<(u32, Option<(Ts, u32)>)> = out_recv.collect_sorted(0).await;
+                assert_eq!(got, vec![(5, Some((ts(3), 30))), (6, Some((ts(4), 40)))]);
             });
     }
 }
