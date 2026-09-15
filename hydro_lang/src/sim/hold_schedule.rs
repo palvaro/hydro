@@ -7,10 +7,11 @@
 //! location. Three policies exist:
 //!
 //! - [`EdgePolicy::Prompt`]: release everything buffered (the default for every edge).
-//! - [`EdgePolicy::Metered`]: release exactly one buffered item per decision. This makes the
-//!   edge a clock: a stream of timer elements sent to the simulation up front is consumed one
-//!   per tick of the slice that reads it, so the slice's tick count *is* logical time and the
-//!   driver, not the test harness, decides when time advances.
+//! - [`EdgePolicy::Metered(n)`]: release exactly `n` buffered items per decision. With `n = 1`
+//!   this makes the edge a clock: a stream of timer elements sent to the simulation up front is
+//!   consumed one per tick of the slice that reads it, so the slice's tick count *is* logical
+//!   time and the driver, not the test harness, decides when time advances. With `n > 1` it
+//!   paces an input that arrives at a fixed rate per tick (a workload sent up front).
 //! - [`EdgePolicy::Hold(d)`]: items that first appear in the buffer at the hook's `k`-th
 //!   decision are released at its `(k + d)`-th decision. Since the hook is asked exactly once
 //!   per tick of its slice, and a metered clock in the same slice advances once per tick, a
@@ -40,8 +41,8 @@ use super::edge_counts::{HookContext, current_hook, edge_key};
 pub enum EdgePolicy {
     /// Release everything buffered.
     Prompt,
-    /// Release exactly one item per decision.
-    Metered,
+    /// Release exactly this many items per decision (fewer only when fewer are buffered).
+    Metered(usize),
     /// Release an item `d` decisions after it first appeared in the buffer.
     Hold(u64),
 }
@@ -154,9 +155,15 @@ impl HoldScheduleDriver {
         self
     }
 
-    /// Shorthand for [`Self::with_policy`] with [`EdgePolicy::Metered`].
+    /// Shorthand for [`Self::with_policy`] with [`EdgePolicy::Metered`]`(1)`: the edge is a
+    /// clock.
     pub fn meter(self, pred: impl Fn(&str) -> bool + 'static) -> Self {
-        self.with_policy(pred, EdgePolicy::Metered)
+        self.with_policy(pred, EdgePolicy::Metered(1))
+    }
+
+    /// Shorthand for [`Self::with_policy`] with [`EdgePolicy::Metered`]`(per_decision)`.
+    pub fn meter_n(self, pred: impl Fn(&str) -> bool + 'static, per_decision: usize) -> Self {
+        self.with_policy(pred, EdgePolicy::Metered(per_decision))
     }
 
     /// Shorthand for [`Self::with_policy`] with [`EdgePolicy::Hold`].
@@ -179,11 +186,31 @@ impl HoldScheduleDriver {
         let key = edge_key(context.location);
         match self.policy_for(&key) {
             EdgePolicy::Prompt => None,
-            EdgePolicy::Metered => Some(match question {
-                Count { min } => context.buffered.min(1).max(min),
-                Stop => 1,
-                Which => 0,
-            }),
+            EdgePolicy::Metered(n) => {
+                // Unordered hooks ask per item; count what this decision has released so far.
+                let state = self
+                    .states
+                    .entry((key, context.member))
+                    .or_default();
+                if state.current != Some(context.decision) {
+                    state.current = Some(context.decision);
+                    state.released = 0;
+                }
+                Some(match question {
+                    Count { min } => context.buffered.min(n).max(min),
+                    Stop => {
+                        if state.released >= n {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    Which => {
+                        state.released += 1;
+                        0
+                    }
+                })
+            }
             EdgePolicy::Hold(d) => {
                 let state = self.states.entry((key, context.member)).or_default();
                 if state.current != Some(context.decision) {

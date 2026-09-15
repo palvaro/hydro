@@ -3,9 +3,11 @@
 Status: design note, step 2 of the metastability project. E0 (canonical program + deterministic
 sim collapse) and E2 (per-edge counting under two schedules, with controls) are done; no
 lineage code exists yet. Ground truth:
-`hydro_test/src/cluster/retry_storm.rs`, a Hydro client/server program with timeout/retry that
-is driven to a metastable collapse both on localhost and, deterministically, in the simulator
-(step 1: commit `bbd3ca02c5`; E0: the commit that adds this file).
+`hydro_test/src/cluster/rpc_retry.rs`, a Hydro request/response service whose client has a
+timeout-and-retry policy, driven to a metastable collapse by the test harness both on localhost
+and, deterministically, in the simulator (step 1: commit `bbd3ca02c5`; E0: `92bd747dc7`; the
+program was called `retry_storm` until the restructuring described under "E2: results / Program
+hygiene").
 
 A note on process: the previous branch's history and this project's own first E0 attempt both
 show the same failure mode — an agent works for hours without compiling or running anything
@@ -164,6 +166,9 @@ where possible rather than encoded as bespoke tests.
 
 ## E0: results
 
+(Names below are those of the E0 commit; see "E2: results / Program hygiene" for the current
+ones: `rpc_retry.rs`, `rpc_with_retries`, `Workload`, `RetryPolicy`, `ServerConfig`.)
+
 Done. `hydro_test/src/cluster/retry_storm.rs` is now one program: `retry_storm(...)` takes
 three clock streams (`client_clock`, `client_report_tick`, `server_report_tick`);
 `retry_storm_deployed` (behind the `tokio` feature) wires `source_interval`s into them; the
@@ -272,8 +277,38 @@ load perturbation shows the same gain on the same edges as the hold perturbation
 ## E2: results
 
 Done. Every number below is from a test that runs under `cargo test` and asserts it:
-`retry_storm::amplification_tests` (three tests), `raft::amplification_control`, and
+`rpc_retry::amplification_tests` (three tests), `raft::amplification_control`, and
 `hydro_std::ec_inference_demos::reliable_broadcast::amplification_control`.
+
+### Program hygiene
+
+Reviewing E2 surfaced that the ground-truth program did not read as a benign service that
+happens to be vulnerable: the overload script (`trigger_*`) was part of the program's config
+and the client minted its own load from it; the wire protocol carried `attempt` so that the
+*server* could split its work into "first attempts" and "retries"; every name announced the
+outcome. A checker that is meant to look at arbitrary programs cannot be validated on one that
+labels its own failure. The program was therefore restructured, with every E0 and E2 number
+re-measured and unchanged:
+
+- `rpc_with_retries(client, server, requests, clocks…, RetryPolicy, ServerConfig)`: the client
+  takes an application request stream, assigns ids, and retries per
+  `RetryPolicy { timeout_ticks, max_attempts }`; the server has a FIFO and a per-tick budget and
+  answers everything it serves. The wire carries `Request { id, body }` / `Response { id, body }`
+  and nothing about attempts; the server has no notion of a retry.
+- The workload (`Workload { baseline_per_tick, trigger_per_tick, trigger_start_tick,
+  trigger_end_tick }`) lives in the harness: the sim tests feed the request stream per round,
+  the deployment harness (`deploy_with_workload`) builds a generator from the same
+  `source_interval` that drives the clock. Request bodies carry the tick they were issued in,
+  which is how the tests know a request's issue tick.
+- Metrics are what either side can legitimately know: the client reports completed, latency,
+  sent, re-sent and abandoned; the server reports processed and backlog. The tests' "retry"
+  numbers are the client's own re-send count, or (in the sim) the harness noticing that an id
+  it has already seen served is served again.
+
+Deployed after the restructuring: baseline 400/s at 0.03 ticks; tail (t ≥ 25 s) goodput 0/s,
+6400 abandoned, client sent 19200 of which 12800 re-sends, server processed 15120, backlog
+8056 → 11876. Simulator: the E0 trajectory below to the record (217, 420, 680, 838, 1038, 1237;
+tail 0 completed, 400 abandoned, server served 333 ids for the first time and 667 again).
 
 ### Instrument
 
@@ -287,7 +322,7 @@ Done. Every number below is from a test that runs under `cargo test` and asserts
 - **Edge identity.** The hook's source location is the `sliced!` invocation, not the
   `use::batch` line, so every batch in a block shares a location. Hooks now also carry
   `std::any::type_name` of their element, and an edge is keyed `file:line:col <type>`. For
-  `retry_storm` this is unique for all nine batches. For `raft_server` the two timer batches
+  `rpc_retry` this is unique for all ten batches. For `raft_server` the two timer batches
   (both `()`) collide and are counted together; a real fix is an operator id in the IR
   metadata (E3's rewrite pass can assign one).
 - **The hold driver** (`hydro_lang/src/sim/hold_schedule.rs`). `HoldScheduleDriver` is the
@@ -305,9 +340,9 @@ Done. Every number below is from a test that runs under `cargo test` and asserts
   un-metered by mistake, all 300 clock elements were released in one tick, `now` jumped to 299,
   and 510 of 600 requests were retried immediately — the degenerate case the doc's "time
   collapses" warning describes.) So the E2 harness sends the whole clock up front and the
-  driver **meters** the client's clock batch: one element per client tick, the tick count is
-  logical time, and the `responses` hook can be held across ticks because the clock hook is the
-  one that satisfies the forcing rule. When the clock runs dry the held hook is forced and the
+  driver **meters** the client's clock batch (one element per client tick) and its request
+  batch ($b$ per tick): the tick count is logical time, and the `responses` hook can be held
+  across ticks because the clock hook is the one that satisfies the forcing rule. When the clock runs dry the held hook is forced and the
   driver flushes everything (end-of-run flush, visible below).
 - Under this harness the scheduler's round-robin runs the server tick once per two client
   ticks (150 server decisions for 300 client ticks), so baseline latency is 1 or 2 ticks
@@ -387,7 +422,7 @@ bullet asked for: both are schedules under which the server's answer arrives lat
 
 ### What E2 says about the next steps
 
-- Counting at hooks is sufficient to see the gain and its threshold in `retry_storm`, and to
+- Counting at hooks is sufficient to see the gain and its threshold in `rpc_retry`, and to
   see the two controls stay flat. E3 (lineage) is not needed for the verdict; it is needed to
   say *which* held delivery each extra record re-derives.
 - The instrument's coverage is exactly the set of `batch` hooks. Top-level edges

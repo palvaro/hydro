@@ -1,18 +1,11 @@
-//! Ground-truth example of a metastable failure in Hydro: a client that retries on timeout
-//! talking to a server with fixed capacity.
+//! A request/response service with a client-side timeout-and-retry policy.
 //!
-//! The client is an *open-loop* load generator: it issues requests at a configured rate
-//! regardless of whether earlier requests have completed. Every outstanding request that has
-//! not been answered within `timeout_ticks` is re-sent (up to `max_attempts` sends in total)
-//! and then abandoned. The server serves at most `max_per_tick` requests per tick from an
-//! explicit FIFO backlog, so its capacity is `max_per_tick` requests per server tick, and it
-//! answers every request it sees -- including retries of requests it has already answered.
-//!
-//! The feedback loop is explicit in the dataflow: `outgoing -> server -> responses -> outstanding
-//! -> retries -> outgoing`. When a brief overload pushes queueing delay past the timeout,
-//! retries add work to an already saturated server, which keeps latency above the timeout,
-//! which keeps generating retries. If `baseline_per_tick * max_attempts > max_per_tick`, the
-//! system never recovers after the trigger ends.
+//! The client forwards application requests to the server, tagging each with an id, and keeps
+//! a table of the requests still awaiting a response. A request that has not been answered
+//! within [`RetryPolicy::timeout_ticks`] is sent again, up to [`RetryPolicy::max_attempts`]
+//! sends in total, after which the client gives up on it and reports it as abandoned. The
+//! server keeps incoming requests in a FIFO and serves at most [`ServerConfig::max_per_tick`] of
+//! them per tick, answering every request it serves. Both sides export per-window metrics.
 //!
 //! # Time is an input
 //!
@@ -20,54 +13,56 @@
 //! reads a wall clock; all time enters through three stream parameters (the pattern used by
 //! [`super::raft::raft`] for its election and heartbeat timers):
 //!
-//! - `client_clock`: one element per logical client tick. Each element mints the next burst of
-//!   requests (`baseline_per_tick` or `trigger_per_tick` of them) and advances the client's
-//!   logical clock by one. Timeouts and latencies are measured in these ticks.
-//! - `client_report_tick`, `server_report_tick`: one element per reporting window.
+//! - `client_clock`: one element per logical client tick. Each element advances the client's
+//!   logical clock by one; timeouts and latencies are measured in these ticks.
+//! - `client_report_tick`, `server_report_tick`: one element per metrics window.
 //!
-//! [`retry_storm_deployed`] wires `source_interval` streams into these parameters, so on a
-//! real deployment a tick is `clock_period` of wall time; a simulation test feeds them with
-//! `sim_input` and thereby controls time itself. The only deployment-specific piece of the
-//! program is the server's optional CPU burn per request (`service_time`), which is what makes
-//! capacity real on a laptop and is set to zero in simulation, where `max_per_tick` alone is
-//! the capacity.
+//! A deployment wires `source_interval` streams into these parameters, so a tick is a fixed
+//! period of wall time; a simulation feeds them with `sim_input` and thereby controls time
+//! itself. The only deployment-specific piece of the program is the server's optional CPU burn
+//! per request ([`ServerConfig::service_time`]), which is what makes its capacity real on a
+//! machine and is zero in simulation, where `max_per_tick` alone is the capacity.
 
 use std::time::Duration;
 
 use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
 use hydro_lang::prelude::*;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 pub struct Client;
 pub struct Server;
 
+/// What the client puts on the wire: the application's request body under a client-assigned id.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Request {
+pub struct Request<T> {
     pub id: u64,
-    /// 1 for the first send, 2 for the first retry, ...
-    pub attempt: u32,
+    pub body: T,
 }
 
+/// The server's answer, echoing the request body.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Response {
+pub struct Response<T> {
     pub id: u64,
-    pub attempt: u32,
+    pub body: T,
 }
 
 /// Client-side bookkeeping for a request that has been sent but not yet answered. Times are
 /// logical client ticks (the index of the `client_clock` element).
 #[derive(Clone, Debug)]
-pub struct InFlight {
+pub struct InFlight<T> {
+    pub body: T,
     pub first_sent: u64,
     pub last_sent: u64,
+    /// Sends so far: 1 after the first send.
     pub attempt: u32,
 }
 
 #[derive(Clone, Debug)]
-enum Verdict {
-    Keep(InFlight),
-    Retry(InFlight),
-    Abandon(InFlight),
+enum Verdict<T> {
+    Keep(InFlight<T>),
+    Retry(InFlight<T>),
+    Abandon(InFlight<T>),
 }
 
 /// A request that received its first response.
@@ -76,61 +71,42 @@ pub struct Completion {
     pub id: u64,
     /// Client ticks from the first send to the first response.
     pub latency_ticks: u64,
-    /// Number of times the request was sent before it was answered.
-    pub attempts: u32,
 }
 
+/// The client's retry policy.
 #[derive(Clone, Copy, Debug)]
-pub struct RetryStormConfig {
-    /// Requests minted per client tick outside the trigger window.
-    pub baseline_per_tick: u32,
-    /// Requests minted per client tick inside the trigger window.
-    pub trigger_per_tick: u32,
-    /// Trigger window, in client ticks since start: `[trigger_start_tick, trigger_end_tick)`.
-    pub trigger_start_tick: u64,
-    pub trigger_end_tick: u64,
-    /// Upper bound on requests served per server tick: the server's capacity. On a deployment
-    /// this also bounds tick length so the server keeps draining its socket while it works
-    /// through its backlog.
-    pub max_per_tick: u32,
+pub struct RetryPolicy {
     /// How many client ticks the client waits for a response before re-sending.
     pub timeout_ticks: u64,
     /// Total number of sends per request (1 = never retry).
     pub max_attempts: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ServerConfig {
+    /// Upper bound on requests served per server tick: the server's capacity. On a deployment
+    /// this also bounds tick length so the server keeps draining its socket while it works
+    /// through its backlog.
+    pub max_per_tick: u32,
     /// CPU time the server burns per request. Deployment only: makes capacity real on a
     /// machine; must be `Duration::ZERO` in simulation.
     pub service_time: Duration,
-    /// Deployment only: wall-clock period of `client_clock`.
-    pub clock_period: Duration,
-    /// Deployment only: how often both sides print a window report.
-    pub report_interval: Duration,
 }
 
-impl RetryStormConfig {
-    pub fn baseline_rate(&self) -> f64 {
-        self.baseline_per_tick as f64 / self.clock_period.as_secs_f64()
-    }
-    pub fn trigger_rate(&self) -> f64 {
-        self.trigger_per_tick as f64 / self.clock_period.as_secs_f64()
-    }
-    /// Deployed capacity in requests per second, assuming the server is CPU-bound.
-    pub fn capacity(&self) -> f64 {
-        1.0 / self.service_time.as_secs_f64()
-    }
-}
-
-/// Per-window statistics printed by the client.
+/// Per-window metrics exported by the client.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ClientWindow {
+pub struct ClientMetrics {
     pub completed: u64,
     pub latency_sum_ticks: u64,
     pub latency_max_ticks: u64,
-    pub sent_first: u64,
-    pub sent_retry: u64,
+    /// Requests put on the wire, including re-sends.
+    pub sent: u64,
+    /// Of `sent`, how many were re-sends.
+    pub retried: u64,
     pub abandoned: u64,
 }
 
-impl ClientWindow {
+impl ClientMetrics {
     pub fn mean_latency_ticks(&self) -> f64 {
         if self.completed == 0 {
             0.0
@@ -140,34 +116,31 @@ impl ClientWindow {
     }
 }
 
-/// Per-window statistics printed by the server.
+/// Per-window metrics exported by the server.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ServerWindow {
-    /// Requests processed with `attempt == 1` (productive work).
-    pub first_attempts: u64,
-    /// Requests processed with `attempt > 1` (amplified work: the same id, re-derived).
-    pub retries: u64,
+pub struct ServerMetrics {
+    pub processed: u64,
 }
 
-/// Everything observable about a run. The deployed wiring prints the two `*_windows`
-/// streams; simulation tests read whichever of these they need via `sim_output`.
-pub struct RetryStormOutputs<'a> {
+/// Everything observable about a run. A deployment prints the two `*_metrics` streams; tests
+/// read whichever of these they need.
+pub struct RpcOutputs<'a, T> {
     /// Requests that received their first response, at the client.
-    pub completions: Stream<Completion, Process<'a, Client>, Unbounded, NoOrder, ExactlyOnce>,
+    pub completed: Stream<Completion, Process<'a, Client>, Unbounded, NoOrder, ExactlyOnce>,
     /// Ids given up on after `max_attempts` sends.
     pub abandoned: Stream<u64, Process<'a, Client>, Unbounded, NoOrder, ExactlyOnce>,
-    /// Every request the client sends (first attempts and retries).
-    pub outgoing: Stream<Request, Process<'a, Client>, Unbounded, TotalOrder, ExactlyOnce>,
+    /// Every request the client puts on the wire (first sends and re-sends).
+    pub outgoing: Stream<Request<T>, Process<'a, Client>, Unbounded, TotalOrder, ExactlyOnce>,
     /// Every request the server serves.
-    pub processed: Stream<Request, Process<'a, Server>, Unbounded, TotalOrder, ExactlyOnce>,
+    pub processed: Stream<Request<T>, Process<'a, Server>, Unbounded, TotalOrder, ExactlyOnce>,
     /// Depth of the server's backlog at the end of each server tick.
     pub backlog_trace: Stream<usize, Process<'a, Server>, Unbounded, TotalOrder, ExactlyOnce>,
-    /// `(window index, stats)` once per `client_report_tick`.
-    pub client_windows:
-        Stream<(usize, ClientWindow), Process<'a, Client>, Unbounded, TotalOrder, ExactlyOnce>,
-    /// `(window index, stats, backlog depth)` once per `server_report_tick`.
-    pub server_windows: Stream<
-        (usize, ServerWindow, usize),
+    /// `(window index, metrics)` once per `client_report_tick`.
+    pub client_metrics:
+        Stream<(usize, ClientMetrics), Process<'a, Client>, Unbounded, TotalOrder, ExactlyOnce>,
+    /// `(window index, metrics, backlog depth)` once per `server_report_tick`.
+    pub server_metrics: Stream<
+        (usize, ServerMetrics, usize),
         Process<'a, Server>,
         Unbounded,
         TotalOrder,
@@ -175,72 +148,63 @@ pub struct RetryStormOutputs<'a> {
     >,
 }
 
-/// Builds the client/server program. See the module docs for the meaning of the three clock
-/// parameters.
-pub fn retry_storm<'a>(
+/// Builds the client/server program. `requests` is the application's request stream at the
+/// client; see the module docs for the meaning of the three clock parameters.
+///
+/// Request bodies must be `Ord` because re-sends are sorted so that the client's outgoing
+/// stream is totally ordered; over a single connection the server then receives requests in
+/// exactly that order.
+pub fn rpc_with_retries<'a, T>(
     client: &Process<'a, Client>,
     server: &Process<'a, Server>,
+    requests: Stream<T, Process<'a, Client>, Unbounded, TotalOrder, ExactlyOnce>,
     client_clock: Stream<(), Process<'a, Client>, Unbounded>,
     client_report_tick: Stream<(), Process<'a, Client>, Unbounded>,
     server_report_tick: Stream<(), Process<'a, Server>, Unbounded>,
-    config: RetryStormConfig,
-) -> RetryStormOutputs<'a> {
-    let RetryStormConfig {
-        baseline_per_tick,
-        trigger_per_tick,
-        trigger_start_tick,
-        trigger_end_tick,
-        max_per_tick,
+    policy: RetryPolicy,
+    server_config: ServerConfig,
+) -> RpcOutputs<'a, T>
+where
+    T: Clone + Ord + std::hash::Hash + std::fmt::Debug + Serialize + DeserializeOwned + 'a,
+{
+    let RetryPolicy {
         timeout_ticks,
         max_attempts,
+    } = policy;
+    let ServerConfig {
+        max_per_tick,
         service_time,
-        ..
-    } = config;
+    } = server_config;
     // `q!` closures can only capture primitives, so the duration crosses into runtime code as
     // nanos.
     let service_nanos = service_time.as_nanos() as u64;
 
     // Responses come back from the server, which is downstream of `outgoing` (below).
     let (responses_complete, responses) = client
-        .forward_ref::<Stream<Response, Process<'a, Client>, Unbounded, TotalOrder, ExactlyOnce>>(
+        .forward_ref::<Stream<Response<T>, Process<'a, Client>, Unbounded, TotalOrder, ExactlyOnce>>(
         );
 
-    // ---- Client: logical clock, open-loop load, outstanding table, timeouts, retries -------
-    let (outgoing, completions, abandoned) = sliced! {
+    // ---- Client: logical clock, outstanding table, timeouts, re-sends ------------------------
+    let (outgoing, retried_out, completed, abandoned) = sliced! {
         // Each clock element is one logical tick, numbered from 0.
-        let clock = use::batch(client_clock.enumerate(), nondet!(/** batching only shifts which client tick observes a clock element; every element still mints its burst and advances the clock */));
+        let clock = use::batch(client_clock.enumerate(), nondet!(/** batching only shifts which client tick observes a clock element; every element still advances the clock */));
+        // Ids are assigned in arrival order.
+        let new_requests = use::batch(requests.enumerate(), nondet!(/** batching only shifts which client tick first sends a request, i.e. its timestamps */));
         let responses = use::batch(responses, nondet!(/** batching only affects when a completion is observed and when a timeout fires */));
-        let mut outstanding = use::state_null::<KeyedSingleton<u64, InFlight, Tick<_>, Bounded>>();
+        let mut outstanding = use::state_null::<KeyedSingleton<u64, InFlight<T>, Tick<_>, Bounded>>();
         // The client's logical clock: the highest tick number seen so far. A tick of this
         // block that receives no clock element (e.g. one triggered by responses alone) keeps
         // the previous value.
         let mut now = use::state(|l| l.singleton(q!(0u64)));
-        let now_cur = clock.clone().map(q!(|(i, _)| i as u64)).max().unwrap_or(now.clone());
+        let now_cur = clock.map(q!(|(i, _)| i as u64)).max().unwrap_or(now.clone());
         now = now_cur.clone();
 
-        // Open-loop load generator: one burst per clock element; the burst is larger inside
-        // the trigger window. Ids are unique because each tick owns the range
-        // [tick * trigger_per_tick, (tick + 1) * trigger_per_tick).
-        let new_requests = clock.flat_map_ordered(q!(move |(i, _)| {
-            let tick = i as u64;
-            let n = if tick >= trigger_start_tick && tick < trigger_end_tick {
-                trigger_per_tick
-            } else {
-                baseline_per_tick
-            };
-            (0..n as u64).map(move |k| (
-                tick,
-                Request {
-                    id: tick * trigger_per_tick as u64 + k,
-                    attempt: 1,
-                },
-            ))
-        }));
+        let new_requests = new_requests.map(q!(|(i, body)| Request { id: i as u64, body }));
 
         // A response completes an outstanding request. Responses to ids that are no longer
-        // outstanding (duplicate answers to retries, or already-abandoned requests) are ignored.
+        // outstanding (duplicate answers to re-sends, or already-abandoned requests) are ignored.
         let responded_ids = responses.map(q!(|r| r.id)).unique();
-        let completions = responded_ids
+        let completed = responded_ids
             .clone()
             .map(q!(|id| (id, ())))
             .into_keyed()
@@ -250,7 +214,6 @@ pub fn retry_storm<'a>(
             .map(q!(|((id, (_, inflight)), now)| Completion {
                 id,
                 latency_ticks: now - inflight.first_sent,
-                attempts: inflight.attempt,
             }));
 
         // Everything still waiting is judged against the timeout exactly once per tick.
@@ -263,6 +226,7 @@ pub fn retry_storm<'a>(
                     Verdict::Keep(inflight)
                 } else if inflight.attempt < max_attempts {
                     Verdict::Retry(InFlight {
+                        body: inflight.body,
                         first_sent: inflight.first_sent,
                         last_sent: now,
                         attempt: inflight.attempt + 1,
@@ -287,19 +251,21 @@ pub fn retry_storm<'a>(
             }))
             .keys();
 
-        // Retries are sorted so the client's outgoing stream is totally ordered; over a single
-        // connection the server then receives requests in exactly this order.
+        // Re-sends are sorted so the client's outgoing stream is totally ordered.
         let retries_out = retried
             .clone()
             .entries()
-            .map(q!(|(id, f)| Request { id, attempt: f.attempt }))
+            .map(q!(|(id, f)| Request { id, body: f.body }))
             .sort();
+        // What the client knows about its own re-sends, for its metrics.
+        let retried_out = retried.clone().entries().map(q!(|(id, f)| (id, f.attempt)));
 
-        let newly_sent = new_requests.clone().map(q!(|(tick, r)| (
+        let newly_sent = new_requests.clone().cross_singleton(now_cur.clone()).map(q!(|(r, now)| (
             r.id,
             InFlight {
-                first_sent: tick,
-                last_sent: tick,
+                body: r.body,
+                first_sent: now,
+                last_sent: now,
                 attempt: 1,
             }
         )));
@@ -311,25 +277,24 @@ pub fn retry_storm<'a>(
             .first();
 
         (
-            new_requests.map(q!(|(_, r)| r)).chain(retries_out),
-            completions,
+            new_requests.chain(retries_out),
+            retried_out,
+            completed,
             abandoned,
         )
     };
 
-    // ---- Server: explicit FIFO backlog, bounded work per tick ---------------------------
+    // ---- Server: FIFO backlog, bounded work per tick ------------------------------------
     // Requests wait in `backlog`, a Hydro-level queue that persists across ticks. Each tick
     // dequeues at most `max_per_tick` requests (and, when deployed, burns `service_time` of CPU
     // on each), so a tick never runs longer than `max_per_tick * service_time`. Keeping ticks
     // short matters on a deployment: a DFIR node only reads its sockets between ticks, and a
-    // node blocked writing to a full socket cannot read either. (With unbounded work per tick,
-    // the client and server deadlock on each other's full socket buffers as soon as the server
-    // falls behind.)
+    // node blocked writing to a full socket cannot read either.
     let incoming = outgoing.clone().send(server, TCP.fail_stop().bincode());
 
     let (processed, backlog_depth, backlog_trace) = sliced! {
         let arrivals = use::batch(incoming, nondet!(/** arrivals are appended to the FIFO; batching only affects how many share a tick */));
-        let mut backlog = use::state_null::<Stream<Request, Tick<_>, Bounded, TotalOrder>>();
+        let mut backlog = use::state_null::<Stream<Request<T>, Tick<_>, Bounded, TotalOrder>>();
 
         let queued = backlog.chain(arrivals).enumerate();
         let served = queued
@@ -356,27 +321,22 @@ pub fn retry_storm<'a>(
             .clone()
             .map(q!(|req| Response {
                 id: req.id,
-                attempt: req.attempt,
+                body: req.body,
             }))
             .send(client, TCP.fail_stop().bincode()),
     );
 
-    // ---- Server report ------------------------------------------------------------------
-    let server_windows = sliced! {
-        let punctuation = use::batch(server_report_tick.enumerate(), nondet!(/** reporting window boundary */));
-        let processed = use::batch(processed.clone(), nondet!(/** reporting window boundary */));
-        let backlog_depth = use::snapshot(backlog_depth, nondet!(/** reporting window boundary */));
-        let mut acc = use::state(|l| l.singleton(q!(ServerWindow::default())));
+    // ---- Server metrics -----------------------------------------------------------------
+    let server_metrics = sliced! {
+        let punctuation = use::batch(server_report_tick.enumerate(), nondet!(/** metrics window boundary */));
+        let processed = use::batch(processed.clone(), nondet!(/** metrics window boundary */));
+        let backlog_depth = use::snapshot(backlog_depth, nondet!(/** metrics window boundary */));
+        let mut acc = use::state(|l| l.singleton(q!(ServerMetrics::default())));
 
         let window_end = punctuation.first();
-        let in_batch = processed.fold(
-            q!(ServerWindow::default),
-            q!(|w, req| if req.attempt == 1 { w.first_attempts += 1 } else { w.retries += 1 },
-               commutative = manual_proof!(/** counting */)),
-        );
-        let merged = acc.clone().zip(in_batch).map(q!(|(a, b)| ServerWindow {
-            first_attempts: a.first_attempts + b.first_attempts,
-            retries: a.retries + b.retries,
+        let in_batch = processed.count();
+        let merged = acc.clone().zip(in_batch).map(q!(|(a, n)| ServerMetrics {
+            processed: a.processed + n as u64,
         }));
 
         let report = merged
@@ -384,49 +344,48 @@ pub fn retry_storm<'a>(
             .filter_if(window_end.clone().is_some())
             .zip(window_end.clone())
             .zip(backlog_depth)
-            .map(q!(|((w, (i, _)), backlog)| (i, w, backlog)));
+            .map(q!(|((m, (i, _)), backlog)| (i, m, backlog)));
         acc = merged
             .filter_if(window_end.is_none())
-            .unwrap_or(acc.clone().map(q!(|_| ServerWindow::default())));
+            .unwrap_or(acc.clone().map(q!(|_| ServerMetrics::default())));
 
         report.into_stream()
     };
 
-    // ---- Client report ------------------------------------------------------------------
-    let client_windows = sliced! {
-        let punctuation = use::batch(client_report_tick.enumerate(), nondet!(/** reporting window boundary */));
-        let completions = use::batch(completions.clone(), nondet!(/** reporting window boundary */));
-        let sent = use::batch(outgoing.clone(), nondet!(/** reporting window boundary */));
-        let abandoned = use::batch(abandoned.clone(), nondet!(/** reporting window boundary */));
-        let mut acc = use::state(|l| l.singleton(q!(ClientWindow::default())));
+    // ---- Client metrics -----------------------------------------------------------------
+    let client_metrics = sliced! {
+        let punctuation = use::batch(client_report_tick.enumerate(), nondet!(/** metrics window boundary */));
+        let completed = use::batch(completed.clone(), nondet!(/** metrics window boundary */));
+        let sent = use::batch(outgoing.clone(), nondet!(/** metrics window boundary */));
+        let retried = use::batch(retried_out, nondet!(/** metrics window boundary */));
+        let abandoned = use::batch(abandoned.clone(), nondet!(/** metrics window boundary */));
+        let mut acc = use::state(|l| l.singleton(q!(ClientMetrics::default())));
 
         let window_end = punctuation.first();
-        let from_completions = completions.fold(
-            q!(ClientWindow::default),
-            q!(|w, c: Completion| {
-                w.completed += 1;
-                w.latency_sum_ticks += c.latency_ticks;
-                w.latency_max_ticks = w.latency_max_ticks.max(c.latency_ticks);
+        let from_completed = completed.fold(
+            q!(ClientMetrics::default),
+            q!(|m, c: Completion| {
+                m.completed += 1;
+                m.latency_sum_ticks += c.latency_ticks;
+                m.latency_max_ticks = m.latency_max_ticks.max(c.latency_ticks);
             }, commutative = manual_proof!(/** sum, count and max are commutative */)),
         );
-        let from_sent = sent.fold(
-            q!(ClientWindow::default),
-            q!(|w, r: Request| if r.attempt == 1 { w.sent_first += 1 } else { w.sent_retry += 1 },
-               commutative = manual_proof!(/** counting */)),
-        );
+        let from_sent = sent.count();
+        let from_retried = retried.count();
         let from_abandoned = abandoned.count();
 
         let merged = acc
             .clone()
-            .zip(from_completions)
+            .zip(from_completed)
             .zip(from_sent)
+            .zip(from_retried)
             .zip(from_abandoned)
-            .map(q!(|(((a, c), s), ab)| ClientWindow {
+            .map(q!(|((((a, c), s), r), ab)| ClientMetrics {
                 completed: a.completed + c.completed,
                 latency_sum_ticks: a.latency_sum_ticks + c.latency_sum_ticks,
                 latency_max_ticks: a.latency_max_ticks.max(c.latency_max_ticks),
-                sent_first: a.sent_first + s.sent_first,
-                sent_retry: a.sent_retry + s.sent_retry,
+                sent: a.sent + s as u64,
+                retried: a.retried + r as u64,
                 abandoned: a.abandoned + ab as u64,
             }));
 
@@ -434,78 +393,58 @@ pub fn retry_storm<'a>(
             .clone()
             .filter_if(window_end.clone().is_some())
             .zip(window_end.clone())
-            .map(q!(|(w, (i, _))| (i, w)));
+            .map(q!(|(m, (i, _))| (i, m)));
         acc = merged
             .filter_if(window_end.is_none())
-            .unwrap_or(acc.clone().map(q!(|_| ClientWindow::default())));
+            .unwrap_or(acc.clone().map(q!(|_| ClientMetrics::default())));
 
         report.into_stream()
     };
 
-    RetryStormOutputs {
-        completions,
+    RpcOutputs {
+        completed,
         abandoned,
         outgoing,
         processed,
         backlog_trace,
-        client_windows,
-        server_windows,
+        client_metrics,
+        server_metrics,
     }
 }
 
-/// Deployment wiring: `source_interval` clocks at `config.clock_period` and
-/// `config.report_interval`, and one printed report line per window on each side, which is how
-/// the deployed experiment is observed.
-#[cfg(feature = "tokio")]
-pub fn retry_storm_deployed<'a>(
-    client: &Process<'a, Client>,
-    server: &Process<'a, Server>,
-    config: RetryStormConfig,
-) {
-    let clock_nanos = config.clock_period.as_nanos() as u64;
-    let report_nanos = config.report_interval.as_nanos() as u64;
-
-    let client_clock = client.source_interval(q!(Duration::from_nanos(clock_nanos)));
-    let client_report_tick = client.source_interval(q!(Duration::from_nanos(report_nanos)));
-    let server_report_tick = server.source_interval(q!(Duration::from_nanos(report_nanos)));
-
-    let outputs = retry_storm(
-        client,
-        server,
-        client_clock,
-        client_report_tick,
-        server_report_tick,
-        config,
-    );
-
-    outputs.server_windows.for_each(q!(|(i, w, backlog)| println!(
-        "server t={}s processed={} first_attempts={} retries={} backlog={}",
-        i + 1,
-        w.first_attempts + w.retries,
-        w.first_attempts,
-        w.retries,
-        backlog
-    )));
-
-    outputs.client_windows.for_each(q!(|(i, w)| println!(
-        "client t={}s completed={} mean_latency_ticks={:.2} max_latency_ticks={} sent_first={} sent_retry={} abandoned={}",
-        i + 1,
-        w.completed,
-        w.mean_latency_ticks(),
-        w.latency_max_ticks,
-        w.sent_first,
-        w.sent_retry,
-        w.abandoned
-    )));
+/// An open-loop workload for the tests: a fixed number of requests per client tick, with a
+/// window in which the rate is higher. This lives in the harness, not in the program.
+#[derive(Clone, Copy, Debug)]
+pub struct Workload {
+    /// Requests per client tick outside the trigger window.
+    pub baseline_per_tick: u32,
+    /// Requests per client tick inside the trigger window.
+    pub trigger_per_tick: u32,
+    /// Trigger window, in client ticks since start: `[trigger_start_tick, trigger_end_tick)`.
+    pub trigger_start_tick: u64,
+    pub trigger_end_tick: u64,
 }
 
-/// Simulation of the same program under a fixed, fair schedule. A *round* is one element on
-/// `client_clock` followed by letting the simulation quiesce, so per round the client runs one
-/// tick (mint, judge timeouts, retry), the server one tick (serve up to `max_per_tick`), and the
-/// client one more tick to observe the responses. Capacity is therefore `max_per_tick` per round
-/// and the timeout is `timeout_ticks` rounds. There is no wall clock anywhere.
+impl Workload {
+    pub fn requests_at(&self, tick: u64) -> u32 {
+        if tick >= self.trigger_start_tick && tick < self.trigger_end_tick {
+            self.trigger_per_tick
+        } else {
+            self.baseline_per_tick
+        }
+    }
+}
+
+/// Simulation of the program under a fixed, fair schedule. A *round* is one element on
+/// `client_clock` plus that tick's requests, followed by letting the simulation quiesce, so per
+/// round the client runs one tick (send, judge timeouts, re-send), the server one tick (serve up
+/// to `max_per_tick`), and the client one more tick to observe the responses. Capacity is
+/// therefore `max_per_tick` per round and the timeout is `timeout_ticks` rounds. There is no
+/// wall clock anywhere. Request bodies carry the tick they were issued in.
 #[cfg(test)]
 mod sim_tests {
+    use std::collections::HashSet;
+
     use hydro_lang::sim::quiesce;
 
     use super::*;
@@ -515,38 +454,45 @@ mod sim_tests {
         completed: u64,
         latency_sum: u64,
         abandoned: u64,
+        /// Requests on the wire this round whose id had not been seen on the wire before.
         sent_first: u64,
+        /// Requests on the wire this round whose id had been sent before: re-sends.
         sent_retry: u64,
+        /// Requests served this round whose id had not been served before.
         served_first: u64,
-        served_retry: u64,
+        /// Requests served this round whose id had been served before: the server re-doing work.
+        served_again: u64,
         /// Server backlog after this round's server tick (carried over if it did not run).
         backlog: usize,
     }
 
     /// Runs `rounds` rounds and returns one record per round.
-    fn run(config: RetryStormConfig, rounds: usize) -> Vec<Round> {
+    fn run(workload: Workload, policy: RetryPolicy, server_config: ServerConfig, rounds: usize) -> Vec<Round> {
         let mut flow = FlowBuilder::new();
         let client = flow.process::<Client>();
         let server = flow.process::<Server>();
 
+        let (request_send, requests) = client.sim_input::<u64, TotalOrder, ExactlyOnce>();
         let (clock_send, client_clock) = client.sim_input::<(), TotalOrder, ExactlyOnce>();
-        // Reports are a deployment concern; these never fire.
+        // Metrics windows are a deployment concern; these never fire.
         let (_client_report_send, client_report_tick) =
             client.sim_input::<(), TotalOrder, ExactlyOnce>();
         let (_server_report_send, server_report_tick) =
             server.sim_input::<(), TotalOrder, ExactlyOnce>();
 
-        let outputs = retry_storm(
+        let outputs = rpc_with_retries(
             &client,
             &server,
+            requests,
             client_clock,
             client_report_tick,
             server_report_tick,
-            config,
+            policy,
+            server_config,
         );
         // Unordered outputs are read sorted, so map them to something `Ord`.
-        let completions = outputs
-            .completions
+        let completed = outputs
+            .completed
             .map(q!(|c| (c.id, c.latency_ticks)))
             .sim_output();
         let abandoned = outputs.abandoned.sim_output();
@@ -559,28 +505,33 @@ mod sim_tests {
 
         flow.sim().run_prompt(async move || {
             let mut backlog = 0usize;
-            for _ in 0..rounds {
+            let mut sent_ids: HashSet<u64> = HashSet::new();
+            let mut served_ids: HashSet<u64> = HashSet::new();
+            for tick in 0..rounds as u64 {
                 clock_send.send(());
+                for _ in 0..workload.requests_at(tick) {
+                    request_send.send(tick);
+                }
                 quiesce().await;
 
                 let mut r = Round::default();
-                for (_, latency) in completions.collect_sorted::<Vec<_>>().await {
+                for (_, latency) in completed.collect_sorted::<Vec<_>>().await {
                     r.completed += 1;
                     r.latency_sum += latency;
                 }
                 r.abandoned = abandoned.collect_sorted::<Vec<_>>().await.len() as u64;
                 while let Some(req) = outgoing.try_next().await {
-                    if req.attempt == 1 {
+                    if sent_ids.insert(req.id) {
                         r.sent_first += 1
                     } else {
                         r.sent_retry += 1
                     }
                 }
                 while let Some(req) = processed.try_next().await {
-                    if req.attempt == 1 {
+                    if served_ids.insert(req.id) {
                         r.served_first += 1
                     } else {
-                        r.served_retry += 1
+                        r.served_again += 1
                     }
                 }
                 while let Some(depth) = backlog_trace.try_next().await {
@@ -608,17 +559,19 @@ mod sim_tests {
     /// delay of ~84 rounds, past the 40-round timeout. From then on every request is sent
     /// three times, so offered load is 3 x 2 = 6 per round against a capacity of 5 even
     /// after the trigger ends.
-    pub(super) const BASE: RetryStormConfig = RetryStormConfig {
+    pub(super) const WORKLOAD: Workload = Workload {
         baseline_per_tick: 2,
         trigger_per_tick: 12,
         trigger_start_tick: 100,
         trigger_end_tick: 160,
-        max_per_tick: 5,
+    };
+    pub(super) const POLICY: RetryPolicy = RetryPolicy {
         timeout_ticks: 40,
         max_attempts: 3,
+    };
+    pub(super) const SERVER: ServerConfig = ServerConfig {
+        max_per_tick: 5,
         service_time: Duration::ZERO,
-        clock_period: Duration::ZERO,
-        report_interval: Duration::ZERO,
     };
 
     pub(super) const ROUNDS: usize = 800;
@@ -629,8 +582,8 @@ mod sim_tests {
             if i < trace.len() {
                 let r = &trace[i];
                 println!(
-                    "round {i}: completed={} abandoned={} sent_first={} sent_retry={} served_first={} served_retry={} backlog={}",
-                    r.completed, r.abandoned, r.sent_first, r.sent_retry, r.served_first, r.served_retry, r.backlog
+                    "round {i}: completed={} abandoned={} sent_first={} sent_retry={} served_first={} served_again={} backlog={}",
+                    r.completed, r.abandoned, r.sent_first, r.sent_retry, r.served_first, r.served_again, r.backlog
                 );
             }
         }
@@ -638,7 +591,7 @@ mod sim_tests {
 
     #[test]
     fn retries_cause_metastable_collapse() {
-        let trace = run(BASE, ROUNDS);
+        let trace = run(WORKLOAD, POLICY, SERVER, ROUNDS);
         print_trajectory(&trace);
 
         // Baseline before the trigger: every request answered within the round it was sent.
@@ -653,10 +606,10 @@ mod sim_tests {
         let tail_completed = sum(&trace, TAIL_START, ROUNDS, |r| r.completed);
         let tail_abandoned = sum(&trace, TAIL_START, ROUNDS, |r| r.abandoned);
         let tail_first = sum(&trace, TAIL_START, ROUNDS, |r| r.served_first);
-        let tail_retry = sum(&trace, TAIL_START, ROUNDS, |r| r.served_retry);
+        let tail_again = sum(&trace, TAIL_START, ROUNDS, |r| r.served_again);
         let baseline_goodput = 2 * (ROUNDS - TAIL_START) as u64;
         println!(
-            "tail (rounds {TAIL_START}..{ROUNDS}): completed {tail_completed} (baseline would be {baseline_goodput}), abandoned {tail_abandoned}, served first={tail_first} retries={tail_retry}, backlog {} -> {}",
+            "tail (rounds {TAIL_START}..{ROUNDS}): completed {tail_completed} (baseline would be {baseline_goodput}), abandoned {tail_abandoned}, served first={tail_first} again={tail_again}, backlog {} -> {}",
             tail.first().unwrap().backlog,
             tail.last().unwrap().backlog
         );
@@ -665,8 +618,8 @@ mod sim_tests {
             "goodput should have collapsed: {tail_completed} vs baseline {baseline_goodput}"
         );
         assert!(
-            tail_retry > tail_first,
-            "the server should spend most of its capacity on retries (first={tail_first}, retries={tail_retry})"
+            tail_again > tail_first,
+            "the server should spend most of its capacity serving ids it has already served (first={tail_first}, again={tail_again})"
         );
         assert!(
             tail.last().unwrap().backlog > tail.first().unwrap().backlog,
@@ -679,14 +632,16 @@ mod sim_tests {
     #[test]
     fn without_a_trigger_the_system_stays_healthy() {
         let trace = run(
-            RetryStormConfig {
-                trigger_per_tick: BASE.baseline_per_tick,
-                ..BASE
+            Workload {
+                trigger_per_tick: WORKLOAD.baseline_per_tick,
+                ..WORKLOAD
             },
+            POLICY,
+            SERVER,
             ROUNDS,
         );
         print_trajectory(&trace);
-        assert!(trace.iter().all(|r| r.sent_retry == 0 && r.abandoned == 0 && r.served_retry == 0));
+        assert!(trace.iter().all(|r| r.sent_retry == 0 && r.abandoned == 0 && r.served_again == 0));
         assert!(trace.iter().all(|r| r.backlog == 0));
         assert!(trace[1..].iter().all(|r| r.completed == 2));
         assert_eq!(mean_latency(&trace, 0, ROUNDS), 0.0);
@@ -695,9 +650,9 @@ mod sim_tests {
     /// Control: same trigger, no retries. The backlog drains and latency returns to zero.
     #[test]
     fn without_retries_the_system_recovers() {
-        let trace = run(RetryStormConfig { max_attempts: 1, ..BASE }, ROUNDS);
+        let trace = run(WORKLOAD, RetryPolicy { max_attempts: 1, ..POLICY }, SERVER, ROUNDS);
         print_trajectory(&trace);
-        assert!(trace.iter().all(|r| r.sent_retry == 0 && r.served_retry == 0));
+        assert!(trace.iter().all(|r| r.sent_retry == 0 && r.served_again == 0));
         let peak = trace.iter().map(|r| r.backlog).max().unwrap();
         println!("peak backlog {peak}; tail backlog {}", trace.last().unwrap().backlog);
         assert!(peak > 200, "the trigger should have built a backlog past the timeout, got {peak}");
@@ -710,11 +665,11 @@ mod sim_tests {
 /// E2 of the amplification design (`design_docs/2026-09_amplification_as_adversarial_scheduling.md`):
 /// per-edge record counts at the simulator's hooks under two schedules with identical inputs.
 ///
-/// Time is a driver decision here, not a harness loop: every `client_clock` element is sent
-/// up front and the driver *meters* the client's clock `batch` (one element per client tick), so
-/// the client's tick count is logical time. The hold schedule additionally holds items in the
-/// client's `use::batch(responses)` buffer for `d` client ticks. With `d = 0` the two schedules
-/// coincide, which is the baseline.
+/// Time is a driver decision here, not a harness loop: every `client_clock` element and every
+/// request is sent up front and the driver *meters* the client's clock and request batches (one
+/// clock element and `b` requests per client tick), so the client's tick count is logical time.
+/// The hold schedule additionally holds items in the client's `use::batch(responses)` buffer for
+/// `d` client ticks. With `d = 0` the two schedules coincide, which is the baseline.
 #[cfg(test)]
 mod amplification_tests {
     use std::collections::BTreeMap;
@@ -730,7 +685,7 @@ mod amplification_tests {
     fn source() -> String {
         std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/cluster/retry_storm.rs"
+            "/src/cluster/rpc_retry.rs"
         ))
         .unwrap()
     }
@@ -749,24 +704,32 @@ mod amplification_tests {
         line
     }
 
-    /// `(name, slice, element type)` for every counted edge, in report order. A hook's key is
-    /// `file:line:col <type>` where the location is that of the `sliced!` block (the batches
-    /// inside share it), so an edge is named by the line of its block, looked up at test time
-    /// (the `!` is added at runtime so these literals do not match themselves), and the type of
-    /// the records crossing it. The first is the client's clock, which the driver meters; the
-    /// second is the `responses` buffer the hold schedule holds.
+    const CLIENT_SLICE: &str = "let (outgoing, retried_out, completed, abandoned) = sliced";
+    const SERVER_SLICE: &str = "let (processed, backlog_depth, backlog_trace) = sliced";
+    const SERVER_METRICS_SLICE: &str = "let server_metrics = sliced";
+    const CLIENT_METRICS_SLICE: &str = "let client_metrics = sliced";
+
+    /// `(name, slice, element type suffix)` for every counted edge, in report order. A hook's
+    /// key is `file:line:col <type>` where the location is that of the `sliced!` block (the
+    /// batches inside share it), so an edge is named by the line of its block, looked up at
+    /// test time (the `!` is added at runtime so these literals do not match themselves), and
+    /// the type of the records crossing it. The first two are the client's clock and request
+    /// input, which the driver meters; the third is the `responses` buffer the hold schedule
+    /// holds.
     const EDGE_NEEDLES: &[(&str, &str, &str)] = &[
-        ("clock (client)", "let (outgoing, completions, abandoned) = sliced", "(usize, ())"),
-        ("server -> client (responses)", "let (outgoing, completions, abandoned) = sliced", "::Response"),
-        ("client -> server (arrivals)", "let (processed, backlog_depth, backlog_trace) = sliced", "::Request"),
-        ("server processed", "let server_windows = sliced", "::Request"),
-        ("outgoing (client report)", "let client_windows = sliced", "::Request"),
-        ("completions (client report)", "let client_windows = sliced", "::Completion"),
-        ("abandoned (client report)", "let client_windows = sliced", "u64"),
+        ("clock (client)", CLIENT_SLICE, "(usize, ())"),
+        ("requests (client)", CLIENT_SLICE, "(usize, u64)"),
+        ("server -> client (responses)", CLIENT_SLICE, "::Response<u64>"),
+        ("client -> server (arrivals)", SERVER_SLICE, "::Request<u64>"),
+        ("server processed", SERVER_METRICS_SLICE, "::Request<u64>"),
+        ("outgoing (client metrics)", CLIENT_METRICS_SLICE, "::Request<u64>"),
+        ("retried (client metrics)", CLIENT_METRICS_SLICE, "(u64, u32)"),
+        ("completions (client metrics)", CLIENT_METRICS_SLICE, "::Completion"),
+        ("abandoned (client metrics)", CLIENT_METRICS_SLICE, " <u64"),
     ];
 
     fn edge_pred(slice: &str, element_type: &str) -> impl Fn(&str) -> bool + Clone + 'static {
-        let tag = format!("retry_storm.rs:{}:", line_of(&format!("{slice}!")));
+        let tag = format!("rpc_retry.rs:{}:", line_of(&format!("{slice}!")));
         let suffix = format!("{element_type}>");
         move |key: &str| key.contains(&tag) && key.ends_with(&suffix)
     }
@@ -782,9 +745,11 @@ mod amplification_tests {
     #[derive(Debug, Default)]
     struct Run {
         counts: EdgeCounts,
-        /// id -> number of sends observed on `outgoing`.
+        /// id -> number of times it was put on the wire.
         sends: BTreeMap<u64, u32>,
-        /// id -> number of times the server processed it.
+        /// id -> the client tick it was issued in (the request body).
+        issued_at: BTreeMap<u64, u64>,
+        /// id -> number of times the server served it.
         served: BTreeMap<u64, u32>,
         /// id -> latency in client ticks of the first response.
         completions: BTreeMap<u64, u64>,
@@ -821,63 +786,109 @@ mod amplification_tests {
         }
     }
 
-    /// Sends `ticks` clock elements up front and runs to quiescence under `driver`, which is
-    /// given the clock already metered.
-    fn run_counted(
-        config: RetryStormConfig,
-        ticks: usize,
-        driver: impl FnOnce(HoldScheduleDriver) -> HoldScheduleDriver,
-    ) -> Run {
+    fn histogram<K: Ord + Copy>(values: impl Iterator<Item = K>) -> BTreeMap<K, usize> {
+        let mut h = BTreeMap::new();
+        for v in values {
+            *h.entry(v).or_default() += 1;
+        }
+        h
+    }
+
+    /// The simulator ports of one wiring of the program.
+    #[derive(Clone, Copy)]
+    struct Ports {
+        completed: hydro_lang::sim::SimReceiver<(u64, u64), NoOrder, ExactlyOnce>,
+        abandoned: hydro_lang::sim::SimReceiver<u64, NoOrder, ExactlyOnce>,
+        outgoing: hydro_lang::sim::SimReceiver<Request<u64>, TotalOrder, ExactlyOnce>,
+        processed: hydro_lang::sim::SimReceiver<Request<u64>, TotalOrder, ExactlyOnce>,
+        backlog_trace: hydro_lang::sim::SimReceiver<usize, TotalOrder, ExactlyOnce>,
+    }
+
+    type Senders = (
+        hydro_lang::sim::SimSender<(), TotalOrder, ExactlyOnce>,
+        hydro_lang::sim::SimSender<u64, TotalOrder, ExactlyOnce>,
+    );
+
+    fn wire<'a>(policy: RetryPolicy, server_config: ServerConfig) -> (FlowBuilder<'a>, Senders, Ports) {
         let mut flow = FlowBuilder::new();
         let client = flow.process::<Client>();
         let server = flow.process::<Server>();
 
+        let (request_send, requests) = client.sim_input::<u64, TotalOrder, ExactlyOnce>();
         let (clock_send, client_clock) = client.sim_input::<(), TotalOrder, ExactlyOnce>();
         let (_client_report_send, client_report_tick) =
             client.sim_input::<(), TotalOrder, ExactlyOnce>();
         let (_server_report_send, server_report_tick) =
             server.sim_input::<(), TotalOrder, ExactlyOnce>();
 
-        let outputs = retry_storm(
+        let outputs = rpc_with_retries(
             &client,
             &server,
+            requests,
             client_clock,
             client_report_tick,
             server_report_tick,
-            config,
+            policy,
+            server_config,
         );
-        let completions = outputs
-            .completions
-            .map(q!(|c| (c.id, c.latency_ticks)))
-            .sim_output();
-        let abandoned = outputs.abandoned.sim_output();
-        let outgoing = outputs.outgoing.sim_output();
-        let processed = outputs.processed.sim_output();
-        let backlog_trace = outputs.backlog_trace.sim_output();
+        let ports = Ports {
+            completed: outputs
+                .completed
+                .map(q!(|c| (c.id, c.latency_ticks)))
+                .sim_output(),
+            abandoned: outputs.abandoned.sim_output(),
+            outgoing: outputs.outgoing.sim_output(),
+            processed: outputs.processed.sim_output(),
+            backlog_trace: outputs.backlog_trace.sim_output(),
+        };
+        (flow, (clock_send, request_send), ports)
+    }
 
-        let driver = driver(HoldScheduleDriver::new().meter(edge_named("clock (client)")));
+    /// Drains every output into `run`.
+    async fn drain(p: Ports, run: &mut Run) {
+        for (id, latency) in p.completed.collect_sorted::<Vec<_>>().await {
+            run.completions.insert(id, latency);
+        }
+        run.abandoned.extend(p.abandoned.collect_sorted::<Vec<_>>().await);
+        while let Some(req) = p.outgoing.try_next().await {
+            *run.sends.entry(req.id).or_default() += 1;
+            run.issued_at.insert(req.id, req.body);
+        }
+        while let Some(req) = p.processed.try_next().await {
+            *run.served.entry(req.id).or_default() += 1;
+        }
+        while let Some(depth) = p.backlog_trace.try_next().await {
+            run.final_backlog = depth;
+        }
+    }
+
+    /// Sends `ticks` clock elements and `per_tick` requests per tick up front and runs to
+    /// quiescence under `driver`, which is given the clock and request batches already metered.
+    fn run_counted(
+        policy: RetryPolicy,
+        server_config: ServerConfig,
+        per_tick: u32,
+        ticks: usize,
+        driver: impl FnOnce(HoldScheduleDriver) -> HoldScheduleDriver,
+    ) -> Run {
+        let (flow, (clock_send, request_send), ports) = wire(policy, server_config);
+        let driver = driver(
+            HoldScheduleDriver::new()
+                .meter(edge_named("clock (client)"))
+                .meter_n(edge_named("requests (client)"), per_tick as usize),
+        );
 
         let mut run = Run::default();
         let run_ref = &mut run;
         let counts = flow.sim().run_with_driver(driver, async move || {
-            for _ in 0..ticks {
+            for tick in 0..ticks as u64 {
                 clock_send.send(());
+                for _ in 0..per_tick {
+                    request_send.send(tick);
+                }
             }
             quiesce().await;
-
-            for (id, latency) in completions.collect_sorted::<Vec<_>>().await {
-                run_ref.completions.insert(id, latency);
-            }
-            run_ref.abandoned = abandoned.collect_sorted::<Vec<_>>().await;
-            while let Some(req) = outgoing.try_next().await {
-                *run_ref.sends.entry(req.id).or_default() += 1;
-            }
-            while let Some(req) = processed.try_next().await {
-                *run_ref.served.entry(req.id).or_default() += 1;
-            }
-            while let Some(depth) = backlog_trace.try_next().await {
-                run_ref.final_backlog = depth;
-            }
+            drain(ports, run_ref).await;
         });
         run.counts = counts;
         run
@@ -891,21 +902,18 @@ mod amplification_tests {
     /// offered load (`baseline * max_attempts` per client tick, two client ticks per server tick
     /// under the scheduler's round-robin) so the server never queues and the only source of
     /// delay is the schedule.
-    const HOLD: RetryStormConfig = RetryStormConfig {
-        baseline_per_tick: 2,
-        trigger_per_tick: 2,
-        trigger_start_tick: 0,
-        trigger_end_tick: 0,
-        max_per_tick: 20,
+    const PER_TICK: u32 = 2;
+    const POLICY: RetryPolicy = RetryPolicy {
         timeout_ticks: 40,
         max_attempts: 3,
+    };
+    const SERVER: ServerConfig = ServerConfig {
+        max_per_tick: 20,
         service_time: Duration::ZERO,
-        clock_period: Duration::ZERO,
-        report_interval: Duration::ZERO,
     };
     const TICKS: usize = 300;
 
-    /// Hand computation (E1). A request minted at tick `t` whose response is visible at tick
+    /// Hand computation (E1). A request issued at tick `t` whose response is visible at tick
     /// `t + l` under the baseline schedule becomes visible at `t + l + d` when held for `d`
     /// ticks. It is judged at ticks `t + k * tau` for `k = 1, 2, ...` while the response is not
     /// yet visible (a response visible in the judging tick suppresses the verdict): the first
@@ -915,17 +923,17 @@ mod amplification_tests {
     /// at tick `ticks - 1`.
     ///
     /// Returns `(sends, Some(latency))` or `(sends, None)` if abandoned.
-    fn expected(t: u64, l: u64, d: u64, config: &RetryStormConfig, ticks: u64) -> (u32, Option<u64>) {
-        let tau = config.timeout_ticks;
+    fn expected(t: u64, l: u64, d: u64, policy: &RetryPolicy, ticks: u64) -> (u32, Option<u64>) {
+        let tau = policy.timeout_ticks;
         let last_tick = ticks - 1;
         let visible = t + l + d;
         let mut sends = 1;
-        for k in 1..=config.max_attempts as u64 {
+        for k in 1..=policy.max_attempts as u64 {
             let judged_at = t + k * tau;
             if judged_at > last_tick || visible <= judged_at {
                 break;
             }
-            if k < config.max_attempts as u64 {
+            if k < policy.max_attempts as u64 {
                 sends += 1;
             } else {
                 return (sends, None);
@@ -934,43 +942,33 @@ mod amplification_tests {
         (sends, Some(visible.min(last_tick) - t))
     }
 
-    fn histogram<K: Ord + Copy>(values: impl Iterator<Item = K>) -> BTreeMap<K, usize> {
-        let mut h = BTreeMap::new();
-        for v in values {
-            *h.entry(v).or_default() += 1;
-        }
-        h
-    }
-
     #[test]
     fn hold_schedule_amplifies_by_the_e1_step_function() {
-        let baseline = run_counted(HOLD, TICKS, |d| d);
-        baseline.print("baseline (metered clock, d = 0)");
-        let n = (TICKS as u64) * HOLD.baseline_per_tick as u64;
+        let baseline = run_counted(POLICY, SERVER, PER_TICK, TICKS, |d| d);
+        baseline.print("baseline (metered clock and requests, d = 0)");
+        let n = (TICKS as u64) * PER_TICK as u64;
         assert_eq!(baseline.sends.len() as u64, n);
         assert!(baseline.sends.values().all(|s| *s == 1));
         assert_eq!(baseline.records("client -> server (arrivals)"), n);
         assert_eq!(baseline.records("server processed"), n);
         assert_eq!(baseline.records("server -> client (responses)"), n);
-        assert_eq!(baseline.records("completions (client report)"), n);
-        assert_eq!(baseline.records("abandoned (client report)"), 0);
+        assert_eq!(baseline.records("completions (client metrics)"), n);
+        assert_eq!(baseline.records("retried (client metrics)"), 0);
+        assert_eq!(baseline.records("abandoned (client metrics)"), 0);
         assert_eq!(baseline.completions.len() as u64, n);
 
-        let tau = HOLD.timeout_ticks;
+        let tau = POLICY.timeout_ticks;
         let mut failures = vec![];
         // Straddle the thresholds `tau`, `2 tau` (retry) and `3 tau` (abandon) for both baseline
         // latencies (1 and 2).
         for d in [tau / 2, tau - 2, tau - 1, tau, tau + tau / 2, 2 * tau - 2, 2 * tau - 1, 2 * tau, 3 * tau - 2, 3 * tau] {
-            let run = run_counted(HOLD, TICKS, hold_driver(d));
+            let run = run_counted(POLICY, SERVER, PER_TICK, TICKS, hold_driver(d));
             run.print(&format!("hold d = {d}"));
 
             let expected: BTreeMap<u64, (u32, Option<u64>)> = baseline
                 .completions
                 .iter()
-                .map(|(id, l)| {
-                    let t = id / HOLD.trigger_per_tick as u64;
-                    (*id, expected(t, *l, d, &HOLD, TICKS as u64))
-                })
+                .map(|(id, l)| (*id, expected(baseline.issued_at[id], *l, d, &POLICY, TICKS as u64)))
                 .collect();
             let expected_sends: u64 = expected.values().map(|(s, _)| *s as u64).sum();
             let expected_completions = expected.values().filter(|(_, c)| c.is_some()).count() as u64;
@@ -981,8 +979,8 @@ mod amplification_tests {
                 run.records("client -> server (arrivals)"),
                 run.records("server processed"),
                 run.records("server -> client (responses)"),
-                run.records("completions (client report)"),
-                run.records("abandoned (client report)"),
+                run.records("completions (client metrics)"),
+                run.records("abandoned (client metrics)"),
             );
 
             let mismatched: Vec<_> = run
@@ -1005,12 +1003,13 @@ mod amplification_tests {
             if run.records("client -> server (arrivals)") != expected_sends
                 || run.records("server processed") != expected_sends
                 || run.records("server -> client (responses)") != expected_sends
-                || run.records("outgoing (client report)") != expected_sends
+                || run.records("outgoing (client metrics)") != expected_sends
+                || run.records("retried (client metrics)") != expected_sends - n
             {
                 failures.push(format!("d = {d}: edge totals differ from hand-computed {expected_sends}"));
             }
-            if run.records("completions (client report)") != expected_completions
-                || run.records("abandoned (client report)") != n - expected_completions
+            if run.records("completions (client metrics)") != expected_completions
+                || run.records("abandoned (client metrics)") != n - expected_completions
                 || run.abandoned.len() as u64 != n - expected_completions
             {
                 failures.push(format!("d = {d}: completions/abandoned differ from hand-computed {expected_completions}/{}", n - expected_completions));
@@ -1022,61 +1021,55 @@ mod amplification_tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
-    /// The E0 collapse under the E0 harness (one clock element per round, then `quiesce()`),
-    /// every hook releasing everything (the prompt driver), counted per edge.
-    fn run_e0_counted(config: RetryStormConfig, rounds: usize) -> Run {
+    /// Control: `max_attempts = 1`. Holding past the timeout changes what the client concludes
+    /// (abandon instead of complete) but not the work on any location-crossing edge.
+    #[test]
+    fn hold_without_retries_changes_no_edge() {
+        let policy = RetryPolicy { max_attempts: 1, ..POLICY };
+        let n = (TICKS as u64) * PER_TICK as u64;
+        let baseline = run_counted(policy, SERVER, PER_TICK, TICKS, |d| d);
+        baseline.print("max_attempts = 1, d = 0");
+        for d in [POLICY.timeout_ticks + 1, 3 * POLICY.timeout_ticks] {
+            let run = run_counted(policy, SERVER, PER_TICK, TICKS, hold_driver(d));
+            run.print(&format!("max_attempts = 1, hold d = {d}"));
+            for edge in [
+                "client -> server (arrivals)",
+                "server processed",
+                "server -> client (responses)",
+                "outgoing (client metrics)",
+            ] {
+                assert_eq!(run.records(edge), n, "{edge} at d = {d}");
+                assert_eq!(run.records(edge), baseline.records(edge), "{edge} at d = {d}");
+            }
+            assert_eq!(run.records("retried (client metrics)"), 0);
+            assert!(run.sends.values().all(|s| *s == 1));
+        }
+    }
+
+    /// The E0 collapse under the E0 harness (one clock element and that tick's requests per
+    /// round, then `quiesce()`), every hook releasing everything (the prompt driver), counted
+    /// per edge.
+    fn run_e0_counted(
+        workload: Workload,
+        policy: RetryPolicy,
+        server_config: ServerConfig,
+        rounds: usize,
+    ) -> Run {
         use hydro_lang::sim::prompt_schedule::PromptScheduleDriver;
 
-        let mut flow = FlowBuilder::new();
-        let client = flow.process::<Client>();
-        let server = flow.process::<Server>();
-
-        let (clock_send, client_clock) = client.sim_input::<(), TotalOrder, ExactlyOnce>();
-        let (_client_report_send, client_report_tick) =
-            client.sim_input::<(), TotalOrder, ExactlyOnce>();
-        let (_server_report_send, server_report_tick) =
-            server.sim_input::<(), TotalOrder, ExactlyOnce>();
-
-        let outputs = retry_storm(
-            &client,
-            &server,
-            client_clock,
-            client_report_tick,
-            server_report_tick,
-            config,
-        );
-        let completions = outputs
-            .completions
-            .map(q!(|c| (c.id, c.latency_ticks)))
-            .sim_output();
-        let abandoned = outputs.abandoned.sim_output();
-        let outgoing = outputs.outgoing.sim_output();
-        let processed = outputs.processed.sim_output();
-        let backlog_trace = outputs.backlog_trace.sim_output();
-
+        let (flow, (clock_send, request_send), ports) = wire(policy, server_config);
         let mut run = Run::default();
         let run_ref = &mut run;
         let counts = flow
             .sim()
             .run_with_driver(PromptScheduleDriver::default(), async move || {
-                for _ in 0..rounds {
+                for tick in 0..rounds as u64 {
                     clock_send.send(());
+                    for _ in 0..workload.requests_at(tick) {
+                        request_send.send(tick);
+                    }
                     quiesce().await;
-                    for (id, latency) in completions.collect_sorted::<Vec<_>>().await {
-                        run_ref.completions.insert(id, latency);
-                    }
-                    run_ref
-                        .abandoned
-                        .extend(abandoned.collect_sorted::<Vec<_>>().await);
-                    while let Some(req) = outgoing.try_next().await {
-                        *run_ref.sends.entry(req.id).or_default() += 1;
-                    }
-                    while let Some(req) = processed.try_next().await {
-                        *run_ref.served.entry(req.id).or_default() += 1;
-                    }
-                    while let Some(depth) = backlog_trace.try_next().await {
-                        run_ref.final_backlog = depth;
-                    }
+                    drain(ports, run_ref).await;
                 }
             });
         run.counts = counts;
@@ -1089,35 +1082,35 @@ mod amplification_tests {
     /// request, saturated at `max_attempts`) as the hold schedule does for `d > 2 tau`.
     #[test]
     fn load_perturbation_shows_the_same_gain_on_the_same_edges() {
-        let config = sim_tests::BASE;
+        let workload = sim_tests::WORKLOAD;
+        let policy = sim_tests::POLICY;
         let rounds = sim_tests::ROUNDS;
-        let run = run_e0_counted(config, rounds);
+        let run = run_e0_counted(workload, policy, sim_tests::SERVER, rounds);
         run.print("E0 trigger, prompt driver, E0 harness");
 
-        let mint_tick = |id: &u64| id / config.trigger_per_tick as u64;
         let by_window = |from: u64, to: u64| {
             histogram(
                 run.sends
                     .iter()
-                    .filter(|(id, _)| (from..to).contains(&mint_tick(id)))
+                    .filter(|(id, _)| (from..to).contains(&run.issued_at[*id]))
                     .map(|(_, s)| *s),
             )
         };
-        let tau = config.timeout_ticks;
-        let pre = by_window(0, config.trigger_start_tick - tau);
+        let tau = policy.timeout_ticks;
+        let pre = by_window(0, workload.trigger_start_tick - tau);
         let post = by_window(200, rounds as u64 - 2 * tau);
         let served_total: u64 = run.served.values().map(|s| *s as u64).sum();
         let sends_total: u64 = run.sends.values().map(|s| *s as u64).sum();
         println!(
-            "  sends per request minted before the trigger [0, {}): {pre:?}; minted in [200, {}): {post:?}; total sends {sends_total} served {served_total} backlog {}",
-            config.trigger_start_tick - tau,
+            "  sends per request issued before the trigger [0, {}): {pre:?}; issued in [200, {}): {post:?}; total sends {sends_total} served {served_total} backlog {}",
+            workload.trigger_start_tick - tau,
             rounds as u64 - 2 * tau,
             run.final_backlog
         );
 
         assert_eq!(pre.keys().copied().collect::<Vec<_>>(), vec![1]);
-        assert_eq!(post.keys().copied().collect::<Vec<_>>(), vec![config.max_attempts]);
-        assert_eq!(run.records("outgoing (client report)"), sends_total);
+        assert_eq!(post.keys().copied().collect::<Vec<_>>(), vec![policy.max_attempts]);
+        assert_eq!(run.records("outgoing (client metrics)"), sends_total);
         assert_eq!(run.records("client -> server (arrivals)"), sends_total);
         assert_eq!(run.records("server processed"), served_total);
         assert_eq!(run.records("server -> client (responses)"), served_total);
@@ -1125,35 +1118,91 @@ mod amplification_tests {
             run.records("server processed") + run.final_backlog as u64,
             run.records("client -> server (arrivals)")
         );
-        assert_eq!(run.records("completions (client report)"), run.completions.len() as u64);
-        assert_eq!(run.records("abandoned (client report)"), run.abandoned.len() as u64);
-    }
-
-    /// Control: `max_attempts = 1`. Holding past the timeout changes what the client concludes
-    /// (abandon instead of complete) but not the work on any location-crossing edge.
-    #[test]
-    fn hold_without_retries_changes_no_edge() {
-        let config = RetryStormConfig { max_attempts: 1, ..HOLD };
-        let n = (TICKS as u64) * config.baseline_per_tick as u64;
-        let baseline = run_counted(config, TICKS, |d| d);
-        baseline.print("max_attempts = 1, d = 0");
-        for d in [HOLD.timeout_ticks + 1, 3 * HOLD.timeout_ticks] {
-            let run = run_counted(config, TICKS, hold_driver(d));
-            run.print(&format!("max_attempts = 1, hold d = {d}"));
-            for edge in [
-                "client -> server (arrivals)",
-                "server processed",
-                "server -> client (responses)",
-                "outgoing (client report)",
-            ] {
-                assert_eq!(run.records(edge), n, "{edge} at d = {d}");
-                assert_eq!(run.records(edge), baseline.records(edge), "{edge} at d = {d}");
-            }
-            assert!(run.sends.values().all(|s| *s == 1));
-        }
+        assert_eq!(run.records("completions (client metrics)"), run.completions.len() as u64);
+        assert_eq!(run.records("abandoned (client metrics)"), run.abandoned.len() as u64);
     }
 }
 
+/// Wall-clock parameters of a deployment.
+#[derive(Clone, Copy, Debug)]
+pub struct Timing {
+    /// Period of `client_clock`, and of the workload generator.
+    pub clock_period: Duration,
+    /// How often both sides print a metrics window.
+    pub report_interval: Duration,
+}
+
+/// Deployment harness: wires a [`Workload`] generator and `source_interval` clocks into the
+/// program and prints one metrics line per window on each side, which is how a deployed run is
+/// observed. (Lives here rather than in the test module because `q!` closures must be part of
+/// the crate that is staged onto the deployed hosts.)
+#[cfg(feature = "tokio")]
+pub fn deploy_with_workload<'a>(
+    client: &Process<'a, Client>,
+    server: &Process<'a, Server>,
+    workload: Workload,
+    policy: RetryPolicy,
+    server_config: ServerConfig,
+    timing: Timing,
+) {
+    let clock_nanos = timing.clock_period.as_nanos() as u64;
+    let report_nanos = timing.report_interval.as_nanos() as u64;
+    let Workload {
+        baseline_per_tick,
+        trigger_per_tick,
+        trigger_start_tick,
+        trigger_end_tick,
+    } = workload;
+
+    // One timer drives both the clock and the load generator, so a tick's requests are
+    // issued in that tick. Request bodies carry the tick they were issued in.
+    let ticks = client.source_interval(q!(Duration::from_nanos(clock_nanos)));
+    let requests = ticks.clone().enumerate().flat_map_ordered(q!(move |(i, _)| {
+        let tick = i as u64;
+        let n = if tick >= trigger_start_tick && tick < trigger_end_tick {
+            trigger_per_tick
+        } else {
+            baseline_per_tick
+        };
+        std::iter::repeat_n(tick, n as usize)
+    }));
+    let client_report_tick = client.source_interval(q!(Duration::from_nanos(report_nanos)));
+    let server_report_tick = server.source_interval(q!(Duration::from_nanos(report_nanos)));
+
+    let outputs = rpc_with_retries(
+        client,
+        server,
+        requests,
+        ticks,
+        client_report_tick,
+        server_report_tick,
+        policy,
+        server_config,
+    );
+
+    outputs.server_metrics.for_each(q!(|(i, m, backlog)| println!(
+        "server t={}s processed={} backlog={}",
+        i + 1,
+        m.processed,
+        backlog
+    )));
+
+    outputs.client_metrics.for_each(q!(|(i, m)| println!(
+        "client t={}s completed={} mean_latency_ticks={:.2} max_latency_ticks={} sent={} retried={} abandoned={}",
+        i + 1,
+        m.completed,
+        m.mean_latency_ticks(),
+        m.latency_max_ticks,
+        m.sent,
+        m.retried,
+        m.abandoned
+    )));
+}
+
+
+/// Deployment on localhost. The harness supplies the workload (a `source_interval`-driven
+/// generator following a [`Workload`]) and the clocks, and observes the program through its
+/// printed per-window metrics.
 #[cfg(all(test, feature = "tokio"))]
 mod deployed_tests {
     use std::time::Duration;
@@ -1169,15 +1218,15 @@ mod deployed_tests {
         t: u64,
         completed: u64,
         mean_latency_ticks: f64,
-        sent_retry: u64,
+        sent: u64,
+        retried: u64,
         abandoned: u64,
     }
 
     #[derive(Debug, Clone)]
     struct ServerLine {
         t: u64,
-        first_attempts: u64,
-        retries: u64,
+        processed: u64,
         backlog: u64,
     }
 
@@ -1185,7 +1234,7 @@ mod deployed_tests {
     where
         T::Err: std::fmt::Debug,
     {
-        let start = line.find(&format!("{key}=")).expect(key) + key.len() + 1;
+        let start = line.find(&format!(" {key}=")).expect(key) + key.len() + 2;
         let rest = &line[start..];
         let end = rest.find(' ').unwrap_or(rest.len());
         rest[..end].trim_end_matches('s').parse().unwrap()
@@ -1196,7 +1245,8 @@ mod deployed_tests {
             t: field(line, "t"),
             completed: field(line, "completed"),
             mean_latency_ticks: field(line, "mean_latency_ticks"),
-            sent_retry: field(line, "sent_retry"),
+            sent: field(line, "sent"),
+            retried: field(line, "retried"),
             abandoned: field(line, "abandoned"),
         }
     }
@@ -1204,21 +1254,24 @@ mod deployed_tests {
     fn parse_server(line: &str) -> ServerLine {
         ServerLine {
             t: field(line, "t"),
-            first_attempts: field(line, "first_attempts"),
-            retries: field(line, "retries"),
+            processed: field(line, "processed"),
             backlog: field(line, "backlog"),
         }
     }
 
-    /// Deploys the program on localhost and collects `seconds` worth of reports from both sides.
-    async fn run(config: RetryStormConfig, seconds: u64) -> (Vec<ClientLine>, Vec<ServerLine>) {
+    /// Deploys the program on localhost and collects `seconds` worth of metrics from both sides.
+    async fn run(
+        workload: Workload,
+        policy: RetryPolicy,
+        seconds: u64,
+    ) -> (Vec<ClientLine>, Vec<ServerLine>) {
         let mut deployment = Deployment::new();
         let localhost = deployment.Localhost();
 
         let mut flow = FlowBuilder::new();
         let client = flow.process::<Client>();
         let server = flow.process::<Server>();
-        retry_storm_deployed(&client, &server, config);
+        deploy_with_workload(&client, &server, workload, policy, SERVER, TIMING);
 
         let rustflags = "-C opt-level=3";
         let nodes = flow
@@ -1295,32 +1348,38 @@ mod deployed_tests {
     /// Server capacity is 1000 req/s (1 ms of CPU per request). Baseline load is 400 req/s, so
     /// the server is at 40% utilization. The trigger triples load to 1200 req/s for three
     /// seconds, which is over capacity and builds a backlog. With `max_attempts = 3` every
-    /// request that waits longer than 200 ms (40 clock ticks) is sent again (twice), so once the backlog exceeds
-    /// the timeout the *offered* load becomes 3 x 400 = 1200 req/s -- still over capacity --
-    /// even after the trigger ends.
-    const BASE: RetryStormConfig = RetryStormConfig {
+    /// request that waits longer than 200 ms (40 clock ticks) is sent again (twice), so once
+    /// the backlog exceeds the timeout the *offered* load becomes 3 x 400 = 1200 req/s -- still
+    /// over capacity -- even after the trigger ends.
+    const WORKLOAD: Workload = Workload {
         baseline_per_tick: 2,
         trigger_per_tick: 6,
         trigger_start_tick: 2000, // t = 10 s
         trigger_end_tick: 2600,   // t = 13 s
-        max_per_tick: 20,
+    };
+    const POLICY: RetryPolicy = RetryPolicy {
         timeout_ticks: 40, // 200 ms at a 5 ms clock
         max_attempts: 3,
+    };
+    const SERVER: ServerConfig = ServerConfig {
+        max_per_tick: 20,
         service_time: Duration::from_millis(1),
+    };
+    const TIMING: Timing = Timing {
         clock_period: Duration::from_millis(5),
         report_interval: Duration::from_secs(1),
     };
 
     const RUN_SECONDS: u64 = 40;
 
-    /// Observed on a laptop with `BASE`: baseline goodput 400/s at <1 tick (5 ms) latency; the trigger raises
-    /// latency to ~340 ms and the server backlog to ~2400; after the trigger ends (t = 13 s)
-    /// goodput stays at *zero* -- every request is abandoned after 3 attempts before the server
-    /// reaches it -- while the server runs at capacity with ~2/3 of its work being retries and
-    /// its backlog grows by ~240/s indefinitely.
+    /// Observed on a laptop: baseline goodput 400/s at <1 tick (5 ms) latency; the trigger
+    /// raises latency to ~340 ms and the server backlog to ~2400; after the trigger ends
+    /// (t = 13 s) goodput stays at *zero* -- every request is abandoned after 3 attempts before
+    /// the server reaches it -- while the server runs at capacity on re-sent requests and its
+    /// backlog grows by ~240/s indefinitely.
     #[tokio::test]
     async fn retries_cause_metastable_collapse() {
-        let (client, server) = run(BASE, RUN_SECONDS).await;
+        let (client, server) = run(WORKLOAD, POLICY, RUN_SECONDS).await;
 
         let baseline_latency = mean_latency_in(&client, 3, 10);
         let baseline_goodput = goodput_in(&client, 3, 10);
@@ -1329,17 +1388,15 @@ mod deployed_tests {
             .iter()
             .filter(|l| l.t >= 25 && l.t <= RUN_SECONDS)
             .collect();
-        let tail_retries: u64 = tail.iter().map(|l| l.retries).sum();
-        let tail_first: u64 = tail.iter().map(|l| l.first_attempts).sum();
-        let tail_abandoned: u64 = client
-            .iter()
-            .filter(|l| l.t >= 25)
-            .map(|l| l.abandoned)
-            .sum();
+        let tail_processed: u64 = tail.iter().map(|l| l.processed).sum();
+        let tail_client: Vec<_> = client.iter().filter(|l| l.t >= 25).collect();
+        let tail_sent: u64 = tail_client.iter().map(|l| l.sent).sum();
+        let tail_retried: u64 = tail_client.iter().map(|l| l.retried).sum();
+        let tail_abandoned: u64 = tail_client.iter().map(|l| l.abandoned).sum();
         println!(
             "baseline: {baseline_goodput:.0}/s at {baseline_latency:.2} ticks; \
              tail (t>=25s): goodput {tail_goodput:.0}/s, abandoned {tail_abandoned}, \
-             server work first={tail_first} retries={tail_retries}, \
+             client sent {tail_sent} of which re-sent {tail_retried}, server processed {tail_processed}, \
              backlog {} -> {}",
             tail.first().unwrap().backlog,
             tail.last().unwrap().backlog
@@ -1360,8 +1417,8 @@ mod deployed_tests {
             "goodput should have collapsed, got {tail_goodput}/s vs baseline {baseline_goodput}/s"
         );
         assert!(
-            tail_retries > tail_first,
-            "the server should be spending most of its capacity on amplified work (retries={tail_retries}, first={tail_first})"
+            tail_retried > tail_sent - tail_retried,
+            "most of what the client puts on the wire should be re-sends (sent={tail_sent}, re-sent={tail_retried})"
         );
         assert!(
             tail.last().unwrap().backlog > tail.first().unwrap().backlog,
@@ -1372,11 +1429,11 @@ mod deployed_tests {
     /// Control: retries enabled, but no trigger. The retry loop is armed and never fires.
     #[tokio::test]
     async fn without_a_trigger_the_system_stays_healthy() {
-        let config = RetryStormConfig {
-            trigger_per_tick: BASE.baseline_per_tick,
-            ..BASE
+        let workload = Workload {
+            trigger_per_tick: WORKLOAD.baseline_per_tick,
+            ..WORKLOAD
         };
-        let (client, server) = run(config, RUN_SECONDS).await;
+        let (client, server) = run(workload, POLICY, RUN_SECONDS).await;
 
         let latency = mean_latency_in(&client, 3, RUN_SECONDS);
         let goodput = goodput_in(&client, 3, RUN_SECONDS);
@@ -1389,22 +1446,21 @@ mod deployed_tests {
 
         assert!(latency < 4.0, "latency should stay low, got {latency} ticks");
         assert!(goodput > 350.0, "goodput should stay at ~400/s, got {goodput}");
-        assert!(client.iter().all(|l| l.sent_retry == 0), "no request should ever time out");
+        assert!(client.iter().all(|l| l.retried == 0), "no request should ever time out");
         assert!(client.iter().all(|l| l.abandoned == 0));
-        assert!(server.iter().all(|l| l.retries == 0 && l.backlog == 0));
+        assert!(server.iter().all(|l| l.backlog == 0));
     }
 
     #[tokio::test]
     async fn without_retries_the_system_recovers() {
-        let config = RetryStormConfig {
+        let policy = RetryPolicy {
             max_attempts: 1,
-            ..BASE
+            ..POLICY
         };
-        let (client, server) = run(config, RUN_SECONDS).await;
+        let (client, server) = run(WORKLOAD, policy, RUN_SECONDS).await;
 
         let baseline = mean_latency_in(&client, 3, 10);
         let tail = mean_latency_in(&client, 25, RUN_SECONDS);
-        let tail_retries: u64 = server.iter().filter(|l| l.t >= 25).map(|l| l.retries).sum();
         println!("baseline mean latency {baseline:.2} ticks; tail mean latency {tail:.2} ticks");
 
         assert!(
@@ -1416,8 +1472,7 @@ mod deployed_tests {
             "latency should return to baseline, got {tail} ticks"
         );
         assert!(goodput_in(&client, 25, RUN_SECONDS) > 350.0);
-        assert_eq!(tail_retries, 0);
-        assert!(client.iter().all(|l| l.sent_retry == 0));
+        assert!(client.iter().all(|l| l.retried == 0));
         assert!(server.iter().filter(|l| l.t >= 25).all(|l| l.backlog == 0));
     }
 }
