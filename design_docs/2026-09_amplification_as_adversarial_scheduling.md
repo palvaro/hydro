@@ -321,10 +321,9 @@ tail 0 completed, 400 abandoned, server served 333 ids for the first time and 66
   the host, so all recording is host-side.
 - **Edge identity.** The hook's source location is the `sliced!` invocation, not the
   `use::batch` line, so every batch in a block shares a location. Hooks now also carry
-  `std::any::type_name` of their element, and an edge is keyed `file:line:col <type>`. For
-  `rpc_retry` this is unique for all ten batches. For `raft_server` the two timer batches
-  (both `()`) collide and are counted together; a real fix is an operator id in the IR
-  metadata (E3's rewrite pass can assign one).
+  `std::any::type_name` of their element, and an edge is keyed `file:line:col#index <type>`
+  (E2b added the hook's index within its tick, because `raft_server`'s two timer batches are
+  both `()`). A real fix is an operator id in the IR metadata (E3's rewrite pass can assign one).
 - **The hold driver** (`hydro_lang/src/sim/hold_schedule.rs`). `HoldScheduleDriver` is the
   prompt driver with a per-edge policy: `Prompt`, `Metered` (release one item per decision) or
   `Hold(d)` (an item first seen at the hook's $k$-th decision is released at its $(k+d)$-th).
@@ -420,11 +419,77 @@ the load perturbation, with no held delivery at all, produces the same gain (3, 
 $A$) on the same three edges as the hold perturbation at $d > 2\tau$ — the evidence E1's last
 bullet asked for: both are schedules under which the server's answer arrives late.
 
+## E2b: a program not written for this (Raft election storms)
+
+Every amplifying result in E2 was on `rpc_retry`, which we built. E2b asks whether the same
+instrument sees amplification in existing code with no changes: `hydro_test/src/cluster/raft.rs`,
+whose election timer is a timeout-and-retry loop on the leader (a follower that sees no
+`AppendEntries` between two election-timer interrupts starts a new term). Test:
+`raft::amplification_tests` (two tests). Nothing in `raft_server` changed.
+
+Two small instrument additions were needed and are recorded here because they were foreseeable
+from E2: the two timer batches in `raft_server` are both `()` streams in one block, so the hook's
+position within its tick joined the edge key (`file:line:col#index <type>`; which index is which
+timer is settled by the heartbeats-only control, where the election hook releases exactly one
+interrupt); and a bursty policy `Periodic { period, count }` (release `count` or everything at
+every `period`-th decision, nothing between) joined `Hold(d)`, because a constant delay only
+shifts a periodic heartbeat while a gap is what a timeout notices. `Periodic { period: E,
+count: Some(1) }` also paces the election timer at one interrupt per `E` ticks.
+
+Setup: 3 members, one uncontested election, then 200 ticks with a heartbeat-timer interrupt
+per tick on every member (followers ignore theirs) and an election-timer interrupt every
+$E = 4$ ticks on every member, all sent up front and paced by the driver. The intra-cluster
+traffic batch (the only edge deliveries cross: RequestVote, votes, AppendEntries and acks share
+it) is scheduled promptly, with a constant delay `Hold(d)`, and in bursts `Periodic { period:
+d }`, for $d \in \{1, 2, 3, 4, 5, 6, 12, 24\}$. Reported per run: traffic records on that edge,
+the highest term reached (terms beyond 1 are elections after the first), and each member's
+final leader view.
+
+| $d$ | constant: traffic / terms | bursty: traffic / terms |
+|-----|---------------------------|-------------------------|
+| prompt | 804 / 1 | — |
+| 1, 2, 3 | 804 / 1 | 804 / 1 |
+| 4   | 334 / 51 | 804 / 1 |
+| 5   | 338 / 51 | 633 / 75 |
+| 6   | 342 / 51 | 701 / 69 |
+| 12  | 364 / 51 | 366 / 53 |
+| 24  | 409 / 51 | 411 / 53 |
+
+Hand computation for the baseline: $4 + 2 \cdot 2 \cdot 200 = 804$ (election, then two
+`AppendEntries` and two acks per heartbeat), measured 804; term 1 throughout. Heartbeats-only
+control (no election timer): 804 and term 1 at every $d$.
+
+Three findings:
+
+- **The threshold is sharp and is the protocol's own liveness condition.** A constant delay of
+  $d \ge E$ (round trip $2d$ longer than the election period) re-elects every period until the
+  run ends: term 51 after 50 periods, and at the end two of three members have no leader at all.
+  Bursty delivery with period $d$ leaves a gap of $d - 1$, so it storms from $d = E + 1$; at
+  $d = E$ it is harmless. Below the threshold nothing changes, at any shape of delay. This is the
+  "shape of the win" the Honesty notes asked for: gain as a step function of the perturbation,
+  with the step where Raft's own analysis puts it (broadcast time $\ll$ election timeout).
+- **The re-derived goal is the leader, 51 times instead of once, but the per-edge record count
+  goes down.** Under the storm the traffic edge carries 334–409 records against 804 promptly:
+  the leader's heartbeats (2 per tick, the productive steady-state work) disappear and a few
+  election messages per period replace them. A single count on an edge that mixes both cannot
+  see the storm; it reports *less* work. In `rpc_retry` counting sufficed because retries add
+  records to an edge without removing any. So "more records on an edge" is not the general
+  signal. "More derivations of the same goal" is, and that requires knowing which records derive
+  which goal, i.e. E3's attribution. E4's objective should be derivations per goal (here: terms,
+  or RequestVote records), not records per edge.
+- **The storm is the metastable failure of Raft, found by a schedule alone.** No message was
+  lost, no member crashed, the inputs were fixed; a delivery delay past a threshold left the
+  cluster without a leader for the remainder of the run (the bursty $d = 5, 6$ cases churn even
+  faster, 74 and 68 elections, with every member's final view leaderless). Whether it would
+  recover if the delay were removed is the E4 question (the E0 sim collapse did not).
+
 ### What E2 says about the next steps
 
 - Counting at hooks is sufficient to see the gain and its threshold in `rpc_retry`, and to
-  see the two controls stay flat. E3 (lineage) is not needed for the verdict; it is needed to
-  say *which* held delivery each extra record re-derives.
+  see the two controls stay flat. But E2b shows it is not sufficient in general: when the
+  amplified work displaces other work on the same edge (Raft's election storm), the count falls.
+  E3 (lineage) is therefore needed for the verdict itself, not only for explanation: the
+  quantity to maximize is derivations of a goal, and only attribution gives it.
 - The instrument's coverage is exactly the set of `batch` hooks. Top-level edges
   (`reliable_broadcast`, the network sends themselves) and intra-tick edges are not counted;
   E3's IR pass is the place to add observation there.

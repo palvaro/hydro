@@ -2805,25 +2805,31 @@ mod tests {
     }
 }
 
-/// E2 control for the amplification design
-/// (`design_docs/2026-09_amplification_as_adversarial_scheduling.md`): Raft driven with
-/// heartbeat inputs only does the same work under every schedule. A leader is elected once,
-/// then every member's heartbeat timer is fed `H` interrupts up front and metered (one per tick,
-/// so each member's tick count is logical time; followers ignore their heartbeat timer). The
-/// hold schedule holds every member's incoming traffic (`AppendEntries` at the followers, the
-/// acks at the leader) for `d` ticks. Per-edge record counts must not change.
+/// E2b of the amplification design
+/// (`design_docs/2026-09_amplification_as_adversarial_scheduling.md`): does the instrument find
+/// amplification in a program that was not written to exhibit it? Raft's election timer is a
+/// timeout-and-retry loop on the leader: followers that see no `AppendEntries` between two
+/// election-timer interrupts start a new term. Nothing in `raft_server` is changed here; only
+/// the schedule of message delivery is.
+///
+/// A leader is elected once; then every member is fed `TICKS` heartbeat-timer interrupts (metered
+/// one per tick, so each member's tick count is logical time; followers ignore theirs) and an
+/// election-timer interrupt every `ELECTION_EVERY` ticks. The intra-cluster traffic batch (the
+/// only edge deliveries cross) is then scheduled three ways: promptly, with a constant delay
+/// (`Hold(d)`), and in bursts with the same maximum delay (`Periodic { period: d }`).
 #[cfg(test)]
-mod amplification_control {
+mod amplification_tests {
     use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
     use hydro_lang::prelude::*;
     use hydro_lang::sim::edge_counts::EdgeCounts;
-    use hydro_lang::sim::hold_schedule::HoldScheduleDriver;
+    use hydro_lang::sim::hold_schedule::{EdgePolicy, HoldScheduleDriver};
     use hydro_lang::sim::quiesce;
 
     use super::{LeaderView, RaftConfig, Replica, raft_server};
 
     const CLUSTER_SIZE: usize = 3;
-    const HEARTBEATS: usize = 50;
+    const TICKS: usize = 200;
+    const ELECTION_EVERY: u64 = 4;
 
     /// Line of the `sliced!` block in `raft_server`, whose hooks carry that location.
     fn server_slice_line() -> usize {
@@ -2839,12 +2845,70 @@ mod amplification_control {
         line
     }
 
-    fn edge(element_type: &'static str) -> impl Fn(&str) -> bool + Clone + 'static {
-        let tag = format!("raft.rs:{}:", server_slice_line());
-        move |key: &str| key.contains(&tag) && key.contains(element_type)
+    fn in_server_slice(key: &str) -> bool {
+        key.contains(&format!("raft.rs:{}:", server_slice_line()))
     }
 
-    fn run(hold: Option<u64>) -> (EdgeCounts, Vec<Vec<LeaderView<Replica>>>) {
+    fn traffic(key: &str) -> bool {
+        in_server_slice(key) && key.contains("RaftRpc")
+    }
+
+    fn timer(key: &str) -> bool {
+        in_server_slice(key) && key.ends_with(" <()>")
+    }
+
+    /// The two timer hooks are both `()` streams in the same block; their keys differ only in
+    /// the hook index. Which is which is settled by the control run below.
+    #[derive(Clone)]
+    struct Timers {
+        election: String,
+        heartbeat: String,
+    }
+
+    struct Outcome {
+        counts: EdgeCounts,
+        /// Leader-view transitions per member after the initial election.
+        transitions: Vec<Vec<LeaderView<Replica>>>,
+    }
+
+    impl Outcome {
+        fn traffic(&self) -> u64 {
+            self.counts.records(traffic)
+        }
+        /// Terms started after the initial election (a candidacy per term).
+        fn elections(&self) -> usize {
+            self.max_term() - 1
+        }
+        fn max_term(&self) -> usize {
+            self.transitions
+                .iter()
+                .flatten()
+                .map(|v| v.term)
+                .max()
+                .unwrap_or(1)
+        }
+        fn print(&self, title: &str) {
+            println!("== {title}");
+            for (key, e) in &self.counts.0 {
+                println!("  [{key}] records={} decisions={} nonempty={}", e.records, e.decisions, e.nonempty_decisions);
+            }
+            println!(
+                "  traffic records {}, highest term {} (so {} elections after the first), view transitions per member {:?}, final views {:?}",
+                self.traffic(),
+                self.max_term(),
+                self.elections(),
+                self.transitions.iter().map(|h| h.len()).collect::<Vec<_>>(),
+                self.transitions
+                    .iter()
+                    .map(|h| h.last().map(|v| (v.term, v.leader.as_ref().map(|m| m.get_raw_id()))))
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
+
+    /// `election_every`: `None` sends no election interrupts after the first election (the
+    /// heartbeats-only control); `Some((timers, e))` sends one every `e` ticks to every member.
+    fn run(traffic_policy: EdgePolicy, election_every: Option<(Timers, u64)>) -> Outcome {
         let mut flow = FlowBuilder::new();
         let cluster = flow.cluster::<Replica>();
 
@@ -2864,14 +2928,26 @@ mod amplification_control {
         );
         let view_recv = outputs.leader_views.sim_cluster_output();
 
-        // The timer batches (both of type `()`) are the clocks; the traffic batch is held.
-        let mut driver = HoldScheduleDriver::new().meter(edge("<()>"));
-        if let Some(d) = hold {
-            driver = driver.hold(edge("RaftRpc"), d);
-        }
+        let mut driver = HoldScheduleDriver::new().with_policy(traffic, traffic_policy);
+        let elections_per_member = match &election_every {
+            None => {
+                driver = driver.meter(timer);
+                0
+            }
+            Some((timers, every)) => {
+                let (election, heartbeat) = (timers.election.clone(), timers.heartbeat.clone());
+                driver = driver
+                    .meter(move |key: &str| key == heartbeat)
+                    .with_policy(
+                        move |key: &str| key == election,
+                        EdgePolicy::Periodic { period: *every, count: Some(1) },
+                    );
+                TICKS as u64 / every
+            }
+        };
 
-        let mut histories: Vec<Vec<LeaderView<Replica>>> = vec![Vec::new(); CLUSTER_SIZE];
-        let histories_ref = &mut histories;
+        let mut transitions: Vec<Vec<LeaderView<Replica>>> = vec![Vec::new(); CLUSTER_SIZE];
+        let transitions_ref = &mut transitions;
         let counts = flow
             .sim()
             .skip_consistency_assertions()
@@ -2880,51 +2956,147 @@ mod amplification_control {
                 // Phase 1: an uncontested election, settled.
                 interrupt_send.send(0, ());
                 quiesce().await;
-                // Phase 2: `HEARTBEATS` heartbeat-timer interrupts per member, up front.
+                let member_0 = hydro_lang::location::MemberId::<Replica>::from_raw_id(0);
                 for member in 0..CLUSTER_SIZE as u32 {
-                    for _ in 0..HEARTBEATS {
+                    let views: Vec<LeaderView<Replica>> = view_recv.collect(member).await;
+                    assert_eq!(
+                        views.last().map(|v| v.term),
+                        Some(1),
+                        "member {member} should be in term 1 after the first election"
+                    );
+                    if member == 0 {
+                        assert_eq!(views.last().unwrap().leader, Some(member_0.clone()));
+                    }
+                }
+                // Phase 2: timers for `TICKS` ticks, all up front; the driver paces them.
+                for member in 0..CLUSTER_SIZE as u32 {
+                    for _ in 0..TICKS {
                         heartbeat_send.send(member, ());
+                    }
+                    for _ in 0..elections_per_member {
+                        interrupt_send.send(member, ());
                     }
                 }
                 quiesce().await;
                 for member in 0..CLUSTER_SIZE as u32 {
-                    histories_ref[member as usize].extend(view_recv.collect::<Vec<_>>(member).await);
+                    transitions_ref[member as usize].extend(view_recv.collect::<Vec<_>>(member).await);
                 }
             });
-        (counts, histories)
+        Outcome { counts, transitions }
+    }
+
+    /// Control (E2): heartbeats only, no election timer. Constant delay changes no count.
+    /// Also settles which `()` hook is which timer: only member 0's single election interrupt
+    /// went through the election hook. (No method calls on `Outcome` here: staging drops
+    /// `impl` blocks but keeps non-test functions.)
+    fn control() -> (Outcome, Timers) {
+        let baseline = run(EdgePolicy::Prompt, None);
+        let timer_keys: Vec<(&String, u64)> = baseline
+            .counts
+            .0
+            .iter()
+            .filter(|(k, _)| timer(k))
+            .map(|(k, e)| (k, e.records))
+            .collect();
+        assert_eq!(timer_keys.len(), 2, "expected two `()` timer hooks, got {timer_keys:?}");
+        let election = timer_keys.iter().find(|(_, n)| *n == 1).expect("election hook released exactly one interrupt").0.clone();
+        let heartbeat = timer_keys.iter().find(|(_, n)| *n == (CLUSTER_SIZE * TICKS) as u64).expect("heartbeat hook released every interrupt").0.clone();
+        (baseline, Timers { election, heartbeat })
     }
 
     #[test]
-    fn heartbeats_do_the_same_work_under_every_schedule() {
-        let (baseline, baseline_views) = run(None);
-        println!("== raft, heartbeats only, metered timers, no hold");
-        for (key, e) in &baseline.0 {
-            println!("  [{key}] records={} decisions={} nonempty={}", e.records, e.decisions, e.nonempty_decisions);
-        }
-        let member_0 = hydro_lang::location::MemberId::<Replica>::from_raw_id(0);
-        for (member, history) in baseline_views.iter().enumerate() {
-            assert_eq!(
-                history.last(),
-                Some(&LeaderView { term: 1, leader: Some(member_0.clone()) }),
-                "member {member} should end on the term-1 leader"
-            );
-        }
+    fn heartbeats_only_do_the_same_work_under_every_schedule() {
+        let (baseline, _) = control();
+        baseline.print("raft, heartbeats only, no hold");
         // Hand computation: the election is 2 RequestVote + 2 votes; every heartbeat interrupt
         // at the leader sends 2 AppendEntries and receives 2 acks.
-        let traffic = baseline.records(edge("RaftRpc"));
-        let expected_traffic = (2 * (CLUSTER_SIZE - 1) + 2 * (CLUSTER_SIZE - 1) * HEARTBEATS) as u64;
-        println!("  traffic records {traffic} (hand-computed {expected_traffic}); timer records {}", baseline.records(edge("<()>")));
-        assert_eq!(traffic, expected_traffic);
-
+        let expected = (2 * (CLUSTER_SIZE - 1) + 2 * (CLUSTER_SIZE - 1) * TICKS) as u64;
+        assert_eq!(baseline.traffic(), expected);
+        assert_eq!(baseline.elections(), 0);
         for d in [1, 5, 20] {
-            let (held, held_views) = run(Some(d));
-            println!("== raft, heartbeats only, traffic held d = {d}");
-            for (key, e) in &held.0 {
-                println!("  [{key}] records={} decisions={} nonempty={}", e.records, e.decisions, e.nonempty_decisions);
+            let held = run(EdgePolicy::Hold(d), None);
+            held.print(&format!("raft, heartbeats only, traffic held d = {d}"));
+            assert_eq!(held.traffic(), expected, "traffic under hold d = {d}");
+            assert_eq!(held.elections(), 0);
+        }
+    }
+
+    /// With the election timer running, the delivery schedule decides how many elections the
+    /// same inputs produce. Measured (see the design doc, "E2b"): up to a delay of 2 ticks
+    /// nothing changes; from a delay of the election period on, no candidate collects a
+    /// majority before its next timer fires (votes are delayed too), so the cluster re-elects
+    /// every period for the rest of the run. The *record count* on the traffic edge falls while
+    /// that happens: heartbeats (2 per tick) disappear and election messages take their place,
+    /// so a single per-edge count cannot see the storm; the number of terms can.
+    #[test]
+    fn election_timer_storms_once_delivery_delay_reaches_the_election_period() {
+        let (baseline, timers) = control();
+        baseline.print("raft, heartbeats only, no hold");
+        let expected_prompt = (2 * (CLUSTER_SIZE - 1) + 2 * (CLUSTER_SIZE - 1) * TICKS) as u64;
+
+        let prompt = run(EdgePolicy::Prompt, Some((timers.clone(), ELECTION_EVERY)));
+        prompt.print(&format!("raft, election timer every {ELECTION_EVERY} ticks, prompt delivery"));
+        assert_eq!(prompt.traffic(), expected_prompt, "prompt delivery: heartbeats suppress every election");
+        assert_eq!(prompt.max_term(), 1);
+
+        println!("== summary (traffic records / elections after the first / highest term), {TICKS} ticks, election timer every {ELECTION_EVERY}");
+        println!("  prompt: {} / {} / {}", prompt.traffic(), prompt.elections(), prompt.max_term());
+        let mut results = vec![];
+        for d in [1, 2, 3, 4, 5, 6, 12, 24] {
+            let held = run(EdgePolicy::Hold(d), Some((timers.clone(), ELECTION_EVERY)));
+            held.print(&format!("raft, election timer, constant delay d = {d}"));
+            let burst = run(
+                EdgePolicy::Periodic { period: d, count: None },
+                Some((timers.clone(), ELECTION_EVERY)),
+            );
+            burst.print(&format!("raft, election timer, bursty delivery every {d} ticks"));
+            println!(
+                "  d = {d:>2}: constant {} / {} / {}   bursty {} / {} / {}",
+                held.traffic(),
+                held.elections(),
+                held.max_term(),
+                burst.traffic(),
+                burst.elections(),
+                burst.max_term()
+            );
+            results.push((d, held, burst));
+        }
+
+        let periods = TICKS as usize / ELECTION_EVERY as usize;
+        for (d, held, burst) in &results {
+            if *d <= 2 {
+                // Short delays: every election interrupt still finds a heartbeat since the last.
+                assert_eq!(held.max_term(), 1, "constant d = {d}");
+                assert_eq!(held.traffic(), expected_prompt, "constant d = {d}");
+                assert_eq!(burst.max_term(), 1, "bursty d = {d}");
+                assert_eq!(burst.traffic(), expected_prompt, "bursty d = {d}");
             }
-            assert_eq!(held.records(edge("RaftRpc")), traffic, "traffic under hold d = {d}");
-            assert_eq!(held.records(edge("<()>")), baseline.records(edge("<()>")), "timer records under hold d = {d}");
-            assert_eq!(held_views, baseline_views, "leader views under hold d = {d}");
+            if *d >= ELECTION_EVERY {
+                // A constant delay of at least the election period: a new term every period
+                // until the run ends, and the single traffic count does not rise while that
+                // happens (the leader's heartbeats are gone; election messages replace them).
+                assert!(
+                    held.elections() >= periods - 1,
+                    "constant d = {d}: expected a perpetual storm, got {} elections",
+                    held.elections()
+                );
+                assert!(
+                    held.traffic() < expected_prompt,
+                    "constant d = {d}: traffic {} vs prompt {expected_prompt}",
+                    held.traffic()
+                );
+            }
+            if *d == ELECTION_EVERY {
+                // Bursty delivery every `d` ticks leaves a gap of `d - 1`: one tick short.
+                assert_eq!(burst.max_term(), 1, "bursty d = {d}");
+            }
+            if *d > ELECTION_EVERY {
+                assert!(
+                    burst.elections() >= periods - 1,
+                    "bursty d = {d}: expected a perpetual storm, got {} elections",
+                    burst.elections()
+                );
+            }
         }
     }
 }

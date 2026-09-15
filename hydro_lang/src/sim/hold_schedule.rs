@@ -12,6 +12,11 @@
 //!   consumed one per tick of the slice that reads it, so the slice's tick count *is* logical
 //!   time and the driver, not the test harness, decides when time advances. With `n > 1` it
 //!   paces an input that arrives at a fixed rate per tick (a workload sent up front).
+//! - [`EdgePolicy::Periodic { period, count }`]: release `count` items (or everything) at every
+//!   `period`-th decision and nothing in between. With `count = Some(1)` this is a slower clock
+//!   (a timer that fires every `period` ticks of its slice); with `count = None` it is bursty
+//!   delivery: the same maximum delay as `Hold(period)`, but as a gap followed by a burst rather
+//!   than a constant shift.
 //! - [`EdgePolicy::Hold(d)`]: items that first appear in the buffer at the hook's `k`-th
 //!   decision are released at its `(k + d)`-th decision. Since the hook is asked exactly once
 //!   per tick of its slice, and a metered clock in the same slice advances once per tick, a
@@ -43,11 +48,19 @@ pub enum EdgePolicy {
     Prompt,
     /// Release exactly this many items per decision (fewer only when fewer are buffered).
     Metered(usize),
+    /// Release `count` items (everything if `None`) at every `period`-th decision, nothing
+    /// otherwise.
+    Periodic {
+        /// Decisions between releases; a release happens when the decision index is a multiple.
+        period: u64,
+        /// Items per release; `None` releases everything buffered.
+        count: Option<usize>,
+    },
     /// Release an item `d` decisions after it first appeared in the buffer.
     Hold(u64),
 }
 
-/// Per-hook bookkeeping for [`EdgePolicy::Hold`]; one per (edge, cluster member).
+/// Per-hook bookkeeping for the stateful policies; one per (edge, cluster member).
 #[derive(Debug, Default)]
 struct HoldState {
     /// Decisions this hook has been asked for so far (its slice's tick count).
@@ -68,8 +81,8 @@ struct HoldState {
 
 impl HoldState {
     /// Starts a new decision: accounts for items that arrived since the last one and computes
-    /// how many are due.
-    fn begin(&mut self, context: &HookContext, d: u64) {
+    /// how many are due under `policy`.
+    fn begin(&mut self, context: &HookContext, policy: EdgePolicy) {
         // Items held across from the previous decision.
         let held = self.buffered - self.released;
         let tick = self.decisions;
@@ -79,24 +92,36 @@ impl HoldState {
         self.released = 0;
         self.questions = 0;
 
-        let newly_arrived = context
-            .buffered
-            .checked_sub(held)
-            .expect("buffer shrank without the driver releasing from it");
-        if newly_arrived > 0 {
-            self.groups.push_back((tick, newly_arrived));
-        }
-
-        let mut due = 0;
-        while let Some(&(arrived, count)) = self.groups.front() {
-            if arrived + d <= tick {
-                due += count;
-                self.groups.pop_front();
-            } else {
-                break;
+        self.due = match policy {
+            EdgePolicy::Prompt => context.buffered,
+            EdgePolicy::Metered(n) => context.buffered.min(n),
+            EdgePolicy::Periodic { period, count } => {
+                if tick.is_multiple_of(period) {
+                    count.map_or(context.buffered, |n| context.buffered.min(n))
+                } else {
+                    0
+                }
             }
-        }
-        self.due = due;
+            EdgePolicy::Hold(d) => {
+                let newly_arrived = context
+                    .buffered
+                    .checked_sub(held)
+                    .expect("buffer shrank without the driver releasing from it");
+                if newly_arrived > 0 {
+                    self.groups.push_back((tick, newly_arrived));
+                }
+                let mut due = 0;
+                while let Some(&(arrived, count)) = self.groups.front() {
+                    if arrived + d <= tick {
+                        due += count;
+                        self.groups.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+                due
+            }
+        };
     }
 
     /// Forced to release with nothing due: the clock has run dry, flush everything.
@@ -183,71 +208,45 @@ impl HoldScheduleDriver {
     /// prompt answer. `Count` answers are counts; `Stop` answers are 0 (continue) or 1 (stop);
     /// `Which` answers are indexes.
     fn answer(&mut self, context: HookContext, question: Question) -> Option<usize> {
-        let key = edge_key(context.location);
-        match self.policy_for(&key) {
-            EdgePolicy::Prompt => None,
-            EdgePolicy::Metered(n) => {
-                // Unordered hooks ask per item; count what this decision has released so far.
-                let state = self
-                    .states
-                    .entry((key, context.member))
-                    .or_default();
-                if state.current != Some(context.decision) {
-                    state.current = Some(context.decision);
-                    state.released = 0;
-                }
-                Some(match question {
-                    Count { min } => context.buffered.min(n).max(min),
-                    Stop => {
-                        if state.released >= n {
-                            1
-                        } else {
-                            0
-                        }
-                    }
-                    Which => {
-                        state.released += 1;
-                        0
-                    }
-                })
-            }
-            EdgePolicy::Hold(d) => {
-                let state = self.states.entry((key, context.member)).or_default();
-                if state.current != Some(context.decision) {
-                    state.begin(&context, d);
-                }
-                state.questions += 1;
-                Some(match question {
-                    Count { min } => {
-                        assert!(
-                            state.questions == 1,
-                            "Hold policy attached to a hook that asks several release counts per decision (keyed batch?): {}",
-                            context.location.0
-                        );
-                        if min > state.due {
-                            state.flush();
-                        }
-                        state.released = state.due;
-                        state.due
-                    }
-                    Stop => {
-                        if state.released >= state.due {
-                            1
-                        } else {
-                            0
-                        }
-                    }
-                    Which => {
-                        if state.questions == 1 && state.due == 0 {
-                            // The first item is being taken without asking: a forced release.
-                            state.flush();
-                        }
-                        state.released += 1;
-                        0
-                    }
-                })
-            }
+        let key = edge_key(context.location, context.index);
+        let policy = self.policy_for(&key);
+        if let EdgePolicy::Prompt = policy {
+            return None;
         }
+        let state = self.states.entry((key, context.member)).or_default();
+        if state.current != Some(context.decision) {
+            state.begin(&context, policy);
+        }
+        state.questions += 1;
+        Some(match question {
+            Count { min } => {
+                assert!(
+                    state.questions == 1,
+                    "policy attached to a hook that asks several release counts per decision (keyed batch?): {}",
+                    context.location.0
+                );
+                if min > state.due {
+                    state.flush();
+                }
+                state.released = state.due;
+                state.due
+            }
+            Stop => {
+                if state.released >= state.due {
+                    1
+                } else {
+                    0
+                }
+            }
+            Which => {
+                if state.questions == 1 && state.due == 0 {
+                    // The first item is being taken without asking: a forced release.
+                    state.flush();
+                }
+                state.released += 1;
+                0
+            }
+        })
     }
 }
 

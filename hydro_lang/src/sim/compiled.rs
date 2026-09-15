@@ -2122,7 +2122,7 @@ fn run_hooks<W: std::fmt::Write>(
 
     bolero::generator::bolero_generator::any::scope::borrow_with(|driver| {
         // first, scan manual decisions
-        hooks.iter_mut().for_each(|hook| {
+        hooks.iter_mut().enumerate().for_each(|(index, hook)| {
             if let Some(is_nontrivial) = hook.current_decision() {
                 made_nontrivial_decision |= is_nontrivial;
                 remaining_decision_count -= 1;
@@ -2130,26 +2130,27 @@ fn run_hooks<W: std::fmt::Write>(
                 // if no nontrivial decision is possible, make a trivial one
                 // (we need to do this in the first pass to force nontrivial decisions
                 // on the remaining hooks)
-                with_current_hook(context(&**hook), member, || {
+                with_current_hook(context(&**hook), index, member, || {
                     hook.autonomous_decision(driver, false)
                 });
                 remaining_decision_count -= 1;
             }
         });
 
-        hooks.iter_mut().for_each(|hook| {
+        hooks.iter_mut().enumerate().for_each(|(index, hook)| {
             if hook.current_decision().is_none() {
                 let force = !made_nontrivial_decision && remaining_decision_count == 1;
-                made_nontrivial_decision |= with_current_hook(context(&**hook), member, || {
-                    hook.autonomous_decision(driver, force)
-                });
+                made_nontrivial_decision |=
+                    with_current_hook(context(&**hook), index, member, || {
+                        hook.autonomous_decision(driver, force)
+                    });
                 remaining_decision_count -= 1;
             }
 
             if let (Some(location), Some(released)) =
                 (hook.edge_location(), hook.pending_release_len())
             {
-                record_release(location, released);
+                record_release(location, index, released);
             }
 
             hook.release_decision(

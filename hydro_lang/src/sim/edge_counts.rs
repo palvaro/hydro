@@ -23,9 +23,11 @@ use std::collections::BTreeMap;
 pub type EdgeLocation = (&'static str, &'static str, &'static str);
 
 /// The key under which an edge is counted and matched by scheduling policies:
-/// `"<file>:<line>:<col> <element type>"`.
-pub fn edge_key(location: EdgeLocation) -> String {
-    format!("{} <{}>", location.0, location.2)
+/// `"<file>:<line>:<col>#<index> <element type>"`, where `index` is the hook's position among
+/// the hooks of its tick (two batches of the same type in one `sliced!` block, e.g. two `()`
+/// timers, differ only there).
+pub fn edge_key(location: EdgeLocation, index: usize) -> String {
+    format!("{}#{} <{}>", location.0, index, location.2)
 }
 
 /// What one tick-boundary hook released over a run.
@@ -73,6 +75,8 @@ impl EdgeCounts {
 pub struct HookContext {
     /// The edge the hook stands for.
     pub location: EdgeLocation,
+    /// The hook's position among the hooks of its tick (see [`edge_key`]).
+    pub index: usize,
     /// The cluster member the hook belongs to, if the location is a cluster.
     pub member: Option<u32>,
     /// Records buffered in the hook before this decision.
@@ -98,10 +102,10 @@ pub fn count_edges<R>(f: impl FnOnce() -> R) -> (R, EdgeCounts) {
 }
 
 /// Called by the scheduler just before a hook releases `records` items across its edge.
-pub(crate) fn record_release(location: EdgeLocation, records: usize) {
+pub(crate) fn record_release(location: EdgeLocation, index: usize, records: usize) {
     RECORDER.with(|r| {
         if let Some(counts) = r.borrow_mut().as_mut() {
-            let entry = counts.0.entry(edge_key(location)).or_default();
+            let entry = counts.0.entry(edge_key(location, index)).or_default();
             if entry.source_line.is_empty() {
                 entry.source_line = location.1.trim().to_owned();
             }
@@ -125,11 +129,13 @@ pub fn current_hook() -> Option<HookContext> {
 /// hook does not stand for an edge.
 pub(crate) fn with_current_hook<R>(
     hook: Option<(EdgeLocation, usize)>,
+    index: usize,
     member: Option<u32>,
     f: impl FnOnce() -> R,
 ) -> R {
     let context = hook.map(|(location, buffered)| HookContext {
         location,
+        index,
         member,
         buffered,
         decision: DECISIONS.with(|d| {
