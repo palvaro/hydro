@@ -86,6 +86,26 @@ pub trait SimHook {
     fn take_halt(&mut self) -> bool {
         false
     }
+
+    /// The source location, source line and element type of the operator this hook stands in
+    /// for, when the hook is a tick-boundary buffer whose releases are records crossing an edge
+    /// of the program (`batch`). `None` for hooks that do not correspond to an edge. Used by
+    /// [`super::edge_counts`] to count records passively and to tell a scheduling policy which
+    /// hook is asking.
+    fn edge_location(&self) -> Option<(&'static str, &'static str, &'static str)> {
+        None
+    }
+
+    /// How many records the decision currently held by this hook will release, when the hook
+    /// stands for an edge (see [`Self::edge_location`]) and a decision has been made.
+    fn pending_release_len(&self) -> Option<usize> {
+        None
+    }
+
+    /// How many records are buffered and awaiting a decision, when the hook stands for an edge.
+    fn buffered_len(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// A hook that can make inline decisions during the execution of a tick.
@@ -193,6 +213,10 @@ pub struct StreamHook<T, Order: Ordering> {
     pub to_release: Option<Vec<T>>,
     pub output: Sender<T>,
     pub batch_location: HookLocationMeta,
+    /// `std::any::type_name` of the buffered element, which together with `batch_location`
+    /// identifies the edge this hook stands for (several `batch`es in one `sliced!` block share
+    /// a location).
+    pub element_type: &'static str,
     pub format_item_debug: fn(&T) -> Option<String>,
     pub _order: std::marker::PhantomData<Order>,
 }
@@ -200,6 +224,18 @@ pub struct StreamHook<T, Order: Ordering> {
 impl<T> SimHook for StreamHook<T, TotalOrder> {
     fn current_decision(&self) -> Option<bool> {
         self.to_release.as_ref().map(|v| !v.is_empty())
+    }
+
+    fn edge_location(&self) -> Option<(&'static str, &'static str, &'static str)> {
+        Some((self.batch_location.0, self.batch_location.1, self.element_type))
+    }
+
+    fn pending_release_len(&self) -> Option<usize> {
+        self.to_release.as_ref().map(|v| v.len())
+    }
+
+    fn buffered_len(&self) -> Option<usize> {
+        Some(self.input.borrow().len())
     }
 
     fn can_make_nontrivial_decision(&self) -> bool {
@@ -267,6 +303,18 @@ impl<T> SimHook for StreamHook<T, TotalOrder> {
 impl<T> SimHook for StreamHook<T, NoOrder> {
     fn current_decision(&self) -> Option<bool> {
         self.to_release.as_ref().map(|v| !v.is_empty())
+    }
+
+    fn edge_location(&self) -> Option<(&'static str, &'static str, &'static str)> {
+        Some((self.batch_location.0, self.batch_location.1, self.element_type))
+    }
+
+    fn pending_release_len(&self) -> Option<usize> {
+        self.to_release.as_ref().map(|v| v.len())
+    }
+
+    fn buffered_len(&self) -> Option<usize> {
+        Some(self.input.borrow().len())
     }
 
     fn can_make_nontrivial_decision(&self) -> bool {
@@ -355,6 +403,8 @@ pub struct KeyedStreamHook<K: Hash + Eq + Clone, V, Order: Ordering> {
     pub to_release: Option<Vec<(K, V)>>,
     pub output: Sender<(K, V)>,
     pub batch_location: HookLocationMeta,
+    /// See [`StreamHook::element_type`].
+    pub element_type: &'static str,
     pub format_item_debug: fn(&(K, V)) -> Option<String>,
     pub _order: std::marker::PhantomData<Order>,
 }
@@ -362,6 +412,19 @@ pub struct KeyedStreamHook<K: Hash + Eq + Clone, V, Order: Ordering> {
 impl<K: Hash + Eq + Clone, V> SimHook for KeyedStreamHook<K, V, TotalOrder> {
     fn current_decision(&self) -> Option<bool> {
         self.to_release.as_ref().map(|v| !v.is_empty())
+    }
+
+    fn edge_location(&self) -> Option<(&'static str, &'static str, &'static str)> {
+        Some((self.batch_location.0, self.batch_location.1, self.element_type))
+    }
+
+    fn pending_release_len(&self) -> Option<usize> {
+        self.to_release.as_ref().map(|v| v.len())
+    }
+
+    fn buffered_len(&self) -> Option<usize> {
+        #[expect(clippy::disallowed_methods, reason = "FxHasher is deterministic")]
+        Some(self.input.borrow().values().map(|q| q.len()).sum())
     }
 
     fn can_make_nontrivial_decision(&self) -> bool {
@@ -454,6 +517,19 @@ impl<K: Hash + Eq + Clone, V> SimHook for KeyedStreamHook<K, V, TotalOrder> {
 impl<K: Hash + Eq + Clone, V> SimHook for KeyedStreamHook<K, V, NoOrder> {
     fn current_decision(&self) -> Option<bool> {
         self.to_release.as_ref().map(|v| !v.is_empty())
+    }
+
+    fn edge_location(&self) -> Option<(&'static str, &'static str, &'static str)> {
+        Some((self.batch_location.0, self.batch_location.1, self.element_type))
+    }
+
+    fn pending_release_len(&self) -> Option<usize> {
+        self.to_release.as_ref().map(|v| v.len())
+    }
+
+    fn buffered_len(&self) -> Option<usize> {
+        #[expect(clippy::disallowed_methods, reason = "FxHasher is deterministic")]
+        Some(self.input.borrow().values().map(|q| q.len()).sum())
     }
 
     fn can_make_nontrivial_decision(&self) -> bool {

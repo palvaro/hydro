@@ -2804,3 +2804,127 @@ mod tests {
         });
     }
 }
+
+/// E2 control for the amplification design
+/// (`design_docs/2026-09_amplification_as_adversarial_scheduling.md`): Raft driven with
+/// heartbeat inputs only does the same work under every schedule. A leader is elected once,
+/// then every member's heartbeat timer is fed `H` interrupts up front and metered (one per tick,
+/// so each member's tick count is logical time; followers ignore their heartbeat timer). The
+/// hold schedule holds every member's incoming traffic (`AppendEntries` at the followers, the
+/// acks at the leader) for `d` ticks. Per-edge record counts must not change.
+#[cfg(test)]
+mod amplification_control {
+    use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
+    use hydro_lang::prelude::*;
+    use hydro_lang::sim::edge_counts::EdgeCounts;
+    use hydro_lang::sim::hold_schedule::HoldScheduleDriver;
+    use hydro_lang::sim::quiesce;
+
+    use super::{LeaderView, RaftConfig, Replica, raft_server};
+
+    const CLUSTER_SIZE: usize = 3;
+    const HEARTBEATS: usize = 50;
+
+    /// Line of the `sliced!` block in `raft_server`, whose hooks carry that location.
+    fn server_slice_line() -> usize {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cluster/raft.rs")).unwrap();
+        // The `!` is added at runtime so this literal does not match itself.
+        let mut hits = source
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| l.trim() == format!(") = sliced{} {{", "!"))
+            .map(|(i, _)| i + 1);
+        let line = hits.next().expect("raft_server's sliced block");
+        assert!(hits.next().is_none(), "more than one `) = sliced! {{` line in raft.rs");
+        line
+    }
+
+    fn edge(element_type: &'static str) -> impl Fn(&str) -> bool + Clone + 'static {
+        let tag = format!("raft.rs:{}:", server_slice_line());
+        move |key: &str| key.contains(&tag) && key.contains(element_type)
+    }
+
+    fn run(hold: Option<u64>) -> (EdgeCounts, Vec<Vec<LeaderView<Replica>>>) {
+        let mut flow = FlowBuilder::new();
+        let cluster = flow.cluster::<Replica>();
+
+        let (interrupt_send, election_timer_interrupts) = cluster.sim_input();
+        let (heartbeat_send, heartbeat_timer_interrupts) = cluster.sim_input();
+        let (_request_send, requests) = cluster.sim_input::<String, TotalOrder, ExactlyOnce>();
+        let outputs = raft_server(
+            &cluster,
+            requests,
+            election_timer_interrupts,
+            heartbeat_timer_interrupts,
+            RaftConfig {
+                cluster_size: CLUSTER_SIZE,
+            },
+            TCP.fail_stop().bincode(),
+            nondet!(/** which member wins an election is inherently non-deterministic */),
+        );
+        let view_recv = outputs.leader_views.sim_cluster_output();
+
+        // The timer batches (both of type `()`) are the clocks; the traffic batch is held.
+        let mut driver = HoldScheduleDriver::new().meter(edge("<()>"));
+        if let Some(d) = hold {
+            driver = driver.hold(edge("RaftRpc"), d);
+        }
+
+        let mut histories: Vec<Vec<LeaderView<Replica>>> = vec![Vec::new(); CLUSTER_SIZE];
+        let histories_ref = &mut histories;
+        let counts = flow
+            .sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&cluster, CLUSTER_SIZE)
+            .run_with_driver(driver, async move || {
+                // Phase 1: an uncontested election, settled.
+                interrupt_send.send(0, ());
+                quiesce().await;
+                // Phase 2: `HEARTBEATS` heartbeat-timer interrupts per member, up front.
+                for member in 0..CLUSTER_SIZE as u32 {
+                    for _ in 0..HEARTBEATS {
+                        heartbeat_send.send(member, ());
+                    }
+                }
+                quiesce().await;
+                for member in 0..CLUSTER_SIZE as u32 {
+                    histories_ref[member as usize].extend(view_recv.collect::<Vec<_>>(member).await);
+                }
+            });
+        (counts, histories)
+    }
+
+    #[test]
+    fn heartbeats_do_the_same_work_under_every_schedule() {
+        let (baseline, baseline_views) = run(None);
+        println!("== raft, heartbeats only, metered timers, no hold");
+        for (key, e) in &baseline.0 {
+            println!("  [{key}] records={} decisions={} nonempty={}", e.records, e.decisions, e.nonempty_decisions);
+        }
+        let member_0 = hydro_lang::location::MemberId::<Replica>::from_raw_id(0);
+        for (member, history) in baseline_views.iter().enumerate() {
+            assert_eq!(
+                history.last(),
+                Some(&LeaderView { term: 1, leader: Some(member_0.clone()) }),
+                "member {member} should end on the term-1 leader"
+            );
+        }
+        // Hand computation: the election is 2 RequestVote + 2 votes; every heartbeat interrupt
+        // at the leader sends 2 AppendEntries and receives 2 acks.
+        let traffic = baseline.records(edge("RaftRpc"));
+        let expected_traffic = (2 * (CLUSTER_SIZE - 1) + 2 * (CLUSTER_SIZE - 1) * HEARTBEATS) as u64;
+        println!("  traffic records {traffic} (hand-computed {expected_traffic}); timer records {}", baseline.records(edge("<()>")));
+        assert_eq!(traffic, expected_traffic);
+
+        for d in [1, 5, 20] {
+            let (held, held_views) = run(Some(d));
+            println!("== raft, heartbeats only, traffic held d = {d}");
+            for (key, e) in &held.0 {
+                println!("  [{key}] records={} decisions={} nonempty={}", e.records, e.decisions, e.nonempty_decisions);
+            }
+            assert_eq!(held.records(edge("RaftRpc")), traffic, "traffic under hold d = {d}");
+            assert_eq!(held.records(edge("<()>")), baseline.records(edge("<()>")), "timer records under hold d = {d}");
+            assert_eq!(held_views, baseline_views, "leader views under hold d = {d}");
+        }
+    }
+}

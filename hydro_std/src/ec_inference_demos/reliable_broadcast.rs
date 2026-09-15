@@ -449,3 +449,60 @@ mod tests {
         );
     }
 }
+
+/// E2 control for the amplification design
+/// (`design_docs/2026-09_amplification_as_adversarial_scheduling.md`): the monotone loop.
+/// Reliable broadcast echoes each message exactly once per member (`unique()` closes the cycle),
+/// so no schedule can make it do more work. Counted at the simulator's hooks under the
+/// deterministic driver.
+#[cfg(test)]
+mod amplification_control {
+    use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
+    use hydro_lang::prelude::*;
+    use hydro_lang::sim::hold_schedule::HoldScheduleDriver;
+    use hydro_lang::sim::quiesce;
+
+    use super::reliable_broadcast_closed;
+
+    const CLUSTER_SIZE: usize = 3;
+    const MESSAGES: u32 = 20;
+
+    #[test]
+    fn echo_once_broadcast_has_no_schedule_decisions() {
+        let mut flow = FlowBuilder::new();
+        let sender = flow.process::<()>();
+        let cluster = flow.cluster::<()>();
+
+        let (in_send, data) = sender.sim_input::<u32, TotalOrder, ExactlyOnce>();
+        let out_recv = reliable_broadcast_closed(data, &cluster).sim_cluster_output();
+
+        let mut delivered: Vec<Vec<u32>> = vec![vec![]; CLUSTER_SIZE];
+        let delivered_ref = &mut delivered;
+        let counts = flow
+            .sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&cluster, CLUSTER_SIZE)
+            .run_with_driver(HoldScheduleDriver::new(), async move || {
+                for m in 0..MESSAGES {
+                    in_send.send(m);
+                }
+                quiesce().await;
+                for member in 0..CLUSTER_SIZE as u32 {
+                    delivered_ref[member as usize] = out_recv.collect_sorted(member).await;
+                }
+            });
+
+        println!("== reliable broadcast (echo once), {MESSAGES} messages to {CLUSTER_SIZE} members");
+        println!("  counted hook edges: {}", counts.0.len());
+        for (key, e) in &counts.0 {
+            println!("  [{key}] records={} decisions={}", e.records, e.decisions);
+        }
+        for (member, got) in delivered.iter().enumerate() {
+            assert_eq!(got, &(0..MESSAGES).collect::<Vec<_>>(), "member {member} deliveries");
+        }
+        // The whole cycle (broadcast, merge, unique, echo) is top-level dataflow: it has no
+        // `batch`, hence no hook, hence no decision a scheduler could vary, and none of its
+        // edges is visible to hook-based counting.
+        assert!(counts.0.is_empty(), "expected no hook edges, got {:?}", counts.0.keys());
+    }
+}

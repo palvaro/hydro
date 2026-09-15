@@ -455,6 +455,7 @@ impl DfirBuilder for SimBuilder {
                                 to_release: None,
                                 output: #hoff_send_ident,
                                 batch_location: (#batch_location, #line, #caret),
+                                element_type: ::std::any::type_name::<#element_type>(),
                                 format_item_debug: #root::__maybe_debug__!(#element_type),
                                 _order: std::marker::PhantomData,
                             })
@@ -519,6 +520,7 @@ impl DfirBuilder for SimBuilder {
                                 to_release: None,
                                 output: #hoff_send_ident,
                                 batch_location: (#batch_location, #line, #caret),
+                                element_type: ::std::any::type_name::<(#key_type, #value_type)>(),
                                 format_item_debug: #root::__maybe_debug__!((#key_type, #value_type)),
                                 _order: std::marker::PhantomData,
                             })

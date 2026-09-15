@@ -1,7 +1,8 @@
 # Work amplification as adversarial scheduling
 
 Status: design note, step 2 of the metastability project. E0 (canonical program + deterministic
-sim collapse) is done; no checker code exists yet. Ground truth:
+sim collapse) and E2 (per-edge counting under two schedules, with controls) are done; no
+lineage code exists yet. Ground truth:
 `hydro_test/src/cluster/retry_storm.rs`, a Hydro client/server program with timeout/retry that
 is driven to a metastable collapse both on localhost and, deterministically, in the simulator
 (step 1: commit `bbd3ca02c5`; E0: the commit that adds this file).
@@ -267,3 +268,133 @@ Counting only, no lineage. Per-edge record counts at the hooks (each hook alread
 `max_attempts = 1`; unchanged for Raft driven with heartbeats only; unchanged for a monotone
 loop. Then the same measurement under the trigger with the prompt driver, to check that the
 load perturbation shows the same gain on the same edges as the hold perturbation.
+
+## E2: results
+
+Done. Every number below is from a test that runs under `cargo test` and asserts it:
+`retry_storm::amplification_tests` (three tests), `raft::amplification_control`, and
+`hydro_std::ec_inference_demos::reliable_broadcast::amplification_control`.
+
+### Instrument
+
+- **Counting** (`hydro_lang/src/sim/edge_counts.rs`). `SimHook` gained `edge_location()`,
+  `pending_release_len()` and `buffered_len()`, implemented by the four `batch` hooks
+  (`StreamHook`/`KeyedStreamHook` × `TotalOrder`/`NoOrder`). The scheduler's `run_hooks` records
+  the size of each release into a thread-local `EdgeCounts` when the run is wrapped in
+  `count_edges`; `SimFlow::run_with_driver(driver, thunk)` does the wrapping and returns the
+  counts. Nothing in generated code or the IR changed; the dylib's statics are not shared with
+  the host, so all recording is host-side.
+- **Edge identity.** The hook's source location is the `sliced!` invocation, not the
+  `use::batch` line, so every batch in a block shares a location. Hooks now also carry
+  `std::any::type_name` of their element, and an edge is keyed `file:line:col <type>`. For
+  `retry_storm` this is unique for all nine batches. For `raft_server` the two timer batches
+  (both `()`) collide and are counted together; a real fix is an operator id in the IR
+  metadata (E3's rewrite pass can assign one).
+- **The hold driver** (`hydro_lang/src/sim/hold_schedule.rs`). `HoldScheduleDriver` is the
+  prompt driver with a per-edge policy: `Prompt`, `Metered` (release one item per decision) or
+  `Hold(d)` (an item first seen at the hook's $k$-th decision is released at its $(k+d)$-th).
+  The scheduler tells the driver which hook is asking (`edge_counts::current_hook`: edge,
+  cluster member, buffered length, decision serial), which is how a context-free bolero `Driver`
+  gets a per-edge policy. `Hold` handles the totally-ordered protocol (one count question) and
+  the unordered one (stop?/which? per item); keyed batches and `TopLevelFoldHook` are not
+  supported.
+- **Time must be a driver decision.** The E0 harness (one clock element, then `quiesce()`, per
+  round) cannot hold anything: `run_hooks` forces the last undecided hook to release at least
+  one item when no other hook released, and `quiesce()` runs the client tick until its buffers
+  are empty, so a held response is forced out within its own round. (Measured: with the clock
+  un-metered by mistake, all 300 clock elements were released in one tick, `now` jumped to 299,
+  and 510 of 600 requests were retried immediately — the degenerate case the doc's "time
+  collapses" warning describes.) So the E2 harness sends the whole clock up front and the
+  driver **meters** the client's clock batch: one element per client tick, the tick count is
+  logical time, and the `responses` hook can be held across ticks because the clock hook is the
+  one that satisfies the forcing rule. When the clock runs dry the held hook is forced and the
+  driver flushes everything (end-of-run flush, visible below).
+- Under this harness the scheduler's round-robin runs the server tick once per two client
+  ticks (150 server decisions for 300 client ticks), so baseline latency is 1 or 2 ticks
+  (300 and 298 requests; the two minted last see 0). E1 assumed a constant $l$; the hand
+  computation below uses each request's measured baseline latency $l_{id}$.
+
+### Hold perturbation (`hold_schedule_amplifies_by_the_e1_step_function`)
+
+Config: $b = 2$, no trigger, $c = 20$ (so that the 12 arrivals per server tick at gain 3 never
+queue), $\tau = 40$, $A = 3$, $T = 300$ ticks, $N = 600$ requests. Baseline (metered clock,
+$d = 0$) reproduces E1's prompt table exactly: 600 on client→server, `processed`, responses and
+`completions`; 0 abandoned. Hand computation per request: visible at $t + l_{id} + d$; judged at
+$t + k\tau$ while not visible and $t + k\tau \le T - 1$; the first $A - 1$ judgements re-send,
+the $A$-th abandons; anything still held when the clock runs dry completes at $T - 1$. The test
+compares this per request (sends and completion latency), not just in aggregate.
+
+| $d$ | sends/request (measured = hand-computed) | client→server = processed = responses | completions | abandoned |
+|-----|------------------------------------------|---------------------------------------|-------------|-----------|
+| 0   | {1: 600}                                  | 600  | 600 | 0 |
+| 20  | {1: 600}                                  | 600  | 600 | 0 |
+| 38  | {1: 600}                                  | 600  | 600 | 0 |
+| 39  | {1: 340, 2: 260}                          | 860  | 600 | 0 |
+| 40  | {1: 80, 2: 520}                           | 1120 | 600 | 0 |
+| 60  | {1: 80, 2: 520}                           | 1120 | 600 | 0 |
+| 78  | {1: 80, 2: 520}                           | 1120 | 600 | 0 |
+| 79  | {1: 80, 2: 300, 3: 220}                   | 1340 | 600 | 0 |
+| 80  | {1: 80, 2: 80, 3: 440}                    | 1560 | 600 | 0 |
+| 118 | {1: 80, 2: 80, 3: 440}                    | 1560 | 600 | 0 |
+| 120 | {1: 80, 2: 80, 3: 440}                    | 1560 | 240 | 360 |
+
+Reading: the step function of E1, with the threshold at $l + d > k\tau$. At $d = 39$ only the
+requests with $l = 2$ cross $\tau$ (260 of them; the rest of the $l = 2$ requests are minted too
+late for a retry to fire before the clock ends); at $d = 40$ both latencies cross. The 80
+requests stuck at 1 send are those minted in the last $\tau$ ticks (no judgement before the
+clock ends). At $d = 79$ the $l = 2$ requests cross $2\tau$; at $d = 80$ all do; gain saturates
+at $A = 3$. At $d = 120 = 3\tau$, $l + d > 3\tau$ and the third judgement abandons: 360
+abandoned, 240 complete via the end-of-run flush — E1's "held forever" row. Completion latency
+under hold equals baseline $+ d$ for every request whose release tick exists, and $T - 1 - t$
+for the ones flushed. Extra records are re-derivations of the same ids: `completions` stays at
+600 while the location-crossing edges go to 1560.
+
+### Controls
+
+- **`max_attempts = 1`** (`hold_without_retries_changes_no_edge`), $d \in \{41, 120\}$:
+  client→server, `processed`, responses and `outgoing` all stay at 600, equal to $d = 0$. What
+  changes is the verdict, not the work: `completions` 80 / `abandoned` 520 (every request whose
+  judgement tick exists is abandoned before its response is visible; the 80 minted in the last
+  40 ticks complete in the flush).
+- **Raft, heartbeats only** (`raft::amplification_control`, 3 members): one uncontested
+  election, then 50 heartbeat-timer interrupts per member sent up front and metered (followers
+  ignore theirs). The traffic batch (`(MemberId, RaftRpc)`, unordered) is held $d \in
+  \{1, 5, 20\}$ on every member. Traffic records: 204 = 4 (RequestVote + votes) + 2 · 2 · 50
+  (AppendEntries + acks), identical at every $d$; timer records 151 at every $d$; leader-view
+  histories identical. The only thing that grows with $d$ is the number of decisions (155 →
+  159 → 175 → 235), i.e. ticks that ran while items were held.
+- **Monotone loop** (`reliable_broadcast::amplification_control`): `reliable_broadcast_closed`
+  (echo once, `unique()` closes the cycle), 20 messages to 3 members. All members deliver all
+  20. The counter sees **zero** edges: the whole cycle is top-level dataflow with no `batch`,
+  so there is no hook, no scheduling decision and nothing an adversary could vary. That is the
+  right verdict ("no moves"), but it also shows the instrument's blind spot: edges outside
+  ticks are invisible to hook counting. `g_set_gossip` would have been the alternative, but its
+  network deliveries land in a `TopLevelFoldHook`, whose question protocol (include/exclude per
+  element, then a permutation) `Hold` does not implement; also, under the prompt driver that
+  hook releases one element (the newest) per decision, not everything. Both are recorded here
+  rather than worked around.
+
+### Load perturbation (`load_perturbation_shows_the_same_gain_on_the_same_edges`)
+
+E0's config and harness (one clock element, `quiesce()`, 800 rounds; $c = 5$; trigger 12/round
+over [100, 160)), `PromptScheduleDriver`, counted. The run is E0's run: backlog 1237 at round
+799. Counts: client→server 4937 = `processed` 3700 + backlog 1237; responses 3700; `completions`
+982; `abandoned` 978; sends per request {1: 619, 2: 425, 3: 1156}. Requests minted before the
+trigger's queue exists ([0, 60)): all 1 send. Requests minted in [200, 720): all 3 sends. So
+the load perturbation, with no held delivery at all, produces the same gain (3, saturated at
+$A$) on the same three edges as the hold perturbation at $d > 2\tau$ — the evidence E1's last
+bullet asked for: both are schedules under which the server's answer arrives late.
+
+### What E2 says about the next steps
+
+- Counting at hooks is sufficient to see the gain and its threshold in `retry_storm`, and to
+  see the two controls stay flat. E3 (lineage) is not needed for the verdict; it is needed to
+  say *which* held delivery each extra record re-derives.
+- The instrument's coverage is exactly the set of `batch` hooks. Top-level edges
+  (`reliable_broadcast`, the network sends themselves) and intra-tick edges are not counted;
+  E3's IR pass is the place to add observation there.
+- The hold is only expressible when something else in the same tick can satisfy the scheduler's
+  forcing rule. A metered clock is the natural such thing; the E4 adversary will need the same
+  structure (or a scheduler change that lets a tick run empty under a policy that asks for it).
+- The `sliced!`-level location and the `()` collision in Raft argue for an operator id in the
+  hook metadata before E4 names moves by edge.

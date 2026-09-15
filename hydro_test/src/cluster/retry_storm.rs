@@ -608,7 +608,7 @@ mod sim_tests {
     /// delay of ~84 rounds, past the 40-round timeout. From then on every request is sent
     /// three times, so offered load is 3 x 2 = 6 per round against a capacity of 5 even
     /// after the trigger ends.
-    const BASE: RetryStormConfig = RetryStormConfig {
+    pub(super) const BASE: RetryStormConfig = RetryStormConfig {
         baseline_per_tick: 2,
         trigger_per_tick: 12,
         trigger_start_tick: 100,
@@ -621,7 +621,7 @@ mod sim_tests {
         report_interval: Duration::ZERO,
     };
 
-    const ROUNDS: usize = 800;
+    pub(super) const ROUNDS: usize = 800;
     const TAIL_START: usize = 600;
 
     fn print_trajectory(trace: &[Round]) {
@@ -704,6 +704,453 @@ mod sim_tests {
         let tail = &trace[TAIL_START..];
         assert!(tail.iter().all(|r| r.backlog == 0 && r.completed == 2 && r.abandoned == 0));
         assert_eq!(mean_latency(&trace, TAIL_START, ROUNDS), 0.0);
+    }
+}
+
+/// E2 of the amplification design (`design_docs/2026-09_amplification_as_adversarial_scheduling.md`):
+/// per-edge record counts at the simulator's hooks under two schedules with identical inputs.
+///
+/// Time is a driver decision here, not a harness loop: every `client_clock` element is sent
+/// up front and the driver *meters* the client's clock `batch` (one element per client tick), so
+/// the client's tick count is logical time. The hold schedule additionally holds items in the
+/// client's `use::batch(responses)` buffer for `d` client ticks. With `d = 0` the two schedules
+/// coincide, which is the baseline.
+#[cfg(test)]
+mod amplification_tests {
+    use std::collections::BTreeMap;
+
+    use hydro_lang::sim::edge_counts::EdgeCounts;
+    use hydro_lang::sim::hold_schedule::HoldScheduleDriver;
+    use hydro_lang::sim::quiesce;
+
+    use super::*;
+
+    /// This file, read at test time (the crate is also staged into the simulator's build, where
+    /// an `include_str!` of a sibling would not resolve).
+    fn source() -> String {
+        std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/cluster/retry_storm.rs"
+        ))
+        .unwrap()
+    }
+
+    /// 1-based line of the unique source line containing `needle`; the hooks' locations are
+    /// `file:line:col`, so this is how a test names an edge of the program.
+    fn line_of(needle: &str) -> usize {
+        let source = source();
+        let mut hits = source
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| l.contains(needle))
+            .map(|(i, _)| i + 1);
+        let line = hits.next().unwrap_or_else(|| panic!("no line contains {needle:?}"));
+        assert!(hits.next().is_none(), "more than one line contains {needle:?}");
+        line
+    }
+
+    /// `(name, slice, element type)` for every counted edge, in report order. A hook's key is
+    /// `file:line:col <type>` where the location is that of the `sliced!` block (the batches
+    /// inside share it), so an edge is named by the line of its block, looked up at test time
+    /// (the `!` is added at runtime so these literals do not match themselves), and the type of
+    /// the records crossing it. The first is the client's clock, which the driver meters; the
+    /// second is the `responses` buffer the hold schedule holds.
+    const EDGE_NEEDLES: &[(&str, &str, &str)] = &[
+        ("clock (client)", "let (outgoing, completions, abandoned) = sliced", "(usize, ())"),
+        ("server -> client (responses)", "let (outgoing, completions, abandoned) = sliced", "::Response"),
+        ("client -> server (arrivals)", "let (processed, backlog_depth, backlog_trace) = sliced", "::Request"),
+        ("server processed", "let server_windows = sliced", "::Request"),
+        ("outgoing (client report)", "let client_windows = sliced", "::Request"),
+        ("completions (client report)", "let client_windows = sliced", "::Completion"),
+        ("abandoned (client report)", "let client_windows = sliced", "u64"),
+    ];
+
+    fn edge_pred(slice: &str, element_type: &str) -> impl Fn(&str) -> bool + Clone + 'static {
+        let tag = format!("retry_storm.rs:{}:", line_of(&format!("{slice}!")));
+        let suffix = format!("{element_type}>");
+        move |key: &str| key.contains(&tag) && key.ends_with(&suffix)
+    }
+
+    fn edge_named(name: &str) -> impl Fn(&str) -> bool + Clone + 'static {
+        let (_, slice, ty) = EDGE_NEEDLES
+            .iter()
+            .find(|(n, _, _)| *n == name)
+            .unwrap_or_else(|| panic!("unknown edge {name}"));
+        edge_pred(slice, ty)
+    }
+
+    #[derive(Debug, Default)]
+    struct Run {
+        counts: EdgeCounts,
+        /// id -> number of sends observed on `outgoing`.
+        sends: BTreeMap<u64, u32>,
+        /// id -> number of times the server processed it.
+        served: BTreeMap<u64, u32>,
+        /// id -> latency in client ticks of the first response.
+        completions: BTreeMap<u64, u64>,
+        abandoned: Vec<u64>,
+        final_backlog: usize,
+    }
+
+    impl Run {
+        fn records(&self, name: &str) -> u64 {
+            self.counts.records(edge_named(name))
+        }
+
+        fn print(&self, title: &str) {
+            println!("== {title}");
+            for (key, e) in &self.counts.0 {
+                println!("  [{key}] records={}", e.records);
+            }
+            for (name, _, _) in EDGE_NEEDLES {
+                let e = self.counts.edge(edge_named(name));
+                println!(
+                    "  {name:<32} records={:<6} decisions={:<5} nonempty={:<5}",
+                    e.records, e.decisions, e.nonempty_decisions
+                );
+            }
+            println!(
+                "  requests={} sends-per-request histogram={:?} completions={} latency histogram={:?} abandoned={} final backlog={}",
+                self.sends.len(),
+                histogram(self.sends.values().copied()),
+                self.completions.len(),
+                histogram(self.completions.values().copied()),
+                self.abandoned.len(),
+                self.final_backlog
+            );
+        }
+    }
+
+    /// Sends `ticks` clock elements up front and runs to quiescence under `driver`, which is
+    /// given the clock already metered.
+    fn run_counted(
+        config: RetryStormConfig,
+        ticks: usize,
+        driver: impl FnOnce(HoldScheduleDriver) -> HoldScheduleDriver,
+    ) -> Run {
+        let mut flow = FlowBuilder::new();
+        let client = flow.process::<Client>();
+        let server = flow.process::<Server>();
+
+        let (clock_send, client_clock) = client.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let (_client_report_send, client_report_tick) =
+            client.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let (_server_report_send, server_report_tick) =
+            server.sim_input::<(), TotalOrder, ExactlyOnce>();
+
+        let outputs = retry_storm(
+            &client,
+            &server,
+            client_clock,
+            client_report_tick,
+            server_report_tick,
+            config,
+        );
+        let completions = outputs
+            .completions
+            .map(q!(|c| (c.id, c.latency_ticks)))
+            .sim_output();
+        let abandoned = outputs.abandoned.sim_output();
+        let outgoing = outputs.outgoing.sim_output();
+        let processed = outputs.processed.sim_output();
+        let backlog_trace = outputs.backlog_trace.sim_output();
+
+        let driver = driver(HoldScheduleDriver::new().meter(edge_named("clock (client)")));
+
+        let mut run = Run::default();
+        let run_ref = &mut run;
+        let counts = flow.sim().run_with_driver(driver, async move || {
+            for _ in 0..ticks {
+                clock_send.send(());
+            }
+            quiesce().await;
+
+            for (id, latency) in completions.collect_sorted::<Vec<_>>().await {
+                run_ref.completions.insert(id, latency);
+            }
+            run_ref.abandoned = abandoned.collect_sorted::<Vec<_>>().await;
+            while let Some(req) = outgoing.try_next().await {
+                *run_ref.sends.entry(req.id).or_default() += 1;
+            }
+            while let Some(req) = processed.try_next().await {
+                *run_ref.served.entry(req.id).or_default() += 1;
+            }
+            while let Some(depth) = backlog_trace.try_next().await {
+                run_ref.final_backlog = depth;
+            }
+        });
+        run.counts = counts;
+        run
+    }
+
+    fn hold_driver(d: u64) -> impl FnOnce(HoldScheduleDriver) -> HoldScheduleDriver {
+        move |driver| driver.hold(edge_named("server -> client (responses)"), d)
+    }
+
+    /// E1's fixed input: baseline load only, and capacity comfortably above the worst case
+    /// offered load (`baseline * max_attempts` per client tick, two client ticks per server tick
+    /// under the scheduler's round-robin) so the server never queues and the only source of
+    /// delay is the schedule.
+    const HOLD: RetryStormConfig = RetryStormConfig {
+        baseline_per_tick: 2,
+        trigger_per_tick: 2,
+        trigger_start_tick: 0,
+        trigger_end_tick: 0,
+        max_per_tick: 20,
+        timeout_ticks: 40,
+        max_attempts: 3,
+        service_time: Duration::ZERO,
+        clock_period: Duration::ZERO,
+        report_interval: Duration::ZERO,
+    };
+    const TICKS: usize = 300;
+
+    /// Hand computation (E1). A request minted at tick `t` whose response is visible at tick
+    /// `t + l` under the baseline schedule becomes visible at `t + l + d` when held for `d`
+    /// ticks. It is judged at ticks `t + k * tau` for `k = 1, 2, ...` while the response is not
+    /// yet visible (a response visible in the judging tick suppresses the verdict): the first
+    /// `max_attempts - 1` such judgements re-send it, the next abandons it. Judgements only
+    /// happen while the clock is still running (`t + k * tau <= ticks - 1`); when the clock runs
+    /// dry the driver flushes everything it holds, so a request still outstanding then completes
+    /// at tick `ticks - 1`.
+    ///
+    /// Returns `(sends, Some(latency))` or `(sends, None)` if abandoned.
+    fn expected(t: u64, l: u64, d: u64, config: &RetryStormConfig, ticks: u64) -> (u32, Option<u64>) {
+        let tau = config.timeout_ticks;
+        let last_tick = ticks - 1;
+        let visible = t + l + d;
+        let mut sends = 1;
+        for k in 1..=config.max_attempts as u64 {
+            let judged_at = t + k * tau;
+            if judged_at > last_tick || visible <= judged_at {
+                break;
+            }
+            if k < config.max_attempts as u64 {
+                sends += 1;
+            } else {
+                return (sends, None);
+            }
+        }
+        (sends, Some(visible.min(last_tick) - t))
+    }
+
+    fn histogram<K: Ord + Copy>(values: impl Iterator<Item = K>) -> BTreeMap<K, usize> {
+        let mut h = BTreeMap::new();
+        for v in values {
+            *h.entry(v).or_default() += 1;
+        }
+        h
+    }
+
+    #[test]
+    fn hold_schedule_amplifies_by_the_e1_step_function() {
+        let baseline = run_counted(HOLD, TICKS, |d| d);
+        baseline.print("baseline (metered clock, d = 0)");
+        let n = (TICKS as u64) * HOLD.baseline_per_tick as u64;
+        assert_eq!(baseline.sends.len() as u64, n);
+        assert!(baseline.sends.values().all(|s| *s == 1));
+        assert_eq!(baseline.records("client -> server (arrivals)"), n);
+        assert_eq!(baseline.records("server processed"), n);
+        assert_eq!(baseline.records("server -> client (responses)"), n);
+        assert_eq!(baseline.records("completions (client report)"), n);
+        assert_eq!(baseline.records("abandoned (client report)"), 0);
+        assert_eq!(baseline.completions.len() as u64, n);
+
+        let tau = HOLD.timeout_ticks;
+        let mut failures = vec![];
+        // Straddle the thresholds `tau`, `2 tau` (retry) and `3 tau` (abandon) for both baseline
+        // latencies (1 and 2).
+        for d in [tau / 2, tau - 2, tau - 1, tau, tau + tau / 2, 2 * tau - 2, 2 * tau - 1, 2 * tau, 3 * tau - 2, 3 * tau] {
+            let run = run_counted(HOLD, TICKS, hold_driver(d));
+            run.print(&format!("hold d = {d}"));
+
+            let expected: BTreeMap<u64, (u32, Option<u64>)> = baseline
+                .completions
+                .iter()
+                .map(|(id, l)| {
+                    let t = id / HOLD.trigger_per_tick as u64;
+                    (*id, expected(t, *l, d, &HOLD, TICKS as u64))
+                })
+                .collect();
+            let expected_sends: u64 = expected.values().map(|(s, _)| *s as u64).sum();
+            let expected_completions = expected.values().filter(|(_, c)| c.is_some()).count() as u64;
+            println!(
+                "  hand-computed: sends-per-request histogram={:?} total {expected_sends}, completions {expected_completions}, abandoned {}; measured client->server {} processed {} responses {} completions {} abandoned {}",
+                histogram(expected.values().map(|(s, _)| *s)),
+                n - expected_completions,
+                run.records("client -> server (arrivals)"),
+                run.records("server processed"),
+                run.records("server -> client (responses)"),
+                run.records("completions (client report)"),
+                run.records("abandoned (client report)"),
+            );
+
+            let mismatched: Vec<_> = run
+                .sends
+                .iter()
+                .filter(|(id, s)| expected[*id].0 != **s)
+                .take(5)
+                .collect();
+            if !mismatched.is_empty() {
+                failures.push(format!("d = {d}: per-request sends differ from hand computation, e.g. (id, measured) {mismatched:?}"));
+            }
+            let mismatched: Vec<_> = expected
+                .iter()
+                .filter(|(id, (_, c))| run.completions.get(*id) != c.as_ref())
+                .take(5)
+                .collect();
+            if !mismatched.is_empty() {
+                failures.push(format!("d = {d}: per-request completions differ from hand computation, e.g. (id, expected) {mismatched:?}"));
+            }
+            if run.records("client -> server (arrivals)") != expected_sends
+                || run.records("server processed") != expected_sends
+                || run.records("server -> client (responses)") != expected_sends
+                || run.records("outgoing (client report)") != expected_sends
+            {
+                failures.push(format!("d = {d}: edge totals differ from hand-computed {expected_sends}"));
+            }
+            if run.records("completions (client report)") != expected_completions
+                || run.records("abandoned (client report)") != n - expected_completions
+                || run.abandoned.len() as u64 != n - expected_completions
+            {
+                failures.push(format!("d = {d}: completions/abandoned differ from hand-computed {expected_completions}/{}", n - expected_completions));
+            }
+            if run.final_backlog != 0 {
+                failures.push(format!("d = {d}: final backlog {}", run.final_backlog));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// The E0 collapse under the E0 harness (one clock element per round, then `quiesce()`),
+    /// every hook releasing everything (the prompt driver), counted per edge.
+    fn run_e0_counted(config: RetryStormConfig, rounds: usize) -> Run {
+        use hydro_lang::sim::prompt_schedule::PromptScheduleDriver;
+
+        let mut flow = FlowBuilder::new();
+        let client = flow.process::<Client>();
+        let server = flow.process::<Server>();
+
+        let (clock_send, client_clock) = client.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let (_client_report_send, client_report_tick) =
+            client.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let (_server_report_send, server_report_tick) =
+            server.sim_input::<(), TotalOrder, ExactlyOnce>();
+
+        let outputs = retry_storm(
+            &client,
+            &server,
+            client_clock,
+            client_report_tick,
+            server_report_tick,
+            config,
+        );
+        let completions = outputs
+            .completions
+            .map(q!(|c| (c.id, c.latency_ticks)))
+            .sim_output();
+        let abandoned = outputs.abandoned.sim_output();
+        let outgoing = outputs.outgoing.sim_output();
+        let processed = outputs.processed.sim_output();
+        let backlog_trace = outputs.backlog_trace.sim_output();
+
+        let mut run = Run::default();
+        let run_ref = &mut run;
+        let counts = flow
+            .sim()
+            .run_with_driver(PromptScheduleDriver::default(), async move || {
+                for _ in 0..rounds {
+                    clock_send.send(());
+                    quiesce().await;
+                    for (id, latency) in completions.collect_sorted::<Vec<_>>().await {
+                        run_ref.completions.insert(id, latency);
+                    }
+                    run_ref
+                        .abandoned
+                        .extend(abandoned.collect_sorted::<Vec<_>>().await);
+                    while let Some(req) = outgoing.try_next().await {
+                        *run_ref.sends.entry(req.id).or_default() += 1;
+                    }
+                    while let Some(req) = processed.try_next().await {
+                        *run_ref.served.entry(req.id).or_default() += 1;
+                    }
+                    while let Some(depth) = backlog_trace.try_next().await {
+                        run_ref.final_backlog = depth;
+                    }
+                }
+            });
+        run.counts = counts;
+        run
+    }
+
+    /// The other perturbation axis (E1, last bullet): same prompt policy, no held delivery,
+    /// but the E0 trigger builds a queue whose delay exceeds the timeout. The same edges
+    /// (client -> server, server processed, server -> client) should show the same gain (3 per
+    /// request, saturated at `max_attempts`) as the hold schedule does for `d > 2 tau`.
+    #[test]
+    fn load_perturbation_shows_the_same_gain_on_the_same_edges() {
+        let config = sim_tests::BASE;
+        let rounds = sim_tests::ROUNDS;
+        let run = run_e0_counted(config, rounds);
+        run.print("E0 trigger, prompt driver, E0 harness");
+
+        let mint_tick = |id: &u64| id / config.trigger_per_tick as u64;
+        let by_window = |from: u64, to: u64| {
+            histogram(
+                run.sends
+                    .iter()
+                    .filter(|(id, _)| (from..to).contains(&mint_tick(id)))
+                    .map(|(_, s)| *s),
+            )
+        };
+        let tau = config.timeout_ticks;
+        let pre = by_window(0, config.trigger_start_tick - tau);
+        let post = by_window(200, rounds as u64 - 2 * tau);
+        let served_total: u64 = run.served.values().map(|s| *s as u64).sum();
+        let sends_total: u64 = run.sends.values().map(|s| *s as u64).sum();
+        println!(
+            "  sends per request minted before the trigger [0, {}): {pre:?}; minted in [200, {}): {post:?}; total sends {sends_total} served {served_total} backlog {}",
+            config.trigger_start_tick - tau,
+            rounds as u64 - 2 * tau,
+            run.final_backlog
+        );
+
+        assert_eq!(pre.keys().copied().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(post.keys().copied().collect::<Vec<_>>(), vec![config.max_attempts]);
+        assert_eq!(run.records("outgoing (client report)"), sends_total);
+        assert_eq!(run.records("client -> server (arrivals)"), sends_total);
+        assert_eq!(run.records("server processed"), served_total);
+        assert_eq!(run.records("server -> client (responses)"), served_total);
+        assert_eq!(
+            run.records("server processed") + run.final_backlog as u64,
+            run.records("client -> server (arrivals)")
+        );
+        assert_eq!(run.records("completions (client report)"), run.completions.len() as u64);
+        assert_eq!(run.records("abandoned (client report)"), run.abandoned.len() as u64);
+    }
+
+    /// Control: `max_attempts = 1`. Holding past the timeout changes what the client concludes
+    /// (abandon instead of complete) but not the work on any location-crossing edge.
+    #[test]
+    fn hold_without_retries_changes_no_edge() {
+        let config = RetryStormConfig { max_attempts: 1, ..HOLD };
+        let n = (TICKS as u64) * config.baseline_per_tick as u64;
+        let baseline = run_counted(config, TICKS, |d| d);
+        baseline.print("max_attempts = 1, d = 0");
+        for d in [HOLD.timeout_ticks + 1, 3 * HOLD.timeout_ticks] {
+            let run = run_counted(config, TICKS, hold_driver(d));
+            run.print(&format!("max_attempts = 1, hold d = {d}"));
+            for edge in [
+                "client -> server (arrivals)",
+                "server processed",
+                "server -> client (responses)",
+                "outgoing (client report)",
+            ] {
+                assert_eq!(run.records(edge), n, "{edge} at d = {d}");
+                assert_eq!(run.records(edge), baseline.records(edge), "{edge} at d = {d}");
+            }
+            assert!(run.sends.values().all(|s| *s == 1));
+        }
     }
 }
 

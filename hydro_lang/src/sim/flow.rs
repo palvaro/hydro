@@ -175,10 +175,25 @@ impl<'a> SimFlow<'a> {
     pub fn run_prompt(self, thunk: impl AsyncFnOnce() + RefUnwindSafe) {
         use super::prompt_schedule::PromptScheduleDriver;
 
-        self.compiled().run_with_driver(
-            PromptScheduleDriver::default(),
-            async |instance| instance.run_with_scheduler(thunk()).await,
-        )
+        self.run_with_driver(PromptScheduleDriver::default(), thunk);
+    }
+
+    /// Runs a single execution of the simulation drawing every scheduling decision from
+    /// `driver` (see [`super::prompt_schedule`] and [`super::hold_schedule`] for deterministic
+    /// drivers), and returns the number of records each tick-boundary hook released, per edge
+    /// (see [`super::edge_counts`]).
+    pub fn run_with_driver<D: bolero::bolero_engine::driver::Driver + 'static>(
+        self,
+        driver: D,
+        thunk: impl AsyncFnOnce() + RefUnwindSafe,
+    ) -> super::edge_counts::EdgeCounts {
+        let compiled = self.compiled();
+        let ((), counts) = super::edge_counts::count_edges(|| {
+            compiled.run_with_driver(driver, async |instance| {
+                instance.run_with_scheduler(thunk()).await
+            })
+        });
+        counts
     }
 
     /// Uses a fuzzing strategy to explore possible executions of the simulation. The provided

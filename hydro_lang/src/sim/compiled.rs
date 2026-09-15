@@ -2049,7 +2049,7 @@ impl<W: std::io::Write> LaunchedSim<W> {
                     })
                 });
 
-                run_hooks(tick_decision_writer.as_mut(), &mut tick.hooks);
+                run_hooks(tick_decision_writer.as_mut(), tick.cluster_id, &mut tick.hooks);
 
                 let run_tick_future = tick.dfir.run_tick();
                 if !tick.inline_hooks.is_empty() {
@@ -2089,8 +2089,10 @@ impl<W: std::io::Write> LaunchedSim<W> {
             } else {
                 let next_obs = next_tick_or_obs - self.possibly_ready_ticks.len();
                 let log_writer = (!matches!(self.log, LogKind::Null)).then_some(&mut self.log);
+                let member = self.possibly_ready_observations[next_obs].cluster_id;
                 run_hooks(
                     log_writer,
+                    member,
                     &mut self.possibly_ready_observations[next_obs].hooks,
                 );
 
@@ -2108,8 +2110,13 @@ impl<W: std::io::Write> LaunchedSim<W> {
 
 fn run_hooks<W: std::fmt::Write>(
     mut tick_decision_writer: Option<&mut W>,
+    member: Option<u32>,
     hooks: &mut [Box<dyn SimHook>],
 ) {
+    use super::edge_counts::{record_release, with_current_hook};
+
+    let context = |hook: &dyn SimHook| hook.edge_location().zip(hook.buffered_len());
+
     let mut remaining_decision_count = hooks.len();
     let mut made_nontrivial_decision = false;
 
@@ -2123,18 +2130,26 @@ fn run_hooks<W: std::fmt::Write>(
                 // if no nontrivial decision is possible, make a trivial one
                 // (we need to do this in the first pass to force nontrivial decisions
                 // on the remaining hooks)
-                hook.autonomous_decision(driver, false);
+                with_current_hook(context(&**hook), member, || {
+                    hook.autonomous_decision(driver, false)
+                });
                 remaining_decision_count -= 1;
             }
         });
 
         hooks.iter_mut().for_each(|hook| {
             if hook.current_decision().is_none() {
-                made_nontrivial_decision |= hook.autonomous_decision(
-                    driver,
-                    !made_nontrivial_decision && remaining_decision_count == 1,
-                );
+                let force = !made_nontrivial_decision && remaining_decision_count == 1;
+                made_nontrivial_decision |= with_current_hook(context(&**hook), member, || {
+                    hook.autonomous_decision(driver, force)
+                });
                 remaining_decision_count -= 1;
+            }
+
+            if let (Some(location), Some(released)) =
+                (hook.edge_location(), hook.pending_release_len())
+            {
+                record_release(location, released);
             }
 
             hook.release_decision(
