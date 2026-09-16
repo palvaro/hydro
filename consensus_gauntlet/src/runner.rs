@@ -49,7 +49,7 @@ fn build_common_flow<'a>(
     Cluster<'a, hydro_test::cluster::raft::Replica>,
 ) {
     use hydro_test::cluster::consensus_bench::{
-        broadcast_transcript_bench, quorum_ladder_bench, raft_bench,
+        broadcast_transcript_bench, multi_paxos_bench, raft_bench,
     };
 
     let clients = builder.cluster();
@@ -78,7 +78,7 @@ fn build_common_flow<'a>(
             CLIENT_WINDOW_MILLIS,
             AGGREGATE_WINDOW_MILLIS,
         ),
-        BackendId::QuorumLadderConsensus => quorum_ladder_bench(
+        BackendId::QuorumLadderConsensus => multi_paxos_bench(
             &clients,
             num_clients,
             &aggregator,

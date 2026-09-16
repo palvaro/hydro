@@ -324,6 +324,7 @@ pub struct StageMetrics {
     pub outputs: Vec<StageHandoffMetrics>,
 }
 
+#[cfg(feature = "meta")]
 impl StageMetrics {
     /// Whether this stage contains a compiler-identified interval source.
     pub fn has_interval_source(&self) -> bool {

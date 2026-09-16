@@ -3,7 +3,9 @@
 `consensus_gauntlet` standardizes the repository's consensus comparison into a
 single report model. Every complete `run` writes a clean, self-contained HTML
 artifact with explanatory text, tables, and inline SVG graphs. Unsupported
-combinations are results rather than silently weakened workloads.
+combinations are results rather than silently weakened workloads. See
+[`VALIDATION.md`](./VALIDATION.md) for the retained historical evidence and the
+current validation boundary; generated run output is intentionally not versioned.
 
 ## Sequestered qualitative review
 
