@@ -59,6 +59,23 @@ pub struct Derivation {
     /// than a record the operator emitted. State-carry edges are followed or not at analysis
     /// time (see [`Lineage::children_with`]).
     pub state_version: bool,
+    /// The tick run this derivation happened in, an index into [`Lineage::ticks`]; `None` for a
+    /// derivation outside any tick (top-level dataflow: sources, the network, outputs). The
+    /// held sets of that tick's releases are the derivation's negative support (E3.3).
+    pub tick: Option<u32>,
+}
+
+/// One run of one tick's dataflow (E3.3): the scheduler asked every hook of the tick for a
+/// decision (one [`Release`] each, consecutive in [`Lineage::releases`]), then ran the tick.
+/// Every derivation reported while it ran carries this run's index in [`Derivation::tick`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TickRun {
+    /// The cluster member the tick belongs to, if any.
+    pub member: Option<u32>,
+    /// The serial of the first release of this run's hooks.
+    pub first_release: u64,
+    /// How many releases this run's hooks logged (one per hook with an edge).
+    pub releases: u64,
 }
 
 /// A record an operator discarded (E3.2): a duplicate at `unique`, with the survivor named.
@@ -72,6 +89,8 @@ pub struct Drop {
     pub survivor: Option<RecordId>,
     /// See [`Derivation::after_release`].
     pub after_release: u64,
+    /// See [`Derivation::tick`].
+    pub tick: Option<u32>,
 }
 
 /// A record that left the program through an external output (`sim_output`).
@@ -151,6 +170,8 @@ pub struct Lineage {
     pub outputs: Vec<Output>,
     /// The operator table; `Derivation::op` indexes it.
     pub operators: Vec<OperatorInfo>,
+    /// Every run of a tick's dataflow, in scheduler order; `Derivation::tick` indexes it (E3.3).
+    pub ticks: Vec<TickRun>,
 }
 
 impl Lineage {
@@ -223,6 +244,8 @@ struct Recorder {
     log: Lineage,
     next_id: RecordId,
     hooks: HashMap<(String, Option<u32>), HookIds>,
+    /// The tick run in progress (between [`begin_tick`] and [`end_tick`]), if any.
+    current_tick: Option<u32>,
 }
 
 impl Default for Recorder {
@@ -231,8 +254,38 @@ impl Default for Recorder {
             log: Lineage::default(),
             next_id: HOST_ID_BASE,
             hooks: HashMap::new(),
+            current_tick: None,
         }
     }
+}
+
+/// Called by the scheduler right before it asks a tick's hooks for their decisions: every release
+/// logged until [`end_tick`] belongs to this run of the tick, and so does every derivation.
+pub(crate) fn begin_tick(member: Option<u32>) {
+    RECORDER.with(|r| {
+        let mut borrow = r.borrow_mut();
+        let Some(recorder) = borrow.as_mut() else {
+            return;
+        };
+        assert!(recorder.current_tick.is_none(), "a tick run began inside another");
+        recorder.current_tick = Some(recorder.log.ticks.len() as u32);
+        recorder.log.ticks.push(TickRun {
+            member,
+            first_release: recorder.log.releases.len() as u64,
+            releases: 0,
+        });
+    });
+}
+
+/// Called by the scheduler once the tick's dataflow has run.
+pub(crate) fn end_tick() {
+    RECORDER.with(|r| {
+        let mut borrow = r.borrow_mut();
+        let Some(recorder) = borrow.as_mut() else {
+            return;
+        };
+        recorder.current_tick = None;
+    });
 }
 
 /// Called by the host's lineage sink for every event the instrumented program reports.
@@ -243,6 +296,7 @@ pub(crate) fn record_event(event: LineageEvent) {
             return;
         };
         let after_release = recorder.log.releases.len() as u64;
+        let tick = recorder.current_tick;
         match event {
             LineageEvent::Derived {
                 record,
@@ -254,6 +308,7 @@ pub(crate) fn record_event(event: LineageEvent) {
                 parents,
                 after_release,
                 state_version: false,
+                tick,
             }),
             LineageEvent::StateVersion {
                 record,
@@ -265,6 +320,7 @@ pub(crate) fn record_event(event: LineageEvent) {
                 parents,
                 after_release,
                 state_version: true,
+                tick,
             }),
             LineageEvent::Dropped {
                 record,
@@ -275,6 +331,7 @@ pub(crate) fn record_event(event: LineageEvent) {
                 op,
                 survivor,
                 after_release,
+                tick,
             }),
             LineageEvent::Output { record, op } => {
                 recorder.log.outputs.push(Output { record, op })
@@ -402,6 +459,9 @@ pub(crate) fn record_release(
             released,
             held,
         });
+        if let Some(run) = recorder.current_tick {
+            recorder.log.ticks[run as usize].releases += 1;
+        }
     });
 }
 
@@ -516,5 +576,227 @@ impl Lineage {
         pred: impl Fn(&OperatorInfo) -> bool + 'a,
     ) -> impl Iterator<Item = &'a Drop> + 'a {
         self.drops.iter().filter(move |d| pred(self.operator(d.op)))
+    }
+}
+
+/// One record found to be a re-derivation toward a goal (E3.3), with its witnesses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReDerivation {
+    /// The record on the edge.
+    pub record: RecordId,
+    /// The record (in `record`'s ancestry, or `record` itself) whose derivation, at a negative
+    /// operator, happened while `held` (and possibly other records descending from the goal, none
+    /// of them an ancestor of `record`) sat in a hook's buffer of the same tick.
+    pub via: RecordId,
+    /// The smallest such held record: the delivery whose absence the derivation of `via`
+    /// answered.
+    pub held: RecordId,
+}
+
+/// The records on an edge derived toward one goal, and which of them are re-derivations.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GoalDerivations {
+    /// Every record on the edge whose ancestry contains the goal's input record
+    /// ([`Lineage::per_goal_by_ancestry`] lists these by count).
+    pub derived: Vec<RecordId>,
+    /// The subset that is a re-derivation: its ancestry also contains a derivation, at a negative
+    /// operator, made while a record descending from the goal was held by a hook of that tick.
+    pub re_derived: Vec<ReDerivation>,
+}
+
+/// Analysis with negative leaves (E3.3): a record is a re-derivation toward a goal if it
+/// descends from the goal's input *and* from a derivation that answered the absence of a
+/// delivery the schedule was holding — a delivery that itself descends from the goal.
+impl Lineage {
+    /// The releases logged by the hooks of tick run `tick`.
+    pub fn releases_of_tick(&self, tick: u32) -> &[Release] {
+        let run = &self.ticks[tick as usize];
+        let first = run.first_release as usize;
+        &self.releases[first..first + run.releases as usize]
+    }
+
+    /// The ids still buffered by the hooks of tick run `tick` after their decisions: the
+    /// deliveries the schedule kept from that run of the tick, its negative leaves.
+    pub fn held_in_tick(&self, tick: u32) -> Vec<RecordId> {
+        self.releases_of_tick(tick)
+            .iter()
+            .flat_map(|r| r.held.iter().copied())
+            .collect()
+    }
+
+    /// Every record with a derivation record, mapped to it.
+    pub fn derivations_by_record(&self) -> HashMap<RecordId, &Derivation> {
+        self.derivations.iter().map(|d| (d.record, d)).collect()
+    }
+
+    /// [`Self::parents`], optionally without the state chain (the mirror image of
+    /// [`Self::children_with`]).
+    pub fn parents_with(&self, follow_state: bool) -> HashMap<RecordId, Vec<RecordId>> {
+        let versions: std::collections::HashSet<RecordId> = self
+            .derivations
+            .iter()
+            .filter(|d| d.state_version)
+            .map(|d| d.record)
+            .collect();
+        self.derivations
+            .iter()
+            .map(|d| {
+                let parents = d
+                    .parents
+                    .iter()
+                    .copied()
+                    .filter(|p| follow_state || !d.state_version || !versions.contains(p))
+                    .collect();
+                (d.record, parents)
+            })
+            .collect()
+    }
+
+    /// `record` and every record it was derived from, directly or transitively, given a parents
+    /// index from [`Self::parents_with`].
+    pub fn ancestors(
+        &self,
+        record: RecordId,
+        parents: &HashMap<RecordId, Vec<RecordId>>,
+    ) -> std::collections::HashSet<RecordId> {
+        let mut seen = std::collections::HashSet::new();
+        seen.insert(record);
+        let mut stack = vec![record];
+        while let Some(id) = stack.pop() {
+            if let Some(ps) = parents.get(&id) {
+                for p in ps {
+                    if seen.insert(*p) {
+                        stack.push(*p);
+                    }
+                }
+            }
+        }
+        seen
+    }
+
+    /// Re-derivations per goal on the edges matching `pred`, with the negative operators being
+    /// those the pass marked ([`OperatorInfo::negative`]: anti-joins and closures reading state
+    /// through handles) and the state chain followed. See [`Self::re_derivations_with`].
+    pub fn re_derivations<G: Ord + Clone>(
+        &self,
+        pred: impl Fn(&str) -> bool,
+        goals: &BTreeMap<RecordId, G>,
+    ) -> BTreeMap<G, GoalDerivations> {
+        self.re_derivations_with(pred, goals, |o| o.negative, true)
+    }
+
+    /// For each goal (named by the id of its input record, as in
+    /// [`Self::per_goal_by_ancestry`]): the records on the edges matching `pred` derived toward
+    /// it, and among them the re-derivations. A record `r` is a re-derivation toward goal `g` iff
+    ///
+    /// 1. `g`'s input is an ancestor of `r` (the positive condition of E3.2), and
+    /// 2. some record `v` in `r`'s ancestry (or `r` itself) was derived by an operator satisfying
+    ///    `negative` in a tick run during which a hook of that tick held records descending from
+    ///    `g` (or `g` itself) — `v`'s *witnesses* — none of which is an ancestor of `r`.
+    ///
+    /// The witnesses are the negative leaves: the deliveries that, released, would have answered
+    /// what the derivation of `v` answered by their absence. If `r` was later derived *from* one
+    /// of them (the completion a late response finally produces, downstream of the `kept` entries
+    /// derived while the response was held), then the absence was filled and `r` is the goal
+    /// reached late, not extra work; hence the last clause. Ancestry follows the state chain iff
+    /// `follow_state`.
+    pub fn re_derivations_with<G: Ord + Clone>(
+        &self,
+        pred: impl Fn(&str) -> bool,
+        goals: &BTreeMap<RecordId, G>,
+        negative: impl Fn(&OperatorInfo) -> bool,
+        follow_state: bool,
+    ) -> BTreeMap<G, GoalDerivations> {
+        use std::collections::HashSet;
+
+        let children = self.children_with(follow_state);
+        let parents = self.parents_with(follow_state);
+        let on_edge: Vec<RecordId> = self.records_on(pred).map(|(_, r)| r.id).collect();
+
+        // What each goal reaches, and which goals reach each held record.
+        let roots: Vec<RecordId> = goals.keys().copied().collect();
+        let reached: Vec<HashSet<RecordId>> = roots
+            .iter()
+            .map(|root| {
+                let mut set = self.descendants(*root, &children);
+                set.insert(*root);
+                set
+            })
+            .collect();
+        let held_per_tick: Vec<Vec<RecordId>> =
+            (0..self.ticks.len() as u32).map(|t| self.held_in_tick(t)).collect();
+        let held_ids: HashSet<RecordId> = held_per_tick.iter().flatten().copied().collect();
+        let mut goals_reaching: HashMap<RecordId, Vec<usize>> = HashMap::new();
+        for h in &held_ids {
+            for (gi, set) in reached.iter().enumerate() {
+                if set.contains(h) {
+                    goals_reaching.entry(*h).or_default().push(gi);
+                }
+            }
+        }
+        // Per tick run: goal -> the held records descending from it.
+        let witnesses_per_tick: Vec<HashMap<usize, Vec<RecordId>>> = held_per_tick
+            .iter()
+            .map(|held| {
+                let mut by_goal: HashMap<usize, Vec<RecordId>> = HashMap::new();
+                for h in held {
+                    if let Some(gs) = goals_reaching.get(h) {
+                        for gi in gs {
+                            by_goal.entry(*gi).or_default().push(*h);
+                        }
+                    }
+                }
+                by_goal
+            })
+            .collect();
+        // Per goal: the records derived at a negative operator with a witness in their tick.
+        let mut tainted: Vec<HashMap<RecordId, &[RecordId]>> = vec![HashMap::new(); roots.len()];
+        for d in &self.derivations {
+            let Some(t) = d.tick else { continue };
+            if !negative(self.operator(d.op)) {
+                continue;
+            }
+            for (gi, ws) in &witnesses_per_tick[t as usize] {
+                tainted[*gi].insert(d.record, ws.as_slice());
+            }
+        }
+
+        let mut out = BTreeMap::new();
+        for (gi, (root, goal)) in goals.iter().enumerate() {
+            debug_assert_eq!(*root, roots[gi]);
+            let mut result = GoalDerivations::default();
+            for r in &on_edge {
+                if !reached[gi].contains(r) {
+                    continue;
+                }
+                result.derived.push(*r);
+                if tainted[gi].is_empty() {
+                    continue;
+                }
+                let anc = self.ancestors(*r, &parents);
+                // A record derived from one of the suppressors is the goal arriving late, not
+                // extra work; `via` counts only if none of its witnesses is an ancestor of `r`.
+                // The smallest (via, held) pair, so the report is deterministic.
+                let witness = anc
+                    .iter()
+                    .filter_map(|a| {
+                        let ws = tainted[gi].get(a)?;
+                        if ws.iter().any(|h| anc.contains(h)) {
+                            return None;
+                        }
+                        ws.iter().min().map(|h| (*a, *h))
+                    })
+                    .min();
+                if let Some((via, held)) = witness {
+                    result.re_derived.push(ReDerivation {
+                        record: *r,
+                        via,
+                        held,
+                    });
+                }
+            }
+            out.insert(goal.clone(), result);
+        }
+        out
     }
 }

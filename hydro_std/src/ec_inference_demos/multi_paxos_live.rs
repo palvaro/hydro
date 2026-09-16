@@ -666,3 +666,293 @@ mod tests {
             });
     }
 }
+
+/// A third program for the amplification design
+/// (`design_docs/2026-09_amplification_as_adversarial_scheduling.md`), not written for it and
+/// not a leader-election theorem: the election kernel's *redo queue*. On a timer interrupt with
+/// pending work and no completion since the previous interrupt, the member campaigns, and on
+/// establishment it releases its **entire** pending set to the core again. So a delay on the
+/// acceptors' acks past the timer period costs a campaign plus one more proposal of every
+/// pending command to every acceptor, and the extra work per stall is proportional to the
+/// backlog, not to the delay. Nothing in `multi_paxos_live` or `multi_paxos` is changed here.
+#[cfg(test)]
+mod amplification_tests {
+    use std::collections::BTreeMap;
+
+    use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
+    use hydro_lang::location::MemberId;
+    use hydro_lang::prelude::*;
+    use hydro_lang::sim::edge_counts::EdgeCounts;
+    use hydro_lang::sim::hold_schedule::{EdgePolicy, HoldScheduleDriver};
+    use hydro_lang::sim::lineage::Lineage;
+    use hydro_lang::sim::quiesce;
+
+    use super::super::quorum::Ts;
+    use super::multi_paxos_live;
+
+    const N_ACCEPTORS: usize = 3;
+    const MAJORITY: usize = 2;
+    const N_PROPOSERS: usize = 2;
+    const LEARNERS: usize = 1;
+    /// Phase 2 runs for `TICKS` kernel ticks: one command per tick (the metered clock, which is
+    /// also what lets the timer hook be paced: the scheduler forces the last undecided hook of a
+    /// tick to release when nothing else did) and a timer interrupt every `PERIOD` ticks.
+    const TICKS: u64 = 200;
+    const PERIOD: u64 = 10;
+
+    /// 1-based line of the unique line of `file` (under `src/`) containing `needle`; hook keys
+    /// carry the `sliced!` location.
+    fn line_of(file: &str, needle: &str) -> usize {
+        let source = std::fs::read_to_string(format!("{}/src/{file}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let mut hits = source.lines().enumerate().filter(|(_, l)| l.contains(needle)).map(|(i, _)| i + 1);
+        let line = hits.next().unwrap_or_else(|| panic!("no line of {file} contains {needle:?}"));
+        assert!(hits.next().is_none(), "more than one line of {file} contains {needle:?}");
+        line
+    }
+
+    fn slice_pred(file: &'static str, needle: &'static str, type_part: &'static str) -> impl Fn(&str) -> bool + Clone + 'static {
+        let tag = format!("{}:{}:", file.rsplit('/').next().unwrap(), line_of(file, &format!("{needle}!")));
+        move |key: &str| key.contains(&tag) && key.contains(type_part)
+    }
+
+    const KERNEL: (&str, &str) = ("ec_inference_demos/multi_paxos_live.rs", "let (leads, releases) = sliced");
+
+    /// The kernel's timer batch: the `()` hook of the election kernel's slice.
+    fn kernel_timer() -> impl Fn(&str) -> bool + Clone + 'static {
+        slice_pred(KERNEL.0, KERNEL.1, " <()>")
+    }
+    /// The acceptors' acks on their way into the proposer's quorum mint (`quorum`'s batch).
+    fn acks() -> impl Fn(&str) -> bool + Clone + 'static {
+        slice_pred("ec_inference_demos/quorum.rs", "let certified = sliced", "MemberId")
+    }
+    /// Phase-2 proposals arriving at the acceptors (the work edge).
+    fn accepts() -> impl Fn(&str) -> bool + Clone + 'static {
+        slice_pred("ec_inference_demos/multi_paxos.rs", "let acceptor_out = sliced", "usize")
+    }
+
+    type Accept = (MemberId<()>, (Ts, usize, usize, Option<u32>));
+
+    struct Outcome {
+        counts: EdgeCounts,
+        lineage: Lineage,
+        /// Learned `(epoch, start, slot, value)` at learner 0.
+        learned: Vec<(u64, usize, usize, Option<u32>)>,
+        /// Establishments at the active proposer.
+        established: Vec<(u64, usize)>,
+        /// The kernel's command and completion hooks (both `u32`), as found by the control run.
+        edges: Option<(String, String)>,
+    }
+
+    /// Phase 1: one command and one interrupt establish an epoch and commit. Phase 2: `TICKS`
+    /// commands and `TICKS / PERIOD` interrupts sent up front, the commands metered one per
+    /// kernel tick and the interrupts paced one per `PERIOD`; the kernel's completion hook (the
+    /// self-hop carrying this proposer's chosen decrees back to its kernel) is scheduled by
+    /// `policy`. That hook shares the tick with the metered command clock, which is what makes
+    /// a hold expressible there (the acks hook at the quorum mint is alone in its tick and is
+    /// forced to release whenever the tick runs; measured: every policy on it gave the prompt
+    /// numbers). Only proposer 0 gets commands and interrupts, so there is no duel: whatever
+    /// campaigns is the redo loop alone.
+    fn run(policy: EdgePolicy, edges: Option<(String, String)>) -> Outcome {
+        let mut flow = FlowBuilder::new();
+        let acceptors = flow.cluster::<()>();
+        let proposers = flow.cluster::<()>();
+        let learners = flow.cluster::<()>();
+        let (timeout_send, timeouts) = proposers.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let (cmd_send, cmds) = proposers.sim_input::<u32, TotalOrder, ExactlyOnce>();
+        let outs = multi_paxos_live(&acceptors, &learners, MAJORITY, N_PROPOSERS, timeouts, cmds);
+        let learned_recv = outs.learned.sim_cluster_output();
+        let est_recv = outs.established.sim_cluster_output();
+
+        let mut driver = HoldScheduleDriver::new();
+        if let Some((cmd_edge, completion_edge)) = edges.clone() {
+            driver = driver
+                .meter(move |key: &str| key == cmd_edge)
+                .with_policy(move |key: &str| key == completion_edge, policy)
+                .with_policy(kernel_timer(), EdgePolicy::Periodic { period: PERIOD, count: Some(1) });
+        }
+        let mut learned = Vec::new();
+        let mut established = Vec::new();
+        let (learned_ref, est_ref) = (&mut learned, &mut established);
+        let phase2 = edges.is_some();
+        let (counts, lineage) = flow
+            .sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&acceptors, N_ACCEPTORS)
+            .with_cluster_size(&proposers, N_PROPOSERS)
+            .with_cluster_size(&learners, LEARNERS)
+            .run_traced(driver, async move || {
+                cmd_send.send(0, 0u32);
+                quiesce().await;
+                timeout_send.send(0, ());
+                quiesce().await;
+                if phase2 {
+                    for c in 1..=TICKS as u32 {
+                        cmd_send.send(0, c);
+                    }
+                    for _ in 0..TICKS / PERIOD {
+                        timeout_send.send(0, ());
+                    }
+                    quiesce().await;
+                }
+                learned_ref.extend(learned_recv.collect_sorted::<Vec<_>>(0).await);
+                est_ref.extend(est_recv.collect_sorted::<Vec<_>>(0).await);
+            });
+        Outcome { counts, lineage, learned, established, edges }
+    }
+
+    /// The control run (phase 1 only) settles which of the kernel's two `u32` hooks is the
+    /// command hook and which the completion hook: the command was sent and quiesced before the
+    /// interrupt, so the command hook's release with a record comes first in the log; the
+    /// completion is delivered after the establishment. Checked again by the phase-2 prompt run
+    /// (the metered hook releases `TICKS + 1` records one per tick).
+    fn control() -> (Outcome, (String, String)) {
+        let control = run(EdgePolicy::Prompt, None);
+        let kernel_u32 = slice_pred(KERNEL.0, KERNEL.1, "<u32>");
+        let mut first_release: Vec<(u64, String)> = vec![];
+        for release in control.lineage.releases_on(kernel_u32) {
+            if !release.released.is_empty() && !first_release.iter().any(|(_, k)| *k == release.edge) {
+                first_release.push((release.serial, release.edge.clone()));
+            }
+        }
+        first_release.sort();
+        assert_eq!(first_release.len(), 2, "the kernel's two u32 hooks: {first_release:?}");
+        let completion = first_release.pop().unwrap().1;
+        let command = first_release.pop().unwrap().1;
+        (control, (command, completion))
+    }
+
+    impl Outcome {
+        /// Accept records at the acceptors carrying each command.
+        fn accepts_per_command(&self) -> BTreeMap<u32, u64> {
+            self.lineage.per_goal::<Accept, u32>(accepts(), |(_, (_, _, _, v))| v.into_iter().collect())
+        }
+        /// Chosen slots per command at learner 0 (the goal edge; more than one is a duplicate
+        /// decree for the same command).
+        fn chosen_per_command(&self) -> BTreeMap<u32, u64> {
+            let mut m = BTreeMap::new();
+            for (_, _, _, v) in &self.learned {
+                if let Some(v) = v {
+                    *m.entry(*v).or_default() += 1;
+                }
+            }
+            m
+        }
+        fn campaigns(&self) -> u64 {
+            self.established.len() as u64 - 1
+        }
+        fn print(&self, title: &str) {
+            println!("== {title}");
+            for (key, e) in &self.counts.0 {
+                println!("  [{key}] records={} decisions={}", e.records, e.decisions);
+            }
+            println!(
+                "  accepts {}, acks {}, campaigns after phase 1 {}, learned slots {}, accepts per command {:?}, chosen per command {:?}",
+                self.counts.records(accepts()),
+                self.counts.records(acks()),
+                self.campaigns(),
+                self.learned.len(),
+                histogram(self.accepts_per_command().values().copied()),
+                histogram(self.chosen_per_command().values().copied())
+            );
+        }
+    }
+
+    fn histogram(values: impl Iterator<Item = u64>) -> BTreeMap<u64, usize> {
+        let mut h = BTreeMap::new();
+        for v in values {
+            *h.entry(v).or_default() += 1;
+        }
+        h
+    }
+
+    /// Hand computation. Prompt: after phase 1 the epoch exists; each command is released once,
+    /// accepted once per acceptor (`N_ACCEPTORS` accept records per command) and chosen once; a
+    /// command completes `l` kernel ticks after release, and as long as `l < PERIOD` every
+    /// interrupt finds a completion since the previous one: no campaign. Completions held a
+    /// constant `d` on their way to the kernel: the kernel sees them `l + d` after release, so only the interrupts at `k * PERIOD <
+    /// l + d` (k >= 1) find no completion since the last one; each campaigns and re-releases
+    /// every pending command (all commands released so far, ~`k * PERIOD` of them) to every
+    /// acceptor. After that a completion arrives every tick and no interrupt stalls again: the
+    /// campaigns are `ceil((l + d) / PERIOD) - 1`, a transient, bounded by `d`. Completions
+    /// released in bursts every `d` ticks (`Periodic`): an interrupt stalls iff no burst fell in its period,
+    /// i.e. never for `d < PERIOD`, and for `d > PERIOD` in about a `1 - PERIOD / d` fraction of
+    /// the periods for the whole run — sustained, growing with the run, and each stall
+    /// re-proposes every pending command, whose number grows with `d`. Every re-proposal that is
+    /// accepted is chosen at a new slot: duplicate decrees for the same command.
+    #[test]
+    fn redo_queue_re_proposes_the_whole_backlog_per_stall() {
+        let (control, edges) = control();
+        control.print("multi_paxos_live, phase 1 only (control)");
+        let prompt = run(EdgePolicy::Prompt, Some(edges.clone()));
+        prompt.print(&format!("multi_paxos_live, {TICKS} commands one per tick, timer every {PERIOD}, prompt"));
+        assert_eq!(prompt.counts.records(|k| k == edges.0), TICKS + 1, "the metered hook is the command hook");
+        assert_eq!(prompt.counts.edge(|k| k == edges.0).nonempty_decisions, TICKS + 1, "one command per kernel tick");
+        let prompt_accepts = prompt.accepts_per_command();
+        assert_eq!(prompt_accepts.len() as u64, TICKS + 1, "every command accepted somewhere");
+        assert!(prompt_accepts.values().all(|c| *c == N_ACCEPTORS as u64), "{:?}", histogram(prompt_accepts.values().copied()));
+        assert!(prompt.chosen_per_command().values().all(|c| *c == 1));
+        assert_eq!(prompt.campaigns(), 0, "no stall under prompt delivery");
+        let prompt_work = prompt.counts.records(accepts());
+
+        let mut rows = vec![];
+        for d in [1u64, 2, 5, 8, 10, 12, 15, 20, 30, 50] {
+            let held = run(EdgePolicy::Hold(d), Some(edges.clone()));
+            held.print(&format!("multi_paxos_live, completions held d = {d}"));
+            let burst = run(EdgePolicy::Periodic { period: d, count: None }, Some(edges.clone()));
+            burst.print(&format!("multi_paxos_live, completions in bursts every {d}"));
+            rows.push((d, held, burst));
+        }
+        println!("== summary (multi_paxos_live, {TICKS} commands, timer every {PERIOD}, prompt: {prompt_work} accepts): d / constant: accepts, campaigns, accepts per command, chosen per command / bursty: same");
+        for (d, held, burst) in &rows {
+            println!(
+                "  d = {d:>2}: constant {} / {} / {:?} / {:?}   bursty {} / {} / {:?} / {:?}",
+                held.counts.records(accepts()),
+                held.campaigns(),
+                histogram(held.accepts_per_command().values().copied()),
+                histogram(held.chosen_per_command().values().copied()),
+                burst.counts.records(accepts()),
+                burst.campaigns(),
+                histogram(burst.accepts_per_command().values().copied()),
+                histogram(burst.chosen_per_command().values().copied()),
+            );
+        }
+        let mut failures = vec![];
+        let periods = TICKS / PERIOD;
+        for (d, held, burst) in &rows {
+            // Constant delay: a transient of at most ceil((l + d) / PERIOD) campaigns with l < PERIOD.
+            let bound = (d + PERIOD - 1) / PERIOD + 1;
+            if held.campaigns() > bound {
+                failures.push(format!("constant d = {d}: {} campaigns, hand-computed at most {bound}", held.campaigns()));
+            }
+            // Bursty: none below the period; sustained above it. At d = PERIOD exactly, one
+            // campaign was measured where the hand computation said none (a single period
+            // straddled a burst boundary: the phase of the bursts against the timer); recorded in
+            // the design doc, bounded here.
+            if *d < PERIOD && burst.campaigns() != 0 {
+                failures.push(format!("bursty d = {d}: {} campaigns, hand-computed 0", burst.campaigns()));
+            }
+            if *d == PERIOD && burst.campaigns() > 1 {
+                failures.push(format!("bursty d = {d}: {} campaigns, hand-computed 0 (1 measured, the boundary case)", burst.campaigns()));
+            }
+            if *d > PERIOD {
+                let expected = periods - periods * PERIOD / d;
+                if burst.campaigns() + 2 < expected {
+                    failures.push(format!("bursty d = {d}: {} campaigns, hand-computed about {expected}", burst.campaigns()));
+                }
+                // Sustained (bursty) against transient (constant): compared on campaigns; the
+                // accept count crosses over only from d = 15 (at d = 12 four small re-releases
+                // did less work than one large one: 639 vs 645).
+                if burst.campaigns() <= held.campaigns() {
+                    failures.push(format!("bursty d = {d}: {} campaigns not above constant delay's {}", burst.campaigns(), held.campaigns()));
+                }
+            }
+            // Every command's accept count is a multiple of N_ACCEPTORS: whole re-proposals.
+            for o in [held, burst] {
+                if o.accepts_per_command().values().any(|c| c % N_ACCEPTORS as u64 != 0) {
+                    failures.push(format!("d = {d}: accepts per command not whole re-proposals: {:?}", histogram(o.accepts_per_command().values().copied())));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+}

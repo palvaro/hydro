@@ -501,7 +501,9 @@ Three findings:
 
 ## E3: design
 
-Status: design. E3.1 and E3.2 are done and measured ("E3: results" below); E3.3 is not started.
+Status: design. All three steps below are done and measured ("E3: results"): boundary ids, the
+lineage pass, and the negative leaves. The negative-leaves result changed what lineage is for;
+see "What lineage is for, revised" and "A third program: the redo queue in multi_paxos_live".
 
 ### The verdict is derivations per goal
 
@@ -814,3 +816,162 @@ a `scan` other than `first()` gets cumulative parents; a `by_mut` singleton is a
 every call (a new version per tick, parents = the closure's inputs); the negative side of an
 anti-join contributes nothing to the positive record's lineage (E3.3's negative leaf goes there);
 the E2 edge key is kept for the hooks and the operator table carries the operator id.
+
+### Negative leaves: linking a re-derivation to the delivery that was held
+
+Done. Tests: `rpc_retry::amplification_tests::negative_leaves_mark_exactly_the_records_the_hold_caused`,
+`raft::amplification_tests::negative_leaves_attribute_the_storm_but_not_the_steady_state`. Every
+number below is asserted by one of them except where marked "printed".
+
+**Instrument.** The scheduler now brackets each run of a tick (`begin_tick`/`end_tick` around
+`run_hooks` and the tick's DFIR run), so every `Derivation` and `Drop` carries the index of its
+`TickRun` in `Lineage::ticks`, and the held sets of that run's releases are the derivation's
+negative support. The pass marks operators as **negative** (`OperatorInfo::negative`): anti-joins
+(`filter_key_not_in`, `difference`), which now emit a derivation of their own for each surviving
+record instead of passing it through (a retry's birth needs a record to hang the negative leaf
+on), and any closure that reads state or aggregates through `by_ref`/`by_mut` handles (Raft's
+`raft_step`: the absence tests are inside it, so the whole step is the best available
+approximation). The analysis, `Lineage::re_derivations(edge, goals)`: a record $r$ on the edge is
+a **re-derivation toward $g$** iff (1) $g$'s input is an ancestor of $r$, and (2) some record $v$
+in $r$'s ancestry (or $r$ itself) was derived at a negative operator in a tick run during which a
+hook of that tick held records descending from $g$ — $v$'s *witnesses* — none of which is an
+ancestor of $r$. The last clause is what keeps a late completion from being marked: the
+completion of request $k$ descends from `kept` entries derived while $k$'s response sat in the
+buffer, but it also descends from that response, so the absence was filled and the record is the
+goal arriving late, not extra work. Without the clause 520 completions are marked at $d = 40$
+(printed, the "every derivation of the tick" variant the design sketched).
+
+**`rpc_retry`, hold $d$ on responses** (E2 configuration). Per request, on all four work edges,
+the re-derivations are exactly the records after the first in release order — `sends − 1` of the
+E2 step function — and every witness is a response *to that request*, held by the `responses`
+hook of the tick in which the marked derivation happened. The completion edge has 0
+re-derivations for every request at every $d$; the `abandoned` edge marks every abandonment (a
+verdict that exists only because the response was held). Nothing is marked at $d = 0$.
+
+| $d$ | re-derivations per request on each work edge (measured = hand-computed) | completions marked | abandoned marked | witnesses checked |
+|-----|-------------------------------------------------------------------------|--------------------|------------------|-------------------|
+| 0   | {0: 600} | 0 / 600 | 0 / 0 | 0 |
+| 40  | {0: 80, 1: 520} | 0 / 600 | 0 / 0 | 2080 |
+| 80  | {0: 80, 1: 80, 2: 440} | 0 / 600 | 0 / 0 | 3840 |
+| 120 | {0: 80, 1: 80, 2: 440} | 0 / 240 | 360 / 360 | 4200 |
+
+Every one of the 4200 marked derivations happened in a tick that released a clock element. That
+settles the forcing-rule question the design left open, at least for this program: absence only
+produces work when something observes it, and what observes it is a timer release, so an
+adversary that paces the timers and holds the deliveries needs no "run empty" option here. (The
+third program below shows the other half of the answer.) Cost, printed: the analysis walks
+ancestors per record on the edge and takes 3.6 s at $d = 0$ but 103 s at $d = 120$ (482k
+derivations, six edges); a top-down formulation would fix it and was not done.
+
+**Raft** ($R = 5$ entries, $E = 4$, 200 ticks). The design's bar was: prompt $= 0$, storm $> 0$
+and growing. Both hold. Under prompt nothing on the traffic edge is ever held and the timer hooks
+hold only `()` leaves, so 0 of the 800 records descending from an entry are marked. Under the
+storm ($d = 4$) 314 of the 324 are: all 292 `RequestVote`s (witnesses: 274 held `RequestVote`s,
+27 held `AppendEntries`, 13 held acks), all 16 acks, and 6 of the 16 `AppendEntries` re-sends —
+the ones at the leader's heartbeat ticks 6–8, after the first acks exist to be held; the 10 at
+heartbeat ticks 1–5 have no negative leaf *at the leader* (the acks that would have stopped them
+do not exist yet, because the `AppendEntries` that would produce them is held at the followers),
+exactly as hand-computed. Per 40-tick window: 64, 60, 60, 60, 60, i.e. 6 per election period,
+growing with the run.
+
+**The contradiction.** A control the design did not ask for: the same rule under $d = 1, 2, 3$,
+where E2b measured the same 804 records and no election. It marks 796, 794 and 792 of the 800.
+`raft_step` is one closure, so every in-flight message descends from the entries through the
+state and counts as a witness, and the rule cannot tell a heartbeat sent while acks are in flight
+from a `RequestVote` sent while an `AppendEntries` is held. Flipping the polarity does not help:
+treating the closure as positive gives 0 on the storm too. The information (which output answers
+which absence) is inside the closure; the IR sees a blob. So on Raft the negative-leaf count says
+a harmless one-tick delay is *worse* than the storm.
+
+| schedule | traffic | elections | derived toward $r_0$ | re-derived toward $r_0$ |
+|----------|---------|-----------|----------------------|-------------------------|
+| prompt | 804 | 0 | 800 | 0 |
+| constant delay 1 / 2 / 3 | 804 | 0 | 800 | 796 / 794 / 792 |
+| constant delay 4 (storm) | 332 | 50 | 324 | 314 |
+
+### What lineage is for, revised
+
+The negative-leaf rule is exact where the program's absence test is a dataflow operator
+(`rpc_retry`'s anti-join) and brackets — 0 or nearly everything — where it is inside a Rust
+closure (Raft, and every protocol in this repository written as one `by_mut` step: `paxos_ec`,
+`dyn_raft`, `broadcast_transcript_consensus`, `multi_paxos`). Its precision is exactly how much
+of the program's logic lives in the dataflow rather than in Rust, which is Hydro's own argument,
+but it means that on the programs we have, a single-run lineage rule is not the verdict. What has
+discriminated every case so far — retry storm, election storm, and the redo queue below — is the
+design's first principle applied per goal: run two schedules on the same inputs and compare
+derivations per goal (E3.1's payload attribution at the hooks suffices; no pass needed), swept
+over the perturbation to get the threshold and the shape. Lineage's remaining jobs are the
+explanation of each extra record where the dataflow exposes the absence test, and the proposal of
+moves (which held record to try next). Making it exact for opaque steps needs a counterfactual
+(fork the deterministic run at the tick with the held record released, LDFI's move), which is the
+search loop's business, not the log's.
+
+### A third program: the redo queue in `multi_paxos_live`
+
+Test: `hydro_std::ec_inference_demos::multi_paxos_live::amplification_tests::redo_queue_re_proposes_the_whole_backlog_per_stall`.
+Nothing in `multi_paxos_live` or `multi_paxos` changed. This is the first program not written for
+this project and not a leader-election theorem: its election kernel keeps a *redo queue* of
+admitted commands not yet observed chosen; a timer interrupt that finds the queue non-empty and no
+completion since the previous interrupt campaigns, and on establishment the kernel **releases the
+whole queue** to the core again.
+
+Harness: 3 acceptors, 2 proposers (only proposer 0 gets commands and interrupts, so no duel), 1
+learner. Phase 1 establishes an epoch. Phase 2: 200 commands, one per kernel tick (the metered
+clock), a timer interrupt every $P = 10$ ticks, and the proposer's own chosen notifications (the
+self-hop back to the kernel) scheduled promptly, with a constant delay `Hold(d)`, or in bursts
+`Periodic { period: d }`. Goals: commands; derivations toward a command: accept records carrying
+it at the acceptors (payload attribution); the goal edge: learned slots per command.
+
+| $d$ | constant: accepts / campaigns / decrees per command | bursty: accepts / campaigns / decrees per command |
+|-----|-----------------------------------------------------|----------------------------------------------------|
+| prompt | 603 / 0 / {1: 201} | — |
+| 1, 2, 5, 8 | 603 / 0 / {1: 201} | 603 / 0 / {1: 201} |
+| 10 | 603 / 0 / {1: 201} | 615 / 1 / {1: 199, 2: 2} |
+| 12 | 645 / 1 / {1: 188, 2: 13} | 639 / 4 / {1: 193, 2: 8} |
+| 15 | 654 / 1 / {1: 185, 2: 16} | 720 / 7 / {1: 173, 2: 28} |
+| 20 | 660 / 1 / {1: 183, 2: 18} | 1146 / 10 / {1: 30, 2: 171} |
+| 30 | 744 / 2 / {1: 175, 2: 8, 3: 18} | 1434 / 13 / {1: 34, 2: 73, 3: 94} |
+| 50 | 1005 / 4 / {1: 155, 2: 8, 3: 12, 4: 8, 5: 18} | 2139 / 16 / {1: 19, 2: 40, 3: 40, 4: 38, 5: 64} |
+
+Hand computation, matched: prompt is 3 accepts per command (one per acceptor), one decree, no
+campaign. A constant delay is a transient: only the interrupts at $kP < l + d$ find no completion
+(campaigns $\le \lceil (l+d)/P \rceil$), then a completion arrives every tick and the stall
+detector is quiet. Bursts every $d > P$ stall in a $1 - P/d$ fraction of the periods for the whole
+run: predicted 3.3 / 6.7 / 10 / 13.3 / 16 campaigns for $d = 12 / 15 / 20 / 30 / 50$, measured
+4 / 7 / 10 / 13 / 16. Each stall re-proposes every pending command to every acceptor, so the work
+per stall grows with the backlog, accept traffic reaches 3.5× and commands are decreed up to five
+times each (duplicate log entries; the module docs assign deduplication to the state machine, and
+the rate had never been measured). Two boundary deviations, recorded rather than tuned: at $d = P$
+one campaign where the hand computation said none (one period straddled a burst boundary), and at
+$d = 12$ bursty did slightly less accept work than constant (639 vs 645: four small re-releases
+against one large one; the crossover is at $d = 15$). Same shape as E2b — threshold at the
+protocol's own timer, constant delay bounded, bursty delay sustained — in code nobody wrote for
+this, with fixed inputs and no message lost.
+
+**The forcing rule decides which moves exist.** The natural move, holding the acceptors' acks,
+was impossible: that hook is alone in its tick (`quorum`'s slice), so the scheduler forces it to
+release whenever the tick runs, and every policy on it gave the prompt numbers (measured, then
+the move was changed to the completion self-hop, which shares a tick with the metered command
+clock). So the open question is answered in two halves: an adversary that paces timers and holds
+deliveries never needs a tick to run empty (rpc_retry), but it does need to hold on edges that
+have no metered co-hook, which today's scheduler does not allow. A scheduler option that lets a
+tick run with nothing released under an explicit policy is the first piece of the search.
+
+### Next: the sweep
+
+- **Scheduler:** let a hook stay held with no other release in the tick, under an explicit
+  driver policy (the rule above). Then every `batch` edge is a move.
+- **The sweep as a tool.** Input: a program, fixed inputs, the metered clock edge(s), a goal
+  extractor at the hooks. For every hook edge × {constant, bursty} × $d$: derivations per goal
+  against the prompt run, campaigns/terms where the program has them, the threshold and the shape
+  (transient vs sustained). This is the table above produced automatically; the three programs
+  so far are its validation set.
+- **Controls over the rest of the corpus:** `synod`, `abd`, `crdt_gossip`, `uniform_broadcast`
+  should come back "no moves" or bounded (abd's read-repair and the gossip pump do fixed work per
+  input; synod's duel is the election theorem again). Any sustained loop there is a finding.
+- **The redo queue under load:** give the acceptors a per-tick capacity (`rpc_retry`'s
+  `max_per_tick`) and ask whether bursty completions plus re-proposals run the backlog away, i.e.
+  whether this is a metastable failure and not only amplification.
+- Dropped: further precision work on lineage for opaque closures (needs the counterfactual
+  fork, which is the search loop's), the analysis-time cost of the negative-leaf walk, and
+  the "every derivation of the tick" variant.

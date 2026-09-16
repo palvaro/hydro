@@ -1334,9 +1334,151 @@ mod amplification_tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
-    /// The E0 collapse under the E0 harness (one clock element and that tick's requests per
-    /// round, then `quiesce()`), every hook releasing everything (the prompt driver), counted
-    /// per edge.
+    /// E3.3 (`design_docs/2026-09_amplification_as_adversarial_scheduling.md`, "E3: design"): the
+    /// perturbation link. A record is a *re-derivation* toward request `k` iff it descends from
+    /// `k`'s input and from a derivation at a negative operator (here `filter_key_not_in`, where a
+    /// retry is born) made while a hook of that tick held a record descending from `k` (a response
+    /// to `k`) that the record itself does not descend from. Hand computation, per request: on
+    /// every work edge the re-derivations are every record after the first (`sends - 1`, E2's
+    /// step function minus one); the completion is never one (it descends from the held response
+    /// that finally arrived); an abandonment always is (a verdict that exists only because the
+    /// response was held); and every witness is a response to `k` sitting in the client's
+    /// `responses` buffer. Under `d = 0` nothing is a re-derivation on any edge.
+    #[test]
+    fn negative_leaves_mark_exactly_the_records_the_hold_caused() {
+        let n = (TICKS as u64) * PER_TICK as u64;
+        let tau = POLICY.timeout_ticks;
+        let mut failures = vec![];
+        let mut baseline: Option<Run> = None;
+        let responses_edge = edge_named("server -> client (responses)");
+        let clock_edge = edge_named("clock (client)");
+        println!("== E3.3 (rpc_retry): re-derivations per request, by negative leaves");
+        let mut summary = vec![];
+        for d in [0, tau, 2 * tau, 3 * tau] {
+            let (run, log) = run_traced_with(POLICY, SERVER, PER_TICK, TICKS, hold_driver(d), true);
+            assert!(log.instrumented);
+            if d == 0 {
+                let negative: Vec<_> = log.operators_where(|o| o.negative).map(|o| format!("op {} {} :: {}", o.id, o.kind, o.source_line.chars().take(60).collect::<String>())).collect();
+                println!("  negative operators: {negative:?}");
+                println!("  {} tick runs, {} releases, {} derivations", log.ticks.len(), log.releases.len(), log.derivations.len());
+                assert_eq!(negative.len(), 1, "one anti-join in the program");
+                assert!(negative[0].contains("filter_key_not_in"));
+            }
+            // E3.2's invariants still hold with the anti-join re-deriving its survivors.
+            for (key, e) in &run.counts.0 {
+                assert_eq!(log.record_count(|k| k == key), e.records, "record count on {key}");
+            }
+            let expected_sends: BTreeMap<u64, u64> = match &baseline {
+                None => run.sends.keys().map(|id| (*id, 1)).collect(),
+                Some(b) => b
+                    .completions
+                    .iter()
+                    .map(|(id, l)| (*id, expected(b.issued_at[id], *l, d, &POLICY, TICKS as u64).0 as u64))
+                    .collect(),
+            };
+            let goals: BTreeMap<u64, u64> = log
+                .records_on(edge_named("requests (client)"))
+                .map(|(_, r)| (r.id, r.decode::<(usize, u64)>().unwrap().0 as u64))
+                .collect();
+            assert_eq!(goals.len() as u64, n);
+            // Every response record by id, and every record's release serial (release order).
+            let response_ids: BTreeMap<u64, u64> = log
+                .records_on(responses_edge.clone())
+                .map(|(_, r)| (r.id, r.decode::<Response<u64>>().unwrap().id))
+                .collect();
+            let serial_of: std::collections::HashMap<u64, u64> =
+                log.releases.iter().flat_map(|rel| rel.released.iter().map(move |r| (r.id, rel.serial))).collect();
+            let by_record = log.derivations_by_record();
+
+            let mut hist_derived = BTreeMap::new();
+            let mut hist_re = BTreeMap::new();
+            let mut all_variant_completions = 0u64;
+            let mut witnesses_checked = 0u64;
+            let mut ticks_with_clock = 0u64;
+            let mut analysis_time = Duration::ZERO;
+            for edge in WORK_EDGES.iter().chain(["completions (client metrics)", "abandoned (client metrics)"].iter()) {
+                let started = std::time::Instant::now();
+                let result = log.re_derivations(edge_named(edge), &goals);
+                analysis_time += started.elapsed();
+                let is_work = WORK_EDGES.contains(edge);
+                if *edge == WORK_EDGES[0] {
+                    hist_derived = histogram(result.values().map(|g| g.derived.len()));
+                    hist_re = histogram(result.values().map(|g| g.re_derived.len()));
+                }
+                if *edge == "completions (client metrics)" {
+                    // The design's E3.3 sketch takes every derivation of the tick as negatively
+                    // supported; printed for comparison, see the design doc.
+                    let all = log.re_derivations_with(edge_named(edge), &goals, |_| true, true);
+                    all_variant_completions = all.values().map(|g| g.re_derived.len() as u64).sum();
+                }
+                for (id, g) in &result {
+                    let derived = g.derived.len() as u64;
+                    let re_derived = g.re_derived.len() as u64;
+                    let (want_derived, want_re) = if is_work {
+                        let s = expected_sends[id];
+                        (s, s - 1)
+                    } else if *edge == "completions (client metrics)" {
+                        (u64::from(run.completions.contains_key(id)), 0)
+                    } else {
+                        let abandoned = u64::from(run.abandoned.contains(id));
+                        (abandoned, abandoned)
+                    };
+                    if (derived, re_derived) != (want_derived, want_re) {
+                        if failures.len() < 12 {
+                            failures.push(format!("d = {d}, {edge}, request {id}: (derived, re-derived) = ({derived}, {re_derived}), hand-computed ({want_derived}, {want_re}); re-derivations {:?}", g.re_derived));
+                        }
+                        continue;
+                    }
+                    // Which records: on a work edge, every record after the first in release order.
+                    if is_work && re_derived > 0 {
+                        let first = g.derived.iter().min_by_key(|r| serial_of[r]).unwrap();
+                        if g.re_derived.iter().any(|r| r.record == *first) {
+                            failures.push(format!("d = {d}, {edge}, request {id}: the first send {first} is marked a re-derivation"));
+                        }
+                    }
+                    // Every witness is a response to this very request, held by the responses hook
+                    // of the tick where `via` was derived; and that tick released a clock element.
+                    for r in &g.re_derived {
+                        witnesses_checked += 1;
+                        if response_ids.get(&r.held) != Some(id) {
+                            if failures.len() < 12 {
+                                failures.push(format!("d = {d}, {edge}, request {id}: witness {} of {} is not a response to {id} ({:?})", r.held, r.record, response_ids.get(&r.held)));
+                            }
+                            continue;
+                        }
+                        let via = by_record[&r.via];
+                        let tick = via.tick.expect("a negative derivation happens in a tick");
+                        let releases = log.releases_of_tick(tick);
+                        if !releases.iter().any(|rel| responses_edge(&rel.edge) && rel.held.contains(&r.held)) {
+                            failures.push(format!("d = {d}, {edge}, request {id}: witness {} was not held by the responses hook at tick run {tick}", r.held));
+                        }
+                        if releases.iter().any(|rel| clock_edge(&rel.edge) && !rel.released.is_empty()) {
+                            ticks_with_clock += 1;
+                        }
+                    }
+                }
+            }
+            println!(
+                "  d = {d:>3}: derived/request on client -> server {hist_derived:?} (hand-computed sends {:?}), re-derived/request {hist_re:?} (hand-computed sends - 1); completions {}, abandoned {}; {witnesses_checked} witnesses checked, {ticks_with_clock} of them in a tick that released a clock element; completions marked under the every-derivation variant: {all_variant_completions}; {} derivations, analysis {analysis_time:.2?} over 6 edges",
+                histogram(expected_sends.values().copied()),
+                run.completions.len(),
+                run.abandoned.len(),
+                log.derivations.len(),
+            );
+            summary.push((d, hist_re.clone(), run.completions.len(), run.abandoned.len(), witnesses_checked, ticks_with_clock, all_variant_completions));
+            if witnesses_checked != ticks_with_clock {
+                failures.push(format!("d = {d}: {witnesses_checked} re-derivations but only {ticks_with_clock} were derived in a tick that released a clock element (the forcing-rule question)"));
+            }
+            if baseline.is_none() {
+                baseline = Some(run);
+            }
+        }
+        println!("== E3.3 summary (rpc_retry): d / re-derived per request on client -> server / completions / abandoned / witnesses / in a clock tick / completions marked by the every-derivation variant");
+        for (d, hist, c, a, w, t, all) in &summary {
+            println!("  {d:>3}: {hist:?} / {c} / {a} / {w} / {t} / {all}");
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
     fn run_e0_counted(
         workload: Workload,
         policy: RetryPolicy,

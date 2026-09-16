@@ -2091,6 +2091,8 @@ impl<W: std::io::Write> LaunchedSim<W> {
                     })
                 });
 
+                // E3.3: the releases below and every derivation of this tick run belong together.
+                super::lineage::begin_tick(tick.cluster_id);
                 run_hooks(tick_decision_writer.as_mut(), tick.cluster_id, &mut tick.hooks);
 
                 let run_tick_future = tick.dfir.run_tick();
@@ -2126,6 +2128,7 @@ impl<W: std::io::Write> LaunchedSim<W> {
                 } else {
                     abort_assert!(run_tick_future.await, "tick DFIR run_tick() returned false");
                 }
+                super::lineage::end_tick();
 
                 self.possibly_ready_ticks.push(tick);
             } else {

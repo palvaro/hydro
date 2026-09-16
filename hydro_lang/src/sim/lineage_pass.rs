@@ -10,13 +10,15 @@
 //!
 //! Rules (the design's table). Sources, `sim_input`s and timers are leaves (a fresh id, no
 //! parents). `map`, `flat_map`, `filter_map`, `enumerate`: child ← input. `filter`, `inspect`,
-//! `batch`, `chain`, `defer_tick` (state carry), `anti_join`'s positive side, the network: the
-//! record passes through under its own id (the network carries the id in front of the payload,
-//! so the receiving location continues the same lineage). `join`, `cross`: child ← both inputs.
-//! `fold`, `reduce`, `scan` (and `first()`, which is a scan): child ← every input seen this
-//! tick, the accumulator carrying the parent ids alongside the user's state. `unique`: the
-//! survivor keeps its id, every duplicate is reported dropped with the survivor named. `sort`
-//! orders by the payload alone. `sim_output` reports the id of every record it emits.
+//! `batch`, `chain`, `defer_tick` (state carry), the network: the record passes through under
+//! its own id (the network carries the id in front of the payload, so the receiving location
+//! continues the same lineage). `join`, `cross`: child ← both inputs. `anti_join`, `difference`:
+//! child ← the surviving positive record (a derivation of its own, since it answers the absence
+//! of a record: E3.3 attaches the tick's held deliveries to it as negative support). `fold`,
+//! `reduce`, `scan` (and `first()`, which is a scan): child ← every input seen this tick, the
+//! accumulator carrying the parent ids alongside the user's state. `unique`: the survivor keeps
+//! its id, every duplicate is reported dropped with the survivor named. `sort` orders by the
+//! payload alone. `sim_output` reports the id of every record it emits.
 //!
 //! Every operator's closure is wrapped, not rewritten: `{ let __f = <the staged closure>;
 //! move |__w| { unwrap; call __f; derive; wrap } }`, so the staged code and its type hints are
@@ -52,6 +54,12 @@ pub struct OperatorInfo {
     pub source_line: String,
     /// The element type of the operator's output before wrapping (for roots, of the input).
     pub element_type: String,
+    /// Whether the operator's outputs can answer the *absence* of a record (E3.3): an anti-join
+    /// (`filter_key_not_in`, `difference`), or a closure that reads state or this tick's
+    /// aggregates through `by_ref`/`by_mut` handles (an opaque step like Raft's, whose absence
+    /// tests are inside). The records a hook of the same tick holds while such an operator
+    /// derives are the derivation's negative support.
+    pub negative: bool,
 }
 
 /// How a collection's elements are laid out after the pass.
@@ -210,6 +218,7 @@ impl Pass {
             location,
             source_line: source_line.trim().to_owned(),
             element_type: element_type_text(&metadata.collection_kind),
+            negative: matches!(kind, "AntiJoin" | "Difference"),
         });
         id
     }
@@ -284,7 +293,7 @@ impl Pass {
     /// a clone of its payloads. A mutably referenced singleton is a state the closure may have
     /// changed, so it gets a new id after the call: state version <- previous version + the
     /// closure's inputs (the design's state-carry rule).
-    fn rewrap_refs(&self, f: &ClosureExpr, op: u32, body: impl FnOnce(&Splice) -> TokenStream) -> ClosureExpr {
+    fn rewrap_refs(&mut self, f: &ClosureExpr, op: u32, body: impl FnOnce(&Splice) -> TokenStream) -> ClosureExpr {
         let rt = self.rt();
         let inner = &f.expr;
         let mut out = f.clone();
@@ -298,6 +307,8 @@ impl Pass {
             out.expr = debug_expr(quote!({ let mut __f = #inner; move |__w| #body }));
             return out;
         }
+        // A closure reading state or aggregates through handles may test absence inside (E3.3).
+        self.operators[op as usize].negative = true;
         let mut parent_ids = vec![];
         let mut shadows = vec![];
         let mut bumps = vec![];
@@ -861,24 +872,34 @@ impl Pass {
                 *node = self.map_node(f, inner, final_kind, &metadata);
             }
 
-            // Anti-join: the positive record passes through; the negative side is stripped to keys.
-            HydroNode::AntiJoin { pos, neg, metadata } => {
-                self.register("AntiJoin", metadata);
+            // Anti-join: the negative side is stripped to keys; the surviving positive record is
+            // re-derived under a new id at this operator (E3.3: the derivation that answers the
+            // absence of a record, to which the held records of its tick are negative support).
+            HydroNode::AntiJoin { .. } => {
+                let old = std::mem::replace(node, HydroNode::Placeholder);
+                let HydroNode::AntiJoin { pos, neg, mut metadata } = old else { unreachable!() };
+                let op = self.register("AntiJoin", &metadata);
                 if rep_of(&pos.metadata().collection_kind) != Rep::Keyed || rep_of(&neg.metadata().collection_kind) != Rep::Stream {
-                    let m = metadata.clone();
-                    self.unsupported("anti-join with these input shapes", &m);
+                    self.unsupported("anti-join with these input shapes", &metadata);
                 }
-                let old_neg = std::mem::replace(&mut **neg, HydroNode::Placeholder);
-                let neg_kind = unwrapped_kind(&old_neg.metadata().collection_kind);
-                let neg_metadata = old_neg.metadata().clone();
-                **neg = self.map_node(quote!({ move |(_, __k)| __k }), old_neg, neg_kind, &neg_metadata);
+                let neg_kind = unwrapped_kind(&neg.metadata().collection_kind);
+                let neg_metadata = neg.metadata().clone();
+                let keys = self.map_node(quote!({ move |(_, __k)| __k }), *neg, neg_kind, &neg_metadata);
                 wrap_kind(&mut metadata.collection_kind);
+                let final_kind = metadata.collection_kind.clone();
+                let anti = HydroNode::AntiJoin { pos, neg: Box::new(keys), metadata: metadata.clone() };
+                *node = self.map_node(
+                    quote!({ move |(__k, (__id, __v))| (__k, (#rt::derive(#op, &[__id]), __v)) }),
+                    anti,
+                    final_kind,
+                    &metadata,
+                );
             }
-            // Difference: an anti-join keyed by the whole payload.
+            // Difference: an anti-join keyed by the whole payload; the survivor re-derived likewise.
             HydroNode::Difference { .. } => {
                 let old = std::mem::replace(node, HydroNode::Placeholder);
                 let HydroNode::Difference { pos, neg, mut metadata } = old else { unreachable!() };
-                self.register("Difference", &metadata);
+                let op = self.register("Difference", &metadata);
                 if rep_of(&metadata.collection_kind) != Rep::Stream {
                     self.unsupported("difference over a keyed collection", &metadata);
                 }
@@ -893,7 +914,7 @@ impl Pass {
                 let anti_metadata = { let mut m = metadata.clone(); m.collection_kind = kind_with_element(&metadata.collection_kind, parse_quote!((#t, u64))); m };
                 let anti = HydroNode::AntiJoin { pos: Box::new(keyed_pos), neg: Box::new(keys), metadata: anti_metadata };
                 metadata.collection_kind = final_kind.clone();
-                *node = self.map_node(quote!({ move |(__t, __id)| (__id, __t) }), anti, final_kind, &metadata);
+                *node = self.map_node(quote!({ move |(__t, __id)| (#rt::derive(#op, &[__id]), __t) }), anti, final_kind, &metadata);
             }
 
             // The network carries the id in front of the payload.
@@ -980,6 +1001,7 @@ impl Pass {
             location,
             source_line: source_line.trim().to_owned(),
             element_type: element_type_text(&input.collection_kind),
+            negative: false,
         });
         id
     }

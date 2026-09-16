@@ -3360,4 +3360,169 @@ mod amplification_tests {
             println!("  {name}: {traffic} / {elections} / {payload} / {ancestry} / {direct} / {kinds:?}");
         }
     }
+
+    /// The kind of a traffic record, for the E3.3 breakdowns.
+    fn rpc_kind(record: &hydro_lang::sim::lineage::Record) -> &'static str {
+        let (_, rpc): Traffic = record.decode().unwrap();
+        match rpc {
+            RaftRpc::RequestVote(_) => "RequestVote",
+            RaftRpc::RequestVoteResponse(_) => "Vote",
+            RaftRpc::AppendEntries(ae) if ae.entries.is_empty() => "heartbeat",
+            RaftRpc::AppendEntries(_) => "AppendEntries",
+            RaftRpc::AppendEntriesReply(_) => "ack",
+        }
+    }
+
+    /// E3.3 on Raft: the perturbation link. `raft_step` is one closure over the member's state,
+    /// so the pass marks it negative and the records a member's hooks hold while it runs are the
+    /// negative support of everything it derives that tick. A traffic record is a re-derivation
+    /// toward entry `r` iff it descends from `r` and from a step run while a record descending
+    /// from `r` (an `AppendEntries` carrying it, an ack or a `RequestVote` of a member that has
+    /// it) sat unreleased in that member's traffic buffer, none of them an ancestor of the record.
+    ///
+    /// Hand computation. Prompt: nothing is ever held on the traffic edge, and the timer hooks
+    /// hold only `()` leaves, so 0 re-derivations for every entry (800 derivations by ancestry).
+    /// Storm (`d = 4`, the E3.2 run: 324 by ancestry = 292 `RequestVote` + 16 `AppendEntries` +
+    /// 16 acks): every `RequestVote` that descends from an entry is derived at a timer tick while
+    /// the member holds the other members' `RequestVote`s or the leader's `AppendEntries`, all
+    /// descending from the entries, so all 292 are re-derivations; the leader's re-sends at its
+    /// first five heartbeat ticks have no negative leaf at the leader (the acks that would stop
+    /// them do not exist yet: the followers first receive `AppendEntries` at heartbeat tick
+    /// `1 + d = 5`, and the leader's tick runs before the followers' in a round), so 10 of the 16
+    /// are *not* re-derivations and the 6 at heartbeat ticks 6–8 are; the acks are derived while
+    /// later `AppendEntries` are held, but every one of those is later absorbed into the
+    /// follower's state, an ancestor of the following acks, so how many acks are marked is not
+    /// hand-computable from the design's rule alone and is printed. Re-derivations must keep
+    /// coming in every window of the run. Below the threshold (`d = 1, 2, 3`: E2b's 804 records
+    /// and no election) what the rule marks is printed and recorded in the design doc, since the
+    /// step is opaque and the rule can only over-approximate there.
+    #[test]
+    fn negative_leaves_attribute_the_storm_but_not_the_steady_state() {
+        let (_, timers) = control();
+        let entries: Vec<String> = (0..REQUESTS).map(|r| format!("r{r}")).collect();
+        let window = 40u64;
+        let mut summary = vec![];
+        let mut failures = vec![];
+        for (name, policy) in [
+            ("prompt", EdgePolicy::Prompt),
+            ("constant delay d = 1", EdgePolicy::Hold(1)),
+            ("constant delay d = 2", EdgePolicy::Hold(2)),
+            ("constant delay d = 3", EdgePolicy::Hold(3)),
+            ("constant delay d = 4", EdgePolicy::Hold(ELECTION_EVERY)),
+        ] {
+            let outcome = run_with(policy, Some((timers.clone(), ELECTION_EVERY)), REQUESTS, true);
+            assert!(outcome.lineage.instrumented);
+            let log = &outcome.lineage;
+            outcome.print(&format!("raft, {REQUESTS} requests, instrumented, {name}"));
+            let negative: Vec<String> = log.operators_where(|o| o.negative).map(|o| format!("op {} {} :: {}", o.id, o.kind, o.source_line.chars().take(50).collect::<String>())).collect();
+            println!("  negative operators: {negative:?}; {} tick runs", log.ticks.len());
+            let goals: std::collections::BTreeMap<u64, String> = log
+                .records_on(|k| in_server_slice(k) && k.ends_with("<alloc::string::String>"))
+                .map(|(_, r)| (r.id, r.decode::<String>().unwrap()))
+                .collect();
+            assert_eq!(goals.values().cloned().collect::<Vec<_>>(), entries);
+            let result = log.re_derivations(traffic, &goals);
+            let by_ancestry = log.per_goal_by_ancestry(traffic, &goals);
+            for (entry, g) in &result {
+                assert_eq!(g.derived.len() as u64, by_ancestry[entry], "{name}, {entry}: derived by ancestry");
+            }
+            let r0 = &result["r0"];
+            // Every entry is attributed alike (they were appended together).
+            assert!(result.values().all(|g| g.re_derived.len() == r0.re_derived.len()), "{name}: {:?}", result.values().map(|g| g.re_derived.len()).collect::<Vec<_>>());
+
+            // Breakdown by kind of the marked and the unmarked records descending from r0, the
+            // marked records by window of the receiving hook's tick, and the `AppendEntries` by
+            // the leader tick that derived them.
+            let record_by_id: std::collections::HashMap<u64, (&hydro_lang::sim::lineage::Release, &hydro_lang::sim::lineage::Record)> =
+                log.records_on(traffic).map(|(rel, r)| (r.id, (rel, r))).collect();
+            let marked: std::collections::HashSet<u64> = r0.re_derived.iter().map(|r| r.record).collect();
+            let mut marked_kinds: std::collections::BTreeMap<&str, u64> = Default::default();
+            let mut unmarked_kinds: std::collections::BTreeMap<&str, u64> = Default::default();
+            let mut per_window: std::collections::BTreeMap<u64, u64> = Default::default();
+            let by_record = log.derivations_by_record();
+            let mut ae_by_leader_tick: std::collections::BTreeMap<u64, (u64, u64)> = Default::default();
+            for id in &r0.derived {
+                let (release, record) = record_by_id[id];
+                let kind = rpc_kind(record);
+                if marked.contains(id) {
+                    *marked_kinds.entry(kind).or_default() += 1;
+                    *per_window.entry(release.tick / window).or_default() += 1;
+                } else {
+                    *unmarked_kinds.entry(kind).or_default() += 1;
+                }
+                if kind == "AppendEntries" {
+                    let tick_run = by_record[id].tick.expect("derived in a tick");
+                    let leader_tick = log.releases_of_tick(tick_run)[0].tick;
+                    let e = ae_by_leader_tick.entry(leader_tick).or_default();
+                    if marked.contains(id) { e.0 += 1 } else { e.1 += 1 }
+                }
+            }
+            let witnesses: std::collections::BTreeMap<&str, u64> = r0.re_derived.iter().fold(Default::default(), |mut m, r| {
+                let kind = record_by_id.get(&r.held).map(|(_, rec)| rpc_kind(rec)).unwrap_or("not a traffic record");
+                *m.entry(kind).or_default() += 1;
+                m
+            });
+            println!(
+                "  {name}: traffic {}, elections {}, derived toward r0 {}, re-derived {}; re-derived by kind {marked_kinds:?}, not re-derived by kind {unmarked_kinds:?}; witnesses by kind {witnesses:?}; re-derived per {window}-tick window {per_window:?}; AppendEntries with entries by leader tick (marked, unmarked) {ae_by_leader_tick:?}",
+                outcome.traffic(),
+                outcome.elections(),
+                r0.derived.len(),
+                r0.re_derived.len(),
+            );
+            summary.push((name, outcome.traffic(), outcome.elections(), r0.derived.len(), r0.re_derived.len(), marked_kinds.clone(), per_window.clone()));
+
+            match name {
+                "prompt" => {
+                    if r0.re_derived.len() != 0 {
+                        failures.push(format!("prompt: {} re-derivations toward r0, hand-computed 0", r0.re_derived.len()));
+                    }
+                    assert_eq!(outcome.elections(), 0);
+                }
+                "constant delay d = 4" => {
+                    assert!(outcome.elections() >= TICKS / ELECTION_EVERY as usize - 1, "the E2b storm");
+                    let rv_derived = marked_kinds.get("RequestVote").copied().unwrap_or(0) + unmarked_kinds.get("RequestVote").copied().unwrap_or(0);
+                    if marked_kinds.get("RequestVote").copied().unwrap_or(0) != rv_derived {
+                        failures.push(format!("storm: {} of {rv_derived} RequestVotes descending from r0 are re-derivations, hand-computed all", marked_kinds.get("RequestVote").copied().unwrap_or(0)));
+                    }
+                    let (ae_marked, ae_unmarked) = (marked_kinds.get("AppendEntries").copied().unwrap_or(0), unmarked_kinds.get("AppendEntries").copied().unwrap_or(0));
+                    if (ae_marked, ae_unmarked) != (6, 10) {
+                        failures.push(format!("storm: AppendEntries with entries (re-derived, not) = ({ae_marked}, {ae_unmarked}), hand-computed (6, 10): leader ticks 6-8 and 1-5"));
+                    }
+                    // By leader tick: the first five heartbeat ticks unmarked, the last three
+                    // marked. (The hook's decision index counts the two phase-1 decisions too,
+                    // so the heartbeat ticks are decisions 3–10, not 1–8.)
+                    let ticks: Vec<u64> = ae_by_leader_tick.keys().copied().collect();
+                    for (i, tick) in ticks.iter().enumerate() {
+                        let (m, u) = ae_by_leader_tick[tick];
+                        let want = if i < 5 { (0, 2) } else { (2, 0) };
+                        if (m, u) != want {
+                            failures.push(format!("storm: AppendEntries at leader tick {tick} (heartbeat tick {}): (re-derived, not) = ({m}, {u}), hand-computed {want:?}", i + 1));
+                        }
+                    }
+                    // The storm does not stop: every window of the run after the first has
+                    // re-derivations, and every witness is a traffic record.
+                    let windows = TICKS as u64 / window;
+                    for w in 1..windows {
+                        if per_window.get(&w).copied().unwrap_or(0) == 0 {
+                            failures.push(format!("storm: no re-derivation in window {w}"));
+                        }
+                    }
+                    if witnesses.contains_key("not a traffic record") {
+                        failures.push(format!("storm: witnesses that are not traffic records: {witnesses:?}"));
+                    }
+                }
+                _ => {
+                    // Below the threshold (E2b): the same 804 records and no election. What the
+                    // rule marks here is printed and recorded in the design doc, not asserted.
+                    assert_eq!(outcome.elections(), 0, "{name}");
+                    assert_eq!(outcome.traffic(), (2 * (CLUSTER_SIZE - 1) + 2 * (CLUSTER_SIZE - 1) * TICKS) as u64, "{name}");
+                }
+            }
+        }
+        println!("== E3.3 summary (raft, {REQUESTS} entries): schedule / traffic / elections / derived toward r0 / re-derived toward r0 / re-derived by kind / per {window}-tick window");
+        for (name, traffic, elections, derived, re_derived, kinds, windows) in &summary {
+            println!("  {name}: {traffic} / {elections} / {derived} / {re_derived} / {kinds:?} / {windows:?}");
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
 }
