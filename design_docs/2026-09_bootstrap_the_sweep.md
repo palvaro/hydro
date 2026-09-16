@@ -42,8 +42,40 @@ Your task is "Next: the sweep", in this order:
 - The sweep as a tool, not a hand-written test: given a program, fixed inputs, the metered
   clock edge(s) and a goal extractor at the hooks, for every hook edge x {constant, bursty} x d
   report derivations per goal against the prompt run, the program's own progress signals if any
-  (terms, campaigns), the threshold and whether the gain is transient or sustained. Validate it by
-  reproducing the three tables in the design doc automatically before running it on anything new.
+  (terms, campaigns), the threshold and whether the gain is transient or sustained. The standard
+  it must meet: reproduce the three tables in the design doc **without being told the edge**.
+  Every result so far was found by a person reading the program and picking the edge; the sweep
+  is what turns "the instrument sees the loop when pointed at it" into "the checker finds it".
+  Run it on the three known programs first, then on anything new.
+- Where the fixed inputs come from: the test body (the `async move || { .. }` closure that
+  `run_traced` takes, called the thunk in the codebase) of the program's existing sim tests,
+  minus mid-run assertions and any `fuzz`/`exhaustive` wrapper. Three shapes exist and the
+  report must say which was used: inputs sent up front (rpc_retry's hold tests, Raft, multi_paxos:
+  time is metered decisions); round by round with `quiesce()` (most existing tests; only usable
+  under `with_empty_ticks_allowed`, where a hold lasts d empty rounds inside the quiesce, so the
+  threshold comes out in rounds); closed loop (the collapse harness, the Raft progress test: the
+  reaction to outputs is part of the workload and must be kept). The goal extractor (which payload
+  field names a goal) is the one declared line of program knowledge per harness.
+- Known incompleteness of the move set, to state in every report: the moves cover one of the
+  design's five hook dimensions (release timing). Release *size* produced the sim collapse with no
+  hold at all; order, crash and membership moves do not exist yet.
+
+An alternative worth a real look, less invasive than the sweep (raised by the user; not started):
+coverage-guided fuzzing with amplification as the coverage metric, i.e. PerfFuzz (Lemieux, Padhye,
+Sen, Song, ISSTA 2018: max hit count per edge as coverage, so the fuzzer hill-climbs on work)
+applied to schedules. The sim's decision sequence is already the fuzz input (a bolero `Driver`);
+derivations per goal at the hooks (E3.1's payload attribution, no pass needed) is the metric;
+bucket it so a new bucket is new coverage. No hand-written policy, no scheduler option, and it
+covers every hook dimension at once (size, order, crash) — which is exactly where the structured
+moves are incomplete. Costs: bolero has no coverage API of its own; feedback needs the libFuzzer
+engine (`cargo bolero test`, sanitizer coverage; libFuzzer accepts user-defined 8-bit "extra
+counters" through a linker section, unwrapped by bolero), and raw decision sequences are a large
+space (E2b's storm is a coordinated pattern over hundreds of decisions; the sweep found it in
+eight runs). A cheap middle: make the *policy* `(edge, shape, d)` the bolero-generated input and
+let plain `cargo test` fuzzing sample it — the sweep, randomized, no engine needed. SlowFuzz
+(Petsios et al., CCS 2017) is the coarser precedent and its single total-work fitness is the
+objective E2b showed to be wrong here; Singularity (Wei et al., FSE 2018) is the precedent for
+fuzzing over generators/policies instead of raw inputs.
 - Then run it on the rest of the corpus as controls: synod, abd, crdt_gossip, uniform_broadcast.
   Expected "no moves" or bounded; a sustained loop is a finding, record it.
 - Then, if time: the redo queue under load (acceptors with a per-tick capacity): does the
