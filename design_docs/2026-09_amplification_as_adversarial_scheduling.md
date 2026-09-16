@@ -957,10 +957,31 @@ deliveries never needs a tick to run empty (rpc_retry), but it does need to hold
 have no metered co-hook, which today's scheduler does not allow. A scheduler option that lets a
 tick run with nothing released under an explicit policy is the first piece of the search.
 
+### The scheduler option: ticks may run empty
+
+Done. `hydro_lang::sim::edge_counts::with_empty_ticks_allowed(|| run)` switches the forcing rule
+off for a run: when every hook of a tick decides to hold, the tick runs with no new input (state
+carry only) and stays runnable, so an edge that is alone in its tick can be held or paced. The
+default is unchanged (every existing test runs under the forcing rule). First use, in the same
+multi_paxos_live test: the acks move that was impossible above, at $d \in \{5, 12, 20, 50\}$.
+
+| $d$ | constant: accepts / campaigns / decrees per command | bursty: accepts / campaigns / decrees per command |
+|-----|-----------------------------------------------------|----------------------------------------------------|
+| 5 | 603 / 0 / {1: 201} | 603 / 0 / {1: 201} |
+| 12 | 603 / 0 / {1: 201} | 720 / 5 / {1: 172, 2: 29} |
+| 20 | 708 / 1 / {1: 184, 3: 16, …} | 1575 / 10 / {1: 47, 2: 27, 3: 106, 4: 20, …} |
+| 50 | 1827 / 4 / {1: 153, 6: 8, 10: 10, 15: 16, …} | 4845 / 16 / {1: 21, 3: 40, 6: 32, 10: 50, 15: 42, …} |
+
+Hand computation, matched: the kernel sees completions late by the same $d$, so the campaign
+staircase is the completion move's within one at every $d$ (asserted). What differs is the work
+per stall: with the delay on the acks the re-proposals' own acks are delayed too, so the pending
+set the next stall re-releases is larger — 4845 accepts against 2139 at bursty $d = 50$, 8× the
+prompt run, and commands decreed up to 15 times. Where the delay sits changes the gain by a
+factor of two on the same program with the same threshold; the sweep has to try every edge.
+
 ### Next: the sweep
 
-- **Scheduler:** let a hook stay held with no other release in the tick, under an explicit
-  driver policy (the rule above). Then every `batch` edge is a move.
+- ~~Scheduler~~: done above.
 - **The sweep as a tool.** Input: a program, fixed inputs, the metered clock edge(s), a goal
   extractor at the hooks. For every hook edge × {constant, bursty} × $d$: derivations per goal
   against the prompt run, campaigns/terms where the program has them, the threshold and the shape

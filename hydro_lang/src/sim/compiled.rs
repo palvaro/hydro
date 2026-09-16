@@ -2185,7 +2185,11 @@ fn run_hooks<W: std::fmt::Write>(
 
         hooks.iter_mut().enumerate().for_each(|(index, hook)| {
             if hook.current_decision().is_none() {
-                let force = !made_nontrivial_decision && remaining_decision_count == 1;
+                // The forcing rule: the last undecided hook must release something if nothing
+                // else did, unless the harness allows empty ticks (`with_empty_ticks_allowed`).
+                let force = !super::edge_counts::empty_ticks_allowed()
+                    && !made_nontrivial_decision
+                    && remaining_decision_count == 1;
                 made_nontrivial_decision |=
                     with_current_hook(context(&**hook), index, member, || {
                         hook.autonomous_decision(driver, force)

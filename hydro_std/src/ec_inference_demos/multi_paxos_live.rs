@@ -752,7 +752,21 @@ mod amplification_tests {
     /// forced to release whenever the tick runs; measured: every policy on it gave the prompt
     /// numbers). Only proposer 0 gets commands and interrupts, so there is no duel: whatever
     /// campaigns is the redo loop alone.
+    /// Which edge the policy applies to.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Move {
+        /// The kernel's completion hook, which shares a tick with the metered command clock.
+        Completions,
+        /// The acceptors' acks at the quorum mint, alone in their tick: only expressible with
+        /// `with_empty_ticks_allowed`, which `run` then switches on.
+        Acks,
+    }
+
     fn run(policy: EdgePolicy, edges: Option<(String, String)>) -> Outcome {
+        run_move(policy, edges, Move::Completions)
+    }
+
+    fn run_move(policy: EdgePolicy, edges: Option<(String, String)>, held: Move) -> Outcome {
         let mut flow = FlowBuilder::new();
         let acceptors = flow.cluster::<()>();
         let proposers = flow.cluster::<()>();
@@ -767,20 +781,23 @@ mod amplification_tests {
         if let Some((cmd_edge, completion_edge)) = edges.clone() {
             driver = driver
                 .meter(move |key: &str| key == cmd_edge)
-                .with_policy(move |key: &str| key == completion_edge, policy)
                 .with_policy(kernel_timer(), EdgePolicy::Periodic { period: PERIOD, count: Some(1) });
+            driver = match held {
+                Move::Completions => driver.with_policy(move |key: &str| key == completion_edge, policy),
+                Move::Acks => driver.with_policy(acks(), policy),
+            };
         }
         let mut learned = Vec::new();
         let mut established = Vec::new();
         let (learned_ref, est_ref) = (&mut learned, &mut established);
         let phase2 = edges.is_some();
-        let (counts, lineage) = flow
+        let sim = flow
             .sim()
             .skip_consistency_assertions()
             .with_cluster_size(&acceptors, N_ACCEPTORS)
             .with_cluster_size(&proposers, N_PROPOSERS)
-            .with_cluster_size(&learners, LEARNERS)
-            .run_traced(driver, async move || {
+            .with_cluster_size(&learners, LEARNERS);
+        let run = || sim.run_traced(driver, async move || {
                 cmd_send.send(0, 0u32);
                 quiesce().await;
                 timeout_send.send(0, ());
@@ -797,6 +814,10 @@ mod amplification_tests {
                 learned_ref.extend(learned_recv.collect_sorted::<Vec<_>>(0).await);
                 est_ref.extend(est_recv.collect_sorted::<Vec<_>>(0).await);
             });
+        let (counts, lineage) = match held {
+            Move::Completions => run(),
+            Move::Acks => hydro_lang::sim::edge_counts::with_empty_ticks_allowed(run),
+        };
         Outcome { counts, lineage, learned, established, edges }
     }
 
@@ -951,6 +972,39 @@ mod amplification_tests {
                 if o.accepts_per_command().values().any(|c| c % N_ACCEPTORS as u64 != 0) {
                     failures.push(format!("d = {d}: accepts per command not whole re-proposals: {:?}", histogram(o.accepts_per_command().values().copied())));
                 }
+            }
+        }
+        // The natural move: hold the acceptors' acks. That hook is alone in its tick, so it needs
+        // the scheduler option that lets a tick run empty (`with_empty_ticks_allowed`); without it
+        // every policy on this edge measured the prompt numbers. Hand computation: the kernel
+        // sees completions late by the same `d`, so the same staircase as above, campaigns within
+        // one of the completion-hold row at the same `d`; the difference is where the delay sits.
+        println!("== the acks move, ticks allowed to run empty: d / constant: accepts, campaigns, decrees per command / bursty: same");
+        let mut ack_rows = vec![];
+        for d in [5u64, 12, 20, 50] {
+            let held = run_move(EdgePolicy::Hold(d), Some(edges.clone()), Move::Acks);
+            let burst = run_move(EdgePolicy::Periodic { period: d, count: None }, Some(edges.clone()), Move::Acks);
+            println!(
+                "  d = {d:>2}: constant {} / {} / {:?}   bursty {} / {} / {:?}",
+                held.counts.records(accepts()),
+                held.campaigns(),
+                histogram(held.chosen_per_command().values().copied()),
+                burst.counts.records(accepts()),
+                burst.campaigns(),
+                histogram(burst.chosen_per_command().values().copied()),
+            );
+            ack_rows.push((d, held, burst));
+        }
+        for (d, held, burst) in &ack_rows {
+            let (_, held_c, burst_c) = rows.iter().find(|(dd, ..)| dd == d).map(|(dd, h, b)| (*dd, h.campaigns(), b.campaigns())).unwrap();
+            if held.campaigns().abs_diff(held_c) > 1 {
+                failures.push(format!("acks move, constant d = {d}: {} campaigns vs {held_c} holding completions", held.campaigns()));
+            }
+            if burst.campaigns().abs_diff(burst_c) > 1 {
+                failures.push(format!("acks move, bursty d = {d}: {} campaigns vs {burst_c} holding completions", burst.campaigns()));
+            }
+            if *d < PERIOD && (held.counts.records(accepts()) != prompt_work || burst.counts.records(accepts()) != prompt_work) {
+                failures.push(format!("acks move, d = {d}: work changed below the threshold"));
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));

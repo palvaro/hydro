@@ -36,11 +36,10 @@ Read, in this order, before doing anything else:
 
 Your task is "Next: the sweep", in this order:
 
-- The scheduler change first: a driver policy under which a hook may stay held even when no
-  other hook in its tick releases (today the last undecided hook is forced to release at least
-  one item, so an edge without a metered co-hook cannot be held; multi_paxos_live's acceptor-acks
-  edge is the measured example). Keep the default behaviour for every existing test.
-- Then the sweep as a tool, not a hand-written test: given a program, fixed inputs, the metered
+- (Done: `edge_counts::with_empty_ticks_allowed` switches the forcing rule off for a run, so an
+  edge alone in its tick can be held; the acks move on multi_paxos_live is measured in the design
+  doc under "The scheduler option". Default unchanged.)
+- The sweep as a tool, not a hand-written test: given a program, fixed inputs, the metered
   clock edge(s) and a goal extractor at the hooks, for every hook edge x {constant, bursty} x d
   report derivations per goal against the prompt run, the program's own progress signals if any
   (terms, campaigns), the threshold and whether the gain is transient or sustained. Validate it by
@@ -159,11 +158,12 @@ Things learned in the boundary-ids and lineage-pass steps; do not rediscover the
 
 Things learned in the negative-leaves step and on multi_paxos_live; do not rediscover them:
 
-- A tick with buffered items is runnable (`SimTick::can_run`), and the forcing rule then makes the
-  last undecided hook release: a `Periodic` or `Hold` policy on a hook that is alone in its slice
-  is silently a prompt policy (measured: every policy on `quorum`'s acks batch gave the prompt
-  numbers). Pace a co-hook in the same slice (a metered input stream is the usual one) or change
-  the scheduler.
+- A tick with buffered items is runnable (`SimTick::can_run`), and under the default forcing rule
+  the last undecided hook must release: a `Periodic` or `Hold` policy on a hook that is alone in
+  its slice is silently a prompt policy (measured: every policy on `quorum`'s acks batch gave the
+  prompt numbers). Either pace a co-hook in the same slice (a metered input stream) or wrap the
+  run in `edge_counts::with_empty_ticks_allowed`; under it the sim does not quiesce while
+  anything is held, so every policy must release eventually.
 - The hook's decision index counts every decision including earlier phases of the harness (Raft:
   the heartbeat ticks are decisions 3–10, not 1–8). Express per-tick hand computations relative
   to the first release of the edge in question.

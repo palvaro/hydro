@@ -90,6 +90,26 @@ thread_local! {
     static RECORDER: RefCell<Option<EdgeCounts>> = const { RefCell::new(None) };
     static CURRENT_HOOK: Cell<Option<HookContext>> = const { Cell::new(None) };
     static DECISIONS: Cell<u64> = const { Cell::new(0) };
+    static EMPTY_TICKS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Runs `f` with the scheduler's forcing rule switched off on this thread: normally, when no hook
+/// of a tick has released anything, the last undecided hook is forced to release at least one
+/// item, so a tick never runs empty and a delivery can only be held while another hook of the
+/// same tick (a metered clock) releases. Under this option a tick whose hooks all decide to hold
+/// runs with no new input (state carry only) and stays runnable, so every `batch` edge can be
+/// held or paced by the policy, including one that is alone in its tick. The scheduler does not
+/// quiesce while anything is held, so every policy in force must release eventually.
+pub fn with_empty_ticks_allowed<R>(f: impl FnOnce() -> R) -> R {
+    let previous = EMPTY_TICKS.with(|e| e.replace(true));
+    let result = f();
+    EMPTY_TICKS.with(|e| e.set(previous));
+    result
+}
+
+/// Whether [`with_empty_ticks_allowed`] is in force on this thread.
+pub(crate) fn empty_ticks_allowed() -> bool {
+    EMPTY_TICKS.with(|e| e.get())
 }
 
 /// Runs `f` with edge counting enabled on this thread and returns what was counted. Nested
