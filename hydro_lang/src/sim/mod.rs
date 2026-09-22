@@ -72,6 +72,15 @@ pub mod hold_schedule;
 pub mod lineage;
 
 #[cfg(stageleft_runtime)]
+pub mod sweep;
+
+#[cfg(stageleft_runtime)]
+pub mod counterfactual;
+
+#[cfg(stageleft_runtime)]
+pub mod identity;
+
+#[cfg(stageleft_runtime)]
 #[doc(hidden)]
 pub mod lineage_rt;
 

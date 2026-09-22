@@ -1073,6 +1073,385 @@ mod amplification_tests {
         }
     }
 
+    /// The sweep (`hydro_lang::sim::sweep`) on E2's fixed inputs, told the clocks (the client
+    /// clock and the request stream, metered) and the goal extractor (every record carries the
+    /// request id it answers; a `Completion` reaches its request) but **not the edge**. It must
+    /// re-find the retry storm: a threshold of `tau - 2` (the requests with baseline latency 2
+    /// cross the timeout first) on the responses, sustained (every request minted early enough
+    /// pays it), saturating at `max_attempts`; the arrivals edge is the same storm from the other
+    /// side of the wire. Every other edge is a metrics tee and must come back "no moves". The
+    /// constant-delay cells are checked per request against E1's step function.
+    #[test]
+    fn sweep_finds_the_retry_storm_without_being_told_the_edge() {
+        use hydro_lang::sim::hold_schedule::EdgePolicy;
+        use hydro_lang::sim::sweep::{Gain, InputShape, Options, Program, Run as SweepRun, Shape, clock};
+
+        let n = (TICKS as u64) * PER_TICK as u64;
+        let baseline = run_counted(POLICY, SERVER, PER_TICK, TICKS, |d| d);
+        // Edge predicates, resolved once (each reads this file for its line).
+        let named: Vec<(&str, Box<dyn Fn(&str) -> bool>)> = EDGE_NEEDLES
+            .iter()
+            .map(|(name, _, _)| (*name, Box::new(edge_named(name)) as Box<dyn Fn(&str) -> bool>))
+            .collect();
+        let completions_edge = edge_named("completions (client metrics)");
+        let program = Program::<u64> {
+            name: "rpc_retry".to_owned(),
+            inputs: InputShape::UpFront,
+            run: Box::new(|driver| {
+                let (flow, (clock_send, request_send), ports) = wire(POLICY, SERVER);
+                let mut run = Run::default();
+                let run_ref = &mut run;
+                let (counts, lineage) = flow.sim().run_traced(driver, async move || {
+                    for tick in 0..TICKS as u64 {
+                        clock_send.send(());
+                        for _ in 0..PER_TICK {
+                            request_send.send(tick);
+                        }
+                    }
+                    quiesce().await;
+                    drain(ports, run_ref).await;
+                });
+                let mut progress = BTreeMap::new();
+                progress.insert("completions".to_owned(), run.completions.len() as i64);
+                progress.insert("abandoned".to_owned(), run.abandoned.len() as i64);
+                progress.insert("final backlog".to_owned(), run.final_backlog as i64);
+                SweepRun { counts, lineage, progress }
+            }),
+            clocks: vec![
+                clock(edge_named("clock (client)"), EdgePolicy::Metered(1)),
+                clock(edge_named("requests (client)"), EdgePolicy::Metered(PER_TICK as usize)),
+            ],
+            time: Some(Box::new(edge_named("clock (client)"))),
+            goals: Box::new(move |edge, record| {
+                let (name, _) = named
+                    .iter()
+                    .find(|(_, pred)| pred(edge))
+                    .unwrap_or_else(|| panic!("unknown edge {edge}"));
+                match *name {
+                    "server -> client (responses)" => vec![record.decode::<Response<u64>>().unwrap().id],
+                    "retried (client metrics)" => vec![record.decode::<(u64, u32)>().unwrap().0],
+                    "abandoned (client metrics)" => vec![record.decode::<u64>().unwrap()],
+                    "completions (client metrics)" => vec![],
+                    _ => vec![record.decode::<Request<u64>>().unwrap().id],
+                }
+            }),
+            reached: Some(Box::new(move |edge, record| {
+                if completions_edge(edge) {
+                    vec![record.decode::<Completion>().unwrap().id]
+                } else {
+                    vec![]
+                }
+            })),
+        };
+        let ds: Vec<u64> = std::env::var("SWEEP_DS")
+            .ok()
+            .map(|s| s.split(',').map(|d| d.parse().unwrap()).collect())
+            .unwrap_or_else(|| vec![1, 2, 4, 8, 16, 32, 64, 128]);
+        let report = program.sweep(&Options { ds, refine: true, verbose: true, empty_ticks: true });
+
+        // For the hand computation of the bursty cells: when each request's first response
+        // reached the responses hook under prompt (the hook's decision index), from a baseline
+        // log; a burst every d releases it at the next multiple of d.
+        let (_, baseline_log) = run_traced(POLICY, SERVER, PER_TICK, TICKS, |d| d);
+        let responses = edge_named("server -> client (responses)");
+        let arrival: BTreeMap<u64, u64> = baseline_log
+            .records_on(responses.clone())
+            .map(|(_, r)| (r.decode::<Response<u64>>().unwrap().id, r.arrived))
+            .collect();
+        let bursty_delay = |id: u64, d: u64| (d - arrival[&id] % d) % d;
+
+        let tau = POLICY.timeout_ticks;
+        let mut failures = vec![];
+        // Prompt: one derivation per request on each of the four work edges, none retried.
+        assert_eq!(report.prompt.per_goal.len() as u64, n);
+        assert!(report.prompt.per_goal.values().all(|c| *c == 4), "{:?}", report.prompt.histogram());
+        let arrivals = edge_named("client -> server (arrivals)");
+        let sends_on_arrivals = |cell: &hydro_lang::sim::sweep::Cell<u64>| -> BTreeMap<u64, u64> {
+            cell.measure.per_edge_per_goal.iter().find(|(k, _)| arrivals(k)).map(|(_, m)| m.clone()).unwrap_or_default()
+        };
+        let mismatches = |measured: &BTreeMap<u64, u64>, delay: &dyn Fn(u64) -> u64| -> Vec<(u64, u64, Option<u64>)> {
+            baseline
+                .completions
+                .iter()
+                .map(|(id, l)| (*id, expected(baseline.issued_at[id], *l, delay(*id), &POLICY, TICKS as u64).0 as u64))
+                .filter(|(id, s)| measured.get(id) != Some(s))
+                .map(|(id, s)| (id, s, measured.get(&id).copied()))
+                .take(5)
+                .collect()
+        };
+        for (name, _, _) in EDGE_NEEDLES {
+            if matches!(*name, "clock (client)" | "requests (client)") {
+                continue;
+            }
+            let pred = edge_named(name);
+            if report.is_idle(&pred) {
+                // `retried`, `abandoned` and the report tick carry nothing under prompt.
+                println!("  {name}: idle under prompt, not swept");
+                continue;
+            }
+            let constant = report.sweep_of(&pred, Shape::Constant);
+            let bursty = report.sweep_of(&pred, Shape::Bursty);
+            match *name {
+                "server -> client (responses)" => {
+                    // Hand computation (E1): the first retry when l + d > tau, first for l = 2.
+                    if constant.threshold != Some(tau - 1) {
+                        failures.push(format!("{name}, constant: threshold {:?}, hand-computed {}", constant.threshold, tau - 1));
+                    }
+                    if constant.verdict != Gain::Sustained {
+                        failures.push(format!("{name}, constant: verdict {:?}, expected Sustained", constant.verdict));
+                    }
+                    // Per request, every constant cell: sends equal E1's step function.
+                    for cell in &constant.cells {
+                        let mismatched = mismatches(&sends_on_arrivals(cell), &|_| cell.d);
+                        if !mismatched.is_empty() {
+                            failures.push(format!("{name}, constant d = {}: sends per request differ from the hand computation, e.g. (id, expected, measured) {mismatched:?}", cell.d));
+                        }
+                    }
+                    // Bursty: a response arriving at hook decision a is released at the next
+                    // multiple of d, so its delay is (-a mod d), at most d - 1; the step function
+                    // applies per request with that delay. The threshold is the smallest d at
+                    // which some request's delay reaches tau - l with a judgement before the
+                    // clock ends, computed from the prompt arrivals rather than assumed to be tau
+                    // (the arrivals' parity against the server's every-other-tick cadence decides
+                    // which delays occur).
+                    let bursty_threshold = (1..=3 * tau).find(|d| {
+                        baseline.completions.iter().any(|(id, l)| expected(baseline.issued_at[id], *l, bursty_delay(*id, *d), &POLICY, TICKS as u64).0 > 1)
+                    });
+                    if bursty.threshold != bursty_threshold {
+                        failures.push(format!("{name}, bursty: threshold {:?}, hand-computed {bursty_threshold:?}", bursty.threshold));
+                    }
+                    if bursty.verdict != Gain::Sustained {
+                        failures.push(format!("{name}, bursty: verdict {:?}, expected Sustained", bursty.verdict));
+                    }
+                    for cell in &bursty.cells {
+                        let mismatched = mismatches(&sends_on_arrivals(cell), &|id| bursty_delay(id, cell.d));
+                        if !mismatched.is_empty() {
+                            failures.push(format!("{name}, bursty d = {}: sends per request differ from the hand computation, e.g. (id, expected, measured) {mismatched:?}", cell.d));
+                        }
+                    }
+                }
+                "client -> server (arrivals)" => {
+                    // The same storm from the other side of the wire. The threshold is the same
+                    // (a request held d at the server answers d late), and from tau on the work
+                    // equals the responses move's at the same d; at tau - 1 fewer requests cross
+                    // (a server whose buffer holds records runs every round, so the baseline
+                    // latencies are no longer 1 or 2 by parity: recorded, not hand-computed).
+                    if constant.threshold != Some(tau - 1) {
+                        failures.push(format!("{name}, constant: threshold {:?}, hand-computed {}", constant.threshold, tau - 1));
+                    }
+                    if constant.verdict != Gain::Sustained {
+                        failures.push(format!("{name}, constant: verdict {:?}, expected Sustained", constant.verdict));
+                    }
+                    let on_responses = report.sweep_of(responses.clone(), Shape::Constant);
+                    for cell in constant.cells.iter().filter(|c| c.d >= tau) {
+                        let Some(other) = on_responses.cells.iter().find(|c| c.d == cell.d) else { continue };
+                        if cell.measure.derivations() != other.measure.derivations() {
+                            failures.push(format!("{name}, constant d = {}: {} derivations, responses move {}", cell.d, cell.measure.derivations(), other.measure.derivations()));
+                        }
+                    }
+                    // Bursty at the server: a burst of 2d requests against a capacity of 20 per
+                    // tick leaves a backlog; the last burst's remainder is stranded when the clock
+                    // runs dry (a tick with state but no input is not runnable), so completions
+                    // fall with no extra work before any retry fires. Recorded: a scheduler
+                    // limitation (in deployment the server tick is timer-driven), not amplification.
+                    println!(
+                        "  {name}, bursty: first gain {:?}, sustained from {:?}; stranded backlog per d {:?}",
+                        bursty.threshold,
+                        bursty.sustained_from,
+                        bursty.cells.iter().map(|c| (c.d, c.measure.progress["final backlog"])).collect::<Vec<_>>()
+                    );
+                }
+                _ => {
+                    // Metrics tees: holding a copy changes nothing upstream.
+                    for sweep in [constant, bursty] {
+                        if sweep.threshold.is_some() {
+                            failures.push(format!("{name}, {:?}: threshold {:?}, expected none (a metrics tee)", sweep.shape, sweep.threshold));
+                        }
+                    }
+                }
+            }
+        }
+        for s in report.findings() {
+            println!("  finding: [{}] {:?} threshold {:?} knee {:?} verdict {:?}", s.edge, s.shape, s.threshold, s.sustained_from, s.verdict);
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// The rpc_retry `Program` for the sweep and the counterfactual forks (E2's inputs, the two
+    /// metered clocks, the request id as the goal, a `Completion` as reaching it).
+    fn sweep_program(policy: RetryPolicy) -> hydro_lang::sim::sweep::Program<u64> {
+        use hydro_lang::sim::hold_schedule::EdgePolicy;
+        use hydro_lang::sim::sweep::{InputShape, Program, Run as SweepRun, clock};
+
+        let named: Vec<(&str, Box<dyn Fn(&str) -> bool>)> = EDGE_NEEDLES
+            .iter()
+            .map(|(name, _, _)| (*name, Box::new(edge_named(name)) as Box<dyn Fn(&str) -> bool>))
+            .collect();
+        let completions_edge = edge_named("completions (client metrics)");
+        Program::<u64> {
+            name: format!("rpc_retry (max_attempts {})", policy.max_attempts),
+            inputs: InputShape::UpFront,
+            run: Box::new(move |driver| {
+                let (flow, (clock_send, request_send), ports) = wire(policy, SERVER);
+                let mut run = Run::default();
+                let run_ref = &mut run;
+                let (counts, lineage) = flow.sim().run_traced(driver, async move || {
+                    for tick in 0..TICKS as u64 {
+                        clock_send.send(());
+                        for _ in 0..PER_TICK {
+                            request_send.send(tick);
+                        }
+                    }
+                    quiesce().await;
+                    drain(ports, run_ref).await;
+                });
+                let mut progress = BTreeMap::new();
+                progress.insert("completions".to_owned(), run.completions.len() as i64);
+                progress.insert("abandoned".to_owned(), run.abandoned.len() as i64);
+                progress.insert("final backlog".to_owned(), run.final_backlog as i64);
+                SweepRun { counts, lineage, progress }
+            }),
+            clocks: vec![
+                clock(edge_named("clock (client)"), EdgePolicy::Metered(1)),
+                clock(edge_named("requests (client)"), EdgePolicy::Metered(PER_TICK as usize)),
+            ],
+            time: Some(Box::new(edge_named("clock (client)"))),
+            goals: Box::new(move |edge, record| {
+                let (name, _) = named.iter().find(|(_, pred)| pred(edge)).unwrap_or_else(|| panic!("unknown edge {edge}"));
+                match *name {
+                    "server -> client (responses)" => vec![record.decode::<Response<u64>>().unwrap().id],
+                    "retried (client metrics)" => vec![record.decode::<(u64, u32)>().unwrap().0],
+                    "abandoned (client metrics)" => vec![record.decode::<u64>().unwrap()],
+                    "completions (client metrics)" => vec![],
+                    _ => vec![record.decode::<Request<u64>>().unwrap().id],
+                }
+            }),
+            reached: Some(Box::new(move |edge, record| {
+                if completions_edge(edge) { vec![record.decode::<Completion>().unwrap().id] } else { vec![] }
+            })),
+        }
+    }
+
+    /// Per-decision counterfactual forks (`hydro_lang::sim::counterfactual`) on E2's hold: the
+    /// responses edge held `d = tau`, and for each of the first held arrival groups a replay in
+    /// which the hook releases at that group's arrival. The responses hook is totally ordered,
+    /// so a release is a prefix: the fork flushes everything held at that decision (the responses
+    /// that arrived in the last `d` decisions), each of them early by `a - arrival`.
+    ///
+    /// Hand computation, per request: a response flushed at decision `a` after arriving at `a'`
+    /// is delayed `a - a'` instead of `d`, so its request's sends are `expected(t, l, a - a')`
+    /// instead of `expected(t, l, d)`; the records the hold caused, per fork, are the sum over the
+    /// flushed requests of the difference in sends on each of the four work edges, plus one
+    /// `retried` record per send removed; no other request changes. Control: `max_attempts = 1`,
+    /// where a fork changes the verdict of the flushed requests (complete instead of abandon) and
+    /// no work.
+    #[test]
+    fn counterfactual_forks_remove_exactly_the_flushed_requests_retries() {
+        use hydro_lang::sim::counterfactual::Sample;
+        use hydro_lang::sim::hold_schedule::EdgePolicy;
+
+        let tau = POLICY.timeout_ticks;
+        let d = tau;
+        let n: usize = std::env::var("FORKS").ok().and_then(|s| s.parse().ok()).unwrap_or(12);
+        let baseline = run_counted(POLICY, SERVER, PER_TICK, TICKS, |x| x);
+        // The held run's log, for the arrival decision of each request's first response.
+        let (_, held_log) = run_traced(POLICY, SERVER, PER_TICK, TICKS, hold_driver(d));
+        let responses = edge_named("server -> client (responses)");
+        let mut arrival: BTreeMap<u64, u64> = BTreeMap::new();
+        for (_, r) in held_log.records_on(responses.clone()) {
+            let id = r.decode::<Response<u64>>().unwrap().id;
+            arrival.entry(id).or_insert(r.arrived);
+        }
+        let responses_pred = edge_named("server -> client (responses)");
+
+        let report = sweep_program(POLICY).forks(responses_pred, EdgePolicy::Hold(d), Sample::Stride { k: 8, n }, true, true);
+        let mut failures = vec![];
+        let work_edges: Vec<Box<dyn Fn(&str) -> bool>> = WORK_EDGES.iter().map(|e| Box::new(edge_named(e)) as Box<dyn Fn(&str) -> bool>).collect();
+        let retried = edge_named("retried (client metrics)");
+        for f in &report.forks {
+            // The responses hook is totally ordered, so every fork after the first arrival is a
+            // prefix release (the first has nothing older to release).
+            let a = f.fork.decision;
+            // Flushed: every request whose first response arrived in (a - d, a].
+            let mut expected_removed_sends = 0u64;
+            let mut expected_per_goal: BTreeMap<u64, u64> = BTreeMap::new();
+            let mut flushed: Vec<u64> = vec![];
+            for (id, l) in &baseline.completions {
+                let Some(&arrived) = arrival.get(id) else { continue };
+                if arrived + d > a && arrived <= a {
+                    flushed.push(*id);
+                    let t = baseline.issued_at[id];
+                    let before = expected(t, *l, d, &POLICY, TICKS as u64).0 as u64;
+                    let after = expected(t, *l, a - arrived, &POLICY, TICKS as u64).0 as u64;
+                    if before > after {
+                        expected_removed_sends += before - after;
+                        // Four work edges and a `retried` record per send removed.
+                        expected_per_goal.insert(*id, 5 * (before - after));
+                    }
+                }
+            }
+            let measured_work: u64 = f.per_edge.iter().filter(|(k, _)| work_edges.iter().any(|p| p(k))).map(|(_, p)| p.caused()).sum();
+            let measured_retried: u64 = f.per_edge.iter().filter(|(k, _)| retried(k)).map(|(_, p)| p.caused()).sum();
+            if measured_work != 4 * expected_removed_sends || measured_retried != expected_removed_sends {
+                failures.push(format!("fork at decision {a}: caused {measured_work} work records and {measured_retried} retried, hand-computed {} and {expected_removed_sends}", 4 * expected_removed_sends));
+            }
+            // The records themselves: every caused record carries the id of a flushed request
+            // whose sends were removed, and per such request there are exactly `before - after`
+            // of them on each work edge and on `retried`.
+            let mut per_id_edge: BTreeMap<(u64, String), u64> = BTreeMap::new();
+            for (edge, _, record) in &f.caused_records {
+                let name = EDGE_NEEDLES.iter().find(|(_, slice, ty)| edge_pred(slice, ty)(edge)).map(|(n, _, _)| *n).unwrap_or("?");
+                let id = match name {
+                    "server -> client (responses)" => record.decode::<Response<u64>>().unwrap().id,
+                    "retried (client metrics)" => record.decode::<(u64, u32)>().unwrap().0,
+                    "completions (client metrics)" => record.decode::<Completion>().unwrap().id,
+                    "abandoned (client metrics)" => record.decode::<u64>().unwrap(),
+                    _ => record.decode::<Request<u64>>().unwrap().id,
+                };
+                *per_id_edge.entry((id, name.to_owned())).or_default() += 1;
+            }
+            let mut expected_records: BTreeMap<(u64, String), u64> = BTreeMap::new();
+            for (id, five_times) in &expected_per_goal {
+                for edge in WORK_EDGES.iter().chain(["retried (client metrics)"].iter()) {
+                    expected_records.insert((*id, edge.to_string()), five_times / 5);
+                }
+            }
+            // Every flushed request completes earlier, so its `Completion` record (which carries
+            // the latency) differs between the branches: one caused and one displaced, the goal
+            // reached at a different time rather than extra work.
+            for id in &flushed {
+                expected_records.insert((*id, "completions (client metrics)".to_owned()), 1);
+            }
+            if per_id_edge != expected_records {
+                let extra: Vec<_> = per_id_edge.iter().filter(|(k, v)| expected_records.get(*k) != Some(v)).take(5).collect();
+                let missing: Vec<_> = expected_records.iter().filter(|(k, v)| per_id_edge.get(*k) != Some(v)).take(5).collect();
+                failures.push(format!("fork at decision {a}: caused records differ from the hand computation; unexpected {extra:?}, missing {missing:?}"));
+            }
+            let measured_per_goal: BTreeMap<u64, u64> = f.per_goal.iter().filter(|(_, p)| p.caused() > 0).map(|(g, p)| (*g, p.caused())).collect();
+            if measured_per_goal != expected_per_goal {
+                let diff: Vec<_> = expected_per_goal.iter().filter(|(g, v)| measured_per_goal.get(g) != Some(v)).take(5).collect();
+                failures.push(format!("fork at decision {a}: derivations caused per request differ from the hand computation, e.g. (id, expected) {diff:?}; {} measured vs {} expected requests", measured_per_goal.len(), expected_per_goal.len()));
+            }
+            // Displacement: the flushed requests complete earlier; nothing new is produced.
+            let displaced_work: u64 = f.per_edge.iter().filter(|(k, _)| work_edges.iter().any(|p| p(k))).map(|(_, p)| p.displaced()).sum();
+            if displaced_work != 0 {
+                failures.push(format!("fork at decision {a}: {displaced_work} work records displaced, hand-computed 0"));
+            }
+        }
+
+        let control = sweep_program(RetryPolicy { max_attempts: 1, ..POLICY }).forks(edge_named("server -> client (responses)"), EdgePolicy::Hold(d), Sample::Stride { k: 8, n }, true, true);
+        for f in &control.forks {
+            let work: u64 = f.per_edge.iter().filter(|(k, _)| work_edges.iter().any(|p| p(k))).map(|(_, p)| p.caused() + p.displaced()).sum();
+            if work != 0 {
+                failures.push(format!("max_attempts = 1, fork at decision {}: {work} work records changed, hand-computed 0", f.fork.decision));
+            }
+        }
+        let (caused, displaced, toward) = report.totals();
+        let (c_caused, c_displaced, c_toward) = control.totals();
+        println!("== rpc_retry forks: 3 attempts caused/displaced/toward goals {caused}/{displaced}/{toward}; 1 attempt {c_caused}/{c_displaced}/{c_toward}");
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
     /// Derivations toward request `id` on `edge`, from the lineage log: every record crossing
     /// the edge is decoded as the harness's type for it and attributed to the request id it
     /// carries. This is E3.1's attribution: by the harness, at the boundary, no parents.

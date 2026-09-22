@@ -60,4 +60,6 @@ pub mod multi_paxos_live;
 pub mod quorum;
 pub mod reliable_broadcast;
 pub mod synod;
+#[cfg(test)]
+mod sweep_controls;
 pub mod uniform_broadcast;

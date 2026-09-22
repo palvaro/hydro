@@ -22,6 +22,14 @@
 //!   per tick of its slice, and a metered clock in the same slice advances once per tick, a
 //!   record is held for `d` ticks of logical time. `Hold(0)` is `Prompt`.
 //!
+//! A **fork** ([`Fork`], [`HoldScheduleDriver::with_fork`]) is a counterfactual edit to a `Hold`
+//! policy: at one decision of one hook, the records that arrived at a given decision are released
+//! although the policy would hold them, and everything else proceeds under the same policy. On an
+//! unordered hook exactly those records are released (the driver picks their positions); on a
+//! totally ordered hook the hook only releases a prefix, so everything older is released with
+//! them. Replaying a run with one fork and diffing it against the run without is the per-decision
+//! counterfactual of `design_docs/2026-09_perffuzz_spike.md`.
+//!
 //! When the scheduler *forces* a hook to release (no other hook in the tick released anything,
 //! so the hook must release at least one item) and nothing held is due, the driver releases
 //! everything: the only way that happens is when the clock has run dry, so this is the
@@ -31,8 +39,9 @@
 //! `batch` asks one question, "how many items from the front (in `min..=buffered`)". An
 //! unordered `batch` asks, per item, "stop releasing?" (a boolean; skipped for the first item
 //! when forced) and then "which of the remaining items?" (an exclusive range); the policy stops
-//! after the due count and always picks the oldest. A keyed `batch` asks one count per key and
-//! is not supported by `Hold` (it panics at the first decision).
+//! after the due count and always picks the oldest. A keyed `batch` asks one count per key; only
+//! `Periodic` (all keys or none) is supported there, the other policies panic at the first
+//! decision.
 
 use core::ops::Bound;
 use std::collections::{HashMap, VecDeque};
@@ -60,6 +69,20 @@ pub enum EdgePolicy {
     Hold(u64),
 }
 
+/// A counterfactual edit to a `Hold` policy: at the hook's `decision`, release the records that
+/// arrived at `arrived` (see the [module documentation](self)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fork {
+    /// The edge key (see [`edge_key`]).
+    pub edge: String,
+    /// The cluster member the hook belongs to, if any.
+    pub member: Option<u32>,
+    /// The hook's decision index (0-based) at which to release.
+    pub decision: u64,
+    /// The decision index at which the records to release arrived.
+    pub arrived: u64,
+}
+
 /// Per-hook bookkeeping for the stateful policies; one per (edge, cluster member).
 #[derive(Debug, Default)]
 struct HoldState {
@@ -77,12 +100,19 @@ struct HoldState {
     released: usize,
     /// Questions answered so far in the current decision.
     questions: usize,
+    /// A fork applies to this decision: the arrival tick of the records to release, until the
+    /// first question resolves it.
+    fork: Option<u64>,
+    /// The forked group's position in the buffer once the due items are gone, and its size
+    /// (unordered hooks).
+    fork_position: usize,
+    fork_count: usize,
 }
 
 impl HoldState {
     /// Starts a new decision: accounts for items that arrived since the last one and computes
     /// how many are due under `policy`.
-    fn begin(&mut self, context: &HookContext, policy: EdgePolicy) {
+    fn begin(&mut self, context: &HookContext, policy: EdgePolicy, fork: Option<&Fork>) {
         // Items held across from the previous decision.
         let held = self.buffered - self.released;
         let tick = self.decisions;
@@ -91,6 +121,9 @@ impl HoldState {
         self.buffered = context.buffered;
         self.released = 0;
         self.questions = 0;
+        self.fork = fork.filter(|f| f.decision == tick).map(|f| f.arrived);
+        self.fork_position = 0;
+        self.fork_count = 0;
 
         self.due = match policy {
             EdgePolicy::Prompt => context.buffered,
@@ -128,6 +161,41 @@ impl HoldState {
     fn flush(&mut self) {
         self.groups.clear();
         self.due = self.buffered;
+        self.fork = None;
+        self.fork_count = 0;
+    }
+
+    /// Resolves a pending fork for a hook that releases a prefix: everything that arrived at or
+    /// before the forked tick becomes due.
+    fn fork_prefix(&mut self) {
+        if let Some(arrived) = self.fork.take() {
+            while let Some(&(a, count)) = self.groups.front() {
+                if a <= arrived {
+                    self.due += count;
+                    self.groups.pop_front();
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Resolves a pending fork for a hook that releases by position: the forked group leaves
+    /// the held groups and its position (after the due items, which sit in front of it, are
+    /// gone) is remembered.
+    fn fork_exact(&mut self) {
+        if let Some(arrived) = self.fork.take() {
+            let mut position = 0;
+            for (i, &(a, count)) in self.groups.iter().enumerate() {
+                if a == arrived {
+                    self.fork_position = position;
+                    self.fork_count = count;
+                    self.groups.remove(i);
+                    return;
+                }
+                position += count;
+            }
+        }
     }
 }
 
@@ -136,6 +204,7 @@ pub struct HoldScheduleDriver {
     depth: usize,
     rules: Vec<(Box<dyn Fn(&str) -> bool>, EdgePolicy)>,
     states: HashMap<(String, Option<u32>), HoldState>,
+    forks: Vec<Fork>,
 }
 
 impl Default for HoldScheduleDriver {
@@ -149,6 +218,7 @@ impl std::fmt::Debug for HoldScheduleDriver {
         f.debug_struct("HoldScheduleDriver")
             .field("rules", &self.rules.iter().map(|(_, p)| p).collect::<Vec<_>>())
             .field("states", &self.states)
+            .field("forks", &self.forks)
             .finish()
     }
 }
@@ -170,7 +240,14 @@ impl HoldScheduleDriver {
             depth: 0,
             rules: vec![],
             states: HashMap::new(),
+            forks: vec![],
         }
+    }
+
+    /// Adds a counterfactual edit (see [`Fork`]); only meaningful on an edge under `Hold`.
+    pub fn with_fork(mut self, fork: Fork) -> Self {
+        self.forks.push(fork);
+        self
     }
 
     /// Attaches `policy` to every edge whose key (see [`edge_key`]: `file:line:col <element
@@ -213,18 +290,26 @@ impl HoldScheduleDriver {
         if let EdgePolicy::Prompt = policy {
             return None;
         }
+        let fork = self
+            .forks
+            .iter()
+            .find(|f| f.edge == key && f.member == context.member);
         let state = self.states.entry((key, context.member)).or_default();
         if state.current != Some(context.decision) {
-            state.begin(&context, policy);
+            state.begin(&context, policy, fork);
         }
         state.questions += 1;
         Some(match question {
             Count { min } => {
+                // A keyed `batch` asks one count per key. `Periodic` releases all keys or none,
+                // so the same answer (clamped to each key's queue) serves every question; the
+                // other policies would need per-key arrival bookkeeping the hook does not offer.
                 assert!(
-                    state.questions == 1,
-                    "policy attached to a hook that asks several release counts per decision (keyed batch?): {}",
+                    state.questions == 1 || matches!(policy, EdgePolicy::Periodic { .. }),
+                    "policy {policy:?} attached to a hook that asks several release counts per decision (keyed batch?): {}",
                     context.location.0
                 );
+                state.fork_prefix();
                 if min > state.due {
                     state.flush();
                 }
@@ -232,19 +317,22 @@ impl HoldScheduleDriver {
                 state.due
             }
             Stop => {
-                if state.released >= state.due {
+                state.fork_exact();
+                if state.released >= state.due + state.fork_count {
                     1
                 } else {
                     0
                 }
             }
             Which => {
-                if state.questions == 1 && state.due == 0 {
+                state.fork_exact();
+                if state.questions == 1 && state.due == 0 && state.fork_count == 0 {
                     // The first item is being taken without asking: a forced release.
                     state.flush();
                 }
+                let index = if state.released < state.due { 0 } else { state.fork_position };
                 state.released += 1;
-                0
+                index
             }
         })
     }

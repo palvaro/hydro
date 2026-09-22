@@ -2922,6 +2922,30 @@ mod amplification_tests {
 
     /// [`run`], with the program compiled by the lineage pass when `instrumented` (E3.2).
     fn run_with(traffic_policy: EdgePolicy, election_every: Option<(Timers, u64)>, requests: usize, instrumented: bool) -> Outcome {
+        let mut driver = HoldScheduleDriver::new().with_policy(traffic, traffic_policy);
+        let elections_per_member = match &election_every {
+            None => {
+                driver = driver.meter(timer);
+                0
+            }
+            Some((timers, every)) => {
+                let (election, heartbeat) = (timers.election.clone(), timers.heartbeat.clone());
+                driver = driver
+                    .meter(move |key: &str| key == heartbeat)
+                    .with_policy(
+                        move |key: &str| key == election,
+                        EdgePolicy::Periodic { period: *every, count: Some(1) },
+                    );
+                TICKS as u64 / every
+            }
+        };
+        run_driver(driver, elections_per_member, requests, instrumented)
+    }
+
+    /// One run under a driver the caller built (the clocks and the move already in it):
+    /// phase 1, `requests` entries at the leader, then `TICKS` heartbeat and
+    /// `elections_per_member` election interrupts per member, all up front.
+    fn run_driver(driver: HoldScheduleDriver, elections_per_member: u64, requests: usize, instrumented: bool) -> Outcome {
         let mut flow = FlowBuilder::new();
         let cluster = flow.cluster::<Replica>();
 
@@ -2941,24 +2965,6 @@ mod amplification_tests {
         );
         let view_recv = outputs.leader_views.sim_cluster_output();
         let committed_recv = outputs.committed.end_atomic().sim_cluster_output();
-
-        let mut driver = HoldScheduleDriver::new().with_policy(traffic, traffic_policy);
-        let elections_per_member = match &election_every {
-            None => {
-                driver = driver.meter(timer);
-                0
-            }
-            Some((timers, every)) => {
-                let (election, heartbeat) = (timers.election.clone(), timers.heartbeat.clone());
-                driver = driver
-                    .meter(move |key: &str| key == heartbeat)
-                    .with_policy(
-                        move |key: &str| key == election,
-                        EdgePolicy::Periodic { period: *every, count: Some(1) },
-                    );
-                TICKS as u64 / every
-            }
-        };
 
         let mut transitions: Vec<Vec<LeaderView<Replica>>> = vec![Vec::new(); CLUSTER_SIZE];
         let transitions_ref = &mut transitions;
@@ -3119,6 +3125,308 @@ mod amplification_tests {
                     burst.elections()
                 );
             }
+        }
+    }
+
+    /// The sweep (`hydro_lang::sim::sweep`) on the E3.1 inputs (`REQUESTS` entries, election
+    /// timer every `ELECTION_EVERY`), told the clocks (the heartbeat hook, metered; the election
+    /// hook, one interrupt per period) and the goal extractor (an `AppendEntries` is derived
+    /// toward every entry it carries) but **not the edge**. It must re-find the election storm
+    /// on the traffic edge: from some constant delay on, the program's progress signals change
+    /// for the rest of the run (a term per period, nothing commits) while the per-goal
+    /// derivations by payload can only see the leader's re-sends before it is deposed, a
+    /// transient. The requests and committed edges must come back "no moves".
+    ///
+    /// Run twice: under the sweep's default (ticks may run empty) and under the forcing rule
+    /// (E2b's setting), because the storm's threshold depends on the phase of the followers'
+    /// election timers against the leader's heartbeats, and the two settings schedule phase 1
+    /// differently (under the forcing rule the lone interrupt of phase 1 is flushed at once;
+    /// under empty ticks it waits for the timer's period). E2b measured the threshold at the
+    /// election period under the forcing rule; the phases are printed for both.
+    #[test]
+    fn sweep_finds_the_election_storm_without_being_told_the_edge() {
+        use hydro_lang::sim::sweep::{Gain, Options, Shape};
+
+        let (_, timers) = control();
+        let ds: Vec<u64> = std::env::var("SWEEP_DS")
+            .ok()
+            .map(|s| s.split(',').map(|d| d.parse().unwrap()).collect())
+            .unwrap_or_else(|| hydro_lang::sim::sweep::grid(24));
+        let periods = TICKS as i64 / ELECTION_EVERY as i64;
+        let mut failures = vec![];
+        let mut thresholds = vec![];
+        for empty_ticks in [true, false] {
+            let report = sweep_program(&timers).sweep(&Options { ds: ds.clone(), refine: true, verbose: true, empty_ticks });
+            // Prompt: every entry carried once per follower (E3.1), no election, all committed.
+            assert_eq!(report.prompt.per_goal.len(), REQUESTS);
+            assert!(report.prompt.per_goal.values().all(|c| *c == (CLUSTER_SIZE - 1) as u64), "{:?}", report.prompt.histogram());
+            assert_eq!(report.prompt.progress["elections"], 0);
+            assert_eq!(report.prompt.progress["committed total"], (REQUESTS * CLUSTER_SIZE) as i64);
+            for shape in [Shape::Constant, Shape::Bursty] {
+                let sweep = report.sweep_of(traffic, shape);
+                // The storm threshold in the progress signals: the smallest d with a term per
+                // period (the sweep bisects the first progress change, so it is exact); every
+                // larger d must storm too, and nothing commits under a storm.
+                let storm_from = sweep.cells.iter().find(|c| c.measure.progress["elections"] >= periods - 1).map(|c| c.d);
+                if storm_from != sweep.progress_from {
+                    failures.push(format!("traffic, {shape:?}: first progress change {:?} is not the storm {storm_from:?}", sweep.progress_from));
+                }
+                for cell in &sweep.cells {
+                    let elections = cell.measure.progress["elections"];
+                    let committed = cell.measure.progress["committed total"];
+                    if Some(cell.d) >= storm_from && storm_from.is_some() {
+                        if elections < periods - 1 {
+                            failures.push(format!("traffic, {shape:?} d = {}: {elections} elections above the storm threshold {storm_from:?}", cell.d));
+                        }
+                        if committed != 0 {
+                            failures.push(format!("traffic, {shape:?} d = {}: {committed} committed under the storm", cell.d));
+                        }
+                    } else if elections != 0 {
+                        failures.push(format!("traffic, {shape:?} d = {}: {elections} elections below the storm threshold", cell.d));
+                    }
+                    // The leader's re-sends by payload: it carries the pending entries to both
+                    // followers at every heartbeat until the ack is processed (below the storm)
+                    // or it is deposed (under it).
+                    if cell.measure.per_goal.len() != REQUESTS || cell.measure.per_goal.values().any(|c| c % (CLUSTER_SIZE as u64 - 1) != 0) {
+                        failures.push(format!("traffic, {shape:?} d = {}: entries carried unevenly {:?}", cell.d, cell.measure.per_goal));
+                    }
+                }
+                if storm_from.is_none() {
+                    failures.push(format!("traffic, {shape:?} (empty ticks {empty_ticks}): no storm at any d in {ds:?}"));
+                }
+                if sweep.verdict == Gain::None {
+                    failures.push(format!("traffic, {shape:?}: no verdict at the largest d"));
+                }
+                thresholds.push((empty_ticks, shape, sweep.threshold, storm_from));
+            }
+            let requests_edge = |key: &str| in_server_slice(key) && key.ends_with("<alloc::string::String>");
+            let committed_edge = |key: &str| !in_server_slice(key);
+            for (name, pred) in [("requests", Box::new(requests_edge) as Box<dyn Fn(&str) -> bool>), ("committed", Box::new(committed_edge))] {
+                for shape in [Shape::Constant, Shape::Bursty] {
+                    let sweep = report.sweep_of(&pred, shape);
+                    if sweep.threshold.is_some() {
+                        failures.push(format!("{name}, {shape:?}: threshold {:?}, expected none", sweep.threshold));
+                    }
+                }
+            }
+            for s in report.findings() {
+                println!("  finding (empty ticks {empty_ticks}): [{}] {:?} threshold {:?} knee {:?} verdict {:?}", s.edge, s.shape, s.threshold, s.sustained_from, s.verdict);
+            }
+        }
+        println!("== raft storm thresholds: (ticks may run empty, shape, first gain, first storm)");
+        for t in &thresholds {
+            println!("  {t:?}");
+        }
+        // E2b (forcing rule, no entries): the storm from a constant delay of the election period;
+        // bursty above it (E2b's grid had 5 and 6, both storming, with no entries; measured here
+        // with 5 entries and printed). Under the sweep's default the constant threshold is lower:
+        // phase 1's election traffic is held too (under the forcing rule the traffic hook, alone
+        // with items in a follower's tick, is flushed), so the followers' election timers start
+        // phase 2 out of phase with the leader's heartbeats by up to d, and a heartbeat that
+        // would have arrived just in time arrives just late. Same program, same inputs, same
+        // delay: the storm's threshold is the election period minus the timers' phase offset,
+        // and the sweep found the lower one.
+        for (empty_ticks, shape, _, storm_from) in &thresholds {
+            match (empty_ticks, shape) {
+                (false, Shape::Constant) if *storm_from != Some(ELECTION_EVERY) => {
+                    failures.push(format!("forcing rule, constant: storm from {storm_from:?}, E2b measured {ELECTION_EVERY}"));
+                }
+                (_, Shape::Bursty) if *storm_from <= Some(ELECTION_EVERY) => {
+                    failures.push(format!("{shape:?} (empty ticks {empty_ticks}): storm from {storm_from:?}, a burst every d leaves a gap of d - 1, so above {ELECTION_EVERY}"));
+                }
+                (true, Shape::Constant) if *storm_from > Some(ELECTION_EVERY) => {
+                    failures.push(format!("ticks may run empty, constant: storm from {storm_from:?}, at most {ELECTION_EVERY}"));
+                }
+                _ => {}
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// Per-decision counterfactual forks (`hydro_lang::sim::counterfactual`, the PerfFuzz spike's
+    /// "one untested path"): the traffic edge held `d = ELECTION_EVERY`, and for each of the
+    /// first held arrival groups a replay in which that group is released at its arrival, diffed
+    /// against the held run per edge, per payload shape and per goal.
+    ///
+    /// Kill criterion first: heartbeats only (no election timer), where E2 measured identical
+    /// record counts under every hold. Hand computation: a fork changes *when* a message arrives,
+    /// never how many are sent — every heartbeat tick sends two `AppendEntries` and gets two
+    /// acks — so the per-edge diff is 0 for every fork. What a fork does change is what the
+    /// `AppendEntries` carry: the leader re-sends the pending entries to a follower at every
+    /// heartbeat until that follower's ack is processed, and a follower's ack comes back `d`
+    /// ticks earlier when its first `AppendEntries` is not held, so releasing the first
+    /// `AppendEntries` to a follower removes `d` entry-carrying re-sends to it: per goal, `d`
+    /// derivations caused, per edge, none. Per shape, the heuristic cannot see it (the `entries`
+    /// field sits past the rendering cut).
+    ///
+    /// Then the storm (election timer every `ELECTION_EVERY`, same `d`): releasing a held
+    /// `AppendEntries` early at a follower in a given period lets that follower see a heartbeat
+    /// before its timer, so it does not campaign in that period. Whether that removes an election
+    /// (the other follower campaigns anyway) and how the rest of the run diverges is what the
+    /// experiment measures; the spike's stated expectation is that the diff is the
+    /// `RequestVote`/vote path.
+    #[test]
+    fn counterfactual_forks_attribute_the_hold_per_delivery() {
+        use hydro_lang::sim::counterfactual::Sample;
+
+        let (_, timers) = control();
+        let d = ELECTION_EVERY;
+        let n: usize = std::env::var("FORKS").ok().and_then(|s| s.parse().ok()).unwrap_or(18);
+        let mut failures = vec![];
+
+        let control = sweep_program_with(&timers, 0).forks(traffic, EdgePolicy::Hold(d), Sample::First(n), true, true);
+        // The first `AppendEntries` arrival at each follower in the held run (its earlier
+        // arrivals are phase 1's election messages).
+        let first_arrival = |report: &hydro_lang::sim::counterfactual::ForkReport<String>, member: Option<u32>| {
+            report
+                .forks
+                .iter()
+                .filter(|f| f.fork.member == member && f.group_shapes.iter().any(|s| s.contains("AppendEntries(")))
+                .map(|f| f.fork.arrived)
+                .min()
+                .unwrap_or(u64::MAX / 2)
+        };
+        for f in &control.forks {
+            if f.prefix {
+                failures.push(format!("fork at member {:?} decision {}: released older records too; the traffic hook is unordered", f.fork.member, f.fork.decision));
+            }
+            if f.caused() != 0 || f.displaced() != 0 {
+                failures.push(format!("heartbeats only, fork at member {:?} decision {}: per-edge counts changed (caused {}, displaced {}), hand-computed 0", f.fork.member, f.fork.decision, f.caused(), f.displaced()));
+            }
+            if !f.progress_changes.is_empty() {
+                failures.push(format!("heartbeats only, fork at member {:?} decision {}: progress changed {:?}", f.fork.member, f.fork.decision, f.progress_changes));
+            }
+            // Per goal: the leader re-sends the entries to a follower at every heartbeat until
+            // an ack is processed; the earliest ack in the fork answers the `AppendEntries`
+            // released at `a`, where the held run's earliest answered the first one, released at
+            // `a0 + d`. So `max(0, a0 + d - a)` re-sends per entry are removed at a follower,
+            // none at the leader (whose own held records are acks and votes).
+            let is_append = f.group_shapes.iter().any(|s| s.contains("AppendEntries("));
+            let expected_per_entry = if f.fork.member == Some(0) || !is_append { 0 } else { (first_arrival(&control, f.fork.member) + d).saturating_sub(f.fork.decision) };
+            let per_goal: std::collections::BTreeSet<u64> = f.per_goal.values().map(|p| p.caused()).collect();
+            let ok = if expected_per_entry == 0 { per_goal.is_empty() || per_goal == [0].into() } else { per_goal == [expected_per_entry].into() && f.per_goal.len() == REQUESTS };
+            if !ok {
+                failures.push(format!("heartbeats only, fork at member {:?} decision {}: derivations caused per entry {per_goal:?}, hand-computed {expected_per_entry}", f.fork.member, f.fork.decision));
+            }
+        }
+        let (c_caused, c_displaced, c_goals) = control.totals();
+        let c_shapes = control.caused_per_shape();
+        if c_shapes.values().any(|v| *v > 0) {
+            failures.push(format!("heartbeats only: per-shape changes {c_shapes:?}, hand-computed none"));
+        }
+
+        let storm = sweep_program_with(&timers, TICKS as u64 / ELECTION_EVERY).forks(traffic, EdgePolicy::Hold(d), Sample::First(n), true, true);
+        // The records themselves, decoded. Matched by payload, nearly every `RequestVote` the
+        // forked follower ever sends differs between the branches (its `last_log_index` is 5 once
+        // it has the entries, its terms shift), so the raw lists are the storm renumbered, ~110
+        // caused against ~111 displaced. Collapsed by role (kind, sender, receiver) the net is
+        // the campaign the early heartbeat suppressed. Printed both ways; the role-collapsed net
+        // must agree with the per-shape count diff.
+        println!("== raft storm forks, the records the hold caused: raw (payload-matched) counts, then the net by role (kind from -> to):");
+        let role = |edge: &str, member: Option<u32>, r: &hydro_lang::sim::lineage::Record| -> String {
+            if traffic(edge) {
+                let (from, rpc): Traffic = r.decode().unwrap();
+                let kind = match rpc {
+                    RaftRpc::RequestVote(_) => "RequestVote",
+                    RaftRpc::RequestVoteResponse(_) => "Vote",
+                    RaftRpc::AppendEntries(ae) => if ae.entries.is_empty() { "heartbeat" } else { "AppendEntries" },
+                    RaftRpc::AppendEntriesReply(_) => "ack",
+                };
+                format!("{kind} {} -> {}", from.get_raw_id(), member.map_or("-".to_owned(), |m| m.to_string()))
+            } else {
+                format!("commit at {}", member.map_or("-".to_owned(), |m| m.to_string()))
+            }
+        };
+        let mut role_net_request_votes = 0i64;
+        for f in &storm.forks {
+            if f.caused_records.is_empty() && f.displaced_records.is_empty() {
+                continue;
+            }
+            let mut net: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+            for (edge, member, r) in &f.caused_records {
+                *net.entry(role(edge, *member, r)).or_default() += 1;
+            }
+            for (edge, member, r) in &f.displaced_records {
+                *net.entry(role(edge, *member, r)).or_default() -= 1;
+            }
+            net.retain(|_, v| *v != 0);
+            role_net_request_votes += net.iter().filter(|(k, _)| k.starts_with("RequestVote")).map(|(_, v)| *v).sum::<i64>();
+            println!("   member {:?} decision {}: raw caused {} / displaced {}; net by role {:?}", f.fork.member, f.fork.decision, f.caused_records.len(), f.displaced_records.len(), net);
+        }
+        let (s_caused, s_displaced, s_goals) = storm.totals();
+        let s_shapes = storm.caused_per_shape();
+        let request_votes: u64 = s_shapes.iter().filter(|((_, s), _)| s.contains("RequestVote(")).map(|(_, v)| *v).sum();
+        let commits_gained: u64 = storm.forks.iter().map(|f| f.progress_changes.iter().filter(|(k, _, _)| k == "committed total").map(|(_, a, b)| (b - a).max(0) as u64).sum::<u64>()).sum();
+        println!("== raft forks (d = {d}, {n} forks each): heartbeats only: caused/displaced/toward goals {c_caused}/{c_displaced}/{c_goals}, per shape none; storm: {s_caused}/{s_displaced}/{s_goals}, RequestVote records caused {request_votes}, commits gained over forks {commits_gained}, per shape {:?}",
+            s_shapes.iter().filter(|(_, v)| **v > 0).map(|((_, s), v)| (s.chars().skip(24).take(20).collect::<String>(), *v)).collect::<Vec<_>>());
+        // The storm's per-delivery signal is in the shape column (RequestVotes removed by
+        // releasing a follower's AppendEntries in time), not in the per-goal column, where
+        // both runs show the leader's bounded re-sends.
+        if request_votes == 0 {
+            failures.push("storm: no fork removed a RequestVote".to_owned());
+        }
+        if role_net_request_votes != request_votes as i64 {
+            failures.push(format!("storm: RequestVotes caused by role-collapsed records {role_net_request_votes} vs by shape count {request_votes}"));
+        }
+        if s_goals > c_goals {
+            failures.push(format!("storm: derivations toward goals caused {s_goals} exceed the control's {c_goals}; the per-goal column was expected to be blind to the storm"));
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// The Raft program for the sweep: the E3.1 inputs, the two timer clocks, entries as goals.
+    /// Prints, per run, the decision index of each member's first phase-2 heartbeat and election
+    /// release (the timers' phases).
+    fn sweep_program(timers: &Timers) -> hydro_lang::sim::sweep::Program<String> {
+        sweep_program_with(timers, TICKS as u64 / ELECTION_EVERY)
+    }
+
+    /// [`sweep_program`] with `elections_per_member` election interrupts per member in phase 2
+    /// (0: the heartbeats-only control).
+    fn sweep_program_with(timers: &Timers, elections_per_member: u64) -> hydro_lang::sim::sweep::Program<String> {
+        use hydro_lang::sim::sweep::{InputShape, Program, Run, clock};
+
+        let (heartbeat, election) = (timers.heartbeat.clone(), timers.election.clone());
+        let (heartbeat_key, election_key) = (heartbeat.clone(), election.clone());
+        Program::<String> {
+            name: if elections_per_member == 0 { "raft (heartbeats only)".to_owned() } else { "raft".to_owned() },
+            inputs: InputShape::UpFront,
+            run: Box::new(move |driver| {
+                let outcome = run_driver(driver, elections_per_member, REQUESTS, false);
+                let mut progress = std::collections::BTreeMap::new();
+                // (No method calls on `Outcome` here: staging drops `impl` blocks.)
+                let max_term = outcome.transitions.iter().flatten().map(|v| v.term).max().unwrap_or(1);
+                progress.insert("elections".to_owned(), max_term as i64 - 1);
+                progress.insert("committed at member 0".to_owned(), outcome.committed[0].len() as i64);
+                progress.insert("committed total".to_owned(), outcome.committed.iter().map(|c| c.len()).sum::<usize>() as i64);
+                // Timer phases: per member, the decision index of the election hook's releases
+                // (phase 1's, then phase 2's first) and of the heartbeat hook's first release.
+                let mut phases = vec![];
+                for member in 0..CLUSTER_SIZE as u32 {
+                    let elections: Vec<u64> = outcome.lineage.releases.iter().filter(|r| r.edge == election_key && r.member == Some(member) && !r.released.is_empty()).map(|r| r.tick).take(2).collect();
+                    let heartbeat = outcome.lineage.releases.iter().find(|r| r.edge == heartbeat_key && r.member == Some(member) && !r.released.is_empty()).map(|r| r.tick);
+                    phases.push((member, elections, heartbeat));
+                }
+                println!("    timer phases (member, election release ticks, first heartbeat tick): {phases:?}");
+                Run { counts: outcome.counts, lineage: outcome.lineage, progress }
+            }),
+            clocks: vec![
+                clock({ let heartbeat = heartbeat.clone(); move |key: &str| key == heartbeat }, EdgePolicy::Metered(1)),
+                clock(move |key: &str| key == election, EdgePolicy::Periodic { period: ELECTION_EVERY, count: Some(1) }),
+            ],
+            time: Some(Box::new(move |key: &str| key == heartbeat)),
+            goals: Box::new(|edge, record| {
+                if traffic(edge) {
+                    let (_, rpc): Traffic = record.decode().expect("traffic is Serialize");
+                    match rpc {
+                        RaftRpc::AppendEntries(ae) => ae.entries.into_iter().map(|e| e.message).collect(),
+                        _ => vec![],
+                    }
+                } else {
+                    vec![]
+                }
+            }),
+            reached: None,
         }
     }
 

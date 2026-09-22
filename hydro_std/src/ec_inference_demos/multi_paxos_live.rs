@@ -1009,4 +1009,167 @@ mod amplification_tests {
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
+
+    /// The sweep (`hydro_lang::sim::sweep`) on the same inputs, told the clocks (the command
+    /// hook, metered; the kernel timer, one interrupt per `PERIOD`) and the goal extractor
+    /// (accept records at the acceptors carry the command they propose) but **not the edge**. It
+    /// must re-find the redo queue: the completion self-hop and the acceptors' acks, bursty
+    /// delivery sustained above the timer period, constant delay transient; and it reports what
+    /// every other hook edge does under the same moves.
+    #[test]
+    fn sweep_finds_the_redo_queue_without_being_told_the_edge() {
+        use hydro_lang::sim::sweep::{Gain, InputShape, Options, Program, Run, Shape, clock};
+
+        let (_, edges) = control();
+        let (cmd_edge, completion_edge) = edges;
+        let accepts_pred = accepts();
+        let program = Program::<u32> {
+            name: "multi_paxos_live".to_owned(),
+            inputs: InputShape::UpFront,
+            run: Box::new(move |driver| {
+                let outcome = run_under(driver);
+                let chosen = outcome.chosen_per_command();
+                let mut progress = BTreeMap::new();
+                progress.insert("campaigns".to_owned(), outcome.campaigns() as i64);
+                progress.insert("learned slots".to_owned(), outcome.learned.len() as i64);
+                progress.insert("commands chosen".to_owned(), chosen.len() as i64);
+                progress.insert("max decrees per command".to_owned(), chosen.values().copied().max().unwrap_or(0) as i64);
+                Run { counts: outcome.counts, lineage: outcome.lineage, progress }
+            }),
+            clocks: vec![
+                clock({ let cmd_edge = cmd_edge.clone(); move |key: &str| key == cmd_edge }, EdgePolicy::Metered(1)),
+                clock(kernel_timer(), EdgePolicy::Periodic { period: PERIOD, count: Some(1) }),
+            ],
+            time: Some(Box::new(move |key: &str| key == cmd_edge)),
+            goals: Box::new(move |edge, record| {
+                if accepts_pred(edge) {
+                    let (_, (_, _, _, v)): Accept = record.decode().expect("accepts are Serialize");
+                    v.into_iter().collect()
+                } else {
+                    vec![]
+                }
+            }),
+            reached: None,
+        };
+        let ds: Vec<u64> = std::env::var("SWEEP_DS")
+            .ok()
+            .map(|s| s.split(',').map(|d| d.parse().unwrap()).collect())
+            .unwrap_or_else(|| hydro_lang::sim::sweep::grid(50));
+        let report = program.sweep(&Options { ds, refine: true, verbose: true, empty_ticks: true });
+
+        let mut failures = vec![];
+        let completions = |k: &str| k == completion_edge;
+        // Hand computation (see `redo_queue_re_proposes_the_whole_backlog_per_stall`): the stall
+        // detector fires once a completion is late by about the timer period (the exact offset
+        // is the program's own latency and the phase of the interrupts, a few ticks), so every
+        // threshold sits within a few ticks of `PERIOD`; a constant delay is a transient, bursts
+        // above the period stall for the whole run. Measured: completions 12 / 10, acks 13 / 9
+        // (constant / bursty).
+        let about_period = |t: Option<u64>| matches!(t, Some(t) if (PERIOD - 2..=PERIOD + 3).contains(&t));
+        for (name, pred) in [("completions", Box::new(completions) as Box<dyn Fn(&str) -> bool>), ("acks", Box::new(acks()))] {
+            let constant = report.sweep_of(&pred, Shape::Constant);
+            let bursty = report.sweep_of(&pred, Shape::Bursty);
+            if !about_period(constant.threshold) {
+                failures.push(format!("{name}, constant: threshold {:?}, hand-computed about {PERIOD}", constant.threshold));
+            }
+            if !about_period(bursty.threshold) {
+                failures.push(format!("{name}, bursty: threshold {:?}, hand-computed about {PERIOD}", bursty.threshold));
+            }
+            if bursty.verdict != Gain::Sustained {
+                failures.push(format!("{name}, bursty: verdict {:?}, expected Sustained", bursty.verdict));
+            }
+            if constant.verdict != Gain::Transient {
+                failures.push(format!("{name}, constant: verdict {:?}, expected Transient", constant.verdict));
+            }
+            // Constant delay: a transient of at most ceil((l + d) / PERIOD) campaigns.
+            for cell in &constant.cells {
+                let bound = (cell.d.div_ceil(PERIOD) + 1) as i64;
+                if cell.measure.progress["campaigns"] > bound {
+                    failures.push(format!("{name}, constant d = {}: {} campaigns, hand-computed at most {bound}", cell.d, cell.measure.progress["campaigns"]));
+                }
+            }
+        }
+        // The finding the sweep made that no one had pointed the instrument at: a constant delay
+        // on the phase-2 proposals themselves (the accepts edge). Above the period the
+        // re-proposals of every campaign land after the next interrupt, which has already
+        // campaigned again and fenced them at the acceptors, so nothing completes while the
+        // timer runs: every interrupt after the first campaigns (`TICKS / PERIOD - 1`), every
+        // pending command is re-proposed to every acceptor at every campaign, and the pending
+        // set grows by `PERIOD` commands per campaign from the `n0` pending at the first one.
+        // Hand computation: per command, `N_ACCEPTORS * (1 + campaigns after its admission)`,
+        // a staircase of `PERIOD` commands per step; in total
+        // `N_ACCEPTORS * (TICKS + 1 + sum_k (n0 + PERIOD * (k - 1)))`.
+        let proposals = report.sweep_of(accepts(), Shape::Constant);
+        let saturated: Vec<_> = proposals.cells.iter().filter(|c| c.measure.progress["campaigns"] == (TICKS / PERIOD) as i64 - 1).collect();
+        if saturated.is_empty() {
+            failures.push("accepts, constant: no cell with a campaign per interrupt".to_owned());
+        }
+        for cell in &saturated {
+            let campaigns = cell.measure.progress["campaigns"] as u64;
+            let steps = histogram(cell.measure.per_goal.values().map(|a| a / N_ACCEPTORS as u64));
+            let n0 = steps.get(&(campaigns + 1)).copied().unwrap_or(0) as u64;
+            let mut expected = N_ACCEPTORS as u64 * (TICKS + 1);
+            for k in 1..=campaigns {
+                expected += N_ACCEPTORS as u64 * (n0 + PERIOD * (k - 1));
+            }
+            let middle_steps_ok = (2..=campaigns).all(|p| steps.get(&p).copied().unwrap_or(0) as u64 == PERIOD);
+            println!(
+                "  accepts, constant d = {}: {} campaigns, {} accept records (hand-computed {expected} from n0 = {n0}), proposals per command {steps:?}, commands chosen {}, learned slots {}",
+                cell.d,
+                campaigns,
+                cell.measure.derivations(),
+                cell.measure.progress["commands chosen"],
+                cell.measure.progress["learned slots"]
+            );
+            if cell.measure.derivations() != expected || !middle_steps_ok {
+                failures.push(format!("accepts, constant d = {}: {} accept records, hand-computed {expected}; staircase {steps:?}", cell.d, cell.measure.derivations()));
+            }
+            if cell.measure.progress["commands chosen"] != (TICKS + 1) as i64 {
+                failures.push(format!("accepts, constant d = {}: {} commands chosen once the timer stopped, expected all {}", cell.d, cell.measure.progress["commands chosen"], TICKS + 1));
+            }
+        }
+        for s in report.findings() {
+            println!("  finding: [{}] {:?} threshold {:?} knee {:?} verdict {:?}", s.edge, s.shape, s.threshold, s.sustained_from, s.verdict);
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// One run of the phase-1 + phase-2 harness under a driver the caller built (the sweep's
+    /// entry point; the clocks and the move are already in the driver).
+    fn run_under(driver: HoldScheduleDriver) -> Outcome {
+        let mut flow = FlowBuilder::new();
+        let acceptors = flow.cluster::<()>();
+        let proposers = flow.cluster::<()>();
+        let learners = flow.cluster::<()>();
+        let (timeout_send, timeouts) = proposers.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let (cmd_send, cmds) = proposers.sim_input::<u32, TotalOrder, ExactlyOnce>();
+        let outs = multi_paxos_live(&acceptors, &learners, MAJORITY, N_PROPOSERS, timeouts, cmds);
+        let learned_recv = outs.learned.sim_cluster_output();
+        let est_recv = outs.established.sim_cluster_output();
+        let mut learned = Vec::new();
+        let mut established = Vec::new();
+        let (learned_ref, est_ref) = (&mut learned, &mut established);
+        let (counts, lineage) = flow
+            .sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&acceptors, N_ACCEPTORS)
+            .with_cluster_size(&proposers, N_PROPOSERS)
+            .with_cluster_size(&learners, LEARNERS)
+            .run_traced(driver, async move || {
+                cmd_send.send(0, 0u32);
+                quiesce().await;
+                timeout_send.send(0, ());
+                quiesce().await;
+                for c in 1..=TICKS as u32 {
+                    cmd_send.send(0, c);
+                }
+                for _ in 0..TICKS / PERIOD {
+                    timeout_send.send(0, ());
+                }
+                quiesce().await;
+                learned_ref.extend(learned_recv.collect_sorted::<Vec<_>>(0).await);
+                est_ref.extend(est_recv.collect_sorted::<Vec<_>>(0).await);
+            });
+        Outcome { counts, lineage, learned, established, edges: None }
+    }
 }

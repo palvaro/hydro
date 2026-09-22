@@ -34,52 +34,64 @@ Read, in this order, before doing anything else:
    `re_derivations`); lineage_rt.rs and lineage_pass.rs only if you touch the pass.
 4. .kiro/steering/*.md and AGENTS.md, project rules.
 
-Your task is "Next: the sweep", in this order:
+Your task is "Next" at the end of the design doc. State of the sweep (the previous task, done;
+read the design doc's "The sweep" section before anything else):
 
-- (Done: `edge_counts::with_empty_ticks_allowed` switches the forcing rule off for a run, so an
-  edge alone in its tick can be held; the acks move on multi_paxos_live is measured in the design
-  doc under "The scheduler option". Default unchanged.)
-- The sweep as a tool, not a hand-written test: given a program, fixed inputs, the metered
-  clock edge(s) and a goal extractor at the hooks, for every hook edge x {constant, bursty} x d
-  report derivations per goal against the prompt run, the program's own progress signals if any
-  (terms, campaigns), the threshold and whether the gain is transient or sustained. The standard
-  it must meet: reproduce the three tables in the design doc **without being told the edge**.
-  Every result so far was found by a person reading the program and picking the edge; the sweep
-  is what turns "the instrument sees the loop when pointed at it" into "the checker finds it".
-  Run it on the three known programs first, then on anything new.
-- Where the fixed inputs come from: the test body (the `async move || { .. }` closure that
-  `run_traced` takes, called the thunk in the codebase) of the program's existing sim tests,
-  minus mid-run assertions and any `fuzz`/`exhaustive` wrapper. Three shapes exist and the
-  report must say which was used: inputs sent up front (rpc_retry's hold tests, Raft, multi_paxos:
-  time is metered decisions); round by round with `quiesce()` (most existing tests; only usable
-  under `with_empty_ticks_allowed`, where a hold lasts d empty rounds inside the quiesce, so the
-  threshold comes out in rounds); closed loop (the collapse harness, the Raft progress test: the
-  reaction to outputs is part of the workload and must be kept). The goal extractor (which payload
-  field names a goal) is the one declared line of program knowledge per harness.
-- Known incompleteness of the move set, to state in every report: the moves cover one of the
-  design's five hook dimensions (release timing). Release *size* produced the sim collapse with no
-  hold at all; order, crash and membership moves do not exist yet.
+- `hydro_lang/src/sim/sweep.rs` is the tool. A harness declares `sweep::Program { run, clocks,
+  time, goals, reached }` and calls `.sweep(&Options { ds, refine, verbose, empty_ticks })`; it
+  gets a `Report` with one `EdgeSweep` per (candidate edge, shape) holding every `Cell`
+  (derivations per goal, excess by window, progress changes, `Gain`) and three bisected
+  thresholds (`threshold` = first finding, `sustained_from` = the knee, `progress_from`).
+  Candidates are every counted hook edge with a record under prompt that no clock predicate
+  matches; keyed batches get the bursty shape only. `Report::print` is the table; `findings()`,
+  `sweep_of(pred, shape)`, `is_idle(pred)` are what the tests use. `Program::time = None` makes a
+  program single-shot (`Gain::Extra`, no shape). Every run is under `with_empty_ticks_allowed`
+  unless `Options::empty_ticks = false`.
+- Validation set, all green and asserted against hand computations: `rpc_retry::amplification_tests::
+  sweep_finds_the_retry_storm_without_being_told_the_edge` (5 min), `raft::amplification_tests::
+  sweep_finds_the_election_storm_without_being_told_the_edge` (8 min, runs both scheduler settings),
+  `multi_paxos_live::amplification_tests::sweep_finds_the_redo_queue_without_being_told_the_edge`
+  (12 min), and `hydro_std::ec_inference_demos::sweep_controls` (5 tests, ~7 min). `SWEEP_DS=1,2,4`
+  overrides the grid for a quick run.
+- Findings the sweep made that nobody had pointed the instrument at: on multi_paxos_live a constant
+  delay of 15 on the phase-2 proposals is a zero-goodput loop (19 campaigns, 6816 accepts, the
+  staircase hand-computed); on Raft the constant-delay storm starts at d = 2 under empty ticks
+  (timer phase offset from phase 1, printed per run), 4 under the forcing rule (E2b).
 
-An alternative worth a real look, less invasive than the sweep (raised by the user; not started):
-coverage-guided fuzzing with amplification as the coverage metric, i.e. PerfFuzz (Lemieux, Padhye,
-Sen, Song, ISSTA 2018: max hit count per edge as coverage, so the fuzzer hill-climbs on work)
-applied to schedules. The sim's decision sequence is already the fuzz input (a bolero `Driver`);
-derivations per goal at the hooks (E3.1's payload attribution, no pass needed) is the metric;
-bucket it so a new bucket is new coverage. No hand-written policy, no scheduler option, and it
-covers every hook dimension at once (size, order, crash) — which is exactly where the structured
-moves are incomplete. Costs: bolero has no coverage API of its own; feedback needs the libFuzzer
-engine (`cargo bolero test`, sanitizer coverage; libFuzzer accepts user-defined 8-bit "extra
-counters" through a linker section, unwrapped by bolero), and raw decision sequences are a large
-space (E2b's storm is a coordinated pattern over hundreds of decisions; the sweep found it in
-eight runs). A cheap middle: make the *policy* `(edge, shape, d)` the bolero-generated input and
-let plain `cargo test` fuzzing sample it — the sweep, randomized, no engine needed. SlowFuzz
-(Petsios et al., CCS 2017) is the coarser precedent and its single total-work fitness is the
-objective E2b showed to be wrong here; Singularity (Wei et al., FSE 2018) is the precedent for
-fuzzing over generators/policies instead of raw inputs.
-- Then run it on the rest of the corpus as controls: synod, abd, crdt_gossip, uniform_broadcast.
-  Expected "no moves" or bounded; a sustained loop is a finding, record it.
-- Then, if time: the redo queue under load (acceptors with a per-tick capacity): does the
-  backlog run away?
+Next, in this order:
+
+- **The redo queue under load:** give multi_paxos_live's acceptors a per-tick capacity
+  (`rpc_retry`'s `max_per_tick` idiom: process at most c per tick, keep the rest in state) and
+  sweep it: does bursty completion delivery plus re-proposals run the backlog away? The
+  proposal-path finding says a constant delay ≥ 15 on the accepts already gives a loop with zero
+  goodput; capacity is the way that delay arises on its own. Do not change `multi_paxos.rs` for
+  it: wrap or fork the acceptor in the harness (the program under test can be a variant in
+  hydro_std with the capacity as a parameter, defaulting to unlimited) — or, if that is not
+  possible without touching the acceptor's slice, say so and stop.
+- **Round-by-round inputs.** No harness has tried the round-by-round shape (send, `quiesce()`,
+  repeat). Under empty ticks a hold lasts d rounds inside the quiesce; the sweep's `time` would
+  be the input edge. Try it on one existing round-by-round test before claiming it works.
+- (Done: the per-decision counterfactual fork, `hydro_lang/src/sim/counterfactual.rs` and
+  `HoldScheduleDriver::with_fork`; design doc "Per-decision counterfactual forks". Kill criterion
+  passed: Raft heartbeats-only, 0 records changed at every fork. rpc_retry: exact per request.
+  Raft storm: 4 `RequestVote`s caused per early `AppendEntries`, visible per payload shape, not
+  per edge (displacement) and not per goal (the leader's re-sends look the same in the control).)
+- **Identity from the program's own dedup operators** (design doc "Identity is the idempotency
+  key"): list the keyed and negative operators the lineage pass sees, with key expressions, on
+  the three programs; compare with the hand-written goal extractors. Predictions are written
+  there; multi_paxos_live is predicted to come out wrong (slot vs command) — record it.
+  Scaffolding exists and compiles but has **never been run**: `hydro_lang/src/sim/identity.rs`
+  (`loci(operators)`, `print`) and `CompiledSim::operators()` (the pass's table without a run).
+  Expect the key-type parsing to need work once it meets real element types. Also read by hand
+  before running: Raft's receiver key is the term and Paxos's the slot, per-attempt stamps, so
+  the pass is predicted to find nothing usable there; the full argument is in the design doc.
+- **Forks on multi_paxos_live's proposal path** (accepts edge, constant d = 15): does one early
+  delivery end the loop or skip one period? Hand-compute first (design doc "Next").
+- **The payload-shape column in the sweep**: per (edge, shape) against prompt, tried on the three
+  validation programs and the controls before it is trusted.
+
+The coverage-guided alternative below was the spike's subject and is answered by it: a generic
+search, yes; a generic score, no. Kept for the record.
 
 Do not resume lineage precision work for opaque closures (needs a counterfactual fork; the
 search loop's business), do not build a separate payload-multiset verdict (per-goal counts carry
@@ -214,3 +226,48 @@ Things learned in the negative-leaves step and on multi_paxos_live; do not redis
   (~70 s), `cargo test -p hydro_lang --features sim` (~6 min), `cargo test -p hydro_test --lib --
   --test-threads=1 rpc_retry:: raft::` (~25 min; the negative-leaves test on rpc_retry alone is
   ~9 min, mostly analysis).
+
+Things learned in the sweep and fork steps; do not rediscover them:
+
+- A fork's "prefix or exact" cannot be read off the held run's log (under `Hold` every hook
+  releases oldest-first); read it off the fork run's release at the forked decision, excluding
+  records the policy had due anyway.
+- The first arrival at a Raft follower is phase 1's `RequestVote`, not the first `AppendEntries`;
+  hand computations about "the first held delivery" need the payload shape of the forked group
+  (`ForkOutcome::group_shapes`).
+- The `Debug`-derived shape cuts at 72 characters, which is before `entries:` in an
+  `AppendEntries`; an empty heartbeat and an entry-carrying one share a shape.
+- Record-level fork diffs (`ForkOutcome::caused_records`) match by payload. On Raft that pairs
+  almost nothing across the branches (`last_log_index`, terms shift), ~110 caused vs ~111
+  displaced per fork; collapse by role (kind, sender, receiver) before reading them. On rpc_retry
+  payload matching is exact except the `Completion` latency field.
+
+- The crate under test is staged into the trybuild project *at run time*, per `run_traced`.
+  Editing a source file of `hydro_std`, `hydro_test` or `hydro_lang` while a sim test of that
+  crate is running re-stages a changed source mid-run and the compile fails
+  (`trybuild/generate.rs:667`). Do not edit those crates while their tests run; edit
+  `design_docs/` or a scratch file outside them instead.
+- Under `with_empty_ticks_allowed` a tick whose hooks all held may have nothing to do
+  (`run_tick()` returns false: no state to carry); `compiled.rs` now allows that when nothing was
+  released (`run_hooks` returns whether anything was). Under the forcing rule it is still an error.
+- A held edge in phase 1 of a harness changes the phase of one member's timers against another's
+  (Raft: the storm at d = 2 instead of 4). Under the forcing rule a hook alone with items in its
+  tick is flushed, which is why E2b never saw it. Print the timer phases (first releases per member)
+  when a threshold disagrees with a hand computation.
+- A tick with program state but no hook input is not runnable, so a server whose backlog is
+  processed per tick strands its last burst when the clock runs dry (rpc_retry, bursty arrivals:
+  completions 556 at d = 37 with fewer derivations than prompt). The sweep reports it as a
+  progress-only finding; it is a scheduler limitation (deployed ticks are timer-driven), not
+  amplification.
+- Bursty thresholds depend on the parity of arrivals against the hook's decision index
+  (rpc_retry: 41, not τ = 40). Hand-compute them from the prompt log's `Record::arrived`
+  (`delay = (−a) mod d`), not from the shape alone.
+- Type names of private types in edge keys carry the staged path
+  (`hydro_std_hydro_trybuild::__staged::ec_inference_demos::abd::ToReplica<u32>`); match on the
+  `sliced!` line and a type fragment, never on the crate path.
+- Edge keys of two blocks with the same `let x = sliced!` line text (quorum.rs's two `covered`
+  mints, crdt_gossip's two `sampled`) cannot be named by `line_of`; name one by the unique block
+  and the other as "the other edge in that file".
+- Cost: ~3 s per run; a sweep is (candidates × 2 shapes × grid + ~3 bisections each) runs.
+  Never run two `cargo test` processes at once (a 5-test control file took 39 min wall while
+  nothing else ran; the machine, not the tests).

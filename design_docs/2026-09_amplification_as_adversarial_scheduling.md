@@ -979,20 +979,354 @@ set the next stall re-releases is larger — 4845 accepts against 2139 at bursty
 prompt run, and commands decreed up to 15 times. Where the delay sits changes the gain by a
 factor of two on the same program with the same threshold; the sweep has to try every edge.
 
-### Next: the sweep
+### The sweep
 
-- ~~Scheduler~~: done above.
-- **The sweep as a tool.** Input: a program, fixed inputs, the metered clock edge(s), a goal
-  extractor at the hooks. For every hook edge × {constant, bursty} × $d$: derivations per goal
-  against the prompt run, campaigns/terms where the program has them, the threshold and the shape
-  (transient vs sustained). This is the table above produced automatically; the three programs
-  so far are its validation set.
-- **Controls over the rest of the corpus:** `synod`, `abd`, `crdt_gossip`, `uniform_broadcast`
-  should come back "no moves" or bounded (abd's read-repair and the gossip pump do fixed work per
-  input; synod's duel is the election theorem again). Any sustained loop there is a finding.
+Done: `hydro_lang/src/sim/sweep.rs`. Tests, one per program, each a harness of the program's
+existing sim inputs and one goal extractor:
+`rpc_retry::amplification_tests::sweep_finds_the_retry_storm_without_being_told_the_edge`,
+`raft::amplification_tests::sweep_finds_the_election_storm_without_being_told_the_edge`,
+`multi_paxos_live::amplification_tests::sweep_finds_the_redo_queue_without_being_told_the_edge`,
+and the corpus controls in `hydro_std/src/ec_inference_demos/sweep_controls.rs`. Every number
+below is printed by one of them and the ones marked "asserted" are checked against a hand
+computation there.
+
+**The tool.** `sweep::Program { run, clocks, time, goals, reached }` is what a harness declares:
+`run` wires the flow and runs the fixed inputs under a driver the sweep builds; `clocks` are the
+edges the driver meters or paces in every run (a metered input stream, a periodic timer) and are
+never moved; `time` is the clock whose non-empty releases are logical time; `goals` is the one
+declared line of program knowledge, `(edge key, record) -> goals`, decoding the payload with the
+host's type for that edge. The sweep runs prompt once, takes every other counted hook edge with a
+record under prompt as a candidate, and for each candidate × {constant `Hold(d)`, bursty
+`Periodic { period: d }`} × a geometric grid of `d` runs the same inputs and compares
+derivations per goal ([`Lineage::per_goal`], payload attribution, no pass). Per cell it reports
+the total and per-goal histogram of derivations toward goals, the largest per-goal ratio against
+prompt, records no goal accounts for, the harness's progress signals against prompt's, and the
+excess over prompt in four windows of logical time — a record's time is the clock count at the
+decision it *arrived* at its hook, which a hold cannot move — from which the gain is labelled
+transient (at least three quarters of the excess in the first half of the run) or sustained.
+Three thresholds are located by bisection between grid points: the first `d` with any finding,
+the first with a sustained gain (the knee), and the first with a progress change. Every run is
+under `with_empty_ticks_allowed`, so an edge alone in its tick is a candidate like any other; the
+forcing rule is an option (`Options::empty_ticks = false`), used once below. Keyed `batch` edges
+are counted but not in the lineage log (no per-record positions), so they get the bursty shape
+only (`HoldScheduleDriver` now answers a keyed hook's per-key count questions under `Periodic`,
+all keys or none) and a note. Two scheduler fixes were needed: a tick whose hooks all held may
+find its DFIR has nothing to do (`run_tick()` false) — an error under the forcing rule, allowed
+under empty ticks — and the driver's keyed-hook panic became `Periodic`-only.
+
+**Cost.** One run is one compiled simulation with the harness's inputs: ~3 s on rpc_retry
+(300 ticks) and multi_paxos_live (200 commands), ~4 s on Raft (200 ticks × 3 members). The
+sweeps below took 102, 55 (× 2 settings) and 239 runs: 5, 7 and 12 minutes.
+
+**rpc_retry** (E2's inputs: 300 ticks, 2 requests per tick, τ = 40, A = 3; clocks: the client
+clock and the request stream; goals: the request id every record carries, a `Completion`
+reaches its request). 11 hook edges, 3 idle under prompt (`retried`, `abandoned`, the server's
+report tick), 2 clocks, 6 candidates. Prompt: 4 derivations per request (arrival, processed,
+response, outgoing), 600 reached. Findings, all asserted per request against E1's step function
+(`expected(t, l, delay)`, sends per request), constant and bursty:
+
+| edge | shape | first gain | knee | derivations at d = 40 / 64 / 128 (prompt 2400) | progress at 128 |
+|------|-------|------------|------|-------------------------------------------------|-----------------|
+| responses (server → client) | constant | 39 | 39 | 5000 / 5000 / 7560 | abandoned 360, completions 240 |
+| responses | bursty | 41 | 41 | 2400 / 3400 / 5192 | abandoned 32, completions 568 |
+| arrivals (client → server) | constant | 39 | 39 | 5000 / 5000 / 7560 | abandoned 360, completions 240 |
+| arrivals | bursty | 37 (progress only) | 40 | 2466 / 3422 / 5614 | abandoned 46, completions 482, backlog 136 |
+| processed, outgoing, completions (metrics tees) | both | — | — | 2400 at every d | — |
+
+The retry storm, re-found on both edges of the wire without being told either. Constant delay:
+the threshold is τ − 1 (the requests with baseline latency 2 cross the timeout first), the gain
+is sustained (every request minted early enough pays it) and saturates at A: 5000 = 2400 + 520 ×
+5 (four work edges and a `retried` record per extra send), 7560 at 3τ = the same plus 360
+abandon records; per-goal max ratio 2.25 then 3.75. Bursty: a response arriving at hook decision
+`a` is released at the next multiple of `d`, so its delay is `(−a mod d)`, at most `d − 1`; the
+threshold is **41**, not the τ = 40 a first hand computation says, because the arrivals'
+parity against the server's every-other-tick cadence decides which delays occur — the test
+derives the threshold from the prompt log's arrival decisions and matches every bursty cell per
+request (asserted). Holding the arrivals instead of the responses gives the same step function
+from τ on (asserted equal to the responses move at every d ≥ 40) and 2 requests instead of 260
+at τ − 1: a server whose buffer holds records runs every round, so the baseline latencies lose
+their parity (recorded, not hand-computed). The bursty arrivals move also shows the sweep's one
+scheduler artifact: a burst of 2d requests against a capacity of 20 per tick leaves a backlog,
+and the last burst's remainder is stranded when the clock runs dry, because a tick with state but
+no input is not runnable — completions 556/570/584/598 at d = 37–40 with *fewer* derivations
+than prompt and no retry yet. In deployment the server tick is timer-driven; the sweep labels it
+"progress only" and the knee (40) is where the retries start.
+
+**Raft** (E3.1's inputs: 5 entries, election timer every 4, 200 heartbeat ticks × 3 members;
+clocks: the heartbeat hook metered, the election hook paced; goals: the entries an
+`AppendEntries` carries). 5 hook edges: the two timers, the requests, the committed output
+slice, the traffic. Prompt: 2 derivations per entry (one `AppendEntries` per follower), 0
+elections, 15 commits. Requests and committed: no moves at any d (asserted). Traffic:
+
+| setting | shape | first gain | first storm (progress) | derivations per entry, below / at the storm | elections at the largest d |
+|---------|-------|------------|------------------------|---------------------------------------------|----------------------------|
+| ticks may run empty | constant | 1 | **2** | 6 at d = 1; 8, 8, 16, 16, 24, 32, 40, 56 at d = 2 … 24 | 50 |
+| ticks may run empty | bursty | 2 | 5 | 2(2d − 1) below; 2(d + 3) from d = 6 | 52 (82 at d = 5, 75 at d = 6) |
+| forcing rule (E2b's) | constant | 1 | 4 | 6, 10, 14 at d = 1, 2, 3; 16, 20, … from 4 | 50 |
+| forcing rule | bursty | 2 | 5 | as above | 52 |
+
+The election storm, re-found: from the storm threshold on, a term per period and nothing
+commits, for every larger d (asserted), while the per-goal derivations by payload see only the
+leader's re-sends before it is deposed — 2 per follower per heartbeat tick of the leader's life,
+which the storm quantizes to the election period (4⌈(d+1)/4⌉ per follower under a constant
+delay) — a transient in every cell. So on Raft the sweep's verdict is carried by the progress
+signals, exactly as E2b said a single count could not see the storm; the derivation count says
+"bounded", the terms say "loop", and the report prints both. **A contradiction with E2b, worth
+recording:** under the sweep's default the constant-delay storm starts at d = 2, not at the
+election period. The timer phases are printed per run: under the forcing rule the followers'
+first phase-2 heartbeat decision is 1 and their election timer fires at 4 at every d, because
+phase 1's election traffic — the only thing in a follower's tick — is flushed by the forcing
+rule and phase 1 costs the same number of decisions whatever the policy; under empty ticks
+phase 1's traffic is really held d, phase 1 takes longer, and at d = 2 the followers reach
+phase 2 at decision 3 with the timer at 4 while the leader's first heartbeat, two decisions
+later plus d, arrives just after it. Same program, same inputs, same delay: the storm's threshold
+is the election period minus the phase offset between the followers' timers and the leader's
+heartbeats, and E2b measured the offset-zero case. The bursty threshold (5, E2b's "above the
+period") is the same in both settings; at d = 5 and 6 there are 82 and 75 terms in 200 ticks,
+more than one candidate per period.
+
+**multi_paxos_live** (the redo-queue inputs: 200 commands at one per kernel tick, timer every
+10; clocks: the command hook metered, the kernel timer paced; goals: the command an accept
+record at the acceptors carries). 12 hook edges, 2 clocks, 10 candidates, none idle. Prompt:
+603 derivations (3 per command), 0 campaigns, 201 learned slots.
+
+| edge | shape | first gain | knee | campaigns / accepts / max decrees per command at d = 12 / 16 / 32 / 48 |
+|------|-------|------------|------|-------------------------------------------------------------------------|
+| completions → kernel (the edge held by hand before) | constant | 12 | — (transient) | 1/648/2 · 1/642/2 · 3/843/4 · 4/1041/5 |
+| completions → kernel | bursty | 10 | 11 | 3/639/2 · 8/819/2 · 14/1542/4 · 15/1947/5 |
+| acks → quorum mint (the edge needing empty ticks) | constant | 13 | — (transient) | 0/603/1 · 1/708/3 · 2/930/6 · 4/1827/15 |
+| acks → quorum mint | bursty | 9 | 9 | 5/720/2 · 8/1227/4 · 14/3045/11 · 16/7527/19 |
+| **phase-2 proposals → acceptors** (new) | constant | 13 | **15** | 0/603/1 · **19/6816/2** · 19/6816/2 · 19/6816/2 |
+| phase-2 proposals → acceptors | bursty | 9 | 9 | 6/819/2 · 10/1047/2 · 14/1737/2 · 16/5691/2 |
+| **kernel releases → proposer core** (new) | constant | 13 | 13 | 0/603/1 · 1/660/2 · 2/747/3 · 4/1011/5 |
+| kernel releases → proposer core | bursty | 10 | 10 | 4/645/2 · 9/927/3 · 15/1821/5 · 17/2517/6 |
+| prepares, promises, the learner's and the kernel's other edges (6) | both | — | — | 603 at every d |
+
+The redo queue, re-found on both edges that were held by hand (thresholds within three ticks of
+the period, asserted; constant transient and bounded by ⌈(l + d)/P⌉ campaigns, asserted;
+bursty sustained), with the same numbers where the grids meet (acks bursty d = 12: 720 / 5, as
+in the table above). And two edges nobody had pointed the instrument at. Holding the kernel's
+releases on their way into the proposer core is the completion move from the other side. Holding
+the **phase-2 proposals themselves** is the strongest move on this program and a different
+shape: from a constant delay of 15 the run saturates — every interrupt after the first campaigns
+(19 of 20), the pending set is re-proposed in full at every campaign, and *nothing completes
+while the timer runs*: the re-proposals of a campaign land 15 ticks later, after the next
+interrupt has campaigned again and its prepares (not delayed) have raised the acceptors'
+promise, so they are refused. Accept records 6816 = 3 × (201 + Σ_{k=1}^{19} (19 + 10(k − 1))):
+19 commands pending at the first campaign, then 10 more per period, each proposed once per
+campaign after its admission, a staircase {20: 19, 19: 10, …, 2: 10, 1: 2} of proposals per
+command (asserted, at d = 15, 16, 24, 32, 48: identical). All 201 commands are chosen once the
+timer stops (learned slots 203). That is the Raft storm's shape in Paxos with one proposer and no
+duel — a redo timer shorter than the proposal path's delay fences its own proposals — 11× the
+accept work at zero goodput for the length of the run, and a constant delay does it. Where the
+delay sits changes the outcome by an order of magnitude on the same program: the completion move
+at d = 48 is 1041 accepts and a transient; the proposal move at d = 15 is 6816 and a loop.
+
+**Corpus controls** (`sweep_controls.rs`, five tests; these programs have no timer, so the
+sweep runs them single-shot: no clock, no shape, a gain would be reported as "extra"; grid 1–16,
+bisection on). Measured, all asserted:
+
+| program | inputs | hook edges | runs | prompt | under every move |
+|---------|--------|------------|------|--------|------------------|
+| uniform broadcast (20 messages, 3 members, threshold 2) | up front | 1 (the certificate mint) | 17 | 180 attestations, 60 deliveries | 180, 60 |
+| synod, sole proposer | up front | 4 (prepares, accepts, promises, acks) | 65 | 12 records, 1 chosen | 12, 1 |
+| synod, duel (rounds 1 and 2) | up front | 4 | 65 | 21 records (the lower ballot's accepts refused), 1 value | 21, agreement holds |
+| ABD, write then read (1 client) | closed loop | 4 (2 replica batches of one private type, 2 mints) | 65 | 12 attributed + 12 unattributed, read returns 10 | 12 + 12, 10 |
+| g-set gossip (2 members, 8 pump ticks) | up front | 1 (the pump, which is the clock) | 1 | converged | no candidate edge |
+
+No moves anywhere, as the design predicted: fixed work per input, no retry, no timer. The gossip
+row is the honest statement rather than a measurement — its deliveries land in a top-level fold,
+which has no hook, so once the pump is the clock there is nothing for the sweep to hold.
+
+**Incompleteness, to state in every report (the tool prints it):** the moves cover one of the
+design's five hook dimensions, release timing. Release *size* produced the sim collapse with no
+hold at all; order, crash and membership moves do not exist yet. And what the sweep's inputs
+are: the test body of the program's existing sim tests, sent up front and metered (all three
+programs here; the corpus controls are single-shot or closed loop); round-by-round harnesses
+have not been tried.
+
+### Per-decision counterfactual forks
+
+Done, first experiments: `hydro_lang/src/sim/counterfactual.rs`, `HoldScheduleDriver::with_fork`.
+Tests: `raft::amplification_tests::counterfactual_forks_attribute_the_hold_per_delivery` (the kill
+criterion and the storm, 3 min) and
+`rpc_retry::amplification_tests::counterfactual_forks_remove_exactly_the_flushed_requests_retries`
+(1.5 min). Every number below is printed by them; the ones marked asserted are checked against a
+hand computation.
+
+**Mechanism.** No snapshot: a fork is a replay of the held run under the same policy with one
+edit, `Fork { edge, member, decision, arrived }`: at that hook decision the records that arrived at
+`arrived` are released although `Hold(d)` would keep them. On an unordered hook the driver
+answers the "which item" questions with the group's positions, so exactly those records go; on a
+totally ordered hook the hook releases a prefix, so everything older goes with them (the report
+says which happened, read off the fork run's log). Everything else — clocks, inputs, the policy at
+every other decision — is the held run's. A fork is taken at the group's own arrival ("this
+delivery was not held"). The diff against the held run is taken three ways: per edge (record
+counts, no program knowledge), per (edge, payload shape) (the `Debug` rendering with digits and
+string contents removed, cut at 72 characters; no program knowledge, a heuristic), and per goal
+(the harness's extractor, as in the sweep). "Caused" is the positive part of held − fork, the work
+the hold made; "displaced" the reverse. One replay per fork, ~3–4 s; 18 forks per experiment here.
+
+**rpc_retry** (E2's inputs, responses held d = τ = 40, 12 forks at every 8th arrival group; the
+responses hook is totally ordered, so a fork flushes the whole held buffer at that decision).
+Hand computation per request: a response flushed at decision a after arriving at a′ is delayed
+a − a′ instead of d, so its sends are `expected(t, l, a − a′)` instead of `expected(t, l, d)`; the
+records caused are 4 work records plus one `retried` per send removed, and no other request
+changes. Asserted at every fork, per request: caused 20 at decision 2 (4 requests), 180 at 18, 340
+at 34, then 400 at every later fork (80 requests × 5 = the whole buffer's retries); displaced 0
+throughout; the per-goal column gives the same 5 per request. `max_attempts = 1`: 0 work records
+changed at every fork (asserted); the metrics edges show 80 abandons turned into 80 completions
+per fork — the verdict, not the work. So on the program with the dataflow absence test the fork
+reproduces E3.3's exact result with no lineage at all, and its granularity is the hook's: a
+prefix, not a record.
+
+**Raft** (E3.1's inputs, traffic held d = 4, the first 18 arrival groups, i.e. phase 1's election
+messages and the first heartbeat ticks at every member). The kill criterion first, heartbeats only:
+
+| fork (member, decision, what) | per edge caused / displaced | per shape | per goal (5 entries) |
+|---|---|---|---|
+| phase-1 votes and `RequestVote`s (decisions 0–1) | 0 / 0 | none | 0 |
+| a follower's first `AppendEntries`, decision 5 | 0 / 0 | none | 4 per entry |
+| its 2nd, 3rd, 4th `AppendEntries`, decisions 6, 7, 8 | 0 / 0 | none | 3, 2, 1 per entry |
+| decisions 9–12 | 0 / 0 | none | 0 |
+
+Per edge and per shape the diff is 0 at every fork (asserted): a fork moves a message, it never
+changes how many are sent. Per goal it is `max(0, a₀ + d − a)` re-sends per entry for an
+`AppendEntries` arriving at a follower at a (asserted), where a₀ + d is when the held run's first
+`AppendEntries` was released: the leader re-sends the pending entries until an ack is processed,
+and the earliest ack in the fork answers the message released at a. This is the bounded
+transient the sweep sees at d = 1..3, now attributed to the delivery that caused it; and it is
+present in the control, because a hold *does* cause it.
+
+The storm (election timer every 4, same d, same 18 forks):
+
+| fork | per edge caused / displaced | per shape | per goal | progress |
+|---|---|---|---|---|
+| phase-1 messages | 0 / 0 | none | 0 | — |
+| follower 1's `AppendEntries` at 5, 6, 7 | 4 / 5 | `RequestVote` 298 → 294; committed `LogEntry` 0 → 5 | 3, 2, 1 per entry | committed 0 → 5 |
+| follower 2's `AppendEntries` at 5, 6, 7 | 3 / 5 | `RequestVote` 298 → 294, one more vote; committed 0 → 5 | 3, 2, 1 per entry | committed 0 → 5 |
+| follower 1's at 8 | 4 / 0 | `RequestVote` 298 → 294 | 0 | — |
+| follower 2's two records at 8 | 0 / 2 | two more votes | 0 | elections 50 → 51 |
+| decisions 9–11 (election traffic) | 0 / 0 | none | 0 | — |
+
+Reading, column by column, which is the point of the experiment:
+
+- **Per edge**, the storm's per-delivery signal is 3–4 records caused against 5 displaced: net
+  negative. Releasing one follower's first `AppendEntries` in time removes that follower's
+  campaign in that period (4 `RequestVote` records) and lets the leader commit the 5 entries
+  before it is deposed (5 records on the committed edge). Totals over 18 forks: caused 25,
+  displaced 32. A per-edge total, even per delivery, is blind to this storm for the same reason
+  E2b's was: what the hold causes is small and what it displaces is larger.
+- **Per shape**, the storm is legible with no program knowledge: the caused records are all
+  `RequestVote`s (28 over the forks), the displaced ones are commits and votes, and the control
+  has no shape change at all. This is the spike's stated expectation ("the diff is the
+  RequestVote/vote path") met, and it is the first program-knowledge-free measure in this project
+  that separates the storm from the control. Its cost is that the shape is a heuristic over a
+  `Debug` string.
+- **Per goal**, the storm and the control look alike: 3, 2, 1 re-sends per entry removed in both
+  (asserted: the storm's total toward goals, 60, does not exceed the control's 100). The goal
+  column measures the leader's bounded re-sends, which is real work the hold caused, but it is
+  not the storm. On Raft the goal is the leader, not the entries, and no extractor over the
+  traffic payloads names it.
+
+**The records themselves (provenance for opaque closures).** The counts above are aggregates of
+a record-level difference the fork also produces: every record that crossed a hook in the held
+run and has no counterpart in the fork, matched by edge, member and payload
+(`ForkOutcome::caused_records`, and `displaced_records` for the reverse). This is the link E3.3's
+rule could not compute inside `raft_step`: for one held delivery, the concrete records that exist
+because it was held. On rpc_retry it is exact, asserted per record at every fork: the caused
+records are the retry records (arrival, processed, response, outgoing, `retried`) of exactly the
+flushed requests whose early release beats their timeout, plus one `Completion` per flushed
+request, which differs between the branches only in its latency field — the goal reached at a
+different time, matched against its displaced twin. On Raft the raw lists are useless and the
+reason is instructive: releasing follower 1's first `AppendEntries` gives ~110 caused records and
+~111 displaced, because once the follower holds the five entries every `RequestVote` it ever
+sends carries `last_log_index: 5` instead of `0`, and the terms shift by one, so payload matching
+pairs almost nothing across the branches and the whole storm shows up twice, renumbered.
+Collapsing the two lists by *role* — (RPC kind, sender, receiver), dropping the payload — recovers
+the answer exactly: for that fork, net caused `RequestVote 1 → 0` × 2, `RequestVote 1 → 2` × 2,
+`AppendEntries 0 → 1` × 3 (the entry-carrying re-sends), net displaced `heartbeat 0 → 1` × 3 (the
+same messages, empty) and `commit at 0` × 5; the role-collapsed `RequestVote` total over the 18
+forks equals the per-shape count (28, asserted). For the two records the fork releases at
+decision 8 the net is only two votes exchanged, and from decision 9 on the raw lists are one ack
+each way (the same ack, with a different term) and the net is empty.
+
+So the fork makes the *set difference* exact for a closure, and the remaining problem moves to
+record identity across runs: which fields of a record are its identity (kind, sender, receiver, a
+request id) and which are state stamped on it (term, `last_log_index`, latency). rpc_retry's
+records are all identity, so payload matching is exact there; Raft's carry state, and the role
+key that fixes it is the goal extractor's knowledge in another form. The `Debug`-shape heuristic
+(digits stripped) is a program-knowledge-free approximation of the role key that happened to be
+exact on both programs here.
+
+**What this settles and what it does not.** The fork is exact where E3.3's rule was exact
+(rpc_retry, asserted per record) and it is exact where the rule bracketed once records are
+matched by role (Raft: the suppressed campaign's four `RequestVote`s and the three entry-carrying
+re-sends per early `AppendEntries`, nothing in the control), with no lineage, no pass and no
+negative-operator marking. It also shows the storm is a system condition that no single delivery
+owns: each fork removes one follower's campaign in one period and the run storms on (elections
+50 in every fork but one), so summing "caused" over forks measures how many deliveries each
+individually matter, not how much the storm costs. The per-fork granularity is the hook's
+(prefix on ordered edges). Cost is one replay per fork; the sweep's finding says which edge and
+which d, so an attribution pass is tens of replays, not thousands.
+
+### Identity is the idempotency key
+
+The residue of program knowledge, located by the fork's record lists, is one fact per message
+type: which fields say what the message is *for* and which are stamps the protocol puts on it at
+send time. `Request { id, body }`: both identity. `Completion { id, latency_ticks }`: id is
+identity, latency a stamp. `RequestVote { term, candidate, last_log_index, last_log_term }`:
+candidate is identity (the message is work toward "candidate becomes leader"), the rest are
+stamps. `AppendEntries { term, leader, prev_log_*, entries, leader_commit }`: each entry's index
+is identity, the rest are stamps.
+
+**The identity fields are the idempotency key.** A retried RPC carries the same request id with a
+new attempt number and timestamp; a re-proposed Paxos value carries the same slot under a higher
+ballot; a re-sent Raft entry carries the same index under the current term. "Same key, different
+stamp" is what the receiver uses to recognise a duplicate and what the checker needs to recognise
+"the same goal, derived again". They are the same fact.
+
+**Consequently the residue is already in the program.** A receiver that deduplicates has an
+operator that does it, and that operator names the key: `unique()` (identity = the whole
+payload), `filter_key_not_in` / `anti_join` (identity = the key), `fold_keyed` and `join` (the
+key), `use::state` keyed by an id (rpc_retry's `outstanding`, keyed by request id). The lineage
+pass already walks the IR and marks the absence-testing operators as negative
+(`OperatorInfo::negative`); their key expressions are the goal extractor, derived rather than
+declared. Where that works it removes the declared line entirely. Where the dedup lives inside a
+Rust closure (Raft's `raft_step` keeps `match_index` and the log in HashMaps the IR cannot see),
+the key is still in the code, in the closure's map types, but not in the dataflow; the fallback is
+a derive on the wire type (`#[goal(...)]` per variant, generating the extractor and the fork's
+cross-run matching key), which is written once on the type, not per test, and is the same
+knowledge the programmer wrote into the closure's HashMap keys.
+
+Experiment to run next, cheap because the operator table exists: for each of the three
+programs, list the keyed and negative operators the pass sees with their key expressions, and
+compare with the hand-written goal extractors. Prediction: rpc_retry's `filter_key_not_in` on
+responses by `id` and the `unique()` on responses give exactly `Response::id` / `Request::id`;
+multi_paxos_live's acceptor `fold` keyed by slot gives the slot (a finer goal than the command:
+the redo queue re-proposes the same command at a *new* slot, so the command is the identity and
+the slot is a stamp — the inference would get this wrong, and that is worth knowing); Raft gives
+nothing, the closure case.
+
+### Next
+
+- **Forks on multi_paxos_live's proposal path**, where the sweep found the zero-goodput loop:
+  does releasing one campaign's proposals in time end the loop (one delivery owns it, the
+  redo-queue shape) or only skip one period (the Raft shape)? The accepts edge is unordered
+  (exact forks). The hand computation: releasing the proposals of campaign k at their arrival
+  should let them be chosen before interrupt k + 1, so that interrupt finds a completion and does
+  not campaign; whether the *following* interrupt stalls again depends on whether the next
+  batch's proposals are still delayed 15.
+- **The shape heuristic as a sweep column.** Per (edge, shape) counts against prompt would give
+  the sweep a program-knowledge-free verdict for displacement-type storms; try it on the three
+  validation programs and the controls before trusting it.
 - **The redo queue under load:** give the acceptors a per-tick capacity (`rpc_retry`'s
   `max_per_tick`) and ask whether bursty completions plus re-proposals run the backlog away, i.e.
-  whether this is a metastable failure and not only amplification.
-- Dropped: further precision work on lineage for opaque closures (needs the counterfactual
-  fork, which is the search loop's), the analysis-time cost of the negative-leaf walk, and
-  the "every derivation of the tick" variant.
+  whether this is a metastable failure and not only amplification. The proposal-path finding
+  above says a constant delay already suffices for a loop with zero goodput; capacity is the way
+  the delay arises on its own.
+- Dropped: further precision work on lineage for opaque closures (the fork above replaces it),
+  the analysis-time cost of the negative-leaf walk, and the "every derivation of the tick"
+  variant. The PerfFuzz spike (`2026-09_perffuzz_spike.md`) answered the coverage-guided
+  alternative: a generic search, yes; a generic score, no — the fork is its one untested path,
+  now tested.

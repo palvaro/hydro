@@ -523,6 +523,13 @@ fn lineage_sink(event: super::lineage_rt::LineageEvent) {
 }
 
 impl CompiledSim {
+    /// The lineage pass's operator table (kind, location, source line, element type, whether
+    /// the operator tests absence), when the program was compiled with `with_lineage`; empty
+    /// otherwise. Available without running the program: the static view of it.
+    pub fn operators(&self) -> &[super::lineage::OperatorInfo] {
+        self.operators.as_deref().unwrap_or(&[])
+    }
+
     /// Executes the given closure with a single instance of the compiled simulation.
     pub fn with_instance<T>(&self, thunk: impl FnOnce(CompiledSimInstance<'_>) -> T) -> T {
         self.with_instantiator(|instantiator| thunk(instantiator()), true)
@@ -2093,7 +2100,11 @@ impl<W: std::io::Write> LaunchedSim<W> {
 
                 // E3.3: the releases below and every derivation of this tick run belong together.
                 super::lineage::begin_tick(tick.cluster_id);
-                run_hooks(tick_decision_writer.as_mut(), tick.cluster_id, &mut tick.hooks);
+                let released_any =
+                    run_hooks(tick_decision_writer.as_mut(), tick.cluster_id, &mut tick.hooks);
+                // A tick whose hooks all held (only possible under `with_empty_ticks_allowed`)
+                // may have nothing to do if it carries no state; that is not an error.
+                let may_idle = !released_any && super::edge_counts::empty_ticks_allowed();
 
                 let run_tick_future = tick.dfir.run_tick();
                 if !tick.inline_hooks.is_empty() {
@@ -2103,7 +2114,7 @@ impl<W: std::io::Write> LaunchedSim<W> {
                         tokio::select! {
                             biased;
                             r = &mut run_tick_future_pinned => {
-                                abort_assert!(r, "tick DFIR run_tick() returned false");
+                                abort_assert!(r || may_idle, "tick DFIR run_tick() returned false");
                                 break;
                             }
                             _ = async {} => {
@@ -2126,7 +2137,7 @@ impl<W: std::io::Write> LaunchedSim<W> {
                         }
                     }
                 } else {
-                    abort_assert!(run_tick_future.await, "tick DFIR run_tick() returned false");
+                    abort_assert!(run_tick_future.await || may_idle, "tick DFIR run_tick() returned false");
                 }
                 super::lineage::end_tick();
 
@@ -2153,11 +2164,13 @@ impl<W: std::io::Write> LaunchedSim<W> {
     }
 }
 
+/// Asks every hook of a tick (or observation) for its decision and releases them; returns
+/// whether any hook released anything.
 fn run_hooks<W: std::fmt::Write>(
     mut tick_decision_writer: Option<&mut W>,
     member: Option<u32>,
     hooks: &mut [Box<dyn SimHook>],
-) {
+) -> bool {
     use super::edge_counts::{record_release, with_current_hook};
     use super::lineage;
 
@@ -2228,4 +2241,5 @@ fn run_hooks<W: std::fmt::Write>(
             );
         });
     });
+    made_nontrivial_decision
 }
