@@ -97,6 +97,9 @@ mod provenance_ir;
 pub mod runtime;
 
 #[cfg(stageleft_runtime)]
+pub mod prompt_schedule;
+
+#[cfg(stageleft_runtime)]
 #[doc(hidden)]
 pub use compiled::continue_if_impl;
 #[cfg(stageleft_runtime)]

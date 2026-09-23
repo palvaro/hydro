@@ -22,6 +22,7 @@ pub mod provenance_ground_truth;
 pub mod provenance_evidence_matrix;
 pub mod pure_heartbeat;
 pub mod raft;
+pub mod rpc_retry;
 pub mod provenance_survey;
 pub mod provenance_buffers;
 pub mod simple_cluster;

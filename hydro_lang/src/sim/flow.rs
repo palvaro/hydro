@@ -268,6 +268,32 @@ impl<'a> SimFlow<'a> {
         self.compiled().with_instance(thunk)
     }
 
+    /// Runs a single, deterministic execution of the simulation under the prompt schedule (see
+    /// [`super::prompt_schedule`]): every hook releases everything it has buffered, ready ticks
+    /// run round-robin, nothing crashes. Time in the resulting execution is measured in the
+    /// rounds of inputs the closure sends; the scheduler advances only while the closure awaits.
+    ///
+    /// Use this when an experiment needs to vary the program or its inputs while holding the
+    /// schedule fixed, rather than exploring schedules.
+    pub fn run_prompt(self, thunk: impl AsyncFnOnce() + RefUnwindSafe) {
+        use super::prompt_schedule::PromptScheduleDriver;
+
+        self.run_with_driver(PromptScheduleDriver::default(), thunk);
+    }
+
+    /// Runs a single execution of the simulation drawing every scheduling decision from
+    /// `driver` (see [`super::prompt_schedule`] for a deterministic driver), with the scheduler
+    /// running alongside `thunk`.
+    pub fn run_with_driver<D: bolero::bolero_engine::driver::Driver + 'static>(
+        self,
+        driver: D,
+        thunk: impl AsyncFnOnce() + RefUnwindSafe,
+    ) {
+        self.compiled().run_with_driver(driver, async |instance| {
+            instance.run_with_scheduler(thunk()).await
+        })
+    }
+
     /// Uses a fuzzing strategy to explore possible executions of the simulation. The provided
     /// closure will be repeatedly executed with instances of the Hydro program where the
     /// batching boundaries, order of messages, and retries are varied.
