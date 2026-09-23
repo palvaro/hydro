@@ -6,6 +6,11 @@
 pub mod backoff_retry;
 pub mod bounded_queue_rejection;
 pub mod cache_thundering_herd;
+pub mod compaction_falls_behind;
 pub mod crdt_gossip_load;
 pub mod election_stampede;
 pub mod gossip_resend;
+pub mod lease_renewal_storm;
+pub mod pure_heartbeat_load;
+pub mod rebalancing_ping_pong;
+pub mod transitive_closure_load;
