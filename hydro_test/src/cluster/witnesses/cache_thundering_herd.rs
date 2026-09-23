@@ -53,9 +53,9 @@
 //! | run | request_dated | coalesce | trigger | tail completions | tail mean latency | tail fetches offered | tail fills applied / redundant / stale | origin queue at 600 -> 800 | label |
 //! |---|---|---|---|---|---|---|---|---|---|
 //! | herd, request dated | true | false | yes | 1600 | 0.8 | 1600 | 0 / 0 / 800 | 2462 -> 3258 | hazardous (collapses) |
-//! | herd, fill dated | false | false | yes | 1600 | 0.0 | 100 | 100 / 0 / 0 | 0 -> 0 (peak 680, 568 redundant fills over the run) | hazardous, mitigated (recovers; see hold experiment) |
+//! | herd, fill dated | false | false | yes | 1600 | 0.0 | 100 | 100 / 0 / 0 | 0 -> 0 (peak 680, 568 redundant fills over the run) | no ground truth; recovers, and the tool is expected to find the herd (see hold experiment) |
 //! | no trigger | true | false | no | 1600 | 0.0 | 546 over rounds 10 to 800 | 156 wasted over rounds 10 to 800 | 0 -> 0 | healthy |
-//! | coalescing | true | true | yes | 1600 | 0.0 | 100 | 100 / 0 / 0 | 0 -> 0 (peak 390) | benign |
+//! | coalescing | true | true | yes | 1600 | 0.0 | 100 | 100 / 0 / 0 | 0 -> 0 (peak 390) | benign, by assurance argument: one outstanding fetch per key bounds fetches by distinct misses |
 //!
 //! The fill-dated herd recovers from the trigger, so its label rests on the hold experiment
 //! (`fill_dated_herd_does_more_work_the_longer_fills_are_held`): the same 1920 baseline lookups
@@ -643,7 +643,7 @@ mod sim_tests {
     /// The first version of this program dated entries from the fill's arrival. It was expected
     /// to collapse and does not: the herd's redundant fills keep the hot keys alive while the
     /// queue drains. It is still hazardous, since a held fill still turns lookups into fetches;
-    /// the hold experiment below confirms that. Kept as a measured, mitigated configuration.
+    /// the hold experiment below shows that. Kept as a measured configuration without ground truth.
     #[test]
     fn herd_with_fill_dating_refreshes_itself_and_recovers() {
         let trace = run(WORKLOAD, CacheConfig { request_dated: false, ..CACHE }, ORIGIN, ROUNDS);

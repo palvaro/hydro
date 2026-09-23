@@ -557,7 +557,7 @@ mod sim_tests {
         assert_healthy(&trace, 2, ROUNDS);
     }
 
-    /// The benign twin: same trigger, at most one message per renewal period. Leases lapse while
+    /// The one-outstanding program: same trigger, at most one message per renewal period. Leases lapse while
     /// the backlog drains and everything recovers; total sends equal the periods the clocks define.
     #[test]
     fn with_one_outstanding_renewal_the_system_recovers() {

@@ -24,7 +24,8 @@
 //! background work and the program amplifies. With a reserve at least as large as the puts that
 //! arrive per tick, the segment is bounded, every `Get` costs about one unit, and the program
 //! recovers from the same burst. The mechanism is present in both configurations, so both are
-//! labelled hazardous; the reserve mitigates the outcome without removing the extra work.
+//! labelled hazardous; the reserve changes the outcome under this trigger without removing the
+//! coupling, and the corpus table records the reserved configuration as having no ground truth.
 //!
 //! This differs from the corpus sketch, in which a non-incremental compaction blocks appends. In
 //! that version every record is appended once and scanned once, so total work is a fixed two
@@ -47,7 +48,7 @@
 //! | run | reserve | trigger | tail served (puts / gets) | tail units (serving / compaction) | backlog at 600 -> 800 | segment at 600 -> 800 | label |
 //! |---|---|---|---|---|---|---|---|
 //! | background compaction | 0 | yes | 5 / 200 | 6805 / 0 | 3432 -> 4223 | 31 -> 36 | hazardous, collapses |
-//! | reserved compaction | 8 | yes | 200 / 800 | 1000 / 200 | 0 -> 0 (peak 703 at round 159, empty from round 189) | 0 -> 0 (never above 6) | hazardous, mitigated |
+//! | reserved compaction | 8 | yes | 200 / 800 | 1000 / 200 | 0 -> 0 (peak 703 at round 159, empty from round 189) | 0 -> 0 (never above 6) | no ground truth; the coupling is present and the tool is expected to find it |
 //! | no trigger | 0 | no | 200 / 800 | 1000 / 200 | 0 -> 0 | 0 -> 0 | healthy |
 //!
 //! Hold runs (`held_arrivals_cost_extra_units_growing_with_the_hold`): no trigger, 3 `Put`s and
@@ -73,7 +74,7 @@
 //! from then on the store serves one or two reads per round, each costing the whole budget and
 //! more, reaches a put only about once every twenty rounds, and never has a unit left over for
 //! compaction, so the backlog grows by about 4 per round and the segment ratchets upward. The
-//! reserved twin serves 29 operations per round during the same burst because its reads always
+//! reserved store serves 29 operations per round during the same burst because its reads always
 //! cost one unit, and it drains the resulting backlog within 30 rounds. The hand computation in
 //! `sim_tests` predicted the shape and the tail throughput (about 200 operations against a
 //! baseline of 1000) and overestimated the segment, which grew to 9 rather than 15 during the
@@ -528,7 +529,7 @@ mod sim_tests {
         spent - required
     }
 
-    /// Hazard confirmation for the mitigated configuration. Holding the operations edge makes
+    /// Hazard evidence for the reserved configuration. Holding the operations edge makes
     /// puts and gets that would have been served in separate ticks share a burst, so a tick can
     /// serve more puts than the reserve compacts at the start of the next tick, and the gets
     /// served in that next tick pay for the remainder. The reserve bounds each get's surcharge

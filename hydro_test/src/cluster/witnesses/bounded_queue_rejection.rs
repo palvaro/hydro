@@ -41,7 +41,7 @@
 //!
 //! | run | max_backlog | trigger | tail completions | tail served first / again | queue at 600 -> 800 | whole run: sent / served / rejected / abandoned for 2200 requests | label |
 //! |---|---|---|---|---|---|---|---|
-//! | bounded queue | Some(100) | yes | 400 | 400 / 0 | 0 -> 0 (peak 100, 65 at round 200, empty from round 250) | 3033 / 1968 / 1065 / 232 | hazardous, mitigated (recovers; see hold experiment) |
+//! | bounded queue | Some(100) | yes | 400 | 400 / 0 | 0 -> 0 (peak 100, 65 at round 200, empty from round 250) | 3033 / 1968 / 1065 / 232 | no ground truth; recovers, and the tool is expected to find the retry (see hold experiment) |
 //! | unbounded | None | yes | 0 | 333 / 667 | 1038 -> 1237 | 4937 / 3700 / 0 / 978 | hazardous (collapses) |
 //! | no trigger | Some(100) | no | 400 | 400 / 0 | 0 -> 0 | 1600 / 1600 / 0 / 0 | healthy |
 //!

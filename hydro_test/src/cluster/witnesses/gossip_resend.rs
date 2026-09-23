@@ -13,7 +13,7 @@
 //! The mechanism is the re-send. When inboxes are deep, acknowledgements arrive after the
 //! timeout, so every member re-sends one delta per peer per tick on top of its new deltas; the
 //! re-sends fill the peers' inboxes further, which delays acknowledgements further. The knob is
-//! `ack_timeout_ticks`: zero disables re-sending and gives the benign twin, in which a full
+//! `ack_timeout_ticks`: zero disables re-sending and gives a different program, in which a full
 //! inbox simply drains at the merge rate.
 //!
 //! # Timer parameters

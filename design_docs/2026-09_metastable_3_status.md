@@ -23,20 +23,20 @@ bc5c42c6b6 docs(design): the checker searches schedules under fixed input; twins
 
 Twelve programs and twenty-two labeled configurations live in `hydro_test/src/cluster/witnesses/` and `hydro_test/src/cluster/rpc_retry.rs`. The full table with headline numbers and confirming test names is in `witnesses/mod.rs`. A configuration is hazardous when some schedule makes the same input cost more work, hazardous, mitigated when a parameter keeps that from collapsing the program under load, and benign when work is bounded by the input under every schedule.
 
-| file | configuration | label |
+| file | configuration | basis |
 |---|---|---|
-| `rpc_retry` | `max_attempts = 3` / `1` | hazardous / benign |
-| `backoff_retry` | `backoff = true` / `false` | hazardous, mitigated / hazardous |
-| `bounded_queue_rejection` | `max_backlog = Some(100)` / `None` | hazardous, mitigated / hazardous |
-| `cache_thundering_herd` | no coalescing, request dated / fill dated; coalescing | hazardous / hazardous, mitigated; benign |
-| `compaction_falls_behind` | `compaction_reserve = 0` / `8` | hazardous / hazardous, mitigated |
-| `crdt_gossip_load` | `g_set_gossip` unmodified | benign |
-| `election_stampede` | `timeout_spread_ticks = 0` / `3` | hazardous / hazardous |
-| `gossip_resend` | `ack_timeout_ticks > 0` / `= 0` | hazardous / benign |
-| `lease_renewal_storm` | `resend_after_ticks = Some(4)` / `None` | hazardous / benign |
-| `pure_heartbeat_load` | `pure_heartbeat` unmodified | benign |
-| `rebalancing_ping_pong` | `cooldown_ticks = 0` / `8` | hazardous / hazardous, mitigated |
-| `transitive_closure_load` | `productive_tc` unmodified | benign |
+| `rpc_retry` | `max_attempts = 3` / `1` | hazardous, by exhibited collapse / benign, by assurance argument |
+| `backoff_retry` | `backoff = true` / `false` | no ground truth, expected hazardous / hazardous, by exhibited collapse |
+| `bounded_queue_rejection` | `max_backlog = Some(100)` / `None` | no ground truth, expected hazardous / hazardous, by exhibited collapse |
+| `cache_thundering_herd` | no coalescing, request dated / fill dated; coalescing | hazardous, by exhibited collapse / no ground truth, expected hazardous; benign, by assurance argument |
+| `compaction_falls_behind` | `compaction_reserve = 0` / `8` | hazardous, by exhibited collapse / no ground truth, expected hazardous |
+| `crdt_gossip_load` | `g_set_gossip` unmodified | benign, by assurance argument |
+| `election_stampede` | `timeout_spread_ticks = 0` / `3` | hazardous, by exhibited collapse (both) |
+| `gossip_resend` | `ack_timeout_ticks > 0` / `= 0` | hazardous, by exhibited collapse / benign, by assurance argument |
+| `lease_renewal_storm` | `resend_after_ticks = Some(4)` / `None` | hazardous, by exhibited collapse / benign, by assurance argument |
+| `pure_heartbeat_load` | `pure_heartbeat` unmodified | benign, by assurance argument |
+| `rebalancing_ping_pong` | `cooldown_ticks = 0` / `8` | hazardous, by exhibited collapse / no ground truth, expected hazardous |
+| `transitive_closure_load` | `productive_tc` unmodified | benign, by assurance argument |
 
 All 45 corpus tests pass together (`cargo test -p hydro_test --lib witnesses::`, 92 s of test time, about 5 minutes wall clock including the build), and the 3 `rpc_retry::sim_tests` pass in 8 s. Every program takes time as a stream parameter, keeps its state in Hydro operators, and was labeled by a hand-computed expectation written before measurement.
 
@@ -68,3 +68,7 @@ The checker work starts with section 5 of `2026-09_what_carries_over.md`. Every 
 The first experiment's limit was that a uniform random draw will not hold a reply through forty consecutive clock releases. `hydro_lang/src/sim/hold_one_hook.rs` answers it with a bolero driver that follows the prompt schedule everywhere except at one named `use::batch` hook, which releases nothing while the harness says so, so a delay of any length on one edge is a single decision. Two small changes to the simulator were needed, both inert unless a hold is set: hooks tell the driver who is asking (a thread-local the scheduler sets around each decision, with the hook named `location#index-within-tick [item type]` because every batch in one `sliced!` block reports the block's location), and `SimTick::can_run` ignores a held hook, so a tick whose only loaded hook is held parks instead of being forced to release. Without the second change every hold was refused after one round, on every tick and not only on timerless ones.
 
 The `hold_sweep` tests in `checker_experiments.rs` run every one of the 22 labeled configurations under its own baseline workload with no trigger, discover the hooks that ever have input, hold each from round 20 for 0, 5, 10, 20, 40, 60, 80 and 100 rounds, and read extra work from the witness's own counters. The verdict is hazardous if some hold adds work over the unheld run and benign if none does; the hook with the largest gain is the localization. Twenty-one of twenty-two verdicts agree with the labels, no hold was refused, and the whole run takes about six minutes with the tests in parallel. On `rpc_retry` at its real timeout of 40 the responses hook reproduces the hand computation exactly (0 0 0 0 0 80 160 320) and the server's arrivals hook has the largest gain (0 0 0 0 4 136 498 588); at one attempt every curve is zero. The same two edges localize every request and response program in the corpus. The disagreement is `compaction_falls_behind` with `compaction_reserve = 8`, labeled "hazardous, mitigated" and found benign: with the reserve, neither a held clock nor a held operation stream adds any work, because the reserve compacts the segment before any get is costed; the hazard the label describes needs offered load above capacity, which no schedule of a fixed input produces. Whether that configuration should carry the label is a question about the definition rather than the measurement. A second observation for the definition: the two rebalancing configurations are found hazardous through the same hook with nearly the same curve, so the sweep sees "a delayed dump of tasks causes migrations" and does not separate the ping-pong the cooldown removes from the legitimate moves it leaves.
+
+## Relabeling: every label now carries its basis
+
+The owner ruled that a label is ground truth on one of two bases only. A configuration is hazardous, by exhibited collapse, when a test drove it into collapse, which is a constructive proof. A configuration is benign, by assurance argument, when no collapse was found and the author wrote an argument that work is a function of the input alone under every schedule, either a closed form checked under random schedules or the structural absence of any operator that can emit a second send; the owner accepts such arguments as the best basis a negative label can have, since failing to collapse a program is not evidence that it is robust. The qualifier "mitigated" was removed everywhere, because a tuning parameter such as backoff, a queue bound, a compaction reserve or a cooldown cannot remove a mechanism; whether it suffices depends on a workload unknown when the program is written, so it only moves the threshold. The five configurations that carried the qualifier have no ground truth and are recorded as "no ground truth; tool expected to find amplification". The language of matched pairs was removed from the spec and the report, since it rested on the same fallacy. The counts are ten ground-truth hazardous, seven ground-truth benign, and five expectation-only; the checker agrees with ground truth on 17 of 17 and with the expectations on 4 of 5, the miss being compaction with a reserve of 8, which is now recorded as a checker miss on a program that has the mechanism rather than as a question about the definition. Whether the checker may vary the composition of its input to reach a threshold is left open. Two exhibited-collapse labels (both election configurations, and rebalancing with no cooldown) rest on storms that ended before the run did, and the report flags them for the owner to weigh.

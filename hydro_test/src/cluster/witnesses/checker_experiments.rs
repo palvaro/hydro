@@ -168,21 +168,21 @@
 //! |---|---|---|---|---|---|
 //! | rpc_retry, 3 attempts | hazardous | hazardous | yes | server `Request` arrivals | 0 0 0 0 4 136 498 588 |
 //! | rpc_retry, 1 attempt | benign | benign | yes | none | all 0 |
-//! | backoff_retry, backoff on | hazardous, mitigated | hazardous | yes | server `Request` arrivals | 0 0 0 0 0 90 242 448 |
+//! | backoff_retry, backoff on | no ground truth; expected hazardous | hazardous | yes | server `Request` arrivals | 0 0 0 0 0 90 242 448 |
 //! | backoff_retry, backoff off | hazardous | hazardous | yes | server `Request` arrivals | 0 0 0 0 4 136 498 588 |
-//! | bounded_queue, `Some(100)` | hazardous, mitigated | hazardous | yes | server `Request` arrivals | 0 0 0 0 4 204 400 634 |
+//! | bounded_queue, `Some(100)` | no ground truth; expected hazardous | hazardous | yes | server `Request` arrivals | 0 0 0 0 4 204 400 634 |
 //! | bounded_queue, `None` | hazardous | hazardous | yes | server `Request` arrivals | 0 0 0 0 4 136 498 588 |
 //! | cache, request-dated, no coalescing | hazardous | hazardous | yes | cache `Fill` (fills from origin) | 336 388 468 2520 2668 2668 2668 2668 |
-//! | cache, fill-dated, no coalescing | hazardous, mitigated | hazardous | yes | origin clock `()` | 248 320 400 544 856 1152 1448 1748 |
+//! | cache, fill-dated, no coalescing | no ground truth; expected hazardous | hazardous | yes | origin clock `()` | 248 320 400 544 856 1152 1448 1748 |
 //! | cache, coalescing | benign | benign | yes | none (every curve flat or falling) | 240 240 240 240 220 200 180 160 |
 //! | gossip_resend, ack timeout 3 | hazardous | hazardous | yes | `Ack` hook | 0 100 7063 7065 7065 7065 7065 7065 |
 //! | gossip_resend, ack timeout 0 | benign | benign | yes | none | all 0 |
 //! | election, uniform timeouts | hazardous | hazardous | yes | `Msg` inbox | 0 0 45 125 245 385 530 655 |
-//! | election, spread 3 | hazardous, mitigated | hazardous | yes | `Msg` inbox | 0 0 5 40 100 155 220 265 |
+//! | election, spread 3 | hazardous | hazardous | yes | `Msg` inbox | 0 0 5 40 100 155 220 265 |
 //! | rebalancing, no cooldown | hazardous, recovers | hazardous | yes | `u64` task arrivals | 0 74 112 60 120 185 240 300 |
-//! | rebalancing, cooldown 8 | hazardous, mitigated | hazardous | yes | `u64` task arrivals | 0 18 42 60 120 180 240 300 |
+//! | rebalancing, cooldown 8 | no ground truth; expected hazardous | hazardous | yes | `u64` task arrivals | 0 18 42 60 120 180 240 300 |
 //! | compaction, reserve 0 | hazardous | hazardous | yes | `Op` arrivals | 0 5136 9979 9281 7961 6741 5621 4601 |
-//! | compaction, reserve 8 | hazardous, mitigated | benign | **no** | none | all 0 |
+//! | compaction, reserve 8 | no ground truth; expected hazardous | benign | **no** | none | all 0 |
 //! | lease, re-send after 4 | hazardous | hazardous | yes | client `Ack` hook | 0 12 3345 3495 3495 3495 3495 3495 |
 //! | lease, one outstanding | benign | benign | yes | none | all 0 |
 //! | crdt_gossip | benign | benign | yes | none (pump hold only postpones merges) | 16113 15744 15123 13908 10803 |
@@ -1331,9 +1331,9 @@ mod hold_compaction {
         assert_eq!(hold_sweep::verdict(&r).0, "hazardous");
     }
 
-    /// The corpus labels this configuration "hazardous, mitigated"; the sweep finds no hold
-    /// that adds work (see the module docs), so this test records the verdict instead of
-    /// asserting the label.
+    /// The corpus records this configuration as having no ground truth but expects the tool to find
+    /// amplification. The sweep finds no hold that adds work under the corpus input (see the
+    /// module docs), so this test records the verdict instead of asserting the expectation.
     #[test]
     fn hold_sweep_compaction_reserve_8() {
         let r = hold_sweep::sweep("compaction reserve=8", hold_sweep::GRID, &|t, k| run(8, t, k));

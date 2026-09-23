@@ -20,10 +20,11 @@
 //! would have spent processing. The knob is [`RebalanceConfig::cooldown_ticks`]: after migrating
 //! to a peer, a worker does not migrate to that peer again for this many ticks, so its next
 //! decision rests on a report that already reflects the previous transfer. With a cooldown of
-//! zero the program is hazardous; with a cooldown of at least the report period the mechanism is
-//! mitigated, though acting on stale reports remains in the program. The measured runs show that
-//! the exchange stays bounded and the cluster recovers, so this witness is hazardous without
-//! being metastable under the trigger used here.
+//! zero the program is hazardous; with a cooldown of at least the report period the return trip
+//! is blocked under the trigger used here, though acting on stale reports remains in the program
+//! and a cooldown can only move the threshold at which the bounce runs away. The measured runs
+//! show that the exchange stays bounded and the cluster recovers, so this witness is hazardous
+//! without being metastable under the trigger used here.
 //!
 //! The corpus sketch proposed per-item hysteresis. In a two-worker system that does not stop the
 //! bounce, because the peer that wants to send back can always send its own original tasks
@@ -44,12 +45,14 @@
 //! Two workers, 3 tasks per round each against 5 units per round each, threshold 10. The trigger
 //! gives worker 0 twelve tasks per round during rounds 100 to 160. Tail is rounds 600 to 800,
 //! where baseline completions are 1200. The expected label was amplifying with a collapse; the
-//! measured label is hazardous without a collapse, for the reason given in `sim_tests`.
+//! measured runs show amplification (537 migrations against 195 required) without a collapse, for
+//! the reason given in `sim_tests`. The corpus table records the cooldown configuration as having
+//! no ground truth, since no test collapsed it and no assurance argument exists for it.
 //!
 //! | run | report period | cooldown | trigger | migrations over the run | tasks completed after bouncing | peak total queue, empty from round | tail | label |
 //! |---|---|---|---|---|---|---|---|---|
 //! | stale reports | 4 | 0 | yes | 537 | 126 | 458, round 276 | baseline (1200 completed, 0 migrated) | hazardous, recovers |
-//! | stale reports, cooldown | 4 | 8 | yes | 246 | 0 | 346, round 248 | baseline | mitigated |
+//! | stale reports, cooldown | 4 | 8 | yes | 246 | 0 | 346, round 248 | baseline | no ground truth; the mechanism is present and the tool is expected to find it |
 //! | fresh reports | 1 | 0 | yes | 195 | 0 | 452, round 273 | baseline | schedule control |
 //! | no trigger | 4 | 0 | no | 0 | 0 | 0 | baseline | healthy |
 //!
@@ -498,7 +501,7 @@ mod sim_tests {
         assert_healthy(&trace, 0, ROUNDS);
     }
 
-    /// The mitigated twin: same stale reports and trigger, cooldown of two report periods. A few
+    /// The cooldown configuration: same stale reports and trigger, cooldown of two report periods. A few
     /// productive migrations, no bounces, and a drain.
     #[test]
     fn with_a_cooldown_the_cluster_recovers() {
