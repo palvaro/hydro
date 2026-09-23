@@ -44,6 +44,7 @@
 pub mod backoff_retry;
 pub mod bounded_queue_rejection;
 pub mod cache_thundering_herd;
+pub mod checker_experiments;
 pub mod compaction_falls_behind;
 pub mod crdt_gossip_load;
 pub mod election_stampede;
