@@ -86,6 +86,19 @@ pub trait SimHook {
     fn take_halt(&mut self) -> bool {
         false
     }
+
+    /// The `use::batch` source location this hook stands for, if it batches a stream. Published
+    /// to the driver by the scheduler so a schedule can single out one edge (see
+    /// [`super::hold_one_hook`]). Metadata only; the default is `None`.
+    fn hook_location(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// The Rust type of the items this hook batches, for telling apart the batches of one
+    /// `sliced!` block in reports. Metadata only.
+    fn hook_item_type(&self) -> &'static str {
+        ""
+    }
 }
 
 /// A hook that can make inline decisions during the execution of a tick.
@@ -198,6 +211,14 @@ pub struct StreamHook<T, Order: Ordering> {
 }
 
 impl<T> SimHook for StreamHook<T, TotalOrder> {
+    fn hook_location(&self) -> Option<&'static str> {
+        Some(self.batch_location.0)
+    }
+
+    fn hook_item_type(&self) -> &'static str {
+        std::any::type_name::<T>()
+    }
+
     fn current_decision(&self) -> Option<bool> {
         self.to_release.as_ref().map(|v| !v.is_empty())
     }
@@ -265,6 +286,14 @@ impl<T> SimHook for StreamHook<T, TotalOrder> {
 }
 
 impl<T> SimHook for StreamHook<T, NoOrder> {
+    fn hook_location(&self) -> Option<&'static str> {
+        Some(self.batch_location.0)
+    }
+
+    fn hook_item_type(&self) -> &'static str {
+        std::any::type_name::<T>()
+    }
+
     fn current_decision(&self) -> Option<bool> {
         self.to_release.as_ref().map(|v| !v.is_empty())
     }
@@ -360,6 +389,14 @@ pub struct KeyedStreamHook<K: Hash + Eq + Clone, V, Order: Ordering> {
 }
 
 impl<K: Hash + Eq + Clone, V> SimHook for KeyedStreamHook<K, V, TotalOrder> {
+    fn hook_location(&self) -> Option<&'static str> {
+        Some(self.batch_location.0)
+    }
+
+    fn hook_item_type(&self) -> &'static str {
+        std::any::type_name::<(K, V)>()
+    }
+
     fn current_decision(&self) -> Option<bool> {
         self.to_release.as_ref().map(|v| !v.is_empty())
     }
@@ -452,6 +489,14 @@ impl<K: Hash + Eq + Clone, V> SimHook for KeyedStreamHook<K, V, TotalOrder> {
 }
 
 impl<K: Hash + Eq + Clone, V> SimHook for KeyedStreamHook<K, V, NoOrder> {
+    fn hook_location(&self) -> Option<&'static str> {
+        Some(self.batch_location.0)
+    }
+
+    fn hook_item_type(&self) -> &'static str {
+        std::any::type_name::<(K, V)>()
+    }
+
     fn current_decision(&self) -> Option<bool> {
         self.to_release.as_ref().map(|v| !v.is_empty())
     }

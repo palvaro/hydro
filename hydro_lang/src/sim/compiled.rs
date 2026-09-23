@@ -1882,8 +1882,17 @@ impl SimTick {
     fn can_run(&self) -> bool {
         // All hooks must be ready (have received input or have a last value)...
         self.hooks.iter().all(|hook| hook.is_ready())
-            // ...and at least one hook must be able to release data into the tick.
-            && self.hooks.iter().any(|hook| hook_can_release(&**hook))
+            // ...and at least one hook must be able to release data into the tick. A hook a
+            // hold-one-hook schedule is holding does not count (see `super::hold_one_hook`);
+            // with no hold set, `is_held` is always false.
+            && self.hooks.iter().enumerate().any(|(index, hook)| {
+                hook_can_release(&**hook)
+                    && !super::hold_one_hook::is_held(
+                        hook.hook_location(),
+                        index,
+                        hook.hook_item_type(),
+                    )
+            })
     }
 }
 
@@ -2147,7 +2156,7 @@ fn run_hooks<W: std::fmt::Write>(
 
     bolero::generator::bolero_generator::any::scope::borrow_with(|driver| {
         // first, scan manual decisions
-        hooks.iter_mut().for_each(|hook| {
+        hooks.iter_mut().enumerate().for_each(|(index, hook)| {
             if let Some(is_nontrivial) = hook.current_decision() {
                 made_nontrivial_decision |= is_nontrivial;
                 remaining_decision_count -= 1;
@@ -2155,16 +2164,24 @@ fn run_hooks<W: std::fmt::Write>(
                 // if no nontrivial decision is possible, make a trivial one
                 // (we need to do this in the first pass to force nontrivial decisions
                 // on the remaining hooks)
-                hook.autonomous_decision(driver, false);
+                super::hold_one_hook::with_current_hook(
+                    hook.hook_location(),
+                    index,
+                    hook.hook_item_type(),
+                    || hook.autonomous_decision(driver, false),
+                );
                 remaining_decision_count -= 1;
             }
         });
 
-        hooks.iter_mut().for_each(|hook| {
+        hooks.iter_mut().enumerate().for_each(|(index, hook)| {
             if hook.current_decision().is_none() {
-                made_nontrivial_decision |= hook.autonomous_decision(
-                    driver,
-                    !made_nontrivial_decision && remaining_decision_count == 1,
+                let force = !made_nontrivial_decision && remaining_decision_count == 1;
+                made_nontrivial_decision |= super::hold_one_hook::with_current_hook(
+                    hook.hook_location(),
+                    index,
+                    hook.hook_item_type(),
+                    || hook.autonomous_decision(driver, force),
                 );
                 remaining_decision_count -= 1;
             }
