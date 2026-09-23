@@ -30,6 +30,7 @@ pub mod simple_cluster;
 pub mod two_pc;
 #[cfg(feature = "tokio")]
 pub mod two_pc_bench;
+pub mod witnesses;
 
 // WIP: the following modules were written against an older hydro_lang API
 // (they call `broadcast_from_member`, which has since been renamed/removed,
