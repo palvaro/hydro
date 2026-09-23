@@ -27,6 +27,13 @@
 //! labelled hazardous; the reserve changes the outcome under this trigger without removing the
 //! coupling, and the corpus table records the reserved configuration as having no ground truth.
 //!
+//! Both configurations are excluded from the checker scorecard. This program models its read
+//! cost as an integer inside a record and subtracts it from an integer budget; it never moves the
+//! records it claims to scan, so no work actually increases under any schedule, and a tool that
+//! counts records is right to see nothing. The rows return to the scorecard if the program is
+//! rewritten so that a read joins against the uncompacted segment and produces one record per
+//! record scanned.
+//!
 //! This differs from the corpus sketch, in which a non-incremental compaction blocks appends. In
 //! that version every record is appended once and scanned once, so total work is a fixed two
 //! units per record under every schedule and nothing feeds back. The read-cost coupling used

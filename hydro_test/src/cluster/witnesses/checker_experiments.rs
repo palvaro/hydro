@@ -326,6 +326,36 @@
 //! (which inputs to feed each round). Hooks are perturbed one at a time; `use::snapshot` hooks
 //! are not perturbed and their releases are not counted, since a snapshot is one value per tick
 //! and tick count is a scheduling artifact.
+//!
+//! # Fourth experiment: the checker as a library function
+//!
+//! Everything the third experiment did is now one call,
+//! `hydro_lang::sim::amplification::check`: it takes a `hydro_lang::sim::flow::SimFlow`, a
+//! `hydro_lang::sim::amplification::CheckConfig` (rounds, the round holds begin, the hold
+//! grid), and a closure that sends one round of the fixed workload, and returns a
+//! `hydro_lang::sim::amplification::Report` with the verdict, one curve per hook, and, when
+//! hazardous, the held hook with the largest gain, its source location, what rose, the hold
+//! length at which the gain first appeared, and the hooks that admitted more records under that
+//! hold. The verdict rule is the third experiment's rule unchanged. The function compiles the
+//! simulation once and reuses the compiled artifact for the discovery run and every hold, where
+//! the harnesses above rebuilt the dylib on every run.
+//!
+//! The `library_check` module wires every one of the 22 configurations exactly as the
+//! harnesses above do (same program parameters, same per-round input, same rounds and grid) and
+//! asserts that the function returns the verdict and the held hook that `generic_measure`
+//! recorded. All 22 pass and every gain matches to the unit: `rpc_retry` 1470 at the server's
+//! `Request` arrivals, backoff 448 and 588, bounded queue 634 and 588, cache 2332 at `Fill` and
+//! 1500 at the origin clock, gossip resend 5435 at `Ack`, election 840 and 824 in member 1's
+//! sends, rebalancing 300 at the `u64` task arrivals, lease 3221 at `Ack`, and zero gain on the
+//! seven benign configurations and the two compaction configurations. Where two hooks tie (the
+//! request-dated cache's `Fill` hook and origin clock both gain 2332) the first in identity
+//! order wins, as in `hold_sweep::checker_verdict`. The 22 tests run together in 44 s of wall
+//! clock against 377 s for the third experiment's, because compilation happens once per
+//! configuration instead of once per run.
+//!
+//! One practical note for callers: a type named inside a `q!` closure in the caller's wiring
+//! must be imported at module level, because the staged crate does not see function-local `use`
+//! statements.
 
 #[cfg(test)]
 mod sim_tests {
@@ -2199,5 +2229,639 @@ mod generic_measure {
             super::hold_transitive_closure::run(t, k)
         });
         assert_eq!(compare(&r).0, "benign");
+    }
+}
+
+/// The packaged checker, [`hydro_lang::sim::amplification::check`], run on every corpus
+/// configuration with the same wiring, workload, rounds and grid as [`generic_measure`], and
+/// asserted to return the verdict and held hook that module recorded. See the module docs,
+/// "Fourth experiment".
+#[cfg(test)]
+mod library_check {
+    use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
+    use hydro_lang::prelude::*;
+    use hydro_lang::sim::amplification::{CheckConfig, Report, Verdict, check};
+
+    // Types named inside `q!` closures must be imported at module level; the staged crate does
+    // not see function-local `use` statements.
+    use crate::cluster::witnesses::election_stampede::Msg;
+    use crate::cluster::witnesses::lease_renewal_storm::Job;
+
+    const ROUNDS: usize = 240;
+
+    fn config() -> CheckConfig {
+        CheckConfig::new(ROUNDS)
+    }
+
+    fn expect_hazardous(label: &str, r: &Report, hook_contains: &[&str]) {
+        println!("[library {label}]\n{r}");
+        assert_eq!(r.verdict, Verdict::Hazardous, "{label}");
+        let loc = r.location.as_ref().expect(label);
+        for s in hook_contains {
+            assert!(
+                loc.hook.contains(s),
+                "{label}: expected held hook to contain {s:?}, got {}",
+                loc.hook
+            );
+        }
+    }
+
+    fn expect_benign(label: &str, r: &Report) {
+        println!("[library {label}]\n{r}");
+        assert_eq!(r.verdict, Verdict::Benign, "{label}");
+        assert!(r.location.is_none(), "{label}");
+    }
+
+    // rpc_retry: timeout 40, capacity 5, 2 requests per round.
+
+    fn rpc_retry(max_attempts: u32) -> Report {
+        use crate::cluster::rpc_retry::{Client, RetryPolicy, Server, ServerConfig, rpc_with_retries};
+        let mut flow = FlowBuilder::new();
+        let client = flow.process::<Client>();
+        let server = flow.process::<Server>();
+        let (request_send, requests) = client.sim_input::<u64, TotalOrder, ExactlyOnce>();
+        let (clock_send, client_clock) = client.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let (_crt, client_report_tick) = client.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let (_srt, server_report_tick) = server.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let outputs = rpc_with_retries(
+            &client,
+            &server,
+            requests,
+            client_clock,
+            client_report_tick,
+            server_report_tick,
+            RetryPolicy {
+                timeout_ticks: 40,
+                max_attempts,
+            },
+            ServerConfig {
+                max_per_tick: 5,
+                service_time: std::time::Duration::ZERO,
+            },
+        );
+        let _completed = outputs.completed.map(q!(|c| c.id)).sim_output();
+        let _outgoing = outputs.outgoing.map(q!(|r| r.id)).sim_output();
+        let _processed = outputs.processed.map(q!(|r| r.id)).sim_output();
+        check(flow.sim(), &config(), async |round| {
+            clock_send.send(());
+            for _ in 0..2 {
+                request_send.send(round as u64);
+            }
+        })
+    }
+
+    /// Expected before running: hazardous, held hook the server's `Request` arrivals in
+    /// `rpc_retry.rs`, gain in admitted records (1470 under `generic_measure`).
+    #[test]
+    fn library_rpc_retry_three_attempts() {
+        let r = rpc_retry(3);
+        expect_hazardous("rpc_retry max_attempts=3", &r, &["rpc_retry.rs", "Request"]);
+        assert_eq!(r.location.as_ref().unwrap().rose, "admitted records");
+    }
+
+    /// Expected: benign, every curve flat.
+    #[test]
+    fn library_rpc_retry_one_attempt() {
+        expect_benign("rpc_retry max_attempts=1", &rpc_retry(1));
+    }
+
+    // backoff_retry: base timeout 40, 3 attempts, capacity 5, 2 requests per round.
+
+    fn backoff_retry(backoff: bool) -> Report {
+        use crate::cluster::witnesses::backoff_retry::{
+            Client, RetryPolicy, Server, ServerConfig, rpc_with_backoff,
+        };
+        let mut flow = FlowBuilder::new();
+        let client = flow.process::<Client>();
+        let server = flow.process::<Server>();
+        let (request_send, requests) = client.sim_input::<u64, TotalOrder, ExactlyOnce>();
+        let (clock_send, client_clock) = client.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let outputs = rpc_with_backoff(
+            &client,
+            &server,
+            requests,
+            client_clock,
+            RetryPolicy {
+                base_timeout_ticks: 40,
+                max_attempts: 3,
+                backoff,
+            },
+            ServerConfig { max_per_tick: 5 },
+        );
+        let _completed = outputs.completed.map(q!(|c| c.id)).sim_output();
+        let _outgoing = outputs.outgoing.map(q!(|r| r.id)).sim_output();
+        let _processed = outputs.processed.map(q!(|r| r.id)).sim_output();
+        check(flow.sim(), &config(), async |round| {
+            clock_send.send(());
+            for _ in 0..2 {
+                request_send.send(round as u64);
+            }
+        })
+    }
+
+    /// Expected: hazardous at the server's `Request` arrivals (admitted +448 recorded).
+    #[test]
+    fn library_backoff_retry_backoff_on() {
+        expect_hazardous("backoff_retry backoff=true", &backoff_retry(true), &["backoff_retry.rs", "Request"]);
+    }
+
+    /// Expected: hazardous at the server's `Request` arrivals (admitted +588 recorded).
+    #[test]
+    fn library_backoff_retry_backoff_off() {
+        expect_hazardous("backoff_retry backoff=false", &backoff_retry(false), &["backoff_retry.rs", "Request"]);
+    }
+
+    // bounded_queue_rejection: timeout 40, 3 attempts, reject backoff 10, capacity 5.
+
+    fn bounded_queue(max_backlog: Option<usize>) -> Report {
+        use crate::cluster::witnesses::bounded_queue_rejection::{
+            Client, RetryPolicy, Server, ServerConfig, rpc_with_bounded_queue,
+        };
+        let mut flow = FlowBuilder::new();
+        let client = flow.process::<Client>();
+        let server = flow.process::<Server>();
+        let (request_send, requests) = client.sim_input::<u64, TotalOrder, ExactlyOnce>();
+        let (clock_send, client_clock) = client.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let outputs = rpc_with_bounded_queue(
+            &client,
+            &server,
+            requests,
+            client_clock,
+            RetryPolicy {
+                timeout_ticks: 40,
+                max_attempts: 3,
+                reject_backoff_ticks: 10,
+            },
+            ServerConfig {
+                max_per_tick: 5,
+                max_backlog,
+            },
+        );
+        let _completed = outputs.completed.map(q!(|c| c.id)).sim_output();
+        let _outgoing = outputs.outgoing.map(q!(|r| r.id)).sim_output();
+        let _processed = outputs.processed.map(q!(|r| r.id)).sim_output();
+        let _rejected = outputs.rejected.map(q!(|r| r.id)).sim_output();
+        check(flow.sim(), &config(), async |round| {
+            clock_send.send(());
+            for _ in 0..2 {
+                request_send.send(round as u64);
+            }
+        })
+    }
+
+    /// Expected: hazardous at the server's `Request` arrivals (admitted +634 recorded).
+    #[test]
+    fn library_bounded_queue_some_100() {
+        expect_hazardous(
+            "bounded_queue max_backlog=Some(100)",
+            &bounded_queue(Some(100)),
+            &["bounded_queue_rejection.rs", "Request"],
+        );
+    }
+
+    /// Expected: hazardous at the server's `Request` arrivals (admitted +588 recorded).
+    #[test]
+    fn library_bounded_queue_none() {
+        expect_hazardous(
+            "bounded_queue max_backlog=None",
+            &bounded_queue(None),
+            &["bounded_queue_rejection.rs", "Request"],
+        );
+    }
+
+    // cache_thundering_herd: TTL 20, origin capacity 4, 10 hot keys at 8 lookups per round.
+
+    fn cache(coalesce: bool, request_dated: bool) -> Report {
+        use crate::cluster::witnesses::cache_thundering_herd::{
+            Cache, CacheConfig, Key, Origin, OriginConfig, cache_with_expiry,
+        };
+        const HOT_KEYS: u64 = 10;
+        const HOT_PER_ROUND: u64 = 8;
+        let mut flow = FlowBuilder::new();
+        let cache = flow.process::<Cache>();
+        let origin = flow.process::<Origin>();
+        let (lookup_send, lookups) = cache.sim_input::<Key, TotalOrder, ExactlyOnce>();
+        let (cache_clock_send, cache_clock) = cache.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let (origin_clock_send, origin_clock) = origin.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let outputs = cache_with_expiry(
+            &cache,
+            &origin,
+            lookups,
+            cache_clock,
+            origin_clock,
+            CacheConfig {
+                ttl_ticks: 20,
+                coalesce,
+                request_dated,
+            },
+            OriginConfig { max_fetch_per_tick: 4 },
+        );
+        let _completed = outputs.completed.map(q!(|c| c.id)).sim_output();
+        let _fetches = outputs.fetches.map(q!(|f| f.lookup_id)).sim_output();
+        let _processed = outputs.processed.map(q!(|f| f.lookup_id)).sim_output();
+        let _applied = outputs.fills_applied.map(q!(|f| f.lookup_id)).sim_output();
+        let _redundant = outputs.fills_redundant.map(q!(|f| f.lookup_id)).sim_output();
+        let _stale = outputs.fills_stale.map(q!(|f| f.lookup_id)).sim_output();
+        check(flow.sim(), &config(), async |round| {
+            let round = round as u64;
+            cache_clock_send.send(());
+            origin_clock_send.send(());
+            for i in 0..HOT_PER_ROUND {
+                lookup_send.send(((round * HOT_PER_ROUND + i) % HOT_KEYS) as Key);
+            }
+        })
+    }
+
+    /// Expected: hazardous at the cache's `Fill` hook (admitted +2332 recorded).
+    #[test]
+    fn library_cache_request_dated_no_coalesce() {
+        expect_hazardous("cache request_dated, no coalesce", &cache(false, true), &["Fill"]);
+    }
+
+    /// Expected: hazardous at the origin's clock hook (admitted +1500 recorded).
+    #[test]
+    fn library_cache_fill_dated_no_coalesce() {
+        expect_hazardous(
+            "cache fill_dated, no coalesce",
+            &cache(false, false),
+            &["cache_thundering_herd.rs", "()"],
+        );
+    }
+
+    /// Expected: benign.
+    #[test]
+    fn library_cache_coalesce() {
+        expect_benign("cache coalesce", &cache(true, true));
+    }
+
+    // gossip_resend: 5 members, 5 merges per tick, one update per member per round.
+
+    fn gossip_resend(ack_timeout_ticks: u64) -> Report {
+        use crate::cluster::witnesses::gossip_resend::{GossipConfig, Node, gossip_with_resend};
+        const MEMBERS: u32 = 5;
+        let mut flow = FlowBuilder::new();
+        let cluster = flow.cluster::<Node>();
+        let (timer_send, timer) = cluster.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let (update_send, updates) = cluster.sim_input::<u64, TotalOrder, ExactlyOnce>();
+        let outputs = gossip_with_resend(
+            &cluster,
+            timer,
+            updates,
+            GossipConfig {
+                max_merges_per_tick: 5,
+                ack_timeout_ticks,
+            },
+        );
+        let _wire = outputs.wire.map(q!(|(to, d)| (to, d.from, d.seq))).sim_cluster_output();
+        let _merged = outputs.merged.map(q!(|d| (d.from, d.seq))).sim_cluster_output();
+        let _acks = outputs.acks_sent.sim_cluster_output();
+        let _inbox = outputs.inbox_depth.sim_cluster_output();
+        let _outstanding = outputs.outstanding_depth.sim_cluster_output();
+        let mut next_value = 0u64;
+        check(
+            flow.sim().with_cluster_size(&cluster, MEMBERS as usize),
+            &config(),
+            async |round| {
+                if round == 0 {
+                    next_value = 0;
+                }
+                for m in 0..MEMBERS {
+                    timer_send.send(m, ());
+                    update_send.send(m, next_value);
+                    next_value += 1;
+                }
+            },
+        )
+    }
+
+    /// Expected: hazardous at the `Ack` hook (admitted +5435 recorded).
+    #[test]
+    fn library_gossip_resend_on() {
+        expect_hazardous("gossip_resend ack_timeout=3", &gossip_resend(3), &["Ack"]);
+    }
+
+    /// Expected: benign.
+    #[test]
+    fn library_gossip_resend_off() {
+        expect_benign("gossip_resend ack_timeout=0", &gossip_resend(0));
+    }
+
+    // election_stampede: 5 members, timeout 6, budget 3, one client request per member per round.
+
+    fn election(timeout_spread_ticks: u64) -> Report {
+        use crate::cluster::witnesses::election_stampede::{ElectionConfig, Node, election};
+        const MEMBERS: u32 = 5;
+        let mut flow = FlowBuilder::new();
+        let cluster = flow.cluster::<Node>();
+        let (timer_send, timer) = cluster.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let (client_send, clients) = cluster.sim_input::<u64, TotalOrder, ExactlyOnce>();
+        let outputs = election(
+            &cluster,
+            timer,
+            clients,
+            ElectionConfig {
+                election_timeout_ticks: 6,
+                timeout_spread_ticks,
+                budget_per_tick: 3,
+            },
+        );
+        let _vote_requests = outputs
+            .wire
+            .filter_map(q!(|(_, msg)| match msg {
+                Msg::VoteRequest { .. } => Some(()),
+                _ => None,
+            }))
+            .sim_cluster_output();
+        let _processed = outputs.processed.sim_cluster_output();
+        let _inbox = outputs.inbox_depth.sim_cluster_output();
+        let _state = outputs.state_trace.sim_cluster_output();
+        let _elections = outputs.elections.sim_cluster_output();
+        let mut next_client = 0u64;
+        check(
+            flow.sim().with_cluster_size(&cluster, MEMBERS as usize),
+            &config(),
+            async |round| {
+                if round == 0 {
+                    next_client = 0;
+                }
+                for m in 0..MEMBERS {
+                    timer_send.send(m, ());
+                    client_send.send(m, next_client);
+                    next_client += 1;
+                }
+            },
+        )
+    }
+
+    /// Expected: hazardous, gain in one member's sends (member 1 +840 recorded), held hook the
+    /// timer hook in `election_stampede.rs`.
+    #[test]
+    fn library_election_uniform_timeouts() {
+        let r = election(0);
+        expect_hazardous("election spread=0", &r, &["election_stampede.rs"]);
+        assert!(r.location.as_ref().unwrap().rose.starts_with("sends from"));
+    }
+
+    /// Expected: hazardous, gain in one member's sends (member 1 +824 recorded), held hook the
+    /// `Msg` inbox.
+    #[test]
+    fn library_election_spread_3() {
+        let r = election(3);
+        expect_hazardous("election spread=3", &r, &["election_stampede.rs", "Msg"]);
+        assert!(r.location.as_ref().unwrap().rose.starts_with("sends from"));
+    }
+
+    // rebalancing_ping_pong: 2 workers, 5 units per tick, threshold 10, reports every 4 rounds,
+    // 3 tasks per worker per round.
+
+    fn rebalancing(cooldown_ticks: u64) -> Report {
+        use crate::cluster::witnesses::rebalancing_ping_pong::{
+            RebalanceConfig, Worker, rebalancing_workers,
+        };
+        const N: u32 = 2;
+        let mut flow = FlowBuilder::new();
+        let workers = flow.cluster::<Worker>();
+        let (task_send, tasks) = workers.sim_input::<u64, TotalOrder, ExactlyOnce>();
+        let (clock_send, clock) = workers.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let (report_send, report_tick) = workers.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let outputs = rebalancing_workers(
+            &workers,
+            tasks,
+            clock,
+            report_tick,
+            RebalanceConfig {
+                work_per_tick: 5,
+                threshold: 10,
+                cooldown_ticks,
+            },
+        );
+        let _completed = outputs.completed.map(q!(|t| t.id)).sim_cluster_output();
+        let _migrated = outputs.migrated.map(q!(|(_, t)| t.id)).sim_cluster_output();
+        let _ticks = outputs.ticks.map(q!(|t| t.queue_len)).sim_cluster_output();
+        let mut next_id = 0u64;
+        check(
+            flow.sim().with_cluster_size(&workers, N as usize),
+            &config(),
+            async |round| {
+                if round == 0 {
+                    next_id = 0;
+                }
+                for w in 0..N {
+                    clock_send.send(w, ());
+                    if round % 4 == 0 {
+                        report_send.send(w, ());
+                    }
+                    for _ in 0..3 {
+                        task_send.send(w, next_id);
+                        next_id += 1;
+                    }
+                }
+            },
+        )
+    }
+
+    /// Expected: hazardous at the `u64` task arrivals (admitted +300 recorded).
+    #[test]
+    fn library_rebalancing_no_cooldown() {
+        expect_hazardous("rebalancing cooldown=0", &rebalancing(0), &["rebalancing_ping_pong.rs", "u64"]);
+    }
+
+    /// Expected: hazardous at the `u64` task arrivals (admitted +300 recorded).
+    #[test]
+    fn library_rebalancing_cooldown_8() {
+        expect_hazardous("rebalancing cooldown=8", &rebalancing(8), &["rebalancing_ping_pong.rs", "u64"]);
+    }
+
+    // compaction_falls_behind: budget 30, 1 put and 4 gets per round. Excluded from the
+    // scorecard (its work is a modeled counter); the recorded generic verdict is benign for both.
+
+    fn compaction(compaction_reserve: u64) -> Report {
+        use crate::cluster::witnesses::compaction_falls_behind::{
+            Op, Store, StoreConfig, log_with_compaction,
+        };
+        let mut flow = FlowBuilder::new();
+        let store = flow.process::<Store>();
+        let (op_send, ops) = store.sim_input::<Op, TotalOrder, ExactlyOnce>();
+        let (clock_send, clock) = store.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let outputs = log_with_compaction(
+            &store,
+            ops,
+            clock,
+            StoreConfig {
+                budget_per_tick: 30,
+                compaction_reserve,
+            },
+        );
+        let _served = outputs.served.map(q!(|s| s.id)).sim_output();
+        let _ticks = outputs.ticks.map(q!(|t| t.serve_units)).sim_output();
+        check(flow.sim(), &config(), async |_round| {
+            clock_send.send(());
+            op_send.send(Op::Put);
+            for _ in 0..4 {
+                op_send.send(Op::Get);
+            }
+        })
+    }
+
+    /// Expected: benign under record counts, as `generic_measure` recorded.
+    #[test]
+    fn library_compaction_reserve_0() {
+        expect_benign("compaction reserve=0", &compaction(0));
+    }
+
+    /// Expected: benign.
+    #[test]
+    fn library_compaction_reserve_8() {
+        expect_benign("compaction reserve=8", &compaction(8));
+    }
+
+    // lease_renewal_storm: 20 clients renewing every 10 ticks, server capacity 5.
+
+    fn lease(resend_after_ticks: Option<u64>) -> Report {
+        use crate::cluster::witnesses::lease_renewal_storm::{
+            ClientPolicy, LeaseClient, LeaseServer, ServerConfig, lease_renewal,
+        };
+        const N: u32 = 20;
+        let mut flow = FlowBuilder::new();
+        let clients = flow.cluster::<LeaseClient>();
+        let server = flow.process::<LeaseServer>();
+        let (client_clock_send, client_clock) = clients.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let (server_clock_send, server_clock) = server.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let (_other_send, other_work) = server.sim_input::<u64, TotalOrder, ExactlyOnce>();
+        let outputs = lease_renewal(
+            &clients,
+            &server,
+            client_clock,
+            server_clock,
+            other_work,
+            ClientPolicy {
+                renew_every_ticks: 10,
+                lease_ticks: 30,
+                resend_after_ticks,
+            },
+            ServerConfig { max_per_tick: 5 },
+        );
+        let _sent = outputs.sent.map(q!(|r| r.resend as u64)).sim_cluster_output();
+        let _acked = outputs.acked.map(q!(|a| a.seq)).sim_cluster_output();
+        let _superseded = outputs.superseded.sim_cluster_output();
+        let _lease_trace = outputs.lease_trace.sim_cluster_output();
+        let _served = outputs
+            .served
+            .map(q!(|j| match j {
+                Job::Renewal { resend, .. } => resend as u64,
+                Job::Other(_) => 0,
+            }))
+            .sim_output();
+        let _backlog = outputs.backlog_trace.sim_output();
+        check(
+            flow.sim().with_cluster_size(&clients, N as usize),
+            &config(),
+            async |_round| {
+                for m in 0..N {
+                    client_clock_send.send(m, ());
+                }
+                server_clock_send.send(());
+            },
+        )
+    }
+
+    /// Expected: hazardous at the client's `Ack` hook (admitted +3221 recorded).
+    #[test]
+    fn library_lease_resend_after_4() {
+        expect_hazardous("lease resend_after=Some(4)", &lease(Some(4)), &["Ack"]);
+    }
+
+    /// Expected: benign.
+    #[test]
+    fn library_lease_one_outstanding() {
+        expect_benign("lease resend_after=None", &lease(None));
+    }
+
+    // crdt_gossip_load: 3 members, one update per round, pump every member every round; 60 rounds
+    // and a short grid because the simulator's cost is quadratic in the set size.
+
+    /// Expected: benign (merges fall under every hold).
+    #[test]
+    fn library_crdt_gossip() {
+        use hydro_std::ec_inference_demos::crdt_gossip::g_set_gossip;
+        const N: u32 = 3;
+        let mut flow = FlowBuilder::new();
+        let cluster = flow.cluster::<()>();
+        let (update_send, updates) = cluster.sim_input::<u32, NoOrder, ExactlyOnce>();
+        let (pump_send, pumps) = cluster.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let state = g_set_gossip(&cluster, updates, pumps);
+        let obs_tick = cluster.tick();
+        let _observed = state
+            .snapshot(&obs_tick, nondet!(/** harness observation */))
+            .all_ticks()
+            .sim_cluster_output();
+        let cfg = CheckConfig::new(60).with_grid(&[0, 2, 5, 10, 20]);
+        let r = check(
+            flow.sim()
+                .skip_consistency_assertions()
+                .with_cluster_size(&cluster, N as usize),
+            &cfg,
+            async |round| {
+                for m in 0..N {
+                    pump_send.send(m, ());
+                }
+                update_send.send_many_unordered([((round as u32) % N, round as u32)]);
+            },
+        );
+        expect_benign("crdt_gossip", &r);
+    }
+
+    // pure_heartbeat_load: 3 members, one timer element per member per round.
+
+    /// Expected: benign, and no hook to hold at all.
+    #[test]
+    fn library_pure_heartbeat() {
+        use crate::cluster::pure_heartbeat::pure_heartbeat;
+        const N: u32 = 3;
+        let mut flow = FlowBuilder::new();
+        let cluster = flow.cluster::<()>();
+        let (timer_send, timer) = cluster.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let _received = pure_heartbeat(&cluster, timer).entries().sim_cluster_output();
+        let r = check(
+            flow.sim().with_cluster_size(&cluster, N as usize),
+            &config(),
+            async |_round| {
+                for m in 0..N {
+                    timer_send.send(m, ());
+                }
+            },
+        );
+        expect_benign("pure_heartbeat", &r);
+        assert!(r.curves.is_empty(), "pure_heartbeat has no batch hook");
+    }
+
+    // transitive_closure_load: a 4-edge chain every 5 rounds, one step per round.
+
+    /// Expected: benign.
+    #[test]
+    fn library_transitive_closure() {
+        use crate::local::productive_tc::productive_transitive_closure;
+        let mut flow = FlowBuilder::new();
+        let process = flow.process::<()>();
+        let (graph_send, graphs) = process.sim_input::<Vec<(u32, u32)>, TotalOrder, ExactlyOnce>();
+        let (step_send, steps) = process.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let (facts, traces) = productive_transitive_closure(graphs, steps);
+        let _facts = facts
+            .assume_ordering::<TotalOrder>(nondet!(/** the harness only counts facts */))
+            .sim_output();
+        let _traces = traces.sim_output();
+        let mut graphs_admitted = 0u32;
+        let r = check(flow.sim(), &config(), async |round| {
+            if round == 0 {
+                graphs_admitted = 0;
+            }
+            if round % 5 == 0 {
+                let base = graphs_admitted * 1000;
+                graph_send.send((0..4).map(|i| (base + i, base + i + 1)).collect());
+                graphs_admitted += 1;
+            }
+            step_send.send(());
+        });
+        expect_benign("transitive_closure", &r);
     }
 }
