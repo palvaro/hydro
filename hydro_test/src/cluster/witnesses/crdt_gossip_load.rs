@@ -45,8 +45,9 @@
 //! The per-round cost of full-state gossip is `(n - 1) * (n * |set| + updates)` elements on the
 //! wire and `(n - 1) |set|` merges per member, which the input alone determines; the burst leaves
 //! the set, and so every later round, larger, but no schedule and no trigger changes the number of
-//! sends a round makes. That is not amplification in the corpus's sense, although total work over
-//! a run grows with the square of the number of updates rather than linearly. The run is 120
+//! sends a round makes. Work is bounded by a function of the input under every schedule, which is
+//! the benign label, although total work over a run grows with the square of the number of updates
+//! rather than linearly. The run is 120
 //! rounds rather than 800 because the simulator's cost is quadratic in the set (see `sim_tests`).
 
 /// An open-loop workload for the tests: updates per round, dealt round-robin to members, with a

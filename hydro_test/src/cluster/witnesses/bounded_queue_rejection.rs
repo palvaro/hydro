@@ -14,11 +14,18 @@
 //! `rpc_retry` collapses because a queue deeper than `timeout_ticks * max_per_tick` makes every
 //! queued request time out and be sent again, so the server serves each request several times
 //! and offered load exceeds capacity after the trigger has ended. A queue bounded at less than
-//! `timeout_ticks * max_per_tick` keeps queueing delay below the timeout, so a request that is
-//! queued is served once, and a request that is not queued learns so at once instead of after a
-//! timeout. The rejected requests are re-sent, but a re-send costs the server nothing unless it is
-//! admitted, and then it is served once. The knob is `max_backlog`: `Some(100)` (a delay of 20
-//! ticks against a timeout of 40) is the benign program, `None` is the amplifying twin.
+//! `timeout_ticks * max_per_tick` keeps the *server's* queueing delay below the timeout, so a
+//! request that is queued is served once, and a request that is not queued learns so at once
+//! instead of after a timeout. The rejected requests are re-sent, but a re-send costs the server
+//! nothing unless it is admitted, and then it is served once.
+//!
+//! The bound is a mitigation, not a removal of the hazard. The client still re-sends any request
+//! whose reply has not arrived within `timeout_ticks`, and the server, which does not remember
+//! what it has served, serves the re-send again. The bound caps the delay the server itself can
+//! impose; it cannot cap the delay the network imposes, and a reply held past the timeout still
+//! produces a redundant send and a redundant serve. Both configurations are therefore hazardous.
+//! The knob is `max_backlog`: `Some(100)` (a server delay of at most 20 ticks against a timeout
+//! of 40) recovers from the load trigger, `None` collapses under it exactly as `rpc_retry` does.
 //!
 //! # Timer parameters
 //!
@@ -34,14 +41,25 @@
 //!
 //! | run | max_backlog | trigger | tail completions | tail served first / again | queue at 600 -> 800 | whole run: sent / served / rejected / abandoned for 2200 requests | label |
 //! |---|---|---|---|---|---|---|---|
-//! | bounded queue | Some(100) | yes | 400 | 400 / 0 | 0 -> 0 (peak 100, 65 at round 200, empty from round 250) | 3033 / 1968 / 1065 / 232 | benign |
-//! | unbounded twin | None | yes | 0 | 333 / 667 | 1038 -> 1237 | 4937 / 3700 / 0 / 978 | amplifying |
+//! | bounded queue | Some(100) | yes | 400 | 400 / 0 | 0 -> 0 (peak 100, 65 at round 200, empty from round 250) | 3033 / 1968 / 1065 / 232 | hazardous, mitigated (recovers; see hold experiment) |
+//! | unbounded | None | yes | 0 | 333 / 667 | 1038 -> 1237 | 4937 / 3700 / 0 / 978 | hazardous (collapses) |
 //! | no trigger | Some(100) | no | 400 | 400 / 0 | 0 -> 0 | 1600 / 1600 / 0 / 0 | healthy |
 //!
 //! The bounded run never serves an id twice in 800 rounds, and total sends are 1.38 times the
 //! input against the 3 times that `max_attempts` allows. The price is the 232 requests abandoned
-//! after three rejections during the trigger, which the unbounded twin also abandons (978 of them)
-//! without ever recovering. The unbounded twin's numbers are the numbers of `rpc_retry`.
+//! after three rejections during the trigger, which the unbounded run also abandons (978 of them)
+//! without ever recovering. The unbounded run's numbers are the numbers of `rpc_retry`.
+//!
+//! The bounded configuration's label rests on the hold experiment
+//! (`held_replies_make_the_server_redo_work_under_the_bound`). The server has no timer to
+//! withhold and the simulator will not let a tick run without releasing something from its only
+//! loaded hook, so the experiment lets the fuzzer choose schedules and reads the delay off each
+//! run: 24 requests, one per round, four clock elements per round, timeout 2, queue bound 100
+//! (never reached), 512 schedules. Under the prompt schedule (the no-trigger control) the 24
+//! requests cost 24 sends and 24 serves. Under the fuzzed schedules, 511 of 512 re-sent, the worst
+//! cost 41 sends and 41 serves for the same 24 requests, and mean re-sends grew with the longest
+//! reply delay a schedule imposed: 5.00 at 2 ticks, 5.78 at 3, 8.20 at 4. The same input costs
+//! more work the longer replies are held, which is the hazardous label.
 
 use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
 use hydro_lang::prelude::*;
@@ -546,7 +564,7 @@ mod sim_tests {
         assert!(served <= input);
     }
 
-    /// Control: the twin with an unbounded queue is `rpc_retry` and collapses.
+    /// Control: the unbounded configuration is `rpc_retry` and collapses.
     #[test]
     fn without_the_bound_the_system_collapses() {
         let trace = run(WORKLOAD, POLICY, ServerConfig { max_backlog: None, ..SERVER }, ROUNDS);
@@ -582,6 +600,135 @@ mod sim_tests {
         print_trajectory(&trace);
         assert!(trace.iter().all(|r| r.sent_retry == 0 && r.rejected == 0 && r.abandoned == 0 && r.served_again == 0 && r.backlog == 0));
         assert!(trace[1..].iter().all(|r| r.completed == 2));
+    }
+
+    /// Hold experiment for the bounded configuration, which recovers from the load trigger and so
+    /// cannot be labeled by collapse. The label is hazardous if some schedule makes the same input
+    /// cost more work, and more of it the longer replies are delayed.
+    ///
+    /// The server has no timer, so the harness cannot hold the reply edge by withholding a clock
+    /// as the cache witness does, and the simulator will not let a tick run without releasing
+    /// something from its only loaded hook, so a fixed driver cannot hold replies across a round
+    /// either. The experiment therefore lets the fuzzer choose schedules and reads the delay off
+    /// each run: the harness sends several clock elements per round, and a schedule that releases
+    /// clock elements while holding a reply advances the client's logical time past the timeout.
+    ///
+    /// Hand-computed expectation, written before measuring. One request per round for 24 rounds,
+    /// four clock elements per round, timeout 2 ticks, three sends per request, queue bound 100
+    /// (never approached, so no rejections), capacity 5. Under the prompt schedule every reply is
+    /// observed before the next clock element, latency is 0, and the server serves each of the 24
+    /// ids once. Under a fuzzed schedule, a reply held while two clock elements are released makes
+    /// the client re-send that id, and the server, whose queue is otherwise empty, serves it a
+    /// second time; held across four, a third time. So over the fuzzed runs: every run whose
+    /// longest observed latency is below 2 ticks has zero re-sends and zero re-serves; some run
+    /// with a latency of 2 or more has both; and the largest re-send count found should be several
+    /// times the smallest positive one, growing with the longest latency observed.
+    #[test]
+    fn held_replies_make_the_server_redo_work_under_the_bound() {
+        const ROUNDS: usize = 24;
+        const CLOCKS_PER_ROUND: usize = 4;
+        let policy = RetryPolicy {
+            timeout_ticks: 2,
+            max_attempts: 3,
+            reject_backoff_ticks: 1,
+        };
+        let server_config = ServerConfig {
+            max_per_tick: 5,
+            max_backlog: Some(100),
+        };
+
+        let mut flow = FlowBuilder::new();
+        let client = flow.process::<Client>();
+        let server = flow.process::<Server>();
+        let (request_send, requests) = client.sim_input::<u64, TotalOrder, ExactlyOnce>();
+        let (clock_send, client_clock) = client.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let outputs = rpc_with_bounded_queue(&client, &server, requests, client_clock, policy, server_config);
+        let completed = outputs.completed.sim_output();
+        let outgoing = outputs.outgoing.sim_output();
+        let processed = outputs.processed.sim_output();
+        let rejected = outputs.rejected.sim_output();
+
+        // Per fuzzed run: (longest latency observed, re-sends, re-serves, rejections).
+        let mut runs: Vec<(u64, u64, u64, u64)> = Vec::new();
+        let runs_ref = &mut runs;
+
+        flow.sim().unit_test_fuzz_iterations(512).fuzz(async || {
+            let mut sent_ids: HashSet<u64> = HashSet::new();
+            let mut served_ids: HashSet<u64> = HashSet::new();
+            let mut resends = 0u64;
+            let mut reserves = 0u64;
+            let mut rejections = 0u64;
+            let mut max_latency = 0u64;
+            for tick in 0..ROUNDS as u64 {
+                for _ in 0..CLOCKS_PER_ROUND {
+                    clock_send.send(());
+                }
+                request_send.send(tick);
+                quiesce().await;
+                for c in completed.collect_sorted::<Vec<_>>().await {
+                    max_latency = max_latency.max(c.latency_ticks);
+                }
+                while let Some(req) = outgoing.try_next().await {
+                    if !sent_ids.insert(req.id) {
+                        resends += 1;
+                    }
+                }
+                while let Some(req) = processed.try_next().await {
+                    if !served_ids.insert(req.id) {
+                        reserves += 1;
+                    }
+                }
+                rejections += rejected.collect::<Vec<_>>().await.len() as u64;
+            }
+            runs_ref.push((max_latency, resends, reserves, rejections));
+        });
+
+        assert!(runs.iter().all(|r| r.3 == 0), "the queue bound should never be reached in this experiment");
+        let below_timeout = runs.iter().filter(|r| r.0 < policy.timeout_ticks).count();
+        let with_redo = runs.iter().filter(|r| r.1 > 0).count();
+        let max_resends = runs.iter().map(|r| r.1).max().unwrap();
+        let max_reserves = runs.iter().map(|r| r.2).max().unwrap();
+        let min_positive_resends = runs.iter().map(|r| r.1).filter(|&n| n > 0).min().unwrap_or(0);
+        // Redundant work by the longest observed latency, to show it grows with delay.
+        let mut by_latency: std::collections::BTreeMap<u64, (u64, u64)> = Default::default();
+        for r in &runs {
+            let e = by_latency.entry(r.0).or_default();
+            e.0 += 1;
+            e.1 += r.1;
+        }
+        println!(
+            "{} schedules: {} with longest latency below the timeout, {} with re-sends; most re-sends {max_resends}, most re-serves {max_reserves}, fewest positive re-sends {min_positive_resends}",
+            runs.len(),
+            below_timeout,
+            with_redo
+        );
+        for (lat, (n, resends)) in &by_latency {
+            println!("longest latency {lat}: {n} schedules, mean re-sends {:.2}", *resends as f64 / *n as f64);
+        }
+
+        // No delay, no redundant work: the mechanism is delay-driven.
+        assert!(
+            runs.iter().filter(|r| r.0 < policy.timeout_ticks).all(|r| r.1 == 0 && r.2 == 0),
+            "a schedule that never delayed a reply past the timeout should not have re-sent or re-served"
+        );
+        // Some schedule exists under which the same 24 requests cost the server more than 24 serves.
+        assert!(with_redo > 0, "the fuzzer should find a schedule that re-sends");
+        assert!(max_reserves > 0, "a re-send should make the server serve an id again");
+        // Redundant work grows with delay. A reply held past one timeout can cost one re-send, one
+        // held past two can cost two, so schedules whose longest latency reached twice the
+        // timeout should carry more re-sends on average than those that only reached it once.
+        // (The relation is statistical because a clock jump and the reply can land in the same
+        // client tick, which gives a long latency with no re-send.)
+        let mean = |lo: u64, hi: u64| {
+            let sel: Vec<&(u64, u64, u64, u64)> = runs.iter().filter(|r| r.0 >= lo && r.0 < hi).collect();
+            (sel.len(), sel.iter().map(|r| r.1).sum::<u64>() as f64 / sel.len().max(1) as f64)
+        };
+        let (n_once, mean_once) = mean(policy.timeout_ticks, 2 * policy.timeout_ticks);
+        let (n_twice, mean_twice) = mean(2 * policy.timeout_ticks, u64::MAX);
+        println!("longest latency in [timeout, 2 timeout): {n_once} schedules, mean re-sends {mean_once:.2}; at least 2 timeout: {n_twice} schedules, mean re-sends {mean_twice:.2}");
+        if n_once > 0 && n_twice > 0 {
+            assert!(mean_twice >= mean_once, "re-sends should grow with the delay the schedule imposed");
+        }
     }
 
     /// The bound holds under schedule exploration: however the schedule holds requests and

@@ -19,15 +19,18 @@
 //! and sends one fetch per missing key, so a hot key costs one fetch per expiry however slow the
 //! origin is.
 //!
-//! Whether the loop closes depends on a second knob, [`CacheConfig::request_dated`], which says
-//! from when an entry's age is counted. With `request_dated = false` the age counts from the
-//! tick the fill arrived, so every fill, redundant or not, gives the key another `ttl_ticks` of
-//! life. With `request_dated = true` the age counts from the tick the fetch was issued, which is
-//! the conservative age calculation of RFC 7234 (a cache cannot know how long the origin sat on
-//! the request, so it assumes the response is as old as the request). A fill whose age already
-//! exceeds the TTL when it arrives is *stale*: it answers the waiting lookups but is not stored.
-//! Once the origin's queueing delay exceeds the TTL, every fill is stale, the hot keys are never
-//! present again, and every lookup is a fetch.
+//! Whether the origin then *collapses* depends on a second knob, [`CacheConfig::request_dated`],
+//! which says from when an entry's age is counted. With `request_dated = false` the age counts
+//! from the tick the fill arrived, so every fill, redundant or not, gives the key another
+//! `ttl_ticks` of life. With `request_dated = true` the age counts from the tick the fetch was
+//! issued, which is the conservative age calculation of RFC 7234 (a cache cannot know how long
+//! the origin sat on the request, so it assumes the response is as old as the request). A fill
+//! whose age already exceeds the TTL when it arrives is *stale*: it answers the waiting lookups
+//! but is not stored. Once the origin's queueing delay exceeds the TTL, every fill is stale, the
+//! hot keys are never present again, and every lookup is a fetch. The dating knob changes how far
+//! the herd can go, not whether there is one: without coalescing, a held fill turns the lookups
+//! that arrive meanwhile into fetches under either dating rule, so both non-coalescing
+//! configurations are hazardous.
 //!
 //! # Timer parameters
 //!
@@ -49,17 +52,26 @@
 //!
 //! | run | request_dated | coalesce | trigger | tail completions | tail mean latency | tail fetches offered | tail fills applied / redundant / stale | origin queue at 600 -> 800 | label |
 //! |---|---|---|---|---|---|---|---|---|---|
-//! | herd, request dated | true | false | yes | 1600 | 0.8 | 1600 | 0 / 0 / 800 | 2462 -> 3258 | amplifying |
-//! | herd, fill dated | false | false | yes | 1600 | 0.0 | 100 | 100 / 0 / 0 | 0 -> 0 (peak 680, 568 redundant fills over the run) | benign |
+//! | herd, request dated | true | false | yes | 1600 | 0.8 | 1600 | 0 / 0 / 800 | 2462 -> 3258 | hazardous (collapses) |
+//! | herd, fill dated | false | false | yes | 1600 | 0.0 | 100 | 100 / 0 / 0 | 0 -> 0 (peak 680, 568 redundant fills over the run) | hazardous, mitigated (recovers; see hold experiment) |
 //! | no trigger | true | false | no | 1600 | 0.0 | 546 over rounds 10 to 800 | 156 wasted over rounds 10 to 800 | 0 -> 0 | healthy |
 //! | coalescing | true | true | yes | 1600 | 0.0 | 100 | 100 / 0 / 0 | 0 -> 0 (peak 390) | benign |
 //!
-//! In the amplifying run the lookups themselves are served: a lookup waiting on key `k` is answered
+//! The fill-dated herd recovers from the trigger, so its label rests on the hold experiment
+//! (`fill_dated_herd_does_more_work_the_longer_fills_are_held`): the same 1920 baseline lookups
+//! over 240 rounds, with the origin's clock withheld for `k` rounds from round 100 and then
+//! delivered at once, cost the origin 124, 160, 200, 272 and 498 fetches for `k` of 0, 5, 10, 20
+//! and 50. Every lookup completes in every case and the origin drains by the end; only the work
+//! differs, and it grows with the hold. The coalescing configuration's label rests on
+//! `coalescing_bound_holds_across_schedules`, which shows fetches bounded by distinct misses under
+//! 256 fuzzed schedules.
+//!
+//! In the collapsing run the lookups themselves are served: a lookup waiting on key `k` is answered
 //! by the stale fill of an older fetch for `k`, and one of those arrives every couple of rounds.
 //! What does not recover is the origin, which is offered 8 fetches per round against a capacity of
 //! 4 under the same 8 lookups per round it served with 0.5 fetches before the trigger, and whose
 //! queue grows by 4 per round with nothing useful in it. The fill-dated herd was expected to
-//! amplify and does not: the redundant fills for a key arrive spread over the queueing delay and
+//! collapse and does not: the redundant fills for a key arrive spread over the queueing delay and
 //! each restarts the key's life, so no new fetches are issued while the queue drains.
 
 use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
@@ -372,7 +384,29 @@ mod sim_tests {
         waiting: usize,
     }
 
+    /// A hold on the origin's clock: no `origin_clock` element is delivered during rounds
+    /// `[start, start + rounds)`, and the withheld elements are all delivered in round
+    /// `start + rounds`. The origin's total budget over the run is unchanged, but every fill it
+    /// would have produced in the window arrives up to `rounds` rounds late. This is how the
+    /// harness delays the fill edge without touching the program: the origin's tick, woken only
+    /// by arriving fetches, queues them and serves nothing until its clock returns.
+    #[derive(Clone, Copy, Debug)]
+    struct Hold {
+        start: u64,
+        rounds: u64,
+    }
+
     fn run(workload: Workload, cache_config: CacheConfig, origin_config: OriginConfig, rounds: usize) -> Vec<Round> {
+        run_with_hold(workload, cache_config, origin_config, rounds, None)
+    }
+
+    fn run_with_hold(
+        workload: Workload,
+        cache_config: CacheConfig,
+        origin_config: OriginConfig,
+        rounds: usize,
+        hold: Option<Hold>,
+    ) -> Vec<Round> {
         let mut flow = FlowBuilder::new();
         let cache = flow.process::<Cache>();
         let origin = flow.process::<Origin>();
@@ -407,7 +441,15 @@ mod sim_tests {
             let mut next_cold_key: Key = 1_000_000;
             for round in 0..rounds as u64 {
                 cache_clock_send.send(());
-                origin_clock_send.send(());
+                match hold {
+                    Some(h) if round >= h.start && round < h.start + h.rounds => {}
+                    Some(h) if round == h.start + h.rounds => {
+                        for _ in 0..=h.rounds {
+                            origin_clock_send.send(());
+                        }
+                    }
+                    _ => origin_clock_send.send(()),
+                }
                 for i in 0..workload.hot_per_round {
                     lookup_send.send(((round * workload.hot_per_round as u64 + i as u64) % workload.hot_keys as u64) as Key);
                 }
@@ -599,8 +641,9 @@ mod sim_tests {
     }
 
     /// The first version of this program dated entries from the fill's arrival. It was expected
-    /// to amplify and does not: the herd's redundant fills keep the hot keys alive while the
-    /// queue drains. Kept as a measured benign variant.
+    /// to collapse and does not: the herd's redundant fills keep the hot keys alive while the
+    /// queue drains. It is still hazardous, since a held fill still turns lookups into fetches;
+    /// the hold experiment below confirms that. Kept as a measured, mitigated configuration.
     #[test]
     fn herd_with_fill_dating_refreshes_itself_and_recovers() {
         let trace = run(WORKLOAD, CacheConfig { request_dated: false, ..CACHE }, ORIGIN, ROUNDS);
@@ -618,6 +661,65 @@ mod sim_tests {
         let total_lookups = 8 * ROUNDS as u64 + 10 * 60;
         println!("total fetched {total_fetched} for {total_lookups} lookups");
         assert!(total_fetched <= total_lookups);
+    }
+
+    /// Hold experiment for the fill-dated herd, which recovers from the load trigger and so
+    /// cannot be labeled by collapse. The label is hazardous if the same lookup input produces
+    /// more origin work when fills are delayed, and more of it the longer they are delayed.
+    ///
+    /// Hand-computed expectation, written before measuring. Baseline lookups only (no cold keys),
+    /// 240 rounds, the origin's clock withheld for `k` rounds from round 100 and then delivered
+    /// all at once. With no coalescing, a key that is missing for `d` rounds collects about
+    /// `0.8 d` lookups and so `0.8 d` fetches, one of which is useful; when the origin's clock
+    /// returns it serves them all in one tick, the first fill for each key is applied and the rest
+    /// arrive at a live key and are redundant. Keys expire at about one per two rounds, so a hold
+    /// of `k <= 20` rounds catches about `k / 2` keys, missing for `k / 2` rounds on average,
+    /// which is about `0.8 * (k / 2) * (k / 2) = 0.2 k^2` fetches: about 5 at `k = 5`, 20 at
+    /// `k = 10`, 80 at `k = 20`. Past `k = 20` every key is missing and the herd grows at the full
+    /// lookup rate of 8 per round, so about `80 + 8 (k - 20)`, which is about 320 at `k = 50`.
+    /// Redundant fills are reported but not asserted on: when the withheld clock elements are
+    /// delivered at once, the herd's fills for one key land in one cache tick, and the program
+    /// counts all of them as applied because none was live at the start of that tick. Fetches put
+    /// on the wire and served by the origin are the work measure. At `k = 0` the run is the
+    /// no-trigger control. So fetches should increase with `k`, and be larger at `k = 50` than at
+    /// `k = 0` by roughly 300.
+    #[test]
+    fn fill_dated_herd_does_more_work_the_longer_fills_are_held() {
+        const HOLD_ROUNDS: usize = 240;
+        const HOLDS: [u64; 5] = [0, 5, 10, 20, 50];
+        let workload = Workload { cold_per_round: 0, ..WORKLOAD };
+        let config = CacheConfig { request_dated: false, ..CACHE };
+
+        let mut fetched_by_hold = Vec::new();
+        let mut fills_by_hold = Vec::new();
+        for k in HOLDS {
+            let hold = (k > 0).then_some(Hold { start: 100, rounds: k });
+            let trace = run_with_hold(workload, config, ORIGIN, HOLD_ROUNDS, hold);
+            let lookups = 8 * HOLD_ROUNDS as u64;
+            let fetched = sum(&trace, 0, HOLD_ROUNDS, |r| r.fetched);
+            let redundant = sum(&trace, 0, HOLD_ROUNDS, |r| r.redundant);
+            let applied = sum(&trace, 0, HOLD_ROUNDS, |r| r.applied);
+            let completed = sum(&trace, 0, HOLD_ROUNDS, |r| r.completed);
+            let peak_waiting = trace.iter().map(|r| r.waiting).max().unwrap();
+            println!(
+                "hold {k}: lookups {lookups}, completed {completed}, fetched {fetched}, fills applied {applied} redundant {redundant}, peak waiting {peak_waiting}, queue after run {}",
+                trace.last().unwrap().backlog
+            );
+            // The same input is served in full whatever the hold; only the work differs.
+            assert!(completed.abs_diff(lookups) <= 8, "completed {completed} vs lookups {lookups}");
+            assert_eq!(trace.last().unwrap().backlog, 0, "the origin should have drained by the end");
+            fetched_by_hold.push(fetched);
+            fills_by_hold.push(applied + redundant);
+        }
+        println!("fetched by hold {HOLDS:?}: {fetched_by_hold:?}");
+        println!("fills (applied + redundant) by hold {HOLDS:?}: {fills_by_hold:?}");
+
+        assert!(
+            fetched_by_hold.windows(2).all(|w| w[0] <= w[1]),
+            "fetches should not decrease as the hold grows: {fetched_by_hold:?}"
+        );
+        let excess = fetched_by_hold.last().unwrap() - fetched_by_hold[0];
+        assert!(excess > 100, "a 50-round hold should add well over 100 fetches for the same input, added {excess}");
     }
 
     /// Control: request dating, no coalescing, no trigger. The herd factor at an idle origin is
