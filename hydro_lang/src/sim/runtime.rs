@@ -99,6 +99,14 @@ pub trait SimHook {
     fn hook_item_type(&self) -> &'static str {
         ""
     }
+
+    /// How many stream records the decision currently held will release. Read by the scheduler
+    /// just before `release_decision` so [`super::work_counts`] can count admitted records
+    /// without touching the hook's behaviour. Hooks that release something other than stream
+    /// records (singleton snapshots, membership events, crash points) report zero.
+    fn pending_release_count(&self) -> usize {
+        0
+    }
 }
 
 /// A hook that can make inline decisions during the execution of a tick.
@@ -219,6 +227,10 @@ impl<T> SimHook for StreamHook<T, TotalOrder> {
         std::any::type_name::<T>()
     }
 
+    fn pending_release_count(&self) -> usize {
+        self.to_release.as_ref().map_or(0, Vec::len)
+    }
+
     fn current_decision(&self) -> Option<bool> {
         self.to_release.as_ref().map(|v| !v.is_empty())
     }
@@ -292,6 +304,10 @@ impl<T> SimHook for StreamHook<T, NoOrder> {
 
     fn hook_item_type(&self) -> &'static str {
         std::any::type_name::<T>()
+    }
+
+    fn pending_release_count(&self) -> usize {
+        self.to_release.as_ref().map_or(0, Vec::len)
     }
 
     fn current_decision(&self) -> Option<bool> {
@@ -397,6 +413,10 @@ impl<K: Hash + Eq + Clone, V> SimHook for KeyedStreamHook<K, V, TotalOrder> {
         std::any::type_name::<(K, V)>()
     }
 
+    fn pending_release_count(&self) -> usize {
+        self.to_release.as_ref().map_or(0, Vec::len)
+    }
+
     fn current_decision(&self) -> Option<bool> {
         self.to_release.as_ref().map(|v| !v.is_empty())
     }
@@ -495,6 +515,10 @@ impl<K: Hash + Eq + Clone, V> SimHook for KeyedStreamHook<K, V, NoOrder> {
 
     fn hook_item_type(&self) -> &'static str {
         std::any::type_name::<(K, V)>()
+    }
+
+    fn pending_release_count(&self) -> usize {
+        self.to_release.as_ref().map_or(0, Vec::len)
     }
 
     fn current_decision(&self) -> Option<bool> {

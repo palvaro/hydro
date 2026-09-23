@@ -103,6 +103,9 @@ pub mod prompt_schedule;
 pub mod hold_one_hook;
 
 #[cfg(stageleft_runtime)]
+pub mod work_counts;
+
+#[cfg(stageleft_runtime)]
 #[doc(hidden)]
 pub use compiled::continue_if_impl;
 #[cfg(stageleft_runtime)]

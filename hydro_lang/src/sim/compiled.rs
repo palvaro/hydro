@@ -1026,6 +1026,10 @@ impl<'a> CompiledSimInstance<'a> {
                 sim.step().await;
             }
         }
+
+        if super::work_counts::is_enabled() {
+            sim.record_work_counts();
+        }
     }
 
     /// Consumes this instance and constructs the [`LaunchedSim`] state struct, which is
@@ -1977,6 +1981,23 @@ impl<W: std::io::Write> LaunchedSim<W> {
         self.not_ready_observations
             .retain(|obs| !(obs.location == *loc && obs.cluster_id == c_id));
     }
+
+    /// Reads every DFIR instance's cumulative metrics into [`super::work_counts`]. Async DFIRs
+    /// are keyed by their location; tick DFIRs by their parent location with a ` tick` suffix.
+    /// Cluster members share a key and are summed. Called once when a run finishes.
+    fn record_work_counts(&self) {
+        for (loc, member, dfir) in &self.async_dfirs {
+            super::work_counts::record_dfir(&format!("{loc:?}"), *member, &dfir.metrics());
+        }
+        for tick in self.possibly_ready_ticks.iter().chain(&self.not_ready_ticks) {
+            super::work_counts::record_dfir(
+                &format!("{:?} tick", tick.parent_location),
+                tick.cluster_id,
+                &tick.dfir.metrics(),
+            );
+        }
+    }
+
     /// Runs a single step of the simulation scheduler.
     ///
     /// A step first advances all async DFIRs; if none of them made progress, it instead runs
@@ -2090,7 +2111,7 @@ impl<W: std::io::Write> LaunchedSim<W> {
                     })
                 });
 
-                run_hooks(tick_decision_writer.as_mut(), &mut tick.hooks);
+                run_hooks(tick_decision_writer.as_mut(), &mut tick.hooks, tick.cluster_id);
 
                 let run_tick_future = tick.dfir.run_tick();
                 if !tick.inline_hooks.is_empty() {
@@ -2130,9 +2151,11 @@ impl<W: std::io::Write> LaunchedSim<W> {
             } else {
                 let next_obs = next_tick_or_obs - self.possibly_ready_ticks.len();
                 let log_writer = (!matches!(self.log, LogKind::Null)).then_some(&mut self.log);
+                let obs_member = self.possibly_ready_observations[next_obs].cluster_id;
                 run_hooks(
                     log_writer,
                     &mut self.possibly_ready_observations[next_obs].hooks,
+                    obs_member,
                 );
 
                 // A crash hook may have just fired: permanently halt the crashed
@@ -2150,6 +2173,7 @@ impl<W: std::io::Write> LaunchedSim<W> {
 fn run_hooks<W: std::fmt::Write>(
     mut tick_decision_writer: Option<&mut W>,
     hooks: &mut [Box<dyn SimHook>],
+    member: Option<u32>,
 ) {
     let mut remaining_decision_count = hooks.len();
     let mut made_nontrivial_decision = false;
@@ -2184,6 +2208,18 @@ fn run_hooks<W: std::fmt::Write>(
                     || hook.autonomous_decision(driver, force),
                 );
                 remaining_decision_count -= 1;
+            }
+
+            // Passive accounting for the checker (see `super::work_counts`); a single
+            // thread-local boolean when collection is off.
+            if super::work_counts::is_enabled() {
+                super::work_counts::record_hook_release(
+                    hook.hook_location(),
+                    index,
+                    hook.hook_item_type(),
+                    member,
+                    hook.pending_release_count(),
+                );
             }
 
             hook.release_decision(

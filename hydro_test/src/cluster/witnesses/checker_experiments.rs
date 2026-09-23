@@ -1,5 +1,9 @@
-//! Checker experiments: can schedule exploration alone, with no load trigger and no simulator
-//! changes, recover the corpus label of `rpc_retry`?
+//! Checker experiments, in three steps: can random schedule exploration alone recover the label of
+//! `rpc_retry` (first experiment); can holding one edge at a time recover every corpus label at
+//! the witnesses' own parameters (second); and can the same sweep take its verdict from counts
+//! the simulator collects itself, with nothing read from the program (third)?
+//!
+//! ## First experiment: random schedules, no simulator changes
 //!
 //! The question the checker must answer is whether there exists a schedule under which a fixed
 //! input costs the program more work than the input requires, and more of it the longer delivery
@@ -210,6 +214,118 @@
 //! wherever a hold tips a program into a degraded state it does not leave (compaction, the
 //! gossip `Delta` and timer hooks): a large jump at small `k` and then a decline proportional to
 //! the rounds remaining, which is why the rule reads the peak and not the endpoint.
+//!
+//! # Third experiment: the same sweep with no counters from the program
+//!
+//! The two sweeps above read work from counters the witness authors exposed (sends, serves,
+//! fetches, migrations). A tool pointed at an arbitrary crate has none of those. The
+//! [`generic_measure`] module runs the same 22 sweeps (same inputs, same grid, same hold plan)
+//! and takes the verdict from [`hydro_lang::sim::work_counts`], which the simulator collects
+//! passively: records released by every `use::batch` hook (counted host-side in `run_hooks`),
+//! network messages (the deploy path's `_network_metrics()` pass-through placed in the sim's send
+//! pipelines and read from DFIR metrics), DFIR handoff items, and DFIR subgraph runs, each broken
+//! down by hook, sending location, and cluster member. Nothing about scheduling changed, and the
+//! simulator's own 165 sim tests pass.
+//!
+//! ## Reasoning about the candidates, written before measuring
+//!
+//! A hold delays records; it cannot create them. So a count is fit for the verdict only if a
+//! delay cannot raise it without the program deriving something new. Records released by batch
+//! hooks and network messages both have that property: over a run each is what arrived minus
+//! what is still buffered, batch sizes do not enter, and postponement past the end lowers them.
+//! DFIR handoff items do not: they include persisted state re-read every tick, so a program that
+//! keeps a table of outstanding requests re-reads more rows for longer under a hold with no
+//! record re-derived. Subgraph runs move with tick count, which a hold changes directly. For
+//! `rpc_retry` the expectation was that network messages reproduce the hand count exactly
+//! (sends plus serves are the messages in both directions) and that admitted records reproduce
+//! its shape at a larger scale (a re-sent request enters the server's arrivals tick, the
+//! client's response tick, and the witness's two metrics ticks). For `compaction_falls_behind`
+//! the expectation was a miss: its extra work is a cost field in a payload and a `u64` segment
+//! length, not records.
+//!
+//! ## What the measurement added to the rule
+//!
+//! Two configurations forced a choice the reasoning above had not made. A plain total of
+//! admitted records (or of messages) called `election spread=3` benign: the hand count rises
+//! 0 0 5 40 100 155 220 265, but the cluster's message total *falls* (960 to 944), because the
+//! vote requests the followers add are outnumbered by the heartbeats the leader stops sending
+//! while the cluster is leaderless. The finest breakdown, every hook on every member, caught
+//! that (member 1's sends rise by 824) but called `rpc_retry` at one attempt hazardous: with one
+//! attempt, a request whose reply is held past the timeout is *abandoned* rather than completed,
+//! so the client's `abandoned` hook admits 202 more records while its `completed` hook admits
+//! 202 fewer, a substitution with no work added. The two views fail in opposite ways: a total is
+//! safe against substitution within a location but masked by displacement between members; the
+//! finest view unmasks displacement but flags substitution. What separates the cases is what
+//! competes for capacity. A message sent to another location consumes that location's capacity
+//! and is counted *per sender*, where a quiet leader cannot hide a busy follower. Records a
+//! location admits into its own ticks consume its own capacity and are counted *in total*, where
+//! a completion turned abandonment nets to zero. The rule ([`hold_sweep::checker_verdict`]):
+//! hazardous if some hold raises any member's outgoing messages or the program's total admitted
+//! records above the unheld run; benign otherwise.
+//!
+//! ## Measured across the corpus
+//!
+//! Every configuration under the same input and grid as the second experiment. "hand" is the
+//! verdict from the witness's own counters; "total" is a plain total of admitted records; "rule"
+//! is the checker's rule above. The gain column is the rule's largest rise and what rose. The 22
+//! tests pass together in 377 s of test time against 354 s for the hand-counted sweep, so
+//! counting costs about six percent.
+//!
+//! | configuration | hand | total | rule | what rose, by how much | held hook (rule) |
+//! |---|---|---|---|---|---|
+//! | rpc_retry, 3 attempts | hazardous | hazardous | hazardous | admitted +1470 (network +588, the hand count exactly) | server `Request` arrivals |
+//! | rpc_retry, 1 attempt | benign | benign | benign | none (finest view: `abandoned` hook +202, a substitution) | none |
+//! | backoff_retry, on | hazardous | hazardous | hazardous | admitted +448 | server `Request` arrivals |
+//! | backoff_retry, off | hazardous | hazardous | hazardous | admitted +588 | server `Request` arrivals |
+//! | bounded_queue, `Some(100)` | hazardous | hazardous | hazardous | admitted +634 | server `Request` arrivals |
+//! | bounded_queue, `None` | hazardous | hazardous | hazardous | admitted +588 | server `Request` arrivals |
+//! | cache, request-dated, no coalescing | hazardous | hazardous | hazardous | admitted +2332 | cache `Fill` |
+//! | cache, fill-dated, no coalescing | hazardous | hazardous | hazardous | admitted +1500 | origin clock |
+//! | cache, coalescing | benign | benign | benign | none | none |
+//! | gossip_resend, ack timeout 3 | hazardous | hazardous | hazardous | admitted +5435 | `Ack` hook |
+//! | gossip_resend, ack timeout 0 | benign | benign | benign | none | none |
+//! | election, uniform timeouts | hazardous | hazardous (+108) | hazardous | member 1 sends +840 | timer hook (the `Msg` inbox also rises) |
+//! | election, spread 3 | hazardous | **benign** (total falls) | hazardous | member 1 sends +824 | `Msg` inbox |
+//! | rebalancing, no cooldown | hazardous | hazardous | hazardous | admitted +300 | `u64` task arrivals |
+//! | rebalancing, cooldown 8 | hazardous | hazardous | hazardous | admitted +300 | `u64` task arrivals |
+//! | compaction, reserve 0 | hazardous | **benign** | **benign** | none (handoffs +164460: the backlog re-costed every tick) | none |
+//! | compaction, reserve 8 | benign | benign | benign | none | none |
+//! | lease, re-send after 4 | hazardous | hazardous | hazardous | admitted +3221 | client `Ack` hook |
+//! | lease, one outstanding | benign | benign | benign | none | none |
+//! | crdt_gossip | benign | benign | benign | none (merges fall under every hold) | none |
+//! | pure_heartbeat | benign | benign | benign | none (no batch hook to hold) | none |
+//! | transitive_closure | benign | benign | benign | none | none |
+//!
+//! Twenty-one of twenty-two agree with the hand-counted verdict, and in every agreement the rule
+//! names the same held hook, except `election spread=0`, where the hand count's largest gain was
+//! at the `Msg` inbox and the rule's is at the timer hook one line away in the same `sliced!`
+//! block (both holds delay heartbeats; both rise under both measures). The rule's second
+//! localization signal, the hooks that admitted more under the winning hold, names the edges the
+//! extra records crossed: for `rpc_retry` the server's arrivals, the client's responses, and the
+//! two metrics ticks; for the election, the followers' `Msg` inboxes.
+//!
+//! The disagreement is `compaction_falls_behind` with `compaction_reserve = 0`, as predicted. Its
+//! hold curve under the hand count is 0 5136 9979 9281 7961 6741 5621 4601 units; under admitted
+//! records it is flat at 1440, because the store admits the same 1200 operations and 240 clock
+//! elements whatever the schedule, and the units it "spends" are arithmetic on a `u64`. The only
+//! record-level trace of its collapse is the backlog it re-chains through `cross_singleton` and
+//! `scan` every tick, which handoff items do see (6478 to 170938). But handoff items also call
+//! four of the seven benign configurations hazardous (rpc_retry one attempt +70062, coalescing
+//! cache +124589, gossip_resend off +3282560, lease one outstanding +42591), all through the same
+//! mechanism: state retained longer under a hold is re-read more times. A count that cannot
+//! tell re-reading from re-deriving is not usable for the verdict, so the compaction miss stands.
+//! A witness that materialized its scan as records (a `cross_product` of gets with segment
+//! records rather than a cost field) would be visible to the rule; this one is not, and the
+//! witness was not modified.
+//!
+//! ## What is generic now and what is not
+//!
+//! The verdict and both localization signals now come from the simulator alone: the harness
+//! supplies the program, the workload, and the hold plan, and reads nothing from the program's
+//! outputs. What is still supplied by hand is the workload itself and the per-program wiring
+//! (which inputs to feed each round). Hooks are perturbed one at a time; `use::snapshot` hooks
+//! are not perturbed and their releases are not counted, since a snapshot is one value per tick
+//! and tick count is a scheduling artifact.
 
 #[cfg(test)]
 mod sim_tests {
@@ -449,9 +565,11 @@ mod sim_tests {
 /// re-exports from the real crate, where a `cfg(test)` module does not exist.
 #[cfg(test)]
 mod hold_sweep {
+    use std::collections::BTreeMap;
     use std::time::Instant;
 
     use hydro_lang::sim::hold_one_hook::HoldHandle;
+    use hydro_lang::sim::work_counts::WorkCounts;
 
     /// Hold lengths, in harness rounds, tried for every hook.
     pub const GRID: &[usize] = &[0, 5, 10, 20, 40, 60, 80, 100];
@@ -470,22 +588,27 @@ mod hold_sweep {
         pub forced: u64,
         /// Hooks that had something buffered at least once (from the driver's discovery).
         pub hooks: Vec<String>,
+        /// The simulator's own, program-independent counts for the same execution.
+        pub counts: WorkCounts,
     }
 
     /// The curve for one hook.
     #[derive(Debug, Clone)]
     pub struct HookCurve {
         pub hook: String,
-        /// `(k, extra work)` for each grid point.
+        /// `(k, extra work)` for each grid point, in the witness's own units.
         pub extra: Vec<(usize, i64)>,
         /// `k` values at which the hold was refused (forced releases).
         pub refused_at: Vec<usize>,
+        /// `(k, counts)` for each grid point, from the simulator.
+        pub counts: Vec<(usize, WorkCounts)>,
     }
 
     #[derive(Debug, Clone)]
     pub struct SweepResult {
         pub label: String,
         pub baseline_extra: i64,
+        pub baseline_counts: WorkCounts,
         pub curves: Vec<HookCurve>,
         pub seconds: f64,
     }
@@ -551,14 +674,19 @@ mod hold_sweep {
         let base = run(None, 0);
         let baseline_extra = base.total as i64 - base.required as i64;
         println!(
-            "[{label}] baseline: required {} total {} extra {baseline_extra}; {} hooks with buffered input",
+            "[{label}] baseline: required {} total {} extra {baseline_extra}; {} hooks with buffered input; admitted {} network {} handoffs {} runs {}",
             base.required,
             base.total,
-            base.hooks.len()
+            base.hooks.len(),
+            base.counts.admitted(),
+            base.counts.network(),
+            base.counts.handoffs(),
+            base.counts.runs(),
         );
         let mut curves = Vec::new();
         for hook in &base.hooks {
             let mut extra = vec![(0usize, baseline_extra)];
+            let mut counts = vec![(0usize, base.counts.clone())];
             let mut refused_at = Vec::new();
             for &k in grid.iter().filter(|k| **k > 0) {
                 let o = run(Some(hook), k);
@@ -567,11 +695,13 @@ mod hold_sweep {
                     refused_at.push(k);
                 }
                 extra.push((k, e));
+                counts.push((k, o.counts));
             }
             let curve = HookCurve {
                 hook: hook.clone(),
                 extra,
                 refused_at,
+                counts,
             };
             println!(
                 "[{label}] hold {}: extra {:?} gain {}{}{}",
@@ -585,11 +715,20 @@ mod hold_sweep {
                     format!(" (refused at k = {:?})", curve.refused_at)
                 }
             );
+            for (name, measure) in MEASURES {
+                let series = measure_series(&curve, *measure);
+                println!(
+                    "[{label}]   {name}: {:?} gain {}",
+                    series.iter().map(|(_, v)| *v).collect::<Vec<_>>(),
+                    gain(&series)
+                );
+            }
             curves.push(curve);
         }
         let result = SweepResult {
             label: label.to_owned(),
             baseline_extra,
+            baseline_counts: base.counts,
             curves,
             seconds: started.elapsed().as_secs_f64(),
         };
@@ -600,7 +739,193 @@ mod hold_sweep {
                 .unwrap_or_default(),
             result.seconds
         );
+        for (name, measure) in MEASURES {
+            let (v, best) = generic_verdict(&result, *measure);
+            println!(
+                "[{label}] verdict by {name}: {v}{}",
+                best.map(|c| format!(
+                    ", largest gain {} at {}",
+                    gain(&measure_series(c, *measure)),
+                    c.hook
+                ))
+                .unwrap_or_default(),
+            );
+        }
+        if let (_, Some(c)) = generic_verdict(&result, Measure::Admitted) {
+            println!(
+                "[{label}] admitted records rose at (peak vs unheld): {}",
+                admitted_rises(&result.baseline_counts, c)
+            );
+        }
+        let (cv, cbest) = checker_verdict(&result);
+        println!(
+            "[{label}] verdict by checker rule: {cv}{}",
+            cbest
+                .as_ref()
+                .map(|(c, what, g)| format!(", largest gain {g} in {what} when holding {}", c.hook))
+                .unwrap_or_default()
+        );
+        if let Some((c, _, _)) = cbest {
+            println!(
+                "[{label}] hooks that admitted more under that hold: {}",
+                hook_rises(&result.baseline_counts, c)
+            );
+        }
         result
+    }
+
+    /// A program-independent work measure read from [`WorkCounts`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Measure {
+        /// Records released into ticks by `use::batch` hooks (the checker's measure).
+        Admitted,
+        /// Network messages sent.
+        Network,
+        /// Items read out of DFIR handoffs.
+        Handoffs,
+        /// DFIR subgraph runs.
+        Runs,
+    }
+
+    /// Every measure with its report name, in report order.
+    pub const MEASURES: &[(&str, Measure)] = &[
+        ("admitted", Measure::Admitted),
+        ("network", Measure::Network),
+        ("handoffs", Measure::Handoffs),
+        ("runs", Measure::Runs),
+    ];
+
+    pub fn measure_value(counts: &WorkCounts, measure: Measure) -> i64 {
+        (match measure {
+            Measure::Admitted => counts.admitted(),
+            Measure::Network => counts.network(),
+            Measure::Handoffs => counts.handoffs(),
+            Measure::Runs => counts.runs(),
+        }) as i64
+    }
+
+    /// The curve of one measure for one held hook, as `(k, value)`.
+    pub fn measure_series(curve: &HookCurve, measure: Measure) -> Vec<(usize, i64)> {
+        curve
+            .counts
+            .iter()
+            .map(|(k, c)| (*k, measure_value(c, measure)))
+            .collect()
+    }
+
+    /// The verdict under a program-independent measure, with the hook whose hold produced the
+    /// largest gain. Same rule as [`verdict`]: hazardous if some holdable hook's hold raises the
+    /// measure above the unheld run, benign otherwise. No requirement is subtracted because the
+    /// input, and so the requirement, is the same at every grid point.
+    pub fn generic_verdict(
+        result: &SweepResult,
+        measure: Measure,
+    ) -> (&'static str, Option<&HookCurve>) {
+        let mut best: Option<(&HookCurve, i64)> = None;
+        for c in result.curves.iter().filter(|c| holdable(c)) {
+            let g = gain(&measure_series(c, measure));
+            if g > 0 && best.is_none_or(|(_, bg)| g > bg) {
+                best = Some((c, g));
+            }
+        }
+        match best {
+            Some((c, _)) => ("hazardous", Some(c)),
+            None => ("benign", None),
+        }
+    }
+
+    /// Which hooks admitted more records at the curve's peak than in the unheld run, and by how
+    /// much: the second localization signal, naming the edges the extra records crossed.
+    pub fn admitted_rises(baseline: &WorkCounts, curve: &HookCurve) -> String {
+        let series = measure_series(curve, Measure::Admitted);
+        let peak_k = series
+            .iter()
+            .max_by_key(|(_, v)| *v)
+            .map(|(k, _)| *k)
+            .unwrap_or(0);
+        let Some((_, peak)) = curve.counts.iter().find(|(k, _)| *k == peak_k) else {
+            return String::new();
+        };
+        let mut rises: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+        for (hook, n) in &peak.hook_releases {
+            let before = baseline.hook_releases.get(hook).copied().unwrap_or(0) as i64;
+            let d = *n as i64 - before;
+            if d > 0 {
+                rises.entry(-d).or_default().push(hook.clone());
+            }
+        }
+        rises
+            .into_iter()
+            .flat_map(|(neg, hooks)| hooks.into_iter().map(move |h| format!("{h} +{}", -neg)))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
+    /// The checker's rule. For one held hook, the gain is the largest rise over the unheld run,
+    /// at any hold length, of either the program's total admitted records or any one member's
+    /// outgoing network messages. Messages are read per sender because a total can hide a
+    /// reaction when another sender goes quiet (a leader that stops sending heartbeats while
+    /// followers start sending vote requests); admitted records are read in total because within
+    /// a location a reaction can replace one record with another (a completion becomes an
+    /// abandonment) without adding work. Returns the gain and the name of what rose.
+    pub fn checker_gain(baseline: &WorkCounts, curve: &HookCurve) -> (i64, Option<String>) {
+        let base_sends = baseline.sends_by_member();
+        let base_admitted = baseline.admitted() as i64;
+        let mut best: (i64, Option<String>) = (0, None);
+        for (_, counts) in &curve.counts {
+            let d = counts.admitted() as i64 - base_admitted;
+            if d > best.0 {
+                best = (d, Some("admitted records".to_owned()));
+            }
+            for (place, n) in counts.sends_by_member() {
+                let before = base_sends.get(&place).copied().unwrap_or(0) as i64;
+                let d = n as i64 - before;
+                if d > best.0 {
+                    best = (d, Some(place));
+                }
+            }
+        }
+        best
+    }
+
+    /// The verdict under the checker's rule, with the held hook that produced the largest gain
+    /// and the name of what rose.
+    pub fn checker_verdict(
+        result: &SweepResult,
+    ) -> (&'static str, Option<(&HookCurve, String, i64)>) {
+        let mut best: Option<(&HookCurve, String, i64)> = None;
+        for c in result.curves.iter().filter(|c| holdable(c)) {
+            let (g, what) = checker_gain(&result.baseline_counts, c);
+            if g > 0 && best.as_ref().is_none_or(|(_, _, bg)| g > *bg) {
+                best = Some((c, what.unwrap_or_default(), g));
+            }
+        }
+        match best {
+            Some(b) => ("hazardous", Some(b)),
+            None => ("benign", None),
+        }
+    }
+
+    /// Which hooks on which members admitted more records at any hold length than in the unheld
+    /// run: reported for localization only (see [`WorkCounts::hooks_by_member`]).
+    pub fn hook_rises(baseline: &WorkCounts, curve: &HookCurve) -> String {
+        let base = baseline.hooks_by_member();
+        let mut best: BTreeMap<String, i64> = BTreeMap::new();
+        for (_, counts) in &curve.counts {
+            for (place, n) in counts.hooks_by_member() {
+                let d = n as i64 - base.get(&place).copied().unwrap_or(0) as i64;
+                if d > 0 {
+                    let e = best.entry(place).or_default();
+                    *e = (*e).max(d);
+                }
+            }
+        }
+        let mut v: Vec<(String, i64)> = best.into_iter().collect();
+        v.sort_by_key(|(_, d)| -*d);
+        v.into_iter()
+            .map(|(p, d)| format!("{p} +{d}"))
+            .collect::<Vec<_>>()
+            .join("; ")
     }
 
     /// Applies the hold plan inside a round loop: call once per round before sending inputs.
@@ -633,7 +958,7 @@ mod hold_rpc_retry {
     const ROUNDS: usize = 240;
     const REQUESTS_PER_ROUND: usize = 2;
 
-    fn run(max_attempts: u32, target: Option<&str>, k: usize) -> Outcome {
+    pub(super) fn run(max_attempts: u32, target: Option<&str>, k: usize) -> Outcome {
         let policy = RetryPolicy {
             timeout_ticks: 40,
             max_attempts,
@@ -664,6 +989,7 @@ mod hold_rpc_retry {
         let processed = outputs.processed.map(q!(|r| r.id)).sim_output();
 
         let (driver, handle) = HoldOneHookDriver::new();
+        hydro_lang::sim::work_counts::enable();
         let mut out = Outcome::default();
         let out_ref = &mut out;
         let handle_ref = &handle;
@@ -691,6 +1017,7 @@ mod hold_rpc_retry {
             out_ref.total = sends + serves;
         });
         out.forced = handle.forced_releases();
+        out.counts = hydro_lang::sim::work_counts::take();
         out.hooks = handle.hooks_seen();
         out
     }
@@ -728,7 +1055,7 @@ mod hold_backoff_retry {
 
     const ROUNDS: usize = 240;
 
-    fn run(backoff: bool, target: Option<&str>, k: usize) -> Outcome {
+    pub(super) fn run(backoff: bool, target: Option<&str>, k: usize) -> Outcome {
         let policy = RetryPolicy {
             base_timeout_ticks: 40,
             max_attempts: 3,
@@ -752,6 +1079,7 @@ mod hold_backoff_retry {
         let processed = outputs.processed.map(q!(|r| r.id)).sim_output();
 
         let (driver, handle) = HoldOneHookDriver::new();
+        hydro_lang::sim::work_counts::enable();
         let mut out = Outcome::default();
         let out_ref = &mut out;
         let handle_ref = &handle;
@@ -779,6 +1107,7 @@ mod hold_backoff_retry {
             out_ref.total = sends + serves;
         });
         out.forced = handle.forced_releases();
+        out.counts = hydro_lang::sim::work_counts::take();
         out.hooks = handle.hooks_seen();
         out
     }
@@ -813,7 +1142,7 @@ mod hold_bounded_queue {
 
     const ROUNDS: usize = 240;
 
-    fn run(max_backlog: Option<usize>, target: Option<&str>, k: usize) -> Outcome {
+    pub(super) fn run(max_backlog: Option<usize>, target: Option<&str>, k: usize) -> Outcome {
         let policy = RetryPolicy {
             timeout_ticks: 40,
             max_attempts: 3,
@@ -841,6 +1170,7 @@ mod hold_bounded_queue {
         let rejected = outputs.rejected.map(q!(|r| r.id)).sim_output();
 
         let (driver, handle) = HoldOneHookDriver::new();
+        hydro_lang::sim::work_counts::enable();
         let mut out = Outcome::default();
         let out_ref = &mut out;
         let handle_ref = &handle;
@@ -870,6 +1200,7 @@ mod hold_bounded_queue {
             out_ref.total = work;
         });
         out.forced = handle.forced_releases();
+        out.counts = hydro_lang::sim::work_counts::take();
         out.hooks = handle.hooks_seen();
         out
     }
@@ -908,7 +1239,7 @@ mod hold_cache {
     const HOT_KEYS: u64 = 10;
     const HOT_PER_ROUND: u64 = 8;
 
-    fn run(coalesce: bool, request_dated: bool, target: Option<&str>, k: usize) -> Outcome {
+    pub(super) fn run(coalesce: bool, request_dated: bool, target: Option<&str>, k: usize) -> Outcome {
         let mut flow = FlowBuilder::new();
         let cache = flow.process::<Cache>();
         let origin = flow.process::<Origin>();
@@ -936,6 +1267,7 @@ mod hold_cache {
         let stale = outputs.fills_stale.map(q!(|f| f.lookup_id)).sim_output();
 
         let (driver, handle) = HoldOneHookDriver::new();
+        hydro_lang::sim::work_counts::enable();
         let mut out = Outcome::default();
         let out_ref = &mut out;
         let handle_ref = &handle;
@@ -964,6 +1296,7 @@ mod hold_cache {
             out_ref.total = work;
         });
         out.forced = handle.forced_releases();
+        out.counts = hydro_lang::sim::work_counts::take();
         out.hooks = handle.hooks_seen();
         out
     }
@@ -1008,7 +1341,7 @@ mod hold_gossip_resend {
     const MEMBERS: u32 = 5;
     const ROUNDS: usize = 240;
 
-    fn run(ack_timeout_ticks: u64, target: Option<&str>, k: usize) -> Outcome {
+    pub(super) fn run(ack_timeout_ticks: u64, target: Option<&str>, k: usize) -> Outcome {
         let mut flow = FlowBuilder::new();
         let cluster = flow.cluster::<Node>();
         let (timer_send, timer) = cluster.sim_input::<(), TotalOrder, ExactlyOnce>();
@@ -1029,6 +1362,7 @@ mod hold_gossip_resend {
         let outstanding = outputs.outstanding_depth.sim_cluster_output();
 
         let (driver, handle) = HoldOneHookDriver::new();
+        hydro_lang::sim::work_counts::enable();
         let mut out = Outcome::default();
         let out_ref = &mut out;
         let handle_ref = &handle;
@@ -1068,6 +1402,7 @@ mod hold_gossip_resend {
             out_ref.total = total;
         });
         out.forced = handle.forced_releases();
+        out.counts = hydro_lang::sim::work_counts::take();
         out.hooks = handle.hooks_seen();
         out
     }
@@ -1100,7 +1435,7 @@ mod hold_election {
     const MEMBERS: u32 = 5;
     const ROUNDS: usize = 240;
 
-    fn run(timeout_spread_ticks: u64, target: Option<&str>, k: usize) -> Outcome {
+    pub(super) fn run(timeout_spread_ticks: u64, target: Option<&str>, k: usize) -> Outcome {
         let mut flow = FlowBuilder::new();
         let cluster = flow.cluster::<Node>();
         let (timer_send, timer) = cluster.sim_input::<(), TotalOrder, ExactlyOnce>();
@@ -1128,6 +1463,7 @@ mod hold_election {
         let elections = outputs.elections.sim_cluster_output();
 
         let (driver, handle) = HoldOneHookDriver::new();
+        hydro_lang::sim::work_counts::enable();
         let mut out = Outcome::default();
         let out_ref = &mut out;
         let handle_ref = &handle;
@@ -1158,6 +1494,7 @@ mod hold_election {
             out_ref.total = work;
         });
         out.forced = handle.forced_releases();
+        out.counts = hydro_lang::sim::work_counts::take();
         out.hooks = handle.hooks_seen();
         out
     }
@@ -1192,7 +1529,7 @@ mod hold_rebalancing {
     const N: u32 = 2;
     const ROUNDS: usize = 240;
 
-    fn run(cooldown_ticks: u64, target: Option<&str>, k: usize) -> Outcome {
+    pub(super) fn run(cooldown_ticks: u64, target: Option<&str>, k: usize) -> Outcome {
         let mut flow = FlowBuilder::new();
         let workers = flow.cluster::<Worker>();
         let (task_send, tasks) = workers.sim_input::<u64, TotalOrder, ExactlyOnce>();
@@ -1214,6 +1551,7 @@ mod hold_rebalancing {
         let ticks = outputs.ticks.map(q!(|t| t.queue_len)).sim_cluster_output();
 
         let (driver, handle) = HoldOneHookDriver::new();
+        hydro_lang::sim::work_counts::enable();
         let mut out = Outcome::default();
         let out_ref = &mut out;
         let handle_ref = &handle;
@@ -1245,6 +1583,7 @@ mod hold_rebalancing {
             out_ref.total = work;
         });
         out.forced = handle.forced_releases();
+        out.counts = hydro_lang::sim::work_counts::take();
         out.hooks = handle.hooks_seen();
         out
     }
@@ -1278,7 +1617,7 @@ mod hold_compaction {
 
     const ROUNDS: usize = 240;
 
-    fn run(compaction_reserve: u64, target: Option<&str>, k: usize) -> Outcome {
+    pub(super) fn run(compaction_reserve: u64, target: Option<&str>, k: usize) -> Outcome {
         let mut flow = FlowBuilder::new();
         let store = flow.process::<Store>();
         let (op_send, ops) = store.sim_input::<Op, TotalOrder, ExactlyOnce>();
@@ -1296,6 +1635,7 @@ mod hold_compaction {
         let ticks = outputs.ticks.map(q!(|t| t.serve_units)).sim_output();
 
         let (driver, handle) = HoldOneHookDriver::new();
+        hydro_lang::sim::work_counts::enable();
         let mut out = Outcome::default();
         let out_ref = &mut out;
         let handle_ref = &handle;
@@ -1321,6 +1661,7 @@ mod hold_compaction {
             out_ref.total = units;
         });
         out.forced = handle.forced_releases();
+        out.counts = hydro_lang::sim::work_counts::take();
         out.hooks = handle.hooks_seen();
         out
     }
@@ -1358,7 +1699,7 @@ mod hold_lease {
     const N: u32 = 20;
     const ROUNDS: usize = 240;
 
-    fn run(resend_after_ticks: Option<u64>, target: Option<&str>, k: usize) -> Outcome {
+    pub(super) fn run(resend_after_ticks: Option<u64>, target: Option<&str>, k: usize) -> Outcome {
         let mut flow = FlowBuilder::new();
         let clients = flow.cluster::<LeaseClient>();
         let server = flow.process::<LeaseServer>();
@@ -1392,6 +1733,7 @@ mod hold_lease {
         let backlog = outputs.backlog_trace.sim_output();
 
         let (driver, handle) = HoldOneHookDriver::new();
+        hydro_lang::sim::work_counts::enable();
         let mut out = Outcome::default();
         let out_ref = &mut out;
         let handle_ref = &handle;
@@ -1428,6 +1770,7 @@ mod hold_lease {
             out_ref.total = total;
         });
         out.forced = handle.forced_releases();
+        out.counts = hydro_lang::sim::work_counts::take();
         out.hooks = handle.hooks_seen();
         out
     }
@@ -1462,9 +1805,9 @@ mod hold_crdt_gossip {
 
     const N: u32 = 3;
     const ROUNDS: usize = 60;
-    const GRID: &[usize] = &[0, 2, 5, 10, 20];
+    pub(super) const GRID: &[usize] = &[0, 2, 5, 10, 20];
 
-    fn run(target: Option<&str>, k: usize) -> Outcome {
+    pub(super) fn run(target: Option<&str>, k: usize) -> Outcome {
         let mut flow = FlowBuilder::new();
         let cluster = flow.cluster::<()>();
         let (update_send, updates) = cluster.sim_input::<u32, NoOrder, ExactlyOnce>();
@@ -1477,6 +1820,7 @@ mod hold_crdt_gossip {
             .sim_cluster_output();
 
         let (driver, handle) = HoldOneHookDriver::new();
+        hydro_lang::sim::work_counts::enable();
         let mut out = Outcome::default();
         let out_ref = &mut out;
         let handle_ref = &handle;
@@ -1501,6 +1845,7 @@ mod hold_crdt_gossip {
                 out_ref.total = work;
             });
         out.forced = handle.forced_releases();
+        out.counts = hydro_lang::sim::work_counts::take();
         out.hooks = handle.hooks_seen();
         out
     }
@@ -1528,13 +1873,14 @@ mod hold_pure_heartbeat {
     const N: u32 = 3;
     const ROUNDS: usize = 240;
 
-    fn run(target: Option<&str>, k: usize) -> Outcome {
+    pub(super) fn run(target: Option<&str>, k: usize) -> Outcome {
         let mut flow = FlowBuilder::new();
         let cluster = flow.cluster::<()>();
         let (timer_send, timer) = cluster.sim_input::<(), TotalOrder, ExactlyOnce>();
         let received = pure_heartbeat(&cluster, timer).entries().sim_cluster_output();
 
         let (driver, handle) = HoldOneHookDriver::new();
+        hydro_lang::sim::work_counts::enable();
         let mut out = Outcome::default();
         let out_ref = &mut out;
         let handle_ref = &handle;
@@ -1559,6 +1905,7 @@ mod hold_pure_heartbeat {
             out_ref.total = got;
         });
         out.forced = handle.forced_releases();
+        out.counts = hydro_lang::sim::work_counts::take();
         out.hooks = handle.hooks_seen();
         out
     }
@@ -1584,7 +1931,7 @@ mod hold_transitive_closure {
 
     const ROUNDS: usize = 240;
 
-    fn run(target: Option<&str>, k: usize) -> Outcome {
+    pub(super) fn run(target: Option<&str>, k: usize) -> Outcome {
         let mut flow = FlowBuilder::new();
         let process = flow.process::<()>();
         let (graph_send, graphs) = process.sim_input::<Vec<(u32, u32)>, TotalOrder, ExactlyOnce>();
@@ -1596,6 +1943,7 @@ mod hold_transitive_closure {
         let traces = traces.sim_output();
 
         let (driver, handle) = HoldOneHookDriver::new();
+        hydro_lang::sim::work_counts::enable();
         let mut out = Outcome::default();
         let out_ref = &mut out;
         let handle_ref = &handle;
@@ -1621,6 +1969,7 @@ mod hold_transitive_closure {
             out_ref.total = work;
         });
         out.forced = handle.forced_releases();
+        out.counts = hydro_lang::sim::work_counts::take();
         out.hooks = handle.hooks_seen();
         out
     }
@@ -1629,5 +1978,226 @@ mod hold_transitive_closure {
     fn hold_sweep_transitive_closure() {
         let r = hold_sweep::sweep("transitive_closure", hold_sweep::GRID, &|t, k| run(t, k));
         assert_eq!(hold_sweep::verdict(&r).0, "benign");
+    }
+}
+
+/// The same hold sweeps read through the simulator's own counts (`hydro_lang::sim::work_counts`)
+/// instead of the witnesses' output counters. See the module docs, "Third experiment".
+///
+/// Each test runs one configuration exactly as the `hold_*` module above does (same input, same
+/// grid, same hold plan), takes the verdict under the checker's rule (any member's outgoing
+/// messages or the program's total admitted records rise), prints the comparison with the
+/// hand-counted verdict and with a plain total, and asserts the verdict the module docs record.
+#[cfg(test)]
+mod generic_measure {
+    use super::hold_sweep::{self, Measure, SweepResult};
+
+    /// Prints one comparison row and returns the generic verdict (per-place rule) and the held
+    /// hook that produced it.
+    fn compare(r: &SweepResult) -> (&'static str, Option<String>) {
+        let (hand_v, hand_best) = hold_sweep::verdict(r);
+        let (total_v, total_best) = hold_sweep::generic_verdict(r, Measure::Admitted);
+        let (place_v, place_best) = hold_sweep::checker_verdict(r);
+        let series = |c: &hold_sweep::HookCurve| {
+            hold_sweep::measure_series(c, Measure::Admitted)
+                .iter()
+                .map(|(_, v)| *v)
+                .collect::<Vec<_>>()
+        };
+        println!(
+            "[{}] COMPARE hand: {hand_v} at {} | admitted total: {total_v} at {} curve {:?} | checker rule: {place_v} at {} | agree {}",
+            r.label,
+            hand_best.map(|c| c.hook.clone()).unwrap_or_else(|| "none".into()),
+            total_best.map(|c| c.hook.clone()).unwrap_or_else(|| "none".into()),
+            total_best.map(series).unwrap_or_default(),
+            place_best
+                .as_ref()
+                .map(|(c, what, g)| format!("{} ({what} +{g})", c.hook))
+                .unwrap_or_else(|| "none".into()),
+            hand_v == place_v,
+        );
+        (place_v, place_best.map(|(c, _, _)| c.hook.clone()))
+    }
+
+    #[test]
+    fn generic_rpc_retry_three_attempts() {
+        let r = hold_sweep::sweep("generic rpc_retry max_attempts=3", hold_sweep::GRID, &|t, k| {
+            super::hold_rpc_retry::run(3, t, k)
+        });
+        let (v, hook) = compare(&r);
+        assert_eq!(v, "hazardous");
+        assert!(hook.unwrap().contains("rpc_retry.rs"));
+    }
+
+    #[test]
+    fn generic_rpc_retry_one_attempt() {
+        let r = hold_sweep::sweep("generic rpc_retry max_attempts=1", hold_sweep::GRID, &|t, k| {
+            super::hold_rpc_retry::run(1, t, k)
+        });
+        assert_eq!(compare(&r).0, "benign");
+    }
+
+    #[test]
+    fn generic_backoff_retry_backoff_on() {
+        let r = hold_sweep::sweep("generic backoff_retry backoff=true", hold_sweep::GRID, &|t, k| {
+            super::hold_backoff_retry::run(true, t, k)
+        });
+        assert_eq!(compare(&r).0, "hazardous");
+    }
+
+    #[test]
+    fn generic_backoff_retry_backoff_off() {
+        let r = hold_sweep::sweep("generic backoff_retry backoff=false", hold_sweep::GRID, &|t, k| {
+            super::hold_backoff_retry::run(false, t, k)
+        });
+        assert_eq!(compare(&r).0, "hazardous");
+    }
+
+    #[test]
+    fn generic_bounded_queue_some_100() {
+        let r = hold_sweep::sweep("generic bounded_queue max_backlog=Some(100)", hold_sweep::GRID, &|t, k| {
+            super::hold_bounded_queue::run(Some(100), t, k)
+        });
+        assert_eq!(compare(&r).0, "hazardous");
+    }
+
+    #[test]
+    fn generic_bounded_queue_none() {
+        let r = hold_sweep::sweep("generic bounded_queue max_backlog=None", hold_sweep::GRID, &|t, k| {
+            super::hold_bounded_queue::run(None, t, k)
+        });
+        assert_eq!(compare(&r).0, "hazardous");
+    }
+
+    #[test]
+    fn generic_cache_request_dated_no_coalesce() {
+        let r = hold_sweep::sweep("generic cache request_dated, no coalesce", hold_sweep::GRID, &|t, k| {
+            super::hold_cache::run(false, true, t, k)
+        });
+        assert_eq!(compare(&r).0, "hazardous");
+    }
+
+    #[test]
+    fn generic_cache_fill_dated_no_coalesce() {
+        let r = hold_sweep::sweep("generic cache fill_dated, no coalesce", hold_sweep::GRID, &|t, k| {
+            super::hold_cache::run(false, false, t, k)
+        });
+        assert_eq!(compare(&r).0, "hazardous");
+    }
+
+    #[test]
+    fn generic_cache_coalesce() {
+        let r = hold_sweep::sweep("generic cache coalesce", hold_sweep::GRID, &|t, k| {
+            super::hold_cache::run(true, true, t, k)
+        });
+        assert_eq!(compare(&r).0, "benign");
+    }
+
+    #[test]
+    fn generic_gossip_resend_on() {
+        let r = hold_sweep::sweep("generic gossip_resend ack_timeout=3", hold_sweep::GRID, &|t, k| {
+            super::hold_gossip_resend::run(3, t, k)
+        });
+        assert_eq!(compare(&r).0, "hazardous");
+    }
+
+    #[test]
+    fn generic_gossip_resend_off() {
+        let r = hold_sweep::sweep("generic gossip_resend ack_timeout=0", hold_sweep::GRID, &|t, k| {
+            super::hold_gossip_resend::run(0, t, k)
+        });
+        assert_eq!(compare(&r).0, "benign");
+    }
+
+    #[test]
+    fn generic_election_uniform_timeouts() {
+        let r = hold_sweep::sweep("generic election spread=0", hold_sweep::GRID, &|t, k| {
+            super::hold_election::run(0, t, k)
+        });
+        assert_eq!(compare(&r).0, "hazardous");
+    }
+
+    #[test]
+    fn generic_election_spread_3() {
+        let r = hold_sweep::sweep("generic election spread=3", hold_sweep::GRID, &|t, k| {
+            super::hold_election::run(3, t, k)
+        });
+        assert_eq!(compare(&r).0, "hazardous");
+    }
+
+    #[test]
+    fn generic_rebalancing_no_cooldown() {
+        let r = hold_sweep::sweep("generic rebalancing cooldown=0", hold_sweep::GRID, &|t, k| {
+            super::hold_rebalancing::run(0, t, k)
+        });
+        assert_eq!(compare(&r).0, "hazardous");
+    }
+
+    #[test]
+    fn generic_rebalancing_cooldown_8() {
+        let r = hold_sweep::sweep("generic rebalancing cooldown=8", hold_sweep::GRID, &|t, k| {
+            super::hold_rebalancing::run(8, t, k)
+        });
+        assert_eq!(compare(&r).0, "hazardous");
+    }
+
+    /// Predicted before measuring: benign under admitted records, disagreeing with the
+    /// hand-counted verdict. The store's extra work is a cost field in a payload and a `u64`
+    /// segment length, not records; the only records it moves are the operations and clock
+    /// elements themselves, whose totals a hold cannot raise.
+    #[test]
+    fn generic_compaction_reserve_0() {
+        let r = hold_sweep::sweep("generic compaction reserve=0", hold_sweep::GRID, &|t, k| {
+            super::hold_compaction::run(0, t, k)
+        });
+        assert_eq!(compare(&r).0, "benign");
+    }
+
+    #[test]
+    fn generic_compaction_reserve_8() {
+        let r = hold_sweep::sweep("generic compaction reserve=8", hold_sweep::GRID, &|t, k| {
+            super::hold_compaction::run(8, t, k)
+        });
+        assert_eq!(compare(&r).0, "benign");
+    }
+
+    #[test]
+    fn generic_lease_resend_after_4() {
+        let r = hold_sweep::sweep("generic lease resend_after=Some(4)", hold_sweep::GRID, &|t, k| {
+            super::hold_lease::run(Some(4), t, k)
+        });
+        assert_eq!(compare(&r).0, "hazardous");
+    }
+
+    #[test]
+    fn generic_lease_one_outstanding() {
+        let r = hold_sweep::sweep("generic lease resend_after=None", hold_sweep::GRID, &|t, k| {
+            super::hold_lease::run(None, t, k)
+        });
+        assert_eq!(compare(&r).0, "benign");
+    }
+
+    #[test]
+    fn generic_crdt_gossip() {
+        let r = hold_sweep::sweep("generic crdt_gossip", super::hold_crdt_gossip::GRID, &|t, k| {
+            super::hold_crdt_gossip::run(t, k)
+        });
+        assert_eq!(compare(&r).0, "benign");
+    }
+
+    #[test]
+    fn generic_pure_heartbeat() {
+        let r = hold_sweep::sweep("generic pure_heartbeat", hold_sweep::GRID, &|t, k| {
+            super::hold_pure_heartbeat::run(t, k)
+        });
+        assert_eq!(compare(&r).0, "benign");
+    }
+
+    #[test]
+    fn generic_transitive_closure() {
+        let r = hold_sweep::sweep("generic transitive_closure", hold_sweep::GRID, &|t, k| {
+            super::hold_transitive_closure::run(t, k)
+        });
+        assert_eq!(compare(&r).0, "benign");
     }
 }

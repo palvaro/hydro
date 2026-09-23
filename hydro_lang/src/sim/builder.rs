@@ -213,6 +213,17 @@ impl SimBuilder {
         }
     }
 
+    /// The `-> _network_metrics()` pass-through for a send pipeline, or nothing for an embedded
+    /// (external) payload type, which is not serialized to `Bytes` and so has no payload length
+    /// to count. See `super::work_counts`.
+    fn network_metrics_pass(external_ty: Option<&syn::Type>) -> proc_macro2::TokenStream {
+        if external_ty.is_some() {
+            proc_macro2::TokenStream::new()
+        } else {
+            quote::quote!(-> _network_metrics())
+        }
+    }
+
     fn channel_table_ident(&mut self, channel_id: u32, elem_ty: &syn::Type) -> syn::Ident {
         if let Some(ident) = self.channel_tables.get(&channel_id) {
             return ident.clone();
@@ -284,9 +295,13 @@ impl SimBuilder {
             }
         };
         if let Some(serialize_pipeline) = serialize {
+            // `_network_metrics()` is the pass-through a deployment uses to count serialized
+            // messages into the subgraph's `DfirMetrics`; here it lets `super::work_counts`
+            // read message counts from the host side without touching the send itself.
+            let metrics = Self::network_metrics_pass(external_ty);
             self.get_dfir_mut(from).add_dfir(
                 parse_quote! {
-                    #input_ident -> map(#serialize_pipeline) -> for_each(|#send_pat| #send_body);
+                    #input_ident -> map(#serialize_pipeline) #metrics -> for_each(|#send_pat| #send_body);
                 },
                 None,
                 Some(&format!("send{}", suffix)),
@@ -1633,9 +1648,10 @@ impl DfirBuilder for SimBuilder {
                 };
 
                 if let Some(serialize_pipeline) = serialize {
+                    let metrics = Self::network_metrics_pass(external_element_type);
                     self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(#send_closure);
+                            #input_ident -> map(#serialize_pipeline) #metrics -> for_each(#send_closure);
                         },
                         None,
                         Some(&format!("send{}", tag_id)),
@@ -1725,9 +1741,10 @@ impl DfirBuilder for SimBuilder {
                 };
 
                 if let Some(serialize_pipeline) = serialize {
+                    let metrics = Self::network_metrics_pass(external_element_type);
                     self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(#send_closure);
+                            #input_ident -> map(#serialize_pipeline) #metrics -> for_each(#send_closure);
                         },
                         None,
                         Some(&format!("send{}", tag_id)),
@@ -1825,9 +1842,10 @@ impl DfirBuilder for SimBuilder {
                 };
 
                 if let Some(serialize_pipeline) = serialize {
+                    let metrics = Self::network_metrics_pass(external_element_type);
                     self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(#send_closure);
+                            #input_ident -> map(#serialize_pipeline) #metrics -> for_each(#send_closure);
                         },
                         None,
                         Some(&format!("send{}", tag_id)),
@@ -1937,9 +1955,10 @@ impl DfirBuilder for SimBuilder {
                 };
 
                 if let Some(serialize_pipeline) = serialize {
+                    let metrics = Self::network_metrics_pass(external_element_type);
                     self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(#send_closure);
+                            #input_ident -> map(#serialize_pipeline) #metrics -> for_each(#send_closure);
                         },
                         None,
                         Some(&format!("send{}", tag_id)),
