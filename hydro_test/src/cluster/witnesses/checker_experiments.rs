@@ -2286,10 +2286,10 @@ mod library_check {
     use crate::cluster::witnesses::election_stampede::Msg;
     use crate::cluster::witnesses::lease_renewal_storm::Job;
 
-    const ROUNDS: usize = 240;
-
+    /// The default horizon, so these tests validate the configuration a caller gets without
+    /// choosing one.
     fn config() -> CheckConfig {
-        CheckConfig::new(ROUNDS)
+        CheckConfig::default()
     }
 
     fn expect_hazardous(label: &str, r: &Report, hook_contains: &[&str]) {
@@ -2349,13 +2349,19 @@ mod library_check {
         })
     }
 
-    /// Expected before running: hazardous, held hook the server's `Request` arrivals in
-    /// `rpc_retry.rs`, gain in admitted records (1470 under `generic_measure`).
+    /// Expected: hazardous at the server's `Request` arrivals, gain in admitted records. Both
+    /// edges of the loop first react at a hold of 64 rounds (the timeout is 40); arrivals gain
+    /// 415 there against the `Response` hook's 240, so the location rule names arrivals, as the
+    /// fixed grid did (+1470). Over the whole curve the `Response` hook's largest gain (16243 at
+    /// 512 rounds) exceeds arrivals' (15742 at 128), because a long hold on replies makes the
+    /// server serve every held request again on each re-send, while a hold on arrivals is capped
+    /// by the attempt limit; the rule does not use that comparison.
     #[test]
     fn library_rpc_retry_three_attempts() {
         let r = rpc_retry(3);
         expect_hazardous("rpc_retry max_attempts=3", &r, &["rpc_retry.rs", "Request"]);
         assert_eq!(r.location.as_ref().unwrap().rose, "admitted records");
+        assert_eq!(r.location.as_ref().unwrap().first_gain_at, 64);
     }
 
     /// Expected: benign, every curve flat.
@@ -2398,13 +2404,17 @@ mod library_check {
         })
     }
 
-    /// Expected: hazardous at the server's `Request` arrivals (admitted +448 recorded).
+    /// Expected: hazardous at the server's `Request` arrivals (+448 under the fixed grid). Under
+    /// the geometric sequence both edges first react at 64 rounds and arrivals gains more there
+    /// (62 against 42); over the whole curve both edges reach the same ceiling on client sends
+    /// under the hold to the end of the run, which is why the rule ranks by first reaction.
     #[test]
     fn library_backoff_retry_backoff_on() {
         expect_hazardous("backoff_retry backoff=true", &backoff_retry(true), &["backoff_retry.rs", "Request"]);
     }
 
-    /// Expected: hazardous at the server's `Request` arrivals (admitted +588 recorded).
+    /// Expected: hazardous at the server's `Request` arrivals (this configuration is
+    /// `rpc_retry`; +588 under the fixed grid, first reaction at 64 rounds here).
     #[test]
     fn library_backoff_retry_backoff_off() {
         expect_hazardous("backoff_retry backoff=false", &backoff_retry(false), &["backoff_retry.rs", "Request"]);
@@ -2458,7 +2468,8 @@ mod library_check {
         );
     }
 
-    /// Expected: hazardous at the server's `Request` arrivals (admitted +588 recorded).
+    /// Expected: hazardous at the server's `Request` arrivals (this configuration is
+    /// `rpc_retry`; +588 under the fixed grid, first reaction at 64 rounds here).
     #[test]
     fn library_bounded_queue_none() {
         expect_hazardous(
@@ -2511,19 +2522,29 @@ mod library_check {
         })
     }
 
-    /// Expected: hazardous at the cache's `Fill` hook (admitted +2332 recorded).
+    /// Expected: hazardous at the origin's clock hook. Under the fixed grid the cache's `Fill`
+    /// hook won (admitted +2332). Under the geometric sequence the origin's clock reacts to a
+    /// hold of one round (a one-round-slower origin lets more lookups miss), before `Fill` does
+    /// at two; both reach the same ceiling (admitted +10540) at longer holds. The mechanism is a
+    /// slow origin, and delaying the origin's clock is that slowness directly.
     #[test]
     fn library_cache_request_dated_no_coalesce() {
-        expect_hazardous("cache request_dated, no coalesce", &cache(false, true), &["Fill"]);
+        expect_hazardous(
+            "cache request_dated, no coalesce",
+            &cache(false, true),
+            &["cache_thundering_herd.rs", "298:44#1 [()]"],
+        );
     }
 
-    /// Expected: hazardous at the origin's clock hook (admitted +1500 recorded).
+    /// Expected: hazardous at the origin's clock hook (+1500 under the fixed grid). It reacts to
+    /// a hold of one round (a one-round-slower origin lets more lookups miss), before the `Fill`
+    /// hook does at two; both reach 7436 extra cache sends under the hold to the end of the run.
     #[test]
     fn library_cache_fill_dated_no_coalesce() {
         expect_hazardous(
             "cache fill_dated, no coalesce",
             &cache(false, false),
-            &["cache_thundering_herd.rs", "()"],
+            &["cache_thundering_herd.rs", "298:44#1 [()]"],
         );
     }
 
@@ -2573,10 +2594,23 @@ mod library_check {
         )
     }
 
-    /// Expected: hazardous at the `Ack` hook (admitted +5435 recorded).
+    /// Expected: hazardous at the members' timer hook. Under the fixed grid the `Ack` hook won
+    /// (admitted +5435). Under the geometric sequence the timer hook reacts first (at a hold of
+    /// 2 rounds, +9952 admitted): a re-send is due when an acknowledgement is older than the
+    /// timeout as judged by the member's own clock, so pausing every member's clock and then
+    /// dumping the withheld elements makes every outstanding delta look overdue at once. The
+    /// `Ack` hook first reacts at 4 rounds and reaches the same plateau. The test asserts that
+    /// the `Ack` hook still shows a gain.
     #[test]
     fn library_gossip_resend_on() {
-        expect_hazardous("gossip_resend ack_timeout=3", &gossip_resend(3), &["Ack"]);
+        let r = gossip_resend(3);
+        expect_hazardous("gossip_resend ack_timeout=3", &r, &["gossip_resend.rs", "(usize, ())"]);
+        let ack = r
+            .curves
+            .iter()
+            .find(|c| c.hook.contains("Ack"))
+            .expect("Ack hook");
+        assert!(ack.gain > 0, "the Ack hook should still react to held acknowledgements");
     }
 
     /// Expected: benign.
@@ -2641,13 +2675,24 @@ mod library_check {
         assert!(r.location.as_ref().unwrap().rose.starts_with("sends from"));
     }
 
-    /// Expected: hazardous, gain in one member's sends (member 1 +824 recorded), held hook the
-    /// `Msg` inbox.
+    /// Expected: hazardous, gain in one member's sends, at the timer hook. Under the fixed grid
+    /// the `Msg` inbox won (member 1 +824, at a hold of 20 rounds). Under the geometric sequence
+    /// the timer hook reacts first (at 8 rounds, +3948 at the default horizon): a pause of all
+    /// members' clocks followed by the dump makes every follower's staggered timeout fire at
+    /// once. The `Msg` inbox first reacts at 16 rounds and keeps reacting at every longer hold,
+    /// but its large reaction sits near a hold of 20 rounds, between the sequence's 16 and 32.
+    /// The test asserts that the `Msg` inbox still shows a gain.
     #[test]
     fn library_election_spread_3() {
         let r = election(3);
-        expect_hazardous("election spread=3", &r, &["election_stampede.rs", "Msg"]);
+        expect_hazardous("election spread=3", &r, &["election_stampede.rs", "(usize, ())"]);
         assert!(r.location.as_ref().unwrap().rose.starts_with("sends from"));
+        let inbox = r
+            .curves
+            .iter()
+            .find(|c| c.hook.contains("Msg"))
+            .expect("Msg inbox hook");
+        assert!(inbox.gain > 0, "the Msg inbox should still react to a held delivery");
     }
 
     // rebalancing_ping_pong: 2 workers, 5 units per tick, threshold 10, reports every 4 rounds,
@@ -2816,8 +2861,8 @@ mod library_check {
         expect_benign("lease resend_after=None", &lease(None));
     }
 
-    // crdt_gossip_load: 3 members, one update per round, pump every member every round; 60 rounds
-    // and a short grid because the simulator's cost is quadratic in the set size.
+    // crdt_gossip_load: 3 members, one update per round, pump every member every round; a
+    // 60-round horizon because the simulator's cost is quadratic in the set size.
 
     /// Expected: benign (merges fall under every hold).
     #[test]
@@ -2834,7 +2879,7 @@ mod library_check {
             .snapshot(&obs_tick, nondet!(/** harness observation */))
             .all_ticks()
             .sim_cluster_output();
-        let cfg = CheckConfig::new(60).with_grid(&[0, 2, 5, 10, 20]);
+        let cfg = CheckConfig::new(60);
         let r = check(
             flow.sim()
                 .skip_consistency_assertions()

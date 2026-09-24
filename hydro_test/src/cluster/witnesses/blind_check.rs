@@ -3,9 +3,15 @@
 //! The seven programs under `blind/` were written by an author who knew nothing about the
 //! checker. This module was written by an operator who read, for each program, only its public
 //! function signature and the steady-state (no-trigger) input its own harness feeds per round.
-//! The checker's verdict rule and configuration are unchanged from the corpus runs
-//! (`CheckConfig::new(240)`). Verdicts were recorded in
-//! `design_docs/2026-09_blind_results.md` before any label was read.
+//! The verdicts in `design_docs/2026-09_blind_results.md` were recorded before any label was
+//! read, under the fixed hold grid the checker had at the time (holds of up to 100 rounds from
+//! round 20, 240 rounds). The checker has since replaced the grid with a geometric sequence of
+//! holds up to the horizon, and these tests now run at the default horizon
+//! (`CheckConfig::default()`); every verdict is unchanged. The named hook moved in the four
+//! hazardous programs, in each case to another edge of the same resend loop, because the last
+//! hold lasts to the end of the run and a permanent hold on any edge of the loop makes the
+//! sender exhaust its resends, so several hooks reach the same ceiling on sender messages and
+//! the tie goes to identity order.
 //!
 //! Each test prints the full `Report` and asserts nothing about the verdict.
 
@@ -15,10 +21,10 @@ mod blind_check {
     use hydro_lang::prelude::*;
     use hydro_lang::sim::amplification::{CheckConfig, Report, check};
 
-    const ROUNDS: usize = 240;
-
+    /// The default horizon, so these tests validate the configuration a caller gets without
+    /// choosing one.
     fn config() -> CheckConfig {
-        CheckConfig::new(ROUNDS)
+        CheckConfig::default()
     }
 
     fn show(label: &str, r: &Report) {
