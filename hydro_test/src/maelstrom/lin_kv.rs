@@ -1036,10 +1036,12 @@ mod tests {
         output_handle.complete(multi_paxos_lin_kv_server(&cluster, 3, input));
 
         let mut deployment = MaelstromDeployment::new("lin-kv")
-            .maelstrom_path(PathBuf::from_str(&std::env::var("MAELSTROM_PATH").expect(
-                "MAELSTROM_PATH env var not set, set it to the maelstrom executable path",
-            ))
-            .unwrap())
+            .maelstrom_path(
+                PathBuf::from_str(&std::env::var("MAELSTROM_PATH").expect(
+                    "MAELSTROM_PATH env var not set, set it to the maelstrom executable path",
+                ))
+                .unwrap(),
+            )
             .node_count(3)
             .time_limit(20)
             .rate(10)
@@ -1071,10 +1073,12 @@ mod tests {
         output_handle.complete(multi_paxos_lin_kv_server(&cluster, 3, input));
 
         let mut deployment = MaelstromDeployment::new("lin-kv")
-            .maelstrom_path(PathBuf::from_str(&std::env::var("MAELSTROM_PATH").expect(
-                "MAELSTROM_PATH env var not set, set it to the maelstrom executable path",
-            ))
-            .unwrap())
+            .maelstrom_path(
+                PathBuf::from_str(&std::env::var("MAELSTROM_PATH").expect(
+                    "MAELSTROM_PATH env var not set, set it to the maelstrom executable path",
+                ))
+                .unwrap(),
+            )
             .node_count(3)
             .time_limit(60)
             .rate(30)

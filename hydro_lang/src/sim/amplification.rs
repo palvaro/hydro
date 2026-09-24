@@ -209,7 +209,11 @@ impl fmt::Display for Report {
         )?;
         for c in &self.curves {
             let extra: Vec<i64> = c.extra_admitted.iter().map(|(_, e)| *e).collect();
-            write!(f, "hold {}: extra admitted {:?} gain {}", c.hook, extra, c.gain)?;
+            write!(
+                f,
+                "hold {}: extra admitted {:?} gain {}",
+                c.hook, extra, c.gain
+            )?;
             if let Some(r) = &c.rose {
                 write!(f, " in {r}")?;
             }
@@ -388,11 +392,7 @@ fn apply_hold(handle: &HoldHandle, target: Option<&str>, k: usize, round: usize,
 /// Hooks that admitted more records than in the unheld run, at the grid point where the
 /// curve's admitted total peaked.
 fn hooks_that_rose(baseline: &WorkCounts, curve: &HookCurve) -> BTreeMap<String, i64> {
-    let Some((_, peak)) = curve
-        .counts
-        .iter()
-        .max_by_key(|(_, c)| c.admitted())
-    else {
+    let Some((_, peak)) = curve.counts.iter().max_by_key(|(_, c)| c.admitted()) else {
         return BTreeMap::new();
     };
     let mut rises = BTreeMap::new();
