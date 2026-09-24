@@ -168,8 +168,10 @@ pub fn rpc_with_bounded_queue<'a>(
     // `q!` closures capture primitives; an unbounded queue is one deeper than anything reachable.
     let max_backlog = max_backlog.unwrap_or(usize::MAX);
 
-    let (replies_complete, replies) = client
-        .forward_ref::<Stream<Reply, Process<'a, Client>, Unbounded, TotalOrder, ExactlyOnce>>();
+    let (replies_complete, replies) =
+        client
+            .forward_ref::<Stream<Reply, Process<'a, Client>, Unbounded, TotalOrder, ExactlyOnce>>(
+            );
 
     // ---- Client: logical clock, outstanding table, timeouts, rejections, re-sends -------------
     let (outgoing, completed, abandoned) = sliced! {
@@ -400,7 +402,12 @@ mod sim_tests {
         backlog: usize,
     }
 
-    fn run(workload: Workload, policy: RetryPolicy, server_config: ServerConfig, rounds: usize) -> Vec<Round> {
+    fn run(
+        workload: Workload,
+        policy: RetryPolicy,
+        server_config: ServerConfig,
+        rounds: usize,
+    ) -> Vec<Round> {
         let mut flow = FlowBuilder::new();
         let client = flow.process::<Client>();
         let server = flow.process::<Server>();
@@ -408,7 +415,14 @@ mod sim_tests {
         let (request_send, requests) = client.sim_input::<u64, TotalOrder, ExactlyOnce>();
         let (clock_send, client_clock) = client.sim_input::<(), TotalOrder, ExactlyOnce>();
 
-        let outputs = rpc_with_bounded_queue(&client, &server, requests, client_clock, policy, server_config);
+        let outputs = rpc_with_bounded_queue(
+            &client,
+            &server,
+            requests,
+            client_clock,
+            policy,
+            server_config,
+        );
         let completed = outputs.completed.sim_output();
         let abandoned = outputs.abandoned.sim_output();
         let outgoing = outputs.outgoing.sim_output();
@@ -509,12 +523,21 @@ mod sim_tests {
     const TAIL_START: usize = 600;
 
     fn print_trajectory(trace: &[Round]) {
-        for i in [0, 50, 99, 115, 130, 159, 180, 200, 250, 300, 400, 500, 600, 700, 799] {
+        for i in [
+            0, 50, 99, 115, 130, 159, 180, 200, 250, 300, 400, 500, 600, 700, 799,
+        ] {
             if i < trace.len() {
                 let r = &trace[i];
                 println!(
                     "round {i}: completed={} abandoned={} sent_first={} sent_retry={} served_first={} served_again={} rejected={} backlog={}",
-                    r.completed, r.abandoned, r.sent_first, r.sent_retry, r.served_first, r.served_again, r.rejected, r.backlog
+                    r.completed,
+                    r.abandoned,
+                    r.sent_first,
+                    r.sent_retry,
+                    r.served_first,
+                    r.served_again,
+                    r.rejected,
+                    r.backlog
                 );
             }
         }
@@ -542,32 +565,58 @@ mod sim_tests {
         print_totals(&trace);
 
         let pre = &trace[10..100];
-        assert!(pre.iter().all(|r| r.backlog == 0 && r.completed == 2 && r.sent_retry == 0 && r.rejected == 0));
+        assert!(
+            pre.iter().all(|r| r.backlog == 0
+                && r.completed == 2
+                && r.sent_retry == 0
+                && r.rejected == 0)
+        );
         assert_eq!(mean_latency(&trace, 10, 100), 0.0);
 
         // The trigger did fill the queue, and rejections happened.
         let peak = trace.iter().map(|r| r.backlog).max().unwrap();
-        assert_eq!(peak, 100, "the queue should have reached its bound, peak {peak}");
+        assert_eq!(
+            peak, 100,
+            "the queue should have reached its bound, peak {peak}"
+        );
         assert!(sum(&trace, 100, 200, |r| r.rejected) > 200);
         // The server never serves an id twice, under any part of the run.
         assert_eq!(sum(&trace, 0, ROUNDS, |r| r.served_again), 0);
         // Recovery: the tail is at baseline.
         let tail = &trace[TAIL_START..];
-        assert!(tail.iter().all(|r| r.backlog == 0 && r.completed == 2 && r.sent_retry == 0 && r.rejected == 0 && r.abandoned == 0));
+        assert!(tail.iter().all(|r| r.backlog == 0
+            && r.completed == 2
+            && r.sent_retry == 0
+            && r.rejected == 0
+            && r.abandoned == 0));
         assert_eq!(mean_latency(&trace, TAIL_START, ROUNDS), 0.0);
-        assert!(trace[250..].iter().all(|r| r.backlog == 0), "the queue should be empty from round 250");
+        assert!(
+            trace[250..].iter().all(|r| r.backlog == 0),
+            "the queue should be empty from round 250"
+        );
         // Total work is bounded by a small multiple of the input.
         let input = WORKLOAD.total_requests(ROUNDS as u64);
         let sent = sum(&trace, 0, ROUNDS, |r| r.sent_first + r.sent_retry);
         let served = sum(&trace, 0, ROUNDS, |r| r.served_first + r.served_again);
-        assert!(sent <= 2 * input, "sends {sent} should be under twice the input {input}");
+        assert!(
+            sent <= 2 * input,
+            "sends {sent} should be under twice the input {input}"
+        );
         assert!(served <= input);
     }
 
     /// Control: the unbounded configuration is `rpc_retry` and collapses.
     #[test]
     fn without_the_bound_the_system_collapses() {
-        let trace = run(WORKLOAD, POLICY, ServerConfig { max_backlog: None, ..SERVER }, ROUNDS);
+        let trace = run(
+            WORKLOAD,
+            POLICY,
+            ServerConfig {
+                max_backlog: None,
+                ..SERVER
+            },
+            ROUNDS,
+        );
         print_trajectory(&trace);
         print_totals(&trace);
         assert!(trace.iter().all(|r| r.rejected == 0));
@@ -598,7 +647,11 @@ mod sim_tests {
             ROUNDS,
         );
         print_trajectory(&trace);
-        assert!(trace.iter().all(|r| r.sent_retry == 0 && r.rejected == 0 && r.abandoned == 0 && r.served_again == 0 && r.backlog == 0));
+        assert!(trace.iter().all(|r| r.sent_retry == 0
+            && r.rejected == 0
+            && r.abandoned == 0
+            && r.served_again == 0
+            && r.backlog == 0));
         assert!(trace[1..].iter().all(|r| r.completed == 2));
     }
 
@@ -642,7 +695,14 @@ mod sim_tests {
         let server = flow.process::<Server>();
         let (request_send, requests) = client.sim_input::<u64, TotalOrder, ExactlyOnce>();
         let (clock_send, client_clock) = client.sim_input::<(), TotalOrder, ExactlyOnce>();
-        let outputs = rpc_with_bounded_queue(&client, &server, requests, client_clock, policy, server_config);
+        let outputs = rpc_with_bounded_queue(
+            &client,
+            &server,
+            requests,
+            client_clock,
+            policy,
+            server_config,
+        );
         let completed = outputs.completed.sim_output();
         let outgoing = outputs.outgoing.sim_output();
         let processed = outputs.processed.sim_output();
@@ -683,12 +743,20 @@ mod sim_tests {
             runs_ref.push((max_latency, resends, reserves, rejections));
         });
 
-        assert!(runs.iter().all(|r| r.3 == 0), "the queue bound should never be reached in this experiment");
+        assert!(
+            runs.iter().all(|r| r.3 == 0),
+            "the queue bound should never be reached in this experiment"
+        );
         let below_timeout = runs.iter().filter(|r| r.0 < policy.timeout_ticks).count();
         let with_redo = runs.iter().filter(|r| r.1 > 0).count();
         let max_resends = runs.iter().map(|r| r.1).max().unwrap();
         let max_reserves = runs.iter().map(|r| r.2).max().unwrap();
-        let min_positive_resends = runs.iter().map(|r| r.1).filter(|&n| n > 0).min().unwrap_or(0);
+        let min_positive_resends = runs
+            .iter()
+            .map(|r| r.1)
+            .filter(|&n| n > 0)
+            .min()
+            .unwrap_or(0);
         // Redundant work by the longest observed latency, to show it grows with delay.
         let mut by_latency: std::collections::BTreeMap<u64, (u64, u64)> = Default::default();
         for r in &runs {
@@ -703,31 +771,51 @@ mod sim_tests {
             with_redo
         );
         for (lat, (n, resends)) in &by_latency {
-            println!("longest latency {lat}: {n} schedules, mean re-sends {:.2}", *resends as f64 / *n as f64);
+            println!(
+                "longest latency {lat}: {n} schedules, mean re-sends {:.2}",
+                *resends as f64 / *n as f64
+            );
         }
 
         // No delay, no redundant work: the mechanism is delay-driven.
         assert!(
-            runs.iter().filter(|r| r.0 < policy.timeout_ticks).all(|r| r.1 == 0 && r.2 == 0),
+            runs.iter()
+                .filter(|r| r.0 < policy.timeout_ticks)
+                .all(|r| r.1 == 0 && r.2 == 0),
             "a schedule that never delayed a reply past the timeout should not have re-sent or re-served"
         );
         // Some schedule exists under which the same 24 requests cost the server more than 24 serves.
-        assert!(with_redo > 0, "the fuzzer should find a schedule that re-sends");
-        assert!(max_reserves > 0, "a re-send should make the server serve an id again");
+        assert!(
+            with_redo > 0,
+            "the fuzzer should find a schedule that re-sends"
+        );
+        assert!(
+            max_reserves > 0,
+            "a re-send should make the server serve an id again"
+        );
         // Redundant work grows with delay. A reply held past one timeout can cost one re-send, one
         // held past two can cost two, so schedules whose longest latency reached twice the
         // timeout should carry more re-sends on average than those that only reached it once.
         // (The relation is statistical because a clock jump and the reply can land in the same
         // client tick, which gives a long latency with no re-send.)
         let mean = |lo: u64, hi: u64| {
-            let sel: Vec<&(u64, u64, u64, u64)> = runs.iter().filter(|r| r.0 >= lo && r.0 < hi).collect();
-            (sel.len(), sel.iter().map(|r| r.1).sum::<u64>() as f64 / sel.len().max(1) as f64)
+            let sel: Vec<&(u64, u64, u64, u64)> =
+                runs.iter().filter(|r| r.0 >= lo && r.0 < hi).collect();
+            (
+                sel.len(),
+                sel.iter().map(|r| r.1).sum::<u64>() as f64 / sel.len().max(1) as f64,
+            )
         };
         let (n_once, mean_once) = mean(policy.timeout_ticks, 2 * policy.timeout_ticks);
         let (n_twice, mean_twice) = mean(2 * policy.timeout_ticks, u64::MAX);
-        println!("longest latency in [timeout, 2 timeout): {n_once} schedules, mean re-sends {mean_once:.2}; at least 2 timeout: {n_twice} schedules, mean re-sends {mean_twice:.2}");
+        println!(
+            "longest latency in [timeout, 2 timeout): {n_once} schedules, mean re-sends {mean_once:.2}; at least 2 timeout: {n_twice} schedules, mean re-sends {mean_twice:.2}"
+        );
         if n_once > 0 && n_twice > 0 {
-            assert!(mean_twice >= mean_once, "re-sends should grow with the delay the schedule imposed");
+            assert!(
+                mean_twice >= mean_once,
+                "re-sends should grow with the delay the schedule imposed"
+            );
         }
     }
 
@@ -759,7 +847,14 @@ mod sim_tests {
         let server = flow.process::<Server>();
         let (request_send, requests) = client.sim_input::<u64, TotalOrder, ExactlyOnce>();
         let (clock_send, client_clock) = client.sim_input::<(), TotalOrder, ExactlyOnce>();
-        let outputs = rpc_with_bounded_queue(&client, &server, requests, client_clock, policy, server_config);
+        let outputs = rpc_with_bounded_queue(
+            &client,
+            &server,
+            requests,
+            client_clock,
+            policy,
+            server_config,
+        );
         let outgoing = outputs.outgoing.sim_output();
         let processed = outputs.processed.sim_output();
         let backlog_trace = outputs.backlog_trace.sim_output();

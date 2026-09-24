@@ -18,13 +18,13 @@ pub mod paxos_bench;
 pub mod paxos_log_bench;
 #[cfg(feature = "tokio")]
 pub mod paxos_with_client;
-pub mod provenance_ground_truth;
+pub mod provenance_buffers;
 pub mod provenance_evidence_matrix;
+pub mod provenance_ground_truth;
+pub mod provenance_survey;
 pub mod pure_heartbeat;
 pub mod raft;
 pub mod rpc_retry;
-pub mod provenance_survey;
-pub mod provenance_buffers;
 pub mod simple_cluster;
 #[cfg(feature = "tokio")]
 pub mod two_pc;

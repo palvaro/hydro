@@ -157,7 +157,9 @@ mod sim_tests {
                         let size = latest[member as usize].len();
                         r.set_sizes.push(size);
                         r.missing.push(union.len() - size);
-                        let issued = (0..u).filter(|&k| Workload::member_of(round, k, n) == member).count();
+                        let issued = (0..u)
+                            .filter(|&k| Workload::member_of(round, k, n) == member)
+                            .count();
                         r.wire_elements_bound += (n as usize - 1) * (issued + size);
                     }
                     trace_ref.push(r);
@@ -214,7 +216,11 @@ mod sim_tests {
 
         // Every member holds the union at the end of every round, trigger or not.
         for (i, r) in trace.iter().enumerate() {
-            assert!(r.missing.iter().all(|&m| m == 0), "round {i}: members missing elements: {:?}", r.missing);
+            assert!(
+                r.missing.iter().all(|&m| m == 0),
+                "round {i}: members missing elements: {:?}",
+                r.missing
+            );
         }
         // The union is what the workload issued.
         assert_eq!(trace[29].union_size, 30);
@@ -223,7 +229,10 @@ mod sim_tests {
         // Per-round wire work is exactly the derived function of set size: `(n - 1) (u + n |S|)`.
         for (i, r) in trace.iter().enumerate() {
             let u = WORKLOAD.updates_at(i as u64) as usize;
-            assert_eq!(r.wire_elements_bound, (N as usize - 1) * (u + (N as usize) * r.union_size));
+            assert_eq!(
+                r.wire_elements_bound,
+                (N as usize - 1) * (u + (N as usize) * r.union_size)
+            );
         }
         assert_eq!(trace[30].wire_elements_bound, 260);
         assert_eq!(trace[49].wire_elements_bound, 1400);
