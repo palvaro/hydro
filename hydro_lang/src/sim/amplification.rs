@@ -3,11 +3,13 @@
 //!
 //! [`check`] takes a simulation and a fixed workload, compiles the simulation once, and runs
 //! it many times. The first run follows the deterministic prompt schedule and discovers every
-//! `use::batch` hook that ever has something buffered. Each later run holds one of those hooks
-//! (see [`super::hold_one_hook`]) from a chosen round for a chosen number of rounds, with every
-//! other decision still following the prompt schedule, so a delay of any length on one edge is a
-//! single decision. Every run is measured with the counts the simulator collects itself (see
-//! [`super::work_counts`]); nothing is read from the program's outputs.
+//! `use::batch` and `use::snapshot` hook that ever has something buffered. Each later run holds
+//! one of those hooks (see [`super::hold_one_hook`]) from a chosen round for a chosen number of
+//! rounds, with every other decision still following the prompt schedule, so a delay of any
+//! length on one edge is a single decision. A held batch delays the records arriving at it; a
+//! held snapshot keeps its tick observing a stale version of a singleton. Every run is measured
+//! with the counts the simulator collects itself (see [`super::work_counts`]); nothing is read
+//! from the program's outputs.
 //!
 //! # The verdict rule
 //!
@@ -37,7 +39,9 @@
 //!
 //! Records are counted where they enter a tick and where they cross the network. Work that a
 //! program represents as a number inside a record, or as records flowing between operators
-//! within one tick, is invisible. `use::snapshot` hooks are neither held nor counted.
+//! within one tick, is invisible. Snapshot hooks are held but their releases are not counted,
+//! because a snapshot is one value per tick execution and not a record the program produced.
+//! Hooks are held one at a time.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -118,6 +122,13 @@ pub struct HookCurve {
     /// Hold lengths at which the simulator forced the held hook to release. A curve with any
     /// refusal is not read for the verdict.
     pub refused_at: Vec<usize>,
+    /// `(k, how many of the held hook's questions were answered "do not move")` for each grid
+    /// point with `k > 0`. Zero at some `k` does not mean the hold had no effect: a tick whose
+    /// only releasable hook is held is not runnable, so it parks and the held hook is never
+    /// asked. That is how a hold on a single-hook tick (a server whose only input is its
+    /// arrivals) takes effect. A nonzero count shows the hook was asked while held and answered
+    /// "do not move" each time.
+    pub holds_applied: Vec<(usize, u64)>,
     /// The largest rise, over the unheld run, of admitted records or of any one sender's
     /// messages, at any grid point.
     pub gain: i64,
@@ -128,14 +139,29 @@ pub struct HookCurve {
 }
 
 impl HookCurve {
-    /// The `use::batch` source location, without the index and item type.
+    /// The `use::batch` or `use::snapshot` source location, without the index and item type.
     pub fn source_location(&self) -> &str {
         self.hook.split('#').next().unwrap_or(&self.hook)
+    }
+
+    /// Whether the held hook was a `use::snapshot` (its identity carries the word `snapshot`).
+    pub fn is_snapshot(&self) -> bool {
+        self.hook.contains("[snapshot ")
     }
 
     /// Whether the simulator honoured the hold at every grid point.
     pub fn holdable(&self) -> bool {
         self.refused_at.is_empty()
+    }
+
+    /// Hold lengths at which the held hook was never asked a question while held. Its tick
+    /// parked for the whole hold (see [`HookCurve::holds_applied`]).
+    pub fn unasked_while_held_at(&self) -> Vec<usize> {
+        self.holds_applied
+            .iter()
+            .filter(|(_, n)| *n == 0)
+            .map(|(k, _)| *k)
+            .collect()
     }
 }
 
@@ -144,7 +170,7 @@ impl HookCurve {
 pub struct Location {
     /// The held hook whose hold produced the largest gain.
     pub hook: String,
-    /// That hook's `use::batch` source location.
+    /// That hook's `use::batch` or `use::snapshot` source location.
     pub source_location: String,
     /// What rose: `"admitted records"` or a `sends from ...` place.
     pub rose: String,
@@ -190,6 +216,10 @@ impl fmt::Display for Report {
             if !c.holdable() {
                 write!(f, " (refused at k = {:?})", c.refused_at)?;
             }
+            let unasked = c.unasked_while_held_at();
+            if !unasked.is_empty() {
+                write!(f, " (tick parked, hook never asked, at k = {unasked:?})")?;
+            }
             writeln!(f)?;
         }
         write!(f, "verdict {}", self.verdict)?;
@@ -221,7 +251,7 @@ pub fn check(
 ) -> Report {
     let started = Instant::now();
     let compiled = flow.compiled();
-    let (baseline, hooks, _) = run_once(&compiled, config, &mut round, None, 0);
+    let (baseline, hooks, _, _) = run_once(&compiled, config, &mut round, None, 0);
     let base_sends = baseline.sends_by_member();
     let base_admitted = baseline.admitted() as i64;
 
@@ -231,14 +261,16 @@ pub fn check(
         let mut extra_sends = vec![(0usize, BTreeMap::new())];
         let mut counts = vec![(0usize, baseline.clone())];
         let mut refused_at = Vec::new();
+        let mut holds_applied = Vec::new();
         let mut gain = 0i64;
         let mut rose = None;
         let mut first_gain_at = None;
         for &k in config.grid.iter().filter(|k| **k > 0) {
-            let (c, _, forced) = run_once(&compiled, config, &mut round, Some(hook), k);
+            let (c, _, forced, applied) = run_once(&compiled, config, &mut round, Some(hook), k);
             if forced > 0 {
                 refused_at.push(k);
             }
+            holds_applied.push((k, applied));
             let d_admitted = c.admitted() as i64 - base_admitted;
             let mut d_sends = BTreeMap::new();
             let mut rise_here = false;
@@ -273,6 +305,7 @@ pub fn check(
             extra_sends_by_member: extra_sends,
             counts,
             refused_at,
+            holds_applied,
             gain,
             rose,
             first_gain_at,
@@ -308,15 +341,15 @@ pub fn check(
 }
 
 /// One execution: `config.rounds` rounds of workload, holding `target` from `config.hold_start`
-/// for `k` rounds. Returns the counts, the hooks the driver saw with buffered input, and how
-/// many times the held hook was forced to release.
+/// for `k` rounds. Returns the counts, the hooks the driver saw with buffered input, how many
+/// times the held hook was forced to release, and how many times the hold was applied.
 fn run_once(
     compiled: &CompiledSim,
     config: &CheckConfig,
     round: &mut (impl AsyncFnMut(usize) + RefUnwindSafe),
     target: Option<&str>,
     k: usize,
-) -> (WorkCounts, Vec<String>, u64) {
+) -> (WorkCounts, Vec<String>, u64, u64) {
     let (driver, handle) = HoldOneHookDriver::new();
     work_counts::enable();
     let handle_ref = &handle;
@@ -333,7 +366,12 @@ fn run_once(
     });
     handle.end_hold();
     let counts = work_counts::take();
-    (counts, handle.hooks_seen(), handle.forced_releases())
+    (
+        counts,
+        handle.hooks_seen(),
+        handle.forced_releases(),
+        handle.holds_applied(),
+    )
 }
 
 fn apply_hold(handle: &HoldHandle, target: Option<&str>, k: usize, round: usize, start: usize) {

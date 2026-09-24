@@ -36,6 +36,13 @@
 //! - **Subgraph runs** ([`WorkCounts::subgraph_runs`]) and tick executions. A hold parks the held
 //!   tick and then runs it once on release, so a schedule changes these directly, in either
 //!   direction, without any change in records. Not fit for the verdict; exposed for comparison.
+//! - **Snapshot releases** are not counted at all. A `use::snapshot` hook releases exactly one
+//!   value every time its tick runs, whether a new version or the last one again, so its release
+//!   count is the tick's execution count under another name, and the count of *new* versions it
+//!   observes depends on how many the schedule let it skip. Neither is a record the program
+//!   produced. Snapshot hooks are therefore held by the checker (see [`super::hold_one_hook`])
+//!   but contribute nothing to [`WorkCounts::admitted`]; the work a stale snapshot provokes shows
+//!   up where it always does, in the records and messages the program then derives.
 //!
 //! # The verdict rule these counts support
 //!
@@ -69,6 +76,7 @@ use std::collections::BTreeMap;
 use dfir_rs::scheduled::metrics::DfirMetrics;
 
 use super::hold_one_hook::hook_id;
+use super::runtime::HookKind;
 
 thread_local! {
     static ENABLED: Cell<bool> = const { Cell::new(false) };
@@ -169,12 +177,14 @@ pub fn is_enabled() -> bool {
 }
 
 /// Records that the hook at `location` and `index` within its tick, on cluster `member` (or a
-/// process), released `n` items. Called by the scheduler; not for use by harnesses.
+/// process), released `n` items. Called by the scheduler; not for use by harnesses. Snapshot
+/// hooks report zero items and so add nothing here (see the [module docs](self)).
 #[doc(hidden)]
 pub fn record_hook_release(
     location: Option<&'static str>,
     index: usize,
     item_type: &'static str,
+    kind: HookKind,
     member: Option<u32>,
     n: usize,
 ) {
@@ -184,7 +194,7 @@ pub fn record_hook_release(
     if n == 0 {
         return;
     }
-    let id = hook_id(location, index, item_type);
+    let id = hook_id(location, index, item_type, kind);
     COUNTS.with(|c| {
         let mut c = c.borrow_mut();
         *c.hook_releases.entry(id.clone()).or_default() += n as u64;

@@ -323,9 +323,10 @@
 //! The verdict and both localization signals now come from the simulator alone: the harness
 //! supplies the program, the workload, and the hold plan, and reads nothing from the program's
 //! outputs. What is still supplied by hand is the workload itself and the per-program wiring
-//! (which inputs to feed each round). Hooks are perturbed one at a time; `use::snapshot` hooks
-//! are not perturbed and their releases are not counted, since a snapshot is one value per tick
-//! and tick count is a scheduling artifact.
+//! (which inputs to feed each round). Hooks are perturbed one at a time. At the time of this
+//! experiment `use::snapshot` hooks were not perturbed; the fifth experiment below adds them.
+//! Their releases are still not counted, since a snapshot is one value per tick and tick count
+//! is a scheduling artifact.
 //!
 //! # Fourth experiment: the checker as a library function
 //!
@@ -356,6 +357,44 @@
 //! One practical note for callers: a type named inside a `q!` closure in the caller's wiring
 //! must be imported at module level, because the staged crate does not see function-local `use`
 //! statements.
+//!
+//! # Fifth experiment: holding `use::snapshot` hooks too
+//!
+//! Until this experiment the checker held only `use::batch` hooks. A `use::snapshot` is the
+//! other scheduling decision the simulator makes inside a tick: which queued version of a
+//! singleton the tick observes, or whether it observes the last one again. A hold on a snapshot
+//! hook now pins the observed version at what it was when the hold began, for `k` rounds, so the
+//! tick keeps acting on stale state, which is what a delayed state update looks like from inside
+//! the program. When the hold ends the hook skips to the newest queued version, the analogue of a
+//! batch hook releasing its whole buffer, so that the perturbation is a delay of `k` rounds and
+//! not a lag that persists for the rest of the run. Snapshot hooks carry the word `snapshot` in
+//! their identity and are discovered, held, and reported like batch hooks; their releases are
+//! still not counted, for the reason given above. The simulator change is metadata (singleton
+//! hooks now report a location and a kind) plus the scheduler telling the driver whether it is
+//! forcing a decision; nothing changes unless a hold is set.
+//!
+//! The corpus turned out to contain three snapshot hooks that ever make a decision. Two belong
+//! to programs: `rpc_retry.rs:330`, the server metrics tick's snapshot of its backlog depth, and
+//! `crdt_gossip.rs:70`, the G-Set snapshot that each member broadcasts on every pump. The third
+//! is the crdt_gossip harness's own observer. Holding each of them at every grid length gave a
+//! gain of exactly zero on every count, in both `rpc_retry` configurations and in `crdt_gossip`,
+//! and the applied-hold counter confirms the two program snapshots were pinned at every length
+//! (the observer's tick has no other input, so it parked instead). The reasons are mechanical.
+//! The backlog-depth snapshot feeds a metrics accumulator that nothing downstream acts on, so a
+//! stale depth changes a reported number and no work. The gossip snapshot is broadcast once per
+//! pump element whatever its contents, so a stale set changes what each message carries and not
+//! how many messages there are, and the receiving fold is idempotent; convergence is delayed by
+//! `k` rounds while work is unchanged, which is the benign label's argument restated. No verdict
+//! and no named location changed on any of the 22 configurations, and no benign configuration
+//! became hazardous. The 22 tests run together in 63 s of wall clock against 44 s before, the
+//! difference being the extra hold runs for the three snapshot hooks (the crdt_gossip runs are
+//! the expensive ones, at about a second per run).
+//!
+//! What this experiment did not test is a program whose *sends* depend on a snapshot, such as a
+//! retry judged against a snapshotted clock or a fetch issued because a snapshotted cache still
+//! shows a miss. Every corpus program keeps that kind of state in `use::state` inside the tick,
+//! where the scheduler makes no decision about it, so there was nothing for a snapshot hold to
+//! provoke. The machinery is in place for a witness that does it the other way.
 
 #[cfg(test)]
 mod sim_tests {

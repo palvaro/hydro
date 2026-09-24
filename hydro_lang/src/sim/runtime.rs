@@ -58,6 +58,17 @@ macro_rules! __maybe_debug__ {
     }};
 }
 
+/// What kind of nondeterminism point a [`SimHook`] stands for, as far as a schedule that singles
+/// out one hook is concerned (see [`super::hold_one_hook`]). Metadata only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookKind {
+    /// A `use::batch`: the decision is which buffered records to release into the tick.
+    Batch,
+    /// A `use::snapshot`: the decision is which queued version of a singleton (or of each key
+    /// of a keyed singleton) the tick observes, or whether to observe the last one again.
+    Snapshot,
+}
+
 pub trait SimHook {
     fn current_decision(&self) -> Option<bool>;
     fn can_make_nontrivial_decision(&self) -> bool;
@@ -87,23 +98,32 @@ pub trait SimHook {
         false
     }
 
-    /// The `use::batch` source location this hook stands for, if it batches a stream. Published
-    /// to the driver by the scheduler so a schedule can single out one edge (see
+    /// The `use::batch` or `use::snapshot` source location this hook stands for, if it is one of
+    /// those. Published to the driver by the scheduler so a schedule can single out one edge (see
     /// [`super::hold_one_hook`]). Metadata only; the default is `None`.
     fn hook_location(&self) -> Option<&'static str> {
         None
     }
 
-    /// The Rust type of the items this hook batches, for telling apart the batches of one
-    /// `sliced!` block in reports. Metadata only.
+    /// The Rust type of the items this hook batches or the singleton it snapshots, for telling
+    /// apart the hooks of one `sliced!` block in reports. Metadata only.
     fn hook_item_type(&self) -> &'static str {
         ""
+    }
+
+    /// Whether this hook is a batch or a snapshot. Metadata only; the default is
+    /// [`HookKind::Batch`], which is right for every hook that has a location except the
+    /// singleton hooks, which override it.
+    fn hook_kind(&self) -> HookKind {
+        HookKind::Batch
     }
 
     /// How many stream records the decision currently held will release. Read by the scheduler
     /// just before `release_decision` so [`super::work_counts`] can count admitted records
     /// without touching the hook's behaviour. Hooks that release something other than stream
-    /// records (singleton snapshots, membership events, crash points) report zero.
+    /// records (singleton snapshots, membership events, crash points) report zero: a snapshot
+    /// hook releases one value every time its tick runs, new or not, so counting it would count
+    /// tick executions, which a schedule moves directly.
     fn pending_release_count(&self) -> usize {
         0
     }
@@ -649,6 +669,18 @@ impl<T: Clone> SingletonHook<T> {
 }
 
 impl<T: Clone> SimHook for SingletonHook<T> {
+    fn hook_location(&self) -> Option<&'static str> {
+        Some(self.batch_location.0)
+    }
+
+    fn hook_item_type(&self) -> &'static str {
+        std::any::type_name::<T>()
+    }
+
+    fn hook_kind(&self) -> HookKind {
+        HookKind::Snapshot
+    }
+
     fn current_decision(&self) -> Option<bool> {
         self.to_release.as_ref().map(|t| t.1)
     }
@@ -871,6 +903,18 @@ impl<K: Hash + Eq + Clone, V: Clone> KeyedSingletonHook<K, V> {
 }
 
 impl<K: Hash + Eq + Clone, V: Clone> SimHook for KeyedSingletonHook<K, V> {
+    fn hook_location(&self) -> Option<&'static str> {
+        Some(self.batch_location.0)
+    }
+
+    fn hook_item_type(&self) -> &'static str {
+        std::any::type_name::<(K, V)>()
+    }
+
+    fn hook_kind(&self) -> HookKind {
+        HookKind::Snapshot
+    }
+
     fn current_decision(&self) -> Option<bool> {
         self.to_release
             .as_ref()

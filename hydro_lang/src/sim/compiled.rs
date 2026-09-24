@@ -1895,6 +1895,7 @@ impl SimTick {
                         hook.hook_location(),
                         index,
                         hook.hook_item_type(),
+                        hook.hook_kind(),
                     )
             })
     }
@@ -2192,6 +2193,8 @@ fn run_hooks<W: std::fmt::Write>(
                     hook.hook_location(),
                     index,
                     hook.hook_item_type(),
+                    hook.hook_kind(),
+                    false,
                     || hook.autonomous_decision(driver, false),
                 );
                 remaining_decision_count -= 1;
@@ -2205,6 +2208,8 @@ fn run_hooks<W: std::fmt::Write>(
                     hook.hook_location(),
                     index,
                     hook.hook_item_type(),
+                    hook.hook_kind(),
+                    force,
                     || hook.autonomous_decision(driver, force),
                 );
                 remaining_decision_count -= 1;
@@ -2217,6 +2222,7 @@ fn run_hooks<W: std::fmt::Write>(
                     hook.hook_location(),
                     index,
                     hook.hook_item_type(),
+                    hook.hook_kind(),
                     member,
                     hook.pending_release_count(),
                 );
