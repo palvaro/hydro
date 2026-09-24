@@ -377,17 +377,17 @@ fn wrap_map(f: &ClosureExpr, in_repr: Repr, in_ty: &syn::Type, out_repr: Repr) -
                 let (mut __prov_t, mut __prov_c, __prov_x) = #untag;
             },
             call: quote!(let __prov_y = __prov_f(__prov_x);),
-            result: retag(out_repr, quote!(__prov_t), quote!(__prov_c), quote!(__prov_y)),
+            result: retag(
+                out_repr,
+                quote!(__prov_t),
+                quote!(__prov_c),
+                quote!(__prov_y),
+            ),
         }
     })
 }
 
-fn wrap_flat_map(
-    f: &ClosureExpr,
-    in_repr: Repr,
-    in_ty: &syn::Type,
-    out_repr: Repr,
-) -> ClosureExpr {
+fn wrap_flat_map(f: &ClosureExpr, in_repr: Repr, in_ty: &syn::Type, out_repr: Repr) -> ClosureExpr {
     wrap_closure(f, |_| {
         let untag = untag(in_repr, quote!(__prov_item));
         let retag = retag(
@@ -418,7 +418,12 @@ fn wrap_filter_map(
 ) -> ClosureExpr {
     wrap_closure(f, |_| {
         let untag = untag(in_repr, quote!(__prov_item));
-        let retag = retag(out_repr, quote!(__prov_t), quote!(__prov_c), quote!(__prov_y));
+        let retag = retag(
+            out_repr,
+            quote!(__prov_t),
+            quote!(__prov_c),
+            quote!(__prov_y),
+        );
         Body {
             params: quote!(__prov_item: #in_ty),
             pre: quote! {
@@ -638,7 +643,10 @@ fn ty_of(node: &HydroNode) -> syn::Type {
     item_type(&node.metadata().collection_kind)
 }
 
-#[expect(clippy::too_many_arguments, reason = "one field per EmissionRecord member")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one field per EmissionRecord member"
+)]
 fn emission_record(
     kind: TokenStream,
     point: u32,

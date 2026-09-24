@@ -127,21 +127,21 @@ pub fn record_metrics_sidecar(
                 record_metrics_dfir(
                     namespace,
                     location_name,
-                      timestamp,
-                      &dfir_metrics,
-                      &mut writer,
-                  )
-                  .await
-                  .unwrap();
+                    timestamp,
+                    &dfir_metrics,
+                    &mut writer,
+                )
+                .await
+                .unwrap();
 
-                  record_metrics_stages(
-                      namespace,
-                      location_name,
-                      timestamp,
-                      &dfir_metrics,
-                      &stage_topology,
-                      &mut writer,
-                  )
+                record_metrics_stages(
+                    namespace,
+                    location_name,
+                    timestamp,
+                    &dfir_metrics,
+                    &stage_topology,
+                    &mut writer,
+                )
                 .await
                 .unwrap();
 

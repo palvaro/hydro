@@ -309,52 +309,54 @@ mod sim_tests {
         let trace_ref = &mut trace;
         let mut next_value = 0u64;
 
-        flow.sim().with_cluster_size(&cluster, MEMBERS as usize).run_prompt(async move || {
-            let mut inbox = vec![0usize; MEMBERS as usize];
-            let mut outstanding = vec![0usize; MEMBERS as usize];
-            let mut sent: HashSet<(u32, u64, u32)> = HashSet::new();
-            let mut merged_ids: HashSet<(u32, u32, u64)> = HashSet::new();
-            for round in 0..rounds as u64 {
-                for m in 0..MEMBERS {
-                    timer_send.send(m, ());
-                    for _ in 0..workload.at(round) {
-                        update_send.send(m, next_value);
-                        next_value += 1;
+        flow.sim()
+            .with_cluster_size(&cluster, MEMBERS as usize)
+            .run_prompt(async move || {
+                let mut inbox = vec![0usize; MEMBERS as usize];
+                let mut outstanding = vec![0usize; MEMBERS as usize];
+                let mut sent: HashSet<(u32, u64, u32)> = HashSet::new();
+                let mut merged_ids: HashSet<(u32, u32, u64)> = HashSet::new();
+                for round in 0..rounds as u64 {
+                    for m in 0..MEMBERS {
+                        timer_send.send(m, ());
+                        for _ in 0..workload.at(round) {
+                            update_send.send(m, next_value);
+                            next_value += 1;
+                        }
                     }
-                }
-                quiesce().await;
+                    quiesce().await;
 
-                let mut r = Round::default();
-                for m in 0..MEMBERS {
-                    while let Some((to, d)) = wire.try_next(m).await {
-                        if sent.insert((d.from, d.seq, to)) {
-                            r.sent_first += 1
-                        } else {
-                            r.sent_again += 1
+                    let mut r = Round::default();
+                    for m in 0..MEMBERS {
+                        while let Some((to, d)) = wire.try_next(m).await {
+                            if sent.insert((d.from, d.seq, to)) {
+                                r.sent_first += 1
+                            } else {
+                                r.sent_again += 1
+                            }
+                        }
+                        while let Some(d) = merged.try_next(m).await {
+                            if merged_ids.insert((m, d.from, d.seq)) {
+                                r.merged_first += 1
+                            } else {
+                                r.merged_again += 1
+                            }
+                        }
+                        while let Some(_) = acks_sent.try_next(m).await {
+                            r.acks_sent += 1;
+                        }
+                        while let Some(depth) = inbox_depth.try_next(m).await {
+                            inbox[m as usize] = depth;
+                        }
+                        while let Some(depth) = outstanding_depth.try_next(m).await {
+                            outstanding[m as usize] = depth;
                         }
                     }
-                    while let Some(d) = merged.try_next(m).await {
-                        if merged_ids.insert((m, d.from, d.seq)) {
-                            r.merged_first += 1
-                        } else {
-                            r.merged_again += 1
-                        }
-                    }
-                    while let Some(_) = acks_sent.try_next(m).await {
-                        r.acks_sent += 1;
-                    }
-                    while let Some(depth) = inbox_depth.try_next(m).await {
-                        inbox[m as usize] = depth;
-                    }
-                    while let Some(depth) = outstanding_depth.try_next(m).await {
-                        outstanding[m as usize] = depth;
-                    }
+                    r.inbox_total = inbox.iter().sum();
+                    r.outstanding_total = outstanding.iter().sum();
+                    trace_ref.push(r);
                 }
-                r.inbox_total = inbox.iter().sum();
-                r.outstanding_total = outstanding.iter().sum();
-                trace_ref.push(r);
-            }
-        });
+            });
         trace
     }
 
@@ -407,7 +409,13 @@ mod sim_tests {
                 let r = &trace[i];
                 println!(
                     "round {i}: sent_first={} sent_again={} merged_first={} merged_again={} acks={} inbox_total={} outstanding_total={}",
-                    r.sent_first, r.sent_again, r.merged_first, r.merged_again, r.acks_sent, r.inbox_total, r.outstanding_total
+                    r.sent_first,
+                    r.sent_again,
+                    r.merged_first,
+                    r.merged_again,
+                    r.acks_sent,
+                    r.inbox_total,
+                    r.outstanding_total
                 );
             }
         }
@@ -438,7 +446,11 @@ mod sim_tests {
         let pre = &trace[10..100];
         let per_round = (MEMBERS * (MEMBERS - 1)) as u64;
         assert!(
-            pre.iter().all(|r| r.sent_first == per_round && r.sent_again == 0 && r.merged_first == per_round && r.merged_again == 0 && r.inbox_total <= IN_FLIGHT),
+            pre.iter().all(|r| r.sent_first == per_round
+                && r.sent_again == 0
+                && r.merged_first == per_round
+                && r.merged_again == 0
+                && r.inbox_total <= IN_FLIGHT),
             "the system should be healthy before the trigger"
         );
     }
@@ -453,10 +465,20 @@ mod sim_tests {
         let tail = &trace[TAIL_START..];
         let tail_first = sum(&trace, TAIL_START, ROUNDS, |r| r.merged_first);
         let tail_again = sum(&trace, TAIL_START, ROUNDS, |r| r.merged_again);
-        assert!(tail_again >= tail_first / 2, "a large share of tail merges should be redundant (first={tail_first}, again={tail_again})");
+        assert!(
+            tail_again >= tail_first / 2,
+            "a large share of tail merges should be redundant (first={tail_first}, again={tail_again})"
+        );
         assert!(sum(&trace, TAIL_START, ROUNDS, |r| r.sent_again) > 0);
-        assert!(tail.last().unwrap().inbox_total > tail.first().unwrap().inbox_total, "the inboxes should still be growing");
-        assert!(tail.windows(2).all(|w| w[1].inbox_total >= w[0].inbox_total), "inboxes never shrink in the tail");
+        assert!(
+            tail.last().unwrap().inbox_total > tail.first().unwrap().inbox_total,
+            "the inboxes should still be growing"
+        );
+        assert!(
+            tail.windows(2)
+                .all(|w| w[1].inbox_total >= w[0].inbox_total),
+            "inboxes never shrink in the tail"
+        );
     }
 
     /// Control: re-send on, no trigger.
@@ -472,27 +494,56 @@ mod sim_tests {
         );
         print_trajectory(&trace);
         report("no trigger", &trace);
-        assert!(trace.iter().all(|r| r.sent_again == 0 && r.merged_again == 0 && r.inbox_total <= IN_FLIGHT));
+        assert!(
+            trace
+                .iter()
+                .all(|r| r.sent_again == 0 && r.merged_again == 0 && r.inbox_total <= IN_FLIGHT)
+        );
     }
 
     /// The knob off: same trigger, no re-sends. Every delta is merged exactly once per member,
     /// which is the benign shape.
     #[test]
     fn without_resends_the_inboxes_drain() {
-        let trace = run(WORKLOAD, GossipConfig { ack_timeout_ticks: 0, ..CONFIG }, ROUNDS);
+        let trace = run(
+            WORKLOAD,
+            GossipConfig {
+                ack_timeout_ticks: 0,
+                ..CONFIG
+            },
+            ROUNDS,
+        );
         print_trajectory(&trace);
         report("re-send off", &trace);
         assert_healthy_pre_trigger(&trace);
-        assert!(trace.iter().all(|r| r.sent_again == 0 && r.merged_again == 0));
+        assert!(
+            trace
+                .iter()
+                .all(|r| r.sent_again == 0 && r.merged_again == 0)
+        );
         let peak = trace.iter().map(|r| r.inbox_total).max().unwrap();
-        let recovered_at = trace.iter().rposition(|r| r.inbox_total > IN_FLIGHT).map(|i| i + 1).unwrap();
+        let recovered_at = trace
+            .iter()
+            .rposition(|r| r.inbox_total > IN_FLIGHT)
+            .map(|i| i + 1)
+            .unwrap();
         println!("peak inbox total {peak}; inbox last above in-flight before round {recovered_at}");
-        assert!(peak > 5 * 100, "the trigger should have built inboxes far past the timeout, got {peak}");
-        assert!(trace[TAIL_START..].iter().all(|r| r.inbox_total <= IN_FLIGHT));
+        assert!(
+            peak > 5 * 100,
+            "the trigger should have built inboxes far past the timeout, got {peak}"
+        );
+        assert!(
+            trace[TAIL_START..]
+                .iter()
+                .all(|r| r.inbox_total <= IN_FLIGHT)
+        );
         let total_first = sum(&trace, 0, ROUNDS, |r| r.sent_first);
         let total_merged = sum(&trace, 0, ROUNDS, |r| r.merged_first);
         // Every delta is merged exactly once per peer, except the last round's in-flight deltas.
-        assert!(total_first - total_merged <= IN_FLIGHT as u64, "sent {total_first}, merged {total_merged}");
+        assert!(
+            total_first - total_merged <= IN_FLIGHT as u64,
+            "sent {total_first}, merged {total_merged}"
+        );
         assert!(total_merged >= total_first - IN_FLIGHT as u64);
     }
 }

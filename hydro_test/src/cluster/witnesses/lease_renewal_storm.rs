@@ -176,8 +176,13 @@ pub fn lease_renewal<'a>(
     let ServerConfig { max_per_tick } = server_config;
 
     // Acknowledgements come back from the server, which is downstream of `sent` (below).
-    let (acks_complete, acks) = clients
-        .forward_ref::<Stream<Ack, Cluster<'a, LeaseClient>, Unbounded, TotalOrder, ExactlyOnce>>();
+    let (acks_complete, acks) = clients.forward_ref::<Stream<
+        Ack,
+        Cluster<'a, LeaseClient>,
+        Unbounded,
+        TotalOrder,
+        ExactlyOnce,
+    >>();
 
     // ---- Client: logical clock, one outstanding renewal, grace-based re-sends -----------------
     let (sent, acked, superseded, lease_trace) = sliced! {
@@ -358,7 +363,13 @@ mod sim_tests {
         backlog: usize,
     }
 
-    fn run(n: u32, workload: Workload, policy: ClientPolicy, server_config: ServerConfig, rounds: usize) -> Vec<Round> {
+    fn run(
+        n: u32,
+        workload: Workload,
+        policy: ClientPolicy,
+        server_config: ServerConfig,
+        rounds: usize,
+    ) -> Vec<Round> {
         let mut flow = FlowBuilder::new();
         let clients = flow.cluster::<LeaseClient>();
         let server = flow.process::<LeaseServer>();
@@ -367,7 +378,15 @@ mod sim_tests {
         let (server_clock_send, server_clock) = server.sim_input::<(), TotalOrder, ExactlyOnce>();
         let (other_send, other_work) = server.sim_input::<u64, TotalOrder, ExactlyOnce>();
 
-        let outputs = lease_renewal(&clients, &server, client_clock, server_clock, other_work, policy, server_config);
+        let outputs = lease_renewal(
+            &clients,
+            &server,
+            client_clock,
+            server_clock,
+            other_work,
+            policy,
+            server_config,
+        );
         let sent = outputs.sent.sim_cluster_output();
         let acked = outputs.acked.sim_cluster_output();
         let superseded = outputs.superseded.sim_cluster_output();
@@ -407,7 +426,8 @@ mod sim_tests {
                                 r.sent_first += 1
                             }
                         }
-                        r.superseded += superseded.collect_sorted::<Vec<u64>>(member).await.len() as u64;
+                        r.superseded +=
+                            superseded.collect_sorted::<Vec<u64>>(member).await.len() as u64;
                         for valid in lease_trace.collect::<Vec<bool>>(member).await {
                             if !valid {
                                 r.lapsed_ticks += 1
@@ -484,12 +504,22 @@ mod sim_tests {
     const TAIL_START: usize = 600;
 
     fn print_trajectory(trace: &[Round]) {
-        for i in [0, 50, 99, 103, 110, 130, 159, 160, 200, 250, 300, 350, 400, 500, 600, 700, 799] {
+        for i in [
+            0, 50, 99, 103, 110, 130, 159, 160, 200, 250, 300, 350, 400, 500, 600, 700, 799,
+        ] {
             if i < trace.len() {
                 let r = &trace[i];
                 println!(
                     "round {i}: acked={} sent_first={} sent_resend={} superseded={} lapsed_ticks={} served first={} resend={} other={} backlog={}",
-                    r.acked, r.sent_first, r.sent_resend, r.superseded, r.lapsed_ticks, r.served_first, r.served_resend, r.served_other, r.backlog
+                    r.acked,
+                    r.sent_first,
+                    r.sent_resend,
+                    r.superseded,
+                    r.lapsed_ticks,
+                    r.served_first,
+                    r.served_resend,
+                    r.served_other,
+                    r.backlog
                 );
             }
         }
@@ -502,11 +532,24 @@ mod sim_tests {
     fn assert_healthy(trace: &[Round], from: usize, to: usize) {
         for (i, r) in trace[from..to].iter().enumerate() {
             let i = i + from;
-            assert!(r.backlog <= 2, "round {i}: only this round's renewals should be waiting, got {}", r.backlog);
-            assert_eq!(r.sent_first, 2, "round {i}: two renewal periods begin per round");
+            assert!(
+                r.backlog <= 2,
+                "round {i}: only this round's renewals should be waiting, got {}",
+                r.backlog
+            );
+            assert_eq!(
+                r.sent_first, 2,
+                "round {i}: two renewal periods begin per round"
+            );
             assert_eq!(r.sent_resend, 0, "round {i}: nothing to re-send");
-            assert_eq!(r.acked, 2, "round {i}: the previous round's two renewals are acknowledged");
-            assert_eq!(r.latency_sum, 2, "round {i}: each acknowledgement takes one tick");
+            assert_eq!(
+                r.acked, 2,
+                "round {i}: the previous round's two renewals are acknowledged"
+            );
+            assert_eq!(
+                r.latency_sum, 2,
+                "round {i}: each acknowledgement takes one tick"
+            );
             assert_eq!(r.superseded, 0, "round {i}: nothing superseded");
             assert_eq!(r.lapsed_ticks, 0, "round {i}: no lease lapses");
         }
@@ -532,12 +575,30 @@ mod sim_tests {
             tail.first().unwrap().backlog,
             tail.last().unwrap().backlog
         );
-        assert!(tail_acked < baseline_acked / 4, "acknowledgements should have collapsed: {tail_acked} vs {baseline_acked}");
-        assert!(tail_resend > tail_first, "the wire should carry mostly re-sends (first={tail_first}, resend={tail_resend})");
-        assert!(tail_served_resend > tail_served_first, "the server should spend most of its capacity on re-sends");
-        assert!(tail_lapsed > N as u64 * (ROUNDS - TAIL_START) as u64 / 2, "most leases should be lapsed in the tail");
-        assert!(tail.last().unwrap().backlog > tail.first().unwrap().backlog, "the backlog should still be growing");
-        assert!(tail.windows(2).all(|w| w[1].backlog >= w[0].backlog), "backlog never shrinks in the tail");
+        assert!(
+            tail_acked < baseline_acked / 4,
+            "acknowledgements should have collapsed: {tail_acked} vs {baseline_acked}"
+        );
+        assert!(
+            tail_resend > tail_first,
+            "the wire should carry mostly re-sends (first={tail_first}, resend={tail_resend})"
+        );
+        assert!(
+            tail_served_resend > tail_served_first,
+            "the server should spend most of its capacity on re-sends"
+        );
+        assert!(
+            tail_lapsed > N as u64 * (ROUNDS - TAIL_START) as u64 / 2,
+            "most leases should be lapsed in the tail"
+        );
+        assert!(
+            tail.last().unwrap().backlog > tail.first().unwrap().backlog,
+            "the backlog should still be growing"
+        );
+        assert!(
+            tail.windows(2).all(|w| w[1].backlog >= w[0].backlog),
+            "backlog never shrinks in the tail"
+        );
     }
 
     /// Control: re-sends armed, no trigger. Nothing is ever late.
@@ -564,16 +625,35 @@ mod sim_tests {
         let trace = run(N, WORKLOAD, ONE_OUTSTANDING, SERVER, ROUNDS);
         print_trajectory(&trace);
         assert_healthy(&trace, 2, 100);
-        assert!(trace.iter().all(|r| r.sent_resend == 0 && r.served_resend == 0));
+        assert!(
+            trace
+                .iter()
+                .all(|r| r.sent_resend == 0 && r.served_resend == 0)
+        );
         let peak = trace.iter().map(|r| r.backlog).max().unwrap();
-        let empty_from = trace[160..].iter().position(|r| r.backlog <= 2).map(|i| i + 160);
+        let empty_from = trace[160..]
+            .iter()
+            .position(|r| r.backlog <= 2)
+            .map(|i| i + 160);
         let lapsed_total = sum(&trace, 0, ROUNDS, |r| r.lapsed_ticks);
         let superseded_total = sum(&trace, 0, ROUNDS, |r| r.superseded);
         let sent_total = sum(&trace, 0, ROUNDS, |r| r.sent_first);
-        println!("peak backlog {peak}; back to steady state from round {empty_from:?}; lapsed client ticks {lapsed_total}; superseded {superseded_total}; sent {sent_total}");
-        assert!(peak > 400, "the trigger should have built a backlog, got {peak}");
-        assert!(lapsed_total > 0, "leases should lapse while the backlog drains");
-        assert_eq!(sent_total, N as u64 * ROUNDS as u64 / RESENDING.renew_every_ticks, "exactly one send per renewal period");
+        println!(
+            "peak backlog {peak}; back to steady state from round {empty_from:?}; lapsed client ticks {lapsed_total}; superseded {superseded_total}; sent {sent_total}"
+        );
+        assert!(
+            peak > 400,
+            "the trigger should have built a backlog, got {peak}"
+        );
+        assert!(
+            lapsed_total > 0,
+            "leases should lapse while the backlog drains"
+        );
+        assert_eq!(
+            sent_total,
+            N as u64 * ROUNDS as u64 / RESENDING.renew_every_ticks,
+            "exactly one send per renewal period"
+        );
         assert_healthy(&trace, TAIL_START, ROUNDS);
     }
 
@@ -589,27 +669,43 @@ mod sim_tests {
         let (client_clock_send, client_clock) = clients.sim_input::<(), TotalOrder, ExactlyOnce>();
         let (server_clock_send, server_clock) = server.sim_input::<(), TotalOrder, ExactlyOnce>();
         let (_other_send, other_work) = server.sim_input::<u64, TotalOrder, ExactlyOnce>();
-        let outputs = lease_renewal(&clients, &server, client_clock, server_clock, other_work, policy, SERVER);
+        let outputs = lease_renewal(
+            &clients,
+            &server,
+            client_clock,
+            server_clock,
+            other_work,
+            policy,
+            SERVER,
+        );
         let sent = outputs.sent.sim_cluster_output();
 
         let mut total = 0u64;
         let total_ref = &mut total;
-        flow.sim().with_cluster_size(&clients, N as usize).run_prompt(async move || {
-            for round in 0..rounds {
-                for member in 0..N {
-                    client_clock_send.send(member, ());
+        flow.sim()
+            .with_cluster_size(&clients, N as usize)
+            .run_prompt(async move || {
+                for round in 0..rounds {
+                    for member in 0..N {
+                        client_clock_send.send(member, ());
+                    }
+                    let held = round >= HOLD_AT && round < HOLD_AT + hold;
+                    let grants = if held {
+                        0
+                    } else if round == HOLD_AT + hold {
+                        hold + 1
+                    } else {
+                        1
+                    };
+                    for _ in 0..grants {
+                        server_clock_send.send(());
+                    }
+                    quiesce().await;
+                    for member in 0..N {
+                        *total_ref += sent.collect::<Vec<Renewal>>(member).await.len() as u64;
+                    }
                 }
-                let held = round >= HOLD_AT && round < HOLD_AT + hold;
-                let grants = if held { 0 } else if round == HOLD_AT + hold { hold + 1 } else { 1 };
-                for _ in 0..grants {
-                    server_clock_send.send(());
-                }
-                quiesce().await;
-                for member in 0..N {
-                    *total_ref += sent.collect::<Vec<Renewal>>(member).await.len() as u64;
-                }
-            }
-        });
+            });
         let required = N as u64 * rounds as u64 / policy.renew_every_ticks;
         assert!(total >= required, "every period sends at least once");
         total - required
@@ -625,14 +721,29 @@ mod sim_tests {
     fn holding_acknowledgements_causes_extra_sends_only_with_resends() {
         const RUN: usize = 300;
         let holds = [0usize, 2, 4, 8, 16, 32];
-        let resending: Vec<u64> = holds.iter().map(|&h| extra_sends_with_hold(RESENDING, h, RUN)).collect();
-        let one_outstanding: Vec<u64> = holds.iter().map(|&h| extra_sends_with_hold(ONE_OUTSTANDING, h, RUN)).collect();
+        let resending: Vec<u64> = holds
+            .iter()
+            .map(|&h| extra_sends_with_hold(RESENDING, h, RUN))
+            .collect();
+        let one_outstanding: Vec<u64> = holds
+            .iter()
+            .map(|&h| extra_sends_with_hold(ONE_OUTSTANDING, h, RUN))
+            .collect();
         for ((h, r), o) in holds.iter().zip(&resending).zip(&one_outstanding) {
             println!("hold {h} rounds -> extra sends: resend after 4 = {r}, one outstanding = {o}");
         }
-        assert!(one_outstanding.iter().all(|&e| e == 0), "one outstanding renewal never sends extra: {one_outstanding:?}");
+        assert!(
+            one_outstanding.iter().all(|&e| e == 0),
+            "one outstanding renewal never sends extra: {one_outstanding:?}"
+        );
         assert_eq!(resending[0], 0);
-        assert!(resending.windows(2).all(|w| w[1] >= w[0]), "extra sends should not shrink as the hold grows: {resending:?}");
-        assert!(resending.last().unwrap() > &0, "a long hold should cause re-sends: {resending:?}");
+        assert!(
+            resending.windows(2).all(|w| w[1] >= w[0]),
+            "extra sends should not shrink as the hold grows: {resending:?}"
+        );
+        assert!(
+            resending.last().unwrap() > &0,
+            "a long hold should cause re-sends: {resending:?}"
+        );
     }
 }
