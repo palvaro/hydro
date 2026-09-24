@@ -2361,7 +2361,7 @@ mod library_check {
         let r = rpc_retry(3);
         expect_hazardous("rpc_retry max_attempts=3", &r, &["rpc_retry.rs", "Request"]);
         assert_eq!(r.location.as_ref().unwrap().rose, "admitted records");
-        assert_eq!(r.location.as_ref().unwrap().first_gain_at, 64);
+        assert_eq!(r.location.as_ref().unwrap().first_reaction_at, 64);
     }
 
     /// Expected: benign, every curve flat.
@@ -2610,7 +2610,7 @@ mod library_check {
             .iter()
             .find(|c| c.hook.contains("Ack"))
             .expect("Ack hook");
-        assert!(ack.gain > 0, "the Ack hook should still react to held acknowledgements");
+        assert!(ack.extra_work > 0, "the Ack hook should still react to held acknowledgements");
     }
 
     /// Expected: benign.
@@ -2692,7 +2692,7 @@ mod library_check {
             .iter()
             .find(|c| c.hook.contains("Msg"))
             .expect("Msg inbox hook");
-        assert!(inbox.gain > 0, "the Msg inbox should still react to a held delivery");
+        assert!(inbox.extra_work > 0, "the Msg inbox should still react to a held delivery");
     }
 
     // rebalancing_ping_pong: 2 workers, 5 units per tick, threshold 10, reports every 4 rounds,

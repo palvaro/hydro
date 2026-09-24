@@ -31,8 +31,8 @@ mod blind_check {
         println!("[blind {label}]\n{r}");
         if let Some(l) = &r.location {
             println!(
-                "[blind {label}] location: hook {} at {} rose {} gain {} first at k = {}",
-                l.hook, l.source_location, l.rose, l.gain, l.first_gain_at
+                "[blind {label}] location: hook {} at {} rose {} extra work {} first reacted at {}",
+                l.hook, l.source_location, l.rose, l.extra_work, l.first_reaction_at
             );
         }
         for c in &r.curves {

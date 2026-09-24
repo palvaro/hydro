@@ -35,9 +35,9 @@
 //! because within one location a reaction can replace one record with another (a completion
 //! becomes an abandonment) without adding work. The verdict is [`Verdict::Hazardous`] if some
 //! hold that the simulator honoured raises either count above the unheld run at any hold length
-//! tried, and [`Verdict::Benign`] otherwise. The rule uses only the existence of a gain. The
-//! shape of the curve, whether the gain grows with the hold length or not, is reported for the
-//! reader and is not a criterion the checker applies.
+//! tried, and [`Verdict::Benign`] otherwise. The rule uses only the existence of extra work. The
+//! shape of the curve, whether the extra work grows with the hold length or not, is reported for
+//! the reader and is not a criterion the checker applies.
 //!
 //! # The location
 //!
@@ -46,12 +46,13 @@
 //! first appeared, then, among hooks tied on that length, by the larger extra work at that
 //! length, and only then by the largest extra work anywhere on the curve. The point that reacts
 //! to the least delay is where the program's response to lateness begins, which is the fact a
-//! reader wants; the largest gain over the whole curve is not a good primary criterion because
-//! the last hold in the sequence lasts to the end of the run, and under a permanent hold on any
-//! edge of a resend loop the sender exhausts its resends on every request, so several edges of
-//! the same loop reach one ceiling and the largest gain no longer distinguishes them. The report
-//! carries the winning hook's first-reaction length, its gain at that length, its largest gain
-//! over the curve, and the hooks that admitted more records under it.
+//! reader wants; the largest extra work over the whole curve is not a good primary criterion
+//! because the last hold in the sequence lasts to the end of the run, and under a permanent hold
+//! on any edge of a resend loop the sender exhausts its resends on every request, so several
+//! edges of the same loop reach one ceiling and the largest extra work no longer distinguishes
+//! them. The report carries the winning hook's first-reaction length, its extra work at that
+//! length, its largest extra work over the curve, and the hooks that admitted more records under
+//! it.
 //!
 //! # What the caller supplies
 //!
@@ -190,45 +191,107 @@ pub struct HookCurve {
     /// arrivals) takes effect. A nonzero count shows the hook was asked while held and answered
     /// "do not move" each time.
     pub holds_applied: Vec<(usize, u64)>,
-    /// The largest rise, over the unheld run, of admitted records or of any one sender's
-    /// messages, at any hold length.
-    pub gain: i64,
-    /// What rose to give `gain`: `"admitted records"` or a `sends from ...` place.
+    /// The extra work this hold caused: the largest rise, over the unheld run, of admitted
+    /// records or of any one sender's messages, at any hold length.
+    pub extra_work: i64,
+    /// What rose to give `extra_work`: `"admitted records"` or a `sends from ...` place.
     pub rose: Option<String>,
-    /// The smallest hold length at which any positive rise appeared.
-    pub first_gain_at: Option<usize>,
-    /// The largest rise at `first_gain_at` (admitted records or one sender's messages), used to
-    /// rank hooks that first reacted at the same length.
-    pub gain_at_first: i64,
+    /// The smallest hold length at which any extra work appeared.
+    pub first_reaction_at: Option<usize>,
+    /// The extra work at `first_reaction_at` (admitted records or one sender's messages), used
+    /// to rank hooks that first reacted at the same length.
+    pub extra_work_at_first_reaction: i64,
 }
 
 impl HookCurve {
-    /// The one line the checker prints for this hook: identity, both curves, and the gain.
-    fn summary(&self) -> String {
-        let extra: Vec<i64> = self.extra_admitted.iter().map(|(_, e)| *e).collect();
-        let sends: Vec<i64> = self
-            .extra_sends_by_member
+    /// The extra admitted records at each hold length, excluding the unheld run.
+    fn admitted_row(&self) -> Vec<i64> {
+        self.extra_admitted
             .iter()
+            .filter(|(k, _)| *k > 0)
+            .map(|(_, e)| *e)
+            .collect()
+    }
+
+    /// The extra messages from the busiest sender at each hold length, excluding the unheld run.
+    fn sends_row(&self) -> Vec<i64> {
+        self.extra_sends_by_member
+            .iter()
+            .filter(|(k, _)| *k > 0)
             .map(|(_, m)| m.values().copied().max().unwrap_or(0))
-            .collect();
-        let mut s = format!(
-            "hold {}: extra admitted {:?} extra sends (largest sender) {:?} gain {}",
-            self.hook, extra, sends, self.gain
-        );
-        if let Some(r) = &self.rose {
-            s.push_str(&format!(" in {r}"));
-        }
-        if let Some(k) = self.first_gain_at {
-            s.push_str(&format!(" (first at k = {k}, gain there {})", self.gain_at_first));
-        }
+            .collect()
+    }
+
+    /// The hook's identity rendered for a reader: `file:line:col #index, batch of T` or
+    /// `file:line:col #index, snapshot of T`.
+    pub fn readable_name(&self) -> String {
+        readable_hook_name(&self.hook)
+    }
+
+    /// The lines the checker prints for this hook. A hook whose hold caused no extra work at
+    /// any length prints one line; otherwise the name and the two curves, aligned under the
+    /// hold-length header the report prints once.
+    fn lines(&self, width: usize) -> Vec<String> {
+        let mut out = Vec::new();
+        let admitted = self.admitted_row();
+        let sends = self.sends_row();
+        let name = self.readable_name();
+        let quiet = admitted.iter().all(|e| *e <= 0) && sends.iter().all(|e| *e <= 0);
+        let mut notes = Vec::new();
         if !self.holdable() {
-            s.push_str(&format!(" (refused at k = {:?})", self.refused_at));
+            notes.push(format!(
+                "the simulator forced a release at {}, so this point is not read for the verdict",
+                if self.refused_at.len() == 1 {
+                    format!("hold length {}", self.refused_at[0])
+                } else {
+                    format!("hold lengths {}", list(&self.refused_at))
+                }
+            ));
         }
         let unasked = self.unasked_while_held_at();
         if !unasked.is_empty() {
-            s.push_str(&format!(" (tick parked, hook never asked, at k = {unasked:?})"));
+            let at = if unasked.len() == self.holds_applied.len() {
+                "at every hold length".to_owned()
+            } else if unasked.len() == 1 {
+                format!("at hold length {}", unasked[0])
+            } else {
+                format!("at hold lengths {}", list(&unasked))
+            };
+            notes.push(format!("held by parking the tick, which has no other input, {at}"));
         }
-        s
+        if quiet {
+            let mut line = format!("{name}: no extra work at any hold length");
+            if !notes.is_empty() {
+                line.push_str(&format!(" ({})", notes.join("; ")));
+            }
+            out.push(line);
+            return out;
+        }
+        out.push(format!("{name}"));
+        out.push(format!(
+            "{:<width$}{}",
+            "    extra records admitted",
+            row(&admitted),
+            width = width
+        ));
+        out.push(format!(
+            "{:<width$}{}",
+            "    extra messages, busiest sender",
+            row(&sends),
+            width = width
+        ));
+        let mut summary = format!(
+            "    first reacted at a hold of {} rounds with {} extra; largest extra work {} in {}",
+            self.first_reaction_at.unwrap_or(0),
+            self.extra_work_at_first_reaction,
+            self.extra_work,
+            self.rose.as_deref().unwrap_or("nothing")
+        );
+        if !notes.is_empty() {
+            summary.push_str(&format!(" ({})", notes.join("; ")));
+        }
+        out.push(summary);
+        out
     }
 
     /// The `use::batch` or `use::snapshot` source location, without the index and item type.
@@ -264,18 +327,25 @@ pub struct Location {
     pub hook: String,
     /// That hook's `use::batch` or `use::snapshot` source location.
     pub source_location: String,
-    /// What rose to give `gain`: `"admitted records"` or a `sends from ...` place.
+    /// What rose to give `extra_work`: `"admitted records"` or a `sends from ...` place.
     pub rose: String,
-    /// The largest rise over the unheld run at any hold length.
-    pub gain: i64,
-    /// The smallest hold length at which a rise appeared.
-    pub first_gain_at: usize,
-    /// The rise at `first_gain_at`.
-    pub gain_at_first: i64,
+    /// The largest extra work over the unheld run at any hold length.
+    pub extra_work: i64,
+    /// The smallest hold length at which extra work appeared.
+    pub first_reaction_at: usize,
+    /// The extra work at `first_reaction_at`.
+    pub extra_work_at_first_reaction: i64,
     /// Every hook that admitted more records under the winning hold than in the unheld run,
     /// at the hold length where the winning hook's admitted total peaked, with the rise. These
     /// are the edges the extra records crossed.
     pub hooks_that_rose: BTreeMap<String, i64>,
+}
+
+impl Location {
+    /// The hook's identity rendered for a reader.
+    pub fn readable_name(&self) -> String {
+        readable_hook_name(&self.hook)
+    }
 }
 
 /// Everything [`check`] measured.
@@ -302,48 +372,126 @@ pub struct Report {
     pub seconds: f64,
 }
 
+/// The width of the label column in the printed report, so that every curve's numbers line up
+/// under the hold-length header.
+const LABEL_WIDTH: usize = 36;
+
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
             f,
-            "{} rounds, holds from round {} of {:?} rounds (horizon {}); baseline: admitted {} network {} over {} hooks with buffered input",
-            self.rounds,
-            self.hold_start,
-            self.hold_lengths,
-            self.horizon,
+            "amplification check: {} rounds of workload, every hold begins at round {}",
+            self.rounds, self.hold_start
+        )?;
+        writeln!(
+            f,
+            "horizon: {} rounds (the longest delay imposed; a hold of that length lasts to the end of the run)",
+            self.horizon
+        )?;
+        writeln!(f, "run time: {:.1} s including compilation", self.seconds)?;
+        writeln!(
+            f,
+            "unheld run: {} records admitted at decision points, {} network messages sent, {} decision points had buffered input",
             self.baseline.admitted(),
             self.baseline.network(),
             self.curves.len()
         )?;
+        writeln!(f)?;
+        writeln!(
+            f,
+            "A decision point is named by the source location of the sliced! block it belongs to, then #n for its position among that block's decision points, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. Each curve gives extra work over the unheld run, at each hold length."
+        )?;
+        writeln!(f)?;
+        writeln!(
+            f,
+            "{:<width$}{}",
+            "hold length (rounds)",
+            row_usize(&self.hold_lengths),
+            width = LABEL_WIDTH
+        )?;
         for c in &self.curves {
-            writeln!(f, "{}", c.summary())?;
+            for line in c.lines(LABEL_WIDTH) {
+                writeln!(f, "{line}")?;
+            }
         }
+        writeln!(f)?;
         match &self.location {
             Some(l) => {
-                write!(
+                writeln!(f, "verdict: hazardous")?;
+                writeln!(f, "  decision point: {}", l.readable_name())?;
+                writeln!(
                     f,
-                    "verdict hazardous: holding {} first added work at a delay of {} rounds ({} in {} there; largest gain {} over the curve)",
-                    l.hook, l.first_gain_at, l.gain_at_first, l.rose, l.gain
+                    "  first reacted at a hold of {} rounds, with {} extra {} there",
+                    l.first_reaction_at,
+                    l.extra_work_at_first_reaction,
+                    if l.rose == "admitted records" {
+                        "admitted records".to_owned()
+                    } else {
+                        format!("messages ({})", l.rose)
+                    }
+                )?;
+                writeln!(
+                    f,
+                    "  largest extra work over the curve: {} in {}",
+                    l.extra_work, l.rose
                 )?;
                 if !l.hooks_that_rose.is_empty() {
-                    let rises: Vec<String> = l
-                        .hooks_that_rose
-                        .iter()
-                        .map(|(h, d)| format!("{h} +{d}"))
-                        .collect();
-                    write!(f, "; hooks that admitted more: {}", rises.join("; "))?;
+                    writeln!(
+                        f,
+                        "  decision points that admitted more records under that hold, at its peak:"
+                    )?;
+                    for (h, d) in &l.hooks_that_rose {
+                        writeln!(f, "    {} +{d}", readable_hook_name(h))?;
+                    }
                 }
             }
             None => {
-                write!(
+                writeln!(f, "verdict: benign")?;
+                writeln!(
                     f,
-                    "verdict benign: no reaction to a delay of up to {} rounds was found at any decision point",
+                    "  no reaction to a delay of up to {} rounds was found at any decision point",
                     self.horizon
                 )?;
             }
         }
-        writeln!(f, " in {:.1} s", self.seconds)
+        Ok(())
     }
+}
+
+/// Renders `location#index [item]` or `location#index [snapshot item]` as
+/// `location #index, batch of item` or `location #index, snapshot of item`.
+fn readable_hook_name(hook: &str) -> String {
+    let (loc, rest) = match hook.split_once('#') {
+        Some(x) => x,
+        None => return hook.to_owned(),
+    };
+    let (index, item) = match rest.split_once(" [") {
+        Some((i, item)) => (i, item.trim_end_matches(']')),
+        None => (rest, ""),
+    };
+    if let Some(t) = item.strip_prefix("snapshot ") {
+        format!("{loc} #{index}, snapshot of {t}")
+    } else if item.is_empty() {
+        format!("{loc} #{index}")
+    } else {
+        format!("{loc} #{index}, batch of {item}")
+    }
+}
+
+fn row(values: &[i64]) -> String {
+    values.iter().map(|v| format!("{v:>7}")).collect()
+}
+
+fn row_usize(values: &[usize]) -> String {
+    values.iter().map(|v| format!("{v:>7}")).collect()
+}
+
+fn list(values: &[usize]) -> String {
+    values
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Runs the checker. `round(i)` sends round `i` of the fixed workload; the checker awaits
@@ -367,10 +515,10 @@ pub fn check(
         let mut counts = vec![(0usize, baseline.clone())];
         let mut refused_at = Vec::new();
         let mut holds_applied = Vec::new();
-        let mut gain = 0i64;
+        let mut extra_work = 0i64;
         let mut rose = None;
-        let mut first_gain_at = None;
-        let mut gain_at_first = 0i64;
+        let mut first_reaction_at = None;
+        let mut extra_work_at_first_reaction = 0i64;
         for &k in &hold_lengths {
             let (c, _, forced, applied) = run_once(&compiled, config, &mut round, Some(hook), k);
             if forced > 0 {
@@ -380,22 +528,22 @@ pub fn check(
             let d_admitted = c.admitted() as i64 - base_admitted;
             let mut d_sends = BTreeMap::new();
             let mut rise_here = d_admitted.max(0);
-            if d_admitted > gain {
-                gain = d_admitted;
+            if d_admitted > extra_work {
+                extra_work = d_admitted;
                 rose = Some("admitted records".to_owned());
             }
             for (place, n) in c.sends_by_member() {
                 let d = n as i64 - base_sends.get(&place).copied().unwrap_or(0) as i64;
                 rise_here = rise_here.max(d);
-                if d > gain {
-                    gain = d;
+                if d > extra_work {
+                    extra_work = d;
                     rose = Some(place.clone());
                 }
                 d_sends.insert(place, d);
             }
-            if rise_here > 0 && first_gain_at.is_none() {
-                first_gain_at = Some(k);
-                gain_at_first = rise_here;
+            if rise_here > 0 && first_reaction_at.is_none() {
+                first_reaction_at = Some(k);
+                extra_work_at_first_reaction = rise_here;
             }
             extra_admitted.push((k, d_admitted));
             extra_sends.push((k, d_sends));
@@ -408,33 +556,36 @@ pub fn check(
             counts,
             refused_at,
             holds_applied,
-            gain,
+            extra_work,
             rose,
-            first_gain_at,
-            gain_at_first,
+            first_reaction_at,
+            extra_work_at_first_reaction,
         };
         if config.progress {
             eprintln!(
-                "[amplification {}/{} at {:.0} s] {}",
+                "[amplification {}/{} at {:.0} s] hold lengths {}",
                 curves.len() + 1,
                 hooks.len(),
                 started.elapsed().as_secs_f64(),
-                curve.summary()
+                row_usize(&hold_lengths).trim_start()
             );
+            for line in curve.lines(LABEL_WIDTH) {
+                eprintln!("  {line}");
+            }
         }
         curves.push(curve);
     }
 
-    // Rank: shortest first-reaction length, then larger gain at that length, then larger gain
-    // over the curve. A remaining tie goes to the first hook in identity order, and the report's
-    // curves show it.
+    // Rank: shortest first-reaction length, then more extra work at that length, then more
+    // extra work over the curve. A remaining tie goes to the first hook in identity order, and
+    // the report's curves show it.
     let mut best: Option<&HookCurve> = None;
-    for c in curves.iter().filter(|c| c.holdable() && c.gain > 0) {
+    for c in curves.iter().filter(|c| c.holdable() && c.extra_work > 0) {
         let key = |c: &HookCurve| {
             (
-                std::cmp::Reverse(c.first_gain_at.unwrap_or(usize::MAX)),
-                c.gain_at_first,
-                c.gain,
+                std::cmp::Reverse(c.first_reaction_at.unwrap_or(usize::MAX)),
+                c.extra_work_at_first_reaction,
+                c.extra_work,
             )
         };
         if best.is_none_or(|b| key(c) > key(b)) {
@@ -445,9 +596,9 @@ pub fn check(
         hook: c.hook.clone(),
         source_location: c.source_location().to_owned(),
         rose: c.rose.clone().unwrap_or_default(),
-        gain: c.gain,
-        first_gain_at: c.first_gain_at.unwrap_or(0),
-        gain_at_first: c.gain_at_first,
+        extra_work: c.extra_work,
+        first_reaction_at: c.first_reaction_at.unwrap_or(0),
+        extra_work_at_first_reaction: c.extra_work_at_first_reaction,
         hooks_that_rose: hooks_that_rose(&baseline, c),
     });
     Report {
