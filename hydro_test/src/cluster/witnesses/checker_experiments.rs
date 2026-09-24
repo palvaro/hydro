@@ -405,7 +405,9 @@ mod sim_tests {
     use hydro_lang::prelude::*;
     use hydro_lang::sim::quiesce;
 
-    use crate::cluster::rpc_retry::{Client, RetryPolicy, Server, ServerConfig, rpc_with_retries};
+    use crate::cluster::rpc_retry::{
+        Client, RetryPolicy, Server, ServerConfig, rpc_with_retries,
+    };
 
     const ROUNDS: usize = 24;
     const REQUESTS_PER_ROUND: usize = 2;
@@ -564,10 +566,7 @@ mod sim_tests {
         let (runs, elapsed) = fuzz_baseline(3, TIMEOUT_TICKS);
         report("max_attempts = 3", &runs, elapsed);
 
-        assert!(
-            runs.iter()
-                .all(|r| r.distinct == (ROUNDS * REQUESTS_PER_ROUND) as u64)
-        );
+        assert!(runs.iter().all(|r| r.distinct == (ROUNDS * REQUESTS_PER_ROUND) as u64));
         // No delay, no redundant work: the mechanism is delay-driven.
         assert!(
             runs.iter()
@@ -576,24 +575,15 @@ mod sim_tests {
             "a schedule that never delayed a reply past the timeout should not have re-sent or re-served"
         );
         // Some schedule makes the same 48 requests cost more than 48 sends and 48 serves.
-        assert!(
-            runs.iter().any(|r| extra_sends(r) > 0),
-            "the fuzzer should find a schedule that re-sends"
-        );
-        assert!(
-            runs.iter().any(|r| extra_serves(r) > 0),
-            "a re-send should make the server serve an id again"
-        );
+        assert!(runs.iter().any(|r| extra_sends(r) > 0), "the fuzzer should find a schedule that re-sends");
+        assert!(runs.iter().any(|r| extra_serves(r) > 0), "a re-send should make the server serve an id again");
         // Never more than the attempt cap.
         assert!(runs.iter().all(|r| extra_sends(r) <= 2 * r.distinct));
         // Extra work grows with delay.
         let (n1, m1) = bucket(&runs, TIMEOUT_TICKS, 2 * TIMEOUT_TICKS);
         let (n2, m2) = bucket(&runs, 2 * TIMEOUT_TICKS, u64::MAX);
         if n1 > 0 && n2 > 0 {
-            assert!(
-                m2 >= m1,
-                "extra sends should grow with the delay the schedule imposed"
-            );
+            assert!(m2 >= m1, "extra sends should grow with the delay the schedule imposed");
         }
     }
 
@@ -603,13 +593,9 @@ mod sim_tests {
         let (runs, elapsed) = fuzz_baseline(1, TIMEOUT_TICKS);
         report("max_attempts = 1", &runs, elapsed);
 
+        assert!(runs.iter().all(|r| r.distinct == (ROUNDS * REQUESTS_PER_ROUND) as u64));
         assert!(
-            runs.iter()
-                .all(|r| r.distinct == (ROUNDS * REQUESTS_PER_ROUND) as u64)
-        );
-        assert!(
-            runs.iter()
-                .all(|r| extra_sends(r) == 0 && extra_serves(r) == 0),
+            runs.iter().all(|r| extra_sends(r) == 0 && extra_serves(r) == 0),
             "without retries no schedule can add work"
         );
         // The delays are still there; only the response to them is gone.
@@ -629,27 +615,16 @@ mod sim_tests {
         let mut means = Vec::new();
         for timeout in [2u64, 4, 6] {
             let (runs, elapsed) = fuzz_baseline(3, timeout);
-            report_with_timeout(
-                &format!("max_attempts = 3, timeout = {timeout}"),
-                &runs,
-                elapsed,
-                timeout,
-            );
+            report_with_timeout(&format!("max_attempts = 3, timeout = {timeout}"), &runs, elapsed, timeout);
             let mean = runs.iter().map(extra_sends).sum::<u64>() as f64 / runs.len() as f64;
             let max = runs.iter().map(extra_sends).max().unwrap_or(0);
             println!("[timeout = {timeout}] mean extra sends {mean:.2}, max {max}");
             if timeout >= 4 {
-                assert!(
-                    max <= (ROUNDS * REQUESTS_PER_ROUND) as u64,
-                    "a delay of at most 6 can trigger at most one re-send when the timeout is 4 or more"
-                );
+                assert!(max <= (ROUNDS * REQUESTS_PER_ROUND) as u64, "a delay of at most 6 can trigger at most one re-send when the timeout is 4 or more");
             }
             means.push(mean);
         }
-        assert!(
-            means[0] > means[1] && means[1] > means[2],
-            "extra work should fall as the timeout rises: {means:?}"
-        );
+        assert!(means[0] > means[1] && means[1] > means[2], "extra work should fall as the timeout rises: {means:?}");
     }
 }
 
@@ -802,11 +777,7 @@ mod hold_sweep {
                 curve.hook,
                 curve.extra.iter().map(|(_, e)| *e).collect::<Vec<_>>(),
                 gain(&curve.extra),
-                if monotone_to_peak(&curve.extra) {
-                    ""
-                } else {
-                    " (dips)"
-                },
+                if monotone_to_peak(&curve.extra) { "" } else { " (dips)" },
                 if holdable(&curve) {
                     String::new()
                 } else {
@@ -1122,9 +1093,7 @@ mod hold_rpc_retry {
 
     #[test]
     fn hold_sweep_rpc_retry_three_attempts() {
-        let r = hold_sweep::sweep("rpc_retry max_attempts=3", hold_sweep::GRID, &|t, k| {
-            run(3, t, k)
-        });
+        let r = hold_sweep::sweep("rpc_retry max_attempts=3", hold_sweep::GRID, &|t, k| run(3, t, k));
         let (v, best) = hold_sweep::verdict(&r);
         assert_eq!(v, "hazardous");
         assert!(best.unwrap().hook.contains("rpc_retry.rs"));
@@ -1132,9 +1101,7 @@ mod hold_rpc_retry {
 
     #[test]
     fn hold_sweep_rpc_retry_one_attempt() {
-        let r = hold_sweep::sweep("rpc_retry max_attempts=1", hold_sweep::GRID, &|t, k| {
-            run(1, t, k)
-        });
+        let r = hold_sweep::sweep("rpc_retry max_attempts=1", hold_sweep::GRID, &|t, k| run(1, t, k));
         let (v, _) = hold_sweep::verdict(&r);
         assert_eq!(v, "benign");
     }
@@ -1216,17 +1183,13 @@ mod hold_backoff_retry {
 
     #[test]
     fn hold_sweep_backoff_retry_backoff_on() {
-        let r = hold_sweep::sweep("backoff_retry backoff=true", hold_sweep::GRID, &|t, k| {
-            run(true, t, k)
-        });
+        let r = hold_sweep::sweep("backoff_retry backoff=true", hold_sweep::GRID, &|t, k| run(true, t, k));
         assert_eq!(hold_sweep::verdict(&r).0, "hazardous");
     }
 
     #[test]
     fn hold_sweep_backoff_retry_backoff_off() {
-        let r = hold_sweep::sweep("backoff_retry backoff=false", hold_sweep::GRID, &|t, k| {
-            run(false, t, k)
-        });
+        let r = hold_sweep::sweep("backoff_retry backoff=false", hold_sweep::GRID, &|t, k| run(false, t, k));
         assert_eq!(hold_sweep::verdict(&r).0, "hazardous");
     }
 }
@@ -1313,21 +1276,15 @@ mod hold_bounded_queue {
 
     #[test]
     fn hold_sweep_bounded_queue_some_100() {
-        let r = hold_sweep::sweep(
-            "bounded_queue max_backlog=Some(100)",
-            hold_sweep::GRID,
-            &|t, k| run(Some(100), t, k),
-        );
+        let r = hold_sweep::sweep("bounded_queue max_backlog=Some(100)", hold_sweep::GRID, &|t, k| {
+            run(Some(100), t, k)
+        });
         assert_eq!(hold_sweep::verdict(&r).0, "hazardous");
     }
 
     #[test]
     fn hold_sweep_bounded_queue_none() {
-        let r = hold_sweep::sweep(
-            "bounded_queue max_backlog=None",
-            hold_sweep::GRID,
-            &|t, k| run(None, t, k),
-        );
+        let r = hold_sweep::sweep("bounded_queue max_backlog=None", hold_sweep::GRID, &|t, k| run(None, t, k));
         assert_eq!(hold_sweep::verdict(&r).0, "hazardous");
     }
 }
@@ -1351,12 +1308,7 @@ mod hold_cache {
     const HOT_KEYS: u64 = 10;
     const HOT_PER_ROUND: u64 = 8;
 
-    pub(super) fn run(
-        coalesce: bool,
-        request_dated: bool,
-        target: Option<&str>,
-        k: usize,
-    ) -> Outcome {
+    pub(super) fn run(coalesce: bool, request_dated: bool, target: Option<&str>, k: usize) -> Outcome {
         let mut flow = FlowBuilder::new();
         let cache = flow.process::<Cache>();
         let origin = flow.process::<Origin>();
@@ -1374,18 +1326,13 @@ mod hold_cache {
                 coalesce,
                 request_dated,
             },
-            OriginConfig {
-                max_fetch_per_tick: 4,
-            },
+            OriginConfig { max_fetch_per_tick: 4 },
         );
         let completed = outputs.completed.map(q!(|c| c.id)).sim_output();
         let fetches = outputs.fetches.map(q!(|f| f.lookup_id)).sim_output();
         let processed = outputs.processed.map(q!(|f| f.lookup_id)).sim_output();
         let applied = outputs.fills_applied.map(q!(|f| f.lookup_id)).sim_output();
-        let redundant = outputs
-            .fills_redundant
-            .map(q!(|f| f.lookup_id))
-            .sim_output();
+        let redundant = outputs.fills_redundant.map(q!(|f| f.lookup_id)).sim_output();
         let stale = outputs.fills_stale.map(q!(|f| f.lookup_id)).sim_output();
 
         let (driver, handle) = HoldOneHookDriver::new();
@@ -1425,29 +1372,23 @@ mod hold_cache {
 
     #[test]
     fn hold_sweep_cache_request_dated_no_coalesce() {
-        let r = hold_sweep::sweep(
-            "cache request_dated, no coalesce",
-            hold_sweep::GRID,
-            &|t, k| run(false, true, t, k),
-        );
+        let r = hold_sweep::sweep("cache request_dated, no coalesce", hold_sweep::GRID, &|t, k| {
+            run(false, true, t, k)
+        });
         assert_eq!(hold_sweep::verdict(&r).0, "hazardous");
     }
 
     #[test]
     fn hold_sweep_cache_fill_dated_no_coalesce() {
-        let r = hold_sweep::sweep(
-            "cache fill_dated, no coalesce",
-            hold_sweep::GRID,
-            &|t, k| run(false, false, t, k),
-        );
+        let r = hold_sweep::sweep("cache fill_dated, no coalesce", hold_sweep::GRID, &|t, k| {
+            run(false, false, t, k)
+        });
         assert_eq!(hold_sweep::verdict(&r).0, "hazardous");
     }
 
     #[test]
     fn hold_sweep_cache_coalesce() {
-        let r = hold_sweep::sweep("cache coalesce", hold_sweep::GRID, &|t, k| {
-            run(true, true, t, k)
-        });
+        let r = hold_sweep::sweep("cache coalesce", hold_sweep::GRID, &|t, k| run(true, true, t, k));
         assert_eq!(hold_sweep::verdict(&r).0, "benign");
     }
 }
@@ -1483,14 +1424,8 @@ mod hold_gossip_resend {
                 ack_timeout_ticks,
             },
         );
-        let wire = outputs
-            .wire
-            .map(q!(|(to, d)| (to, d.from, d.seq)))
-            .sim_cluster_output();
-        let merged = outputs
-            .merged
-            .map(q!(|d| (d.from, d.seq)))
-            .sim_cluster_output();
+        let wire = outputs.wire.map(q!(|(to, d)| (to, d.from, d.seq))).sim_cluster_output();
+        let merged = outputs.merged.map(q!(|d| (d.from, d.seq))).sim_cluster_output();
         let acks = outputs.acks_sent.sim_cluster_output();
         let inbox = outputs.inbox_depth.sim_cluster_output();
         let outstanding = outputs.outstanding_depth.sim_cluster_output();
@@ -1500,43 +1435,41 @@ mod hold_gossip_resend {
         let mut out = Outcome::default();
         let out_ref = &mut out;
         let handle_ref = &handle;
-        flow.sim()
-            .with_cluster_size(&cluster, MEMBERS as usize)
-            .run_with_driver(driver, async || {
-                let mut sent: HashSet<(u32, u32, u64)> = HashSet::new();
-                let mut merged_ids: HashSet<(u32, u32, u64)> = HashSet::new();
-                let mut first = 0u64;
-                let mut total = 0u64;
-                let mut next_value = 0u64;
-                for round in 0..ROUNDS {
-                    apply_hold(handle_ref, target, k, round);
-                    for m in 0..MEMBERS {
-                        timer_send.send(m, ());
-                        update_send.send(m, next_value);
-                        next_value += 1;
-                    }
-                    quiesce().await;
-                    for m in 0..MEMBERS {
-                        while let Some(x) = wire.try_next(m).await {
-                            total += 1;
-                            if sent.insert(x) {
-                                first += 1;
-                            }
-                        }
-                        while let Some((from, seq)) = merged.try_next(m).await {
-                            total += 1;
-                            if merged_ids.insert((m, from, seq)) {
-                                first += 1;
-                            }
-                        }
-                        while acks.try_next(m).await.is_some() {}
-                        while inbox.try_next(m).await.is_some() {}
-                        while outstanding.try_next(m).await.is_some() {}
-                    }
+        flow.sim().with_cluster_size(&cluster, MEMBERS as usize).run_with_driver(driver, async || {
+            let mut sent: HashSet<(u32, u32, u64)> = HashSet::new();
+            let mut merged_ids: HashSet<(u32, u32, u64)> = HashSet::new();
+            let mut first = 0u64;
+            let mut total = 0u64;
+            let mut next_value = 0u64;
+            for round in 0..ROUNDS {
+                apply_hold(handle_ref, target, k, round);
+                for m in 0..MEMBERS {
+                    timer_send.send(m, ());
+                    update_send.send(m, next_value);
+                    next_value += 1;
                 }
-                out_ref.required = first;
-                out_ref.total = total;
-            });
+                quiesce().await;
+                for m in 0..MEMBERS {
+                    while let Some(x) = wire.try_next(m).await {
+                        total += 1;
+                        if sent.insert(x) {
+                            first += 1;
+                        }
+                    }
+                    while let Some((from, seq)) = merged.try_next(m).await {
+                        total += 1;
+                        if merged_ids.insert((m, from, seq)) {
+                            first += 1;
+                        }
+                    }
+                    while acks.try_next(m).await.is_some() {}
+                    while inbox.try_next(m).await.is_some() {}
+                    while outstanding.try_next(m).await.is_some() {}
+                }
+            }
+            out_ref.required = first;
+            out_ref.total = total;
+        });
         out.forced = handle.forced_releases();
         out.counts = hydro_lang::sim::work_counts::take();
         out.hooks = handle.hooks_seen();
@@ -1545,17 +1478,13 @@ mod hold_gossip_resend {
 
     #[test]
     fn hold_sweep_gossip_resend_on() {
-        let r = hold_sweep::sweep("gossip_resend ack_timeout=3", hold_sweep::GRID, &|t, k| {
-            run(3, t, k)
-        });
+        let r = hold_sweep::sweep("gossip_resend ack_timeout=3", hold_sweep::GRID, &|t, k| run(3, t, k));
         assert_eq!(hold_sweep::verdict(&r).0, "hazardous");
     }
 
     #[test]
     fn hold_sweep_gossip_resend_off() {
-        let r = hold_sweep::sweep("gossip_resend ack_timeout=0", hold_sweep::GRID, &|t, k| {
-            run(0, t, k)
-        });
+        let r = hold_sweep::sweep("gossip_resend ack_timeout=0", hold_sweep::GRID, &|t, k| run(0, t, k));
         assert_eq!(hold_sweep::verdict(&r).0, "benign");
     }
 }
@@ -1607,34 +1536,32 @@ mod hold_election {
         let mut out = Outcome::default();
         let out_ref = &mut out;
         let handle_ref = &handle;
-        flow.sim()
-            .with_cluster_size(&cluster, MEMBERS as usize)
-            .run_with_driver(driver, async || {
-                let mut work = 0u64;
-                let mut next_client = 0u64;
-                for round in 0..ROUNDS {
-                    apply_hold(handle_ref, target, k, round);
-                    for m in 0..MEMBERS {
-                        timer_send.send(m, ());
-                        client_send.send(m, next_client);
-                        next_client += 1;
-                    }
-                    quiesce().await;
-                    for m in 0..MEMBERS {
-                        while vote_requests.try_next(m).await.is_some() {
-                            work += 1;
-                        }
-                        while elections.try_next(m).await.is_some() {
-                            work += 1;
-                        }
-                        while processed.try_next(m).await.is_some() {}
-                        while inbox.try_next(m).await.is_some() {}
-                        while state.try_next(m).await.is_some() {}
-                    }
+        flow.sim().with_cluster_size(&cluster, MEMBERS as usize).run_with_driver(driver, async || {
+            let mut work = 0u64;
+            let mut next_client = 0u64;
+            for round in 0..ROUNDS {
+                apply_hold(handle_ref, target, k, round);
+                for m in 0..MEMBERS {
+                    timer_send.send(m, ());
+                    client_send.send(m, next_client);
+                    next_client += 1;
                 }
-                out_ref.required = 0;
-                out_ref.total = work;
-            });
+                quiesce().await;
+                for m in 0..MEMBERS {
+                    while vote_requests.try_next(m).await.is_some() {
+                        work += 1;
+                    }
+                    while elections.try_next(m).await.is_some() {
+                        work += 1;
+                    }
+                    while processed.try_next(m).await.is_some() {}
+                    while inbox.try_next(m).await.is_some() {}
+                    while state.try_next(m).await.is_some() {}
+                }
+            }
+            out_ref.required = 0;
+            out_ref.total = work;
+        });
         out.forced = handle.forced_releases();
         out.counts = hydro_lang::sim::work_counts::take();
         out.hooks = handle.hooks_seen();
@@ -1697,35 +1624,33 @@ mod hold_rebalancing {
         let mut out = Outcome::default();
         let out_ref = &mut out;
         let handle_ref = &handle;
-        flow.sim()
-            .with_cluster_size(&workers, N as usize)
-            .run_with_driver(driver, async || {
-                let mut work = 0u64;
-                let mut next_id = 0u64;
-                for round in 0..ROUNDS {
-                    apply_hold(handle_ref, target, k, round);
-                    for w in 0..N {
-                        clock_send.send(w, ());
-                        if round % 4 == 0 {
-                            report_send.send(w, ());
-                        }
-                        for _ in 0..3 {
-                            task_send.send(w, next_id);
-                            next_id += 1;
-                        }
+        flow.sim().with_cluster_size(&workers, N as usize).run_with_driver(driver, async || {
+            let mut work = 0u64;
+            let mut next_id = 0u64;
+            for round in 0..ROUNDS {
+                apply_hold(handle_ref, target, k, round);
+                for w in 0..N {
+                    clock_send.send(w, ());
+                    if round % 4 == 0 {
+                        report_send.send(w, ());
                     }
-                    quiesce().await;
-                    for w in 0..N {
-                        while completed.try_next(w).await.is_some() {}
-                        while migrated.try_next(w).await.is_some() {
-                            work += 1;
-                        }
-                        while ticks.try_next(w).await.is_some() {}
+                    for _ in 0..3 {
+                        task_send.send(w, next_id);
+                        next_id += 1;
                     }
                 }
-                out_ref.required = 0;
-                out_ref.total = work;
-            });
+                quiesce().await;
+                for w in 0..N {
+                    while completed.try_next(w).await.is_some() {}
+                    while migrated.try_next(w).await.is_some() {
+                        work += 1;
+                    }
+                    while ticks.try_next(w).await.is_some() {}
+                }
+            }
+            out_ref.required = 0;
+            out_ref.total = work;
+        });
         out.forced = handle.forced_releases();
         out.counts = hydro_lang::sim::work_counts::take();
         out.hooks = handle.hooks_seen();
@@ -1734,17 +1659,13 @@ mod hold_rebalancing {
 
     #[test]
     fn hold_sweep_rebalancing_no_cooldown() {
-        let r = hold_sweep::sweep("rebalancing cooldown=0", hold_sweep::GRID, &|t, k| {
-            run(0, t, k)
-        });
+        let r = hold_sweep::sweep("rebalancing cooldown=0", hold_sweep::GRID, &|t, k| run(0, t, k));
         assert_eq!(hold_sweep::verdict(&r).0, "hazardous");
     }
 
     #[test]
     fn hold_sweep_rebalancing_cooldown_8() {
-        let r = hold_sweep::sweep("rebalancing cooldown=8", hold_sweep::GRID, &|t, k| {
-            run(8, t, k)
-        });
+        let r = hold_sweep::sweep("rebalancing cooldown=8", hold_sweep::GRID, &|t, k| run(8, t, k));
         assert_eq!(hold_sweep::verdict(&r).0, "hazardous");
     }
 }
@@ -1816,9 +1737,7 @@ mod hold_compaction {
 
     #[test]
     fn hold_sweep_compaction_reserve_0() {
-        let r = hold_sweep::sweep("compaction reserve=0", hold_sweep::GRID, &|t, k| {
-            run(0, t, k)
-        });
+        let r = hold_sweep::sweep("compaction reserve=0", hold_sweep::GRID, &|t, k| run(0, t, k));
         assert_eq!(hold_sweep::verdict(&r).0, "hazardous");
     }
 
@@ -1827,13 +1746,8 @@ mod hold_compaction {
     /// module docs), so this test records the verdict instead of asserting the expectation.
     #[test]
     fn hold_sweep_compaction_reserve_8() {
-        let r = hold_sweep::sweep("compaction reserve=8", hold_sweep::GRID, &|t, k| {
-            run(8, t, k)
-        });
-        println!(
-            "[compaction reserve=8] verdict {}",
-            hold_sweep::verdict(&r).0
-        );
+        let r = hold_sweep::sweep("compaction reserve=8", hold_sweep::GRID, &|t, k| run(8, t, k));
+        println!("[compaction reserve=8] verdict {}", hold_sweep::verdict(&r).0);
     }
 }
 
@@ -1874,10 +1788,7 @@ mod hold_lease {
             },
             ServerConfig { max_per_tick: 5 },
         );
-        let sent = outputs
-            .sent
-            .map(q!(|r| r.resend as u64))
-            .sim_cluster_output();
+        let sent = outputs.sent.map(q!(|r| r.resend as u64)).sim_cluster_output();
         let acked = outputs.acked.map(q!(|a| a.seq)).sim_cluster_output();
         let superseded = outputs.superseded.sim_cluster_output();
         let lease_trace = outputs.lease_trace.sim_cluster_output();
@@ -1895,40 +1806,38 @@ mod hold_lease {
         let mut out = Outcome::default();
         let out_ref = &mut out;
         let handle_ref = &handle;
-        flow.sim()
-            .with_cluster_size(&clients, N as usize)
-            .run_with_driver(driver, async || {
-                let mut first = 0u64;
-                let mut total = 0u64;
-                for round in 0..ROUNDS {
-                    apply_hold(handle_ref, target, k, round);
-                    for m in 0..N {
-                        client_clock_send.send(m, ());
-                    }
-                    server_clock_send.send(());
-                    quiesce().await;
-                    for m in 0..N {
-                        while let Some(resend) = sent.try_next(m).await {
-                            total += 1;
-                            if resend == 0 {
-                                first += 1;
-                            }
-                        }
-                        let _ = acked.collect_sorted::<Vec<_>>(m).await;
-                        let _ = superseded.collect_sorted::<Vec<_>>(m).await;
-                        while lease_trace.try_next(m).await.is_some() {}
-                    }
-                    while let Some(resend) = served.try_next().await {
+        flow.sim().with_cluster_size(&clients, N as usize).run_with_driver(driver, async || {
+            let mut first = 0u64;
+            let mut total = 0u64;
+            for round in 0..ROUNDS {
+                apply_hold(handle_ref, target, k, round);
+                for m in 0..N {
+                    client_clock_send.send(m, ());
+                }
+                server_clock_send.send(());
+                quiesce().await;
+                for m in 0..N {
+                    while let Some(resend) = sent.try_next(m).await {
                         total += 1;
                         if resend == 0 {
                             first += 1;
                         }
                     }
-                    while backlog.try_next().await.is_some() {}
+                    let _ = acked.collect_sorted::<Vec<_>>(m).await;
+                    let _ = superseded.collect_sorted::<Vec<_>>(m).await;
+                    while lease_trace.try_next(m).await.is_some() {}
                 }
-                out_ref.required = first;
-                out_ref.total = total;
-            });
+                while let Some(resend) = served.try_next().await {
+                    total += 1;
+                    if resend == 0 {
+                        first += 1;
+                    }
+                }
+                while backlog.try_next().await.is_some() {}
+            }
+            out_ref.required = first;
+            out_ref.total = total;
+        });
         out.forced = handle.forced_releases();
         out.counts = hydro_lang::sim::work_counts::take();
         out.hooks = handle.hooks_seen();
@@ -1937,17 +1846,13 @@ mod hold_lease {
 
     #[test]
     fn hold_sweep_lease_resend_after_4() {
-        let r = hold_sweep::sweep("lease resend_after=Some(4)", hold_sweep::GRID, &|t, k| {
-            run(Some(4), t, k)
-        });
+        let r = hold_sweep::sweep("lease resend_after=Some(4)", hold_sweep::GRID, &|t, k| run(Some(4), t, k));
         assert_eq!(hold_sweep::verdict(&r).0, "hazardous");
     }
 
     #[test]
     fn hold_sweep_lease_one_outstanding() {
-        let r = hold_sweep::sweep("lease resend_after=None", hold_sweep::GRID, &|t, k| {
-            run(None, t, k)
-        });
+        let r = hold_sweep::sweep("lease resend_after=None", hold_sweep::GRID, &|t, k| run(None, t, k));
         assert_eq!(hold_sweep::verdict(&r).0, "benign");
     }
 }
@@ -2041,37 +1946,33 @@ mod hold_pure_heartbeat {
         let mut flow = FlowBuilder::new();
         let cluster = flow.cluster::<()>();
         let (timer_send, timer) = cluster.sim_input::<(), TotalOrder, ExactlyOnce>();
-        let received = pure_heartbeat(&cluster, timer)
-            .entries()
-            .sim_cluster_output();
+        let received = pure_heartbeat(&cluster, timer).entries().sim_cluster_output();
 
         let (driver, handle) = HoldOneHookDriver::new();
         hydro_lang::sim::work_counts::enable();
         let mut out = Outcome::default();
         let out_ref = &mut out;
         let handle_ref = &handle;
-        flow.sim()
-            .with_cluster_size(&cluster, N as usize)
-            .run_with_driver(driver, async || {
-                let mut pulses = 0u64;
-                let mut got = 0u64;
-                for round in 0..ROUNDS {
-                    apply_hold(handle_ref, target, k, round);
-                    for m in 0..N {
-                        timer_send.send(m, ());
-                        pulses += 1;
-                    }
-                    quiesce().await;
-                    for m in 0..N {
-                        got += received
-                            .collect_sorted::<Vec<(MemberId<()>, Heartbeat)>>(m)
-                            .await
-                            .len() as u64;
-                    }
+        flow.sim().with_cluster_size(&cluster, N as usize).run_with_driver(driver, async || {
+            let mut pulses = 0u64;
+            let mut got = 0u64;
+            for round in 0..ROUNDS {
+                apply_hold(handle_ref, target, k, round);
+                for m in 0..N {
+                    timer_send.send(m, ());
+                    pulses += 1;
                 }
-                out_ref.required = pulses * N as u64;
-                out_ref.total = got;
-            });
+                quiesce().await;
+                for m in 0..N {
+                    got += received
+                        .collect_sorted::<Vec<(MemberId<()>, Heartbeat)>>(m)
+                        .await
+                        .len() as u64;
+                }
+            }
+            out_ref.required = pulses * N as u64;
+            out_ref.total = got;
+        });
         out.forced = handle.forced_releases();
         out.counts = hydro_lang::sim::work_counts::take();
         out.hooks = handle.hooks_seen();
@@ -2175,12 +2076,8 @@ mod generic_measure {
         println!(
             "[{}] COMPARE hand: {hand_v} at {} | admitted total: {total_v} at {} curve {:?} | checker rule: {place_v} at {} | agree {}",
             r.label,
-            hand_best
-                .map(|c| c.hook.clone())
-                .unwrap_or_else(|| "none".into()),
-            total_best
-                .map(|c| c.hook.clone())
-                .unwrap_or_else(|| "none".into()),
+            hand_best.map(|c| c.hook.clone()).unwrap_or_else(|| "none".into()),
+            total_best.map(|c| c.hook.clone()).unwrap_or_else(|| "none".into()),
             total_best.map(series).unwrap_or_default(),
             place_best
                 .as_ref()
@@ -2193,11 +2090,9 @@ mod generic_measure {
 
     #[test]
     fn generic_rpc_retry_three_attempts() {
-        let r = hold_sweep::sweep(
-            "generic rpc_retry max_attempts=3",
-            hold_sweep::GRID,
-            &|t, k| super::hold_rpc_retry::run(3, t, k),
-        );
+        let r = hold_sweep::sweep("generic rpc_retry max_attempts=3", hold_sweep::GRID, &|t, k| {
+            super::hold_rpc_retry::run(3, t, k)
+        });
         let (v, hook) = compare(&r);
         assert_eq!(v, "hazardous");
         assert!(hook.unwrap().contains("rpc_retry.rs"));
@@ -2205,71 +2100,57 @@ mod generic_measure {
 
     #[test]
     fn generic_rpc_retry_one_attempt() {
-        let r = hold_sweep::sweep(
-            "generic rpc_retry max_attempts=1",
-            hold_sweep::GRID,
-            &|t, k| super::hold_rpc_retry::run(1, t, k),
-        );
+        let r = hold_sweep::sweep("generic rpc_retry max_attempts=1", hold_sweep::GRID, &|t, k| {
+            super::hold_rpc_retry::run(1, t, k)
+        });
         assert_eq!(compare(&r).0, "benign");
     }
 
     #[test]
     fn generic_backoff_retry_backoff_on() {
-        let r = hold_sweep::sweep(
-            "generic backoff_retry backoff=true",
-            hold_sweep::GRID,
-            &|t, k| super::hold_backoff_retry::run(true, t, k),
-        );
+        let r = hold_sweep::sweep("generic backoff_retry backoff=true", hold_sweep::GRID, &|t, k| {
+            super::hold_backoff_retry::run(true, t, k)
+        });
         assert_eq!(compare(&r).0, "hazardous");
     }
 
     #[test]
     fn generic_backoff_retry_backoff_off() {
-        let r = hold_sweep::sweep(
-            "generic backoff_retry backoff=false",
-            hold_sweep::GRID,
-            &|t, k| super::hold_backoff_retry::run(false, t, k),
-        );
+        let r = hold_sweep::sweep("generic backoff_retry backoff=false", hold_sweep::GRID, &|t, k| {
+            super::hold_backoff_retry::run(false, t, k)
+        });
         assert_eq!(compare(&r).0, "hazardous");
     }
 
     #[test]
     fn generic_bounded_queue_some_100() {
-        let r = hold_sweep::sweep(
-            "generic bounded_queue max_backlog=Some(100)",
-            hold_sweep::GRID,
-            &|t, k| super::hold_bounded_queue::run(Some(100), t, k),
-        );
+        let r = hold_sweep::sweep("generic bounded_queue max_backlog=Some(100)", hold_sweep::GRID, &|t, k| {
+            super::hold_bounded_queue::run(Some(100), t, k)
+        });
         assert_eq!(compare(&r).0, "hazardous");
     }
 
     #[test]
     fn generic_bounded_queue_none() {
-        let r = hold_sweep::sweep(
-            "generic bounded_queue max_backlog=None",
-            hold_sweep::GRID,
-            &|t, k| super::hold_bounded_queue::run(None, t, k),
-        );
+        let r = hold_sweep::sweep("generic bounded_queue max_backlog=None", hold_sweep::GRID, &|t, k| {
+            super::hold_bounded_queue::run(None, t, k)
+        });
         assert_eq!(compare(&r).0, "hazardous");
     }
 
     #[test]
     fn generic_cache_request_dated_no_coalesce() {
-        let r = hold_sweep::sweep(
-            "generic cache request_dated, no coalesce",
-            hold_sweep::GRID,
-            &|t, k| super::hold_cache::run(false, true, t, k),
-        );
+        let r = hold_sweep::sweep("generic cache request_dated, no coalesce", hold_sweep::GRID, &|t, k| {
+            super::hold_cache::run(false, true, t, k)
+        });
         assert_eq!(compare(&r).0, "hazardous");
     }
 
     #[test]
     fn generic_cache_fill_dated_no_coalesce() {
-        let r = hold_sweep::sweep(
-            "generic cache fill_dated, no coalesce",
-            hold_sweep::GRID,
-            &|t, k| super::hold_cache::run(false, false, t, k),
-        );
+        let r = hold_sweep::sweep("generic cache fill_dated, no coalesce", hold_sweep::GRID, &|t, k| {
+            super::hold_cache::run(false, false, t, k)
+        });
         assert_eq!(compare(&r).0, "hazardous");
     }
 
@@ -2283,21 +2164,17 @@ mod generic_measure {
 
     #[test]
     fn generic_gossip_resend_on() {
-        let r = hold_sweep::sweep(
-            "generic gossip_resend ack_timeout=3",
-            hold_sweep::GRID,
-            &|t, k| super::hold_gossip_resend::run(3, t, k),
-        );
+        let r = hold_sweep::sweep("generic gossip_resend ack_timeout=3", hold_sweep::GRID, &|t, k| {
+            super::hold_gossip_resend::run(3, t, k)
+        });
         assert_eq!(compare(&r).0, "hazardous");
     }
 
     #[test]
     fn generic_gossip_resend_off() {
-        let r = hold_sweep::sweep(
-            "generic gossip_resend ack_timeout=0",
-            hold_sweep::GRID,
-            &|t, k| super::hold_gossip_resend::run(0, t, k),
-        );
+        let r = hold_sweep::sweep("generic gossip_resend ack_timeout=0", hold_sweep::GRID, &|t, k| {
+            super::hold_gossip_resend::run(0, t, k)
+        });
         assert_eq!(compare(&r).0, "benign");
     }
 
@@ -2319,21 +2196,17 @@ mod generic_measure {
 
     #[test]
     fn generic_rebalancing_no_cooldown() {
-        let r = hold_sweep::sweep(
-            "generic rebalancing cooldown=0",
-            hold_sweep::GRID,
-            &|t, k| super::hold_rebalancing::run(0, t, k),
-        );
+        let r = hold_sweep::sweep("generic rebalancing cooldown=0", hold_sweep::GRID, &|t, k| {
+            super::hold_rebalancing::run(0, t, k)
+        });
         assert_eq!(compare(&r).0, "hazardous");
     }
 
     #[test]
     fn generic_rebalancing_cooldown_8() {
-        let r = hold_sweep::sweep(
-            "generic rebalancing cooldown=8",
-            hold_sweep::GRID,
-            &|t, k| super::hold_rebalancing::run(8, t, k),
-        );
+        let r = hold_sweep::sweep("generic rebalancing cooldown=8", hold_sweep::GRID, &|t, k| {
+            super::hold_rebalancing::run(8, t, k)
+        });
         assert_eq!(compare(&r).0, "hazardous");
     }
 
@@ -2359,31 +2232,25 @@ mod generic_measure {
 
     #[test]
     fn generic_lease_resend_after_4() {
-        let r = hold_sweep::sweep(
-            "generic lease resend_after=Some(4)",
-            hold_sweep::GRID,
-            &|t, k| super::hold_lease::run(Some(4), t, k),
-        );
+        let r = hold_sweep::sweep("generic lease resend_after=Some(4)", hold_sweep::GRID, &|t, k| {
+            super::hold_lease::run(Some(4), t, k)
+        });
         assert_eq!(compare(&r).0, "hazardous");
     }
 
     #[test]
     fn generic_lease_one_outstanding() {
-        let r = hold_sweep::sweep(
-            "generic lease resend_after=None",
-            hold_sweep::GRID,
-            &|t, k| super::hold_lease::run(None, t, k),
-        );
+        let r = hold_sweep::sweep("generic lease resend_after=None", hold_sweep::GRID, &|t, k| {
+            super::hold_lease::run(None, t, k)
+        });
         assert_eq!(compare(&r).0, "benign");
     }
 
     #[test]
     fn generic_crdt_gossip() {
-        let r = hold_sweep::sweep(
-            "generic crdt_gossip",
-            super::hold_crdt_gossip::GRID,
-            &|t, k| super::hold_crdt_gossip::run(t, k),
-        );
+        let r = hold_sweep::sweep("generic crdt_gossip", super::hold_crdt_gossip::GRID, &|t, k| {
+            super::hold_crdt_gossip::run(t, k)
+        });
         assert_eq!(compare(&r).0, "benign");
     }
 
@@ -2447,9 +2314,7 @@ mod library_check {
     // rpc_retry: timeout 40, capacity 5, 2 requests per round.
 
     fn rpc_retry(max_attempts: u32) -> Report {
-        use crate::cluster::rpc_retry::{
-            Client, RetryPolicy, Server, ServerConfig, rpc_with_retries,
-        };
+        use crate::cluster::rpc_retry::{Client, RetryPolicy, Server, ServerConfig, rpc_with_retries};
         let mut flow = FlowBuilder::new();
         let client = flow.process::<Client>();
         let server = flow.process::<Server>();
@@ -2536,21 +2401,13 @@ mod library_check {
     /// Expected: hazardous at the server's `Request` arrivals (admitted +448 recorded).
     #[test]
     fn library_backoff_retry_backoff_on() {
-        expect_hazardous(
-            "backoff_retry backoff=true",
-            &backoff_retry(true),
-            &["backoff_retry.rs", "Request"],
-        );
+        expect_hazardous("backoff_retry backoff=true", &backoff_retry(true), &["backoff_retry.rs", "Request"]);
     }
 
     /// Expected: hazardous at the server's `Request` arrivals (admitted +588 recorded).
     #[test]
     fn library_backoff_retry_backoff_off() {
-        expect_hazardous(
-            "backoff_retry backoff=false",
-            &backoff_retry(false),
-            &["backoff_retry.rs", "Request"],
-        );
+        expect_hazardous("backoff_retry backoff=false", &backoff_retry(false), &["backoff_retry.rs", "Request"]);
     }
 
     // bounded_queue_rejection: timeout 40, 3 attempts, reject backoff 10, capacity 5.
@@ -2636,18 +2493,13 @@ mod library_check {
                 coalesce,
                 request_dated,
             },
-            OriginConfig {
-                max_fetch_per_tick: 4,
-            },
+            OriginConfig { max_fetch_per_tick: 4 },
         );
         let _completed = outputs.completed.map(q!(|c| c.id)).sim_output();
         let _fetches = outputs.fetches.map(q!(|f| f.lookup_id)).sim_output();
         let _processed = outputs.processed.map(q!(|f| f.lookup_id)).sim_output();
         let _applied = outputs.fills_applied.map(q!(|f| f.lookup_id)).sim_output();
-        let _redundant = outputs
-            .fills_redundant
-            .map(q!(|f| f.lookup_id))
-            .sim_output();
+        let _redundant = outputs.fills_redundant.map(q!(|f| f.lookup_id)).sim_output();
         let _stale = outputs.fills_stale.map(q!(|f| f.lookup_id)).sim_output();
         check(flow.sim(), &config(), async |round| {
             let round = round as u64;
@@ -2662,11 +2514,7 @@ mod library_check {
     /// Expected: hazardous at the cache's `Fill` hook (admitted +2332 recorded).
     #[test]
     fn library_cache_request_dated_no_coalesce() {
-        expect_hazardous(
-            "cache request_dated, no coalesce",
-            &cache(false, true),
-            &["Fill"],
-        );
+        expect_hazardous("cache request_dated, no coalesce", &cache(false, true), &["Fill"]);
     }
 
     /// Expected: hazardous at the origin's clock hook (admitted +1500 recorded).
@@ -2703,14 +2551,8 @@ mod library_check {
                 ack_timeout_ticks,
             },
         );
-        let _wire = outputs
-            .wire
-            .map(q!(|(to, d)| (to, d.from, d.seq)))
-            .sim_cluster_output();
-        let _merged = outputs
-            .merged
-            .map(q!(|d| (d.from, d.seq)))
-            .sim_cluster_output();
+        let _wire = outputs.wire.map(q!(|(to, d)| (to, d.from, d.seq))).sim_cluster_output();
+        let _merged = outputs.merged.map(q!(|d| (d.from, d.seq))).sim_cluster_output();
         let _acks = outputs.acks_sent.sim_cluster_output();
         let _inbox = outputs.inbox_depth.sim_cluster_output();
         let _outstanding = outputs.outstanding_depth.sim_cluster_output();
@@ -2860,21 +2702,13 @@ mod library_check {
     /// Expected: hazardous at the `u64` task arrivals (admitted +300 recorded).
     #[test]
     fn library_rebalancing_no_cooldown() {
-        expect_hazardous(
-            "rebalancing cooldown=0",
-            &rebalancing(0),
-            &["rebalancing_ping_pong.rs", "u64"],
-        );
+        expect_hazardous("rebalancing cooldown=0", &rebalancing(0), &["rebalancing_ping_pong.rs", "u64"]);
     }
 
     /// Expected: hazardous at the `u64` task arrivals (admitted +300 recorded).
     #[test]
     fn library_rebalancing_cooldown_8() {
-        expect_hazardous(
-            "rebalancing cooldown=8",
-            &rebalancing(8),
-            &["rebalancing_ping_pong.rs", "u64"],
-        );
+        expect_hazardous("rebalancing cooldown=8", &rebalancing(8), &["rebalancing_ping_pong.rs", "u64"]);
     }
 
     // compaction_falls_behind: budget 30, 1 put and 4 gets per round. Excluded from the
@@ -2946,10 +2780,7 @@ mod library_check {
             },
             ServerConfig { max_per_tick: 5 },
         );
-        let _sent = outputs
-            .sent
-            .map(q!(|r| r.resend as u64))
-            .sim_cluster_output();
+        let _sent = outputs.sent.map(q!(|r| r.resend as u64)).sim_cluster_output();
         let _acked = outputs.acked.map(q!(|a| a.seq)).sim_cluster_output();
         let _superseded = outputs.superseded.sim_cluster_output();
         let _lease_trace = outputs.lease_trace.sim_cluster_output();
@@ -3029,9 +2860,7 @@ mod library_check {
         let mut flow = FlowBuilder::new();
         let cluster = flow.cluster::<()>();
         let (timer_send, timer) = cluster.sim_input::<(), TotalOrder, ExactlyOnce>();
-        let _received = pure_heartbeat(&cluster, timer)
-            .entries()
-            .sim_cluster_output();
+        let _received = pure_heartbeat(&cluster, timer).entries().sim_cluster_output();
         let r = check(
             flow.sim().with_cluster_size(&cluster, N as usize),
             &config(),

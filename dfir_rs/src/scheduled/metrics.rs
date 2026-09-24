@@ -11,9 +11,9 @@ use slotmap::SecondaryMap;
 use web_time::{Duration, Instant};
 
 #[cfg(feature = "meta")]
-use dfir_lang::graph::DfirGraph;
-#[cfg(feature = "meta")]
 use dfir_lang::graph::ops::DelayType;
+#[cfg(feature = "meta")]
+use dfir_lang::graph::DfirGraph;
 
 /// Metrics for a [`Dfir`](super::context::Dfir) graph instance.
 ///
@@ -561,11 +561,11 @@ mod test {
         assert_eq!(sg_metrics.total_run_count(), 7); // 12 - 5
         assert_eq!(sg_metrics.total_poll_count(), 15); // 25 - 10
         assert_eq!(sg_metrics.total_idle_count(), 5); // 7 - 2
-        //
+                                                      //
         let hoff_metrics = &second.handoffs[handoff_id];
         // total_items_count should be diffed
         assert_eq!(hoff_metrics.total_items_count(), 150); // 250 - 100
-        // curr_items_count should NOT be diffed (it's a current value, not cumulative)
+                                                           // curr_items_count should NOT be diffed (it's a current value, not cumulative)
         assert_eq!(hoff_metrics.curr_items_count(), 10);
     }
 }

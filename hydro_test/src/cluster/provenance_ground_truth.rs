@@ -919,18 +919,9 @@ mod tests {
         ));
         let small = observed.iter().find(|o| o.0 == 1).unwrap();
         let large = observed.iter().find(|o| o.0 == 5).unwrap();
-        assert_eq!(
-            small.2, large.2,
-            "replication message count is per follower, not per entry"
-        );
-        assert!(
-            large.3 > small.3,
-            "replication bytes grow with the retained log"
-        );
-        assert_eq!(
-            small.5, large.5,
-            "steady-state heartbeat bytes do not grow with the log"
-        );
+        assert_eq!(small.2, large.2, "replication message count is per follower, not per entry");
+        assert!(large.3 > small.3, "replication bytes grow with the retained log");
+        assert_eq!(small.5, large.5, "steady-state heartbeat bytes do not grow with the log");
     }
 
     /// Retry under *request* loss: the service discards the first arrival of every odd-id
@@ -954,8 +945,7 @@ mod tests {
         let client = flow.process();
         let service = flow.process();
         let (request_send, requests) = client.sim_input::<Request, TotalOrder, ExactlyOnce>();
-        let (retry_send, retry_ticks) =
-            client.sim_input_operational::<(), TotalOrder, ExactlyOnce>();
+        let (retry_send, retry_ticks) = client.sim_input_operational::<(), TotalOrder, ExactlyOnce>();
         let (service_send, service_ticks) =
             service.sim_input_operational::<(), TotalOrder, ExactlyOnce>();
         let outputs = timeout_retry_lossy_with_timers(
@@ -1043,8 +1033,7 @@ mod tests {
         let client = flow.process();
         let service = flow.process();
         let (request_send, requests) = client.sim_input::<Request, TotalOrder, ExactlyOnce>();
-        let (retry_send, retry_ticks) =
-            client.sim_input_operational::<(), TotalOrder, ExactlyOnce>();
+        let (retry_send, retry_ticks) = client.sim_input_operational::<(), TotalOrder, ExactlyOnce>();
         let (service_send, service_ticks) =
             service.sim_input_operational::<(), TotalOrder, ExactlyOnce>();
         let outputs = timeout_retry_lossy_with_timers(

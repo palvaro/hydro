@@ -11,7 +11,7 @@ use quote::quote_spanned;
 use serde::{Deserialize, Serialize};
 use slotmap::Key;
 use syn::punctuated::Punctuated;
-use syn::{Expr, Token, parse_quote_spanned};
+use syn::{parse_quote_spanned, Expr, Token};
 
 use super::{
     GraphLoopId, GraphNode, GraphNodeId, GraphSubgraphId, OpInstGenerics, OperatorInstance,

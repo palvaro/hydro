@@ -152,8 +152,7 @@ pub struct CacheOutputs<'a> {
     /// Every fetch the origin serves.
     pub processed: Stream<Fetch, Process<'a, Origin>, Unbounded, TotalOrder, ExactlyOnce>,
     /// Depth of the origin's queue at the end of each origin tick.
-    pub origin_backlog_trace:
-        Stream<usize, Process<'a, Origin>, Unbounded, TotalOrder, ExactlyOnce>,
+    pub origin_backlog_trace: Stream<usize, Process<'a, Origin>, Unbounded, TotalOrder, ExactlyOnce>,
 }
 
 /// Builds the cache/origin program. `lookups` is the application's lookup stream at the cache;
@@ -175,8 +174,8 @@ pub fn cache_with_expiry<'a>(
     let OriginConfig { max_fetch_per_tick } = origin_config;
 
     // Fills come back from the origin, which is downstream of `fetches` (below).
-    let (fills_complete, fills) =
-        cache.forward_ref::<Stream<Fill, Process<'a, Cache>, Unbounded, TotalOrder, ExactlyOnce>>();
+    let (fills_complete, fills) = cache
+        .forward_ref::<Stream<Fill, Process<'a, Cache>, Unbounded, TotalOrder, ExactlyOnce>>();
 
     // ---- Cache: logical clock, entries with expiry, waiting lookups, fetches -----------------
     let (completed, fetches, fills_applied, fills_redundant, fills_stale, waiting_trace) = sliced! {
@@ -397,12 +396,7 @@ mod sim_tests {
         rounds: u64,
     }
 
-    fn run(
-        workload: Workload,
-        cache_config: CacheConfig,
-        origin_config: OriginConfig,
-        rounds: usize,
-    ) -> Vec<Round> {
+    fn run(workload: Workload, cache_config: CacheConfig, origin_config: OriginConfig, rounds: usize) -> Vec<Round> {
         run_with_hold(workload, cache_config, origin_config, rounds, None)
     }
 
@@ -457,10 +451,7 @@ mod sim_tests {
                     _ => origin_clock_send.send(()),
                 }
                 for i in 0..workload.hot_per_round {
-                    lookup_send.send(
-                        ((round * workload.hot_per_round as u64 + i as u64)
-                            % workload.hot_keys as u64) as Key,
-                    );
+                    lookup_send.send(((round * workload.hot_per_round as u64 + i as u64) % workload.hot_keys as u64) as Key);
                 }
                 for _ in 0..workload.cold_at(round) {
                     lookup_send.send(next_cold_key);
@@ -542,29 +533,18 @@ mod sim_tests {
         coalesce: false,
         request_dated: true,
     };
-    pub(super) const ORIGIN: OriginConfig = OriginConfig {
-        max_fetch_per_tick: 4,
-    };
+    pub(super) const ORIGIN: OriginConfig = OriginConfig { max_fetch_per_tick: 4 };
 
     pub(super) const ROUNDS: usize = 800;
     const TAIL_START: usize = 600;
 
     fn print_trajectory(trace: &[Round]) {
-        for i in [
-            0, 5, 50, 99, 130, 159, 200, 250, 300, 400, 500, 600, 700, 799,
-        ] {
+        for i in [0, 5, 50, 99, 130, 159, 200, 250, 300, 400, 500, 600, 700, 799] {
             if i < trace.len() {
                 let r = &trace[i];
                 println!(
                     "round {i}: completed={} latency_sum={} fetched={} applied={} redundant={} stale={} backlog={} waiting={}",
-                    r.completed,
-                    r.latency_sum,
-                    r.fetched,
-                    r.applied,
-                    r.redundant,
-                    r.stale,
-                    r.backlog,
-                    r.waiting
+                    r.completed, r.latency_sum, r.fetched, r.applied, r.redundant, r.stale, r.backlog, r.waiting
                 );
             }
         }
@@ -600,16 +580,11 @@ mod sim_tests {
         let rounds = (to - from) as u64;
         let slack = (WORKLOAD.hot_per_round - ORIGIN.max_fetch_per_tick) as usize;
         assert!(
-            window
-                .iter()
-                .all(|r| r.backlog <= slack && r.waiting <= slack),
+            window.iter().all(|r| r.backlog <= slack && r.waiting <= slack),
             "origin queue and waiting set should stay within one round's synchronized expiries in rounds [{from}, {to})"
         );
         let empty = window.iter().filter(|r| r.backlog == 0).count() as u64;
-        assert!(
-            empty * 10 >= rounds * 8,
-            "origin queue should be empty in at least 80% of rounds [{from}, {to}), got {empty} of {rounds}"
-        );
+        assert!(empty * 10 >= rounds * 8, "origin queue should be empty in at least 80% of rounds [{from}, {to}), got {empty} of {rounds}");
         let completed = sum(trace, from, to, |r| r.completed);
         assert!(
             completed.abs_diff(8 * rounds) <= 8,
@@ -617,10 +592,7 @@ mod sim_tests {
             8 * rounds
         );
         let fetched = sum(trace, from, to, |r| r.fetched);
-        assert!(
-            fetched <= rounds,
-            "fetch load should be about 0.5 per round in [{from}, {to}), got {fetched} in {rounds} rounds"
-        );
+        assert!(fetched <= rounds, "fetch load should be about 0.5 per round in [{from}, {to}), got {fetched} in {rounds} rounds");
         assert!(mean_latency(trace, from, to) <= 1.0);
     }
 
@@ -674,33 +646,16 @@ mod sim_tests {
     /// the hold experiment below shows that. Kept as a measured configuration without ground truth.
     #[test]
     fn herd_with_fill_dating_refreshes_itself_and_recovers() {
-        let trace = run(
-            WORKLOAD,
-            CacheConfig {
-                request_dated: false,
-                ..CACHE
-            },
-            ORIGIN,
-            ROUNDS,
-        );
+        let trace = run(WORKLOAD, CacheConfig { request_dated: false, ..CACHE }, ORIGIN, ROUNDS);
         print_trajectory(&trace);
         print_tail(&trace);
         assert_healthy_pre_trigger(&trace);
-        assert!(
-            trace.iter().all(|r| r.stale == 0),
-            "fill dating never produces a stale fill"
-        );
+        assert!(trace.iter().all(|r| r.stale == 0), "fill dating never produces a stale fill");
         let peak = trace.iter().map(|r| r.backlog).max().unwrap();
         let redundant: u64 = trace.iter().map(|r| r.redundant).sum();
         println!("peak origin queue {peak}; redundant fills over the run {redundant}");
-        assert!(
-            peak > 200,
-            "the trigger should have built a queue far past the ttl, got {peak}"
-        );
-        assert!(
-            redundant > 0,
-            "the herd should have produced redundant fills"
-        );
+        assert!(peak > 200, "the trigger should have built a queue far past the ttl, got {peak}");
+        assert!(redundant > 0, "the herd should have produced redundant fills");
         assert_healthy_tail(&trace);
         let total_fetched: u64 = trace.iter().map(|r| r.fetched).sum();
         let total_lookups = 8 * ROUNDS as u64 + 10 * 60;
@@ -732,22 +687,13 @@ mod sim_tests {
     fn fill_dated_herd_does_more_work_the_longer_fills_are_held() {
         const HOLD_ROUNDS: usize = 240;
         const HOLDS: [u64; 5] = [0, 5, 10, 20, 50];
-        let workload = Workload {
-            cold_per_round: 0,
-            ..WORKLOAD
-        };
-        let config = CacheConfig {
-            request_dated: false,
-            ..CACHE
-        };
+        let workload = Workload { cold_per_round: 0, ..WORKLOAD };
+        let config = CacheConfig { request_dated: false, ..CACHE };
 
         let mut fetched_by_hold = Vec::new();
         let mut fills_by_hold = Vec::new();
         for k in HOLDS {
-            let hold = (k > 0).then_some(Hold {
-                start: 100,
-                rounds: k,
-            });
+            let hold = (k > 0).then_some(Hold { start: 100, rounds: k });
             let trace = run_with_hold(workload, config, ORIGIN, HOLD_ROUNDS, hold);
             let lookups = 8 * HOLD_ROUNDS as u64;
             let fetched = sum(&trace, 0, HOLD_ROUNDS, |r| r.fetched);
@@ -760,15 +706,8 @@ mod sim_tests {
                 trace.last().unwrap().backlog
             );
             // The same input is served in full whatever the hold; only the work differs.
-            assert!(
-                completed.abs_diff(lookups) <= 8,
-                "completed {completed} vs lookups {lookups}"
-            );
-            assert_eq!(
-                trace.last().unwrap().backlog,
-                0,
-                "the origin should have drained by the end"
-            );
+            assert!(completed.abs_diff(lookups) <= 8, "completed {completed} vs lookups {lookups}");
+            assert_eq!(trace.last().unwrap().backlog, 0, "the origin should have drained by the end");
             fetched_by_hold.push(fetched);
             fills_by_hold.push(applied + redundant);
         }
@@ -780,70 +719,36 @@ mod sim_tests {
             "fetches should not decrease as the hold grows: {fetched_by_hold:?}"
         );
         let excess = fetched_by_hold.last().unwrap() - fetched_by_hold[0];
-        assert!(
-            excess > 100,
-            "a 50-round hold should add well over 100 fetches for the same input, added {excess}"
-        );
+        assert!(excess > 100, "a 50-round hold should add well over 100 fetches for the same input, added {excess}");
     }
 
     /// Control: request dating, no coalescing, no trigger. The herd factor at an idle origin is
     /// at most the lookups that share a round, and the queue never builds.
     #[test]
     fn without_a_trigger_the_origin_keeps_up() {
-        let trace = run(
-            Workload {
-                cold_per_round: 0,
-                ..WORKLOAD
-            },
-            CACHE,
-            ORIGIN,
-            ROUNDS,
-        );
+        let trace = run(Workload { cold_per_round: 0, ..WORKLOAD }, CACHE, ORIGIN, ROUNDS);
         print_trajectory(&trace);
         assert_healthy(&trace, 10, ROUNDS);
         let fetched = sum(&trace, 10, ROUNDS, |r| r.fetched);
         let wasted = sum(&trace, 10, ROUNDS, |r| r.redundant + r.stale);
-        println!(
-            "fetched {fetched}, redundant or stale {wasted}, mean latency {:.2}",
-            mean_latency(&trace, 10, ROUNDS)
-        );
+        println!("fetched {fetched}, redundant or stale {wasted}, mean latency {:.2}", mean_latency(&trace, 10, ROUNDS));
         // The synchronized expiry queues fetches for a round, and the lookups arriving in that
         // round herd on the pending keys; this is the mechanism at a scale the origin absorbs.
-        assert!(
-            wasted <= (ROUNDS as u64 - 10) / 4,
-            "wasted fills should be a small fraction of rounds, got {wasted}"
-        );
+        assert!(wasted <= (ROUNDS as u64 - 10) / 4, "wasted fills should be a small fraction of rounds, got {wasted}");
     }
 
     /// Control: request dating, same trigger, coalescing on. One fetch per missing key, so the
     /// queue the trigger built drains and the tail is healthy.
     #[test]
     fn with_coalescing_the_origin_recovers() {
-        let trace = run(
-            WORKLOAD,
-            CacheConfig {
-                coalesce: true,
-                ..CACHE
-            },
-            ORIGIN,
-            ROUNDS,
-        );
+        let trace = run(WORKLOAD, CacheConfig { coalesce: true, ..CACHE }, ORIGIN, ROUNDS);
         print_trajectory(&trace);
         print_tail(&trace);
         assert_healthy_pre_trigger(&trace);
-        assert!(
-            trace.iter().all(|r| r.redundant == 0),
-            "coalescing never produces a redundant fill"
-        );
+        assert!(trace.iter().all(|r| r.redundant == 0), "coalescing never produces a redundant fill");
         let peak = trace.iter().map(|r| r.backlog).max().unwrap();
-        println!(
-            "peak origin queue {peak}; tail queue {}",
-            trace.last().unwrap().backlog
-        );
-        assert!(
-            peak > 200,
-            "the trigger should have built a queue far past the ttl, got {peak}"
-        );
+        println!("peak origin queue {peak}; tail queue {}", trace.last().unwrap().backlog);
+        assert!(peak > 200, "the trigger should have built a queue far past the ttl, got {peak}");
         assert_healthy_tail(&trace);
         let total_fetched: u64 = trace.iter().map(|r| r.fetched).sum();
         let total_arrived: u64 = trace.iter().map(|r| r.applied + r.stale).sum();
@@ -884,9 +789,7 @@ mod sim_tests {
             cache_clock,
             origin_clock,
             config,
-            OriginConfig {
-                max_fetch_per_tick: 1,
-            },
+            OriginConfig { max_fetch_per_tick: 1 },
         );
         let fetches = outputs.fetches.sim_output();
         let applied = outputs.fills_applied.sim_output();

@@ -95,10 +95,7 @@ impl BoundaryManifest {
             .filter(|port| !covered.contains(&port.port))
             .map(|port| (port.port, port.role, port.type_name.clone()))
             .collect();
-        assert!(
-            missing.is_empty(),
-            "campaign adapter omitted input ports: {missing:?}"
-        );
+        assert!(missing.is_empty(), "campaign adapter omitted input ports: {missing:?}");
     }
 }
 
@@ -154,8 +151,11 @@ impl<'a> InputRegistry<'a> {
 
     /// Registers a process operational input. The value is fixed because operational events carry
     /// no application information; use a data input if values are semantically meaningful.
-    pub fn process_operational<T, O>(&mut self, sender: &'a SimSender<T, O, ExactlyOnce>, value: T)
-    where
+    pub fn process_operational<T, O>(
+        &mut self,
+        sender: &'a SimSender<T, O, ExactlyOnce>,
+        value: T,
+    ) where
         T: Serialize + DeserializeOwned + Clone + RefUnwindSafe + 'a,
         O: Ordering + RefUnwindSafe,
     {
@@ -215,7 +215,10 @@ impl<'a> InputRegistry<'a> {
                 role: InputRole::Operational,
                 targets,
                 send_index: Box::new(move |target, _| {
-                    sender.send_indexed(target.expect("cluster operational target"), value.clone());
+                    sender.send_indexed(
+                        target.expect("cluster operational target"),
+                        value.clone(),
+                    );
                 }),
             },
         );
@@ -240,10 +243,7 @@ impl<'a> InputRegistry<'a> {
             .filter(|port| !manifest.input_ports().any(|p| p.port == **port))
             .copied()
             .collect();
-        assert!(
-            extra.is_empty(),
-            "registered ports absent from manifest: {extra:?}"
-        );
+        assert!(extra.is_empty(), "registered ports absent from manifest: {extra:?}");
         for port in manifest.input_ports() {
             let registered = &self.inputs[&port.port];
             assert_eq!(
@@ -275,10 +275,7 @@ pub struct CampaignConfig {
 impl CampaignConfig {
     /// Validates campaign parameters before any input is sent.
     pub fn validate(&self) {
-        assert!(
-            !self.scales.is_empty(),
-            "a feedback campaign needs at least one scale"
-        );
+        assert!(!self.scales.is_empty(), "a feedback campaign needs at least one scale");
         assert!(
             self.scales.windows(2).all(|w| w[0] < w[1]),
             "campaign scales must be strictly increasing: {:?}",
@@ -354,11 +351,7 @@ pub type EmissionShape = (usize, TagSet, bool, bool, u64);
 
 fn shape_of(record: &EmissionRecord) -> EmissionShape {
     let data: TagSet = record.data_tags().copied().collect();
-    let payload = if data.is_empty() {
-        0
-    } else {
-        record.payload_hash
-    };
+    let payload = if data.is_empty() { 0 } else { record.payload_hash };
     (
         record.bytes,
         data,
@@ -376,10 +369,7 @@ fn stable_window(config: &CampaignConfig, scale: usize) -> usize {
 }
 
 fn is_physical(record: &EmissionRecord) -> bool {
-    matches!(
-        record.kind,
-        EmissionPointKind::Network | EmissionPointKind::Output
-    )
+    matches!(record.kind, EmissionPointKind::Network | EmissionPointKind::Output)
 }
 
 impl EpochObservation {
@@ -572,36 +562,21 @@ impl EdgeEvidence {
         vec![
             ("data_msgs", self.data_phase_emissions.to_string()),
             ("data_bytes", self.data_phase_bytes.to_string()),
-            (
-                "op_curve(scale:msgs:bytes)",
-                format!("{:?}", self.operational_curve),
-            ),
+            ("op_curve(scale:msgs:bytes)", format!("{:?}", self.operational_curve)),
             ("op_msgs", self.operational_emissions.to_string()),
             ("op_bytes", self.operational_bytes.to_string()),
             ("no_lineage", self.no_lineage.to_string()),
             ("no_data_ancestry", self.no_data_ancestry.to_string()),
-            (
-                "undominated_data_ancestry",
-                self.undominated_data_ancestry.to_string(),
-            ),
-            (
-                "operational_dominated_ancestry",
-                self.operational_dominated_ancestry.to_string(),
-            ),
-            (
-                "data_dominated_ancestry",
-                self.data_dominated_ancestry.to_string(),
-            ),
+            ("undominated_data_ancestry", self.undominated_data_ancestry.to_string()),
+            ("operational_dominated_ancestry", self.operational_dominated_ancestry.to_string()),
+            ("data_dominated_ancestry", self.data_dominated_ancestry.to_string()),
             ("exact_lineage", self.exact_lineage.to_string()),
             ("coarse_lineage", self.coarse_lineage.to_string()),
             ("recurring_payloads", self.recurring_payloads.to_string()),
             ("op_scales", self.operational_work_scales.to_string()),
             ("fired_tag_msgs", self.fired_tag_emissions.to_string()),
             ("other_node_msgs", self.other_node_emissions.to_string()),
-            (
-                "other_node_msgs_exact",
-                self.other_node_emissions_exact.to_string(),
-            ),
+            ("other_node_msgs_exact", self.other_node_emissions_exact.to_string()),
             ("returned_msgs", self.returned_emissions.to_string()),
             ("terminal_by_scale", format!("{:?}", self.terminal_by_scale)),
             ("terminal", format!("{:?}", self.terminal)),
@@ -711,7 +686,8 @@ impl CampaignReport {
                         if carries_fresh {
                             a.fired_tag_emissions += 1;
                             let emitter: Node = (record.source.clone(), record.member);
-                            let destination: Node = (record.destination.clone(), record.recipient);
+                            let destination: Node =
+                                (record.destination.clone(), record.recipient);
                             let others: Vec<&Node> =
                                 fired_nodes.iter().filter(|n| **n != emitter).collect();
                             if !others.is_empty() {
@@ -772,10 +748,8 @@ impl CampaignReport {
                     .map(|(&scale, &(messages, bytes))| (scale, messages, bytes))
                     .collect();
                 let operational_work_scales = operational_curve.windows(2).any(|pair| {
-                    let [
-                        (_, lower_messages, lower_bytes),
-                        (_, higher_messages, higher_bytes),
-                    ] = pair
+                    let [(_, lower_messages, lower_bytes), (_, higher_messages, higher_bytes)] =
+                        pair
                     else {
                         unreachable!()
                     };
@@ -1111,12 +1085,7 @@ impl EvidenceMatrix {
             matrix
                 .rows
                 .iter()
-                .map(|row| {
-                    (
-                        (row.case.clone(), row.evidence.edge.stable_key()),
-                        &row.evidence,
-                    )
-                })
+                .map(|row| ((row.case.clone(), row.evidence.edge.stable_key()), &row.evidence))
                 .collect()
         }
         let base = index(self);
@@ -1124,10 +1093,7 @@ impl EvidenceMatrix {
         let keys: BTreeSet<_> = base.keys().chain(var.keys()).cloned().collect();
         let mut out = Vec::new();
         for (case, edge) in keys {
-            match (
-                base.get(&(case.clone(), edge.clone())),
-                var.get(&(case.clone(), edge.clone())),
-            ) {
+            match (base.get(&(case.clone(), edge.clone())), var.get(&(case.clone(), edge.clone()))) {
                 (Some(b), Some(v)) => {
                     for ((name, bv), (_, vv)) in b.fields().into_iter().zip(v.fields()) {
                         if bv != vv {
@@ -1264,15 +1230,7 @@ pub fn run_evidence_matrix(
                     epoch_curve: report
                         .epochs
                         .iter()
-                        .map(|e| {
-                            (
-                                e.scale,
-                                e.action,
-                                e.repetition,
-                                e.physical_emissions,
-                                e.bytes,
-                            )
-                        })
+                        .map(|e| (e.scale, e.action, e.repetition, e.physical_emissions, e.bytes))
                         .collect(),
                 });
                 rows.extend(evidence.into_iter().map(|evidence| EvidenceMatrixRow {
@@ -1608,9 +1566,7 @@ mod tests {
                 stop_after_stable_repetitions: 1,
             },
             epochs: vec![epoch],
-            port_nodes: [(9, ("Process(a)".to_owned(), false))]
-                .into_iter()
-                .collect(),
+            port_nodes: [(9, ("Process(a)".to_owned(), false))].into_iter().collect(),
         };
         let rows = report.edge_evidence();
         let to_b = rows
@@ -1621,22 +1577,8 @@ mod tests {
             .iter()
             .find(|r| r.edge.channel.1 == "Process(a)")
             .unwrap();
-        assert_eq!(
-            (
-                to_b.fired_tag_emissions,
-                to_b.other_node_emissions,
-                to_b.returned_emissions
-            ),
-            (1, 0, 0)
-        );
-        assert_eq!(
-            (
-                to_a.fired_tag_emissions,
-                to_a.other_node_emissions,
-                to_a.returned_emissions
-            ),
-            (1, 1, 1)
-        );
+        assert_eq!((to_b.fired_tag_emissions, to_b.other_node_emissions, to_b.returned_emissions), (1, 0, 0));
+        assert_eq!((to_a.fired_tag_emissions, to_a.other_node_emissions, to_a.returned_emissions), (1, 1, 1));
     }
 
     /// The stopping shape ignores payload identity and operational tag identity but keeps the
@@ -1667,10 +1609,7 @@ mod tests {
         };
         let heartbeat_1 = epoch(vec![mk(&[op_tag(2, 0)], 100)]);
         let heartbeat_2 = epoch(vec![mk(&[op_tag(2, 1)], 101)]);
-        assert_eq!(
-            heartbeat_1.physical_signature(),
-            heartbeat_2.physical_signature()
-        );
+        assert_eq!(heartbeat_1.physical_signature(), heartbeat_2.physical_signature());
         let fact_1 = epoch(vec![mk(&[data(0), op_tag(2, 0)], 5)]);
         let fact_2 = epoch(vec![mk(&[data(1), op_tag(2, 1)], 5)]);
         assert_ne!(fact_1.physical_signature(), fact_2.physical_signature());
@@ -1679,10 +1618,7 @@ mod tests {
         let replay_2 = epoch(vec![mk(&[data(0), op_tag(2, 1)], 5)]);
         assert_eq!(replay_1.physical_signature(), replay_2.physical_signature());
         let next_item = epoch(vec![mk(&[data(0), op_tag(2, 1)], 6)]);
-        assert_ne!(
-            replay_1.physical_signature(),
-            next_item.physical_signature()
-        );
+        assert_ne!(replay_1.physical_signature(), next_item.physical_signature());
     }
 
     #[test]

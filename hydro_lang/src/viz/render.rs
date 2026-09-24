@@ -7,10 +7,10 @@ use std::sync::OnceLock;
 use auto_impl::auto_impl;
 use slotmap::{Key, SecondaryMap, SlotMap};
 
-pub use super::graphviz::{HydroDot, escape_dot};
+pub use super::graphviz::{escape_dot, HydroDot};
 pub use super::json::HydroJson;
 // Re-export specific implementations
-pub use super::mermaid::{HydroMermaid, escape_mermaid};
+pub use super::mermaid::{escape_mermaid, HydroMermaid};
 use crate::compile::ir::backtrace::Backtrace;
 use crate::compile::ir::{DebugExpr, HydroIrMetadata, HydroNode, HydroRoot, HydroSource};
 use crate::location::dynamic::LocationId;

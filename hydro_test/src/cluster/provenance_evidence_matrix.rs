@@ -53,26 +53,10 @@ mod tests {
         write!(out, "{}", report.render_schedule_variations_tsv()).unwrap();
     }
 
-    fn write_pair(
-        out: &mut File,
-        baseline: (&str, &EvidenceMatrix),
-        variant: (&str, &EvidenceMatrix),
-    ) -> usize {
+    fn write_pair(out: &mut File, baseline: (&str, &EvidenceMatrix), variant: (&str, &EvidenceMatrix)) -> usize {
         let differences = baseline.1.compare(variant.1);
-        writeln!(
-            out,
-            "# pair baseline={} variant={} differences={}",
-            baseline.0,
-            variant.0,
-            differences.len()
-        )
-        .unwrap();
-        write!(
-            out,
-            "{}",
-            EvidenceMatrix::render_comparison_tsv(&differences)
-        )
-        .unwrap();
+        writeln!(out, "# pair baseline={} variant={} differences={}", baseline.0, variant.0, differences.len()).unwrap();
+        write!(out, "{}", EvidenceMatrix::render_comparison_tsv(&differences)).unwrap();
         differences.len()
     }
 
@@ -114,44 +98,16 @@ mod tests {
 
         // Refactor pairs: a checker property, asserted.
         let mut refactor_differences = 0;
-        refactor_differences += write_pair(
-            &mut out,
-            ("heartbeat", &heartbeat),
-            ("heartbeat_refactor", &heartbeat_refactor),
-        );
-        refactor_differences += write_pair(
-            &mut out,
-            ("retry", &retry),
-            ("retry_refactor", &retry_refactor),
-        );
-        refactor_differences += write_pair(
-            &mut out,
-            ("gossip", &gossip),
-            ("gossip_refactor", &gossip_refactor),
-        );
-        refactor_differences += write_pair(
-            &mut out,
-            ("tc_chain", &tc_chain),
-            ("tc_chain_refactor", &tc_chain_refactor),
-        );
+        refactor_differences += write_pair(&mut out, ("heartbeat", &heartbeat), ("heartbeat_refactor", &heartbeat_refactor));
+        refactor_differences += write_pair(&mut out, ("retry", &retry), ("retry_refactor", &retry_refactor));
+        refactor_differences += write_pair(&mut out, ("gossip", &gossip), ("gossip_refactor", &gossip_refactor));
+        refactor_differences += write_pair(&mut out, ("tc_chain", &tc_chain), ("tc_chain_refactor", &tc_chain_refactor));
 
         // Mechanism / generator pairs: recorded raw, not asserted.
         write_pair(&mut out, ("retry", &retry), ("retry_dedup", &retry_dedup));
-        write_pair(
-            &mut out,
-            ("gossip", &gossip),
-            ("gossip_no_pump", &gossip_no_pump),
-        );
-        write_pair(
-            &mut out,
-            ("tc_chain", &tc_chain),
-            ("tc_chain_ungated", &tc_chain_ungated),
-        );
-        write_pair(
-            &mut out,
-            ("tc_cycle", &tc_cycle),
-            ("tc_cycle_ungated", &tc_cycle_ungated),
-        );
+        write_pair(&mut out, ("gossip", &gossip), ("gossip_no_pump", &gossip_no_pump));
+        write_pair(&mut out, ("tc_chain", &tc_chain), ("tc_chain_ungated", &tc_chain_ungated));
+        write_pair(&mut out, ("tc_cycle", &tc_cycle), ("tc_cycle_ungated", &tc_cycle_ungated));
         write_pair(&mut out, ("tc_chain", &tc_chain), ("tc_cycle", &tc_cycle));
 
         assert_eq!(
@@ -167,15 +123,10 @@ mod tests {
         let mut flow = FlowBuilder::new();
         let cluster = flow.cluster::<()>();
         let (timer_send, timer) = cluster.sim_input_operational::<(), TotalOrder, ExactlyOnce>();
-        let timer = if refactor {
-            timer.map(q!(|x| x))
-        } else {
-            timer
-        };
-        pure_heartbeat(&cluster, timer).entries().for_each(q!(
-            |_| {},
-            commutative = manual_proof!(/** observation only */)
-        ));
+        let timer = if refactor { timer.map(q!(|x| x)) } else { timer };
+        pure_heartbeat(&cluster, timer)
+            .entries()
+            .for_each(q!(|_| {}, commutative = manual_proof!(/** observation only */)));
 
         let mut sim = flow.sim().with_cluster_size(&cluster, MEMBERS);
         let manifest = sim.feedback_boundary_manifest();
@@ -186,19 +137,13 @@ mod tests {
     }
 
     fn retry_flow(dedup: bool, refactor: bool) -> EvidenceMatrix {
-        use crate::distributed::timeout_retry::{
-            LossPolicy, Request, timeout_retry_lossy_with_timers,
-        };
+        use crate::distributed::timeout_retry::{LossPolicy, Request, timeout_retry_lossy_with_timers};
 
         let mut flow = FlowBuilder::new();
         let client = flow.process();
         let service = flow.process();
         let (request_send, requests) = client.sim_input::<Request, TotalOrder, ExactlyOnce>();
-        let requests = if refactor {
-            requests.map(q!(|x| x))
-        } else {
-            requests
-        };
+        let requests = if refactor { requests.map(q!(|x| x)) } else { requests };
         let (retry_send, retries) = client.sim_input_operational::<(), TotalOrder, ExactlyOnce>();
         let (service_send, service_ticks) =
             service.sim_input_operational::<(), TotalOrder, ExactlyOnce>();
@@ -214,14 +159,8 @@ mod tests {
                 ..LossPolicy::default()
             },
         );
-        outputs.completed.for_each(q!(
-            |_| {},
-            commutative = manual_proof!(/** observation only */)
-        ));
-        outputs.events.for_each(q!(
-            |_| {},
-            commutative = manual_proof!(/** observation only */)
-        ));
+        outputs.completed.for_each(q!(|_| {}, commutative = manual_proof!(/** observation only */)));
+        outputs.events.for_each(q!(|_| {}, commutative = manual_proof!(/** observation only */)));
 
         let mut sim = flow.sim();
         let manifest = sim.feedback_boundary_manifest();
@@ -243,25 +182,14 @@ mod tests {
         let mut flow = FlowBuilder::new();
         let cluster = flow.cluster::<()>();
         let (update_send, updates) = cluster.sim_input::<u32, NoOrder, ExactlyOnce>();
-        let updates = if refactor {
-            updates.map(q!(|x| x))
-        } else {
-            updates
-        };
+        let updates = if refactor { updates.map(q!(|x| x)) } else { updates };
         let (timer_send, timers) = cluster.sim_input_operational::<(), TotalOrder, ExactlyOnce>();
         // "No pump" variant: the operational port still exists but never reaches the publisher.
-        let timers = if pump {
-            timers
-        } else {
-            timers.filter(q!(|_| false))
-        };
+        let timers = if pump { timers } else { timers.filter(q!(|_| false)) };
         g_set_gossip(&cluster, updates, timers)
             .sample_eager(nondet!(/** observation only */))
             .assume_ordering::<TotalOrder>(nondet!(/** observation only */))
-            .for_each(q!(
-                |_| {},
-                idempotent = manual_proof!(/** observation only */)
-            ));
+            .for_each(q!(|_| {}, idempotent = manual_proof!(/** observation only */)));
 
         let mut sim = flow
             .sim()
@@ -276,18 +204,12 @@ mod tests {
     }
 
     fn tc_flow(gated: bool, cyclic_generator: bool, refactor: bool) -> EvidenceMatrix {
-        use crate::local::productive_tc::{
-            productive_transitive_closure, ungated_transitive_closure,
-        };
+        use crate::local::productive_tc::{productive_transitive_closure, ungated_transitive_closure};
 
         let mut flow = FlowBuilder::new();
         let process = flow.process::<()>();
         let (edge_send, edges) = process.sim_input::<Vec<(u32, u32)>, TotalOrder, ExactlyOnce>();
-        let edges = if refactor {
-            edges.map(q!(|x| x))
-        } else {
-            edges
-        };
+        let edges = if refactor { edges.map(q!(|x| x)) } else { edges };
         let (step_send, steps) = process.sim_input_operational::<(), TotalOrder, ExactlyOnce>();
         let (facts, traces) = if gated {
             productive_transitive_closure(edges, steps)

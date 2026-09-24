@@ -5539,9 +5539,7 @@ impl HydroNode {
             | HydroNode::UnboundSingleton { .. }
             | HydroNode::AssertIsConsistent { .. } => {}
             HydroNode::Source { source, .. } => match source {
-                HydroSource::Stream(expr)
-                | HydroSource::Interval(expr)
-                | HydroSource::Iter(expr) => transform(expr),
+                HydroSource::Stream(expr) | HydroSource::Interval(expr) | HydroSource::Iter(expr) => transform(expr),
                 HydroSource::ExternalNetwork()
                 | HydroSource::Spin()
                 | HydroSource::ClusterMembers(_, _)

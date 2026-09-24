@@ -804,9 +804,9 @@ pub fn buffer_table(
         let data: TagSet = run[0].data_tags().copied().collect();
         let has_operational = run[0].operational_tags().next().is_some();
         for r in run {
-            let h = history.entry(r.channel()).or_insert_with(|| History {
-                maximal: Vec::new(),
-            });
+            let h = history
+                .entry(r.channel())
+                .or_insert_with(|| History { maximal: Vec::new() });
             let id = BufferId {
                 kind: r.kind,
                 name: r.name.clone(),
@@ -1100,10 +1100,7 @@ mod tests {
         let to0 = table.iter().find(|b| b.id.channel.2 == Some(0)).unwrap();
         let to1 = table.iter().find(|b| b.id.channel.2 == Some(1)).unwrap();
         assert_eq!(to0.novel, 1);
-        assert_eq!(
-            to0.redundant, 1,
-            "the third send repeats what recipient 0 got"
-        );
+        assert_eq!(to0.redundant, 1, "the third send repeats what recipient 0 got");
         assert_eq!(to1.novel, 1);
         assert!(!to1.re_admits());
     }

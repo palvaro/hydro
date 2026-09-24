@@ -48,16 +48,7 @@ mod tests {
         let _ = writeln!(
             out,
             "{:<10} {:<12} {:>4}->{:<4} {:>4} {:>5} {:>5} {:>5}  {:<10} {:<8} {}",
-            "kind",
-            "name",
-            "send",
-            "recv",
-            "adm",
-            "novel",
-            "react",
-            "redun",
-            "growth",
-            "gate",
+            "kind", "name", "send", "recv", "adm", "novel", "react", "redun", "growth", "gate",
             "verdict"
         );
         for b in table {
@@ -168,10 +159,7 @@ mod tests {
                     .iter()
                     .find(|b| b.id.name == "requests" && b.id.kind == EmissionPointKind::Network)
                     .expect("a requests buffer exists");
-                assert!(
-                    req.re_admits(),
-                    "the retry timer re-admits the backlog: {req:?}"
-                );
+                assert!(req.re_admits(), "the retry timer re-admits the backlog: {req:?}");
                 assert!(
                     req.re_admits_only_operationally(),
                     "re-admission is timer-driven, not data-driven: {req:?}"
@@ -229,8 +217,9 @@ mod tests {
                         steps_taken += 1;
                         quiesce().await;
                         let produced = take_emissions();
-                        let progressed =
-                            produced.iter().any(|r| r.kind == EmissionPointKind::Output);
+                        let progressed = produced
+                            .iter()
+                            .any(|r| r.kind == EmissionPointKind::Output);
                         history.extend(produced);
                         if !progressed {
                             break;
@@ -245,10 +234,7 @@ mod tests {
                 // whole retained set every tick by construction; that is the fixpoint working, not
                 // physical re-admission, and is excluded — see `buffer_table`.)
                 let table = buffer_table(&history, &gates, false);
-                dump_table(
-                    "transitive closure: fixpoint buffer (network/output)",
-                    &table,
-                );
+                dump_table("transitive closure: fixpoint buffer (network/output)", &table);
                 assert!(
                     table.iter().all(|b| !b.re_admits()),
                     "no TC buffer re-admits any lineage: {table:#?}"
@@ -314,10 +300,7 @@ mod tests {
                 }
 
                 let table = buffer_table(&history, &gates, false);
-                dump_table(
-                    "gossip (N=4, 3 pumps from member 0): fixed-rate buffer",
-                    &table,
-                );
+                dump_table("gossip (N=4, 3 pumps from member 0): fixed-rate buffer", &table);
 
                 // Member 0's outbound edges re-admit the whole set on every pump, at fixed size.
                 let readmitting: Vec<_> = table

@@ -64,6 +64,7 @@
 //! `cargo test -p hydro_test --lib rpc_retry::sim_tests` (3 tests, 8 s).
 
 pub mod backoff_retry;
+pub mod blind;
 pub mod bounded_queue_rejection;
 pub mod cache_thundering_herd;
 pub mod checker_experiments;

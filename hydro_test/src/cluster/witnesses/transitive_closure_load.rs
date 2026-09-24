@@ -228,10 +228,7 @@ mod sim_tests {
     const WORKLOAD: Workload = Workload {
         baseline: Shape::Chain { edges: 4 },
         baseline_every: 5,
-        trigger: Shape::Layered {
-            layers: 4,
-            width: 3,
-        },
+        trigger: Shape::Layered { layers: 4, width: 3 },
         trigger_start: 100,
         trigger_end: 160,
     };
@@ -253,9 +250,7 @@ mod sim_tests {
     }
 
     fn print_trajectory(trace: &[Round]) {
-        for i in [
-            0, 1, 2, 3, 4, 5, 99, 100, 101, 102, 103, 130, 159, 160, 161, 162, 163, 200, 600, 799,
-        ] {
+        for i in [0, 1, 2, 3, 4, 5, 99, 100, 101, 102, 103, 130, 159, 160, 161, 162, 163, 200, 600, 799] {
             if i < trace.len() {
                 let r = &trace[i];
                 println!(
@@ -278,91 +273,39 @@ mod sim_tests {
             "whole run: {edges} edges admitted, {candidates} candidates ({rejected} rejected), {novel} novel facts, known {}; trigger rounds 100..160 generated {} candidates, tail rounds {TAIL_START}..{ROUNDS} generated {}",
             trace.last().unwrap().known,
             trace[100..160].iter().map(|r| r.candidates).sum::<u64>(),
-            trace[TAIL_START..]
-                .iter()
-                .map(|r| r.candidates)
-                .sum::<u64>()
+            trace[TAIL_START..].iter().map(|r| r.candidates).sum::<u64>()
         );
-        assert_eq!(
-            candidates, expected_candidates,
-            "every candidate is a path of length two or more in an admitted graph"
-        );
-        assert_eq!(
-            novel, expected_closure,
-            "the novel facts are exactly the closure"
-        );
+        assert_eq!(candidates, expected_candidates, "every candidate is a path of length two or more in an admitted graph");
+        assert_eq!(novel, expected_closure, "the novel facts are exactly the closure");
         assert_eq!(trace.last().unwrap().known, expected_closure);
         // The baseline pattern: 0, 3, 2, 1, 0 candidates in the five rounds from a chain's admission.
         for start in (0..100).step_by(5) {
-            let pattern: Vec<u64> = trace[start..start + 5]
-                .iter()
-                .map(|r| r.candidates)
-                .collect();
-            assert_eq!(
-                pattern,
-                vec![0, 3, 2, 1, 0],
-                "rounds {start}..{}",
-                start + 5
-            );
+            let pattern: Vec<u64> = trace[start..start + 5].iter().map(|r| r.candidates).collect();
+            assert_eq!(pattern, vec![0, 3, 2, 1, 0], "rounds {start}..{}", start + 5);
         }
         // Two layered graphs expanded per round during the trigger, 81 candidates per round.
-        assert!(
-            trace[102..=160].iter().all(|r| r.candidates == 81),
-            "{:?}",
-            trace[102..=160]
-                .iter()
-                .map(|r| r.candidates)
-                .collect::<Vec<_>>()
-        );
+        assert!(trace[102..=160].iter().all(|r| r.candidates == 81), "{:?}", trace[102..=160].iter().map(|r| r.candidates).collect::<Vec<_>>());
         // Nothing lingers: the last trigger graph finishes in round 161 alongside the next chain.
         assert_eq!(trace[161].candidates, 27 + 3);
         assert_eq!(trace[162].candidates, 2);
         assert_eq!(trace[163].candidates, 1);
         assert_eq!(trace[164].candidates, 0);
         for start in (165..ROUNDS - 5).step_by(5) {
-            let pattern: Vec<u64> = trace[start..start + 5]
-                .iter()
-                .map(|r| r.candidates)
-                .collect();
-            assert_eq!(
-                pattern,
-                vec![0, 3, 2, 1, 0],
-                "rounds {start}..{}",
-                start + 5
-            );
+            let pattern: Vec<u64> = trace[start..start + 5].iter().map(|r| r.candidates).collect();
+            assert_eq!(pattern, vec![0, 3, 2, 1, 0], "rounds {start}..{}", start + 5);
         }
     }
 
     /// Control: no trigger. The baseline pattern throughout.
     #[test]
     fn without_a_trigger_the_pattern_never_changes() {
-        let trace = run(
-            Workload {
-                trigger: WORKLOAD.baseline,
-                trigger_start: 0,
-                trigger_end: 0,
-                ..WORKLOAD
-            },
-            ROUNDS,
-        );
+        let trace = run(Workload { trigger: WORKLOAD.baseline, trigger_start: 0, trigger_end: 0, ..WORKLOAD }, ROUNDS);
         print_trajectory(&trace);
         for start in (0..ROUNDS - 5).step_by(5) {
-            let pattern: Vec<u64> = trace[start..start + 5]
-                .iter()
-                .map(|r| r.candidates)
-                .collect();
-            assert_eq!(
-                pattern,
-                vec![0, 3, 2, 1, 0],
-                "rounds {start}..{}",
-                start + 5
-            );
+            let pattern: Vec<u64> = trace[start..start + 5].iter().map(|r| r.candidates).collect();
+            assert_eq!(pattern, vec![0, 3, 2, 1, 0], "rounds {start}..{}", start + 5);
         }
-        assert_eq!(
-            trace.iter().map(|r| r.rejected).sum::<u64>(),
-            0,
-            "a chain has no duplicate paths"
-        );
+        assert_eq!(trace.iter().map(|r| r.rejected).sum::<u64>(), 0, "a chain has no duplicate paths");
     }
 
     /// Under schedule exploration the work never exceeds the closure's join candidates: however
@@ -383,10 +326,7 @@ mod sim_tests {
         let workload = Workload {
             baseline: Shape::Chain { edges: 3 },
             baseline_every: 4,
-            trigger: Shape::Layered {
-                layers: 3,
-                width: 2,
-            },
+            trigger: Shape::Layered { layers: 3, width: 2 },
             trigger_start: 1,
             trigger_end: 4,
         };
@@ -423,14 +363,8 @@ mod sim_tests {
                 }
                 while facts.try_next().await.is_some() {}
             }
-            assert!(
-                candidates <= expected_candidates,
-                "more candidates than paths: {candidates} > {expected_candidates}"
-            );
-            assert!(
-                novel <= expected_closure,
-                "more novel facts than the closure: {novel} > {expected_closure}"
-            );
+            assert!(candidates <= expected_candidates, "more candidates than paths: {candidates} > {expected_candidates}");
+            assert!(novel <= expected_closure, "more novel facts than the closure: {novel} > {expected_closure}");
             if candidates < expected_candidates {
                 short_ref.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }

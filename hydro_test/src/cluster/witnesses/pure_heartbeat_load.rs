@@ -83,9 +83,7 @@ mod sim_tests {
         let mut flow = FlowBuilder::new();
         let cluster = flow.cluster::<()>();
         let (timer_send, timer) = cluster.sim_input::<(), TotalOrder, ExactlyOnce>();
-        let received = pure_heartbeat(&cluster, timer)
-            .entries()
-            .sim_cluster_output();
+        let received = pure_heartbeat(&cluster, timer).entries().sim_cluster_output();
 
         let mut trace: Vec<Round> = Vec::with_capacity(rounds);
         let trace_ref = &mut trace;
@@ -137,12 +135,7 @@ mod sim_tests {
         for i in [0, 50, 99, 100, 130, 159, 160, 161, 200, 400, 600, 799] {
             if i < trace.len() {
                 let r = &trace[i];
-                println!(
-                    "round {i}: pulses={} received={:?} total={}",
-                    r.pulses,
-                    r.received,
-                    total_received(r)
-                );
+                println!("round {i}: pulses={} received={:?} total={}", r.pulses, r.received, total_received(r));
             }
         }
     }
@@ -152,15 +145,8 @@ mod sim_tests {
         let trace = run(N, WORKLOAD, ROUNDS);
         print_trajectory(&trace);
         for (i, r) in trace.iter().enumerate() {
-            assert_eq!(
-                total_received(r),
-                N as u64 * r.pulses,
-                "round {i}: work is exactly n per element"
-            );
-            assert!(
-                r.received.iter().all(|&x| x == r.pulses),
-                "round {i}: every member receives every heartbeat"
-            );
+            assert_eq!(total_received(r), N as u64 * r.pulses, "round {i}: work is exactly n per element");
+            assert!(r.received.iter().all(|&x| x == r.pulses), "round {i}: every member receives every heartbeat");
         }
         assert!(trace[..100].iter().all(|r| total_received(r) == 9));
         assert!(trace[100..160].iter().all(|r| total_received(r) == 42));
@@ -186,9 +172,7 @@ mod sim_tests {
             let mut flow = FlowBuilder::new();
             let cluster = flow.cluster::<()>();
             let (timer_send, timer) = cluster.sim_input::<(), TotalOrder, ExactlyOnce>();
-            let received = pure_heartbeat(&cluster, timer)
-                .entries()
-                .sim_cluster_output();
+            let received = pure_heartbeat(&cluster, timer).entries().sim_cluster_output();
             let mut total = 0u64;
             let total_ref = &mut total;
             flow.sim()
@@ -199,13 +183,7 @@ mod sim_tests {
                             timer_send.send(member, ());
                         }
                         let held = (100..100 + hold).contains(&round);
-                        let pulses = if held {
-                            0
-                        } else if round == 100 + hold {
-                            hold + 1
-                        } else {
-                            1
-                        };
+                        let pulses = if held { 0 } else if round == 100 + hold { hold + 1 } else { 1 };
                         for _ in 0..pulses {
                             timer_send.send(0, ());
                         }
@@ -218,10 +196,7 @@ mod sim_tests {
                         }
                     }
                 });
-            println!(
-                "hold {hold} rounds -> {total} messages for {} elements",
-                N as usize * RUN
-            );
+            println!("hold {hold} rounds -> {total} messages for {} elements", N as usize * RUN);
             assert_eq!(total, (N as u64) * (N as u64) * RUN as u64);
         }
     }
@@ -240,9 +215,7 @@ mod sim_tests {
         let mut flow = FlowBuilder::new();
         let cluster = flow.cluster::<()>();
         let (timer_send, timer) = cluster.sim_input::<(), TotalOrder, ExactlyOnce>();
-        let received = pure_heartbeat(&cluster, timer)
-            .entries()
-            .sim_cluster_output();
+        let received = pure_heartbeat(&cluster, timer).entries().sim_cluster_output();
         flow.sim()
             .with_cluster_size(&cluster, N as usize)
             .unit_test_fuzz_iterations(256)

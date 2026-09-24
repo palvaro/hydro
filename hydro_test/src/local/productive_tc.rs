@@ -214,10 +214,7 @@ mod tests {
             graph_send.send(edges.clone());
             let admitted = trace_recv.next().await;
             assert_eq!(admitted.input_edges, edges.len());
-            assert_eq!(
-                admitted.novel_facts,
-                BTreeSet::from_iter(edges.iter().copied()).len()
-            );
+            assert_eq!(admitted.novel_facts, BTreeSet::from_iter(edges.iter().copied()).len());
 
             let mut saw_redundancy = false;
             let mut drained = false;
@@ -250,7 +247,10 @@ mod tests {
 
     #[test]
     fn layered_diamond_has_finite_redundant_work() {
-        check_graph(vec![(0, 1), (0, 2), (1, 3), (2, 3), (3, 4), (3, 5)], true);
+        check_graph(
+            vec![(0, 1), (0, 2), (1, 3), (2, 3), (3, 4), (3, 5)],
+            true,
+        );
     }
 
     #[test]

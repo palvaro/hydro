@@ -80,22 +80,11 @@ pub enum Role {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Msg {
-    Heartbeat {
-        term: u64,
-        from: u32,
-    },
-    VoteRequest {
-        term: u64,
-        from: u32,
-    },
-    VoteGranted {
-        term: u64,
-        from: u32,
-    },
+    Heartbeat { term: u64, from: u32 },
+    VoteRequest { term: u64, from: u32 },
+    VoteGranted { term: u64, from: u32 },
     /// Harness load. Costs one unit of budget and has no other effect.
-    Client {
-        id: u64,
-    },
+    Client { id: u64 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,11 +105,7 @@ impl NodeState {
         NodeState {
             id,
             term: 1,
-            role: if id == 0 {
-                Role::Leader
-            } else {
-                Role::Follower
-            },
+            role: if id == 0 { Role::Leader } else { Role::Follower },
             last_heartbeat: 0,
             votes: 0,
             voted_in_term: 0,
@@ -190,24 +175,12 @@ pub fn step(
             st.last_heartbeat = now;
             started = Some(st.term);
             for p in peers {
-                out.push((
-                    *p,
-                    Msg::VoteRequest {
-                        term: st.term,
-                        from: st.id,
-                    },
-                ));
+                out.push((*p, Msg::VoteRequest { term: st.term, from: st.id }));
             }
         }
         if st.role == Role::Leader {
             for p in peers {
-                out.push((
-                    *p,
-                    Msg::Heartbeat {
-                        term: st.term,
-                        from: st.id,
-                    },
-                ));
+                out.push((*p, Msg::Heartbeat { term: st.term, from: st.id }));
             }
         }
     }
@@ -402,54 +375,52 @@ mod sim_tests {
         let trace_ref = &mut trace;
         let mut next_client_id = 0u64;
 
-        flow.sim()
-            .with_cluster_size(&cluster, MEMBERS as usize)
-            .run_prompt(async move || {
-                let mut inbox = vec![0usize; MEMBERS as usize];
-                let mut role = vec![(1u64, Role::Follower); MEMBERS as usize];
-                role[0].1 = Role::Leader;
-                for round in 0..rounds as u64 {
-                    for m in 0..MEMBERS {
-                        timer_send.send(m, ());
-                        for _ in 0..workload.at(round) {
-                            client_send.send(m, next_client_id);
-                            next_client_id += 1;
-                        }
+        flow.sim().with_cluster_size(&cluster, MEMBERS as usize).run_prompt(async move || {
+            let mut inbox = vec![0usize; MEMBERS as usize];
+            let mut role = vec![(1u64, Role::Follower); MEMBERS as usize];
+            role[0].1 = Role::Leader;
+            for round in 0..rounds as u64 {
+                for m in 0..MEMBERS {
+                    timer_send.send(m, ());
+                    for _ in 0..workload.at(round) {
+                        client_send.send(m, next_client_id);
+                        next_client_id += 1;
                     }
-                    quiesce().await;
-
-                    let mut r = Round::default();
-                    for m in 0..MEMBERS {
-                        while let Some((_, msg)) = wire.try_next(m).await {
-                            match msg {
-                                Msg::VoteRequest { .. } => r.vote_requests_sent += 1,
-                                Msg::Heartbeat { .. } => r.heartbeats_sent += 1,
-                                _ => {}
-                            }
-                        }
-                        while let Some(msg) = processed.try_next(m).await {
-                            match msg {
-                                Msg::Heartbeat { .. } => r.heartbeats_processed += 1,
-                                Msg::Client { .. } => r.clients_processed += 1,
-                                _ => {}
-                            }
-                        }
-                        while let Some(_) = elections.try_next(m).await {
-                            r.elections_started += 1;
-                        }
-                        while let Some(depth) = inbox_depth.try_next(m).await {
-                            inbox[m as usize] = depth;
-                        }
-                        while let Some(s) = state_trace.try_next(m).await {
-                            role[m as usize] = s;
-                        }
-                    }
-                    r.max_term = role.iter().map(|(t, _)| *t).max().unwrap();
-                    r.leaders = role.iter().filter(|(_, r)| *r == Role::Leader).count() as u64;
-                    r.inbox_total = inbox.iter().sum();
-                    trace_ref.push(r);
                 }
-            });
+                quiesce().await;
+
+                let mut r = Round::default();
+                for m in 0..MEMBERS {
+                    while let Some((_, msg)) = wire.try_next(m).await {
+                        match msg {
+                            Msg::VoteRequest { .. } => r.vote_requests_sent += 1,
+                            Msg::Heartbeat { .. } => r.heartbeats_sent += 1,
+                            _ => {}
+                        }
+                    }
+                    while let Some(msg) = processed.try_next(m).await {
+                        match msg {
+                            Msg::Heartbeat { .. } => r.heartbeats_processed += 1,
+                            Msg::Client { .. } => r.clients_processed += 1,
+                            _ => {}
+                        }
+                    }
+                    while let Some(_) = elections.try_next(m).await {
+                        r.elections_started += 1;
+                    }
+                    while let Some(depth) = inbox_depth.try_next(m).await {
+                        inbox[m as usize] = depth;
+                    }
+                    while let Some(s) = state_trace.try_next(m).await {
+                        role[m as usize] = s;
+                    }
+                }
+                r.max_term = role.iter().map(|(t, _)| *t).max().unwrap();
+                r.leaders = role.iter().filter(|(_, r)| *r == Role::Leader).count() as u64;
+                r.inbox_total = inbox.iter().sum();
+                trace_ref.push(r);
+            }
+        });
         trace
     }
 
@@ -507,21 +478,12 @@ mod sim_tests {
     const TAIL_START: usize = 600;
 
     fn print_trajectory(trace: &[Round]) {
-        for i in [
-            0, 50, 99, 105, 110, 119, 130, 160, 200, 250, 300, 400, 500, 600, 700, 799,
-        ] {
+        for i in [0, 50, 99, 105, 110, 119, 130, 160, 200, 250, 300, 400, 500, 600, 700, 799] {
             if i < trace.len() {
                 let r = &trace[i];
                 println!(
                     "round {i}: hb_processed={} hb_sent={} vote_req_sent={} elections={} clients_processed={} max_term={} leaders={} inbox_total={}",
-                    r.heartbeats_processed,
-                    r.heartbeats_sent,
-                    r.vote_requests_sent,
-                    r.elections_started,
-                    r.clients_processed,
-                    r.max_term,
-                    r.leaders,
-                    r.inbox_total
+                    r.heartbeats_processed, r.heartbeats_sent, r.vote_requests_sent, r.elections_started, r.clients_processed, r.max_term, r.leaders, r.inbox_total
                 );
             }
         }
@@ -530,11 +492,7 @@ mod sim_tests {
     fn assert_healthy_pre_trigger(trace: &[Round]) {
         let pre = &trace[10..100];
         assert!(
-            pre.iter()
-                .all(|r| r.heartbeats_processed == (MEMBERS - 1) as u64
-                    && r.elections_started == 0
-                    && r.leaders == 1
-                    && r.inbox_total == 0),
+            pre.iter().all(|r| r.heartbeats_processed == (MEMBERS - 1) as u64 && r.elections_started == 0 && r.leaders == 1 && r.inbox_total == 0),
             "the system should be healthy before the trigger"
         );
     }
@@ -551,11 +509,7 @@ mod sim_tests {
     fn report(name: &str, trace: &[Round]) {
         let (elections, votes) = wasted_work(trace);
         let peak_inbox = trace.iter().map(|r| r.inbox_total).max().unwrap();
-        let last_unhealthy = trace
-            .iter()
-            .rposition(|r| r.leaders != 1 || r.elections_started > 0)
-            .map(|i| i + 1)
-            .unwrap_or(0);
+        let last_unhealthy = trace.iter().rposition(|r| r.leaders != 1 || r.elections_started > 0).map(|i| i + 1).unwrap_or(0);
         let tail_hb = sum(trace, TAIL_START, trace.len(), |r| r.heartbeats_processed);
         println!(
             "{name}: elections started {elections}; vote requests sent {votes}; peak inbox total {peak_inbox}; last unhealthy round before {last_unhealthy}; final term {}; tail heartbeats processed {tail_hb} (baseline {}); tail inbox {} -> {}",
@@ -576,29 +530,14 @@ mod sim_tests {
         assert_healthy_pre_trigger(&trace);
 
         let (elections, votes) = wasted_work(&trace);
-        assert!(
-            elections >= 4 * 10,
-            "the trigger should have caused repeated stampedes, got {elections} elections"
-        );
-        assert!(
-            votes >= 4 * elections,
-            "each election should have sent a vote request to every peer"
-        );
+        assert!(elections >= 4 * 10, "the trigger should have caused repeated stampedes, got {elections} elections");
+        assert!(votes >= 4 * elections, "each election should have sent a vote request to every peer");
         // A stampede is every follower starting an election in the same round.
-        let stampedes = trace
-            .iter()
-            .filter(|r| r.elections_started >= (MEMBERS - 1) as u64)
-            .count();
-        assert!(
-            stampedes >= 10,
-            "followers should have timed out together, got {stampedes} stampede rounds"
-        );
+        let stampedes = trace.iter().filter(|r| r.elections_started >= (MEMBERS - 1) as u64).count();
+        assert!(stampedes >= 10, "followers should have timed out together, got {stampedes} stampede rounds");
         // The leader was lost for a long stretch.
         let leaderless = trace.iter().filter(|r| r.leaders == 0).count();
-        assert!(
-            leaderless > 100,
-            "the cluster should have been leaderless for a long stretch, got {leaderless} rounds"
-        );
+        assert!(leaderless > 100, "the cluster should have been leaderless for a long stretch, got {leaderless} rounds");
     }
 
     /// Wasted work grows with how long heartbeats are held behind the trigger's load.
@@ -615,19 +554,9 @@ mod sim_tests {
                 ROUNDS,
             );
             let wasted = wasted_work(&trace);
-            let last_unhealthy = trace
-                .iter()
-                .rposition(|r| r.leaders != 1 || r.elections_started > 0)
-                .map(|i| i + 1)
-                .unwrap_or(0);
-            println!(
-                "hold {hold} rounds: elections {} vote requests {} last unhealthy round before {last_unhealthy}",
-                wasted.0, wasted.1
-            );
-            assert!(
-                wasted > previous,
-                "wasted work should grow with the hold: {wasted:?} after {previous:?}"
-            );
+            let last_unhealthy = trace.iter().rposition(|r| r.leaders != 1 || r.elections_started > 0).map(|i| i + 1).unwrap_or(0);
+            println!("hold {hold} rounds: elections {} vote requests {} last unhealthy round before {last_unhealthy}", wasted.0, wasted.1);
+            assert!(wasted > previous, "wasted work should grow with the hold: {wasted:?} after {previous:?}");
             previous = wasted;
         }
     }
@@ -645,18 +574,8 @@ mod sim_tests {
         );
         print_trajectory(&trace);
         report("no trigger", &trace);
-        assert!(
-            trace[1..]
-                .iter()
-                .all(|r| r.heartbeats_processed == (MEMBERS - 1) as u64
-                    && r.leaders == 1
-                    && r.inbox_total == 0)
-        );
-        assert!(
-            trace
-                .iter()
-                .all(|r| r.elections_started == 0 && r.vote_requests_sent == 0 && r.max_term == 1)
-        );
+        assert!(trace[1..].iter().all(|r| r.heartbeats_processed == (MEMBERS - 1) as u64 && r.leaders == 1 && r.inbox_total == 0));
+        assert!(trace.iter().all(|r| r.elections_started == 0 && r.vote_requests_sent == 0 && r.max_term == 1));
     }
 
     /// The knob variant: same trigger, staggered timeouts. Also hazardous; the spread changes
@@ -664,36 +583,15 @@ mod sim_tests {
     #[test]
     fn spread_timeouts_still_stampede_but_settle_sooner() {
         let uniform = run(WORKLOAD, CONFIG, ROUNDS);
-        let spread = run(
-            WORKLOAD,
-            ElectionConfig {
-                timeout_spread_ticks: 3,
-                ..CONFIG
-            },
-            ROUNDS,
-        );
+        let spread = run(WORKLOAD, ElectionConfig { timeout_spread_ticks: 3, ..CONFIG }, ROUNDS);
         print_trajectory(&spread);
         report("uniform", &uniform);
         report("spread 3", &spread);
         assert_healthy_pre_trigger(&spread);
         let (elections, _) = wasted_work(&spread);
-        assert!(
-            elections > 0,
-            "the trigger should still cause elections with staggered timeouts"
-        );
-        let settle = |t: &[Round]| {
-            t.iter()
-                .rposition(|r| r.leaders != 1 || r.elections_started > 0)
-                .map(|i| i + 1)
-                .unwrap_or(0)
-        };
+        assert!(elections > 0, "the trigger should still cause elections with staggered timeouts");
+        let settle = |t: &[Round]| t.iter().rposition(|r| r.leaders != 1 || r.elections_started > 0).map(|i| i + 1).unwrap_or(0);
         assert!(settle(&spread) <= settle(&uniform));
-        assert!(
-            spread[TAIL_START..]
-                .iter()
-                .all(|r| r.heartbeats_processed == (MEMBERS - 1) as u64
-                    && r.leaders == 1
-                    && r.elections_started == 0)
-        );
+        assert!(spread[TAIL_START..].iter().all(|r| r.heartbeats_processed == (MEMBERS - 1) as u64 && r.leaders == 1 && r.elections_started == 0));
     }
 }

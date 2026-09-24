@@ -4,8 +4,8 @@
 //! acknowledgements, retries, outstanding-work state, or response path.
 
 use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
-use hydro_lang::location::MemberId;
 use hydro_lang::location::cluster::EventualConsistency;
+use hydro_lang::location::MemberId;
 use hydro_lang::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -42,8 +42,8 @@ mod tests {
     use hydro_deploy::Deployment;
     use hydro_lang::telemetry::emf::RecordMetricsSidecar;
 
-    use super::*;
     use crate::stage_telemetry::{StageWindow, parse_stage_windows};
+    use super::*;
 
     /// A window that would previously have been flagged as "retained-state
     /// network work without ordinary input": a stateful stage that emits
@@ -73,16 +73,12 @@ mod tests {
             flow.with_default_optimize::<hydro_lang::compile::embedded::EmbeddedDeploy>();
         let preview = built.preview_compile();
         let graph = preview.dfir_for(&cluster).unwrap();
-        assert!(graph.node_ids().any(|node_id| {
-            graph
-                .operator_tag(node_id)
-                .is_some_and(|tag| tag.starts_with("interval__"))
-        }));
-        assert!(
-            !graph
-                .node_ids()
-                .any(|node_id| graph.handoff_delay_type(node_id).is_some())
-        );
+        assert!(graph.node_ids().any(|node_id| graph
+            .operator_tag(node_id)
+            .is_some_and(|tag| tag.starts_with("interval__"))));
+        assert!(!graph
+            .node_ids()
+            .any(|node_id| graph.handoff_delay_type(node_id).is_some()));
         assert_eq!(
             graph
                 .nodes()
@@ -104,8 +100,7 @@ mod tests {
         let mut flow = FlowBuilder::new();
         let cluster = flow.cluster::<()>();
         let timer = cluster.source_interval(q!(std::time::Duration::from_millis(40)));
-        pure_heartbeat(&cluster, timer).entries().for_each(q!(
-            |_| {},
+        pure_heartbeat(&cluster, timer).entries().for_each(q!(|_| {},
             commutative = manual_proof!(/** terminal observation only */)
         ));
         let sidecar = RecordMetricsSidecar::builder()
@@ -179,9 +174,8 @@ mod tests {
             .entries()
             .sim_cluster_output();
 
-        flow.sim()
-            .with_cluster_size(&cluster, MEMBERS)
-            .exhaustive(async || {
+        flow.sim().with_cluster_size(&cluster, MEMBERS).exhaustive(
+            async || {
                 for member in 0..MEMBERS as u32 {
                     for _ in 0..PULSES {
                         timer_send.send(member, ());
@@ -191,6 +185,7 @@ mod tests {
                     let messages = received.collect_sorted::<Vec<_>>(member).await;
                     assert_eq!(messages.len(), PULSES * MEMBERS);
                 }
-            });
+            },
+        );
     }
 }
