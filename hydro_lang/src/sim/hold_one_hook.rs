@@ -250,7 +250,13 @@ impl HoldHandle {
     /// Every hook identity that has asked the driver a question with more than one answer so
     /// far, sorted.
     pub fn hooks_seen(&self) -> Vec<String> {
-        self.state.lock().unwrap().hooks_seen.iter().cloned().collect()
+        self.state
+            .lock()
+            .unwrap()
+            .hooks_seen
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// How many times the held hook was answered "do not move".
@@ -387,7 +393,9 @@ macro_rules! hold_int {
                 Policy::CatchUp => Some(match max {
                     Bound::Included(max) => *max,
                     // "Which version": the newest.
-                    Bound::Excluded(max) => (*max).checked_sub(1 as $ty).unwrap_or(least).max(least),
+                    Bound::Excluded(max) => {
+                        (*max).checked_sub(1 as $ty).unwrap_or(least).max(least)
+                    }
                     Bound::Unbounded => least,
                 }),
                 Policy::Prompt => Some(match max {

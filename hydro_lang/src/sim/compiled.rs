@@ -1990,7 +1990,11 @@ impl<W: std::io::Write> LaunchedSim<W> {
         for (loc, member, dfir) in &self.async_dfirs {
             super::work_counts::record_dfir(&format!("{loc:?}"), *member, &dfir.metrics());
         }
-        for tick in self.possibly_ready_ticks.iter().chain(&self.not_ready_ticks) {
+        for tick in self
+            .possibly_ready_ticks
+            .iter()
+            .chain(&self.not_ready_ticks)
+        {
             super::work_counts::record_dfir(
                 &format!("{:?} tick", tick.parent_location),
                 tick.cluster_id,
@@ -2112,7 +2116,11 @@ impl<W: std::io::Write> LaunchedSim<W> {
                     })
                 });
 
-                run_hooks(tick_decision_writer.as_mut(), &mut tick.hooks, tick.cluster_id);
+                run_hooks(
+                    tick_decision_writer.as_mut(),
+                    &mut tick.hooks,
+                    tick.cluster_id,
+                );
 
                 let run_tick_future = tick.dfir.run_tick();
                 if !tick.inline_hooks.is_empty() {

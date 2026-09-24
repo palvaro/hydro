@@ -180,9 +180,13 @@ where
     let service_nanos = service_time.as_nanos() as u64;
 
     // Responses come back from the server, which is downstream of `outgoing` (below).
-    let (responses_complete, responses) = client
-        .forward_ref::<Stream<Response<T>, Process<'a, Client>, Unbounded, TotalOrder, ExactlyOnce>>(
-        );
+    let (responses_complete, responses) = client.forward_ref::<Stream<
+        Response<T>,
+        Process<'a, Client>,
+        Unbounded,
+        TotalOrder,
+        ExactlyOnce,
+    >>();
 
     // ---- Client: logical clock, outstanding table, timeouts, re-sends ------------------------
     let (outgoing, retried_out, completed, abandoned) = sliced! {
@@ -467,7 +471,12 @@ mod sim_tests {
     }
 
     /// Runs `rounds` rounds and returns one record per round.
-    fn run(workload: Workload, policy: RetryPolicy, server_config: ServerConfig, rounds: usize) -> Vec<Round> {
+    fn run(
+        workload: Workload,
+        policy: RetryPolicy,
+        server_config: ServerConfig,
+        rounds: usize,
+    ) -> Vec<Round> {
         let mut flow = FlowBuilder::new();
         let client = flow.process::<Client>();
         let server = flow.process::<Server>();
@@ -583,7 +592,13 @@ mod sim_tests {
                 let r = &trace[i];
                 println!(
                     "round {i}: completed={} abandoned={} sent_first={} sent_retry={} served_first={} served_again={} backlog={}",
-                    r.completed, r.abandoned, r.sent_first, r.sent_retry, r.served_first, r.served_again, r.backlog
+                    r.completed,
+                    r.abandoned,
+                    r.sent_first,
+                    r.sent_retry,
+                    r.served_first,
+                    r.served_again,
+                    r.backlog
                 );
             }
         }
@@ -596,8 +611,14 @@ mod sim_tests {
 
         // Baseline before the trigger: every request answered within the round it was sent.
         let pre = &trace[10..100];
-        assert!(pre.iter().all(|r| r.backlog == 0), "backlog should be empty before the trigger");
-        assert!(pre.iter().all(|r| r.completed == 2 && r.sent_retry == 0 && r.abandoned == 0));
+        assert!(
+            pre.iter().all(|r| r.backlog == 0),
+            "backlog should be empty before the trigger"
+        );
+        assert!(
+            pre.iter()
+                .all(|r| r.completed == 2 && r.sent_retry == 0 && r.abandoned == 0)
+        );
         assert_eq!(mean_latency(&trace, 10, 100), 0.0);
 
         // Long after the trigger ended, offered load is back at baseline but the system has
@@ -625,7 +646,10 @@ mod sim_tests {
             tail.last().unwrap().backlog > tail.first().unwrap().backlog,
             "the backlog should still be growing at the end of the run"
         );
-        assert!(tail.windows(2).all(|w| w[1].backlog >= w[0].backlog), "backlog never shrinks in the tail");
+        assert!(
+            tail.windows(2).all(|w| w[1].backlog >= w[0].backlog),
+            "backlog never shrinks in the tail"
+        );
     }
 
     /// Control: retries armed, no trigger. The loop never fires.
@@ -641,7 +665,11 @@ mod sim_tests {
             ROUNDS,
         );
         print_trajectory(&trace);
-        assert!(trace.iter().all(|r| r.sent_retry == 0 && r.abandoned == 0 && r.served_again == 0));
+        assert!(
+            trace
+                .iter()
+                .all(|r| r.sent_retry == 0 && r.abandoned == 0 && r.served_again == 0)
+        );
         assert!(trace.iter().all(|r| r.backlog == 0));
         assert!(trace[1..].iter().all(|r| r.completed == 2));
         assert_eq!(mean_latency(&trace, 0, ROUNDS), 0.0);
@@ -650,14 +678,35 @@ mod sim_tests {
     /// Control: same trigger, no retries. The backlog drains and latency returns to zero.
     #[test]
     fn without_retries_the_system_recovers() {
-        let trace = run(WORKLOAD, RetryPolicy { max_attempts: 1, ..POLICY }, SERVER, ROUNDS);
+        let trace = run(
+            WORKLOAD,
+            RetryPolicy {
+                max_attempts: 1,
+                ..POLICY
+            },
+            SERVER,
+            ROUNDS,
+        );
         print_trajectory(&trace);
-        assert!(trace.iter().all(|r| r.sent_retry == 0 && r.served_again == 0));
+        assert!(
+            trace
+                .iter()
+                .all(|r| r.sent_retry == 0 && r.served_again == 0)
+        );
         let peak = trace.iter().map(|r| r.backlog).max().unwrap();
-        println!("peak backlog {peak}; tail backlog {}", trace.last().unwrap().backlog);
-        assert!(peak > 200, "the trigger should have built a backlog past the timeout, got {peak}");
+        println!(
+            "peak backlog {peak}; tail backlog {}",
+            trace.last().unwrap().backlog
+        );
+        assert!(
+            peak > 200,
+            "the trigger should have built a backlog past the timeout, got {peak}"
+        );
         let tail = &trace[TAIL_START..];
-        assert!(tail.iter().all(|r| r.backlog == 0 && r.completed == 2 && r.abandoned == 0));
+        assert!(
+            tail.iter()
+                .all(|r| r.backlog == 0 && r.completed == 2 && r.abandoned == 0)
+        );
         assert_eq!(mean_latency(&trace, TAIL_START, ROUNDS), 0.0);
     }
 }
@@ -696,15 +745,18 @@ pub fn deploy_with_workload<'a>(
     // One timer drives both the clock and the load generator, so a tick's requests are
     // issued in that tick. Request bodies carry the tick they were issued in.
     let ticks = client.source_interval(q!(Duration::from_nanos(clock_nanos)));
-    let requests = ticks.clone().enumerate().flat_map_ordered(q!(move |(i, _)| {
-        let tick = i as u64;
-        let n = if tick >= trigger_start_tick && tick < trigger_end_tick {
-            trigger_per_tick
-        } else {
-            baseline_per_tick
-        };
-        std::iter::repeat_n(tick, n as usize)
-    }));
+    let requests = ticks
+        .clone()
+        .enumerate()
+        .flat_map_ordered(q!(move |(i, _)| {
+            let tick = i as u64;
+            let n = if tick >= trigger_start_tick && tick < trigger_end_tick {
+                trigger_per_tick
+            } else {
+                baseline_per_tick
+            };
+            std::iter::repeat_n(tick, n as usize)
+        }));
     let client_report_tick = client.source_interval(q!(Duration::from_nanos(report_nanos)));
     let server_report_tick = server.source_interval(q!(Duration::from_nanos(report_nanos)));
 
@@ -719,12 +771,14 @@ pub fn deploy_with_workload<'a>(
         server_config,
     );
 
-    outputs.server_metrics.for_each(q!(|(i, m, backlog)| println!(
-        "server t={}s processed={} backlog={}",
-        i + 1,
-        m.processed,
-        backlog
-    )));
+    outputs
+        .server_metrics
+        .for_each(q!(|(i, m, backlog)| println!(
+            "server t={}s processed={} backlog={}",
+            i + 1,
+            m.processed,
+            backlog
+        )));
 
     outputs.client_metrics.for_each(q!(|(i, m)| println!(
         "client t={}s completed={} mean_latency_ticks={:.2} max_latency_ticks={} sent={} retried={} abandoned={}",
@@ -737,7 +791,6 @@ pub fn deploy_with_workload<'a>(
         m.abandoned
     )));
 }
-
 
 /// Deployment on localhost. The harness supplies the workload (a `source_interval`-driven
 /// generator following a [`Workload`]) and the clocks, and observes the program through its
@@ -981,11 +1034,22 @@ mod deployed_tests {
             .filter(|l| l.t >= 3)
             .map(|l| l.mean_latency_ticks)
             .fold(0.0, f64::max);
-        println!("no trigger: goodput {goodput:.0}/s, mean latency {latency:.2} ticks, worst 1s-window mean {worst:.2} ticks");
+        println!(
+            "no trigger: goodput {goodput:.0}/s, mean latency {latency:.2} ticks, worst 1s-window mean {worst:.2} ticks"
+        );
 
-        assert!(latency < 4.0, "latency should stay low, got {latency} ticks");
-        assert!(goodput > 350.0, "goodput should stay at ~400/s, got {goodput}");
-        assert!(client.iter().all(|l| l.retried == 0), "no request should ever time out");
+        assert!(
+            latency < 4.0,
+            "latency should stay low, got {latency} ticks"
+        );
+        assert!(
+            goodput > 350.0,
+            "goodput should stay at ~400/s, got {goodput}"
+        );
+        assert!(
+            client.iter().all(|l| l.retried == 0),
+            "no request should ever time out"
+        );
         assert!(client.iter().all(|l| l.abandoned == 0));
         assert!(server.iter().all(|l| l.backlog == 0));
     }
