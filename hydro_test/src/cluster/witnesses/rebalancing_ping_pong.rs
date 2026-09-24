@@ -359,7 +359,10 @@ mod sim_tests {
                                 r.completed_bounced += 1;
                             }
                         }
-                        r.migrated += migrated.collect::<Vec<(MemberId<Worker>, Task)>>(worker).await.len() as u64;
+                        r.migrated += migrated
+                            .collect::<Vec<(MemberId<Worker>, Task)>>(worker)
+                            .await
+                            .len() as u64;
                         for t in ticks.collect::<Vec<WorkerTick>>(worker).await {
                             r.admitted += t.admitted as u64;
                             queues[worker as usize] = t.queue_len;
@@ -431,7 +434,9 @@ mod sim_tests {
     const TAIL_START: usize = 600;
 
     fn print_trajectory(trace: &[Round]) {
-        for i in [0, 50, 99, 104, 110, 130, 159, 160, 200, 250, 300, 400, 500, 600, 700, 799] {
+        for i in [
+            0, 50, 99, 104, 110, 130, 159, 160, 200, 250, 300, 400, 500, 600, 700, 799,
+        ] {
             if i < trace.len() {
                 let r = &trace[i];
                 println!(
@@ -445,10 +450,17 @@ mod sim_tests {
     fn assert_healthy(trace: &[Round], from: usize, to: usize) {
         for (i, r) in trace[from..to].iter().enumerate() {
             let i = i + from;
-            assert_eq!(r.completed, 6, "round {i}: every task processed in its round");
+            assert_eq!(
+                r.completed, 6,
+                "round {i}: every task processed in its round"
+            );
             assert_eq!(r.migrated, 0, "round {i}: nothing to rebalance");
             assert_eq!(r.admitted, 0, "round {i}: nothing admitted");
-            assert!(r.queues.iter().all(|&q| q == 0), "round {i}: queues empty, got {:?}", r.queues);
+            assert!(
+                r.queues.iter().all(|&q| q == 0),
+                "round {i}: queues empty, got {:?}",
+                r.queues
+            );
         }
     }
 
@@ -476,12 +488,26 @@ mod sim_tests {
         let migrated_total = sum(&trace, 0, ROUNDS, |r| r.migrated);
         let bounced_total = sum(&trace, 0, ROUNDS, |r| r.completed_bounced);
         let peak = trace.iter().map(total_queue).max().unwrap();
-        let empty_from = trace[160..].iter().position(|r| total_queue(r) == 0).map(|i| i + 160);
-        println!("migrated {migrated_total} tasks over the run, {bounced_total} of them more than once; peak total queue {peak}; empty from round {empty_from:?}");
-        assert!(peak > 200, "the trigger should have built a queue, got {peak}");
-        assert!(bounced_total > 0, "stale reports should make some tasks bounce");
+        let empty_from = trace[160..]
+            .iter()
+            .position(|r| total_queue(r) == 0)
+            .map(|i| i + 160);
+        println!(
+            "migrated {migrated_total} tasks over the run, {bounced_total} of them more than once; peak total queue {peak}; empty from round {empty_from:?}"
+        );
+        assert!(
+            peak > 200,
+            "the trigger should have built a queue, got {peak}"
+        );
+        assert!(
+            bounced_total > 0,
+            "stale reports should make some tasks bounce"
+        );
         // The expected collapse did not happen: the tail is baseline.
-        assert_eq!((completed, bounced, migrated, admitted), (6 * (ROUNDS - TAIL_START) as u64, 0, 0, 0));
+        assert_eq!(
+            (completed, bounced, migrated, admitted),
+            (6 * (ROUNDS - TAIL_START) as u64, 0, 0, 0)
+        );
         assert_healthy(&trace, TAIL_START, ROUNDS);
     }
 
@@ -511,25 +537,52 @@ mod sim_tests {
         let migrated_total = sum(&trace, 0, ROUNDS, |r| r.migrated);
         let bounced_total = sum(&trace, 0, ROUNDS, |r| r.completed_bounced);
         let peak = trace.iter().map(total_queue).max().unwrap();
-        let empty_from = trace[160..].iter().position(|r| total_queue(r) == 0).map(|i| i + 160);
-        println!("migrated {migrated_total} tasks over the run, {bounced_total} of them more than once; peak total queue {peak}; empty from round {empty_from:?}");
-        assert!(peak > 200, "the trigger should have built a queue, got {peak}");
-        assert!(migrated_total > 0, "the skew should have been rebalanced at least once");
+        let empty_from = trace[160..]
+            .iter()
+            .position(|r| total_queue(r) == 0)
+            .map(|i| i + 160);
+        println!(
+            "migrated {migrated_total} tasks over the run, {bounced_total} of them more than once; peak total queue {peak}; empty from round {empty_from:?}"
+        );
+        assert!(
+            peak > 200,
+            "the trigger should have built a queue, got {peak}"
+        );
+        assert!(
+            migrated_total > 0,
+            "the skew should have been rebalanced at least once"
+        );
         assert_healthy(&trace, TAIL_START, ROUNDS);
     }
 
     /// The same program under fresh reports: same trigger, no cooldown, one report per tick.
     #[test]
     fn with_fresh_reports_the_cluster_recovers() {
-        let trace = run(N, Workload { report_every: 1, ..WORKLOAD }, STALE_NO_COOLDOWN, ROUNDS);
+        let trace = run(
+            N,
+            Workload {
+                report_every: 1,
+                ..WORKLOAD
+            },
+            STALE_NO_COOLDOWN,
+            ROUNDS,
+        );
         print_trajectory(&trace);
         assert_healthy(&trace, 0, 100);
         let migrated_total = sum(&trace, 0, ROUNDS, |r| r.migrated);
         let bounced_total = sum(&trace, 0, ROUNDS, |r| r.completed_bounced);
         let peak = trace.iter().map(total_queue).max().unwrap();
-        let empty_from = trace[160..].iter().position(|r| total_queue(r) == 0).map(|i| i + 160);
-        println!("migrated {migrated_total} tasks over the run, {bounced_total} of them more than once; peak total queue {peak}; empty from round {empty_from:?}");
-        assert!(peak > 200, "the trigger should have built a queue, got {peak}");
+        let empty_from = trace[160..]
+            .iter()
+            .position(|r| total_queue(r) == 0)
+            .map(|i| i + 160);
+        println!(
+            "migrated {migrated_total} tasks over the run, {bounced_total} of them more than once; peak total queue {peak}; empty from round {empty_from:?}"
+        );
+        assert!(
+            peak > 200,
+            "the trigger should have built a queue, got {peak}"
+        );
         assert_healthy(&trace, TAIL_START, ROUNDS);
     }
 
@@ -544,11 +597,28 @@ mod sim_tests {
         const RUN: usize = 400;
         let periods = [1u64, 2, 3, 4, 6, 8];
         let measure = |k: u64, config: RebalanceConfig| {
-            let trace = run(N, Workload { report_every: k, ..WORKLOAD }, config, RUN);
-            (sum(&trace, 0, RUN, |r| r.migrated), sum(&trace, 0, RUN, |r| r.completed_bounced))
+            let trace = run(
+                N,
+                Workload {
+                    report_every: k,
+                    ..WORKLOAD
+                },
+                config,
+                RUN,
+            );
+            (
+                sum(&trace, 0, RUN, |r| r.migrated),
+                sum(&trace, 0, RUN, |r| r.completed_bounced),
+            )
         };
-        let hot: Vec<(u64, u64)> = periods.iter().map(|&k| measure(k, STALE_NO_COOLDOWN)).collect();
-        let cooled: Vec<(u64, u64)> = periods.iter().map(|&k| measure(k, STALE_WITH_COOLDOWN)).collect();
+        let hot: Vec<(u64, u64)> = periods
+            .iter()
+            .map(|&k| measure(k, STALE_NO_COOLDOWN))
+            .collect();
+        let cooled: Vec<(u64, u64)> = periods
+            .iter()
+            .map(|&k| measure(k, STALE_WITH_COOLDOWN))
+            .collect();
         for ((k, h), c) in periods.iter().zip(&hot).zip(&cooled) {
             println!(
                 "reports every {k} rounds -> over {RUN} rounds: no cooldown migrated {} bounced {}, cooldown 8 migrated {} bounced {}",
@@ -556,9 +626,22 @@ mod sim_tests {
             );
         }
         assert_eq!(hot[0].1, 0, "fresh reports should bounce nothing: {hot:?}");
-        assert!(hot[2..].iter().all(|h| h.1 > 0), "stale reports should bounce tasks: {hot:?}");
-        assert!(hot[3].0 >= 2 * hot[0].0 && hot[5].0 >= 2 * hot[0].0, "stale reports should multiply migrations: {hot:?}");
-        assert!(cooled.iter().all(|c| c.1 == 0), "the cooldown should bounce nothing: {cooled:?}");
-        assert!(cooled.iter().all(|c| c.0 <= 2 * hot[0].0), "the cooldown should keep migrations near the fresh-report count: {cooled:?} vs {}", hot[0].0);
+        assert!(
+            hot[2..].iter().all(|h| h.1 > 0),
+            "stale reports should bounce tasks: {hot:?}"
+        );
+        assert!(
+            hot[3].0 >= 2 * hot[0].0 && hot[5].0 >= 2 * hot[0].0,
+            "stale reports should multiply migrations: {hot:?}"
+        );
+        assert!(
+            cooled.iter().all(|c| c.1 == 0),
+            "the cooldown should bounce nothing: {cooled:?}"
+        );
+        assert!(
+            cooled.iter().all(|c| c.0 <= 2 * hot[0].0),
+            "the cooldown should keep migrations near the fresh-report count: {cooled:?} vs {}",
+            hot[0].0
+        );
     }
 }
