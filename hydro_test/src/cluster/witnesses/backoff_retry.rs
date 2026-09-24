@@ -165,9 +165,13 @@ where
     // `q!` closures capture primitives only, so the flag crosses as an integer.
     let backoff_flag: u32 = backoff as u32;
 
-    let (responses_complete, responses) = client
-        .forward_ref::<Stream<Response<T>, Process<'a, Client>, Unbounded, TotalOrder, ExactlyOnce>>(
-        );
+    let (responses_complete, responses) = client.forward_ref::<Stream<
+        Response<T>,
+        Process<'a, Client>,
+        Unbounded,
+        TotalOrder,
+        ExactlyOnce,
+    >>();
 
     // ---- Client: logical clock, outstanding table, timeouts, re-sends ------------------------
     let (outgoing, completed, abandoned) = sliced! {
@@ -333,16 +337,30 @@ mod sim_tests {
 
     /// Builds the flow and returns the round loop's trace. Shared between `run_prompt` and
     /// `fuzz` so the same harness drives both.
-    fn build(flow: &mut FlowBuilder<'_>, policy: RetryPolicy, server_config: ServerConfig) -> Harness {
+    fn build(
+        flow: &mut FlowBuilder<'_>,
+        policy: RetryPolicy,
+        server_config: ServerConfig,
+    ) -> Harness {
         let client = flow.process::<Client>();
         let server = flow.process::<Server>();
         let (request_send, requests) = client.sim_input::<u64, TotalOrder, ExactlyOnce>();
         let (clock_send, client_clock) = client.sim_input::<(), TotalOrder, ExactlyOnce>();
-        let outputs = rpc_with_backoff(&client, &server, requests, client_clock, policy, server_config);
+        let outputs = rpc_with_backoff(
+            &client,
+            &server,
+            requests,
+            client_clock,
+            policy,
+            server_config,
+        );
         Harness {
             request_send,
             clock_send,
-            completed: outputs.completed.map(q!(|c| (c.id, c.latency_ticks))).sim_output(),
+            completed: outputs
+                .completed
+                .map(q!(|c| (c.id, c.latency_ticks)))
+                .sim_output(),
             abandoned: outputs.abandoned.sim_output(),
             outgoing: outputs.outgoing.sim_output(),
             processed: outputs.processed.sim_output(),
@@ -398,7 +416,12 @@ mod sim_tests {
         trace
     }
 
-    fn run(workload: Workload, policy: RetryPolicy, server_config: ServerConfig, rounds: usize) -> Vec<Round> {
+    fn run(
+        workload: Workload,
+        policy: RetryPolicy,
+        server_config: ServerConfig,
+        rounds: usize,
+    ) -> Vec<Round> {
         let mut flow = FlowBuilder::new();
         let h = build(&mut flow, policy, server_config);
         let mut trace = Vec::new();
@@ -452,12 +475,20 @@ mod sim_tests {
     const TAIL_START: usize = 800;
 
     fn print_trajectory(trace: &[Round]) {
-        for i in [0, 50, 99, 130, 159, 200, 250, 300, 400, 500, 600, 700, 799, 999] {
+        for i in [
+            0, 50, 99, 130, 159, 200, 250, 300, 400, 500, 600, 700, 799, 999,
+        ] {
             if i < trace.len() {
                 let r = &trace[i];
                 println!(
                     "round {i}: completed={} abandoned={} sent_first={} sent_retry={} served_first={} served_again={} backlog={}",
-                    r.completed, r.abandoned, r.sent_first, r.sent_retry, r.served_first, r.served_again, r.backlog
+                    r.completed,
+                    r.abandoned,
+                    r.sent_first,
+                    r.sent_retry,
+                    r.served_first,
+                    r.served_again,
+                    r.backlog
                 );
             }
         }
@@ -469,10 +500,17 @@ mod sim_tests {
         print_trajectory(&trace);
 
         let pre = &trace[10..100];
-        assert!(pre.iter().all(|r| r.backlog == 0 && r.completed == 2 && r.sent_retry == 0));
+        assert!(
+            pre.iter()
+                .all(|r| r.backlog == 0 && r.completed == 2 && r.sent_retry == 0)
+        );
 
         let peak = trace.iter().map(|r| r.backlog).max().unwrap();
-        let recovered_at = trace.iter().rposition(|r| r.backlog > 0).map(|i| i + 1).unwrap();
+        let recovered_at = trace
+            .iter()
+            .rposition(|r| r.backlog > 0)
+            .map(|i| i + 1)
+            .unwrap();
         let total_first = sum(&trace, 0, ROUNDS, |r| r.sent_first);
         let total_retry = sum(&trace, 0, ROUNDS, |r| r.sent_retry);
         let tail_completed = sum(&trace, TAIL_START, ROUNDS, |r| r.completed);
@@ -480,12 +518,29 @@ mod sim_tests {
         println!(
             "peak backlog {peak}; backlog last nonzero before round {recovered_at}; sends first={total_first} retry={total_retry}; tail completed {tail_completed}, served again {tail_again}"
         );
-        assert!(peak > 200, "the trigger should have built a backlog past the timeout, got {peak}");
-        assert!(total_retry > 0, "the trigger should have caused some re-sends");
-        assert!(recovered_at <= 700, "backlog should be gone by round 700, was last non-zero before round {recovered_at}");
+        assert!(
+            peak > 200,
+            "the trigger should have built a backlog past the timeout, got {peak}"
+        );
+        assert!(
+            total_retry > 0,
+            "the trigger should have caused some re-sends"
+        );
+        assert!(
+            recovered_at <= 700,
+            "backlog should be gone by round 700, was last non-zero before round {recovered_at}"
+        );
         let tail = &trace[TAIL_START..];
-        assert!(tail.iter().all(|r| r.backlog == 0 && r.completed == 2 && r.sent_retry == 0 && r.abandoned == 0));
-        assert!(total_first + total_retry <= 2 * total_first, "total work should be at most 2x the input");
+        assert!(
+            tail.iter().all(|r| r.backlog == 0
+                && r.completed == 2
+                && r.sent_retry == 0
+                && r.abandoned == 0)
+        );
+        assert!(
+            total_first + total_retry <= 2 * total_first,
+            "total work should be at most 2x the input"
+        );
     }
 
     /// Control: backoff on, no trigger.
@@ -501,7 +556,10 @@ mod sim_tests {
             ROUNDS,
         );
         print_trajectory(&trace);
-        assert!(trace.iter().all(|r| r.sent_retry == 0 && r.abandoned == 0 && r.served_again == 0 && r.backlog == 0));
+        assert!(trace.iter().all(|r| r.sent_retry == 0
+            && r.abandoned == 0
+            && r.served_again == 0
+            && r.backlog == 0));
         assert!(trace[1..].iter().all(|r| r.completed == 2));
     }
 
@@ -523,8 +581,13 @@ mod sim_tests {
             let first = sum(&trace, 0, ROUNDS, |r| r.sent_first);
             let retry = sum(&trace, 0, ROUNDS, |r| r.sent_retry);
             let again = sum(&trace, 0, ROUNDS, |r| r.served_again);
-            println!("hold {hold} rounds: first sends {first}, re-sends {retry}, served again {again}");
-            assert!(retry > previous, "re-sends should grow with the hold: {retry} after {previous}");
+            println!(
+                "hold {hold} rounds: first sends {first}, re-sends {retry}, served again {again}"
+            );
+            assert!(
+                retry > previous,
+                "re-sends should grow with the hold: {retry} after {previous}"
+            );
             previous = retry;
         }
     }
@@ -532,7 +595,15 @@ mod sim_tests {
     /// The knob's other setting: same trigger, `backoff = false`, which is W1 and collapses.
     #[test]
     fn without_backoff_the_system_collapses() {
-        let trace = run(WORKLOAD, RetryPolicy { backoff: false, ..POLICY }, SERVER, 800);
+        let trace = run(
+            WORKLOAD,
+            RetryPolicy {
+                backoff: false,
+                ..POLICY
+            },
+            SERVER,
+            800,
+        );
         print_trajectory(&trace);
         let tail = &trace[600..];
         let tail_completed = sum(&trace, 600, 800, |r| r.completed);
@@ -565,7 +636,10 @@ mod sim_tests {
             let trace = drive(&h, workload, SHORT_ROUNDS).await;
             let first = sum(&trace, 0, SHORT_ROUNDS, |r| r.sent_first);
             let retry = sum(&trace, 0, SHORT_ROUNDS, |r| r.sent_retry);
-            assert!(retry <= first, "re-sends {retry} exceeded first sends {first}");
+            assert!(
+                retry <= first,
+                "re-sends {retry} exceeded first sends {first}"
+            );
         });
     }
 }
