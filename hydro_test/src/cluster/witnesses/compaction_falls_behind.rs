@@ -386,12 +386,20 @@ mod sim_tests {
     const TAIL_START: usize = 600;
 
     fn print_trajectory(trace: &[Round]) {
-        for i in [0, 50, 99, 100, 101, 130, 159, 160, 200, 250, 300, 400, 500, 600, 700, 799] {
+        for i in [
+            0, 50, 99, 100, 101, 130, 159, 160, 200, 250, 300, 400, 500, 600, 700, 799,
+        ] {
             if i < trace.len() {
                 let r = &trace[i];
                 println!(
                     "round {i}: ticks={} served_puts={} served_gets={} serve_units={} compact_units={} backlog={} segment={}",
-                    r.ticks, r.served_puts, r.served_gets, r.serve_units, r.compact_units, r.backlog, r.segment
+                    r.ticks,
+                    r.served_puts,
+                    r.served_gets,
+                    r.serve_units,
+                    r.compact_units,
+                    r.backlog,
+                    r.segment
                 );
             }
         }
@@ -400,12 +408,25 @@ mod sim_tests {
     fn assert_healthy(trace: &[Round], from: usize, to: usize) {
         for (i, r) in trace[from..to].iter().enumerate() {
             let i = i + from;
-            assert_eq!(r.ticks, 1, "round {i}: the store should run one tick per round");
+            assert_eq!(
+                r.ticks, 1,
+                "round {i}: the store should run one tick per round"
+            );
             assert_eq!(r.backlog, 0, "round {i}: backlog should be empty");
             assert_eq!(r.segment, 0, "round {i}: segment should be compacted");
-            assert_eq!((r.served_puts, r.served_gets), (1, 4), "round {i}: every operation served");
-            assert_eq!(r.serve_units, 5, "round {i}: every operation costs one unit");
-            assert_eq!(r.compact_units, 1, "round {i}: the put is compacted in the same round");
+            assert_eq!(
+                (r.served_puts, r.served_gets),
+                (1, 4),
+                "round {i}: every operation served"
+            );
+            assert_eq!(
+                r.serve_units, 5,
+                "round {i}: every operation costs one unit"
+            );
+            assert_eq!(
+                r.compact_units, 1,
+                "round {i}: the put is compacted in the same round"
+            );
         }
     }
 
@@ -438,13 +459,22 @@ mod sim_tests {
             tail_serve > 5 * (ROUNDS - TAIL_START) as u64 * 2,
             "the store should spend far more than baseline units serving far fewer operations (spent {tail_serve})"
         );
-        assert_eq!(tail_compact, 0, "compaction should never get a unit in the tail");
+        assert_eq!(
+            tail_compact, 0,
+            "compaction should never get a unit in the tail"
+        );
         assert!(
             tail.last().unwrap().backlog > tail.first().unwrap().backlog,
             "the backlog should still be growing at the end of the run"
         );
-        assert!(tail.windows(2).all(|w| w[1].backlog >= w[0].backlog), "backlog never shrinks in the tail");
-        assert!(tail.windows(2).all(|w| w[1].segment >= w[0].segment), "segment never shrinks in the tail");
+        assert!(
+            tail.windows(2).all(|w| w[1].backlog >= w[0].backlog),
+            "backlog never shrinks in the tail"
+        );
+        assert!(
+            tail.windows(2).all(|w| w[1].segment >= w[0].segment),
+            "segment never shrinks in the tail"
+        );
     }
 
     /// Control: background compaction, no trigger. The put is compacted every round.
@@ -473,15 +503,27 @@ mod sim_tests {
         assert_healthy(&trace, 0, 100);
         let peak = trace.iter().map(|r| r.backlog).max().unwrap();
         let peak_round = trace.iter().position(|r| r.backlog == peak).unwrap();
-        let empty_from = trace[160..].iter().position(|r| r.backlog == 0).map(|i| i + 160);
+        let empty_from = trace[160..]
+            .iter()
+            .position(|r| r.backlog == 0)
+            .map(|i| i + 160);
         let max_segment = trace.iter().map(|r| r.segment).max().unwrap();
-        println!("peak backlog {peak} at round {peak_round}; empty again from round {empty_from:?}; largest end-of-round segment {max_segment}");
-        assert!(peak > 500, "the trigger should have built a backlog, got {peak}");
+        println!(
+            "peak backlog {peak} at round {peak_round}; empty again from round {empty_from:?}; largest end-of-round segment {max_segment}"
+        );
+        assert!(
+            peak > 500,
+            "the trigger should have built a backlog, got {peak}"
+        );
         assert!(
             max_segment <= RESERVED.compaction_reserve,
             "the reserve compacts everything the previous round appended, so the segment never exceeds the reserve (got {max_segment})"
         );
-        assert_eq!(sum(&trace, 0, ROUNDS, |r| r.served_gets), sum(&trace, 0, ROUNDS, |r| r.serve_units) - sum(&trace, 0, ROUNDS, |r| r.served_puts), "every get should cost exactly one unit");
+        assert_eq!(
+            sum(&trace, 0, ROUNDS, |r| r.served_gets),
+            sum(&trace, 0, ROUNDS, |r| r.serve_units) - sum(&trace, 0, ROUNDS, |r| r.served_puts),
+            "every get should cost exactly one unit"
+        );
         assert_healthy(&trace, TAIL_START, ROUNDS);
     }
 
@@ -532,7 +574,10 @@ mod sim_tests {
                 }
             }
         });
-        assert!(spent >= required, "the store cannot do less than the required work");
+        assert!(
+            spent >= required,
+            "the store cannot do less than the required work"
+        );
         spent - required
     }
 
@@ -558,20 +603,44 @@ mod sim_tests {
     fn held_arrivals_cost_extra_units_growing_with_the_hold() {
         const RUN: usize = 300;
         let holds = [0usize, 4, 8, 16, 32];
-        let reserved: Vec<u64> = holds.iter().map(|&h| extra_units_with_hold(RESERVED, h, RUN)).collect();
-        let background: Vec<u64> = holds.iter().map(|&h| extra_units_with_hold(BACKGROUND, h, RUN)).collect();
+        let reserved: Vec<u64> = holds
+            .iter()
+            .map(|&h| extra_units_with_hold(RESERVED, h, RUN))
+            .collect();
+        let background: Vec<u64> = holds
+            .iter()
+            .map(|&h| extra_units_with_hold(BACKGROUND, h, RUN))
+            .collect();
         for ((h, r), b) in holds.iter().zip(&reserved).zip(&background) {
             println!("hold {h} rounds -> extra units: reserve 8 = {r}, reserve 0 = {b}");
         }
-        assert_eq!(reserved[0], 0, "with nothing held the reserved store never scans an uncompacted record");
-        assert_eq!(background[0], 0, "with nothing held the background store never scans an uncompacted record");
-        assert!(reserved.windows(2).all(|w| w[1] > w[0]), "extra work should grow with the hold: {reserved:?}");
-        assert!(reserved[1..].iter().zip(&background[1..]).all(|(r, b)| r < b), "the reserve should bound the extra work: {reserved:?} vs {background:?}");
+        assert_eq!(
+            reserved[0], 0,
+            "with nothing held the reserved store never scans an uncompacted record"
+        );
+        assert_eq!(
+            background[0], 0,
+            "with nothing held the background store never scans an uncompacted record"
+        );
+        assert!(
+            reserved.windows(2).all(|w| w[1] > w[0]),
+            "extra work should grow with the hold: {reserved:?}"
+        );
+        assert!(
+            reserved[1..]
+                .iter()
+                .zip(&background[1..])
+                .all(|(r, b)| r < b),
+            "the reserve should bound the extra work: {reserved:?} vs {background:?}"
+        );
         // Without the reserve, a hold of eight rounds (45 operations in one batch, 27 of them puts)
         // is enough on its own to tip the store into the permanent collapse of the trigger run, so
         // the extra work over a fixed 300-round window then grows with the rounds remaining after
         // the release rather than with the hold. The reserved store's extra work stays within a
         // few hundred units.
-        assert!(background[2] > 100 * reserved[2], "a hold of eight rounds should collapse the background store: {background:?}");
+        assert!(
+            background[2] > 100 * reserved[2],
+            "a hold of eight rounds should collapse the background store: {background:?}"
+        );
     }
 }

@@ -232,7 +232,9 @@ pub fn timeout_retry_lossy_with_timers<'a>(
             value: request.value.to_uppercase(),
         }))
         .send(client, TCP.fail_stop().bincode().name("responses"))
-        .filter(q!(move |response| !(black_hole_odd_responses != 0 && response.id % 2 == 1)));
+        .filter(q!(
+            move |response| !(black_hole_odd_responses != 0 && response.id % 2 == 1)
+        ));
 
     let completed = responses.clone().unique();
     let service_completion_events = responses

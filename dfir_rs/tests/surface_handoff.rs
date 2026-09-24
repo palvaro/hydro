@@ -16,12 +16,19 @@ pub async fn test_stage_metrics_correlate_handoff_inputs_and_outputs() {
         .iter()
         .find(|stage| stage.inputs.iter().any(|input| input.items == 5))
         .expect("consumer stage should observe all five handoff items");
-    let input = consumer.inputs.iter().find(|input| input.items == 5).unwrap();
+    let input = consumer
+        .inputs
+        .iter()
+        .find(|input| input.items == 5)
+        .unwrap();
     assert_eq!(consumer.input_items(), 5);
     assert_eq!(consumer.feedback_input_items(), 0);
-    assert!(stages.iter().any(|stage| stage.outputs.iter().any(|output| {
-        output.handoff_id == input.handoff_id && output.items == 5
-    })));
+    assert!(stages.iter().any(|stage| {
+        stage
+            .outputs
+            .iter()
+            .any(|output| output.handoff_id == input.handoff_id && output.items == 5)
+    }));
 }
 
 /// Test: `handoff()` pseudo-operator forces a subgraph boundary.
