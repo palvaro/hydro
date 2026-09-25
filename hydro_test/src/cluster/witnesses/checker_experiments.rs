@@ -2532,7 +2532,7 @@ mod library_check {
         expect_hazardous(
             "cache request_dated, no coalesce",
             &cache(false, true),
-            &["cache_thundering_herd.rs", "298:44#1 [()]"],
+            &["cache_thundering_herd.rs:299", "[()]"],
         );
     }
 
@@ -2544,7 +2544,7 @@ mod library_check {
         expect_hazardous(
             "cache fill_dated, no coalesce",
             &cache(false, false),
-            &["cache_thundering_herd.rs", "298:44#1 [()]"],
+            &["cache_thundering_herd.rs:299", "[()]"],
         );
     }
 

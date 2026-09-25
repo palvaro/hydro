@@ -37,11 +37,13 @@
 //! publishes, in a thread-local, the identity of the hook whose `autonomous_decision` it is
 //! about to call, together with whether the scheduler is forcing that hook to make a nontrivial
 //! decision (see [`with_current_hook`]), and clears it afterwards. The identity is the hook's
-//! source location followed by `#` and the hook's index within its tick, because every batch and
-//! snapshot inside one `sliced!` block reports the block's location, so the location alone does
-//! not tell the hooks of one tick apart; snapshot hooks carry the word `snapshot` before their
-//! item type. Hooks that carry no location (crash hooks, membership hooks, top-level ordering
-//! hooks) publish nothing, as does the scheduler's own "which ready tick runs next" question.
+//! source position as `file:line` (the line of its own `use::batch` or `use::snapshot`
+//! expression, recorded by `sliced!` while it expands), followed by `#` and the hook's index
+//! within its tick, then the item type in brackets; snapshot hooks carry the word `snapshot`
+//! before their item type. The index keeps identities distinct when two decision points share
+//! a line, and reports show it only in that case. Hooks that carry no location (crash hooks,
+//! membership hooks, top-level ordering hooks) publish nothing, as does the scheduler's own
+//! "which ready tick runs next" question.
 //! This is read-only metadata; it changes no scheduling behaviour.
 //!
 //! # Holds the simulator refuses
@@ -148,15 +150,35 @@ pub fn with_current_hook<R>(
     result
 }
 
-/// The identity string for a hook: `location#index [item type]` for a batch and
-/// `location#index [snapshot item type]` for a snapshot. The item type is there for the reader,
-/// with module paths stripped; the location, index and kind identify the hook.
+/// The identity string for a hook: `file:line#index [item type]` for a batch and
+/// `file:line#index [snapshot item type]` for a snapshot. The item type is there for the reader,
+/// with module paths stripped; the position, index and kind identify the hook. The column that
+/// the hook's location metadata carries is dropped, since the line is what a reader looks up
+/// and the index already keeps two points on one line apart.
 pub fn hook_id(location: &str, index: usize, item_type: &str, kind: HookKind) -> String {
+    let location = line_of(location);
     match kind {
         HookKind::Batch => format!("{location}#{index} [{}]", strip_paths(item_type)),
         HookKind::Snapshot => {
             format!("{location}#{index} [snapshot {}]", strip_paths(item_type))
         }
+    }
+}
+
+/// Reduces a `file:line:col` location to `file:line`. A location without a trailing numeric
+/// column (such as `unknown location`) is returned unchanged.
+fn line_of(location: &str) -> &str {
+    match location.rsplit_once(':') {
+        Some((head, col))
+            if !col.is_empty()
+                && col.bytes().all(|b| b.is_ascii_digit())
+                && head
+                    .rsplit_once(':')
+                    .is_some_and(|(_, line)| !line.is_empty() && line.bytes().all(|b| b.is_ascii_digit())) =>
+        {
+            head
+        }
+        _ => location,
     }
 }
 
@@ -510,7 +532,7 @@ mod tests {
     fn snapshot_hold_pins_then_catches_up() {
         let (mut d, h) = HoldOneHookDriver::new();
         let id = hook_id(LOC, 0, "T", HookKind::Snapshot);
-        assert_eq!(id, "a.rs:1:1#0 [snapshot T]");
+        assert_eq!(id, "a.rs:1#0 [snapshot T]");
 
         // Prompt policy: observe a new version, the oldest queued.
         assert_eq!(ask_snapshot(&mut d, false, 3), (Some(false), Some(0)));
@@ -547,7 +569,7 @@ mod tests {
     fn batch_hold_is_unchanged() {
         let (mut d, h) = HoldOneHookDriver::new();
         let id = hook_id(LOC, 1, "u64", HookKind::Batch);
-        assert_eq!(id, "a.rs:1:1#1 [u64]");
+        assert_eq!(id, "a.rs:1#1 [u64]");
         let ask = |d: &mut HoldOneHookDriver, forced: bool| {
             with_current_hook(Some(LOC), 1, "u64", HookKind::Batch, forced, || {
                 let least = if forced { 1 } else { 0 };

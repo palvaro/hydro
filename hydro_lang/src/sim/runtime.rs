@@ -106,7 +106,7 @@ pub trait SimHook {
     }
 
     /// The Rust type of the items this hook batches or the singleton it snapshots, for telling
-    /// apart the hooks of one `sliced!` block in reports. Metadata only.
+    /// apart hooks in reports. Metadata only.
     fn hook_item_type(&self) -> &'static str {
         ""
     }

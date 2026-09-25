@@ -72,7 +72,7 @@
 //! because a snapshot is one value per tick execution and not a record the program produced.
 //! Hooks are held one at a time.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::panic::RefUnwindSafe;
 use std::time::Instant;
@@ -173,7 +173,7 @@ impl fmt::Display for Verdict {
 /// What one held hook did to the counts, across the hold lengths tried.
 #[derive(Debug, Clone)]
 pub struct HookCurve {
-    /// The hook's identity, `location#index [item type]`.
+    /// The hook's identity, `file:line#index [item type]` (see [`super::hold_one_hook::hook_id`]).
     pub hook: String,
     /// `(k, admitted records minus the unheld run's)` for each hold length, including `k = 0`.
     pub extra_admitted: Vec<(usize, i64)>,
@@ -222,20 +222,21 @@ impl HookCurve {
             .collect()
     }
 
-    /// The hook's identity rendered for a reader: `file:line:col #index, batch of T` or
-    /// `file:line:col #index, snapshot of T`.
-    pub fn readable_name(&self) -> String {
-        readable_hook_name(&self.hook)
+    /// The hook's identity rendered for a reader: `file:line, batch of T` or
+    /// `file:line, snapshot of T`. The index is shown only when `show_index` is set, which a
+    /// report does for decision points that share a line.
+    pub fn readable_name(&self, show_index: bool) -> String {
+        readable_hook_name(&self.hook, show_index)
     }
 
     /// The lines the checker prints for this hook. A hook whose hold caused no extra work at
     /// any length prints one line; otherwise the name and the two curves, aligned under the
     /// hold-length header the report prints once.
-    fn lines(&self, width: usize) -> Vec<String> {
+    fn lines(&self, width: usize, show_index: bool) -> Vec<String> {
         let mut out = Vec::new();
         let admitted = self.admitted_row();
         let sends = self.sends_row();
-        let name = self.readable_name();
+        let name = self.readable_name(show_index);
         let quiet = admitted.iter().all(|e| *e <= 0) && sends.iter().all(|e| *e <= 0);
         let mut notes = Vec::new();
         if !self.holdable() {
@@ -294,9 +295,10 @@ impl HookCurve {
         out
     }
 
-    /// The `use::batch` or `use::snapshot` source location, without the index and item type.
+    /// The `use::batch` or `use::snapshot` source position as `file:line`, without the index
+    /// and item type.
     pub fn source_location(&self) -> &str {
-        self.hook.split('#').next().unwrap_or(&self.hook)
+        hook_line(&self.hook)
     }
 
     /// Whether the held hook was a `use::snapshot` (its identity carries the word `snapshot`).
@@ -342,9 +344,11 @@ pub struct Location {
 }
 
 impl Location {
-    /// The hook's identity rendered for a reader.
-    pub fn readable_name(&self) -> String {
-        readable_hook_name(&self.hook)
+    /// The hook's identity rendered for a reader: `file:line, batch of T` or
+    /// `file:line, snapshot of T`. The index is shown only when `show_index` is set, which a
+    /// report does for decision points that share a line.
+    pub fn readable_name(&self, show_index: bool) -> String {
+        readable_hook_name(&self.hook, show_index)
     }
 }
 
@@ -399,8 +403,10 @@ impl fmt::Display for Report {
         writeln!(f)?;
         writeln!(
             f,
-            "A decision point is named by the source location of the sliced! block it belongs to, then #n for its position among that block's decision points, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. Each curve gives extra work over the unheld run, at each hold length."
+            "A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length."
         )?;
+        let shared = shared_lines(self.curves.iter().map(|c| c.hook.as_str()));
+        let show_index = |hook: &str| shared.contains(hook_line(hook));
         writeln!(f)?;
         writeln!(
             f,
@@ -410,7 +416,7 @@ impl fmt::Display for Report {
             width = LABEL_WIDTH
         )?;
         for c in &self.curves {
-            for line in c.lines(LABEL_WIDTH) {
+            for line in c.lines(LABEL_WIDTH, show_index(&c.hook)) {
                 writeln!(f, "{line}")?;
             }
         }
@@ -418,7 +424,7 @@ impl fmt::Display for Report {
         match &self.location {
             Some(l) => {
                 writeln!(f, "verdict: hazardous")?;
-                writeln!(f, "  decision point: {}", l.readable_name())?;
+                writeln!(f, "  decision point: {}", l.readable_name(show_index(&l.hook)))?;
                 writeln!(
                     f,
                     "  first reacted at a hold of {} rounds, with {} extra {} there",
@@ -441,7 +447,7 @@ impl fmt::Display for Report {
                         "  decision points that admitted more records under that hold, at its peak:"
                     )?;
                     for (h, d) in &l.hooks_that_rose {
-                        writeln!(f, "    {} +{d}", readable_hook_name(h))?;
+                        writeln!(f, "    {} +{d}", readable_hook_name(h, show_index(h)))?;
                     }
                 }
             }
@@ -458,9 +464,11 @@ impl fmt::Display for Report {
     }
 }
 
-/// Renders `location#index [item]` or `location#index [snapshot item]` as
-/// `location #index, batch of item` or `location #index, snapshot of item`.
-fn readable_hook_name(hook: &str) -> String {
+/// Renders a hook identity `file:line#index [item]` or `file:line#index [snapshot item]` as
+/// `file:line, batch of item` or `file:line, snapshot of item`. When `show_index` is set, the
+/// index follows the position as ` #index`, which a report does only for decision points that
+/// share a line with another.
+fn readable_hook_name(hook: &str, show_index: bool) -> String {
     let (loc, rest) = match hook.split_once('#') {
         Some(x) => x,
         None => return hook.to_owned(),
@@ -469,13 +477,37 @@ fn readable_hook_name(hook: &str) -> String {
         Some((i, item)) => (i, item.trim_end_matches(']')),
         None => (rest, ""),
     };
-    if let Some(t) = item.strip_prefix("snapshot ") {
-        format!("{loc} #{index}, snapshot of {t}")
-    } else if item.is_empty() {
+    let position = if show_index {
         format!("{loc} #{index}")
     } else {
-        format!("{loc} #{index}, batch of {item}")
+        loc.to_owned()
+    };
+    if let Some(t) = item.strip_prefix("snapshot ") {
+        format!("{position}, snapshot of {t}")
+    } else if item.is_empty() {
+        position
+    } else {
+        format!("{position}, batch of {item}")
     }
+}
+
+/// The `file:line` part of a hook identity.
+fn hook_line(hook: &str) -> &str {
+    hook.split('#').next().unwrap_or(hook)
+}
+
+/// The lines shared by more than one of the given hook identities. A decision point on such a
+/// line is shown with its index so the reader can tell the points apart.
+fn shared_lines<'a>(hooks: impl IntoIterator<Item = &'a str>) -> BTreeSet<String> {
+    let mut seen = BTreeSet::new();
+    let mut shared = BTreeSet::new();
+    for h in hooks {
+        let line = hook_line(h).to_owned();
+        if !seen.insert(line.clone()) {
+            shared.insert(line);
+        }
+    }
+    shared
 }
 
 fn row(values: &[i64]) -> String {
@@ -508,6 +540,7 @@ pub fn check(
     let base_sends = baseline.sends_by_member();
     let base_admitted = baseline.admitted() as i64;
 
+    let shared = shared_lines(hooks.iter().map(|h| h.as_str()));
     let mut curves = Vec::with_capacity(hooks.len());
     for hook in &hooks {
         let mut extra_admitted = vec![(0usize, 0i64)];
@@ -569,7 +602,7 @@ pub fn check(
                 started.elapsed().as_secs_f64(),
                 row_usize(&hold_lengths).trim_start()
             );
-            for line in curve.lines(LABEL_WIDTH) {
+            for line in curve.lines(LABEL_WIDTH, shared.contains(hook_line(hook))) {
                 eprintln!("  {line}");
             }
         }

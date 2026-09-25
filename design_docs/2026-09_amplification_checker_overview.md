@@ -50,7 +50,7 @@ The curve over hold lengths carries more than the verdict. A program that pays a
 
 The user provides three things. The first is the program, written in ordinary Hydro dataflow with its timers as stream parameters, which is how any Hydro program must be written to be simulated at all; a deployment wires periodic timers into the same parameters. The second is a closure that sends one round of a steady workload into the program's inputs, including one tick event to each timer; the checker calls it once per round and then runs the simulation until nothing more can happen before calling it again. The workload should be the program's ordinary operating point with no burst, because the question the checker answers is whether some schedule makes that same input cost more. The third is the length of the run in rounds, which we call the horizon, with a default of 1000. The horizon is the only setting, and it is not a tuning knob in the sense the hold lengths would have been: it bounds the longest delay the checker can impose, so a benign verdict is the statement that no reaction to a delay of up to the horizon was found at any decision point, and the report says so in those words. The hold lengths themselves are fixed by the doubling sequence, and every hold begins at round 1, after one round of ordinary operation has created the decision points and their state; the program's reaction depends on how long a delay lasts and not on when it starts.
 
-What comes back is a report. It contains the verdict, the baseline counts, and one curve per discovered decision point giving the extra admitted records and the extra messages from each sender at every hold length. For a hazardous program it also contains a location: the decision point that reacted to the shortest delay, given as a source file and line, together with the hold length at which its reaction first appeared, what rose there (messages from which sender, or admitted records) and by how much, its largest extra work over the whole curve, and which other decision points admitted more records under that hold. Because every decision point in one step reports the location of the step's block, the location is a block and an index within it rather than a single line. As each decision point's holds complete the checker prints that point's curve, so a long run shows its findings as it goes. The simulation is compiled once and reused for every run. At the default horizon a benign program with a handful of decision points is checked in 2 to 30 seconds, and a hazardous one in 15 seconds to several minutes; the cost of checking a hazardous program is mostly the cost of simulating the storm the longest holds provoke, since a backlog of thousands of records is re-read every step for hundreds of rounds. The twenty-two corpus configurations described next take about twenty minutes of test time together at the default horizon, of which the delta gossip program with re-sends accounts for more than eight and the two lease-renewal configurations for four, and about a minute and a half at a horizon of 240 rounds.
+What comes back is a report. It contains the verdict, the baseline counts, and one curve per discovered decision point giving the extra admitted records and the extra messages from each sender at every hold length. For a hazardous program it also contains a location: the decision point that reacted to the shortest delay, given as a source file and line, together with the hold length at which its reaction first appeared, what rose there (messages from which sender, or admitted records) and by how much, its largest extra work over the whole curve, and which other decision points admitted more records under that hold. The line is that of the program's own `use::batch` or `use::snapshot` expression, recorded while the `sliced!` macro that introduces a step expands, so the location names one operator; when two decision points share a line, the report adds each one's position within its step. As each decision point's holds complete the checker prints that point's curve, so a long run shows its findings as it goes. The simulation is compiled once and reused for every run. At the default horizon a benign program with a handful of decision points is checked in 2 to 30 seconds, and a hazardous one in 15 seconds to several minutes; the cost of checking a hazardous program is mostly the cost of simulating the storm the longest holds provoke, since a backlog of thousands of records is re-read every step for hundreds of rounds. The twenty-two corpus configurations described next take about twenty minutes of test time together at the default horizon, of which the delta gossip program with re-sends accounts for more than eight and the two lease-renewal configurations for four, and about a minute and a half at a horizon of 240 rounds.
 
 ### The report for the running example
 
@@ -59,50 +59,50 @@ The report below is what the checker printed for the retry service with three at
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 30.3 s including compilation
+run time: 27.5 s including compilation
 unheld run: 13000 records admitted at decision points, 4000 network messages sent, 8 decision points had buffered input
 
-A decision point is named by the source location of the sliced! block it belongs to, then #n for its position among that block's decision points, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. Each curve gives extra work over the unheld run, at each hold length.
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length.
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/rpc_retry.rs:188:56 #0, batch of Response<u64>
-    extra records admitted                0      0      0      0      0      0    240   1360   3920  16243  11867
-    extra messages, busiest sender        0      0      0      0      0      0     48    272    784   3603   3756
-    first reacted at a hold of 64 rounds with 240 extra; largest extra work 16243 in admitted records
-src/cluster/rpc_retry.rs:188:56 #1, batch of (usize, ()): no extra work at any hold length
-src/cluster/rpc_retry.rs:188:56 #2, batch of (usize, u64)
+src/cluster/rpc_retry.rs:190, batch of (usize, ()): no extra work at any hold length
+src/cluster/rpc_retry.rs:192, batch of (usize, u64)
     extra records admitted                0      0      0      0      0      0      0    475  12644  10102 -11988
     extra messages, busiest sender        0      0      0      0      0      0      0     95   3150   3156  -1998
     first reacted at a hold of 128 rounds with 475 extra; largest extra work 12644 in admitted records
-src/cluster/rpc_retry.rs:295:52 #0, batch of Request<u64>
+src/cluster/rpc_retry.rs:193, batch of Response<u64>
+    extra records admitted                0      0      0      0      0      0    240   1360   3920  16243  11867
+    extra messages, busiest sender        0      0      0      0      0      0     48    272    784   3603   3756
+    first reacted at a hold of 64 rounds with 240 extra; largest extra work 16243 in admitted records
+src/cluster/rpc_retry.rs:296, batch of Request<u64>
     extra records admitted                0      0      0      0      0      0    415  15742  14462  11902   1278
     extra messages, busiest sender        0      0      0      0      0      0     83   3756   3756   3756   3756
     first reacted at a hold of 64 rounds with 415 extra; largest extra work 15742 in admitted records (held by parking the tick, which has no other input, at every hold length)
-src/cluster/rpc_retry.rs:330:25 #0, batch of Request<u64>: no extra work at any hold length
-src/cluster/rpc_retry.rs:330:25 #2, snapshot of usize: no extra work at any hold length
-src/cluster/rpc_retry.rs:356:25 #0, batch of Completion: no extra work at any hold length (held by parking the tick, which has no other input, at hold length 1)
-src/cluster/rpc_retry.rs:356:25 #1, batch of Request<u64>: no extra work at any hold length
+src/cluster/rpc_retry.rs:332, batch of Request<u64>: no extra work at any hold length
+src/cluster/rpc_retry.rs:333, snapshot of usize: no extra work at any hold length
+src/cluster/rpc_retry.rs:358, batch of Completion: no extra work at any hold length (held by parking the tick, which has no other input, at hold length 1)
+src/cluster/rpc_retry.rs:359, batch of Request<u64>: no extra work at any hold length
 
 verdict: hazardous
-  decision point: src/cluster/rpc_retry.rs:295:52 #0, batch of Request<u64>
+  decision point: src/cluster/rpc_retry.rs:296, batch of Request<u64>
   first reacted at a hold of 64 rounds, with 415 extra admitted records there
   largest extra work over the curve: 15742 in admitted records
   decision points that admitted more records under that hold, at its peak:
-    src/cluster/rpc_retry.rs:188:56 #0, batch of Response<u64> +2357
-    src/cluster/rpc_retry.rs:295:52 #0, batch of Request<u64> +3756
-    src/cluster/rpc_retry.rs:330:25 #0, batch of Request<u64> +2357
-    src/cluster/rpc_retry.rs:356:25 #1, batch of Request<u64> +3756
-    src/cluster/rpc_retry.rs:356:25 #2, batch of (u64, u32) +3756
-    src/cluster/rpc_retry.rs:356:25 #3, batch of u64 +1387
+    src/cluster/rpc_retry.rs:193, batch of Response<u64> +2357
+    src/cluster/rpc_retry.rs:296, batch of Request<u64> +3756
+    src/cluster/rpc_retry.rs:332, batch of Request<u64> +2357
+    src/cluster/rpc_retry.rs:359, batch of Request<u64> +3756
+    src/cluster/rpc_retry.rs:360, batch of (u64, u32) +3756
+    src/cluster/rpc_retry.rs:361, batch of u64 +1387
 ```
 
-The first four lines say what was run: 1000 rounds of the steady workload, every hold beginning at round 1, so the longest possible delay is 999 rounds; the whole check took 30 seconds; and the undisturbed run admitted 13000 records at decision points and sent 4000 messages, which is one request and one reply for each of the 2000 requests. The sentence after them explains how decision points are named, and the row headed `hold length (rounds)` gives the eleven hold lengths that every curve's numbers line up under.
+The first four lines say what was run: 1000 rounds of the steady workload, every hold beginning at round 1, so the longest possible delay is 999 rounds; the whole check took 28 seconds; and the undisturbed run admitted 13000 records at decision points and sent 4000 messages, which is one request and one reply for each of the 2000 requests. The sentence after them explains how decision points are named: by the file and line of the program's own `use::batch` or `use::snapshot` expression, so that a reader can open the file at that line and find the operator. The row headed `hold length (rounds)` gives the eleven hold lengths that every curve's numbers line up under.
 
-The eight decision points are the program's steps' inputs. The block at line 188 is the client's step; its point `#0` admits replies arriving from the server, `#1` admits the client's clock, and `#2` admits the new requests the workload sends in. The block at line 295 is the server's step, and its single point `#0` admits requests arriving from the client. The blocks at lines 330 and 356 are two metrics steps that count backlog and completions, and the snapshot at 330 is the server's metrics step reading the backlog depth.
+The eight decision points are the program's steps' inputs. Lines 190, 192 and 193 are the client's step: line 190 admits the client's clock, line 192 admits the new requests the workload sends in, and line 193 admits replies arriving from the server. Line 296 is the server's step's single input, the requests arriving from the client. Lines 332 and 333 belong to a metrics step on the server that counts processed requests and reads the backlog depth through a snapshot, and lines 358 and 359 belong to a metrics step on the client that counts completions and sends.
 
-The client's reply point, `188:56 #0`, carries the curve derived by hand earlier in this document. Its second row, extra messages from the busiest sender, reads 48, 272 and 784 at holds of 64, 128 and 256 rounds: two requests per round re-sent once for every round the hold exceeds the forty-tick timeout, and re-sent again for every round it exceeds twice the timeout. Its first row, extra records admitted, is five times larger at each of those lengths, 240, 1360 and 3920, because a re-sent request and its reply are admitted at five decision points on their way through the program (the server's arrivals, the client's replies, and three metrics inputs) while they are one message per hop; the two rows measure the same re-sends at two places, and the report shows both. At 512 rounds the message row jumps to 3603, for the reason given earlier: the re-sends made during a long hold overload the server, whose queue then outlasts the hold. At 999 rounds the record row is lower than at 512 even though the message row is higher, because a hold to the end of the run pushes some records past the end where they are never admitted.
+The client's reply point, line 193, carries the curve derived by hand earlier in this document. Its second row, extra messages from the busiest sender, reads 48, 272 and 784 at holds of 64, 128 and 256 rounds: two requests per round re-sent once for every round the hold exceeds the forty-tick timeout, and re-sent again for every round it exceeds twice the timeout. Its first row, extra records admitted, is five times larger at each of those lengths, 240, 1360 and 3920, because a re-sent request and its reply are admitted at five decision points on their way through the program (the server's arrivals, the client's replies, and three metrics inputs) while they are one message per hop; the two rows measure the same re-sends at two places, and the report shows both. At 512 rounds the message row jumps to 3603, for the reason given earlier: the re-sends made during a long hold overload the server, whose queue then outlasts the hold. At 999 rounds the record row is lower than at 512 even though the message row is higher, because a hold to the end of the run pushes some records past the end where they are never admitted.
 
-The client's new-request point, `188:56 #2`, reacts only from 128 rounds, when the dump of 256 held requests reaching the server at once builds a queue whose delay exceeds the timeout, and its 999-round entry is negative because requests held to the end of the run are never sent at all. The server's arrivals point, `295:52 #0`, first reacts at the same 64 rounds as the reply point but with more extra work there, 415 records and 83 messages against 240 and 48, and by 128 rounds its message row has already reached 3756, the ceiling of two re-sends for every request in the run: the released requests take the server tens of rounds to drain at three net per round, every one that waits longer than forty ticks is re-sent into the same queue, and the storm never ends. The annotation on that point says the hold worked by parking the server's step, since the step has no other input and cannot run while its only input is held. The two metrics steps and the client's clock show no extra work at any length, because the program does nothing about their lateness except wait.
+The client's new-request point, line 192, reacts only from 128 rounds, when the dump of 256 held requests reaching the server at once builds a queue whose delay exceeds the timeout, and its 999-round entry is negative because requests held to the end of the run are never sent at all. The server's arrivals point, line 296, first reacts at the same 64 rounds as the reply point but with more extra work there, 415 records and 83 messages against 240 and 48, and by 128 rounds its message row has already reached 3756, the ceiling of two re-sends for every request in the run: the released requests take the server tens of rounds to drain at three net per round, every one that waits longer than forty ticks is re-sent into the same queue, and the storm never ends. The annotation on that point says the hold worked by parking the server's step, since the step has no other input and cannot run while its only input is held. The two metrics steps and the client's clock show no extra work at any length, because the program does nothing about their lateness except wait.
 
 The verdict block names the server's arrivals point as the location, because it is one of the two points that react at the shortest hold and adds more extra work there, and it lists the decision points that admitted more records under that hold at its peak, which is the path the re-sent requests took: the client's reply input, the server's arrivals, and the metrics inputs.
 
@@ -111,20 +111,20 @@ The same program with the retry limit set to one attempt produces this report.
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 27.1 s including compilation
+run time: 26.2 s including compilation
 unheld run: 13000 records admitted at decision points, 4000 network messages sent, 8 decision points had buffered input
 
-A decision point is named by the source location of the sliced! block it belongs to, then #n for its position among that block's decision points, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. Each curve gives extra work over the unheld run, at each hold length.
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length.
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/rpc_retry.rs:188:56 #0, batch of Response<u64>: no extra work at any hold length
-src/cluster/rpc_retry.rs:188:56 #1, batch of (usize, ()): no extra work at any hold length
-src/cluster/rpc_retry.rs:188:56 #2, batch of (usize, u64): no extra work at any hold length
-src/cluster/rpc_retry.rs:295:52 #0, batch of Request<u64>: no extra work at any hold length (held by parking the tick, which has no other input, at every hold length)
-src/cluster/rpc_retry.rs:330:25 #0, batch of Request<u64>: no extra work at any hold length
-src/cluster/rpc_retry.rs:330:25 #2, snapshot of usize: no extra work at any hold length
-src/cluster/rpc_retry.rs:356:25 #0, batch of Completion: no extra work at any hold length (held by parking the tick, which has no other input, at hold length 1)
-src/cluster/rpc_retry.rs:356:25 #1, batch of Request<u64>: no extra work at any hold length
+src/cluster/rpc_retry.rs:190, batch of (usize, ()): no extra work at any hold length
+src/cluster/rpc_retry.rs:192, batch of (usize, u64): no extra work at any hold length
+src/cluster/rpc_retry.rs:193, batch of Response<u64>: no extra work at any hold length
+src/cluster/rpc_retry.rs:296, batch of Request<u64>: no extra work at any hold length (held by parking the tick, which has no other input, at every hold length)
+src/cluster/rpc_retry.rs:332, batch of Request<u64>: no extra work at any hold length
+src/cluster/rpc_retry.rs:333, snapshot of usize: no extra work at any hold length
+src/cluster/rpc_retry.rs:358, batch of Completion: no extra work at any hold length (held by parking the tick, which has no other input, at hold length 1)
+src/cluster/rpc_retry.rs:359, batch of Request<u64>: no extra work at any hold length
 
 verdict: benign
   no reaction to a delay of up to 999 rounds was found at any decision point
@@ -148,13 +148,13 @@ A second evaluation was therefore run on programs the checker's developers had n
 
 ## What the checker cannot do
 
-The verdict is a statement about the workload the user supplied, and it can depend on that workload; the log store with a compaction reserve is not amplified by any schedule of one write per four reads and is amplified under three writes per two reads, so a program with a tuning parameter can pass at one operating point and fail at another, and the checker reports only the point it was given. Work that a program performs as arithmetic inside an operator, rather than as records that move, is invisible, because the counts see records entering steps and messages crossing the network and nothing that happens to a number inside a record or to records flowing between operators within one step. Decision points are held one at a time, from round 1, for the lengths in the doubling sequence, so a hazard that requires two edges to be delayed together, or a delay that must begin at a particular moment, is outside the search, and a reaction that is largest at a length between two entries of the sequence is seen only at the entries; the staggered election's inbox reacts most at a hold near 20 rounds and the sequence sees it at 16 and 32, where it is small. A benign verdict is bounded by the horizon: it says that no reaction to a delay of up to the horizon was found, and a program whose reaction begins beyond that is reported benign with the horizon stated. The location rule ranks by the shortest provoking delay, so a point that reacts slightly to a short delay outranks one that reacts strongly to a longer delay; the report carries every point's curve so a reader can see both. The reported location is the step whose decision point was held, given as the source location of its block and the index of the point within it, rather than a single operator. A program with no batch or snapshot decision point offers the simulator nothing to hold and is reported benign on that basis alone, as the pure heartbeat is. Snapshot decision points are held but their reads are not counted as work, because a step reads its snapshot exactly once every time it runs regardless of freshness, and no program in the corpus makes its sends depend on a snapshot, so the snapshot hold has not yet met a case that could exercise it.
+The verdict is a statement about the workload the user supplied, and it can depend on that workload; the log store with a compaction reserve is not amplified by any schedule of one write per four reads and is amplified under three writes per two reads, so a program with a tuning parameter can pass at one operating point and fail at another, and the checker reports only the point it was given. Work that a program performs as arithmetic inside an operator, rather than as records that move, is invisible, because the counts see records entering steps and messages crossing the network and nothing that happens to a number inside a record or to records flowing between operators within one step. Decision points are held one at a time, from round 1, for the lengths in the doubling sequence, so a hazard that requires two edges to be delayed together, or a delay that must begin at a particular moment, is outside the search, and a reaction that is largest at a length between two entries of the sequence is seen only at the entries; the staggered election's inbox reacts most at a hold near 20 rounds and the sequence sees it at 16 and 32, where it is small. A benign verdict is bounded by the horizon: it says that no reaction to a delay of up to the horizon was found, and a program whose reaction begins beyond that is reported benign with the horizon stated. The location rule ranks by the shortest provoking delay, so a point that reacts slightly to a short delay outranks one that reacts strongly to a longer delay; the report carries every point's curve so a reader can see both. A program with no batch or snapshot decision point offers the simulator nothing to hold and is reported benign on that basis alone, as the pure heartbeat is. Snapshot decision points are held but their reads are not counted as work, because a step reads its snapshot exactly once every time it runs regardless of freshness, and no program in the corpus makes its sends depend on a snapshot, so the snapshot hold has not yet met a case that could exercise it.
 
 ## What the simulator already had and what this work added
 
 The checker is built on Hydro's existing simulator and adds to it rather than replacing any part of it. Before this work the simulator already exposed every scheduling decision as a question to a pluggable source of answers. A `use::batch` in a program compiles to a hook (`StreamHook` in `hydro_lang/src/sim/runtime.rs`) that asks, each time its step might run, how many of its waiting items to admit and, for unordered streams, which ones; a `use::snapshot` compiles to a hook (`SingletonHook`) that asks which queued version of its state the step should observe. The answers come from a bolero `Driver`, and the simulator's `fuzz` and `exhaustive` entry points supply random and exhaustive drivers. The scheduler, the step loop, the network delivery into a receiver's top-level channel, and the `quiesce` fixpoint were all in place. The deterministic reference schedule (`prompt_schedule.rs`, 114 lines, a driver that admits everything and observes the newest version) and the `run_with_driver` entry point that runs a simulation once under a caller-supplied driver (26 lines in `flow.rs` and 31 in `compiled.rs`) were ported onto this branch from an earlier, abandoned attempt at the same problem before the checker was written, so they are additions in the sense that the main branch did not have them, though the checker did not originate them.
 
-This work added the following, in about 1,600 lines across `hydro_lang/src/sim/`. The hold driver (`hold_one_hook.rs`, 582 lines) is a `Driver` that answers the existing questions with "admit nothing" for one chosen batch hook or "observe the version you saw last" for one chosen snapshot hook, and answers every other question as the reference schedule would; it also records which hooks ever had something waiting, which is how decision points are discovered. Hook identity and kind (113 lines added to `runtime.rs`) let each hook report its source location, its item type, whether it is a batch or a snapshot, and how many items it is about to release, and the scheduler now publishes, around each question, which hook is asking and whether it is being forced to decide (part of 108 lines changed in `compiled.rs`). A one-clause change to the scheduler's test of whether a step can run (`SimTick::can_run` in `compiled.rs`) makes a step whose only waiting input sits behind a held hook park instead of being forced to admit something, which is what lets a hold outlive one round; with no hold set the clause is always true and the test is unchanged. The snapshot pin and catch-up rules live in the hold driver: a held snapshot keeps its last version, and on release the first decision skips to the newest queued version so the effect is a delay rather than a lag. The passive work counters (`work_counts.rs`, 239 lines, plus 29 lines in `builder.rs`) count records admitted per hook per cluster member, and network messages per sending member by placing the deployment path's existing `_network_metrics()` pass-through into the simulator's send pipelines; they are off unless a caller enables them. The `check` function, its configuration and its report (`amplification.rs`) run the experiment described above and rank the results. Every addition is inert unless a hold is set or counting is enabled, and the simulator's own test suite passes unchanged.
+This work added the following, in about 1,750 lines, almost all of them under `hydro_lang/src/sim/`. The hold driver (`hold_one_hook.rs`, 582 lines) is a `Driver` that answers the existing questions with "admit nothing" for one chosen batch hook or "observe the version you saw last" for one chosen snapshot hook, and answers every other question as the reference schedule would; it also records which hooks ever had something waiting, which is how decision points are discovered. Hook identity and kind (113 lines added to `runtime.rs`) let each hook report its source location, its item type, whether it is a batch or a snapshot, and how many items it is about to release, and the scheduler now publishes, around each question, which hook is asking and whether it is being forced to decide (part of 108 lines changed in `compiled.rs`). The source location a hook reports is the line of the program's own `use::batch` or `use::snapshot` expression. That needed a change outside the simulator, because the simulator positions operators by a runtime backtrace and rustc collapses the debug-info location of code expanded from an external macro to the macro's call site, so for a program in another crate the backtrace of every decision point inside a `sliced!` block named the block. A new `span_location!` macro in the `copy_span` crate (74 lines) reads the position of the user's tokens while `sliced!` expands, `sliced!` passes it to a new field on the operator's backtrace record (65 lines in `compile/ir/backtrace.rs`, 10 in the macro), and the simulator prefers that position when it has one (part of 32 lines in `builder.rs`). Nothing else reads the field, so backtraces used elsewhere are unchanged. A one-clause change to the scheduler's test of whether a step can run (`SimTick::can_run` in `compiled.rs`) makes a step whose only waiting input sits behind a held hook park instead of being forced to admit something, which is what lets a hold outlive one round; with no hold set the clause is always true and the test is unchanged. The snapshot pin and catch-up rules live in the hold driver: a held snapshot keeps its last version, and on release the first decision skips to the newest queued version so the effect is a delay rather than a lag. The passive work counters (`work_counts.rs`, 239 lines, plus 29 lines in `builder.rs`) count records admitted per hook per cluster member, and network messages per sending member by placing the deployment path's existing `_network_metrics()` pass-through into the simulator's send pipelines; they are off unless a caller enables them. The `check` function, its configuration and its report (`amplification.rs`) run the experiment described above and rank the results. Every addition is inert unless a hold is set or counting is enabled, and the simulator's own test suite passes unchanged.
 
 ## Where the code is
 
@@ -169,57 +169,57 @@ The reports below are the checker's printed output for every configuration it wa
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 30.3 s including compilation
+run time: 27.5 s including compilation
 unheld run: 13000 records admitted at decision points, 4000 network messages sent, 8 decision points had buffered input
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/rpc_retry.rs:188:56 #0, batch of Response<u64>
-    extra records admitted                0      0      0      0      0      0    240   1360   3920  16243  11867
-    extra messages, busiest sender        0      0      0      0      0      0     48    272    784   3603   3756
-    first reacted at a hold of 64 rounds with 240 extra; largest extra work 16243 in admitted records
-src/cluster/rpc_retry.rs:188:56 #2, batch of (usize, u64)
+src/cluster/rpc_retry.rs:192, batch of (usize, u64)
     extra records admitted                0      0      0      0      0      0      0    475  12644  10102 -11988
     extra messages, busiest sender        0      0      0      0      0      0      0     95   3150   3156  -1998
     first reacted at a hold of 128 rounds with 475 extra; largest extra work 12644 in admitted records
-src/cluster/rpc_retry.rs:295:52 #0, batch of Request<u64>
+src/cluster/rpc_retry.rs:193, batch of Response<u64>
+    extra records admitted                0      0      0      0      0      0    240   1360   3920  16243  11867
+    extra messages, busiest sender        0      0      0      0      0      0     48    272    784   3603   3756
+    first reacted at a hold of 64 rounds with 240 extra; largest extra work 16243 in admitted records
+src/cluster/rpc_retry.rs:296, batch of Request<u64>
     extra records admitted                0      0      0      0      0      0    415  15742  14462  11902   1278
     extra messages, busiest sender        0      0      0      0      0      0     83   3756   3756   3756   3756
     first reacted at a hold of 64 rounds with 415 extra; largest extra work 15742 in admitted records (held by parking the tick, which has no other input, at every hold length)
 
 verdict: hazardous
-  decision point: src/cluster/rpc_retry.rs:295:52 #0, batch of Request<u64>
+  decision point: src/cluster/rpc_retry.rs:296, batch of Request<u64>
   first reacted at a hold of 64 rounds, with 415 extra admitted records there
   largest extra work over the curve: 15742 in admitted records
   decision points that admitted more records under that hold, at its peak:
-    src/cluster/rpc_retry.rs:188:56 #0, batch of Response<u64> +2357
-    src/cluster/rpc_retry.rs:295:52 #0, batch of Request<u64> +3756
-    src/cluster/rpc_retry.rs:330:25 #0, batch of Request<u64> +2357
-    src/cluster/rpc_retry.rs:356:25 #1, batch of Request<u64> +3756
-    src/cluster/rpc_retry.rs:356:25 #2, batch of (u64, u32) +3756
-    src/cluster/rpc_retry.rs:356:25 #3, batch of u64 +1387
+    src/cluster/rpc_retry.rs:193, batch of Response<u64> +2357
+    src/cluster/rpc_retry.rs:296, batch of Request<u64> +3756
+    src/cluster/rpc_retry.rs:332, batch of Request<u64> +2357
+    src/cluster/rpc_retry.rs:359, batch of Request<u64> +3756
+    src/cluster/rpc_retry.rs:360, batch of (u64, u32) +3756
+    src/cluster/rpc_retry.rs:361, batch of u64 +1387
 ```
 
-This report is abbreviated: 5 decision points that showed no extra work at any hold length are omitted, along with the explanatory sentence.
+This report is abbreviated: five decision points that showed no extra work at any hold length are omitted, along with the explanatory sentence.
 
 ### rpc_retry, one attempt
 
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 27.1 s including compilation
+run time: 26.2 s including compilation
 unheld run: 13000 records admitted at decision points, 4000 network messages sent, 8 decision points had buffered input
 
-A decision point is named by the source location of the sliced! block it belongs to, then #n for its position among that block's decision points, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. Each curve gives extra work over the unheld run, at each hold length.
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length.
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/rpc_retry.rs:188:56 #0, batch of Response<u64>: no extra work at any hold length
-src/cluster/rpc_retry.rs:188:56 #1, batch of (usize, ()): no extra work at any hold length
-src/cluster/rpc_retry.rs:188:56 #2, batch of (usize, u64): no extra work at any hold length
-src/cluster/rpc_retry.rs:295:52 #0, batch of Request<u64>: no extra work at any hold length (held by parking the tick, which has no other input, at every hold length)
-src/cluster/rpc_retry.rs:330:25 #0, batch of Request<u64>: no extra work at any hold length
-src/cluster/rpc_retry.rs:330:25 #2, snapshot of usize: no extra work at any hold length
-src/cluster/rpc_retry.rs:356:25 #0, batch of Completion: no extra work at any hold length (held by parking the tick, which has no other input, at hold length 1)
-src/cluster/rpc_retry.rs:356:25 #1, batch of Request<u64>: no extra work at any hold length
+src/cluster/rpc_retry.rs:190, batch of (usize, ()): no extra work at any hold length
+src/cluster/rpc_retry.rs:192, batch of (usize, u64): no extra work at any hold length
+src/cluster/rpc_retry.rs:193, batch of Response<u64>: no extra work at any hold length
+src/cluster/rpc_retry.rs:296, batch of Request<u64>: no extra work at any hold length (held by parking the tick, which has no other input, at every hold length)
+src/cluster/rpc_retry.rs:332, batch of Request<u64>: no extra work at any hold length
+src/cluster/rpc_retry.rs:333, snapshot of usize: no extra work at any hold length
+src/cluster/rpc_retry.rs:358, batch of Completion: no extra work at any hold length (held by parking the tick, which has no other input, at hold length 1)
+src/cluster/rpc_retry.rs:359, batch of Request<u64>: no extra work at any hold length
 
 verdict: benign
   no reaction to a delay of up to 999 rounds was found at any decision point
@@ -230,30 +230,30 @@ verdict: benign
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 14.8 s including compilation
+run time: 16.3 s including compilation
 unheld run: 7000 records admitted at decision points, 4000 network messages sent, 4 decision points had buffered input
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/backoff_retry.rs:173:43 #0, batch of Response<u64>
-    extra records admitted                0      0      0      0      0      0     42    308   1294   4014   1639
-    extra messages, busiest sender        0      0      0      0      0      0     21    154    647   2007   3637
-    first reacted at a hold of 64 rounds with 42 extra; largest extra work 4014 in admitted records
-src/cluster/witnesses/backoff_retry.rs:173:43 #2, batch of (usize, u64)
+src/cluster/witnesses/backoff_retry.rs:175, batch of (usize, u64)
     extra records admitted                0      0      0      0      0      0      0     34   2278   3135  -5994
     extra messages, busiest sender        0      0      0      0      0      0      0     17   1139   2698  -1998
     first reacted at a hold of 128 rounds with 34 extra; largest extra work 3135 in admitted records
-src/cluster/witnesses/backoff_retry.rs:262:37 #0, batch of Request<u64>
+src/cluster/witnesses/backoff_retry.rs:176, batch of Response<u64>
+    extra records admitted                0      0      0      0      0      0     42    308   1294   4014   1639
+    extra messages, busiest sender        0      0      0      0      0      0     21    154    647   2007   3637
+    first reacted at a hold of 64 rounds with 42 extra; largest extra work 4014 in admitted records
+src/cluster/witnesses/backoff_retry.rs:263, batch of Request<u64>
     extra records admitted                0      0      0      0      0      0     62   1226   5354   4074  -3996
     extra messages, busiest sender        0      0      0      0      0      0     31    613   3637   3637   3637
     first reacted at a hold of 64 rounds with 62 extra; largest extra work 5354 in admitted records (held by parking the tick, which has no other input, at every hold length)
 
 verdict: hazardous
-  decision point: src/cluster/witnesses/backoff_retry.rs:262:37 #0, batch of Request<u64>
+  decision point: src/cluster/witnesses/backoff_retry.rs:263, batch of Request<u64>
   first reacted at a hold of 64 rounds, with 62 extra admitted records there
   largest extra work over the curve: 5354 in admitted records
   decision points that admitted more records under that hold, at its peak:
-    src/cluster/witnesses/backoff_retry.rs:173:43 #0, batch of Response<u64> +1717
-    src/cluster/witnesses/backoff_retry.rs:262:37 #0, batch of Request<u64> +3637
+    src/cluster/witnesses/backoff_retry.rs:176, batch of Response<u64> +1717
+    src/cluster/witnesses/backoff_retry.rs:263, batch of Request<u64> +3637
 ```
 
 This report is abbreviated: one decision point that showed no extra work at any hold length is omitted, along with the explanatory sentence.
@@ -263,30 +263,30 @@ This report is abbreviated: one decision point that showed no extra work at any 
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 13.2 s including compilation
+run time: 15.0 s including compilation
 unheld run: 7000 records admitted at decision points, 4000 network messages sent, 4 decision points had buffered input
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/backoff_retry.rs:173:43 #0, batch of Response<u64>
-    extra records admitted                0      0      0      0      0      0     96    544   1568   6440   1758
-    extra messages, busiest sender        0      0      0      0      0      0     48    272    784   3603   3756
-    first reacted at a hold of 64 rounds with 96 extra; largest extra work 6440 in admitted records
-src/cluster/witnesses/backoff_retry.rs:173:43 #2, batch of (usize, u64)
+src/cluster/witnesses/backoff_retry.rs:175, batch of (usize, u64)
     extra records admitted                0      0      0      0      0      0      0    190   4867   3593  -5994
     extra messages, busiest sender        0      0      0      0      0      0      0     95   3150   3156  -1998
     first reacted at a hold of 128 rounds with 190 extra; largest extra work 4867 in admitted records
-src/cluster/witnesses/backoff_retry.rs:262:37 #0, batch of Request<u64>
+src/cluster/witnesses/backoff_retry.rs:176, batch of Response<u64>
+    extra records admitted                0      0      0      0      0      0     96    544   1568   6440   1758
+    extra messages, busiest sender        0      0      0      0      0      0     48    272    784   3603   3756
+    first reacted at a hold of 64 rounds with 96 extra; largest extra work 6440 in admitted records
+src/cluster/witnesses/backoff_retry.rs:263, batch of Request<u64>
     extra records admitted                0      0      0      0      0      0    166   6113   5473   4193  -3996
     extra messages, busiest sender        0      0      0      0      0      0     83   3756   3756   3756   3756
     first reacted at a hold of 64 rounds with 166 extra; largest extra work 6113 in admitted records (held by parking the tick, which has no other input, at every hold length)
 
 verdict: hazardous
-  decision point: src/cluster/witnesses/backoff_retry.rs:262:37 #0, batch of Request<u64>
+  decision point: src/cluster/witnesses/backoff_retry.rs:263, batch of Request<u64>
   first reacted at a hold of 64 rounds, with 166 extra admitted records there
   largest extra work over the curve: 6113 in admitted records
   decision points that admitted more records under that hold, at its peak:
-    src/cluster/witnesses/backoff_retry.rs:173:43 #0, batch of Response<u64> +2357
-    src/cluster/witnesses/backoff_retry.rs:262:37 #0, batch of Request<u64> +3756
+    src/cluster/witnesses/backoff_retry.rs:176, batch of Response<u64> +2357
+    src/cluster/witnesses/backoff_retry.rs:263, batch of Request<u64> +3756
 ```
 
 This report is abbreviated: one decision point that showed no extra work at any hold length is omitted, along with the explanatory sentence.
@@ -296,30 +296,30 @@ This report is abbreviated: one decision point that showed no extra work at any 
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 11.2 s including compilation
+run time: 13.1 s including compilation
 unheld run: 7000 records admitted at decision points, 4000 network messages sent, 4 decision points had buffered input
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/bounded_queue_rejection.rs:175:43 #0, batch of Reply
-    extra records admitted                0      0      0      0      0      0     96    544   1634   3682   1758
-    extra messages, busiest sender        0      0      0      0      0      0     48    272    817   1841   3756
-    first reacted at a hold of 64 rounds with 96 extra; largest extra work 3756 in sends from Process(loc1v1)
-src/cluster/witnesses/bounded_queue_rejection.rs:175:43 #2, batch of (usize, u64)
+src/cluster/witnesses/bounded_queue_rejection.rs:177, batch of (usize, u64)
     extra records admitted                0      0      0      0      0      0     50    772   1796   3844  -5994
     extra messages, busiest sender        0      0      0      0      0      0     25    386    898   1922  -1998
     first reacted at a hold of 64 rounds with 50 extra; largest extra work 3844 in admitted records
-src/cluster/witnesses/bounded_queue_rejection.rs:307:60 #0, batch of Request
+src/cluster/witnesses/bounded_queue_rejection.rs:178, batch of Reply
+    extra records admitted                0      0      0      0      0      0     96    544   1634   3682   1758
+    extra messages, busiest sender        0      0      0      0      0      0     48    272    817   1841   3756
+    first reacted at a hold of 64 rounds with 96 extra; largest extra work 3756 in sends from Process(loc1v1)
+src/cluster/witnesses/bounded_queue_rejection.rs:308, batch of Request
     extra records admitted                0      0      0      0      0      0    244    858   1882   3930  -3996
     extra messages, busiest sender        0      0      0      0      0      0    122    429    941   1965   3756
     first reacted at a hold of 64 rounds with 244 extra; largest extra work 3930 in admitted records (held by parking the tick, which has no other input, at every hold length)
 
 verdict: hazardous
-  decision point: src/cluster/witnesses/bounded_queue_rejection.rs:307:60 #0, batch of Request
+  decision point: src/cluster/witnesses/bounded_queue_rejection.rs:308, batch of Request
   first reacted at a hold of 64 rounds, with 244 extra admitted records there
   largest extra work over the curve: 3930 in admitted records
   decision points that admitted more records under that hold, at its peak:
-    src/cluster/witnesses/bounded_queue_rejection.rs:175:43 #0, batch of Reply +1965
-    src/cluster/witnesses/bounded_queue_rejection.rs:307:60 #0, batch of Request +1965
+    src/cluster/witnesses/bounded_queue_rejection.rs:178, batch of Reply +1965
+    src/cluster/witnesses/bounded_queue_rejection.rs:308, batch of Request +1965
 ```
 
 This report is abbreviated: one decision point that showed no extra work at any hold length is omitted, along with the explanatory sentence.
@@ -329,30 +329,30 @@ This report is abbreviated: one decision point that showed no extra work at any 
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 16.3 s including compilation
+run time: 18.2 s including compilation
 unheld run: 7000 records admitted at decision points, 4000 network messages sent, 4 decision points had buffered input
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/bounded_queue_rejection.rs:175:43 #0, batch of Reply
-    extra records admitted                0      0      0      0      0      0     96    544   1568   6440   1758
-    extra messages, busiest sender        0      0      0      0      0      0     48    272    784   3603   3756
-    first reacted at a hold of 64 rounds with 96 extra; largest extra work 6440 in admitted records
-src/cluster/witnesses/bounded_queue_rejection.rs:175:43 #2, batch of (usize, u64)
+src/cluster/witnesses/bounded_queue_rejection.rs:177, batch of (usize, u64)
     extra records admitted                0      0      0      0      0      0      0    190   4867   3593  -5994
     extra messages, busiest sender        0      0      0      0      0      0      0     95   3150   3156  -1998
     first reacted at a hold of 128 rounds with 190 extra; largest extra work 4867 in admitted records
-src/cluster/witnesses/bounded_queue_rejection.rs:307:60 #0, batch of Request
+src/cluster/witnesses/bounded_queue_rejection.rs:178, batch of Reply
+    extra records admitted                0      0      0      0      0      0     96    544   1568   6440   1758
+    extra messages, busiest sender        0      0      0      0      0      0     48    272    784   3603   3756
+    first reacted at a hold of 64 rounds with 96 extra; largest extra work 6440 in admitted records
+src/cluster/witnesses/bounded_queue_rejection.rs:308, batch of Request
     extra records admitted                0      0      0      0      0      0    166   6113   5473   4193  -3996
     extra messages, busiest sender        0      0      0      0      0      0     83   3756   3756   3756   3756
     first reacted at a hold of 64 rounds with 166 extra; largest extra work 6113 in admitted records (held by parking the tick, which has no other input, at every hold length)
 
 verdict: hazardous
-  decision point: src/cluster/witnesses/bounded_queue_rejection.rs:307:60 #0, batch of Request
+  decision point: src/cluster/witnesses/bounded_queue_rejection.rs:308, batch of Request
   first reacted at a hold of 64 rounds, with 166 extra admitted records there
   largest extra work over the curve: 6113 in admitted records
   decision points that admitted more records under that hold, at its peak:
-    src/cluster/witnesses/bounded_queue_rejection.rs:175:43 #0, batch of Reply +2357
-    src/cluster/witnesses/bounded_queue_rejection.rs:307:60 #0, batch of Request +3756
+    src/cluster/witnesses/bounded_queue_rejection.rs:178, batch of Reply +2357
+    src/cluster/witnesses/bounded_queue_rejection.rs:308, batch of Request +3756
 ```
 
 This report is abbreviated: one decision point that showed no extra work at any hold length is omitted, along with the explanatory sentence.
@@ -362,34 +362,34 @@ This report is abbreviated: one decision point that showed no extra work at any 
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 23.0 s including compilation
+run time: 24.3 s including compilation
 unheld run: 11400 records admitted at decision points, 1400 network messages sent, 5 decision points had buffered input
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/cache_thundering_herd.rs:181:91 #1, batch of Fill
-    extra records admitted                0      4     28     64   -228    100  10540  10540  10540  10540   6544
-    extra messages, busiest sender        0      2     14     32   -114     50   7240   7240   7240   7240   7240
-    first reacted at a hold of 2 rounds with 4 extra; largest extra work 10540 in admitted records
-src/cluster/witnesses/cache_thundering_herd.rs:181:91 #2, batch of (usize, u32)
+src/cluster/witnesses/cache_thundering_herd.rs:183, batch of (usize, u32)
     extra records admitted             -200   -196   -192   -176   -100  10332  10202   9946   9434   8412  -9376
     extra messages, busiest sender     -100    -98    -96    -88    -50   7156   7154   7154   7154   7156   -692
     first reacted at a hold of 32 rounds with 10332 extra; largest extra work 10332 in admitted records
-src/cluster/witnesses/cache_thundering_herd.rs:298:44 #0, batch of Fetch
-    extra records admitted                0      4      8     24    -72  10358  10230   9974   9462   8438  -1384
-    extra messages, busiest sender        0      2      4     12    -36   7182   7182   7182   7182   7182   7182
-    first reacted at a hold of 2 rounds with 4 extra; largest extra work 10358 in admitted records
-src/cluster/witnesses/cache_thundering_herd.rs:298:44 #1, batch of ()
+src/cluster/witnesses/cache_thundering_herd.rs:184, batch of Fill
+    extra records admitted                0      4     28     64   -228    100  10540  10540  10540  10540   6544
+    extra messages, busiest sender        0      2     14     32   -114     50   7240   7240   7240   7240   7240
+    first reacted at a hold of 2 rounds with 4 extra; largest extra work 10540 in admitted records
+src/cluster/witnesses/cache_thundering_herd.rs:299, batch of ()
     extra records admitted                4     16     36     76   -216    188  10540  10540  10540  10540   5545
     extra messages, busiest sender        2      8     18     38   -108     94   7240   7240   7240   7240   7240
     first reacted at a hold of 1 rounds with 4 extra; largest extra work 10540 in admitted records
+src/cluster/witnesses/cache_thundering_herd.rs:300, batch of Fetch
+    extra records admitted                0      4      8     24    -72  10358  10230   9974   9462   8438  -1384
+    extra messages, busiest sender        0      2      4     12    -36   7182   7182   7182   7182   7182   7182
+    first reacted at a hold of 2 rounds with 4 extra; largest extra work 10358 in admitted records
 
 verdict: hazardous
-  decision point: src/cluster/witnesses/cache_thundering_herd.rs:298:44 #1, batch of ()
+  decision point: src/cluster/witnesses/cache_thundering_herd.rs:299, batch of ()
   first reacted at a hold of 1 rounds, with 4 extra admitted records there
   largest extra work over the curve: 10540 in admitted records
   decision points that admitted more records under that hold, at its peak:
-    src/cluster/witnesses/cache_thundering_herd.rs:181:91 #1, batch of Fill +3300
-    src/cluster/witnesses/cache_thundering_herd.rs:298:44 #0, batch of Fetch +7240
+    src/cluster/witnesses/cache_thundering_herd.rs:184, batch of Fill +3300
+    src/cluster/witnesses/cache_thundering_herd.rs:300, batch of Fetch +7240
 ```
 
 This report is abbreviated: one decision point that showed no extra work at any hold length is omitted, along with the explanatory sentence.
@@ -399,58 +399,58 @@ This report is abbreviated: one decision point that showed no extra work at any 
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 16.9 s including compilation
+run time: 17.9 s including compilation
 unheld run: 11008 records admitted at decision points, 1008 network messages sent, 5 decision points had buffered input
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/cache_thundering_herd.rs:181:91 #0, batch of (usize, ())
+src/cluster/witnesses/cache_thundering_herd.rs:182, batch of (usize, ())
     extra records admitted                4      8      8      8      8      8    -32    -92   -212   -472  -1979
     extra messages, busiest sender        2      4      4      4      4      4    -16    -46   -106   -236   -490
     first reacted at a hold of 1 rounds with 4 extra; largest extra work 8 in admitted records
-src/cluster/witnesses/cache_thundering_herd.rs:181:91 #1, batch of Fill
-    extra records admitted                0      8     28     64    148    368    836   1812   3716   7234   6936
-    extra messages, busiest sender        0      4     14     32     74    184    418    906   1858   3738   7436
-    first reacted at a hold of 2 rounds with 8 extra; largest extra work 7436 in sends from Process(loc1v1)
-src/cluster/witnesses/cache_thundering_herd.rs:181:91 #2, batch of (usize, u32)
+src/cluster/witnesses/cache_thundering_herd.rs:183, batch of (usize, u32)
     extra records admitted               -4      0      4     20     96    512    980   2252   3976   5308  -8984
     extra messages, busiest sender       -2      0      2     10     48    256    490   1126   1988   3856   -496
     first reacted at a hold of 4 rounds with 4 extra; largest extra work 5308 in admitted records
-src/cluster/witnesses/cache_thundering_herd.rs:298:44 #0, batch of Fetch
-    extra records admitted                0      4      8     24    108    368   1048   1808   3708   5136   -992
-    extra messages, busiest sender        0      2      4     12     54    184    524    904   1854   3684   7374
-    first reacted at a hold of 2 rounds with 4 extra; largest extra work 7374 in sends from Process(loc1v1)
-src/cluster/witnesses/cache_thundering_herd.rs:298:44 #1, batch of ()
+src/cluster/witnesses/cache_thundering_herd.rs:184, batch of Fill
+    extra records admitted                0      8     28     64    148    368    836   1812   3716   7234   6936
+    extra messages, busiest sender        0      4     14     32     74    184    418    906   1858   3738   7436
+    first reacted at a hold of 2 rounds with 8 extra; largest extra work 7436 in sends from Process(loc1v1)
+src/cluster/witnesses/cache_thundering_herd.rs:299, batch of ()
     extra records admitted                4     20     36     76    164    384    852   1824   3736   7242   5937
     extra messages, busiest sender        2     10     18     38     82    192    426    912   1868   3746   7436
     first reacted at a hold of 1 rounds with 4 extra; largest extra work 7436 in sends from Process(loc1v1)
+src/cluster/witnesses/cache_thundering_herd.rs:300, batch of Fetch
+    extra records admitted                0      4      8     24    108    368   1048   1808   3708   5136   -992
+    extra messages, busiest sender        0      2      4     12     54    184    524    904   1854   3684   7374
+    first reacted at a hold of 2 rounds with 4 extra; largest extra work 7374 in sends from Process(loc1v1)
 
 verdict: hazardous
-  decision point: src/cluster/witnesses/cache_thundering_herd.rs:298:44 #1, batch of ()
+  decision point: src/cluster/witnesses/cache_thundering_herd.rs:299, batch of ()
   first reacted at a hold of 1 rounds, with 4 extra messages (sends from Process(loc1v1)) there
   largest extra work over the curve: 7436 in sends from Process(loc1v1)
   decision points that admitted more records under that hold, at its peak:
-    src/cluster/witnesses/cache_thundering_herd.rs:181:91 #1, batch of Fill +3496
-    src/cluster/witnesses/cache_thundering_herd.rs:298:44 #0, batch of Fetch +3746
+    src/cluster/witnesses/cache_thundering_herd.rs:184, batch of Fill +3496
+    src/cluster/witnesses/cache_thundering_herd.rs:300, batch of Fetch +3746
 ```
 
-This report is abbreviated: 0 decision points that showed no extra work at any hold length are omitted, along with the explanatory sentence.
+This report is abbreviated: the explanatory sentence is omitted.
 
 ### cache_thundering_herd, coalescing
 
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 14.0 s including compilation
+run time: 14.8 s including compilation
 unheld run: 11000 records admitted at decision points, 1000 network messages sent, 5 decision points had buffered input
 
-A decision point is named by the source location of the sliced! block it belongs to, then #n for its position among that block's decision points, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. Each curve gives extra work over the unheld run, at each hold length.
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length.
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/cache_thundering_herd.rs:181:91 #0, batch of (usize, ()): no extra work at any hold length
-src/cluster/witnesses/cache_thundering_herd.rs:181:91 #1, batch of Fill: no extra work at any hold length
-src/cluster/witnesses/cache_thundering_herd.rs:181:91 #2, batch of (usize, u32): no extra work at any hold length
-src/cluster/witnesses/cache_thundering_herd.rs:298:44 #0, batch of Fetch: no extra work at any hold length
-src/cluster/witnesses/cache_thundering_herd.rs:298:44 #1, batch of (): no extra work at any hold length
+src/cluster/witnesses/cache_thundering_herd.rs:182, batch of (usize, ()): no extra work at any hold length
+src/cluster/witnesses/cache_thundering_herd.rs:183, batch of (usize, u32): no extra work at any hold length
+src/cluster/witnesses/cache_thundering_herd.rs:184, batch of Fill: no extra work at any hold length
+src/cluster/witnesses/cache_thundering_herd.rs:299, batch of (): no extra work at any hold length
+src/cluster/witnesses/cache_thundering_herd.rs:300, batch of Fetch: no extra work at any hold length
 
 verdict: benign
   no reaction to a delay of up to 999 rounds was found at any decision point
@@ -461,14 +461,14 @@ verdict: benign
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 7.9 s including compilation
+run time: 8.2 s including compilation
 unheld run: 6000 records admitted at decision points, 0 network messages sent, 2 decision points had buffered input
 
-A decision point is named by the source location of the sliced! block it belongs to, then #n for its position among that block's decision points, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. Each curve gives extra work over the unheld run, at each hold length.
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length.
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/compaction_falls_behind.rs:160:26 #0, batch of (usize, Op): no extra work at any hold length
-src/cluster/witnesses/compaction_falls_behind.rs:160:26 #1, batch of (): no extra work at any hold length
+src/cluster/witnesses/compaction_falls_behind.rs:161, batch of (): no extra work at any hold length
+src/cluster/witnesses/compaction_falls_behind.rs:162, batch of (usize, Op): no extra work at any hold length
 
 verdict: benign
   no reaction to a delay of up to 999 rounds was found at any decision point
@@ -479,14 +479,14 @@ verdict: benign
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 5.0 s including compilation
+run time: 5.4 s including compilation
 unheld run: 6000 records admitted at decision points, 0 network messages sent, 2 decision points had buffered input
 
-A decision point is named by the source location of the sliced! block it belongs to, then #n for its position among that block's decision points, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. Each curve gives extra work over the unheld run, at each hold length.
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length.
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/compaction_falls_behind.rs:160:26 #0, batch of (usize, Op): no extra work at any hold length
-src/cluster/witnesses/compaction_falls_behind.rs:160:26 #1, batch of (): no extra work at any hold length
+src/cluster/witnesses/compaction_falls_behind.rs:161, batch of (): no extra work at any hold length
+src/cluster/witnesses/compaction_falls_behind.rs:162, batch of (usize, Op): no extra work at any hold length
 
 verdict: benign
   no reaction to a delay of up to 999 rounds was found at any decision point
@@ -497,15 +497,15 @@ verdict: benign
 ```
 amplification check: 60 rounds of workload, every hold begins at round 1
 horizon: 59 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 30.2 s including compilation
+run time: 32.0 s including compilation
 unheld run: 180 records admitted at decision points, 720 network messages sent, 3 decision points had buffered input
 
-A decision point is named by the source location of the sliced! block it belongs to, then #n for its position among that block's decision points, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. Each curve gives extra work over the unheld run, at each hold length.
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length.
 
 hold length (rounds)                      1      2      4      8     16     32     59
-/Users/palvarox/code/hydro-metastable-3/.infinity/.sandboxes/.tmpPxjZIX/hydro_std/src/ec_inference_demos/crdt_gossip.rs:70:18 #0, snapshot of BTreeSet<u32>: no extra work at any hold length (held by parking the tick, which has no other input, at hold length 1)
-/Users/palvarox/code/hydro-metastable-3/.infinity/.sandboxes/.tmpPxjZIX/hydro_std/src/ec_inference_demos/crdt_gossip.rs:70:18 #1, batch of (): no extra work at any hold length
-src/cluster/witnesses/checker_experiments.rs:2879:14 #0, snapshot of BTreeSet<u32>: no extra work at any hold length (held by parking the tick, which has no other input, at every hold length)
+hydro_std/src/ec_inference_demos/crdt_gossip.rs:71, snapshot of BTreeSet<u32>: no extra work at any hold length (held by parking the tick, which has no other input, at hold length 1)
+hydro_std/src/ec_inference_demos/crdt_gossip.rs:75, batch of (): no extra work at any hold length
+src/cluster/witnesses/checker_experiments.rs:2879, snapshot of BTreeSet<u32>: no extra work at any hold length (held by parking the tick, which has no other input, at every hold length)
 
 verdict: benign
   no reaction to a delay of up to 59 rounds was found at any decision point
@@ -516,27 +516,27 @@ verdict: benign
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 18.5 s including compilation
+run time: 19.8 s including compilation
 unheld run: 14000 records admitted at decision points, 4000 network messages sent, 3 decision points had buffered input
 
-A decision point is named by the source location of the sliced! block it belongs to, then #n for its position among that block's decision points, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. Each curve gives extra work over the unheld run, at each hold length.
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length.
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/election_stampede.rs:226:65 #0, batch of Msg
-    extra records admitted                0      0      0      2     16     38     68    138    260    874  -3996
-    extra messages, busiest sender        0      0      0   3936   3892   3772   3540   3060   2100    664    664
-    first reacted at a hold of 8 rounds with 3936 extra; largest extra work 3936 in sends from Cluster(loc1v1) @1
-src/cluster/witnesses/election_stampede.rs:226:65 #1, batch of u64
-    extra records admitted                0      0      0      0      0      4      9     14      9     66  -4995
-    extra messages, busiest sender        0      0      0      0      0   3764   3536   3080   2136    324      0
-    first reacted at a hold of 32 rounds with 3764 extra; largest extra work 3764 in sends from Cluster(loc1v1) @1
-src/cluster/witnesses/election_stampede.rs:226:65 #2, batch of (usize, ())
+src/cluster/witnesses/election_stampede.rs:227, batch of (usize, ())
     extra records admitted               -4     -8    -16    -23    -61   -115   -242   -497  -1010  -1973  -8991
     extra messages, busiest sender       -4     -8    -16   3944   3872   3768   3536   3072   2136    328  -3996
     first reacted at a hold of 8 rounds with 3944 extra; largest extra work 3944 in sends from Cluster(loc1v1) @1
+src/cluster/witnesses/election_stampede.rs:228, batch of Msg
+    extra records admitted                0      0      0      2     16     38     68    138    260    874  -3996
+    extra messages, busiest sender        0      0      0   3936   3892   3772   3540   3060   2100    664    664
+    first reacted at a hold of 8 rounds with 3936 extra; largest extra work 3936 in sends from Cluster(loc1v1) @1
+src/cluster/witnesses/election_stampede.rs:229, batch of u64
+    extra records admitted                0      0      0      0      0      4      9     14      9     66  -4995
+    extra messages, busiest sender        0      0      0      0      0   3764   3536   3080   2136    324      0
+    first reacted at a hold of 32 rounds with 3764 extra; largest extra work 3764 in sends from Cluster(loc1v1) @1
 
 verdict: hazardous
-  decision point: src/cluster/witnesses/election_stampede.rs:226:65 #2, batch of (usize, ())
+  decision point: src/cluster/witnesses/election_stampede.rs:227, batch of (usize, ())
   first reacted at a hold of 8 rounds, with 3944 extra messages (sends from Cluster(loc1v1) @1) there
   largest extra work over the curve: 3944 in sends from Cluster(loc1v1) @1
 ```
@@ -546,27 +546,27 @@ verdict: hazardous
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 18.6 s including compilation
+run time: 18.4 s including compilation
 unheld run: 14000 records admitted at decision points, 4000 network messages sent, 3 decision points had buffered input
 
-A decision point is named by the source location of the sliced! block it belongs to, then #n for its position among that block's decision points, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. Each curve gives extra work over the unheld run, at each hold length.
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length.
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/election_stampede.rs:226:65 #0, batch of Msg
-    extra records admitted                0      0      0      0     -6     -8    -12    -15    -35    -62  -3996
-    extra messages, busiest sender        0      0      0      0     13     21     49     99    200    401    444
-    first reacted at a hold of 16 rounds with 13 extra; largest extra work 444 in sends from Cluster(loc1v1) @1
-src/cluster/witnesses/election_stampede.rs:226:65 #1, batch of u64
-    extra records admitted                0      0      0      0      0    -24    -31    -64   -135   -269  -4995
-    extra messages, busiest sender        0      0      0      0      0   3780     20     41     89    179      0
-    first reacted at a hold of 32 rounds with 3780 extra; largest extra work 3780 in sends from Cluster(loc1v1) @1
-src/cluster/witnesses/election_stampede.rs:226:65 #2, batch of (usize, ())
+src/cluster/witnesses/election_stampede.rs:227, batch of (usize, ())
     extra records admitted               -4     -8    -16    -32    -67   -137   -282   -572  -1154  -2315  -8991
     extra messages, busiest sender       -4     -8    -16   3948   3892     17     24     48     93    183  -3996
     first reacted at a hold of 8 rounds with 3948 extra; largest extra work 3948 in sends from Cluster(loc1v1) @1
+src/cluster/witnesses/election_stampede.rs:228, batch of Msg
+    extra records admitted                0      0      0      0     -6     -8    -12    -15    -35    -62  -3996
+    extra messages, busiest sender        0      0      0      0     13     21     49     99    200    401    444
+    first reacted at a hold of 16 rounds with 13 extra; largest extra work 444 in sends from Cluster(loc1v1) @1
+src/cluster/witnesses/election_stampede.rs:229, batch of u64
+    extra records admitted                0      0      0      0      0    -24    -31    -64   -135   -269  -4995
+    extra messages, busiest sender        0      0      0      0      0   3780     20     41     89    179      0
+    first reacted at a hold of 32 rounds with 3780 extra; largest extra work 3780 in sends from Cluster(loc1v1) @1
 
 verdict: hazardous
-  decision point: src/cluster/witnesses/election_stampede.rs:226:65 #2, batch of (usize, ())
+  decision point: src/cluster/witnesses/election_stampede.rs:227, batch of (usize, ())
   first reacted at a hold of 8 rounds, with 3948 extra messages (sends from Cluster(loc1v1) @1) there
   largest extra work over the curve: 3948 in sends from Cluster(loc1v1) @1
 ```
@@ -576,53 +576,53 @@ verdict: hazardous
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 505.3 s including compilation
+run time: 496.8 s including compilation
 unheld run: 49990 records admitted at decision points, 39990 network messages sent, 4 decision points had buffered input
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/gossip_resend.rs:121:68 #0, batch of Delta
-    extra records admitted                0      8  24803  24720  24525  24125  23325  21725  18525  12125 -39950
-    extra messages, busiest sender        0      3   4963   4945   4907   4827   4667   4347   3707   2427     -8
-    first reacted at a hold of 2 rounds with 8 extra; largest extra work 24803 in admitted records
-src/cluster/witnesses/gossip_resend.rs:121:68 #1, batch of (usize, ())
+src/cluster/witnesses/gossip_resend.rs:122, batch of (usize, ())
     extra records admitted                0   9952  24795  24615  24255  23535  22095  19215  13455   1935 -24975
     extra messages, busiest sender        0   1999   4959   4923   4851   4707   4419   3843   2691    387  -3996
     first reacted at a hold of 2 rounds with 9952 extra; largest extra work 24795 in admitted records
-src/cluster/witnesses/gossip_resend.rs:121:68 #2, batch of Ack
-    extra records admitted                0      0     60  24878  24910  24910  24910  24910  24910  24910    -50
-    extra messages, busiest sender        0      0     12   4980   4984   4984   4984   4984   4984   4984   4984
-    first reacted at a hold of 4 rounds with 60 extra; largest extra work 24910 in admitted records
-src/cluster/witnesses/gossip_resend.rs:121:68 #3, batch of (usize, u64)
+src/cluster/witnesses/gossip_resend.rs:123, batch of (usize, u64)
     extra records admitted                0      0  14824  24554  24200  23480  22040  19160  13400   1880 -44945
     extra messages, busiest sender        0      0   2977   4913   4842   4698   4410   3834   2682    378  -7988
     first reacted at a hold of 4 rounds with 14824 extra; largest extra work 24554 in admitted records
+src/cluster/witnesses/gossip_resend.rs:124, batch of Delta
+    extra records admitted                0      8  24803  24720  24525  24125  23325  21725  18525  12125 -39950
+    extra messages, busiest sender        0      3   4963   4945   4907   4827   4667   4347   3707   2427     -8
+    first reacted at a hold of 2 rounds with 8 extra; largest extra work 24803 in admitted records
+src/cluster/witnesses/gossip_resend.rs:125, batch of Ack
+    extra records admitted                0      0     60  24878  24910  24910  24910  24910  24910  24910    -50
+    extra messages, busiest sender        0      0     12   4980   4984   4984   4984   4984   4984   4984   4984
+    first reacted at a hold of 4 rounds with 60 extra; largest extra work 24910 in admitted records
 
 verdict: hazardous
-  decision point: src/cluster/witnesses/gossip_resend.rs:121:68 #1, batch of (usize, ())
+  decision point: src/cluster/witnesses/gossip_resend.rs:122, batch of (usize, ())
   first reacted at a hold of 2 rounds, with 9952 extra admitted records there
   largest extra work over the curve: 24795 in admitted records
   decision points that admitted more records under that hold, at its peak:
-    src/cluster/witnesses/gossip_resend.rs:121:68 #0, batch of Delta +19900
-    src/cluster/witnesses/gossip_resend.rs:121:68 #2, batch of Ack +4895
+    src/cluster/witnesses/gossip_resend.rs:124, batch of Delta +19900
+    src/cluster/witnesses/gossip_resend.rs:125, batch of Ack +4895
 ```
 
-This report is abbreviated: 0 decision points that showed no extra work at any hold length are omitted, along with the explanatory sentence.
+This report is abbreviated: the explanatory sentence is omitted.
 
 ### gossip_resend, re-sends off
 
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 161.7 s including compilation
+run time: 160.0 s including compilation
 unheld run: 49990 records admitted at decision points, 39990 network messages sent, 4 decision points had buffered input
 
-A decision point is named by the source location of the sliced! block it belongs to, then #n for its position among that block's decision points, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. Each curve gives extra work over the unheld run, at each hold length.
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length.
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/gossip_resend.rs:121:68 #0, batch of Delta: no extra work at any hold length
-src/cluster/witnesses/gossip_resend.rs:121:68 #1, batch of (usize, ()): no extra work at any hold length
-src/cluster/witnesses/gossip_resend.rs:121:68 #2, batch of Ack: no extra work at any hold length
-src/cluster/witnesses/gossip_resend.rs:121:68 #3, batch of (usize, u64): no extra work at any hold length
+src/cluster/witnesses/gossip_resend.rs:122, batch of (usize, ()): no extra work at any hold length
+src/cluster/witnesses/gossip_resend.rs:123, batch of (usize, u64): no extra work at any hold length
+src/cluster/witnesses/gossip_resend.rs:124, batch of Delta: no extra work at any hold length
+src/cluster/witnesses/gossip_resend.rs:125, batch of Ack: no extra work at any hold length
 
 verdict: benign
   no reaction to a delay of up to 999 rounds was found at any decision point
@@ -633,29 +633,29 @@ verdict: benign
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 165.7 s including compilation
+run time: 164.2 s including compilation
 unheld run: 24998 records admitted at decision points, 3998 network messages sent, 3 decision points had buffered input
 
-A decision point is named by the source location of the sliced! block it belongs to, then #n for its position among that block's decision points, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. Each curve gives extra work over the unheld run, at each hold length.
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length.
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/lease_renewal_storm.rs:183:49 #0, batch of Ack
+src/cluster/witnesses/lease_renewal_storm.rs:184, batch of (usize, ()): no extra work at any hold length
+src/cluster/witnesses/lease_renewal_storm.rs:185, batch of Ack
     extra records admitted                0      0      4     60  14893  14906  14906  14906  14906  14906   9924
     extra messages, busiest sender        0      0      2     30   2984   2984   2984   2984   2984   2984   2984
     first reacted at a hold of 4 rounds with 4 extra; largest extra work 14906 in admitted records
-src/cluster/witnesses/lease_renewal_storm.rs:183:49 #1, batch of (usize, ()): no extra work at any hold length
-src/cluster/witnesses/lease_renewal_storm.rs:265:34 #1, batch of (MemberId<LeaseClient>, Renewal)
+src/cluster/witnesses/lease_renewal_storm.rs:267, batch of (MemberId<LeaseClient>, Renewal)
     extra records admitted                0      0      2  14807  14819  14743  14589  14269  13629  12349  -3994
     extra messages, busiest sender        0      0      1   2959   2919   2839   2679   2359   1719    599    599
     first reacted at a hold of 4 rounds with 2 extra; largest extra work 14819 in admitted records (held by parking the tick, which has no other input, at hold length 1)
 
 verdict: hazardous
-  decision point: src/cluster/witnesses/lease_renewal_storm.rs:183:49 #0, batch of Ack
+  decision point: src/cluster/witnesses/lease_renewal_storm.rs:185, batch of Ack
   first reacted at a hold of 4 rounds, with 4 extra admitted records there
   largest extra work over the curve: 14906 in admitted records
   decision points that admitted more records under that hold, at its peak:
-    src/cluster/witnesses/lease_renewal_storm.rs:183:49 #0, batch of Ack +2984
-    src/cluster/witnesses/lease_renewal_storm.rs:265:34 #1, batch of (MemberId<LeaseClient>, Renewal) +11922
+    src/cluster/witnesses/lease_renewal_storm.rs:185, batch of Ack +2984
+    src/cluster/witnesses/lease_renewal_storm.rs:267, batch of (MemberId<LeaseClient>, Renewal) +11922
 ```
 
 ### lease_renewal_storm, one outstanding renewal
@@ -663,15 +663,15 @@ verdict: hazardous
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 104.0 s including compilation
+run time: 102.2 s including compilation
 unheld run: 24998 records admitted at decision points, 3998 network messages sent, 3 decision points had buffered input
 
-A decision point is named by the source location of the sliced! block it belongs to, then #n for its position among that block's decision points, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. Each curve gives extra work over the unheld run, at each hold length.
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length.
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/lease_renewal_storm.rs:183:49 #0, batch of Ack: no extra work at any hold length
-src/cluster/witnesses/lease_renewal_storm.rs:183:49 #1, batch of (usize, ()): no extra work at any hold length
-src/cluster/witnesses/lease_renewal_storm.rs:265:34 #1, batch of (MemberId<LeaseClient>, Renewal): no extra work at any hold length (held by parking the tick, which has no other input, at hold length 1)
+src/cluster/witnesses/lease_renewal_storm.rs:184, batch of (usize, ()): no extra work at any hold length
+src/cluster/witnesses/lease_renewal_storm.rs:185, batch of Ack: no extra work at any hold length
+src/cluster/witnesses/lease_renewal_storm.rs:267, batch of (MemberId<LeaseClient>, Renewal): no extra work at any hold length (held by parking the tick, which has no other input, at hold length 1)
 
 verdict: benign
   no reaction to a delay of up to 999 rounds was found at any decision point
@@ -682,10 +682,10 @@ verdict: benign
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 2.3 s including compilation
+run time: 2.5 s including compilation
 unheld run: 0 records admitted at decision points, 9000 network messages sent, 0 decision points had buffered input
 
-A decision point is named by the source location of the sliced! block it belongs to, then #n for its position among that block's decision points, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. Each curve gives extra work over the unheld run, at each hold length.
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length.
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
 
@@ -698,26 +698,26 @@ verdict: benign
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 15.1 s including compilation
+run time: 14.7 s including compilation
 unheld run: 9500 records admitted at decision points, 1000 network messages sent, 4 decision points had buffered input
 
-A decision point is named by the source location of the sliced! block it belongs to, then #n for its position among that block's decision points, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. Each curve gives extra work over the unheld run, at each hold length.
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length.
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/rebalancing_ping_pong.rs:158:52 #1, batch of u64
+src/cluster/witnesses/rebalancing_ping_pong.rs:159, batch of (usize, ()): no extra work at any hold length
+src/cluster/witnesses/rebalancing_ping_pong.rs:160, batch of (): no extra work at any hold length
+src/cluster/witnesses/rebalancing_ping_pong.rs:161, batch of u64
     extra records admitted                0      0      0    120    251    547   1252   2796   5834  11986  -5994
     extra messages, busiest sender        0      0      0     65    131    284    639   1422   2948   6031      0
     first reacted at a hold of 8 rounds with 120 extra; largest extra work 11986 in admitted records
-src/cluster/witnesses/rebalancing_ping_pong.rs:158:52 #2, batch of (usize, ()): no extra work at any hold length
-src/cluster/witnesses/rebalancing_ping_pong.rs:158:52 #3, batch of (MemberId<Worker>, usize): no extra work at any hold length (held by parking the tick, which has no other input, at hold lengths 1, 2)
-src/cluster/witnesses/rebalancing_ping_pong.rs:158:52 #4, batch of (): no extra work at any hold length
+src/cluster/witnesses/rebalancing_ping_pong.rs:163, batch of (MemberId<Worker>, usize): no extra work at any hold length (held by parking the tick, which has no other input, at hold lengths 1, 2)
 
 verdict: hazardous
-  decision point: src/cluster/witnesses/rebalancing_ping_pong.rs:158:52 #1, batch of u64
+  decision point: src/cluster/witnesses/rebalancing_ping_pong.rs:161, batch of u64
   first reacted at a hold of 8 rounds, with 120 extra admitted records there
   largest extra work over the curve: 11986 in admitted records
   decision points that admitted more records under that hold, at its peak:
-    src/cluster/witnesses/rebalancing_ping_pong.rs:158:52 #0, batch of (MemberId<Worker>, Task) +11986
+    src/cluster/witnesses/rebalancing_ping_pong.rs:162, batch of (MemberId<Worker>, Task) +11986
 ```
 
 ### rebalancing_ping_pong, cooldown 8
@@ -725,26 +725,26 @@ verdict: hazardous
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 14.3 s including compilation
+run time: 15.0 s including compilation
 unheld run: 9500 records admitted at decision points, 1000 network messages sent, 4 decision points had buffered input
 
-A decision point is named by the source location of the sliced! block it belongs to, then #n for its position among that block's decision points, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. Each curve gives extra work over the unheld run, at each hold length.
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length.
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/rebalancing_ping_pong.rs:158:52 #1, batch of u64
+src/cluster/witnesses/rebalancing_ping_pong.rs:159, batch of (usize, ()): no extra work at any hold length
+src/cluster/witnesses/rebalancing_ping_pong.rs:160, batch of (): no extra work at any hold length
+src/cluster/witnesses/rebalancing_ping_pong.rs:161, batch of u64
     extra records admitted                0      0      0     30     70    142    286    574   1150   2302  -5994
     extra messages, busiest sender        0      0      0     19     37     73    145    289    577   1153      0
     first reacted at a hold of 8 rounds with 30 extra; largest extra work 2302 in admitted records
-src/cluster/witnesses/rebalancing_ping_pong.rs:158:52 #2, batch of (usize, ()): no extra work at any hold length
-src/cluster/witnesses/rebalancing_ping_pong.rs:158:52 #3, batch of (MemberId<Worker>, usize): no extra work at any hold length (held by parking the tick, which has no other input, at hold lengths 1, 2)
-src/cluster/witnesses/rebalancing_ping_pong.rs:158:52 #4, batch of (): no extra work at any hold length
+src/cluster/witnesses/rebalancing_ping_pong.rs:163, batch of (MemberId<Worker>, usize): no extra work at any hold length (held by parking the tick, which has no other input, at hold lengths 1, 2)
 
 verdict: hazardous
-  decision point: src/cluster/witnesses/rebalancing_ping_pong.rs:158:52 #1, batch of u64
+  decision point: src/cluster/witnesses/rebalancing_ping_pong.rs:161, batch of u64
   first reacted at a hold of 8 rounds, with 30 extra admitted records there
   largest extra work over the curve: 2302 in admitted records
   decision points that admitted more records under that hold, at its peak:
-    src/cluster/witnesses/rebalancing_ping_pong.rs:158:52 #0, batch of (MemberId<Worker>, Task) +2302
+    src/cluster/witnesses/rebalancing_ping_pong.rs:162, batch of (MemberId<Worker>, Task) +2302
 ```
 
 ### transitive_closure_load
@@ -752,14 +752,14 @@ verdict: hazardous
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 15.6 s including compilation
+run time: 15.5 s including compilation
 unheld run: 1200 records admitted at decision points, 0 network messages sent, 2 decision points had buffered input
 
-A decision point is named by the source location of the sliced! block it belongs to, then #n for its position among that block's decision points, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. Each curve gives extra work over the unheld run, at each hold length.
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length.
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/local/productive_tc.rs:75:4 #0, batch of Vec<(u32, u32)>: no extra work at any hold length
-src/local/productive_tc.rs:75:4 #1, batch of (): no extra work at any hold length (held by parking the tick, which has no other input, at hold lengths 1, 2, 4)
+src/local/productive_tc.rs:76, batch of Vec<(u32, u32)>: no extra work at any hold length
+src/local/productive_tc.rs:80, batch of (): no extra work at any hold length (held by parking the tick, which has no other input, at hold lengths 1, 2, 4)
 
 verdict: benign
   no reaction to a delay of up to 999 rounds was found at any decision point
@@ -770,110 +770,110 @@ verdict: benign
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 1352.9 s including compilation
+run time: 1315.2 s including compilation
 unheld run: 8000 records admitted at decision points, 4000 network messages sent, 5 decision points had buffered input
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/blind/batch_flush.rs:102:43 #0, batch of u64
-    extra records admitted                0      0      4 814530 856056 869192 885364 893188 902896 930596 996988
-    extra messages, busiest sender        0      0      2 808554 850080 863216 879388 887212 896920 924620 998988
-    first reacted at a hold of 4 rounds with 4 extra; largest extra work 998988 in sends from Process(loc1v1)
-src/cluster/witnesses/blind/batch_flush.rs:102:43 #1, batch of (usize, ())
-    extra records admitted                0      0     -8     16 828826 824518 792868 732470 563152 302218  -5994
-    extra messages, busiest sender        0      0     -4      8 822960 818780 787386 727500 559206 300320  -1998
-    first reacted at a hold of 8 rounds with 16 extra; largest extra work 828826 in admitted records
-src/cluster/witnesses/blind/batch_flush.rs:102:43 #2, batch of (usize, ())
+src/cluster/witnesses/blind/batch_flush.rs:103, batch of (usize, ())
     extra records admitted                0      0      4     52 831418 825620 793572 733116 563318 302476  -4999
     extra messages, busiest sender        0      0      2     26 825554 819884 788092 728148 559374 300580      0
     first reacted at a hold of 4 rounds with 4 extra; largest extra work 831418 in admitted records
-src/cluster/witnesses/blind/batch_flush.rs:161:42 #0, batch of FlushCopy
-    extra records admitted                0      0     60 855714 870396 883372 897516 908576 927870 961196  -4000
-    extra messages, busiest sender        0      0     30 849786 864532 877636 892036 903608 923926 959300 998988
-    first reacted at a hold of 4 rounds with 60 extra; largest extra work 998988 in sends from Process(loc1v1)
-src/cluster/witnesses/blind/batch_flush.rs:161:42 #1, batch of ()
+src/cluster/witnesses/blind/batch_flush.rs:104, batch of (usize, ())
+    extra records admitted                0      0     -8     16 828826 824518 792868 732470 563152 302218  -5994
+    extra messages, busiest sender        0      0     -4      8 822960 818780 787386 727500 559206 300320  -1998
+    first reacted at a hold of 8 rounds with 16 extra; largest extra work 828826 in admitted records
+src/cluster/witnesses/blind/batch_flush.rs:105, batch of u64
+    extra records admitted                0      0      4 814530 856056 869192 885364 893188 902896 930596 996988
+    extra messages, busiest sender        0      0      2 808554 850080 863216 879388 887212 896920 924620 998988
+    first reacted at a hold of 4 rounds with 4 extra; largest extra work 998988 in sends from Process(loc1v1)
+src/cluster/witnesses/blind/batch_flush.rs:162, batch of ()
     extra records admitted                0      0     28    168 855568 868898 885398 893038 902824 930638 995989
     extra messages, busiest sender        0      0     14     84 849576 862906 879406 887046 896832 924646 998988
     first reacted at a hold of 4 rounds with 28 extra; largest extra work 998988 in sends from Process(loc1v1) (held by parking the tick, which has no other input, at hold lengths 1, 2)
+src/cluster/witnesses/blind/batch_flush.rs:163, batch of FlushCopy
+    extra records admitted                0      0     60 855714 870396 883372 897516 908576 927870 961196  -4000
+    extra messages, busiest sender        0      0     30 849786 864532 877636 892036 903608 923926 959300 998988
+    first reacted at a hold of 4 rounds with 60 extra; largest extra work 998988 in sends from Process(loc1v1)
 
 verdict: hazardous
-  decision point: src/cluster/witnesses/blind/batch_flush.rs:161:42 #0, batch of FlushCopy
+  decision point: src/cluster/witnesses/blind/batch_flush.rs:163, batch of FlushCopy
   first reacted at a hold of 4 rounds, with 60 extra messages (sends from Process(loc1v1)) there
   largest extra work over the curve: 998988 in sends from Process(loc1v1)
   decision points that admitted more records under that hold, at its peak:
-    src/cluster/witnesses/blind/batch_flush.rs:102:43 #0, batch of u64 +1896
-    src/cluster/witnesses/blind/batch_flush.rs:161:42 #0, batch of FlushCopy +959300
+    src/cluster/witnesses/blind/batch_flush.rs:105, batch of u64 +1896
+    src/cluster/witnesses/blind/batch_flush.rs:163, batch of FlushCopy +959300
 ```
 
-This report is abbreviated: 0 decision points that showed no extra work at any hold length are omitted, along with the explanatory sentence.
+This report is abbreviated: the explanatory sentence is omitted.
 
 ### blind: log_catchup
 
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 36.6 s including compilation
+run time: 15.7 s including compilation
 unheld run: 6161 records admitted at decision points, 2161 network messages sent, 4 decision points had buffered input
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/blind/log_catchup.rs:125:53 #0, batch of RecordReply
+src/cluster/witnesses/blind/log_catchup.rs:127, batch of RecordReply
     extra records admitted                0      0      0      0     78    247    715   1794   8695   8721  -1167
     extra messages, busiest sender        0      0      0      0     72    228    660   1656   7920   7920   7920
     first reacted at a hold of 16 rounds with 78 extra; largest extra work 8721 in admitted records
-src/cluster/witnesses/blind/log_catchup.rs:218:28 #0, batch of ()
-    extra records admitted                0      0      0      1     -5    -28    -61   -140   -285   -588  -3165
-    extra messages, busiest sender        0      0      0      1      7     20     47    100    207    420    825
-    first reacted at a hold of 8 rounds with 1 extra; largest extra work 825 in sends from Process(loc1v1)
-src/cluster/witnesses/blind/log_catchup.rs:218:28 #2, batch of Fetch
-    extra records admitted                0      0      0      0    182   8338   8128   7517   6250   3698  -2158
-    extra messages, busiest sender        0      0      0      0    168   7678   7358   6718   5438   2878    825
-    first reacted at a hold of 16 rounds with 182 extra; largest extra work 8338 in admitted records
-src/cluster/witnesses/blind/log_catchup.rs:218:28 #3, batch of ()
+src/cluster/witnesses/blind/log_catchup.rs:219, batch of ()
     extra records admitted                0      0      0      0     91    260    611   1547   8769   8801  -2166
     extra messages, busiest sender        0      0      0      0     84    240    564   1428   7998   7998    825
     first reacted at a hold of 16 rounds with 91 extra; largest extra work 8801 in admitted records
+src/cluster/witnesses/blind/log_catchup.rs:220, batch of ()
+    extra records admitted                0      0      0      1     -5    -28    -61   -140   -285   -588  -3165
+    extra messages, busiest sender        0      0      0      1      7     20     47    100    207    420    825
+    first reacted at a hold of 8 rounds with 1 extra; largest extra work 825 in sends from Process(loc1v1)
+src/cluster/witnesses/blind/log_catchup.rs:221, batch of Fetch
+    extra records admitted                0      0      0      0    182   8338   8128   7517   6250   3698  -2158
+    extra messages, busiest sender        0      0      0      0    168   7678   7358   6718   5438   2878    825
+    first reacted at a hold of 16 rounds with 182 extra; largest extra work 8338 in admitted records
 
 verdict: hazardous
-  decision point: src/cluster/witnesses/blind/log_catchup.rs:218:28 #0, batch of ()
+  decision point: src/cluster/witnesses/blind/log_catchup.rs:220, batch of ()
   first reacted at a hold of 8 rounds, with 1 extra messages (sends from Process(loc1v1)) there
   largest extra work over the curve: 825 in sends from Process(loc1v1)
   decision points that admitted more records under that hold, at its peak:
-    src/cluster/witnesses/blind/log_catchup.rs:218:28 #2, batch of Fetch +1
+    src/cluster/witnesses/blind/log_catchup.rs:221, batch of Fetch +1
 ```
 
-This report is abbreviated: 0 decision points that showed no extra work at any hold length are omitted, along with the explanatory sentence.
+This report is abbreviated: the explanatory sentence is omitted.
 
 ### blind: two_phase_commit
 
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 362.4 s including compilation
+run time: 361.1 s including compilation
 unheld run: 9000 records admitted at decision points, 6000 network messages sent, 5 decision points had buffered input
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/blind/two_phase_commit.rs:201:58 #0, batch of (usize, ())
+src/cluster/witnesses/blind/two_phase_commit.rs:203, batch of (usize, ())
     extra records admitted               -3     -3     -3 170090 182351 185497 182508 172451 138734  83114  -6993
     extra messages, busiest sender       -1     -1     -1 167377 179616 182828 180001 170360 137157  82717  -1998
     first reacted at a hold of 8 rounds with 170090 extra; largest extra work 185497 in admitted records
-src/cluster/witnesses/blind/two_phase_commit.rs:201:58 #1, batch of Vote
+src/cluster/witnesses/blind/two_phase_commit.rs:204, batch of Vote
     extra records admitted                0      0     -3     13 176444 189566 197147 205527 209503 220413 244506
     extra messages, busiest sender        0      0     -1      7 173675 186733 194278 202648 206522 217432 246504
     first reacted at a hold of 8 rounds with 13 extra; largest extra work 246504 in sends from Process(loc1v1)
-src/cluster/witnesses/blind/two_phase_commit.rs:240:42 #0, batch of ParticipantMessage
-    extra records admitted               -3     -3      1 179566 190683 197932 205065 211499 218871 231515  -5994
-    extra messages, busiest sender       -1     -1      1 176807 187908 195201 202466 209146 217154 231078 246504
-    first reacted at a hold of 4 rounds with 1 extra; largest extra work 246504 in sends from Process(loc1v1)
-src/cluster/witnesses/blind/two_phase_commit.rs:240:42 #1, batch of ()
+src/cluster/witnesses/blind/two_phase_commit.rs:241, batch of ()
     extra records admitted                0     -3      6 181753 190954 197999 205104 211512 218881 231523 243507
     extra messages, busiest sender        0     -1      3 178984 188179 195270 202507 209159 217166 231088 246504
     first reacted at a hold of 4 rounds with 6 extra; largest extra work 246504 in sends from Process(loc1v1)
+src/cluster/witnesses/blind/two_phase_commit.rs:242, batch of ParticipantMessage
+    extra records admitted               -3     -3      1 179566 190683 197932 205065 211499 218871 231515  -5994
+    extra messages, busiest sender       -1     -1      1 176807 187908 195201 202466 209146 217154 231078 246504
+    first reacted at a hold of 4 rounds with 1 extra; largest extra work 246504 in sends from Process(loc1v1)
 
 verdict: hazardous
-  decision point: src/cluster/witnesses/blind/two_phase_commit.rs:240:42 #1, batch of ()
+  decision point: src/cluster/witnesses/blind/two_phase_commit.rs:241, batch of ()
   first reacted at a hold of 4 rounds, with 6 extra messages (sends from Process(loc1v1)) there
   largest extra work over the curve: 246504 in sends from Process(loc1v1)
   decision points that admitted more records under that hold, at its peak:
-    src/cluster/witnesses/blind/two_phase_commit.rs:240:42 #0, batch of ParticipantMessage +246504
+    src/cluster/witnesses/blind/two_phase_commit.rs:242, batch of ParticipantMessage +246504
 ```
 
 This report is abbreviated: one decision point that showed no extra work at any hold length is omitted, along with the explanatory sentence.
@@ -883,34 +883,34 @@ This report is abbreviated: one decision point that showed no extra work at any 
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 208.6 s including compilation
+run time: 211.4 s including compilation
 unheld run: 8000 records admitted at decision points, 4000 network messages sent, 5 decision points had buffered input
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/blind/visibility_queue.rs:110:37 #1, batch of u64
-    extra records admitted                0      0      0      8     56 102028 122432 130996 135871 144625 163338
-    extra messages, busiest sender        0      0      0      4     28  99055 119459 128023 132898 141652 165336
-    first reacted at a hold of 8 rounds with 8 extra; largest extra work 165336 in sends from Process(loc1v1)
-src/cluster/witnesses/blind/visibility_queue.rs:110:37 #2, batch of (usize, u64)
+src/cluster/witnesses/blind/visibility_queue.rs:115, batch of (usize, u64)
     extra records admitted                0      0      0      0     10 104084 113093 108799  92078  55725  -5994
     extra messages, busiest sender        0      0      0      0      5 101247 110416 106442  90361  55288  -1998
     first reacted at a hold of 16 rounds with 10 extra; largest extra work 113093 in admitted records
-src/cluster/witnesses/blind/visibility_queue.rs:195:44 #0, batch of (usize, ())
+src/cluster/witnesses/blind/visibility_queue.rs:119, batch of u64
+    extra records admitted                0      0      0      8     56 102028 122432 130996 135871 144625 163338
+    extra messages, busiest sender        0      0      0      4     28  99055 119459 128023 132898 141652 165336
+    first reacted at a hold of 8 rounds with 8 extra; largest extra work 165336 in sends from Process(loc1v1)
+src/cluster/witnesses/blind/visibility_queue.rs:196, batch of (usize, ())
     extra records admitted                0      0      0     12     64    398 121992 130877 135789 144617 162339
     extra messages, busiest sender        0      0      0      6     32    199 118995 127880 132792 141620 165336
     first reacted at a hold of 8 rounds with 12 extra; largest extra work 165336 in sends from Process(loc1v1)
-src/cluster/witnesses/blind/visibility_queue.rs:195:44 #1, batch of Delivery
+src/cluster/witnesses/blind/visibility_queue.rs:200, batch of Delivery
     extra records admitted                0      0      0     16 108269 122714 130526 137260 143294 153255  -3996
     extra messages, busiest sender        0      0      0      8 105352 119877 127849 134903 141577 152818 165336
     first reacted at a hold of 8 rounds with 16 extra; largest extra work 165336 in sends from Process(loc1v1)
 
 verdict: hazardous
-  decision point: src/cluster/witnesses/blind/visibility_queue.rs:195:44 #1, batch of Delivery
+  decision point: src/cluster/witnesses/blind/visibility_queue.rs:200, batch of Delivery
   first reacted at a hold of 8 rounds, with 16 extra messages (sends from Process(loc1v1)) there
   largest extra work over the curve: 165336 in sends from Process(loc1v1)
   decision points that admitted more records under that hold, at its peak:
-    src/cluster/witnesses/blind/visibility_queue.rs:110:37 #1, batch of u64 +437
-    src/cluster/witnesses/blind/visibility_queue.rs:195:44 #1, batch of Delivery +152818
+    src/cluster/witnesses/blind/visibility_queue.rs:119, batch of u64 +437
+    src/cluster/witnesses/blind/visibility_queue.rs:200, batch of Delivery +152818
 ```
 
 This report is abbreviated: one decision point that showed no extra work at any hold length is omitted, along with the explanatory sentence.
@@ -920,14 +920,14 @@ This report is abbreviated: one decision point that showed no extra work at any 
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 29.5 s including compilation
+run time: 8.1 s including compilation
 unheld run: 8000 records admitted at decision points, 6000 network messages sent, 2 decision points had buffered input
 
-A decision point is named by the source location of the sliced! block it belongs to, then #n for its position among that block's decision points, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. Each curve gives extra work over the unheld run, at each hold length.
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length.
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/blind/bounded_fanout.rs:110:31 #0, batch of Delivery: no extra work at any hold length (held by parking the tick, which has no other input, at every hold length)
-src/cluster/witnesses/blind/bounded_fanout.rs:88:15 #0, batch of (usize, u64): no extra work at any hold length (held by parking the tick, which has no other input, at every hold length)
+src/cluster/witnesses/blind/bounded_fanout.rs:111, batch of Delivery: no extra work at any hold length (held by parking the tick, which has no other input, at every hold length)
+src/cluster/witnesses/blind/bounded_fanout.rs:89, batch of (usize, u64): no extra work at any hold length (held by parking the tick, which has no other input, at every hold length)
 
 verdict: benign
   no reaction to a delay of up to 999 rounds was found at any decision point
@@ -938,17 +938,17 @@ verdict: benign
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 35.4 s including compilation
+run time: 14.5 s including compilation
 unheld run: 8000 records admitted at decision points, 4000 network messages sent, 5 decision points had buffered input
 
-A decision point is named by the source location of the sliced! block it belongs to, then #n for its position among that block's decision points, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. Each curve gives extra work over the unheld run, at each hold length.
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length.
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/blind/credit_flow.rs:124:48 #0, batch of (usize, ()): no extra work at any hold length
-src/cluster/witnesses/blind/credit_flow.rs:124:48 #1, batch of (usize, ()): no extra work at any hold length
-src/cluster/witnesses/blind/credit_flow.rs:124:48 #2, batch of Ack: no extra work at any hold length
-src/cluster/witnesses/blind/credit_flow.rs:178:56 #0, batch of Job: no extra work at any hold length
-src/cluster/witnesses/blind/credit_flow.rs:178:56 #1, batch of (): no extra work at any hold length
+src/cluster/witnesses/blind/credit_flow.rs:125, batch of (usize, ()): no extra work at any hold length
+src/cluster/witnesses/blind/credit_flow.rs:126, batch of (usize, ()): no extra work at any hold length
+src/cluster/witnesses/blind/credit_flow.rs:127, batch of Ack: no extra work at any hold length
+src/cluster/witnesses/blind/credit_flow.rs:179, batch of (): no extra work at any hold length
+src/cluster/witnesses/blind/credit_flow.rs:180, batch of Job: no extra work at any hold length
 
 verdict: benign
   no reaction to a delay of up to 999 rounds was found at any decision point
@@ -959,14 +959,14 @@ verdict: benign
 ```
 amplification check: 1000 rounds of workload, every hold begins at round 1
 horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 4.7 s including compilation
+run time: 4.4 s including compilation
 unheld run: 4000 records admitted at decision points, 3000 network messages sent, 2 decision points had buffered input
 
-A decision point is named by the source location of the sliced! block it belongs to, then #n for its position among that block's decision points, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. Each curve gives extra work over the unheld run, at each hold length.
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length.
 
 hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-src/cluster/witnesses/blind/token_bucket.rs:80:37 #0, batch of Request: no extra work at any hold length
-src/cluster/witnesses/blind/token_bucket.rs:80:37 #1, batch of (usize, ()): no extra work at any hold length
+src/cluster/witnesses/blind/token_bucket.rs:81, batch of (usize, ()): no extra work at any hold length
+src/cluster/witnesses/blind/token_bucket.rs:82, batch of Request: no extra work at any hold length
 
 verdict: benign
   no reaction to a delay of up to 999 rounds was found at any decision point
