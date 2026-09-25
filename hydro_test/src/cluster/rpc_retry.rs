@@ -27,6 +27,7 @@ use std::time::Duration;
 
 use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
 use hydro_lang::prelude::*;
+use hydro_lang::sim::amplification::{SimOutputs, amplification_check};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -124,6 +125,7 @@ pub struct ServerMetrics {
 
 /// Everything observable about a run. A deployment prints the two `*_metrics` streams; tests
 /// read whichever of these they need.
+#[derive(SimOutputs)]
 pub struct RpcOutputs<'a, T> {
     /// Requests that received their first response, at the client.
     pub completed: Stream<Completion, Process<'a, Client>, Unbounded, NoOrder, ExactlyOnce>,
@@ -154,6 +156,23 @@ pub struct RpcOutputs<'a, T> {
 /// Request bodies must be `Ord` because re-sends are sorted so that the client's outgoing
 /// stream is totally ordered; over a single connection the server then receives requests in
 /// exactly that order.
+///
+/// The two `amplification_check` attributes are the corpus's two labeled configurations; run
+/// them with `./cargo-check-amplification hydro_test rpc_with_retries`.
+#[amplification_check(
+    name = three_attempts,
+    T = u64,
+    workload(requests = 2),
+    policy = RetryPolicy { timeout_ticks: 40, max_attempts: 3 },
+    server_config = ServerConfig { max_per_tick: 5, service_time: Duration::ZERO },
+)]
+#[amplification_check(
+    name = one_attempt,
+    T = u64,
+    workload(requests = 2),
+    policy = RetryPolicy { timeout_ticks: 40, max_attempts: 1 },
+    server_config = ServerConfig { max_per_tick: 5, service_time: Duration::ZERO },
+)]
 pub fn rpc_with_retries<'a, T>(
     client: &Process<'a, Client>,
     server: &Process<'a, Server>,

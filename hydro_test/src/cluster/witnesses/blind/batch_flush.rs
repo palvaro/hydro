@@ -26,6 +26,7 @@
 
 use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
 use hydro_lang::prelude::*;
+use hydro_lang::sim::amplification::{SimOutputs, amplification_check};
 use serde::{Deserialize, Serialize};
 
 pub struct Batcher;
@@ -64,6 +65,7 @@ pub struct SinkConfig {
     pub max_per_tick: u32,
 }
 
+#[derive(SimOutputs)]
 pub struct BatchOutputs<'a> {
     /// Every item copy put on the wire. Equal `flush_tick` values identify a logical batch.
     pub sent: Stream<FlushCopy, Process<'a, Batcher>, Unbounded, TotalOrder, ExactlyOnce>,
@@ -80,6 +82,12 @@ pub struct BatchOutputs<'a> {
 }
 
 /// Builds the size-or-time batcher and bounded-capacity sink.
+#[amplification_check(
+    ignore = "this check takes about twenty minutes at the default horizon; run it with --include-ignored",
+    workload(items = 2),
+    batch_config = BatchConfig { batch_size: 8, flush_after_ticks: 4 },
+    sink_config = SinkConfig { max_per_tick: 8 },
+)]
 pub fn batch_flush<'a>(
     batcher: &Process<'a, Batcher>,
     sink: &Process<'a, Sink>,

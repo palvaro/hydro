@@ -64,6 +64,12 @@
 //! which that same input costs more. As each hook's escalation completes the checker prints one
 //! line to standard error with that hook's curve, so a long run shows its findings as it goes.
 //!
+//! Most callers need not write the wiring by hand. The attribute [`amplification_check`] on a
+//! Hydro function generates it from the function's signature, and `./cargo-check-amplification
+//! <crate>` at the repository root runs every annotated function in a crate and prints a
+//! summary table. The runtime pieces the generated harness relies on live in
+//! [`super::amplification_harness`] and are re-exported here.
+//!
 //! # What this does not see
 //!
 //! Records are counted where they enter a tick and where they cross the network. Work that a
@@ -81,6 +87,13 @@ use super::compiled::{CompiledSim, quiesce};
 use super::flow::SimFlow;
 use super::hold_one_hook::{HoldHandle, HoldOneHookDriver};
 use super::work_counts::{self, WorkCounts};
+
+pub use super::amplification_harness::{InputCounter, InputValue, SimOutputs, Summary, record};
+/// Generates a `#[test]` that wires a Hydro function from its signature and runs [`check`] on
+/// it. See the [macro's documentation](hydro_amplification_macro::amplification_check).
+pub use hydro_amplification_macro::amplification_check;
+/// Implements [`SimOutputs`] for a struct whose fields are streams.
+pub use hydro_amplification_macro::SimOutputs;
 
 /// The horizon [`CheckConfig::default`] uses, in rounds. See [`CheckConfig::rounds`] for how it
 /// was chosen.
@@ -468,7 +481,7 @@ impl fmt::Display for Report {
 /// `file:line, batch of item` or `file:line, snapshot of item`. When `show_index` is set, the
 /// index follows the position as ` #index`, which a report does only for decision points that
 /// share a line with another.
-fn readable_hook_name(hook: &str, show_index: bool) -> String {
+pub fn readable_hook_name(hook: &str, show_index: bool) -> String {
     let (loc, rest) = match hook.split_once('#') {
         Some(x) => x,
         None => return hook.to_owned(),

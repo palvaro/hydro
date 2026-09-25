@@ -39,6 +39,7 @@ use std::collections::BTreeMap;
 
 use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
 use hydro_lang::prelude::*;
+use hydro_lang::sim::amplification::{SimOutputs, amplification_check};
 use serde::{Deserialize, Serialize};
 
 pub struct Coordinator;
@@ -158,6 +159,7 @@ pub fn coordinator_step(
     (state, wire, completed, retries)
 }
 
+#[derive(SimOutputs)]
 pub struct Outputs<'a> {
     /// Every prepare and commit put on the coordinator-to-participant wire.
     pub coordinator_wire:
@@ -177,6 +179,10 @@ pub struct Outputs<'a> {
     pub retries: Stream<u64, Process<'a, Coordinator>, Unbounded, TotalOrder, ExactlyOnce>,
 }
 
+#[amplification_check(
+    workload(transactions = 1),
+    config = Config { prepare_timeout_ticks: 4, participant_capacity: 5 },
+)]
 pub fn two_phase_commit<'a>(
     coordinator: &Process<'a, Coordinator>,
     participant: &Process<'a, Participant>,

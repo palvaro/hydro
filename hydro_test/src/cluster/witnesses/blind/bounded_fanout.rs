@@ -39,6 +39,7 @@
 use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
 use hydro_lang::location::MemberId;
 use hydro_lang::prelude::*;
+use hydro_lang::sim::amplification::{SimOutputs, amplification_check};
 use serde::{Deserialize, Serialize};
 
 pub struct Publisher;
@@ -64,6 +65,7 @@ pub struct FanoutConfig {
     pub subscribers_per_publication: u32,
 }
 
+#[derive(SimOutputs)]
 pub struct FanoutOutputs<'a> {
     /// Every message placed on the wire, paired with its destination raw id.
     pub wire: Stream<(u32, Delivery), Process<'a, Publisher>, Unbounded, TotalOrder, ExactlyOnce>,
@@ -77,6 +79,11 @@ pub struct FanoutOutputs<'a> {
 /// Builds the bounded fan-out program.
 ///
 /// `subscribers` must have at least `config.subscribers_per_publication` members.
+#[amplification_check(
+    subscribers = 3,
+    workload(publications = 2),
+    config = FanoutConfig { subscribers_per_publication: 3 },
+)]
 pub fn bounded_fanout<'a>(
     _publisher: &Process<'a, Publisher>,
     subscribers: &Cluster<'a, Subscriber>,

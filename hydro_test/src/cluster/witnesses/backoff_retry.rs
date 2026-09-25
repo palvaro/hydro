@@ -58,6 +58,7 @@
 
 use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
 use hydro_lang::prelude::*;
+use hydro_lang::sim::amplification::{SimOutputs, amplification_check};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -132,6 +133,7 @@ pub fn wait_before_next_send(base_timeout_ticks: u64, backoff: bool, id: u64, at
     base + jitter
 }
 
+#[derive(SimOutputs)]
 pub struct Outputs<'a, T> {
     /// Requests that received their first response, at the client.
     pub completed: Stream<Completion, Process<'a, Client>, Unbounded, NoOrder, ExactlyOnce>,
@@ -145,6 +147,20 @@ pub struct Outputs<'a, T> {
     pub backlog_trace: Stream<usize, Process<'a, Server>, Unbounded, TotalOrder, ExactlyOnce>,
 }
 
+#[amplification_check(
+    name = backoff_on,
+    T = u64,
+    workload(requests = 2),
+    policy = RetryPolicy { base_timeout_ticks: 40, max_attempts: 3, backoff: true },
+    server_config = ServerConfig { max_per_tick: 5 },
+)]
+#[amplification_check(
+    name = backoff_off,
+    T = u64,
+    workload(requests = 2),
+    policy = RetryPolicy { base_timeout_ticks: 40, max_attempts: 3, backoff: false },
+    server_config = ServerConfig { max_per_tick: 5 },
+)]
 pub fn rpc_with_backoff<'a, T>(
     client: &Process<'a, Client>,
     server: &Process<'a, Server>,

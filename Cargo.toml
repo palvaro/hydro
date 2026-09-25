@@ -10,6 +10,7 @@ members = [
     "dfir_rs",
     "dfir_pipes",
     "example_test",
+    "hydro_amplification_macro",
     "hydro_build_utils",
     "hydro_concurrent_cargo",
     "hydro_deploy/core",

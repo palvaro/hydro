@@ -28,6 +28,7 @@
 
 use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
 use hydro_lang::prelude::*;
+use hydro_lang::sim::amplification::{SimOutputs, amplification_check};
 use serde::{Deserialize, Serialize};
 
 pub struct QueueBroker;
@@ -73,6 +74,7 @@ enum VisibilityVerdict {
     Redeliver((u64, Outstanding)),
 }
 
+#[derive(SimOutputs)]
 pub struct VisibilityQueueOutputs<'a> {
     /// Every initial delivery and redelivery put on the wire.
     pub delivered: Stream<Delivery, Process<'a, QueueBroker>, Unbounded, TotalOrder, ExactlyOnce>,
@@ -86,6 +88,11 @@ pub struct VisibilityQueueOutputs<'a> {
 }
 
 /// Builds a visibility-timeout broker and one bounded-capacity worker.
+#[amplification_check(
+    workload(submissions = 2),
+    queue_config = QueueConfig { visibility_ticks: 6 },
+    worker_config = WorkerConfig { max_per_tick: 5 },
+)]
 pub fn visibility_queue<'a>(
     broker: &Process<'a, QueueBroker>,
     worker: &Process<'a, QueueWorker>,

@@ -78,6 +78,7 @@ use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
 use hydro_lang::location::MemberId;
 use hydro_lang::location::cluster::CLUSTER_SELF_ID;
 use hydro_lang::prelude::*;
+use hydro_lang::sim::amplification::{SimOutputs, amplification_check};
 use serde::{Deserialize, Serialize};
 
 pub struct Worker;
@@ -114,6 +115,7 @@ pub struct RebalanceConfig {
     pub cooldown_ticks: u64,
 }
 
+#[derive(SimOutputs)]
 pub struct RebalanceOutputs<'a> {
     /// Tasks processed, at the worker that processed them.
     pub completed: Stream<Task, Cluster<'a, Worker>, Unbounded, TotalOrder, ExactlyOnce>,
@@ -126,6 +128,41 @@ pub struct RebalanceOutputs<'a> {
 
 /// Builds the worker cluster; see the module docs for the timer parameters. `tasks` is each
 /// worker's own arrival stream, with ids unique across the cluster.
+///
+/// The checks use a `round` closure because reports are pumped every fourth round, which is a
+/// period rather than a rate.
+#[amplification_check(
+    name = no_cooldown,
+    workers = 2,
+    config = RebalanceConfig { work_per_tick: 5, threshold: 10, cooldown_ticks: 0 },
+    round = |round, inputs| {
+        for w in 0..inputs.workers_members {
+            inputs.clock.send(w, ());
+            if round % 4 == 0 {
+                inputs.report_tick.send(w, ());
+            }
+            for i in 0..3u64 {
+                inputs.tasks.send(w, (round as u64 * inputs.workers_members as u64 + w as u64) * 3 + i);
+            }
+        }
+    },
+)]
+#[amplification_check(
+    name = cooldown_8,
+    workers = 2,
+    config = RebalanceConfig { work_per_tick: 5, threshold: 10, cooldown_ticks: 8 },
+    round = |round, inputs| {
+        for w in 0..inputs.workers_members {
+            inputs.clock.send(w, ());
+            if round % 4 == 0 {
+                inputs.report_tick.send(w, ());
+            }
+            for i in 0..3u64 {
+                inputs.tasks.send(w, (round as u64 * inputs.workers_members as u64 + w as u64) * 3 + i);
+            }
+        }
+    },
+)]
 pub fn rebalancing_workers<'a>(
     workers: &Cluster<'a, Worker>,
     tasks: Stream<u64, Cluster<'a, Worker>, Unbounded, TotalOrder, ExactlyOnce>,

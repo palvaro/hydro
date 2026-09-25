@@ -38,6 +38,7 @@
 
 use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
 use hydro_lang::prelude::*;
+use hydro_lang::sim::amplification::{SimOutputs, amplification_check};
 use serde::{Deserialize, Serialize};
 
 pub struct Producer;
@@ -83,6 +84,7 @@ pub struct ConsumerTick {
     pub backlog: usize,
 }
 
+#[derive(SimOutputs)]
 pub struct CreditOutputs<'a> {
     /// Every job message put on the producer-to-consumer wire.
     pub outgoing: Stream<Job, Process<'a, Producer>, Unbounded, TotalOrder, ExactlyOnce>,
@@ -102,6 +104,10 @@ pub struct CreditOutputs<'a> {
 
 /// Builds the credit-controlled channel. Input values carry no ids; ids are assigned by the
 /// producer's arrival-ordered dataflow.
+#[amplification_check(
+    workload(jobs = 2),
+    config = CreditConfig { producer_capacity: 4, consumer_capacity: 4, credit_window: 16 },
+)]
 pub fn credit_flow<'a>(
     producer: &Process<'a, Producer>,
     consumer: &Process<'a, Consumer>,

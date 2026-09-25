@@ -54,6 +54,7 @@ mod blind_check {
     // batch_flush: batch_size 8, flush_after_ticks 4, sink max_per_tick 8; 2 items per round,
     // one batcher clock and one sink clock element per round.
     #[test]
+    #[ignore = "this check takes about twenty minutes at the default horizon; run it with --include-ignored"]
     fn blind_batch_flush() {
         use crate::cluster::witnesses::blind::batch_flush::{
             BatchConfig, Batcher, Sink, SinkConfig, batch_flush,

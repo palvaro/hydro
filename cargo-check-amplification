@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Runs the amplification checker on every function in a crate that carries
+# `#[amplification_check(...)]`, and prints a summary table.
+#
+#   ./cargo-check-amplification [--include-ignored] [--threads N] <crate> [function-substring]
+#
+# Checks marked `ignore = "..."` in their attribute are skipped unless --include-ignored is given.
+# Tests run one at a time by default so the printed reports do not interleave; --threads N runs N
+# at once, which is faster and leaves the per-check reports intact under target/amplification/.
+#
+# Each annotated function expands to a test named `amplification_check_<function>[_<name>]`;
+# this script runs those tests (with output shown, one at a time), then tabulates the summary
+# lines the tests record under `target/amplification/`. The full report of every check is left
+# in `target/amplification/reports/`.
+set -euo pipefail
+
+include_ignored=()
+threads=1
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --include-ignored) include_ignored=(--include-ignored); shift ;;
+    --threads) threads=$2; shift 2 ;;
+    *) break ;;
+  esac
+done
+if [[ $# -lt 1 ]]; then
+  echo "usage: $0 [--include-ignored] [--threads N] <crate> [function-substring]" >&2
+  exit 2
+fi
+crate=$1
+substring=${2:-}
+
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+sdk=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
+if [[ -z "${SDKROOT:-}" && -d "$sdk" ]]; then
+  export SDKROOT=$sdk
+fi
+
+export AMPLIFICATION_RESULTS_DIR="$root/target/amplification"
+mkdir -p "$AMPLIFICATION_RESULTS_DIR/reports"
+results="$AMPLIFICATION_RESULTS_DIR/results.tsv"
+: > "$results"
+
+cargo test -p "$crate" --lib "amplification_check_${substring}" -- --nocapture "--test-threads=$threads" ${include_ignored[@]+"${include_ignored[@]}"}
+
+echo
+echo "amplification check summary ($crate${substring:+, functions matching \"$substring\"})"
+echo
+# results.tsv columns: crate, module, function, configuration, workload, horizon, verdict,
+# location, first reaction, extra work, seconds.
+{
+  printf 'function\tconfiguration\tworkload\tverdict\tlocation\tfirst reaction\textra work\thorizon\tseconds\n'
+  awk -F'\t' 'BEGIN{OFS="\t"} {print $3, $4, $5, $7, $8, $9, $10, $6, $11}' "$results"
+} | column -t -s $'\t'
+echo
+echo "full reports: $AMPLIFICATION_RESULTS_DIR/reports/"

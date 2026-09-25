@@ -89,6 +89,7 @@
 
 use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
 use hydro_lang::prelude::*;
+use hydro_lang::sim::amplification::{InputValue, SimOutputs, amplification_check};
 use serde::{Deserialize, Serialize};
 
 pub struct Store;
@@ -100,6 +101,13 @@ pub enum Op {
     Put,
     /// Look a key up. Costs one unit plus one unit per uncompacted record.
     Get,
+}
+
+/// The corpus's steady mix, one put per four gets, for the generated amplification check.
+impl InputValue for Op {
+    fn nth(n: u64) -> Self {
+        if n % 5 == 0 { Op::Put } else { Op::Get }
+    }
 }
 
 /// One operation the store has served: its arrival index, what it was, and what it cost.
@@ -136,6 +144,7 @@ pub struct StoreConfig {
     pub compaction_reserve: u64,
 }
 
+#[derive(SimOutputs)]
 pub struct StoreOutputs<'a> {
     /// Every operation served, in the order served.
     pub served: Stream<Served, Process<'a, Store>, Unbounded, TotalOrder, ExactlyOnce>,
@@ -145,6 +154,20 @@ pub struct StoreOutputs<'a> {
 
 /// Builds the store. `ops` is the application's operation stream; see the module docs for the
 /// clock parameter.
+///
+/// The steady workload is one put and four gets per round, which `Op`'s [`InputValue`] gives at
+/// five operations per round. Both configurations are excluded from the checker's scorecard
+/// because this program models its read cost as a counter rather than performing a scan.
+#[amplification_check(
+    name = reserve_0,
+    workload(ops = 5),
+    config = StoreConfig { budget_per_tick: 30, compaction_reserve: 0 },
+)]
+#[amplification_check(
+    name = reserve_8,
+    workload(ops = 5),
+    config = StoreConfig { budget_per_tick: 30, compaction_reserve: 8 },
+)]
 pub fn log_with_compaction<'a>(
     store: &Process<'a, Store>,
     ops: Stream<Op, Process<'a, Store>, Unbounded, TotalOrder, ExactlyOnce>,

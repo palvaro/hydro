@@ -17,6 +17,7 @@ pub struct Heartbeat {
 
 /// Emits exactly one heartbeat per timer event at each member, then broadcasts
 /// it to the closed cluster membership.
+#[hydro_lang::sim::amplification::amplification_check(Node = (), cluster = 3)]
 pub fn pure_heartbeat<'a, Node: 'a>(
     cluster: &Cluster<'a, Node>,
     timer: Stream<(), Cluster<'a, Node>, Unbounded, TotalOrder, ExactlyOnce>,

@@ -52,6 +52,7 @@ use hydro_lang::location::cluster::{CLUSTER_SELF_ID, ClusterIds};
 use hydro_lang::location::dynamic::LocationId;
 use hydro_lang::location::{Location, MemberId};
 use hydro_lang::prelude::*;
+use hydro_lang::sim::amplification::{SimOutputs, amplification_check};
 use serde::{Deserialize, Serialize};
 
 pub struct Node;
@@ -80,6 +81,7 @@ pub struct GossipConfig {
     pub ack_timeout_ticks: u64,
 }
 
+#[derive(SimOutputs)]
 pub struct Outputs<'a> {
     /// Every delta a member puts on the wire, as `(destination raw id, delta)`, first sends and
     /// re-sends alike.
@@ -94,6 +96,16 @@ pub struct Outputs<'a> {
     pub outstanding_depth: Stream<usize, Cluster<'a, Node>, Unbounded, TotalOrder, ExactlyOnce>,
 }
 
+#[amplification_check(
+    name = resend_on,
+    cluster = 5,
+    config = GossipConfig { max_merges_per_tick: 5, ack_timeout_ticks: 3 },
+)]
+#[amplification_check(
+    name = resend_off,
+    cluster = 5,
+    config = GossipConfig { max_merges_per_tick: 5, ack_timeout_ticks: 0 },
+)]
 pub fn gossip_with_resend<'a>(
     cluster: &Cluster<'a, Node>,
     timer: Stream<(), Cluster<'a, Node>, Unbounded, TotalOrder, ExactlyOnce>,

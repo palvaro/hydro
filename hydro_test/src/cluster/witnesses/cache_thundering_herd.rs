@@ -76,6 +76,7 @@
 
 use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
 use hydro_lang::prelude::*;
+use hydro_lang::sim::amplification::{SimOutputs, amplification_check};
 use serde::{Deserialize, Serialize};
 
 pub struct Cache;
@@ -135,6 +136,7 @@ pub struct OriginConfig {
 }
 
 /// Everything observable about a run.
+#[derive(SimOutputs)]
 pub struct CacheOutputs<'a> {
     /// Every lookup, once, when its key was served.
     pub completed: Stream<Completion, Process<'a, Cache>, Unbounded, NoOrder, ExactlyOnce>,
@@ -157,6 +159,45 @@ pub struct CacheOutputs<'a> {
 
 /// Builds the cache/origin program. `lookups` is the application's lookup stream at the cache;
 /// ids are assigned in arrival order.
+///
+/// The checks use a `round` closure because the steady workload walks ten hot keys round-robin,
+/// eight lookups per round, and sequential keys would never hit.
+#[amplification_check(
+    name = request_dated_no_coalesce,
+    cache_config = CacheConfig { ttl_ticks: 20, coalesce: false, request_dated: true },
+    origin_config = OriginConfig { max_fetch_per_tick: 4 },
+    round = |round, inputs| {
+        inputs.cache_clock.send(());
+        inputs.origin_clock.send(());
+        for i in 0..8u64 {
+            inputs.lookups.send(((round as u64 * 8 + i) % 10) as Key);
+        }
+    },
+)]
+#[amplification_check(
+    name = fill_dated_no_coalesce,
+    cache_config = CacheConfig { ttl_ticks: 20, coalesce: false, request_dated: false },
+    origin_config = OriginConfig { max_fetch_per_tick: 4 },
+    round = |round, inputs| {
+        inputs.cache_clock.send(());
+        inputs.origin_clock.send(());
+        for i in 0..8u64 {
+            inputs.lookups.send(((round as u64 * 8 + i) % 10) as Key);
+        }
+    },
+)]
+#[amplification_check(
+    name = coalesce,
+    cache_config = CacheConfig { ttl_ticks: 20, coalesce: true, request_dated: true },
+    origin_config = OriginConfig { max_fetch_per_tick: 4 },
+    round = |round, inputs| {
+        inputs.cache_clock.send(());
+        inputs.origin_clock.send(());
+        for i in 0..8u64 {
+            inputs.lookups.send(((round as u64 * 8 + i) % 10) as Key);
+        }
+    },
+)]
 pub fn cache_with_expiry<'a>(
     cache: &Process<'a, Cache>,
     origin: &Process<'a, Origin>,

@@ -67,6 +67,7 @@ use hydro_lang::location::cluster::{CLUSTER_SELF_ID, ClusterIds};
 use hydro_lang::location::dynamic::LocationId;
 use hydro_lang::location::{Location, MemberId};
 use hydro_lang::prelude::*;
+use hydro_lang::sim::amplification::{SimOutputs, amplification_check};
 use serde::{Deserialize, Serialize};
 
 pub struct Node;
@@ -187,6 +188,7 @@ pub fn step(
     (st, out, started)
 }
 
+#[derive(SimOutputs)]
 pub struct Outputs<'a> {
     /// Every message a member puts on the wire, as `(destination raw id, message)`.
     pub wire: Stream<(u32, Msg), Cluster<'a, Node>, Unbounded, TotalOrder, ExactlyOnce>,
@@ -200,6 +202,16 @@ pub struct Outputs<'a> {
     pub elections: Stream<u64, Cluster<'a, Node>, Unbounded, TotalOrder, ExactlyOnce>,
 }
 
+#[amplification_check(
+    name = uniform_timeouts,
+    cluster = 5,
+    config = ElectionConfig { election_timeout_ticks: 6, timeout_spread_ticks: 0, budget_per_tick: 3 },
+)]
+#[amplification_check(
+    name = spread_3,
+    cluster = 5,
+    config = ElectionConfig { election_timeout_ticks: 6, timeout_spread_ticks: 3, budget_per_tick: 3 },
+)]
 pub fn election<'a>(
     cluster: &Cluster<'a, Node>,
     timer: Stream<(), Cluster<'a, Node>, Unbounded, TotalOrder, ExactlyOnce>,

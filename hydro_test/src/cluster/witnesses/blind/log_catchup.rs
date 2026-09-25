@@ -22,6 +22,7 @@
 
 use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
 use hydro_lang::prelude::*;
+use hydro_lang::sim::amplification::{SimOutputs, amplification_check};
 use serde::{Deserialize, Serialize};
 
 pub struct CatchupFollower;
@@ -81,6 +82,7 @@ pub struct FetchCompletion {
     pub latency_ticks: u64,
 }
 
+#[derive(SimOutputs)]
 pub struct CatchupOutputs<'a> {
     /// Every fetch request put on the wire, including retries.
     pub requests: Stream<Fetch, Process<'a, CatchupFollower>, Unbounded, TotalOrder, ExactlyOnce>,
@@ -98,6 +100,10 @@ pub struct CatchupOutputs<'a> {
     pub backlog: Stream<usize, Process<'a, LogLeader>, Unbounded, TotalOrder, ExactlyOnce>,
 }
 
+#[amplification_check(
+    workload(appends = 2, unrelated_work = 0),
+    config = CatchupConfig { poll_every_ticks: 6, retry_after_ticks: 4, chunk_size: 12, leader_capacity: 10 },
+)]
 pub fn replicated_log_catchup<'a>(
     follower: &Process<'a, CatchupFollower>,
     leader: &Process<'a, LogLeader>,

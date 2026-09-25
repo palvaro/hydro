@@ -20,6 +20,7 @@
 
 use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
 use hydro_lang::prelude::*;
+use hydro_lang::sim::amplification::{SimOutputs, amplification_check};
 use serde::{Deserialize, Serialize};
 
 pub struct Producer;
@@ -45,6 +46,7 @@ pub struct TokenBucketConfig {
     pub bucket_capacity: u64,
 }
 
+#[derive(SimOutputs)]
 pub struct TokenBucketOutputs<'a> {
     /// Every request put on the producer-to-regulator wire.
     pub outgoing: Stream<Request, Process<'a, Producer>, Unbounded, TotalOrder, ExactlyOnce>,
@@ -56,6 +58,15 @@ pub struct TokenBucketOutputs<'a> {
 
 /// Builds a token-bucket regulator. `applications` carries the logical tick at which each request
 /// was offered; the dataflow assigns ids in arrival order.
+#[amplification_check(
+    config = TokenBucketConfig { refill_tokens: 5, bucket_capacity: 10 },
+    round = |round, inputs| {
+        for _ in 0..3 {
+            inputs.applications.send(round as u64);
+        }
+        inputs.refill_clock.send(());
+    },
+)]
 pub fn token_bucket<'a>(
     producer: &Process<'a, Producer>,
     regulator: &Process<'a, Regulator>,

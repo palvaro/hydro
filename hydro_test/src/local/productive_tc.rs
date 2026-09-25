@@ -39,6 +39,18 @@ pub struct TcTrace {
 ///
 /// The returned fact stream emits each reachable pair once. The trace stream is
 /// the semantic oracle described by the metastability ground-truth design doc.
+///
+/// The check's `round` closure admits a fresh four-edge chain every fifth round and one step
+/// per round, which is the corpus's steady workload for this program.
+#[hydro_lang::sim::amplification::amplification_check(
+    round = |round, inputs| {
+        if round % 5 == 0 {
+            let base = (round as u32 / 5) * 1000;
+            inputs.graphs.send((0..4).map(|i| (base + i, base + i + 1)).collect());
+        }
+        inputs.steps.send(());
+    },
+)]
 pub fn productive_transitive_closure<'a>(
     graphs: Stream<Vec<(u32, u32)>, Process<'a>, Unbounded, TotalOrder, ExactlyOnce>,
     steps: Stream<(), Process<'a>, Unbounded, TotalOrder, ExactlyOnce>,

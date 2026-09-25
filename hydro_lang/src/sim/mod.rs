@@ -109,6 +109,9 @@ pub mod work_counts;
 pub mod amplification;
 
 #[cfg(stageleft_runtime)]
+pub mod amplification_harness;
+
+#[cfg(stageleft_runtime)]
 #[doc(hidden)]
 pub use compiled::continue_if_impl;
 #[cfg(stageleft_runtime)]

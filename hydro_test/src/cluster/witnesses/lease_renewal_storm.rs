@@ -72,6 +72,7 @@ use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
 use hydro_lang::location::MemberId;
 use hydro_lang::location::cluster::CLUSTER_SELF_ID;
 use hydro_lang::prelude::*;
+use hydro_lang::sim::amplification::{SimOutputs, amplification_check};
 use serde::{Deserialize, Serialize};
 
 pub struct LeaseClient;
@@ -141,6 +142,7 @@ pub struct ServerConfig {
     pub max_per_tick: u32,
 }
 
+#[derive(SimOutputs)]
 pub struct LeaseOutputs<'a> {
     /// Every renewal a client puts on the wire, first sends and re-sends.
     pub sent: Stream<Renewal, Cluster<'a, LeaseClient>, Unbounded, TotalOrder, ExactlyOnce>,
@@ -157,6 +159,22 @@ pub struct LeaseOutputs<'a> {
 }
 
 /// Builds the client cluster and the lease server; see the module docs for the clock parameters.
+///
+/// `other_work` is the burst channel and carries nothing in the steady state, so its rate is zero.
+#[amplification_check(
+    name = resend_after_4,
+    clients = 20,
+    workload(other_work = 0),
+    policy = ClientPolicy { renew_every_ticks: 10, lease_ticks: 30, resend_after_ticks: Some(4) },
+    server_config = ServerConfig { max_per_tick: 5 },
+)]
+#[amplification_check(
+    name = one_outstanding,
+    clients = 20,
+    workload(other_work = 0),
+    policy = ClientPolicy { renew_every_ticks: 10, lease_ticks: 30, resend_after_ticks: None },
+    server_config = ServerConfig { max_per_tick: 5 },
+)]
 pub fn lease_renewal<'a>(
     clients: &Cluster<'a, LeaseClient>,
     server: &Process<'a, LeaseServer>,

@@ -63,6 +63,7 @@
 
 use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
 use hydro_lang::prelude::*;
+use hydro_lang::sim::amplification::{SimOutputs, amplification_check};
 use serde::{Deserialize, Serialize};
 
 pub struct Client;
@@ -131,6 +132,7 @@ pub struct ServerConfig {
 }
 
 /// Everything observable about a run.
+#[derive(SimOutputs)]
 pub struct RpcOutputs<'a> {
     /// Requests that received their first `Ok`, at the client.
     pub completed: Stream<Completion, Process<'a, Client>, Unbounded, NoOrder, ExactlyOnce>,
@@ -148,6 +150,18 @@ pub struct RpcOutputs<'a> {
 
 /// Builds the client/server program. `requests` carries, per application request, the client tick
 /// it was issued in; ids are assigned in arrival order.
+#[amplification_check(
+    name = bounded_100,
+    workload(requests = 2),
+    policy = RetryPolicy { timeout_ticks: 40, max_attempts: 3, reject_backoff_ticks: 10 },
+    server_config = ServerConfig { max_per_tick: 5, max_backlog: Some(100) },
+)]
+#[amplification_check(
+    name = unbounded,
+    workload(requests = 2),
+    policy = RetryPolicy { timeout_ticks: 40, max_attempts: 3, reject_backoff_ticks: 10 },
+    server_config = ServerConfig { max_per_tick: 5, max_backlog: None },
+)]
 pub fn rpc_with_bounded_queue<'a>(
     client: &Process<'a, Client>,
     server: &Process<'a, Server>,
