@@ -45,6 +45,44 @@ pub struct RetryConfig {
     pub policy: Policy,
 }
 
+/// Reconstructs a policy from primitive build-time fields inside staged closures.
+pub fn policy_from_fields(
+    kind: u8,
+    max_attempts: u32,
+    initial_tokens: u64,
+    capacity: u64,
+    refill_per_tick: u64,
+    replies_per_token: u64,
+    timeout_threshold: u32,
+    open_ticks: u64,
+) -> Policy {
+    match kind {
+        0 => Policy::None { max_attempts },
+        1 => Policy::TimeBudget {
+            initial_tokens,
+            capacity,
+            refill_per_tick,
+        },
+        2 => Policy::SuccessBudget {
+            initial_tokens,
+            capacity,
+            replies_per_token,
+        },
+        3 => Policy::HybridBudget {
+            initial_tokens,
+            capacity,
+            refill_per_tick,
+            replies_per_token,
+        },
+        4 => Policy::CircuitBreaker {
+            max_attempts,
+            timeout_threshold,
+            open_ticks,
+        },
+        _ => unreachable!("policy kind is assigned by retry_service"),
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Request {
     pub id: u64,
@@ -60,13 +98,13 @@ pub struct Reply {
     pub attempt: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Completion {
     pub id: u64,
     pub latency_ticks: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Dropped {
     pub id: u64,
     pub retry: bool,
@@ -122,8 +160,14 @@ pub fn client_step(
     replies: Vec<Reply>,
     now: u64,
     clock_ticks: u64,
-    config: RetryConfig,
+    timeout_ticks: u64,
+    policy: Policy,
 ) -> (ClientState, Vec<Request>, Vec<Completion>, Vec<Dropped>) {
+    let config = RetryConfig {
+        timeout_ticks,
+        server_capacity: 1,
+        policy,
+    };
     let mut sent = Vec::new();
     let mut completed = Vec::new();
     let mut dropped = Vec::new();
@@ -345,6 +389,20 @@ pub fn retry_service<'a>(
 ) -> RetryOutputs<'a> {
     assert!(config.timeout_ticks > 0, "the timeout must be positive");
     assert!(config.server_capacity > 0, "server capacity must be positive");
+    let timeout_ticks = config.timeout_ticks;
+    let server_capacity = config.server_capacity;
+    let (policy_kind, max_attempts, initial_tokens, bucket_capacity, refill_per_tick,
+        replies_per_token, timeout_threshold, open_ticks) = match config.policy {
+        Policy::None { max_attempts } => (0u8, max_attempts, 0, 0, 0, 0, 0, 0),
+        Policy::TimeBudget { initial_tokens, capacity, refill_per_tick } =>
+            (1u8, 0, initial_tokens, capacity, refill_per_tick, 0, 0, 0),
+        Policy::SuccessBudget { initial_tokens, capacity, replies_per_token } =>
+            (2u8, 0, initial_tokens, capacity, 0, replies_per_token, 0, 0),
+        Policy::HybridBudget { initial_tokens, capacity, refill_per_tick, replies_per_token } =>
+            (3u8, 0, initial_tokens, capacity, refill_per_tick, replies_per_token, 0, 0),
+        Policy::CircuitBreaker { max_attempts, timeout_threshold, open_ticks } =>
+            (4u8, max_attempts, 0, 0, 0, 0, timeout_threshold, open_ticks),
+    };
     let (reply_complete, reply_incoming) = client.forward_ref::<Stream<
         Reply,
         Process<'a, Client>,
@@ -358,7 +416,9 @@ pub fn retry_service<'a>(
         let arrivals = use::batch(requests.enumerate(), nondet!(/** request admission changes its first-send tick while preserving its arrival-assigned id */));
         let replies = use::batch(reply_incoming, nondet!(/** delayed reply admission can permit a timeout retry before completion */));
         let mut now = use::state(|l| l.singleton(q!(0u64)));
-        let mut state = use::state(|l| l.singleton(q!(crate::cluster::witnesses::blind_budget::service::ClientState::new(config.policy))));
+          let mut state = use::state(|l| l.singleton(q!(crate::cluster::witnesses::blind_budget::service::ClientState::new(
+              crate::cluster::witnesses::blind_budget::service::policy_from_fields(policy_kind, max_attempts, initial_tokens, bucket_capacity, refill_per_tick, replies_per_token, timeout_threshold, open_ticks)
+          ))));
         let now_cur = clocks.clone().map(q!(|(tick, _)| tick as u64)).max().unwrap_or(now.clone());
         now = now_cur.clone();
         let tick_count = clocks.count().map(q!(|count| count as u64));
@@ -372,9 +432,10 @@ pub fn retry_service<'a>(
             .zip(now_cur)
             .zip(tick_count)
             .map(q!(move |((((state, arrivals), replies), now), ticks)| {
-                crate::cluster::witnesses::blind_budget::service::client_step(
-                    state, arrivals, replies, now, ticks, config,
-                )
+              crate::cluster::witnesses::blind_budget::service::client_step(
+                  state, arrivals, replies, now, ticks, timeout_ticks,
+                  crate::cluster::witnesses::blind_budget::service::policy_from_fields(policy_kind, max_attempts, initial_tokens, bucket_capacity, refill_per_tick, replies_per_token, timeout_threshold, open_ticks),
+              )
             }));
         state = stepped.clone().map(q!(|(state, _, _, _)| state));
         let sent = stepped.clone().flat_map_ordered(q!(|(_, sent, _, _)| sent));
@@ -389,7 +450,7 @@ pub fn retry_service<'a>(
         let clocks = use::batch(server_clock, nondet!(/** delaying server clocks withholds a fixed service quantum */));
         let arrivals = use::batch(incoming, nondet!(/** delaying request admission changes FIFO latency but not a request copy */));
         let mut queue = use::state_null::<Stream<Request, Tick<_>, Bounded, TotalOrder>>();
-        let budget = clocks.count().map(q!(move |count| count * config.server_capacity as usize));
+          let budget = clocks.count().map(q!(move |count| count * server_capacity as usize));
         let queued = queue.chain(arrivals).enumerate().cross_singleton(budget);
         let served = queued.clone().filter_map(q!(|((position, request), budget)| (position < budget).then_some(request)));
         queue = queued.filter_map(q!(|((position, request), budget)| (position >= budget).then_some(request)));

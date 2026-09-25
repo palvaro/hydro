@@ -65,6 +65,7 @@
 
 pub mod backoff_retry;
 pub mod blind;
+pub mod blind_budget;
 pub mod blind_check;
 pub mod bounded_queue_rejection;
 pub mod cache_thundering_herd;
