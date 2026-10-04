@@ -2560,7 +2560,7 @@ fn location_for_op(op_meta: &HydroIrOpMetadata) -> (String, String, String) {
     let position = op_meta
         .backtrace
         .user_location()
-        .and_then(|u| Some((u.file?.to_owned(), u.line, u.column.saturating_sub(1))))
+        .and_then(|u| Some((u.file?.to_owned(), u.line, u.column)))
         .or_else(|| {
             op_meta
                 .backtrace

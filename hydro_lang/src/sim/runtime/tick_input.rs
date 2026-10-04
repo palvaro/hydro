@@ -1161,6 +1161,14 @@ impl<T: Clone> RuntimeHook for OptionalInitNoneHook<T> {
     fn location_meta(&self) -> HookLocationMeta {
         self.batch_location
     }
+
+    fn hook_item_type(&self) -> &'static str {
+        std::any::type_name::<T>()
+    }
+
+    fn hook_kind(&self) -> super::HookKind {
+        super::HookKind::Snapshot
+    }
 }
 
 impl<T: Clone> TickInputHook for OptionalInitNoneHook<T> {
