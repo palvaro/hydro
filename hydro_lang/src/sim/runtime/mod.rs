@@ -103,6 +103,12 @@ macro_rules! __maybe_debug__ {
     }};
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookKind {
+    Batch,
+    Snapshot,
+}
+
 /// The shared, type-erased surface of every hook — refined by [`TickInputHook`],
 /// [`ObservationHook`], and [`InlineHook`]: querying and releasing decisions, and
 /// attributing errors. Implemented once per collection kind ([`StreamHook`],
@@ -140,6 +146,21 @@ pub trait RuntimeHook {
     /// The source location of the operator this hook simulates, used to attribute errors
     /// (e.g. an unhooked non-deterministic operator in deterministic mode).
     fn location_meta(&self) -> HookLocationMeta;
+
+    /// The Rust type of records this hook releases, used only to distinguish report entries.
+    fn hook_item_type(&self) -> &'static str {
+        ""
+    }
+
+    /// Whether this is a batch or snapshot decision point.
+    fn hook_kind(&self) -> HookKind {
+        HookKind::Batch
+    }
+
+    /// Number of stream records staged by the current decision. Snapshot hooks return zero.
+    fn pending_release_count(&self) -> usize {
+        0
+    }
 }
 
 /// A hook that feeds a tick: it buffers input across scheduling boundaries and decides,

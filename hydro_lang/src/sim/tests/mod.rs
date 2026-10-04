@@ -1530,3 +1530,26 @@ mod custom_codec {
             });
     }
 }
+
+#[test]
+fn amplification_checker_runs_end_to_end_on_benign_batch() {
+    use crate::sim::amplification::{CheckConfig, Verdict, check};
+
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+    let (sender, input) = node.sim_input::<u64, TotalOrder, ExactlyOnce>();
+    let _output = sliced! {
+        let batch = use::batch(input, nondet!(/** amplification test */));
+        batch.map(q!(|value| value))
+    }
+    .sim_output();
+
+    let report = check(flow.sim(), &CheckConfig::new(8).quiet(), async |round| {
+        sender.send((round * 2) as u64);
+        sender.send((round * 2 + 1) as u64);
+    });
+
+    assert_eq!(report.verdict, Verdict::Benign);
+    assert!(!report.curves.is_empty());
+    assert_eq!(report.horizon, 7);
+}

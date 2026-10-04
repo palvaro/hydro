@@ -158,9 +158,42 @@ define_metrics! {
         #[diff(total)]
         total_idle_duration: Cell<Duration>,
 
+        /// Number of serialized network messages emitted by this subgraph.
+        #[diff(total)]
+        network_message_count: Cell<usize>,
+
+        /// Number of serialized payload bytes emitted by this subgraph.
+        #[diff(total)]
+        network_byte_count: Cell<usize>,
+
         /// Number of times the subgraph has been idle.
         #[diff(total)]
         total_idle_count: Cell<usize>,
+    }
+}
+
+/// Extracts the serialized byte payload from Hydro's internal network-send shapes.
+#[doc(hidden)]
+pub trait SerializedPayload {
+    /// Exact serialized payload length, excluding transport framing.
+    fn serialized_payload_len(&self) -> usize;
+}
+
+impl SerializedPayload for bytes::Bytes {
+    fn serialized_payload_len(&self) -> usize {
+        self.len()
+    }
+}
+
+impl SerializedPayload for bytes::BytesMut {
+    fn serialized_payload_len(&self) -> usize {
+        self.len()
+    }
+}
+
+impl<T, B: SerializedPayload> SerializedPayload for (T, B) {
+    fn serialized_payload_len(&self) -> usize {
+        self.1.serialized_payload_len()
     }
 }
 
@@ -243,6 +276,8 @@ mod test {
                 total_idle_count: Cell::new(2),
                 total_poll_duration: Cell::new(Duration::from_millis(500)),
                 total_idle_duration: Cell::new(Duration::from_millis(200)),
+                network_message_count: Cell::new(0),
+                network_byte_count: Cell::new(0),
             },
         );
         metrics.handoffs.insert(

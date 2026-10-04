@@ -83,6 +83,14 @@ impl<T> RuntimeHook for StreamHook<T, TotalOrder> {
     fn location_meta(&self) -> HookLocationMeta {
         self.batch_location
     }
+
+    fn hook_item_type(&self) -> &'static str {
+        std::any::type_name::<T>()
+    }
+
+    fn pending_release_count(&self) -> usize {
+        self.to_release.as_ref().map_or(0, Vec::len)
+    }
 }
 
 impl<T> TickInputHook for StreamHook<T, TotalOrder> {
@@ -152,6 +160,14 @@ impl<T> RuntimeHook for StreamHook<T, NoOrder> {
 
     fn location_meta(&self) -> HookLocationMeta {
         self.batch_location
+    }
+
+    fn hook_item_type(&self) -> &'static str {
+        std::any::type_name::<T>()
+    }
+
+    fn pending_release_count(&self) -> usize {
+        self.to_release.as_ref().map_or(0, Vec::len)
     }
 }
 
@@ -471,6 +487,14 @@ impl<K: Hash + Eq + Clone, V> RuntimeHook for KeyedStreamHook<K, V, TotalOrder> 
     fn location_meta(&self) -> HookLocationMeta {
         self.batch_location
     }
+
+    fn hook_item_type(&self) -> &'static str {
+        std::any::type_name::<(K, V)>()
+    }
+
+    fn pending_release_count(&self) -> usize {
+        self.to_release.as_ref().map_or(0, Vec::len)
+    }
 }
 
 impl<K: Hash + Eq + Clone, V> TickInputHook for KeyedStreamHook<K, V, TotalOrder> {
@@ -568,6 +592,14 @@ impl<K: Hash + Eq + Clone, V> RuntimeHook for KeyedStreamHook<K, V, NoOrder> {
 
     fn location_meta(&self) -> HookLocationMeta {
         self.batch_location
+    }
+
+    fn hook_item_type(&self) -> &'static str {
+        std::any::type_name::<(K, V)>()
+    }
+
+    fn pending_release_count(&self) -> usize {
+        self.to_release.as_ref().map_or(0, Vec::len)
     }
 }
 
@@ -971,6 +1003,14 @@ impl<T: Clone> RuntimeHook for SingletonHook<T> {
 
     fn location_meta(&self) -> HookLocationMeta {
         self.batch_location
+    }
+
+    fn hook_item_type(&self) -> &'static str {
+        std::any::type_name::<T>()
+    }
+
+    fn hook_kind(&self) -> super::HookKind {
+        super::HookKind::Snapshot
     }
 }
 
@@ -1498,6 +1538,14 @@ impl<K: Hash + Eq + Clone, V: Clone> RuntimeHook for KeyedSingletonHook<K, V> {
 
     fn location_meta(&self) -> HookLocationMeta {
         self.batch_location
+    }
+
+    fn hook_item_type(&self) -> &'static str {
+        std::any::type_name::<(K, V)>()
+    }
+
+    fn hook_kind(&self) -> super::HookKind {
+        super::HookKind::Snapshot
     }
 }
 

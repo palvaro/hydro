@@ -1037,6 +1037,35 @@ impl CompiledSim {
         }
     }
 
+    /// Executes the given closure with a single instance of the compiled simulation, drawing
+    /// every scheduling decision from the provided driver instead of a fuzzer. See
+    /// [`super::prompt_schedule`] for a deterministic driver.
+    ///
+    /// The closure receives the instance without the scheduler running; use
+    /// [`CompiledSimInstance::run_with_scheduler_and_logger`] (or a receiver's methods, which
+    /// drive the scheduler while they wait) inside it. Tick logging follows `HYDRO_SIM_LOG`.
+    pub fn run_with_driver<D: bolero::bolero_engine::driver::Driver + 'static>(
+        &self,
+        driver: D,
+        thunk: impl AsyncFnOnce(CompiledSimInstance<'_>) + RefUnwindSafe,
+    ) {
+        self.with_instantiator(
+            |instantiator| {
+                let instance = instantiator();
+                bolero::bolero_engine::any::scope::with(
+                    Box::new(bolero::bolero_engine::driver::object::Object(driver)),
+                    || {
+                        tokio::runtime::Builder::new_current_thread()
+                            .build()
+                            .unwrap()
+                            .block_on(async { instance.run_without_launching(thunk).await })
+                    },
+                );
+            },
+            false,
+        );
+    }
+
     /// Exhaustively searches all possible executions of the simulation. The provided
     /// closure will be repeatedly executed with instances of the Hydro program where the
     /// batching boundaries, order of messages, and retries are varied.
@@ -1264,7 +1293,7 @@ impl<'a> CompiledSimInstance<'a> {
     /// with respect to the future: it is re-polled between every pair of scheduler steps, but
     /// never while a step is in flight. The [`LaunchedSim`] state struct lives across steps,
     /// in this function's frame.
-    async fn run_with_scheduler(self, thunk: impl Future<Output = ()>) {
+    pub(crate) async fn run_with_scheduler(self, thunk: impl Future<Output = ()>) {
         self.run_with_scheduler_and_maybe_logger::<std::io::Empty>(None, thunk)
             .await;
     }
@@ -1333,6 +1362,10 @@ impl<'a> CompiledSimInstance<'a> {
                 // while a step is in flight, and a step is never cancelled mid-execution.
                 sim.step().await;
             }
+        }
+
+        if super::work_counts::is_enabled() {
+            sim.record_work_counts();
         }
     }
 
@@ -2313,7 +2346,16 @@ impl SimTick {
             .iter()
             .any(|hook| hook.borrow().blocks_tick())
             // ...and at least one hook must be able to trigger the tick.
-            && (self.hooks.iter().any(|hook| hook.can_trigger_tick())
+            && (self.hooks.iter().enumerate().any(|(index, hook)| {
+                let meta = hook.location_meta();
+                hook.can_trigger_tick()
+                    && !super::hold_one_hook::is_held(
+                        Some(meta.location),
+                        index,
+                        hook.hook_item_type(),
+                        hook.hook_kind(),
+                    )
+            })
                 || self
                     .scripted_hooks
                     .iter()
@@ -2414,6 +2456,24 @@ struct LaunchedSim<W: std::io::Write> {
 }
 
 impl<W: std::io::Write> LaunchedSim<W> {
+    fn record_work_counts(&self) {
+        for (loc, member, dfir) in &self.async_dfirs {
+            super::work_counts::record_dfir(&format!("{loc:?}"), *member, &dfir.metrics());
+        }
+        for tick in self
+            .possibly_ready_ticks
+            .iter()
+            .chain(&self.not_ready_ticks)
+            .chain(self.current_scripted_tick.iter())
+        {
+            super::work_counts::record_dfir(
+                &format!("{:?} tick", tick.parent_location),
+                tick.cluster_id,
+                &tick.dfir.metrics(),
+            );
+        }
+    }
+
     /// Runs a single step of the simulation scheduler.
     ///
     /// A step first advances all async DFIRs; if none of them made progress, it instead runs
@@ -2742,6 +2802,7 @@ impl<W: std::io::Write> LaunchedSim<W> {
                     tick_decision_writer.as_mut(),
                     &mut tick.hooks,
                     &tick.scripted_hooks,
+                    tick.cluster_id,
                 );
 
                 let run_tick_future = tick.dfir.run_tick();
@@ -2859,6 +2920,7 @@ fn run_hooks<W: std::fmt::Write>(
     mut tick_decision_writer: Option<&mut W>,
     hooks: &mut [Box<dyn TickInputHook>],
     scripted_hooks: &[Rc<RefCell<dyn ScriptedTickInputHook>>],
+    member: Option<u32>,
 ) {
     // Scripted hooks own and release their decisions without entropy. Run them completely
     // before considering regular hooks; only regular hooks need a Bolero driver.
@@ -2881,23 +2943,49 @@ fn run_hooks<W: std::fmt::Write>(
             // First, resolve every hook that faces no choice (its decision consumes no
             // entropy). Doing this before the second pass lets the final undecided hook
             // be forced to trigger when no earlier hook made a triggering decision.
-            for (hook, decided) in hooks.iter_mut().zip(decided.iter_mut()) {
+            for (index, (hook, decided)) in hooks.iter_mut().zip(decided.iter_mut()).enumerate() {
                 if hook.only_one_possible_decision() {
                     // The no-choice decision can still trigger the tick (the passthrough
                     // singleton always releases the latest value), so its result counts.
-                    made_triggering_decision |= hook.autonomous_decision(driver, false);
+                    let meta = hook.location_meta();
+                    made_triggering_decision |= super::hold_one_hook::with_current_hook(
+                        Some(meta.location),
+                        index,
+                        hook.hook_item_type(),
+                        hook.hook_kind(),
+                        false,
+                        || hook.autonomous_decision(driver, false),
+                    );
                     *decided = true;
                     remaining_decision_count -= 1;
                 }
             }
 
-            for (hook, decided) in hooks.iter_mut().zip(decided.iter()) {
+            for (index, (hook, decided)) in hooks.iter_mut().zip(decided.iter()).enumerate() {
                 if !decided {
-                    made_triggering_decision |= hook.autonomous_decision(
-                        driver,
-                        !made_triggering_decision && remaining_decision_count == 1,
+                    let force = !made_triggering_decision && remaining_decision_count == 1;
+                    let meta = hook.location_meta();
+                    made_triggering_decision |= super::hold_one_hook::with_current_hook(
+                        Some(meta.location),
+                        index,
+                        hook.hook_item_type(),
+                        hook.hook_kind(),
+                        force,
+                        || hook.autonomous_decision(driver, force),
                     );
                     remaining_decision_count -= 1;
+                }
+
+                if super::work_counts::is_enabled() {
+                    let meta = hook.location_meta();
+                    super::work_counts::record_hook_release(
+                        Some(meta.location),
+                        index,
+                        hook.hook_item_type(),
+                        hook.hook_kind(),
+                        member,
+                        hook.pending_release_count(),
+                    );
                 }
 
                 hook.release_decision(

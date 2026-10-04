@@ -69,6 +69,21 @@ pub(crate) mod versioned_network;
 pub mod runtime;
 
 #[cfg(stageleft_runtime)]
+pub mod prompt_schedule;
+
+#[cfg(stageleft_runtime)]
+pub mod hold_one_hook;
+
+#[cfg(stageleft_runtime)]
+pub mod work_counts;
+
+#[cfg(stageleft_runtime)]
+pub mod amplification;
+
+#[cfg(stageleft_runtime)]
+pub mod amplification_harness;
+
+#[cfg(stageleft_runtime)]
 #[doc(hidden)]
 pub use compiled::continue_if_impl;
 #[cfg(stageleft_runtime)]

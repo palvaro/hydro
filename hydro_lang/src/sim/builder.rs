@@ -308,6 +308,17 @@ impl SimBuilder {
         }
     }
 
+    /// The `-> _network_metrics()` pass-through for a send pipeline, or nothing for an embedded
+    /// (external) payload type, which is not serialized to `Bytes` and so has no payload length
+    /// to count. See `super::work_counts`.
+    fn network_metrics_pass(external_ty: Option<&syn::Type>) -> proc_macro2::TokenStream {
+        if external_ty.is_some() {
+            proc_macro2::TokenStream::new()
+        } else {
+            quote::quote!(-> _network_metrics())
+        }
+    }
+
     fn channel_table_ident(&mut self, channel_id: u32, elem_ty: &syn::Type) -> syn::Ident {
         if let Some(ident) = self.channel_tables.get(&channel_id) {
             return ident.clone();
@@ -379,9 +390,13 @@ impl SimBuilder {
             }
         };
         if let Some(serialize_pipeline) = serialize {
+            // `_network_metrics()` is the pass-through a deployment uses to count serialized
+            // messages into the subgraph's `DfirMetrics`; here it lets `super::work_counts`
+            // read message counts from the host side without touching the send itself.
+            let metrics = Self::network_metrics_pass(external_ty);
             self.get_dfir_mut(from).add_dfir(
                 parse_quote! {
-                    #input_ident -> map(#serialize_pipeline) -> for_each(|#send_pat| #send_body);
+                    #input_ident -> map(#serialize_pipeline) #metrics -> for_each(|#send_pat| #send_body);
                 },
                 None,
                 Some(&format!("send{}", suffix)),
@@ -1957,6 +1972,7 @@ impl DfirBuilder for SimBuilder {
         }
 
         let root = get_this_crate();
+        let metrics = Self::network_metrics_pass(external_element_type);
 
         // For embedded (external) serialization, the raw payload type flows across the in-memory
         // channel instead of serialized `Bytes`.
@@ -1983,7 +1999,7 @@ impl DfirBuilder for SimBuilder {
                 if let Some(serialize_pipeline) = serialize {
                     self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(|v| #sink.try_send(v).unwrap());
+                            #input_ident -> map(#serialize_pipeline) #metrics -> for_each(|v| #sink.try_send(v).unwrap());
                         },
                         None,
                         Some(&format!("send{}", tag_id)),
@@ -2031,7 +2047,7 @@ impl DfirBuilder for SimBuilder {
                 if let Some(serialize_pipeline) = serialize {
                     self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(|v| #sink.try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap());
+                            #input_ident -> map(#serialize_pipeline) #metrics -> for_each(|v| #sink.try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap());
                         },
                         None,
                         Some(&format!("send{}", tag_id)),
@@ -2091,7 +2107,7 @@ impl DfirBuilder for SimBuilder {
                 if let Some(serialize_pipeline) = serialize {
                     self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(|(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send(v).unwrap());
+                            #input_ident -> map(#serialize_pipeline) #metrics -> for_each(|(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send(v).unwrap());
                         },
                         None,
                         Some(&format!("send{}", tag_id)),
@@ -2158,7 +2174,7 @@ impl DfirBuilder for SimBuilder {
                 if let Some(serialize_pipeline) = serialize {
                     self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(|(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap());
+                            #input_ident -> map(#serialize_pipeline) #metrics -> for_each(|(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap());
                         },
                         None,
                         Some(&format!("send{}", tag_id)),
@@ -2532,17 +2548,30 @@ impl DfirBuilder for SimBuilder {
 ///
 /// The return type mirrors `HookLocationMeta`, but with owned `String` that will be inlined
 /// into the generated sources.
+/// The source position an operator stands for, as `(file:line:col, source line text, caret
+/// indent)`, for hook identities and the per-tick trace.
+///
+/// An operator created by `sliced!` carries the position of the user's `use::batch(...)` or
+/// `use::snapshot(...)` expression, recorded while the macro expanded (see
+/// [`crate::compile::ir::backtrace::UserLocation`]); that is preferred, because the backtrace
+/// of such an operator names the `sliced!` invocation when the macro is expanded in another
+/// crate. Every other operator is positioned by the first frame of its backtrace.
 fn location_for_op(op_meta: &HydroIrOpMetadata) -> (String, String, String) {
-    op_meta
+    let position = op_meta
         .backtrace
-        .elements()
-        .next()
-        .and_then(|e| {
-            let filename = e.filename.as_deref()?;
-            let lineno = e.lineno?;
-            let colno = e.colno?;
+        .user_location()
+        .and_then(|u| Some((u.file?.to_owned(), u.line, u.column.saturating_sub(1))))
+        .or_else(|| {
+            op_meta
+                .backtrace
+                .elements()
+                .next()
+                .and_then(|e| Some((e.filename.as_deref()?.to_owned(), e.lineno?, e.colno?)))
+        });
 
-            let line = std::fs::read_to_string(filename)
+    position
+        .map(|(filename, lineno, colno)| {
+            let line = std::fs::read_to_string(&filename)
                 .ok()
                 .and_then(|s| {
                     s.lines()
@@ -2552,20 +2581,23 @@ fn location_for_op(op_meta: &HydroIrOpMetadata) -> (String, String, String) {
                 .unwrap_or_default();
 
             let relative_path = (|| {
-                std::path::Path::new(filename)
-                    .strip_prefix(std::env::current_dir().ok()?)
-                    .ok()
+                let cwd = std::env::current_dir().ok()?;
+                let path = std::path::Path::new(&filename);
+                cwd.ancestors()
+                    .filter(|base| base.parent().is_some())
+                    .find_map(|base| path.strip_prefix(base).ok())
+                    .map(std::path::Path::to_path_buf)
             })();
 
             let filename_display = relative_path
                 .map(|p| p.display().to_string())
-                .unwrap_or_else(|| filename.to_owned());
+                .unwrap_or_else(|| filename.clone());
 
-            Some((
+            (
                 format!("{}:{}:{}", filename_display, lineno, colno),
                 line,
-                format!("{:>1$}", "", (colno - 1).try_into().unwrap()),
-            ))
+                format!("{:>1$}", "", colno.saturating_sub(1).try_into().unwrap()),
+            )
         })
         .unwrap_or_else(|| ("unknown location".to_owned(), String::new(), String::new()))
 }

@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Runs every `#[amplification_check(...)]` in a crate as a normal command.
+#
+#   ./cargo-check-amplification [--include-ignored] [--config NAME] <crate> [function-substring]
+#
+# The terminal shows one status line, then the complete concise verdict for each matching check:
+# inferred label, growth, multiplier, and source location. Detailed reports are written to target/amplification/reports/. Checks with `ignore = "..."` are skipped unless requested.
+set -euo pipefail
+
+include_ignored=false
+configuration=
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --include-ignored) include_ignored=true; shift ;;
+    --config)
+      if [[ $# -lt 2 ]]; then echo "--config requires a name" >&2; exit 2; fi
+      configuration=$2
+      shift 2
+      ;;
+    -h|--help)
+      echo "usage: $0 [--include-ignored] [--config NAME] <crate> [function-substring]"
+      exit 0
+      ;;
+    --*) echo "unknown option: $1" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+  echo "usage: $0 [--include-ignored] [--config NAME] <crate> [function-substring]" >&2
+  exit 2
+fi
+crate=$1
+substring=${2:-}
+
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+# Resolve the package through Cargo rather than guessing its directory or Rust library name.
+metadata=$(cargo metadata --format-version=1 --no-deps)
+package_manifest=$(python3 -c '
+import json, sys
+name = sys.argv[1]
+packages = [p for p in json.load(sys.stdin)["packages"] if p["name"] == name]
+if len(packages) != 1:
+    print(f"expected one workspace package named {name!r}, found {len(packages)}", file=sys.stderr)
+    raise SystemExit(2)
+print(packages[0]["manifest_path"])
+' "$crate" <<<"$metadata")
+package_dir=$(dirname "$package_manifest")
+
+export AMPLIFICATION_RESULTS_DIR="$root/target/amplification"
+runner_dir="$AMPLIFICATION_RESULTS_DIR/runner"
+mkdir -p "$AMPLIFICATION_RESULTS_DIR/reports" "$runner_dir/src"
+: > "$AMPLIFICATION_RESULTS_DIR/results.tsv"
+
+# This tiny generated binary links the requested crate so its registered checks are present. It
+# deliberately uses `cargo run`, not Cargo's test harness. Keeping it under target/ avoids adding
+# demo plumbing to the user's crate.
+python3 - "$runner_dir/Cargo.toml" "$package_dir" "$root/hydro_lang" "$crate" <<'PY'
+import json, pathlib, sys
+out, checked, hydro = map(pathlib.Path, sys.argv[1:4])
+crate = sys.argv[4]
+out.write_text(f'''[package]
+name = "hydro-amplification-runner"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[workspace.lints.rust]
+unexpected_cfgs = {{ level = "warn", check-cfg = ["cfg(stageleft_runtime)", "cfg(stageleft_trybuild)", "cfg(hydro_amplification)"] }}
+
+[dependencies]
+checked_crate = {{ path = {json.dumps(str(checked))}, package = {json.dumps(crate)} }}
+hydro_lang = {{ path = {json.dumps(str(hydro))}, features = ["sim"] }}
+stageleft = "0.15.1"
+''')
+PY
+# Reuse the workspace lockfile so this generated runner resolves the same dependency versions and
+# can run offline after the workspace has been built once.
+ln -sf "$root/Cargo.lock" "$runner_dir/Cargo.lock"
+
+cat > "$runner_dir/src/main.rs" <<'RS'
+use checked_crate as _;
+
+fn main() {
+    // Simulation compilation must inspect the checked crate, rather than this generated runner.
+    // SAFETY: this process is single-threaded here, before the checker starts worker threads.
+    unsafe {
+        std::env::set_var(
+            "CARGO_MANIFEST_DIR",
+            std::env::var_os("AMPLIFICATION_SOURCE_DIR").expect("missing checked crate path"),
+        );
+    }
+    hydro_lang::compile::init_test();
+    match hydro_lang::sim::amplification::run_registered_checks(
+        std::env::args().nth(1).as_deref(),
+        std::env::args().nth(2).as_deref(),
+        std::env::args().nth(3).as_deref() == Some("true"),
+    ) {
+        Ok(results) => hydro_lang::sim::amplification::print_verdicts(&results),
+        Err(message) => {
+            eprintln!("amplification check: {message}");
+            std::process::exit(2);
+        }
+    }
+}
+RS
+
+rustflags="${RUSTFLAGS:+$RUSTFLAGS }--cfg hydro_amplification --check-cfg=cfg(hydro_amplification) --cap-lints allow"
+AMPLIFICATION_CRATE="$crate" \
+AMPLIFICATION_SOURCE_DIR="$package_dir" \
+RUSTFLAGS="$rustflags" \
+CARGO_TARGET_DIR="$root/target" \
+cargo run --quiet --manifest-path "$runner_dir/Cargo.toml" -- "$substring" "$configuration" "$include_ignored"
