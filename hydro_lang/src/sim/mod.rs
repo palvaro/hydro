@@ -69,6 +69,9 @@ pub(crate) mod versioned_network;
 pub mod runtime;
 
 #[cfg(stageleft_runtime)]
+pub mod schedule_extension;
+
+#[cfg(stageleft_runtime)]
 pub mod prompt_schedule;
 
 #[cfg(stageleft_runtime)]

@@ -1364,8 +1364,8 @@ impl<'a> CompiledSimInstance<'a> {
             }
         }
 
-        if super::work_counts::is_enabled() {
-            sim.record_work_counts();
+        if super::schedule_extension::is_active() {
+            sim.finish_schedule_extension();
         }
     }
 
@@ -1383,6 +1383,8 @@ impl<'a> CompiledSimInstance<'a> {
             mut scripted_inline_hooks,
             _registry,
         ) = self.dylib_result.take().unwrap();
+
+        super::schedule_extension::scripted_hooks_present(scripted_hooks.len());
 
         // The generated code keys hooks and tick DFIRs by the same locations, so we can
         // move each tick's / observation's hooks out of the maps and attach them
@@ -2348,13 +2350,16 @@ impl SimTick {
             // ...and at least one hook must be able to trigger the tick.
             && (self.hooks.iter().enumerate().any(|(index, hook)| {
                 let meta = hook.location_meta();
-                hook.can_trigger_tick()
-                    && !super::hold_one_hook::is_held(
-                        Some(meta.location),
+                super::schedule_extension::allows_trigger(
+                    super::schedule_extension::HookMetadata {
+                        location: meta.location,
                         index,
-                        hook.hook_item_type(),
-                        hook.hook_kind(),
-                    )
+                        item_type: hook.hook_item_type(),
+                        kind: hook.hook_kind(),
+                        member: self.cluster_id,
+                    },
+                    hook.can_trigger_tick(),
+                )
             })
                 || self
                     .scripted_hooks
@@ -2456,9 +2461,9 @@ struct LaunchedSim<W: std::io::Write> {
 }
 
 impl<W: std::io::Write> LaunchedSim<W> {
-    fn record_work_counts(&self) {
+    fn finish_schedule_extension(&self) {
         for (loc, member, dfir) in &self.async_dfirs {
-            super::work_counts::record_dfir(&format!("{loc:?}"), *member, &dfir.metrics());
+            super::schedule_extension::dfir_finished(&format!("{loc:?}"), *member, &dfir.metrics());
         }
         for tick in self
             .possibly_ready_ticks
@@ -2466,7 +2471,7 @@ impl<W: std::io::Write> LaunchedSim<W> {
             .chain(&self.not_ready_ticks)
             .chain(self.current_scripted_tick.iter())
         {
-            super::work_counts::record_dfir(
+            super::schedule_extension::dfir_finished(
                 &format!("{:?} tick", tick.parent_location),
                 tick.cluster_id,
                 &tick.dfir.metrics(),
@@ -2948,14 +2953,17 @@ fn run_hooks<W: std::fmt::Write>(
                     // The no-choice decision can still trigger the tick (the passthrough
                     // singleton always releases the latest value), so its result counts.
                     let meta = hook.location_meta();
-                    made_triggering_decision |= super::hold_one_hook::with_current_hook(
-                        Some(meta.location),
+                    let hook_meta = super::schedule_extension::HookMetadata {
+                        location: meta.location,
                         index,
-                        hook.hook_item_type(),
-                        hook.hook_kind(),
-                        false,
-                        || hook.autonomous_decision(driver, false),
-                    );
+                        item_type: hook.hook_item_type(),
+                        kind: hook.hook_kind(),
+                        member,
+                    };
+                    made_triggering_decision |=
+                        super::schedule_extension::with_hook_decision(hook_meta, false, || {
+                            hook.autonomous_decision(driver, false)
+                        });
                     *decided = true;
                     remaining_decision_count -= 1;
                 }
@@ -2965,25 +2973,30 @@ fn run_hooks<W: std::fmt::Write>(
                 if !decided {
                     let force = !made_triggering_decision && remaining_decision_count == 1;
                     let meta = hook.location_meta();
-                    made_triggering_decision |= super::hold_one_hook::with_current_hook(
-                        Some(meta.location),
+                    let hook_meta = super::schedule_extension::HookMetadata {
+                        location: meta.location,
                         index,
-                        hook.hook_item_type(),
-                        hook.hook_kind(),
-                        force,
-                        || hook.autonomous_decision(driver, force),
-                    );
+                        item_type: hook.hook_item_type(),
+                        kind: hook.hook_kind(),
+                        member,
+                    };
+                    made_triggering_decision |=
+                        super::schedule_extension::with_hook_decision(hook_meta, force, || {
+                            hook.autonomous_decision(driver, force)
+                        });
                     remaining_decision_count -= 1;
                 }
 
-                if super::work_counts::is_enabled() {
+                if super::schedule_extension::is_active() {
                     let meta = hook.location_meta();
-                    super::work_counts::record_hook_release(
-                        Some(meta.location),
-                        index,
-                        hook.hook_item_type(),
-                        hook.hook_kind(),
-                        member,
+                    super::schedule_extension::hook_released(
+                        super::schedule_extension::HookMetadata {
+                            location: meta.location,
+                            index,
+                            item_type: hook.hook_item_type(),
+                            kind: hook.hook_kind(),
+                            member,
+                        },
                         hook.pending_release_count(),
                     );
                 }

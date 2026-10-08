@@ -122,12 +122,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::panic::RefUnwindSafe;
+use std::rc::Rc;
 use std::time::Instant;
 
 use super::compiled::{CompiledSim, quiesce};
 use super::flow::SimFlow;
 use super::hold_one_hook::{HoldHandle, HoldOneHookDriver};
-use super::work_counts::{self, WorkCounts};
+use super::schedule_extension::{ChainedExtension, ScheduleExtension, with_extension};
+use super::work_counts::{WorkCountExtension, WorkCounts};
 
 pub use super::amplification_harness::{
     CheckResult, InputCounter, InputValue, RegisteredCheck, SimOutputs, Summary, print_verdicts,
@@ -1411,21 +1413,25 @@ fn run_once(
     k: usize,
 ) -> (WorkCounts, Vec<String>, u64, u64) {
     let (driver, handle) = HoldOneHookDriver::new();
-    work_counts::enable();
+    let counts = WorkCountExtension::new();
+    let extension: Rc<dyn ScheduleExtension> =
+        ChainedExtension::new(Rc::new(handle.clone()), counts.clone());
     let handle_ref = &handle;
-    compiled.run_with_driver(driver, async |instance| {
-        instance
-            .run_with_scheduler(async {
-                for r in 0..config.rounds {
-                    apply_hold(handle_ref, target, k, r, config.hold_start);
-                    round(r).await;
-                    quiesce().await;
-                }
-            })
-            .await
+    with_extension(extension, || {
+        compiled.run_with_driver(driver, async |instance| {
+            instance
+                .run_with_scheduler(async {
+                    for r in 0..config.rounds {
+                        apply_hold(handle_ref, target, k, r, config.hold_start);
+                        round(r).await;
+                        quiesce().await;
+                    }
+                })
+                .await
+        });
     });
     handle.end_hold();
-    let counts = work_counts::take();
+    let counts = counts.take();
     (
         counts,
         handle.hooks_seen(),

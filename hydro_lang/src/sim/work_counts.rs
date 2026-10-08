@@ -2,9 +2,8 @@
 //!
 //! The amplification checker needs a measure of work that requires nothing from the program
 //! under test: no output counters, no instrumentation, no knowledge of what a "request" is. This
-//! module collects four such measures from the simulator itself while a run executes, and hands
-//! them to the harness afterwards through [`take`]. Collection is off unless a harness calls
-//! [`enable`], and every hot-path check is a single thread-local boolean.
+//! module collects four such measures through [`WorkCountExtension`]. The simulator invokes the
+//! extension only when a caller explicitly installs it; ordinary runs do no counting work.
 //!
 //! # Which counts can a schedule inflate on its own?
 //!
@@ -63,25 +62,21 @@
 //! # Where the counts come from
 //!
 //! Hook releases are counted by the scheduler in `run_hooks`, on the host side of the dylib
-//! boundary, through [`super::runtime::SimHook::pending_release_count`], and keyed by the same
+//! boundary, through [`super::runtime::RuntimeHook::pending_release_count`], and keyed by the same
 //! `location#index [item type]` identity that [`super::hold_one_hook`] uses, so the per-hook
 //! breakdown names a source location. Network messages, handoff items and subgraph runs are read
 //! from each DFIR instance's [`dfir_rs::scheduled::metrics::DfirMetrics`] when the scheduler
 //! finishes, keyed by the DFIR's location (cluster members are summed). Nothing here changes a
 //! scheduling decision.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use dfir_rs::scheduled::metrics::DfirMetrics;
 
 use super::hold_one_hook::hook_id;
-use super::runtime::HookKind;
-
-thread_local! {
-    static ENABLED: Cell<bool> = const { Cell::new(false) };
-    static COUNTS: RefCell<WorkCounts> = RefCell::new(WorkCounts::default());
-}
+use super::schedule_extension::{HookMetadata, ScheduleExtension};
 
 /// The records a simulation run moved, by kind and by place. See the [module docs](self) for
 /// what each count means and which one the checker's verdict reads.
@@ -157,55 +152,52 @@ fn member_suffix(member: Option<u32>) -> String {
     member.map(|m| format!(" @{m}")).unwrap_or_default()
 }
 
-/// Starts collecting counts on this thread, discarding any collected so far. Call before
-/// `run_with_driver`; the simulation and the harness share one thread there.
-pub fn enable() {
-    ENABLED.with(|e| e.set(true));
-    COUNTS.with(|c| *c.borrow_mut() = WorkCounts::default());
+/// Extension that collects work counts for one simulator execution.
+#[derive(Default)]
+pub struct WorkCountExtension {
+    counts: RefCell<WorkCounts>,
 }
 
-/// Stops collecting and returns what was collected since [`enable`].
-pub fn take() -> WorkCounts {
-    ENABLED.with(|e| e.set(false));
-    COUNTS.with(|c| std::mem::take(&mut *c.borrow_mut()))
+impl WorkCountExtension {
+    /// Creates an empty collector suitable for installing as a schedule extension.
+    pub fn new() -> Rc<Self> {
+        Rc::new(Self::default())
+    }
+
+    /// Removes and returns all counts collected so far.
+    pub fn take(&self) -> WorkCounts {
+        std::mem::take(&mut *self.counts.borrow_mut())
+    }
 }
 
-/// Whether collection is on. The scheduler checks this before doing any counting work.
-#[inline]
-pub fn is_enabled() -> bool {
-    ENABLED.with(|e| e.get())
+impl ScheduleExtension for WorkCountExtension {
+    fn hook_released(&self, hook: HookMetadata, records: usize) {
+        record_hook_release_into(&mut self.counts.borrow_mut(), hook, records);
+    }
+
+    fn dfir_finished(&self, location: &str, member: Option<u32>, metrics: &DfirMetrics) {
+        record_dfir_into(&mut self.counts.borrow_mut(), location, member, metrics);
+    }
 }
 
-/// Records that the hook at `location` and `index` within its tick, on cluster `member` (or a
-/// process), released `n` items. Called by the scheduler; not for use by harnesses. Snapshot
-/// hooks report zero items and so add nothing here (see the [module docs](self)).
-#[doc(hidden)]
-pub fn record_hook_release(
-    location: Option<&'static str>,
-    index: usize,
-    item_type: &'static str,
-    kind: HookKind,
-    member: Option<u32>,
-    n: usize,
-) {
-    let Some(location) = location else {
-        return;
-    };
+fn record_hook_release_into(counts: &mut WorkCounts, hook: HookMetadata, n: usize) {
     if n == 0 {
         return;
     }
-    let id = hook_id(location, index, item_type, kind);
-    COUNTS.with(|c| {
-        let mut c = c.borrow_mut();
-        *c.hook_releases.entry(id.clone()).or_default() += n as u64;
-        *c.hook_releases_by_member.entry((id, member)).or_default() += n as u64;
-    });
+    let id = hook_id(hook.location, hook.index, hook.item_type, hook.kind);
+    *counts.hook_releases.entry(id.clone()).or_default() += n as u64;
+    *counts
+        .hook_releases_by_member
+        .entry((id, hook.member))
+        .or_default() += n as u64;
 }
 
-/// Adds one DFIR instance's cumulative metrics under `location` and `member`. Called by the
-/// scheduler when a run finishes; not for use by harnesses.
-#[doc(hidden)]
-pub fn record_dfir(location: &str, member: Option<u32>, metrics: &DfirMetrics) {
+fn record_dfir_into(
+    counts: &mut WorkCounts,
+    location: &str,
+    member: Option<u32>,
+    metrics: &DfirMetrics,
+) {
     let handoffs: u64 = metrics
         .handoffs
         .values()
@@ -221,19 +213,20 @@ pub fn record_dfir(location: &str, member: Option<u32>, metrics: &DfirMetrics) {
         .values()
         .map(|s| s.network_message_count() as u64)
         .sum();
-    COUNTS.with(|c| {
-        let mut c = c.borrow_mut();
-        if handoffs > 0 {
-            *c.handoff_items.entry(location.to_owned()).or_default() += handoffs;
-        }
-        if runs > 0 {
-            *c.subgraph_runs.entry(location.to_owned()).or_default() += runs;
-        }
-        if messages > 0 {
-            *c.network_messages.entry(location.to_owned()).or_default() += messages;
-            *c.network_messages_by_member
-                .entry((location.to_owned(), member))
-                .or_default() += messages;
-        }
-    });
+    if handoffs > 0 {
+        *counts.handoff_items.entry(location.to_owned()).or_default() += handoffs;
+    }
+    if runs > 0 {
+        *counts.subgraph_runs.entry(location.to_owned()).or_default() += runs;
+    }
+    if messages > 0 {
+        *counts
+            .network_messages
+            .entry(location.to_owned())
+            .or_default() += messages;
+        *counts
+            .network_messages_by_member
+            .entry((location.to_owned(), member))
+            .or_default() += messages;
+    }
 }

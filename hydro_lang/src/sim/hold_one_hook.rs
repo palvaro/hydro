@@ -65,62 +65,21 @@
 //! hold each in turn.
 
 use core::ops::Bound;
-use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use bolero::bolero_engine::driver::Driver;
 
 use super::runtime::HookKind;
+use super::schedule_extension::{
+    HookDecision, HookMetadata, ScheduleExtension, current_hook_decision,
+};
 
 /// What the scheduler publishes about the hook it is about to ask.
-#[derive(Debug, Clone, Copy)]
-struct CurrentHook {
-    location: &'static str,
-    index: usize,
-    item_type: &'static str,
-    kind: HookKind,
-    /// Whether the scheduler is forcing this hook to make a nontrivial decision.
-    forced: bool,
-    /// Counts `with_current_hook` calls, so the driver can tell the questions of one
-    /// `autonomous_decision` from those of the next call to the same hook.
-    decision_seq: u64,
-}
+type CurrentHook = HookDecision;
 
-thread_local! {
-    static CURRENT_HOOK: Cell<Option<CurrentHook>> = const { Cell::new(None) };
-    static DECISION_SEQ: Cell<u64> = const { Cell::new(0) };
-    /// The hook identity being held, mirrored here so the scheduler can consult it without
-    /// reaching into the driver. The harness and the scheduler share one thread under
-    /// `run_with_driver`.
-    static HOLD_TARGET: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
-}
-
-/// Whether the hook at `location` and `index` within its tick is currently held. The scheduler
-/// treats a held hook as unable to release, so a tick whose only loaded hook is held is not
-/// runnable and parks until other input arrives; without this, `run_hooks` would force the held
-/// hook to release the moment it was the tick's only input, and no hold could outlive one round.
-/// With no hold set this is always false and the scheduler behaves exactly as before.
-#[doc(hidden)]
-pub fn is_held(
-    location: Option<&'static str>,
-    index: usize,
-    item_type: &'static str,
-    kind: HookKind,
-) -> bool {
-    let Some(location) = location else {
-        return false;
-    };
-    HOLD_TARGET.with(|t| {
-        t.borrow()
-            .as_deref()
-            .is_some_and(|target| target == hook_id(location, index, item_type, kind))
-    })
-}
-
-/// Runs `f` with the hook's identity, and whether the scheduler is forcing it to decide
-/// nontrivially, published as the hook currently asking the driver for a decision. Called by
-/// the scheduler around every `autonomous_decision`; not for use by harnesses.
+/// Publishes a hook decision through the simulator's generic scheduling context. Kept as a
+/// convenience for the driver's focused tests; the scheduler uses `schedule_extension` directly.
 #[doc(hidden)]
 pub fn with_current_hook<R>(
     location: Option<&'static str>,
@@ -130,24 +89,20 @@ pub fn with_current_hook<R>(
     forced: bool,
     f: impl FnOnce() -> R,
 ) -> R {
-    let seq = DECISION_SEQ.with(|s| {
-        let n = s.get().wrapping_add(1);
-        s.set(n);
-        n
-    });
-    let previous = CURRENT_HOOK.with(|c| {
-        c.replace(location.map(|location| CurrentHook {
+    let Some(location) = location else {
+        return f();
+    };
+    super::schedule_extension::with_hook_decision(
+        HookMetadata {
             location,
             index,
             item_type,
             kind,
-            forced,
-            decision_seq: seq,
-        }))
-    });
-    let result = f();
-    CURRENT_HOOK.with(|c| c.set(previous));
-    result
+            member: None,
+        },
+        forced,
+        f,
+    )
 }
 
 /// The identity string for a hook: `file:line#index [item type]` for a batch and
@@ -209,11 +164,11 @@ fn strip_paths(type_name: &str) -> String {
 }
 
 fn current_hook() -> Option<CurrentHook> {
-    CURRENT_HOOK.with(|c| c.get())
+    current_hook_decision()
 }
 
 fn id_of(h: &CurrentHook) -> String {
-    hook_id(h.location, h.index, h.item_type, h.kind)
+    hook_id(h.hook.location, h.hook.index, h.hook.item_type, h.hook.kind)
 }
 
 #[derive(Debug, Default)]
@@ -241,6 +196,20 @@ pub struct HoldHandle {
     state: Arc<Mutex<HoldState>>,
 }
 
+impl ScheduleExtension for HoldHandle {
+    fn allows_trigger(&self, hook: HookMetadata, default: bool) -> bool {
+        default
+            && self.state.lock().unwrap().target.as_deref()
+                != Some(hook_id(hook.location, hook.index, hook.item_type, hook.kind).as_str())
+    }
+
+    fn scripted_hooks_present(&self, count: usize) {
+        panic!(
+            "amplification checking does not support simulations with {count} scripted tick-input hook(s)"
+        );
+    }
+}
+
 impl HoldHandle {
     /// Starts holding the hook identified by `id` (as listed by [`HoldHandle::hooks_seen`]). On
     /// a cluster the same identity exists on every member, so the hold applies to all of them.
@@ -248,7 +217,6 @@ impl HoldHandle {
         let mut s = self.state.lock().unwrap();
         s.target = Some(id.to_owned());
         s.catching_up = None;
-        HOLD_TARGET.with(|t| *t.borrow_mut() = Some(id.to_owned()));
     }
 
     /// Stops holding; the next question from the held hook is answered as the prompt schedule
@@ -261,7 +229,6 @@ impl HoldHandle {
         {
             s.catching_up = Some((target, None));
         }
-        HOLD_TARGET.with(|t| *t.borrow_mut() = None);
     }
 
     /// The hook identity currently held, if any.
@@ -346,7 +313,7 @@ impl HoldOneHookDriver {
         if s.target.as_deref() == Some(id.as_str()) {
             return Policy::Hold {
                 forced: h.forced,
-                kind: h.kind,
+                kind: h.hook.kind,
             };
         }
         if let Some((hook, seq)) = &mut s.catching_up
@@ -354,10 +321,10 @@ impl HoldOneHookDriver {
         {
             match seq {
                 None => {
-                    *seq = Some(h.decision_seq);
+                    *seq = Some(h.sequence);
                     return Policy::CatchUp;
                 }
-                Some(seq) if *seq == h.decision_seq => return Policy::CatchUp,
+                Some(seq) if *seq == h.sequence => return Policy::CatchUp,
                 Some(_) => {
                     s.catching_up = None;
                 }
@@ -510,9 +477,12 @@ impl Driver for HoldOneHookDriver {
 mod tests {
     use core::ops::Bound;
 
+    use std::rc::Rc;
+
     use bolero::bolero_engine::driver::Driver;
 
     use super::*;
+    use crate::sim::schedule_extension::with_extension;
 
     const LOC: &str = "a.rs:1:1";
 
@@ -539,22 +509,26 @@ mod tests {
     #[test]
     fn snapshot_hold_pins_then_catches_up() {
         let (mut d, h) = HoldOneHookDriver::new();
+        with_extension(Rc::new(h.clone()), || snapshot_hold_scenario(&mut d, &h));
+    }
+
+    fn snapshot_hold_scenario(d: &mut HoldOneHookDriver, h: &HoldHandle) {
         let id = hook_id(LOC, 0, "T", HookKind::Snapshot);
         assert_eq!(id, "a.rs:1#0 [snapshot T]");
 
         // Prompt policy: observe a new version, the oldest queued.
-        assert_eq!(ask_snapshot(&mut d, false, 3), (Some(false), Some(0)));
+        assert_eq!(ask_snapshot(d, false, 3), (Some(false), Some(0)));
         assert_eq!(h.hooks_seen(), vec![id.clone()]);
 
         // Held: observe the last version again; nothing forced.
         h.begin_hold(&id);
-        assert_eq!(ask_snapshot(&mut d, false, 3), (Some(true), None));
-        assert_eq!(ask_snapshot(&mut d, false, 5), (Some(true), None));
+        assert_eq!(ask_snapshot(d, false, 3), (Some(true), None));
+        assert_eq!(ask_snapshot(d, false, 5), (Some(true), None));
         assert_eq!(h.holds_applied(), 2);
         assert_eq!(h.forced_releases(), 0);
 
         // Held and forced: the observation goes ahead (oldest) and is recorded as a refusal.
-        assert_eq!(ask_snapshot(&mut d, true, 5), (None, Some(0)));
+        assert_eq!(ask_snapshot(d, true, 5), (None, Some(0)));
         assert_eq!(h.forced_releases(), 1);
 
         // Hold ends: the first decision skips to the newest queued version, and every question
@@ -570,12 +544,16 @@ mod tests {
         assert_eq!(idx, (Some(6), Some(3)));
 
         // The next decision is back on the prompt policy.
-        assert_eq!(ask_snapshot(&mut d, false, 3), (Some(false), Some(0)));
+        assert_eq!(ask_snapshot(d, false, 3), (Some(false), Some(0)));
     }
 
     #[test]
     fn batch_hold_is_unchanged() {
         let (mut d, h) = HoldOneHookDriver::new();
+        with_extension(Rc::new(h.clone()), || batch_hold_scenario(&mut d, &h));
+    }
+
+    fn batch_hold_scenario(d: &mut HoldOneHookDriver, h: &HoldHandle) {
         let id = hook_id(LOC, 1, "u64", HookKind::Batch);
         assert_eq!(id, "a.rs:1#1 [u64]");
         let ask = |d: &mut HoldOneHookDriver, forced: bool| {
@@ -584,29 +562,40 @@ mod tests {
                 d.gen_usize(Bound::Included(&least), Bound::Included(&4))
             })
         };
-        assert_eq!(ask(&mut d, false), Some(4));
+        assert_eq!(ask(d, false), Some(4));
         h.begin_hold(&id);
-        assert_eq!(ask(&mut d, false), Some(0));
-        assert_eq!(ask(&mut d, true), Some(1));
+        assert_eq!(ask(d, false), Some(0));
+        assert_eq!(ask(d, true), Some(1));
         assert_eq!((h.holds_applied(), h.forced_releases()), (1, 1));
         h.end_hold();
         // A released batch hook does not catch up specially; the prompt policy already releases
         // everything.
-        assert_eq!(ask(&mut d, false), Some(4));
+        assert_eq!(ask(d, false), Some(4));
         assert!(h.held().is_none());
     }
 
     #[test]
-    fn a_held_hook_is_reported_to_the_scheduler() {
+    fn a_held_hook_is_reported_through_the_generic_extension() {
         let (_d, h) = HoldOneHookDriver::new();
         let id = hook_id(LOC, 0, "T", HookKind::Snapshot);
-        assert!(!is_held(Some(LOC), 0, "T", HookKind::Snapshot));
+        let snapshot = HookMetadata {
+            location: LOC,
+            index: 0,
+            item_type: "T",
+            kind: HookKind::Snapshot,
+            member: None,
+        };
+        assert!(h.allows_trigger(snapshot, true));
         h.begin_hold(&id);
-        assert!(is_held(Some(LOC), 0, "T", HookKind::Snapshot));
-        // Same location and index but a batch is a different hook.
-        assert!(!is_held(Some(LOC), 0, "T", HookKind::Batch));
-        assert!(!is_held(None, 0, "T", HookKind::Snapshot));
+        assert!(!h.allows_trigger(snapshot, true));
+        assert!(h.allows_trigger(
+            HookMetadata {
+                kind: HookKind::Batch,
+                ..snapshot
+            },
+            true,
+        ));
         h.end_hold();
-        assert!(!is_held(Some(LOC), 0, "T", HookKind::Snapshot));
+        assert!(h.allows_trigger(snapshot, true));
     }
 }
