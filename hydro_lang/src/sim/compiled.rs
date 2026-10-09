@@ -94,9 +94,11 @@ use libloading::Library;
 use tokio::sync::{Mutex, Notify};
 
 use super::runtime::{
-    Hooks, InlineHooks, ObservationHooks, ScriptTarget, ScriptedHookControl, ScriptedHookRegistry,
-    ScriptedInlineHooks, ScriptedObservationHooks, ScriptedTickHooks, SimLocation,
+    Hooks, InlineHooks, LineageEvent, LineageHandles, ObservationHooks, PolicyTrace, ScriptTarget,
+    ScriptedHookControl, ScriptedHookRegistry, ScriptedInlineHooks, ScriptedObservationHooks,
+    ScriptedTickHooks, SimLocation,
 };
+use super::slice::Slices;
 use super::{SimClusterReceiver, SimClusterSender, SimReceiver, SimSender};
 use crate::compile::builder::ExternalPortId;
 use crate::compile::trybuild::generate::BuiltArtifact;
@@ -408,6 +410,51 @@ impl ScriptCtx {
     }
 }
 
+/// A snapshot of the current simulation instance's lineage events (see
+/// [`LineageEvent`]). Panics if called outside a simulation.
+pub(crate) fn lineage_events() -> Vec<LineageEvent> {
+    CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().lineage.events.borrow().clone())
+}
+
+/// Whether the current simulation instance was compiled with record-level provenance.
+pub(crate) fn lineage_provenance_enabled() -> bool {
+    CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().provenance)
+}
+
+/// The static dependency slices of the current simulation instance's program. Panics if
+/// called outside a simulation.
+pub(crate) fn lineage_slices() -> Rc<Slices> {
+    CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().slices.clone())
+}
+
+/// The current simulation instance's shared lineage/crash handles. Panics if called outside
+/// a simulation.
+pub(crate) fn lineage_handles() -> LineageHandles {
+    CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().lineage.clone())
+}
+
+/// The raw simulator port number that lineage [`LineageEvent::Output`] events use for an
+/// external output port. Panics if called outside a simulation.
+pub(crate) fn lineage_port(port: ExternalPortId) -> usize {
+    CURRENT_SIM_CONNECTIONS.with(|connections| {
+        connections
+            .borrow()
+            .external_registered
+            .get(&port)
+            .expect("external port is not registered in this simulation")
+            .into_inner()
+    })
+}
+
+/// The receiving process/cluster location and member of a scripted hook. Panics if called
+/// outside a simulation or if the hook is not bound.
+pub(crate) fn hook_root_location(hook_id: usize, member: Option<u32>) -> (LocationId, Option<u32>) {
+    let ctx = script_ctx();
+    let hook = ctx.control(hook_id, member);
+    let location = hook.borrow().target().location().clone();
+    (location.location.root().clone(), location.cluster_id)
+}
+
 /// Resolves the per-instance scripting context. Panics if called outside a simulation.
 pub(crate) fn script_ctx() -> ScriptCtx {
     CURRENT_SIM_CONNECTIONS.with(|connections| {
@@ -681,6 +728,12 @@ struct SimConnections {
     scripted_hooks: Rc<ScriptedHookRegistry>,
     /// Coordinates the decision-group protocol between hook handles and the scheduler.
     script_coordinator: Rc<RefCell<ScriptCoordinator>>,
+    /// The execution-granular lineage log, shared with the generated code and the scheduler.
+    lineage: LineageHandles,
+    /// Static dependency slices of the program's sinks.
+    slices: Rc<Slices>,
+    /// Compiled with record-level provenance.
+    provenance: bool,
     log: bool,
     /// Whether this instance is being executed by the exhaustive engine (see
     /// [`CompiledSim::exhaustive`]), which affects how `assert_yields_only` explores
@@ -775,6 +828,10 @@ pub struct CompiledSim {
     pub(super) lib: Library,
     pub(super) externals_port_registry: SimExternalPortRegistry,
     pub(super) unit_test_fuzz_iterations: usize,
+    /// Static dependency slices of the program's sinks (see [`super::slice`]).
+    pub(super) slices: Rc<Slices>,
+    /// Compiled with record-level provenance (see [`super::provenance`]).
+    pub(super) provenance: bool,
 }
 
 #[sealed::sealed]
@@ -820,6 +877,7 @@ type SimLoaded<'a> = libloading::Symbol<
         ScriptedObservationHooks,
         ScriptedInlineHooks,
         ScriptedHookRegistry,
+        LineageHandles,
     ),
 >;
 
@@ -847,6 +905,8 @@ impl CompiledSim {
             &(|| CompiledSimInstance {
                 func: func.clone(),
                 externals_port_registry: self.externals_port_registry.clone(),
+                slices: self.slices.clone(),
+                provenance: self.provenance,
                 dylib_result: None,
                 log,
                 exhaustive: false,
@@ -993,6 +1053,38 @@ impl CompiledSim {
         }
     }
 
+    /// Explores exactly `iterations` randomly scheduled executions of the simulation, with no
+    /// fuzzer, no reproducer lookup, and no failure output: a bounded random sample of the
+    /// schedule space, for callers (such as `hydro_lang::sim::ldfi`) that run many such samples
+    /// under their own control and need each one to terminate. Prefer [`Self::fuzz`] for tests.
+    pub fn fuzz_bounded(&self, iterations: usize, mut thunk: impl AsyncFnMut() + RefUnwindSafe) {
+        self.with_instantiator(
+            |instantiator| {
+                bolero::test(bolero::TargetLocation {
+                    package_name: "",
+                    manifest_dir: "",
+                    module_path: "",
+                    file: ".",
+                    line: 0,
+                    item_path: "<unknown>::__bolero_item_path__",
+                    test_name: None,
+                })
+                .with_iterations(iterations)
+                .run_with_replay(move |is_replay| {
+                    let mut instance = instantiator();
+                    if is_replay {
+                        instance.log = true;
+                    }
+                    tokio::runtime::Builder::new_current_thread()
+                        .build()
+                        .unwrap()
+                        .block_on(async { instance.run(&mut thunk).await })
+                })
+            },
+            false,
+        );
+    }
+
     /// Executes the given closure with a single instance of the compiled simulation, using the
     /// provided bytes as the source of fuzzing decisions. This can be used to manually reproduce a
     /// failure found during fuzzing.
@@ -1137,6 +1229,7 @@ type DylibResult = (
     ScriptedObservationHooks,
     ScriptedInlineHooks,
     ScriptedHookRegistry,
+    LineageHandles,
 );
 
 /// A single instance of a compiled Hydro simulation, which provides methods to interactively
@@ -1144,6 +1237,8 @@ type DylibResult = (
 pub struct CompiledSimInstance<'a> {
     func: SimLoaded<'a>,
     externals_port_registry: SimExternalPortRegistry,
+    slices: Rc<Slices>,
+    provenance: bool,
     dylib_result: Option<DylibResult>,
     log: bool,
     exhaustive: bool,
@@ -1234,6 +1329,7 @@ impl<'a> CompiledSimInstance<'a> {
         }
 
         let scripted_hooks = Rc::new(std::mem::take(&mut dylib_result.8));
+        let lineage = dylib_result.9.clone();
         self.dylib_result = Some(dylib_result);
 
         CURRENT_SIM_CONNECTIONS
@@ -1247,6 +1343,9 @@ impl<'a> CompiledSimInstance<'a> {
                     quiescence: quiescence.clone(),
                     scripted_hooks,
                     script_coordinator: Rc::new(RefCell::new(ScriptCoordinator::default())),
+                    lineage,
+                    slices: self.slices.clone(),
+                    provenance: self.provenance,
                     log: self.log,
                     exhaustive: self.exhaustive,
                 }),
@@ -1349,6 +1448,7 @@ impl<'a> CompiledSimInstance<'a> {
             mut scripted_observation_hooks,
             mut scripted_inline_hooks,
             _registry,
+            lineage,
         ) = self.dylib_result.take().unwrap();
 
         // The generated code keys hooks and tick DFIRs by the same locations, so we can
@@ -1387,13 +1487,20 @@ impl<'a> CompiledSimInstance<'a> {
             })
             .collect();
 
-        let (quiescence, script_coordinator) = CURRENT_SIM_CONNECTIONS.with(|connections| {
-            let connections = connections.borrow();
-            (
-                connections.quiescence.clone(),
-                connections.script_coordinator.clone(),
-            )
-        });
+        let (quiescence, script_coordinator, hook_ids) =
+            CURRENT_SIM_CONNECTIONS.with(|connections| {
+                let connections = connections.borrow();
+                let hook_ids = connections
+                    .scripted_hooks
+                    .iter()
+                    .map(|(key, hook)| (Rc::as_ptr(hook).cast::<()>(), *key))
+                    .collect();
+                (
+                    connections.quiescence.clone(),
+                    connections.script_coordinator.clone(),
+                    hook_ids,
+                )
+            });
 
         let not_ready_observations = async_dfirs
             .iter()
@@ -1457,6 +1564,9 @@ impl<'a> CompiledSimInstance<'a> {
             },
             quiescence,
             deterministic: self.deterministic,
+            lineage,
+            next_exec: 0,
+            hook_ids,
         }
     }
 }
@@ -2411,9 +2521,40 @@ struct LaunchedSim<W: std::io::Write> {
     /// drawn, every unsafe operator with meaningful input must be scripted, and at most
     /// one tick is ever runnable (see `SimFlow::deterministic`).
     deterministic: bool,
+    /// The lineage log shared with generated code; the scheduler assigns execution ids
+    /// and records executions and hook releases into it.
+    lineage: LineageHandles,
+    /// The next execution id to assign.
+    next_exec: u64,
+    /// Scripted hook object identity → `(hook_id, member)`, from the registry; lets the
+    /// scheduler attribute a release to the handle the test knows it by.
+    hook_ids: HashMap<*const (), (usize, Option<u32>)>,
+}
+
+/// The items a scripted hook has delivered under a standing policy (empty when it has
+/// none), from its serialized [`PolicyTrace`].
+fn policy_delivered(hook: &dyn ScriptedTickInputHook) -> Vec<Vec<u8>> {
+    let trace: PolicyTrace = bincode::deserialize(&hook.policy_trace_blob())
+        .expect("internal error: policy trace blob was malformed");
+    trace.delivered
 }
 
 impl<W: std::io::Write> LaunchedSim<W> {
+    /// Starts a new execution: assigns the next id, publishes it to generated code, and
+    /// records it. Returns the id.
+    fn begin_exec(&mut self, location: &LocationId, member: Option<u32>, tick: bool) -> u64 {
+        let id = self.next_exec;
+        self.next_exec += 1;
+        self.lineage.current_exec.set(id);
+        self.lineage.events.borrow_mut().push(LineageEvent::Exec {
+            id,
+            location: location.clone(),
+            member,
+            tick,
+        });
+        id
+    }
+
     /// Runs a single step of the simulation scheduler.
     ///
     /// A step first advances all async DFIRs; if none of them made progress, it instead runs
@@ -2512,8 +2653,22 @@ impl<W: std::io::Write> LaunchedSim<W> {
         }
 
         let mut any_made_progress = false;
-        for (loc, c_id, dfir) in &mut self.async_dfirs {
-            if dfir.run_tick().await {
+        for index in 0..self.async_dfirs.len() {
+            let (loc, c_id) = {
+                let (loc, c_id, _) = &self.async_dfirs[index];
+                (loc.clone(), *c_id)
+            };
+            // Every async run is an execution; one that makes no progress produces no
+            // events, so recording it is harmless and keeps ids dense.
+            let events_before = self.lineage.events.borrow().len();
+            self.begin_exec(&loc, c_id, false);
+            let progressed = self.async_dfirs[index].2.run_tick().await;
+            if !progressed {
+                // Drop the `Exec` record of a run that did nothing.
+                self.lineage.events.borrow_mut().truncate(events_before);
+            }
+            let (loc, c_id, _) = &self.async_dfirs[index];
+            if progressed {
                 any_made_progress = true;
 
                 // This async DFIR may have produced new data, so the ticks and observations
@@ -2732,6 +2887,13 @@ impl<W: std::io::Write> LaunchedSim<W> {
                     write.write_str(" ")
                 };
 
+                let exec = self.begin_exec(&tick.location, tick.cluster_id, true);
+                let delivered_before: Vec<usize> = tick
+                    .scripted_hooks
+                    .iter()
+                    .map(|hook| policy_delivered(&*hook.borrow()).len())
+                    .collect();
+
                 let mut tick_decision_writer = (!matches!(self.log, LogKind::Null)).then(|| {
                     indenter::indented(&mut self.log).with_format(indenter::Format::Custom {
                         inserter: &mut asterisk_indenter,
@@ -2743,6 +2905,27 @@ impl<W: std::io::Write> LaunchedSim<W> {
                     &mut tick.hooks,
                     &tick.scripted_hooks,
                 );
+
+                // Lineage: whatever each policy hook delivered just now fed this execution.
+                for (hook_rc, before) in tick.scripted_hooks.iter().zip(delivered_before) {
+                    let hook = hook_rc.borrow();
+                    let delivered = policy_delivered(&*hook);
+                    if delivered.len() > before {
+                        let ScriptTarget::Tick { location } = hook.target() else {
+                            unreachable!("tick-registered scripted hook had an observation target")
+                        };
+                        let (hook_id, _) = self.hook_ids[&Rc::as_ptr(hook_rc).cast::<()>()];
+                        self.lineage
+                            .events
+                            .borrow_mut()
+                            .push(LineageEvent::Released {
+                                exec,
+                                hook_id,
+                                member: location.cluster_id,
+                                items: delivered[before..].to_vec(),
+                            });
+                    }
+                }
 
                 let run_tick_future = tick.dfir.run_tick();
                 if !tick.inline_hooks.is_empty() || !tick.scripted_inline_hooks.is_empty() {

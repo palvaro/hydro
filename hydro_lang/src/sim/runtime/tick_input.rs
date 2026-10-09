@@ -16,9 +16,9 @@ use dfir_rs::rustc_hash::{FxHashMap, FxHashSet};
 use dfir_rs::util::unsync::mpsc::Sender;
 
 use super::{
-    HookLocationMeta, ManualDebug, RuntimeHook, ScriptDecision, ScriptableHook,
-    ScriptableTickInputHook, TickInputHook, TruncatedVecDebug, abort, describe_keyed_pending,
-    keyed_buffer_len, log_release,
+    HookLocationMeta, ManualDebug, NoPolicy, PolicyTrace, RuntimeHook, ScriptDecision,
+    ScriptableHook, ScriptableTickInputHook, TickInputHook, TruncatedVecDebug, abort,
+    describe_keyed_pending, keyed_buffer_len, log_release,
 };
 use crate::live_collections::stream::{NoOrder, Ordering, TotalOrder};
 
@@ -239,6 +239,47 @@ where
     }
 }
 
+/// A standing policy for an unordered batch hook (see [`ScriptableHook::Policy`]): deliver
+/// every buffered element except those equal to one of `omit`, which are **discarded**
+/// (not held). Every occurrence of an omitted value is discarded for as long as the policy
+/// is installed, so a retransmission of a byte-identical payload is omitted too; replace
+/// the policy (e.g. with an empty `omit`) to let later copies through.
+///
+/// Under this policy the hook behaves like a lossy channel's receive half with a fixed
+/// loss pattern: no entropy is spent, no per-execution decision is needed, and the tick
+/// runs whenever something deliverable has arrived.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct OmissionPolicy<T> {
+    /// Values to discard on arrival.
+    pub omit: Vec<T>,
+}
+
+impl<T> ScriptDecision for OmissionPolicy<T>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    fn describe(&self) -> String {
+        if self.omit.is_empty() {
+            "deliver_all()".to_owned()
+        } else {
+            format!("omit({} value(s))", self.omit.len())
+        }
+    }
+}
+
+/// A standing policy for a totally ordered batch hook (see [`ScriptableHook::Policy`]):
+/// deliver everything as it arrives, tracing every delivery. A reliable (`fail_stop`)
+/// channel admits no omission, so this is the only policy an ordered hook offers; it exists
+/// so such a channel can still be a lineage-traced delivery point for fault injection.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PassthroughPolicy;
+
+impl ScriptDecision for PassthroughPolicy {
+    fn describe(&self) -> String {
+        "deliver_all()".to_owned()
+    }
+}
+
 /// The pending-input view a batch hook reports to its test-side handle (see
 /// [`ScriptableHook::status`]), used by `pause_until_*` predicates.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -253,6 +294,22 @@ where
 {
     type Decision = BatchDecision<T>;
     type Status = BatchStatus;
+    // Omission on a totally ordered stream would violate the order guarantee the consumer
+    // relies on (only `fail_stop` transports yield such streams), so the only standing
+    // policy is the traced pass-through.
+    type Policy = PassthroughPolicy;
+
+    fn policy_sweep(&self, _policy: &PassthroughPolicy, _trace: &mut PolicyTrace) -> bool {
+        !self.input.borrow().is_empty()
+    }
+
+    fn apply_policy(&mut self, _policy: &mut PassthroughPolicy, trace: &mut PolicyTrace) {
+        let delivered: Vec<T> = self.input.borrow_mut().drain(..).collect();
+        for item in &delivered {
+            trace.delivered.push(bincode::serialize(item).unwrap());
+        }
+        self.to_release = Some(delivered);
+    }
 
     fn is_honorable(&self, decision: &BatchDecision<T>) -> Result<bool, String> {
         let input = self.input.borrow();
@@ -328,6 +385,33 @@ where
 {
     type Decision = UnorderedBatchDecision<T>;
     type Status = BatchStatus;
+    type Policy = OmissionPolicy<T>;
+
+    fn policy_sweep(&self, policy: &OmissionPolicy<T>, trace: &mut PolicyTrace) -> bool {
+        let mut input = self.input.borrow_mut();
+        if !policy.omit.is_empty() {
+            let (kept, dropped): (Vec<T>, Vec<T>) = input
+                .drain(..)
+                .partition(|buffered| !policy.omit.contains(buffered));
+            for item in &dropped {
+                trace.dropped.push(bincode::serialize(item).unwrap());
+            }
+            *input = kept.into();
+        }
+        !input.is_empty()
+    }
+
+    fn apply_policy(&mut self, policy: &mut OmissionPolicy<T>, trace: &mut PolicyTrace) {
+        // Anything omitted was already swept at the scheduling query that made the tick
+        // runnable, but input may have arrived since; sweep again so a release never
+        // contains an omitted element.
+        self.policy_sweep(policy, trace);
+        let delivered: Vec<T> = self.input.borrow_mut().drain(..).collect();
+        for item in &delivered {
+            trace.delivered.push(bincode::serialize(item).unwrap());
+        }
+        self.to_release = Some(delivered);
+    }
 
     fn is_honorable(&self, decision: &UnorderedBatchDecision<T>) -> Result<bool, String> {
         Ok(match decision {
@@ -691,6 +775,7 @@ where
 {
     type Decision = KeyedBatchDecision<K, V>;
     type Status = BatchStatus;
+    type Policy = NoPolicy;
 
     fn is_honorable(&self, decision: &KeyedBatchDecision<K, V>) -> Result<bool, String> {
         let input = self.input.borrow();
@@ -799,6 +884,7 @@ where
 {
     type Decision = UnorderedKeyedBatchDecision<K, V>;
     type Status = BatchStatus;
+    type Policy = NoPolicy;
 
     fn is_honorable(&self, decision: &UnorderedKeyedBatchDecision<K, V>) -> Result<bool, String> {
         Ok(match decision {
@@ -1216,6 +1302,7 @@ impl<T: Clone + PartialEq + serde::Serialize + serde::de::DeserializeOwned> Scri
 {
     type Decision = SnapshotDecision<T>;
     type Status = SnapshotStatus;
+    type Policy = NoPolicy;
 
     fn is_honorable(&self, decision: &SnapshotDecision<T>) -> Result<bool, String> {
         let input = self.input.borrow();
@@ -1625,6 +1712,7 @@ where
 {
     type Decision = KeyedSnapshotDecision<K, V>;
     type Status = KeyedSnapshotStatus;
+    type Policy = NoPolicy;
 
     fn is_honorable(&self, decision: &KeyedSnapshotDecision<K, V>) -> Result<bool, String> {
         let input = self.input.borrow();

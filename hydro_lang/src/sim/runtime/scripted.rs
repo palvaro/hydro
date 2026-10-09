@@ -34,6 +34,29 @@ pub trait ScriptDecision: serde::Serialize + serde::de::DeserializeOwned {
     fn describe(&self) -> String;
 }
 
+/// The standing-policy type of hook kinds that support no standing policy (every kind
+/// except unordered batch hooks). Uninhabited: no value of this type can be installed.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub enum NoPolicy {}
+
+impl ScriptDecision for NoPolicy {
+    fn describe(&self) -> String {
+        match *self {}
+    }
+}
+
+/// What a hook under a standing policy has done so far: every element it delivered and
+/// every element it discarded, each bincode-serialized individually (the shell does not
+/// know the element type; the test-side handle does and decodes them). This is the
+/// Level 0 lineage of a fault-injection run: the set of messages that actually flowed.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct PolicyTrace {
+    /// Elements released into the operator, in release order.
+    pub delivered: Vec<Vec<u8>>,
+    /// Elements discarded by the policy, in discard order.
+    pub dropped: Vec<Vec<u8>>,
+}
+
 /// The per-kind decision semantics of a hook that can be driven by a test-side handle,
 /// implemented directly on the ordinary hook types ([`StreamHook`](super::StreamHook),
 /// [`SingletonHook`](super::SingletonHook)).
@@ -44,6 +67,30 @@ pub trait ScriptableHook: RuntimeHook {
     /// This kind's view of its pending, undecided input, read on demand by the test-side
     /// handle (for `pause_until_*` predicates).
     type Status: serde::Serialize;
+    /// A **standing policy** this kind can be placed under instead of a schedule of
+    /// decisions: a filter that is applied autonomously (without entropy and without a
+    /// per-execution decision) whenever the hook's tick runs, for as long as it is
+    /// installed. Used by fault injection, where a channel's receiving hook is told
+    /// "deliver everything except these" once. Kinds without such a policy use
+    /// [`NoPolicy`].
+    type Policy: ScriptDecision;
+
+    /// Sweeps the buffered input under the standing policy: discards (and records in
+    /// `trace`) every element the policy omits, then reports whether anything deliverable
+    /// remains, which makes the hook's tick runnable on this hook's account. Called at
+    /// every scheduling query, so omission takes effect on arrival, as on a lossy
+    /// channel, whether or not the tick ever runs again.
+    fn policy_sweep(&self, _policy: &Self::Policy, _trace: &mut PolicyTrace) -> bool {
+        false
+    }
+
+    /// Applies the standing policy to the (already swept) buffered input, staging the
+    /// release of everything deliverable (possibly nothing) and recording it in `trace`.
+    /// Called instead of [`Self::apply`] / [`Self::implicit`] whenever the tick runs while
+    /// a policy is installed.
+    fn apply_policy(&mut self, _policy: &mut Self::Policy, _trace: &mut PolicyTrace) {
+        abort!("this hook kind does not support a standing policy");
+    }
 
     /// Whether the decision could be honored right now, against the current buffer.
     /// Returns an error when the decision is already known to be invalid rather than
@@ -108,6 +155,13 @@ pub trait ScriptedHookControl {
     fn set_hold(&mut self, hold: bool);
     fn release_hold(&mut self);
     fn set_auto_pause(&mut self, auto_pause: bool);
+    /// Installs (or replaces) a standing policy (bincode of the kind's
+    /// [`ScriptableHook::Policy`]). A hook under a policy takes no scripted decisions
+    /// and is never *forgotten*; the policy stays in force until replaced.
+    fn install_policy(&mut self, policy_blob: &[u8]);
+    /// The bincode-serialized [`PolicyTrace`] of everything this hook has delivered and
+    /// discarded while under a standing policy.
+    fn policy_trace_blob(&self) -> Vec<u8>;
 }
 
 /// The scheduler-facing interface shared by all scripted top-level hooks; refined by
@@ -161,6 +215,11 @@ pub trait ScriptedTickInputHook: ScriptedRuntimeHook {
 
 impl<H: ScriptableTickInputHook> ScriptedTickInputHook for Scripted<H> {
     fn can_trigger_tick(&self) -> bool {
+        if let Some(policy) = &self.policy {
+            return self
+                .core
+                .policy_sweep(policy, &mut self.policy_trace.borrow_mut());
+        }
         self.honorable_queued_decision()
             .is_some_and(|decision| self.core.decision_triggers_tick(decision))
     }
@@ -178,6 +237,11 @@ pub trait ScriptedObservationHook: ScriptedRuntimeHook {
 
 impl<H: ScriptableObservationHook> ScriptedObservationHook for Scripted<H> {
     fn can_fire(&self) -> bool {
+        if let Some(policy) = &self.policy {
+            return self
+                .core
+                .policy_sweep(policy, &mut self.policy_trace.borrow_mut());
+        }
         self.honorable_queued_decision().is_some()
     }
 }
@@ -250,15 +314,23 @@ pub type ScriptedHookRegistry =
 /// and implements the decision semantics via [`ScriptableHook`]) together with the script
 /// state: at most one queued decision (decisions are installed group by group, and a
 /// hook's earlier decision is always consumed before its next one arrives), plus a `hold`
-/// flag for the `pause()` family. The fields are consulted in order — decision present →
-/// normal decision semantics; otherwise hold set → held; otherwise pending input → the
-/// *forgotten* state, which the scheduler's boundary scan reports as an error.
+/// flag for the `pause()` family. The fields are consulted in order — standing policy
+/// installed → the policy decides autonomously at every execution; otherwise decision
+/// present → normal decision semantics; otherwise hold set → held; otherwise pending
+/// input → the *forgotten* state, which the scheduler's boundary scan reports as an error.
 pub struct Scripted<H: ScriptableHook> {
     pub(crate) core: H,
     target: ScriptTarget,
     next_decision: Option<H::Decision>,
     hold: bool,
     auto_pause: bool,
+    /// A standing policy (see [`ScriptableHook::Policy`]). While installed, the hook is
+    /// not scripted: it never takes a queued decision, never blocks or is forgotten, and
+    /// triggers its tick exactly when the policy would release something.
+    policy: Option<H::Policy>,
+    /// Everything delivered and discarded under the policy so far. Discards are recorded
+    /// from the `&self` scheduling queries (see [`ScriptableHook::policy_sweep`]).
+    policy_trace: RefCell<PolicyTrace>,
 }
 
 impl<H: ScriptableHook> Scripted<H> {
@@ -271,12 +343,20 @@ impl<H: ScriptableHook> Scripted<H> {
             next_decision: None,
             hold: false,
             auto_pause: false,
+            policy: None,
+            policy_trace: RefCell::new(PolicyTrace::default()),
         }
     }
 
     /// Consumes the queued decision if honorable (or the implicit only-possibility
-    /// behavior if none is queued), staging the release on the core hook.
+    /// behavior if none is queued), staging the release on the core hook. Under a
+    /// standing policy, the policy is applied instead.
     fn scripted_step(&mut self) {
+        if let Some(policy) = &mut self.policy {
+            self.core
+                .apply_policy(policy, &mut self.policy_trace.borrow_mut());
+            return;
+        }
         match self.next_decision.take() {
             Some(decision) if matches!(self.core.is_honorable(&decision), Ok(true)) => {
                 self.core.apply(decision);
@@ -321,7 +401,12 @@ impl<H: ScriptableHook> RuntimeHook for Scripted<H> {
 
     fn release_decision(&mut self, mut log_writer: Option<&mut dyn std::fmt::Write>) {
         if let Some(w) = log_writer.as_mut() {
-            let _ = writeln!(w, "{}", "(scripted)".color(colored::Color::Cyan));
+            let label = if self.policy.is_some() {
+                "(standing policy)"
+            } else {
+                "(scripted)"
+            };
+            let _ = writeln!(w, "{}", label.color(colored::Color::Cyan));
         }
         self.core.release_decision(log_writer);
     }
@@ -354,6 +439,10 @@ impl<H: ScriptableHook> ScriptedHookControl for Scripted<H> {
 
     fn install_decision(&mut self, decision_blob: &[u8]) {
         assert!(
+            self.policy.is_none(),
+            "cannot script a decision on a hook that is under a standing policy (`omit` / `deliver_all`); the policy decides every execution"
+        );
+        assert!(
             self.next_decision.is_none(),
             "internal error: installed a scripted decision while one was still queued"
         );
@@ -378,6 +467,21 @@ impl<H: ScriptableHook> ScriptedHookControl for Scripted<H> {
     fn set_auto_pause(&mut self, auto_pause: bool) {
         self.auto_pause = auto_pause;
     }
+
+    fn install_policy(&mut self, policy_blob: &[u8]) {
+        assert!(
+            self.next_decision.is_none(),
+            "cannot install a standing policy on a hook with a queued scripted decision; a hook is either scripted or under a policy"
+        );
+        self.policy =
+            Some(bincode::deserialize(policy_blob).expect(
+                "internal error: standing policy blob did not match the hook's policy type",
+            ));
+    }
+
+    fn policy_trace_blob(&self) -> Vec<u8> {
+        bincode::serialize(&*self.policy_trace.borrow()).unwrap()
+    }
 }
 
 impl<H: ScriptableHook> ScriptedRuntimeHook for Scripted<H> {
@@ -387,12 +491,19 @@ impl<H: ScriptableHook> ScriptedRuntimeHook for Scripted<H> {
     }
 
     fn blocks_tick(&self) -> bool {
-        self.next_decision
-            .as_ref()
-            .is_some_and(|d| matches!(self.core.is_honorable(d), Ok(false)))
+        self.policy.is_none()
+            && self
+                .next_decision
+                .as_ref()
+                .is_some_and(|d| matches!(self.core.is_honorable(d), Ok(false)))
     }
 
     fn boundary_check(&self) -> Result<(), String> {
+        // A standing policy decides every execution, so nothing is ever forgotten.
+        if self.policy.is_some() {
+            return Ok(());
+        }
+
         if let Some(Err(message)) = self
             .next_decision
             .as_ref()
@@ -473,6 +584,15 @@ impl<H: ScriptableInlineHook> ScriptedHookControl for ScriptedInline<H> {
     fn set_hold(&mut self, _hold: bool) {}
     fn release_hold(&mut self) {}
     fn set_auto_pause(&mut self, _auto_pause: bool) {}
+
+    // In-tick hooks have no cross-execution buffer to place under a standing policy; the
+    // handle types that offer `omit` never bind to them.
+    fn install_policy(&mut self, _policy_blob: &[u8]) {
+        abort!("in-tick hooks do not support a standing policy");
+    }
+    fn policy_trace_blob(&self) -> Vec<u8> {
+        bincode::serialize(&PolicyTrace::default()).unwrap()
+    }
 }
 
 impl<H: ScriptableInlineHook> ScriptedInlineHook for ScriptedInline<H> {

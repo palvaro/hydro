@@ -2,7 +2,10 @@
 pub mod compartmentalized_paxos;
 #[cfg(feature = "tokio")]
 pub mod compute_pi;
+pub mod isr_replication;
 pub mod kv_replica;
+#[cfg(test)]
+mod ldfi_grid;
 pub mod many_to_many;
 pub mod map_reduce;
 #[cfg(feature = "tokio")]
@@ -14,8 +17,10 @@ pub mod paxos_log_bench;
 #[cfg(feature = "tokio")]
 pub mod paxos_with_client;
 pub mod raft;
+pub mod reliable_broadcast;
 pub mod simple_cluster;
 #[cfg(feature = "tokio")]
 pub mod two_pc;
 #[cfg(feature = "tokio")]
 pub mod two_pc_bench;
+pub mod two_pc_ldfi;

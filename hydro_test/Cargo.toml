@@ -59,6 +59,7 @@ futures = "0.3.0"
 hydro_deploy = { path = "../hydro_deploy/core", version = "=0.17.0-alpha.5" }
 hydro_lang = { path = "../hydro_lang", version = "=0.17.0-alpha.6", features = [
     "deploy",
+    "ldfi",
     "maelstrom",
     "sim",
     "viz",

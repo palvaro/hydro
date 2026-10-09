@@ -62,6 +62,16 @@ pub mod flow;
 pub mod hooks;
 
 #[cfg(stageleft_runtime)]
+#[cfg(feature = "ldfi")]
+pub mod ldfi;
+
+#[cfg(stageleft_runtime)]
+pub mod provenance;
+
+#[cfg(stageleft_runtime)]
+pub mod slice;
+
+#[cfg(stageleft_runtime)]
 pub(crate) mod versioned_network;
 
 #[cfg(stageleft_runtime)]
