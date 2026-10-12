@@ -2808,6 +2808,7 @@ dependencies = [
  "palette",
  "rand 0.10.2",
  "regex",
+ "sedge",
  "serde",
  "serde_json",
  "stageleft",
@@ -5201,6 +5202,32 @@ checksum = "6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3"
 dependencies = [
  "core-foundation-sys",
  "libc",
+]
+
+[[package]]
+name = "sedge"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "hydro_deploy",
+ "hydro_lang",
+ "rand 0.10.2",
+ "sedge_macro",
+ "serde",
+ "stageleft",
+ "stageleft_tool",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+]
+
+[[package]]
+name = "sedge_macro"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.111",
 ]
 
 [[package]]

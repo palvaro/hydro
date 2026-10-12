@@ -383,6 +383,7 @@ fn rustc_target_libdir() -> Option<String> {
         .clone()
 }
 
+#[cfg(any(feature = "sim", feature = "maelstrom"))]
 /// The built artifact returned by [`compile_trybuild_example`].
 ///
 /// Outside coverage runs this is a delete-on-drop temporary copy: every build
@@ -404,6 +405,7 @@ pub enum BuiltArtifact {
     Persisted(PathBuf),
 }
 
+#[cfg(any(feature = "sim", feature = "maelstrom"))]
 impl std::ops::Deref for BuiltArtifact {
     type Target = Path;
 
@@ -415,6 +417,7 @@ impl std::ops::Deref for BuiltArtifact {
     }
 }
 
+#[cfg(any(feature = "sim", feature = "maelstrom"))]
 impl BuiltArtifact {
     /// Persist the artifact at its current path, returning that path (the
     /// temporary copy is kept rather than deleted on drop).

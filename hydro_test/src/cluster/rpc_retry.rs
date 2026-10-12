@@ -151,6 +151,38 @@ pub struct RpcOutputs<'a, T> {
     >,
 }
 
+/// What the Sedge overload harness watches: completions and abandonments by id (the client's ids
+/// are its input's arrival order, which is the harness's sequence number), the server's backlog
+/// as a gauge, and the per-window send, re-send and serve counts as counters.
+#[cfg(feature = "sedge")]
+impl<'a, T> sedge::Observed<'a> for RpcOutputs<'a, T>
+where
+    T: Serialize + DeserializeOwned + 'a,
+{
+    fn observe(self, obs: &mut sedge::Observer<'a>) {
+        obs.completions(self.completed.map(q!(|c| c.id)));
+        obs.abandoned(self.abandoned);
+        obs.gauge(
+            "backlog",
+            self.server_metrics
+                .clone()
+                .map(q!(|(_, _, depth)| depth as f64)),
+        );
+        obs.counter(
+            "served",
+            self.server_metrics.map(q!(|(_, m, _)| m.processed as f64)),
+        );
+        obs.counter(
+            "sent",
+            self.client_metrics.clone().map(q!(|(_, m)| m.sent as f64)),
+        );
+        obs.counter(
+            "retried",
+            self.client_metrics.map(q!(|(_, m)| m.retried as f64)),
+        );
+    }
+}
+
 /// Builds the client/server program. `requests` is the application's request stream at the
 /// client; see the module docs for the meaning of the three clock parameters.
 ///
@@ -163,6 +195,14 @@ pub struct RpcOutputs<'a, T> {
 /// the first 125 rounds of the run so that the report's growth label can read the holds that
 /// outlast the input; the three-attempt configuration is expected to read as stopping at a ceiling of twice the
 /// input, since every request is re-sent at most twice.
+///
+/// The two `overload_check` attributes deploy the same configurations under the Sedge overload
+/// harness: `./scripts/sedge hydro_test rpc_with_retries --factors 2,4`. With a service time of
+/// 2 ms the server sustains about 500 requests per second; a 50 ms clock makes the 40-tick
+/// timeout 2 seconds. `max_per_tick` is 50 rather than 5 so that the server's capacity is set by
+/// the service time alone: the server ticks only when requests arrive, so a small per-tick cap
+/// makes its throughput depend on how arrivals batch. Cress's multiplier for three attempts is
+/// 3×, so the prediction is that factor 4 recovers and factor 2 collapses.
 #[cfg_attr(feature = "cress", amplification_check(
     name = three_attempts,
     T = u64,
@@ -178,6 +218,32 @@ pub struct RpcOutputs<'a, T> {
     workload_rounds = 125,
     policy = RetryPolicy { timeout_ticks: 40, max_attempts: 1 },
     server_config = ServerConfig { max_per_tick: 5, service_time: Duration::ZERO },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = three_attempts,
+    T = u64,
+    load = requests,
+    mu = 500,
+    timers(
+        client_clock = Duration::from_millis(50),
+        client_report_tick = Duration::from_secs(1),
+        server_report_tick = Duration::from_secs(1),
+    ),
+    policy = RetryPolicy { timeout_ticks: 40, max_attempts: 3 },
+    server_config = ServerConfig { max_per_tick: 50, service_time: Duration::from_millis(2) },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = one_attempt,
+    T = u64,
+    load = requests,
+    mu = 500,
+    timers(
+        client_clock = Duration::from_millis(50),
+        client_report_tick = Duration::from_secs(1),
+        server_report_tick = Duration::from_secs(1),
+    ),
+    policy = RetryPolicy { timeout_ticks: 40, max_attempts: 1 },
+    server_config = ServerConfig { max_per_tick: 50, service_time: Duration::from_millis(2) },
 ))]
 #[expect(
     clippy::too_many_arguments,
