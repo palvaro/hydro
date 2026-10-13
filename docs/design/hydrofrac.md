@@ -63,7 +63,11 @@ It departs from Molly in five ways.
    levels of precision (section 6), the finest of which re-executes a node with deliveries
    removed to ask the counterfactual question directly. Molly's lineage was exact
    why-provenance; hydrofrac's is a sound approximation at levels 0 to 2 and a 1-minimal
-   sufficient set at level 3.
+   sufficient set at level 3. A *sufficient set* is a set of deliveries into a node that, replayed
+   alone with every other delivery dropped, still reproduces the output; *1-minimal* (the
+   delta-debugging sense, as in Zeller's `ddmin`) means no single delivery can be removed from it
+   and keep it sufficient. It is one derivation of the output, not necessarily the smallest and
+   not necessarily the only one.
 2. **The schedule is explored, not fixed.** Each hypothesis runs under the simulator's
    exhaustive or sampled schedule exploration. A counterexample is a (fault set, schedule) pair.
    The Raft bug in section 9 needs a specific interleaving as well as a specific lost message,
@@ -310,10 +314,10 @@ log says whether the output appeared.
 
 `Lineage::counterfactual` (`sim/ldfi.rs`) does greedy deletion, latest delivery first, one
 replay per step: delete a delivery; if the output is still produced, leave it deleted; otherwise
-put it back. The result is a 1-minimal sufficient set. Each kept delivery is a dependency and
-is followed to the send that produced it, whose own derivation is computed the same way,
-memoized per run. Three details that each cost a false certificate before they were right: the
-candidate set must include deliveries *after* the output's execution (a later echo can
+put it back. The result is a 1-minimal sufficient set (defined in section 3). Each kept delivery
+is a dependency and is followed to the send that produced it, whose own derivation is computed
+the same way, memoized per run. Three details that each cost a false certificate before they were
+right: the candidate set must include deliveries *after* the output's execution (a later echo can
 substitute for the original); a replayed tick may legitimately have nothing to do once its only
 input is deleted; and a node that does not reproduce the output with every delivery kept (one
 fed through a hook-free path) falls back to the recorded lineage for that step.
