@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="300" viewBox="0 0 800 300" font-family="sans-serif" font-size="11">
+<rect width="800" height="300" fill="white"/>
+<text x="64" y="18" font-size="13">sent (/s) — hydro_test.rpc_with_retries.one_attempt.factor4.trial0</text>
+<rect x="184.3" y="30" width="60.2" height="230.0" fill="#fde8e8"><title>trigger window</title></rect>
+<line x1="64" y1="260.0" x2="786.0" y2="260.0" stroke="#e0e0e0"/>
+<text x="58.0" y="264.0" text-anchor="end" fill="#555">0</text>
+<line x1="64" y1="214.0" x2="786.0" y2="214.0" stroke="#e0e0e0"/>
+<text x="58.0" y="218.0" text-anchor="end" fill="#555">400</text>
+<line x1="64" y1="168.0" x2="786.0" y2="168.0" stroke="#e0e0e0"/>
+<text x="58.0" y="172.0" text-anchor="end" fill="#555">800</text>
+<line x1="64" y1="122.0" x2="786.0" y2="122.0" stroke="#e0e0e0"/>
+<text x="58.0" y="126.0" text-anchor="end" fill="#555">1200</text>
+<line x1="64" y1="76.0" x2="786.0" y2="76.0" stroke="#e0e0e0"/>
+<text x="58.0" y="80.0" text-anchor="end" fill="#555">1600</text>
+<line x1="64" y1="30.0" x2="786.0" y2="30.0" stroke="#e0e0e0"/>
+<text x="58.0" y="34.0" text-anchor="end" fill="#555">2000</text>
+<line x1="64.0" y1="260.0" x2="64.0" y2="264.0" stroke="#555"/>
+<text x="64.0" y="276.0" text-anchor="middle" fill="#555">0</text>
+<line x1="124.2" y1="260.0" x2="124.2" y2="264.0" stroke="#555"/>
+<text x="124.2" y="276.0" text-anchor="middle" fill="#555">5</text>
+<line x1="184.3" y1="260.0" x2="184.3" y2="264.0" stroke="#555"/>
+<text x="184.3" y="276.0" text-anchor="middle" fill="#555">10</text>
+<line x1="244.5" y1="260.0" x2="244.5" y2="264.0" stroke="#555"/>
+<text x="244.5" y="276.0" text-anchor="middle" fill="#555">15</text>
+<line x1="304.7" y1="260.0" x2="304.7" y2="264.0" stroke="#555"/>
+<text x="304.7" y="276.0" text-anchor="middle" fill="#555">20</text>
+<line x1="364.8" y1="260.0" x2="364.8" y2="264.0" stroke="#555"/>
+<text x="364.8" y="276.0" text-anchor="middle" fill="#555">25</text>
+<line x1="425.0" y1="260.0" x2="425.0" y2="264.0" stroke="#555"/>
+<text x="425.0" y="276.0" text-anchor="middle" fill="#555">30</text>
+<line x1="485.2" y1="260.0" x2="485.2" y2="264.0" stroke="#555"/>
+<text x="485.2" y="276.0" text-anchor="middle" fill="#555">35</text>
+<line x1="545.3" y1="260.0" x2="545.3" y2="264.0" stroke="#555"/>
+<text x="545.3" y="276.0" text-anchor="middle" fill="#555">40</text>
+<line x1="605.5" y1="260.0" x2="605.5" y2="264.0" stroke="#555"/>
+<text x="605.5" y="276.0" text-anchor="middle" fill="#555">45</text>
+<line x1="665.7" y1="260.0" x2="665.7" y2="264.0" stroke="#555"/>
+<text x="665.7" y="276.0" text-anchor="middle" fill="#555">50</text>
+<line x1="725.8" y1="260.0" x2="725.8" y2="264.0" stroke="#555"/>
+<text x="725.8" y="276.0" text-anchor="middle" fill="#555">55</text>
+<line x1="786.0" y1="260.0" x2="786.0" y2="264.0" stroke="#555"/>
+<text x="786.0" y="276.0" text-anchor="middle" fill="#555">60</text>
+<text x="425.0" y="292.0" text-anchor="middle" fill="#555">seconds</text>
+<path d="M 64 30 V 260 H 786" fill="none" stroke="#555"/>
+<polyline fill="none" stroke="#ff7f0e" stroke-width="1.5" points="70.0,260.0 82.0,229.8 94.1,242.8 106.1,246.5 118.2,246.7 130.2,247.5 142.2,245.6 154.2,246.1 166.3,260.0 178.3,246.9 190.3,128.7 202.4,143.0 214.4,149.3 226.4,146.5 238.5,145.6 250.5,246.3 262.6,246.9 274.6,260.0 286.6,230.4 298.6,247.6 310.7,260.0 322.7,232.1 334.8,245.2 346.8,260.0 358.8,233.6 370.9,260.0 382.9,229.6 394.9,260.0 406.9,227.2 419.0,260.0 431.0,245.5 443.1,245.7 455.1,232.7 467.1,245.4 479.1,260.0 491.2,230.1 503.2,260.0 515.2,233.7 527.3,246.5 539.3,260.0 551.4,232.6 563.4,246.4 575.4,245.7 587.5,260.0 599.5,245.4 611.5,234.2 623.5,244.5 635.6,260.0 647.6,229.6 659.6,260.0 671.7,234.0 683.7,260.0 695.8,233.7 707.8,260.0 719.8,230.9 731.9,246.8 743.9,247.2 755.9,260.0 768.0,246.2 780.0,231.1 "/>
+<rect x="676.0" y="36.0" width="14" height="4" fill="#ff7f0e"/>
+<text x="696.0" y="42.0" fill="#333">sent</text>
+<rect x="676.0" y="50.0" width="14" height="4" fill="#f0b0b0"/>
+<text x="696.0" y="56.0" fill="#333">trigger</text>
+</svg>

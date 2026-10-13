@@ -14,7 +14,8 @@
 # harness.
 #
 # Each trial prints its verdict as it finishes; the end of the run prints every verdict and a
-# summary per factor. Per-second traces and a results table are written to target/sedge/.
+# summary per factor. Per-second traces, SVG timeseries charts (one per metric per trial) and a
+# results table are written to target/sedge/.
 #
 # Requires python3 (to read `cargo metadata` and write the runner's manifest).
 set -euo pipefail

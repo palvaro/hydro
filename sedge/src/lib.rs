@@ -24,8 +24,8 @@
 //! program's crate implements by hand to say which output carries completions, which carries
 //! abandonments, and which levels and counters to watch. `./scripts/sedge <crate>` at the
 //! repository root builds a runner that links the crate, deploys every annotated function on
-//! localhost, runs the trials, and prints a verdict per trial and a summary per factor. Traces
-//! and a results table are written under `target/sedge/`.
+//! localhost, runs the trials, and prints a verdict per trial and a summary per factor. Traces,
+//! SVG timeseries charts and a results table are written under `target/sedge/`.
 //!
 //! # What this crate contains
 //!
@@ -37,6 +37,7 @@
 //!   program-reported gauges and counters, bucketed per second into a [`Trace`].
 //! - [`generator`]: [`drive`], the open-loop load generator loop.
 //! - [`verdict`]: [`judge`], the verdict read from a trace, with the numbers it was read from.
+//! - [`plot`]: SVG timeseries charts of a trace, one per metric, written beside the TSVs.
 //! - [`harness`]: the run configuration, the deployment of one trial, and the registry.
 //!
 //! # Open loop
@@ -50,6 +51,7 @@
 hydro_lang::setup!();
 
 pub mod generator;
+pub mod plot;
 pub mod profile;
 pub mod program;
 pub mod trace;

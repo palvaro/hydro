@@ -5,8 +5,9 @@
 //! # Where things end up
 //!
 //! Under `$SEDGE_RESULTS_DIR` (the command sets it to `target/sedge/`): `results.tsv` has one
-//! row per trial, and `traces/` has one per-second TSV per trial, named by crate, function,
-//! configuration, factor and trial number.
+//! row per trial, `traces/` has one per-second TSV per trial, named by crate, function,
+//! configuration, factor and trial number, and `plots/` has that trial's [SVG timeseries
+//! charts](crate::plot), one per metric, under the same stem.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -447,11 +448,11 @@ where
         eprintln!("  (deployment did not stop cleanly: {e})");
     }
 
-    let trace_name = format!(
-        "{}.{}.{}.factor{}.trial{}.tsv",
+    let stem = format!(
+        "{}.{}.{}.factor{}.trial{}",
         meta.crate_name, meta.function, meta.configuration, factor, trial
     );
-    let trace_path = run.results_dir.join("traces").join(trace_name);
+    let trace_path = run.results_dir.join("traces").join(format!("{stem}.tsv"));
     let trace_path = match fs::write(&trace_path, trace.to_tsv()) {
         Ok(()) => Some(trace_path),
         Err(e) => {
@@ -459,6 +460,11 @@ where
             None
         }
     };
+    if let Err(e) =
+        crate::plot::write_trial_plots(&trace, &profile, &run.results_dir.join("plots"), &stem)
+    {
+        eprintln!("  could not write plots for {stem}: {e}");
+    }
     let result = TrialResult {
         function: meta.function,
         configuration: meta.configuration,
