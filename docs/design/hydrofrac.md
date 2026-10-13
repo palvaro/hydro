@@ -213,6 +213,60 @@ The fault point is the consumer's batch, not the channel. Three consequences:
 - There is no `cut_after(n)` for a `fail_stop` connection dying on its own; the only fault on a
   reliable channel is the sender's crash.
 
+### 5.6 Why a crash is not a set of omissions
+
+Semantically a crash *is* an omission pattern: `crash(n, t)` is "omit everything `n` sends
+after `t`", and the first draft of this design planned to build it that way, as `omit_from(n)`
+on every channel out of `n`. The prototype nevertheless implements the two faults through
+different mechanisms, omission as a policy on the receiver's hook (5.1) and crash as a cut at
+the send half in generated code (5.2). The reasons are worth stating, because the split looks
+like an accident and is not.
+
+**The omission fault point cannot express a crash.** The hook is the consumer's batch, not the
+channel, and 5.5 lists what it cannot see: hook-free forwarding paths, `sim_output`s straight
+from a channel, tees. For a single omission those are gaps in the fault *model*. For a crash
+assembled from omissions they would be gaps in the *fault*: the node would be dead on its hooked
+channels and alive on every other path, an under-approximation of the fault, which is the
+direction that produces false certificates. Three further things a receiver-side omission
+cannot do at all: it cannot see the sender's timeline (the hook sees arrival order, which is not
+send order under a different schedule, and across channels there is no common order at the
+receivers at all, so "after `m`" is only well-defined at the send half); it is forbidden on
+`fail_stop` channels by type, deliberately, although a node on a `fail_stop` channel can still
+die and a prefix cut is exactly the one fault `fail_stop` admits; and it does not suppress the
+dead node's external outputs, which `run.crashed_member(..)` and the `alive(N through send k)`
+dependency (section 7) rely on.
+
+**The solver needs a crash to be one literal, interpreted against lineage.** The ILP has one
+binary per candidate fault, a crash budget, and at most one crash per node. If a crash were a
+conjunction of omission literals, the search would have to know which messages the node sends
+after `m`, and that set depends on the hypothesis: it is not known until the world in which the
+node crashes has been run. So a crash cannot be extensional (a known set of `omit`s); it is an
+intensional literal, `crash(node after m)`, whose extension is computed per run. That is what
+`Clause { deps, sends, premises }` and `Dependency::killed_by(fault, sends)` do: whether
+`crash(n after m)` kills a dependency is evaluated against the send sequence of the run in which
+the dependency was observed, and a clause carries its run's send sequences because crash
+literals have no run-independent meaning otherwise. The send-count version of this literal
+certified a program with a known bug (5.2); naming the crash point by a message is Molly's
+logical-time indexing in a substrate without a logical clock. Three constructs in the search
+are crash-specific for the same reason and have no omission analogue: preserve points (the
+crash right after a send in the pre-condition's lineage, 6.5), the `alive` dependency, and
+crash premises (section 7, step 4).
+
+**What remains of the objection.** After the fact, a crash is an omission pattern here too:
+dead-node sends are logged as `Sent { dropped: true }` and surface as `crashed_sends`, so the
+two faults are unified at the lineage level and differ only at the injection level. The design
+in 5.5 that would close the gap, a hook on the `Network` node itself, would also unify the
+injection: omission would be "drop these payloads at the send half" and crash "drop everything
+after this payload at the send half", one mechanism with two policies. The present split is in
+part historical, omission having been built on the existing scripted hooks (which already named
+messages by payload equality) and crash in codegen because the hooks lack the sender's timeline.
+Two asymmetries are open questions rather than settled design. Molly's omission is
+`omit(from, to, payload, t)`; ours dropped `t` (identity is channel and bytes, and a standing
+policy drops every identical copy, so an identical retransmission is the same fault) while crash
+kept it, so the fault that is conceptually composite is the temporally indexed one. And a
+derivation observed under `omit(m)` is, like one observed under a crash, only known to hold in
+that world, yet only crashes are recorded as clause premises.
+
 ## 6. Lineage collection through the hooks
 
 ### 6.1 The event log

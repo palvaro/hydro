@@ -16,13 +16,16 @@
 //!   [`Ldfi::lossy_channel`]: the receiving hook is placed under a standing
 //!   [omission policy](crate::sim::hooks::BatchHook::omit). Only unordered (`NoOrder`)
 //!   hooks offer it, which is the guarantee a lossy transport yields.
-//! - **Crash** `crash(node, after k sends)`, available for nodes registered with
-//!   [`Ldfi::crashable`] / [`Ldfi::crashable_cluster`]: the node performs its first `k`
-//!   sends and every later send is dropped at the send half (and its external outputs are
-//!   suppressed once it is dead); see `sim::runtime::lineage`. This is Molly's definition
-//!   of a crash, and it can split the fan-out of one broadcast. Channels registered with
-//!   [`Ldfi::reliable_channel`] admit no omission; crashes of their senders are their only
-//!   faults, which is what `fail_stop` declares.
+//! - **Crash** `crash(node after sending m)` (or `crash(node before any send)`), available
+//!   for nodes registered with [`Ldfi::crashable`] / [`Ldfi::crashable_cluster`]: the node
+//!   performs every send up to and including `m` and every later send is dropped at the
+//!   send half (and its external outputs are suppressed once it is dead); see
+//!   `sim::runtime::lineage`. The crash point is named by a message, not a send count, so
+//!   the literal means the same thing in every run; if `m` is never sent the node survives.
+//!   This is Molly's definition of a crash, and it can split the fan-out of one broadcast.
+//!   Channels registered with [`Ldfi::reliable_channel`] admit no omission; crashes of their
+//!   senders are their only faults, which is what `fail_stop` declares. Crashes are
+//!   deliberately not built out of omissions; `docs/design/hydrofrac.md` §5.6 explains why.
 //!
 //! # Lineage
 //!
@@ -38,8 +41,9 @@
 //! goal can depend on must be registered for the closure to be sound.
 //!
 //! A support is a set of [`Dependency`]s (message, sender, ordinal). A fault *kills* a
-//! dependency if it is `omit` of that message on a lossy channel, or `crash(sender, k)`
-//! with `k ≤` the message's ordinal among the sender's sends. A hypothesis is a hitting
+//! dependency if it is `omit` of that message on a lossy channel, or `crash(sender after m)`
+//! where `m` precedes the message in the sender's send sequence of the run the dependency
+//! was observed in (or `crash(sender before any send)`). A hypothesis is a hitting
 //! set under `kills`; crash literals are capped by [`Ldfi::crash_budget`].
 //!
 //! # Goals
