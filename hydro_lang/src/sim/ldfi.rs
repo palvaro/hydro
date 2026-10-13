@@ -76,8 +76,8 @@ use crate::live_collections::stream::{NoOrder, Ordering, Retries, TotalOrder};
 use crate::location::dynamic::LocationId;
 use crate::location::{Cluster, Location, Process, TaglessMemberId};
 use crate::sim::compiled::{
-    CompiledSim, hook_root_location, lineage_events, lineage_handles, lineage_port,
-    lineage_provenance_enabled, lineage_slices,
+    CompiledSim, hook_root_location, hook_tick_location, lineage_events, lineage_handles,
+    lineage_port, lineage_provenance_enabled, lineage_slices,
 };
 use crate::sim::hooks::{BatchHook, ScriptableHookScope};
 use crate::sim::runtime::{CrashPoint, ExecId, LineageEvent, NodeKey};
@@ -291,6 +291,9 @@ pub trait PolicyHook<T>: RefUnwindSafe {
     /// Installs the policy omitting `omit` (which is empty for ordered hooks).
     #[doc(hidden)]
     fn install(&self, omit: Vec<T>);
+    /// Installs a replay policy (see [`BatchHook::replay`]).
+    #[doc(hidden)]
+    fn replay(&self, execs: Vec<Vec<T>>);
     #[doc(hidden)]
     fn delivered(&self) -> Vec<T>;
     #[doc(hidden)]
@@ -309,6 +312,9 @@ where
     }
     fn install(&self, omit: Vec<T>) {
         self.omit(omit);
+    }
+    fn replay(&self, execs: Vec<Vec<T>>) {
+        BatchHook::<T, NoOrder, R, S>::replay(self, execs);
     }
     fn delivered(&self) -> Vec<T> {
         BatchHook::delivered(self)
@@ -335,6 +341,9 @@ where
         );
         self.deliver_all();
     }
+    fn replay(&self, execs: Vec<Vec<T>>) {
+        BatchHook::<T, TotalOrder, R, S>::replay(self, execs);
+    }
     fn delivered(&self) -> Vec<T> {
         BatchHook::delivered(self)
     }
@@ -353,6 +362,9 @@ trait FaultPoint: RefUnwindSafe {
     /// Installs this channel's share of `faults`.
     fn install(&self, faults: &FaultSet);
     fn deliver_all(&self);
+    /// Places the hook under a replay policy: `execs[k]` (serialized items) is released into
+    /// the `k`-th execution of its tick.
+    fn replay(&self, execs: Vec<Vec<Vec<u8>>>);
     fn delivered(&self) -> Vec<Message>;
     fn dropped(&self) -> Vec<Message>;
 }
@@ -418,6 +430,22 @@ where
         self.hook.install(vec![]);
     }
 
+    fn replay(&self, execs: Vec<Vec<Vec<u8>>>) {
+        let execs: Vec<Vec<T>> = execs
+            .iter()
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|payload| {
+                        bincode::deserialize(payload)
+                            .expect("a recorded release did not decode as the hook's element type")
+                    })
+                    .collect()
+            })
+            .collect();
+        self.hook.replay(execs);
+    }
+
     fn delivered(&self) -> Vec<Message> {
         self.hook
             .delivered()
@@ -458,6 +486,14 @@ pub struct Schedule {
     pub requirements: Derivation,
     /// Deliveries at registered hooks that could not be traced to a send (a lineage gap).
     pub unmatched_releases: usize,
+    /// Whether the body declared the run vacuous ([`Run::mark_vacuous`]: the goal's
+    /// pre-condition failed, so the run says nothing about the protocol).
+    pub vacuous: bool,
+    /// Counterfactual replays run to derive this schedule's lineage ([`Level::Counterfactual`]).
+    pub replays: usize,
+    /// Derivation steps where the node did not reproduce its output under replay and the
+    /// closure fell back to the recorded lineage.
+    pub replay_fallbacks: usize,
 }
 
 /// A derivation together with the send sequences of the run it was observed in.
@@ -467,6 +503,11 @@ pub struct Clause {
     pub deps: Derivation,
     /// The run's send sequences.
     pub sends: Rc<SendSequences>,
+    /// The crashes of the hypothesis the derivation was observed under. A derivation found in
+    /// a world where a node was absent is sufficient only there: a goal such as agreement is
+    /// not monotone in a node's presence (the absent node, alive, may act against it), so a
+    /// hypothesis that does not include these crashes is treated as hitting the clause.
+    pub premises: BTreeSet<Fault>,
 }
 
 impl Clause {
@@ -729,6 +770,8 @@ pub struct Run<'a> {
     eff_cut: RefCell<Option<usize>>,
     /// Goal witnesses named by the body: `(simulator port, member, serialized value)`.
     witnesses: RefCell<Vec<(usize, Option<u32>, Vec<u8>)>>,
+    /// Final-state goal witnesses ([`Run::witness_final`]).
+    final_witnesses: RefCell<Vec<(usize, Option<u32>, Vec<u8>)>>,
     /// Pre-condition witnesses named by the body (outputs the goal is conditioned on).
     requirements: RefCell<Vec<(usize, Option<u32>, Vec<u8>)>>,
     /// Set by the body when the goal's pre-condition failed (nothing to check).
@@ -787,6 +830,39 @@ impl Run<'_> {
         value: &T,
     ) {
         self.witnesses.borrow_mut().push((
+            lineage_port(output.0),
+            Some(member),
+            bincode::serialize(value).unwrap(),
+        ));
+    }
+
+    /// Names the **final** value on a process port as a witness of the goal: the fact is not
+    /// that `value` was output at some point but that it was the *last* output, which also
+    /// rests on nothing superseding it (a "final view", a "last committed index"). Under
+    /// counterfactual replay a delivery is in its derivation if removing it changes the
+    /// node's last output, not merely whether `value` ever appears; the recorded lineage
+    /// levels derive the latest output equal to `value` as [`Self::witness`] does.
+    pub fn witness_final<T: Serialize, O: Ordering, R: Retries>(
+        &self,
+        output: &SimReceiver<T, O, R>,
+        value: &T,
+    ) {
+        self.final_witnesses.borrow_mut().push((
+            lineage_port(output.0),
+            None,
+            bincode::serialize(value).unwrap(),
+        ));
+    }
+
+    /// Like [`Self::witness_final`], for the last value output by member `member` of a
+    /// cluster.
+    pub fn witness_member_final<T: Serialize, O: Ordering, R: Retries>(
+        &self,
+        output: &SimClusterReceiver<T, O, R>,
+        member: u32,
+        value: &T,
+    ) {
+        self.final_witnesses.borrow_mut().push((
             lineage_port(output.0),
             Some(member),
             bincode::serialize(value).unwrap(),
@@ -867,20 +943,110 @@ impl Run<'_> {
         }
     }
 
-    fn finish(self, goal_held: bool) -> Schedule {
+    fn finish(self, goal_held: bool) -> RunRecord {
         let points = &self.search.points;
         let delivered: Vec<Message> = points.iter().flat_map(|p| p.delivered()).collect();
         let dropped: Vec<Message> = points.iter().flat_map(|p| p.dropped()).collect();
         let events = lineage_events();
         let eff_cut = (*self.eff_cut.borrow()).unwrap_or(events.len());
-        let lineage = Lineage::new(&events, self.search, eff_cut, self.level);
+        RunRecord {
+            goal_held,
+            vacuous: self.vacuous.get(),
+            faults: self.faults.clone(),
+            goal_port: self.goal_port,
+            level: self.level,
+            events,
+            eff_cut,
+            witnesses: self.witnesses.into_inner(),
+            final_witnesses: self.final_witnesses.into_inner(),
+            requirements: self.requirements.into_inner(),
+            delivered,
+            dropped,
+            context: InstanceContext::capture(self.search),
+        }
+    }
+}
+
+/// What a [`Lineage`] needs from the simulation instance, captured while it is live: the
+/// derivations are computed after the instance returns, because counterfactual replays are
+/// instances themselves.
+struct InstanceContext {
+    slices: Rc<Slices>,
+    /// Whether the program was compiled with record-level provenance.
+    provenance: bool,
+    /// Receiving node of each point's hook.
+    point_nodes: Vec<NodeKey>,
+    /// The tick (execution unit) and member each point's hook feeds.
+    point_ticks: Vec<NodeKey>,
+}
+
+impl InstanceContext {
+    fn capture(search: &Search) -> Self {
+        InstanceContext {
+            slices: lineage_slices(),
+            provenance: lineage_provenance_enabled(),
+            point_nodes: search
+                .points
+                .iter()
+                .map(|p| {
+                    let (hook_id, member) = p.hook_key();
+                    hook_root_location(hook_id, member)
+                })
+                .collect(),
+            point_ticks: search
+                .points
+                .iter()
+                .map(|p| {
+                    let (hook_id, member) = p.hook_key();
+                    hook_tick_location(hook_id, member)
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Everything one run of the body produced, taken out of the instance; turned into a
+/// [`Schedule`] by [`Self::schedule`] once the instance has returned.
+struct RunRecord {
+    goal_held: bool,
+    vacuous: bool,
+    faults: FaultSet,
+    goal_port: Option<usize>,
+    level: Level,
+    events: Vec<LineageEvent>,
+    eff_cut: usize,
+    witnesses: Vec<(usize, Option<u32>, Vec<u8>)>,
+    final_witnesses: Vec<(usize, Option<u32>, Vec<u8>)>,
+    requirements: Vec<(usize, Option<u32>, Vec<u8>)>,
+    delivered: Vec<Message>,
+    dropped: Vec<Message>,
+    context: InstanceContext,
+}
+
+impl RunRecord {
+    fn crashed_member(&self, cluster: &str, member: u32) -> bool {
+        let label = member_label(cluster, member);
+        self.faults
+            .iter()
+            .any(|fault| matches!(fault, Fault::Crash { node: n, .. } if *n == label))
+    }
+
+    fn schedule(&self, search: &Search, replayer: Option<&Replayer<'_>>) -> Schedule {
+        let lineage = Lineage::new(
+            &self.events,
+            search,
+            self.eff_cut,
+            self.level,
+            &self.context,
+            replayer,
+        );
         let crashed_sends = lineage
             .sent
             .iter()
             .filter(|s| s.dropped)
             .filter_map(|s| s.sender.clone())
             .collect();
-        let derivations = match (&self.search.goal, self.goal_port) {
+        let derivations = match (&search.goal, self.goal_port) {
             (Some(Goal::Any { .. }), Some(port)) => lineage.any_output(port),
             (
                 Some(Goal::AllMembers {
@@ -896,34 +1062,35 @@ impl Run<'_> {
                 lineage.all_members(port, &correct)
             }
             (Some(Goal::Witnessed), _) => {
-                let witnesses = self.witnesses.borrow();
-                if witnesses.is_empty() {
+                if self.witnesses.is_empty() && self.final_witnesses.is_empty() {
                     vec![]
                 } else {
-                    vec![lineage.witnessed(&witnesses)]
+                    let mut derivation = lineage.witnessed(&self.witnesses);
+                    derivation.extend(lineage.witnessed_final(&self.final_witnesses));
+                    vec![derivation]
                 }
             }
             // No goal registered: everything delivered before EFF is the one derivation.
             _ => vec![lineage.all_pre_eff_deliveries()],
         };
-        let requirements = {
-            let required = self.requirements.borrow();
-            if required.is_empty() {
-                Derivation::new()
-            } else {
-                lineage.witnessed(&required)
-            }
+        let requirements = if self.requirements.is_empty() {
+            Derivation::new()
+        } else {
+            lineage.witnessed(&self.requirements)
         };
         Schedule {
-            goal_held,
+            goal_held: self.goal_held,
             derivations,
             observed: lineage.all_deliveries(),
-            delivered,
-            dropped,
+            delivered: self.delivered.clone(),
+            dropped: self.dropped.clone(),
             crashed_sends,
             sends: Rc::new(lineage.send_sequences()),
             requirements,
             unmatched_releases: lineage.unmatched_releases,
+            vacuous: self.vacuous,
+            replays: lineage.replays.get(),
+            replay_fallbacks: lineage.replay_fallbacks.get(),
         }
     }
 }
@@ -952,6 +1119,8 @@ struct ReleaseRecord {
     sender: Option<(String, u64)>,
     /// The execution that performed the matched send, and the channel it used.
     producer: Option<(ExecId, usize)>,
+    /// Index into `sent` of the matched send.
+    send: Option<usize>,
 }
 
 /// A delivered goal-candidate output.
@@ -1006,22 +1175,33 @@ struct Lineage<'a> {
     tags: HashMap<u64, TagRecord>,
     /// Which lineage the closure uses.
     level: Level,
+    /// Whether the program was compiled with record-level provenance.
+    provenance: bool,
     /// Receiving node of each point's hook.
     point_nodes: Vec<NodeKey>,
+    /// The tick and member each point's hook feeds.
+    point_ticks: Vec<NodeKey>,
     /// Releases that matched no send (diagnostic).
     unmatched_releases: usize,
+    /// The replay oracle ([`Level::Counterfactual`]).
+    replayer: Option<&'a Replayer<'a>>,
+    /// Counterfactual derivations of sends, by index into `sent`.
+    send_memo: RefCell<HashMap<usize, Derivation>>,
+    /// Replays run so far.
+    replays: Cell<usize>,
+    /// Derivation steps that fell back to the recorded lineage.
+    replay_fallbacks: Cell<usize>,
 }
 
 impl<'a> Lineage<'a> {
-    fn new(events: &[LineageEvent], search: &'a Search, eff_cut: usize, level: Level) -> Self {
-        let point_nodes = search
-            .points
-            .iter()
-            .map(|p| {
-                let (hook_id, member) = p.hook_key();
-                hook_root_location(hook_id, member)
-            })
-            .collect();
+    fn new(
+        events: &[LineageEvent],
+        search: &'a Search,
+        eff_cut: usize,
+        level: Level,
+        context: &InstanceContext,
+        replayer: Option<&'a Replayer<'a>>,
+    ) -> Self {
         let labels_by_node: HashMap<&NodeKey, &String> = search
             .nodes
             .iter()
@@ -1029,7 +1209,7 @@ impl<'a> Lineage<'a> {
             .collect();
         let mut lineage = Lineage {
             search,
-            slices: lineage_slices(),
+            slices: context.slices.clone(),
             execs: BTreeMap::new(),
             ticks_at: HashMap::new(),
             asyncs_at: HashMap::new(),
@@ -1039,8 +1219,14 @@ impl<'a> Lineage<'a> {
             outputs: vec![],
             tags: HashMap::new(),
             level,
-            point_nodes,
+            provenance: context.provenance,
+            point_nodes: context.point_nodes.clone(),
+            point_ticks: context.point_ticks.clone(),
             unmatched_releases: 0,
+            replayer,
+            send_memo: RefCell::new(HashMap::new()),
+            replays: Cell::new(0),
+            replay_fallbacks: Cell::new(0),
         };
         let mut send_counts: HashMap<NodeKey, u64> = HashMap::new();
         // `(exec, point, payload, pre_eff)` in event order, matched to sends below.
@@ -1184,17 +1370,18 @@ impl<'a> Lineage<'a> {
                     && channels.is_none_or(|c| c.contains(&record.channel))
                     && payload_matches(&payload, &record.bytes, record.from_member)
             });
-            let (sender, producer) = if let Some(i) = hit {
+            let (sender, producer, send) = if let Some(i) = hit {
                 matched[i] = true;
                 (
                     lineage.sent[i].sender.clone(),
                     Some((lineage.sent[i].exec, lineage.sent[i].channel)),
+                    Some(i),
                 )
             } else {
                 if channels.is_some() {
                     lineage.unmatched_releases += 1;
                 }
-                (None, None)
+                (None, None, None)
             };
             lineage
                 .released
@@ -1207,6 +1394,7 @@ impl<'a> Lineage<'a> {
                     pre_eff,
                     sender,
                     producer,
+                    send,
                 });
         }
 
@@ -1272,6 +1460,54 @@ impl<'a> Lineage<'a> {
                     producer: hit,
                 },
             );
+        }
+        if std::env::var("LDFI_LINEAGE_DEBUG").is_ok() {
+            #[expect(clippy::disallowed_methods, reason = "counts; order is irrelevant")]
+            let releases: usize = lineage.released.values().map(Vec::len).sum();
+            #[expect(clippy::disallowed_methods, reason = "counts; order is irrelevant")]
+            let matched: usize = lineage
+                .released
+                .values()
+                .flatten()
+                .filter(|r| r.send.is_some())
+                .count();
+            #[expect(clippy::disallowed_methods, reason = "counts; order is irrelevant")]
+            let recvs: usize = lineage.recvs.values().map(Vec::len).sum();
+            eprintln!(
+                "lineage: {} execs, {} sends ({} dropped), {} releases ({matched} matched to sends), {} recvs, {} outputs, {} tags",
+                lineage.execs.len(),
+                lineage.sent.len(),
+                lineage.sent.iter().filter(|s| s.dropped).count(),
+                releases,
+                recvs,
+                lineage.outputs.len(),
+                lineage.tags.len(),
+            );
+            for output in &lineage.outputs {
+                eprintln!(
+                    "lineage:   output exec {} sink {} port {} member {:?} {} bytes prov {:?}",
+                    output.exec,
+                    output.sink,
+                    output.port,
+                    output.member,
+                    output.bytes.len(),
+                    output.prov
+                );
+            }
+            for (exec, (location, member, tick)) in &lineage.execs {
+                let releases = lineage.released.get(exec).map_or(0, Vec::len);
+                let recvs = lineage.recvs.get(exec).map_or(0, Vec::len);
+                let sends = lineage.sent.iter().filter(|s| s.exec == *exec).count();
+                let outputs = lineage.outputs.iter().filter(|o| o.exec == *exec).count();
+                if releases + recvs + sends + outputs > 0 {
+                    eprintln!(
+                        "lineage:   exec {exec} {}{:?} member {:?}: {releases} releases, {recvs} recvs, {sends} sends, {outputs} outputs",
+                        if *tick { "tick " } else { "async " },
+                        location,
+                        member
+                    );
+                }
+            }
         }
         lineage
     }
@@ -1370,8 +1606,277 @@ impl<'a> Lineage<'a> {
         match self.level {
             Level::Execution => self.closure(output.exec, None),
             Level::Slice => self.closure(output.exec, Some(output.sink)),
-            Level::Record => self.record_closure(&output.prov, output.exec, Some(output.sink)),
+            Level::Record => {
+                if is_opaque(&output.prov) {
+                    self.counterfactual_output(output)
+                } else {
+                    self.record_closure(&output.prov, output.exec, Some(output.sink))
+                }
+            }
+            Level::Counterfactual => self.counterfactual_output(output),
         }
+    }
+
+    /// The derivation of a send, at the configured level (memoized by index into `sent`):
+    /// record-level where the record carries provenance, by replay where it is opaque or
+    /// under [`Level::Counterfactual`], slice-level otherwise.
+    fn send_derivation(&self, i: usize) -> Derivation {
+        if let Some(derivation) = self.send_memo.borrow().get(&i) {
+            return derivation.clone();
+        }
+        let record = &self.sent[i];
+        let derivation = match self.level {
+            Level::Counterfactual => self.counterfactual_send(i),
+            Level::Record if is_opaque(&record.prov) => self.counterfactual_send(i),
+            _ => self.record_closure(&record.prov, record.exec, Some(record.channel)),
+        };
+        self.send_memo.borrow_mut().insert(i, derivation.clone());
+        derivation
+    }
+
+    /// The recorded (non-counterfactual) derivation of a send, as the fallback when replay
+    /// cannot reproduce it: record-level where the record carries real provenance,
+    /// slice-level otherwise (including opaque records).
+    fn recorded_send_closure(&self, i: usize) -> Derivation {
+        let record = &self.sent[i];
+        if is_opaque(&record.prov) {
+            self.closure(record.exec, Some(record.channel))
+        } else {
+            self.record_closure(&record.prov, record.exec, Some(record.channel))
+        }
+    }
+
+    /// The node an execution ran at.
+    fn exec_node(&self, exec: ExecId) -> Option<NodeKey> {
+        self.execs
+            .get(&exec)
+            .map(|(location, member, _)| (location.root().clone(), *member))
+    }
+
+    /// [`Level::Counterfactual`] for an output: the 1-minimal set of deliveries at the
+    /// producing node without which it no longer produces the output, each followed to the
+    /// send that produced it.
+    fn counterfactual_output(&self, output: &OutputRecord) -> Derivation {
+        let fallback = || {
+            if is_opaque(&output.prov) {
+                self.closure(output.exec, Some(output.sink))
+            } else {
+                self.record_closure(&output.prov, output.exec, Some(output.sink))
+            }
+        };
+        let Some(node) = self.exec_node(output.exec) else {
+            return fallback();
+        };
+        let (port, member, bytes) = (output.port, output.member, output.bytes.clone());
+        let produced = move |events: &[LineageEvent]| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    LineageEvent::Output { port: p, member: m, bytes: b, .. }
+                        if *p == port && *m == member && *b == bytes
+                )
+            })
+        };
+        self.counterfactual(&node, output.exec, &produced, fallback)
+    }
+
+    /// The counterfactual derivation of a send (see [`Self::send_derivation`]).
+    fn counterfactual_send(&self, i: usize) -> Derivation {
+        let record = &self.sent[i];
+        match self.exec_node(record.exec) {
+            None => self.recorded_send_closure(i),
+            Some(node) => {
+                let (channel, to, bytes) =
+                    (record.channel, record.to.clone(), record.bytes.clone());
+                let from = node.clone();
+                let produced = move |events: &[LineageEvent]| {
+                    events.iter().any(|event| {
+                        matches!(
+                            event,
+                            LineageEvent::Sent { channel: c, from: f, from_member: fm, to: t, to_member: tm, bytes: b, .. }
+                                if *c == channel && (f.clone(), *fm) == from && (t.clone(), *tm) == to && *b == bytes
+                        )
+                    })
+                };
+                self.counterfactual(&node, record.exec, &produced, || {
+                    self.recorded_send_closure(i)
+                })
+            }
+        }
+    }
+
+    /// The tick executions at `node` (every tick location rooted there), ascending.
+    fn tick_execs_at(&self, node: &NodeKey) -> Vec<ExecId> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "collected and sorted; iteration order is irrelevant"
+        )]
+        let mut execs: Vec<ExecId> = self
+            .ticks_at
+            .iter()
+            .filter(|((tick, member), _)| tick.root() == &node.0 && *member == node.1)
+            .flat_map(|(_, execs)| execs.iter().copied())
+            .collect();
+        execs.sort_unstable();
+        execs
+    }
+
+    /// Whether removing this delivery from a replay could change what the solver sees:
+    /// it is a fault candidate itself, or it leads to a send with lineage of its own.
+    fn matters(&self, release: &ReleaseRecord) -> bool {
+        let dependency = self.dependency(release);
+        (dependency.lossy && release.pre_eff)
+            || dependency.sender.is_some()
+            || release.send.is_some()
+    }
+
+    /// One counterfactual derivation step at `node`: greedy deletion over the deliveries
+    /// into the node's ticks before `exec`, latest first; `produced` recognizes the target in
+    /// a replay's events. Falls back to `fallback` when the node does not reproduce the
+    /// target with every delivery kept, or when there is no replay oracle.
+    fn counterfactual(
+        &self,
+        node: &NodeKey,
+        exec: ExecId,
+        produced: &dyn Fn(&[LineageEvent]) -> bool,
+        fallback: impl FnOnce() -> Derivation,
+    ) -> Derivation {
+        let Some(replayer) = self.replayer else {
+            return fallback();
+        };
+        let tick_execs = self.tick_execs_at(node);
+        // Every delivery into the node's ticks, as `(exec, index)`, in event order.
+        let all: Vec<(ExecId, usize)> = tick_execs
+            .iter()
+            .flat_map(|e| (0..self.released.get(e).map_or(0, Vec::len)).map(move |i| (*e, i)))
+            .collect();
+        // Every delivery into the node is a candidate, including those after the target's
+        // execution: a later delivery can substitute for an earlier one (an echo for the
+        // original), and the minimal sufficient set must be found among all of them.
+        let mut candidates: Vec<(ExecId, usize)> = all
+            .iter()
+            .copied()
+            .filter(|(e, i)| self.matters(&self.released[e][*i]))
+            .collect();
+        if all.is_empty() {
+            // A node with no scripted inputs (fed only through hook-free paths): nothing to
+            // replay against.
+            return fallback();
+        }
+        if candidates.is_empty() {
+            return Derivation::new();
+        }
+        let mut removed: BTreeSet<(ExecId, usize)> = BTreeSet::new();
+        let debug = std::env::var("LDFI_REPLAY_DEBUG").is_ok();
+        let candidate_count = candidates.len();
+        let run = |removed: &BTreeSet<(ExecId, usize)>| -> bool {
+            self.replays.set(self.replays.get() + 1);
+            let scripts = self.replay_scripts(node, &tick_execs, removed);
+            let events = replayer.replay(&scripts);
+            let hit = produced(&events);
+            if debug {
+                let sent = events
+                    .iter()
+                    .filter(|e| matches!(e, LineageEvent::Sent { .. }))
+                    .count();
+                let outputs = events
+                    .iter()
+                    .filter(|e| matches!(e, LineageEvent::Output { .. }))
+                    .count();
+                let execs = events
+                    .iter()
+                    .filter(|e| matches!(e, LineageEvent::Exec { .. }))
+                    .count();
+                eprintln!(
+                    "  replay {:?} exec<= {exec} removed {} of {}: {execs} execs, {sent} sends, {outputs} outputs, produced={hit}; scripts {:?}",
+                    node,
+                    removed.len(),
+                    candidate_count,
+                    scripts
+                        .iter()
+                        .map(|s| s.iter().map(Vec::len).collect::<Vec<_>>())
+                        .collect::<Vec<_>>()
+                );
+            }
+            hit
+        };
+        if !run(&removed) {
+            self.replay_fallbacks.set(self.replay_fallbacks.get() + 1);
+            if replayer.log {
+                eprintln!(
+                    "{}: replay of {:?} did not reproduce the target; falling back to recorded lineage",
+                    replayer.tag, node
+                );
+            }
+            return fallback();
+        }
+        // Latest first: the derivation keeps the earliest sufficient deliveries.
+        candidates.reverse();
+        for candidate in &candidates {
+            removed.insert(*candidate);
+            if !run(&removed) {
+                removed.remove(candidate);
+            }
+        }
+        let mut derivation = Derivation::new();
+        for (e, i) in candidates.iter().rev() {
+            if removed.contains(&(*e, *i)) {
+                continue;
+            }
+            let release = &self.released[e][*i];
+            let mut dependency = self.dependency(release);
+            if !release.pre_eff {
+                dependency.lossy = false;
+            }
+            if dependency.lossy || dependency.sender.is_some() {
+                derivation.insert(dependency);
+            }
+            if let Some(send) = release.send {
+                derivation.extend(self.send_derivation(send));
+            }
+        }
+        derivation
+    }
+
+    /// The replay scripts for every fault point: at `node`, each point's recorded releases
+    /// per execution of its tick minus `removed`; elsewhere nothing (the tick never runs).
+    fn replay_scripts(
+        &self,
+        node: &NodeKey,
+        tick_execs: &[ExecId],
+        removed: &BTreeSet<(ExecId, usize)>,
+    ) -> Vec<Vec<Vec<Vec<u8>>>> {
+        self.search
+            .points
+            .iter()
+            .enumerate()
+            .map(|(point, _)| {
+                if self.point_nodes[point] != *node {
+                    return vec![];
+                }
+                let tick = &self.point_ticks[point];
+                tick_execs
+                    .iter()
+                    .filter(|e| {
+                        self.execs
+                            .get(e)
+                            .is_some_and(|(l, m, _)| (l, *m) == (&tick.0, tick.1))
+                    })
+                    .map(|e| {
+                        self.released
+                            .get(e)
+                            .into_iter()
+                            .flatten()
+                            .enumerate()
+                            .filter(|(i, release)| {
+                                release.point == point && !removed.contains(&(*e, *i))
+                            })
+                            .map(|(_, release)| release.payload.clone())
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     /// The record-level backward closure: delivery ids → the sends that produced them →
@@ -1381,7 +1886,7 @@ impl<'a> Lineage<'a> {
     fn record_closure(&self, prov: &[u64], exec: ExecId, sink: Option<usize>) -> Derivation {
         // No provenance on the record itself: a simulation compiled without it, or an output
         // on a path with no hook (a top-level `sim_output` of what a channel delivered).
-        if !lineage_provenance_enabled() || prov.is_empty() {
+        if !self.provenance || prov.is_empty() {
             return self.closure(exec, sink);
         }
         let mut derivation = Derivation::new();
@@ -1409,6 +1914,8 @@ impl<'a> Lineage<'a> {
                 let record = &self.sent[i];
                 if record.prov.is_empty() {
                     derivation.extend(self.closure(record.exec, Some(record.channel)));
+                } else if is_opaque(&record.prov) {
+                    derivation.extend(self.send_derivation(i));
                 } else {
                     stack.extend(record.prov.iter().copied());
                 }
@@ -1474,9 +1981,105 @@ impl<'a> Lineage<'a> {
                 .max_by_key(|o| o.exec);
             if let Some(output) = latest {
                 derivation.extend(self.derive(output));
+                derivation.extend(self.alive_dependency(output));
             }
         }
         derivation
+    }
+
+    /// A witnessed output also depends on its producer being alive to emit it (a crashed
+    /// node's outputs are suppressed): a dependency "node `N` survives through its `k`-th
+    /// send", `k` the sends `N` had performed by the output, which every earlier crash point
+    /// of `N` kills and whose preserve point (the crash right after send `k`) is the weakest
+    /// crash that keeps the output. Only for crashable producers.
+    fn alive_dependency(&self, output: &OutputRecord) -> Option<Dependency> {
+        let node = self.exec_node(output.exec)?;
+        let label = self
+            .search
+            .nodes
+            .iter()
+            .find(|(_, key)| **key == node)
+            .map(|(label, _)| label.clone())?;
+        let sends = self
+            .sent
+            .iter()
+            .filter(|s| {
+                !s.dropped
+                    && s.exec <= output.exec
+                    && s.sender.as_ref().is_some_and(|(l, _)| *l == label)
+            })
+            .count() as u64;
+        Some(Dependency {
+            message: Message {
+                channel: "alive".to_owned(),
+                payload: bincode::serialize(&(label.clone(), sends)).unwrap(),
+                display: format!("{label} through send #{sends}"),
+            },
+            sender: Some((label, sends)),
+            lossy: false,
+        })
+    }
+
+    /// The union of the lineages of the named final-state witnesses: each must be the last
+    /// output on its port and member (otherwise the fact does not hold and it contributes
+    /// nothing), and is derived as a final-state fact (see [`Run::witness_final`]).
+    fn witnessed_final(&self, witnesses: &[(usize, Option<u32>, Vec<u8>)]) -> Derivation {
+        let mut derivation = Derivation::new();
+        for (port, member, bytes) in witnesses {
+            let last = self
+                .outputs
+                .iter()
+                .filter(|o| o.port == *port && o.member == *member)
+                .max_by_key(|o| o.exec);
+            if let Some(output) = last
+                && output.bytes == *bytes
+            {
+                derivation.extend(self.derive_final(output));
+                derivation.extend(self.alive_dependency(output));
+            }
+        }
+        derivation
+    }
+
+    /// The derivation of an output as a final-state fact: under replay, the deliveries
+    /// without which the node's *last* output on the port differs; otherwise as
+    /// [`Self::derive`].
+    fn derive_final(&self, output: &OutputRecord) -> Derivation {
+        let by_replay = match self.level {
+            Level::Counterfactual => true,
+            Level::Record => is_opaque(&output.prov),
+            Level::Execution | Level::Slice => false,
+        };
+        if !by_replay {
+            return self.derive(output);
+        }
+        let fallback = || {
+            if is_opaque(&output.prov) {
+                self.closure(output.exec, Some(output.sink))
+            } else {
+                self.record_closure(&output.prov, output.exec, Some(output.sink))
+            }
+        };
+        let Some(node) = self.exec_node(output.exec) else {
+            return fallback();
+        };
+        let (port, member, bytes) = (output.port, output.member, output.bytes.clone());
+        let produced = move |events: &[LineageEvent]| {
+            events
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    LineageEvent::Output {
+                        port: p,
+                        member: m,
+                        bytes: b,
+                        ..
+                    } if *p == port && *m == member => Some(b == &bytes),
+                    _ => None,
+                })
+                .unwrap_or(false)
+        };
+        self.counterfactual(&node, output.exec, &produced, fallback)
     }
 
     /// Every pre-EFF delivery through a registered channel, as one derivation.
@@ -1673,14 +2276,19 @@ impl<'a> Lineage<'a> {
                     }
                     // An async run consumes what the location's ticks yielded since its
                     // previous run.
-                    for ((tick_location, tick_member), ticks) in &self.ticks_at {
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "pushes onto a stack whose order does not affect the closure"
+                    )]
+                    for (tick_location, tick_member) in self.ticks_at.keys() {
                         if tick_location.root() == location && tick_member == member {
-                            stack.extend(
-                                ticks
-                                    .iter()
-                                    .copied()
-                                    .filter(|t| *t < exec && previous.is_none_or(|p| *t > p))
-                                    .map(|t| (t, None)),
+                            self.push_ticks_before(
+                                tick_location,
+                                *member,
+                                exec,
+                                previous,
+                                None,
+                                &mut stack,
                             );
                         }
                     }
@@ -1692,7 +2300,9 @@ impl<'a> Lineage<'a> {
 
     /// Pushes the executions of tick `tick` at `member` before `exec` (and after `since`, if
     /// given), to be explored through `sink`'s slice (`None`: their whole input is assumed
-    /// relevant).
+    /// relevant). A yield can take more than one async run to reach a sink (an `atomic`
+    /// boundary adds a hop), so an empty window widens to the latest execution before
+    /// `exec`: an over-approximation, like the rule itself.
     fn push_ticks_before(
         &self,
         tick: &LocationId,
@@ -1702,17 +2312,32 @@ impl<'a> Lineage<'a> {
         sink: Option<usize>,
         stack: &mut Vec<(ExecId, Option<usize>)>,
     ) {
+        let mut pushed = false;
+        let mut latest: Option<ExecId> = None;
         for t in self
             .ticks_at
             .get(&(tick.clone(), member))
             .into_iter()
             .flatten()
         {
-            if *t < exec && since.is_none_or(|s| *t > s) {
-                stack.push((*t, sink));
+            if *t < exec {
+                latest = Some(*t);
+                if since.is_none_or(|s| *t > s) {
+                    stack.push((*t, sink));
+                    pushed = true;
+                }
             }
         }
+        if !pushed && let Some(t) = latest {
+            stack.push((t, sink));
+        }
     }
+}
+
+/// Whether a record's provenance is opaque (it came out of a closure the rewrite cannot see
+/// into; see `Prov::OPAQUE`).
+fn is_opaque(prov: &[u64]) -> bool {
+    prov.contains(&crate::sim::runtime::Prov::OPAQUE)
 }
 
 /// Whether a payload released at a receiving hook is the serialized message `sent`. A
@@ -1776,6 +2401,34 @@ fn member_label(cluster: &str, member: u32) -> String {
     format!("{cluster}@{member}")
 }
 
+/// The counterfactual replay oracle ([`Level::Counterfactual`]): runs one node alone, every
+/// fault point under a replay policy, in a quiet deterministic instance, and returns what
+/// the instance recorded.
+struct Replayer<'a> {
+    sim: &'a CompiledSim,
+    search: &'a Search,
+    log: bool,
+    tag: &'static str,
+}
+
+impl Replayer<'_> {
+    /// Replays with `scripts[p]` (serialized items per tick execution) installed on fault
+    /// point `p`; an empty script keeps that point's tick from ever running.
+    fn replay(&self, scripts: &[Vec<Vec<Vec<u8>>>]) -> Vec<LineageEvent> {
+        let mut events: Vec<LineageEvent> = vec![];
+        let out = &mut events;
+        let points = &self.search.points;
+        self.sim.replay(async || {
+            for (point, script) in points.iter().zip(scripts) {
+                point.replay(script.clone());
+            }
+            crate::sim::compiled::quiesce().await;
+            *out = lineage_events();
+        });
+        events
+    }
+}
+
 /// The registered fault points, crashable nodes, and goal.
 struct Search {
     points: Vec<Box<dyn FaultPoint>>,
@@ -1795,6 +2448,13 @@ pub enum Level {
     /// Level 2: record-level provenance (requires `SimFlow::with_provenance`); falls back
     /// to Level 1 where a record carries none.
     Record,
+    /// Level 3: counterfactual lineage by replay. Each node is re-executed alone, with its
+    /// recorded deliveries held fixed, once per candidate delivery removed; a delivery is in
+    /// the derivation iff the node stops producing the output without it (a 1-minimal
+    /// sufficient set, latest deliveries removed first). Sees through closures and state the
+    /// static slice and the provenance rewrite cannot. Falls back to Level 2 (or 1) where a
+    /// node does not reproduce its output under replay with everything kept.
+    Counterfactual,
 }
 
 /// An LDFI search configuration: the fault points, the crashable nodes, the goal, and the
@@ -1848,14 +2508,15 @@ impl Ldfi {
         self
     }
 
-    /// Reads the lineage level from `LDFI_LEVEL` (`exec`, `slice`, `record`) if set; for
-    /// experiments that compare levels without recompiling the test.
+    /// Reads the lineage level from `LDFI_LEVEL` (`exec`, `slice`, `record`, `replay`) if
+    /// set; for experiments that compare levels without recompiling the test.
     #[must_use]
     pub fn level_from_env(self) -> Self {
         match std::env::var("LDFI_LEVEL").as_deref() {
             Ok("exec") => self.level(Level::Execution),
             Ok("slice") => self.level(Level::Slice),
             Ok("record") => self.level(Level::Record),
+            Ok("replay" | "counterfactual") => self.level(Level::Counterfactual),
             _ => self,
         }
     }
@@ -2047,6 +2708,12 @@ impl Ldfi {
         // Crash points right after a send in a requirement's lineage: the weakest crashes
         // that preserve the pre-condition.
         let mut preserve_points: BTreeSet<Fault> = BTreeSet::new();
+        // Every observed derivation of the pre-condition, as a clause: a hypothesis should
+        // leave at least one of them intact, or the run it proposes says nothing.
+        let mut required: Vec<Clause> = vec![];
+        // Hypotheses whose every schedule was vacuous: their supersets are not proposed
+        // (a heuristic; vacuity is not strictly monotone in the fault set).
+        let mut vacuous_sets: Vec<FaultSet> = vec![];
         let mut tried: BTreeSet<FaultSet> = BTreeSet::new();
         let mut faults = FaultSet::new();
         let tag = match (self.strategy, self.level) {
@@ -2054,6 +2721,7 @@ impl Ldfi {
             (Strategy::Lineage, Level::Execution) => "ldfi/L0",
             (Strategy::Lineage, Level::Slice) => "ldfi",
             (Strategy::Lineage, Level::Record) => "ldfi/L2",
+            (Strategy::Lineage, Level::Counterfactual) => "ldfi/L3",
         };
         let mut slices: Option<Rc<Slices>> = None;
 
@@ -2062,10 +2730,10 @@ impl Ldfi {
                 return Outcome::Budget { runs };
             }
 
-            let mut schedules: Vec<Schedule> = vec![];
+            let mut records: Vec<RunRecord> = vec![];
             {
                 let faults_ref = &faults;
-                let schedules_ref = &mut schedules;
+                let records_ref = &mut records;
                 let slices_ref = &mut slices;
                 let body_ref = &body;
                 let instance = async || {
@@ -2075,13 +2743,14 @@ impl Ldfi {
                         goal_port: goal_port.map(lineage_port),
                         eff_cut: RefCell::new(None),
                         witnesses: RefCell::new(vec![]),
+                        final_witnesses: RefCell::new(vec![]),
                         requirements: RefCell::new(vec![]),
                         vacuous: Cell::new(false),
                         level: self.level,
                     };
                     run.install();
                     let goal_held = body_ref(&run).await;
-                    schedules_ref.push(run.finish(goal_held));
+                    records_ref.push(run.finish(goal_held));
                     *slices_ref = Some(lineage_slices());
                 };
                 match self.exploration {
@@ -2092,12 +2761,33 @@ impl Ldfi {
                 }
             }
             tried.insert(faults.clone());
+            if !records.is_empty() && records.iter().all(|r| r.vacuous) {
+                vacuous_sets.push(faults.clone());
+            }
+            // Derivations are computed outside the instance: counterfactual replays are
+            // instances of their own.
+            let replayer = Replayer {
+                sim,
+                search,
+                log: self.log,
+                tag,
+            };
+            let schedules: Vec<Schedule> = records
+                .iter()
+                .map(|record| record.schedule(search, Some(&replayer)))
+                .collect();
 
             let failing = schedules.iter().find(|s| !s.goal_held).cloned();
             let new_derivations: BTreeSet<Derivation> = schedules
                 .iter()
                 .filter(|s| s.goal_held)
                 .flat_map(|s| s.derivations.iter().cloned())
+                .collect();
+            // The crashes of this hypothesis: premises of every clause it yields.
+            let premises: BTreeSet<Fault> = faults
+                .iter()
+                .filter(|f| matches!(f, Fault::Crash { .. }))
+                .cloned()
                 .collect();
             for schedule in &schedules {
                 observed.extend(
@@ -2106,6 +2796,17 @@ impl Ldfi {
                         .iter()
                         .flat_map(|dep| dep.candidate_faults(&schedule.sends)),
                 );
+                if !schedule.requirements.is_empty()
+                    && !required
+                        .iter()
+                        .any(|c| c.deps == schedule.requirements && c.premises == premises)
+                {
+                    required.push(Clause {
+                        deps: schedule.requirements.clone(),
+                        sends: schedule.sends.clone(),
+                        premises: premises.clone(),
+                    });
+                }
                 for dep in &schedule.requirements {
                     if let Some((node, ordinal)) = &dep.sender
                         && let Some(send) = schedule
@@ -2145,8 +2846,10 @@ impl Ldfi {
             }
             if self.log {
                 let unmatched: usize = schedules.iter().map(|s| s.unmatched_releases).sum();
+                let replays: usize = schedules.iter().map(|s| s.replays).sum();
+                let fallbacks: usize = schedules.iter().map(|s| s.replay_fallbacks).sum();
                 eprintln!(
-                    "{tag}: run #{} {}: {} schedule(s), goal {}; derivations {}{}",
+                    "{tag}: run #{} {}: {} schedule(s), goal {}; derivations {}{}{}",
                     runs.len() + 1,
                     render_set(&faults),
                     schedules.len(),
@@ -2158,6 +2861,11 @@ impl Ldfi {
                     render_set(new_derivations.iter().map(render_set)),
                     if unmatched > 0 {
                         format!("; {unmatched} untraced deliveries")
+                    } else {
+                        String::new()
+                    },
+                    if replays > 0 {
+                        format!("; {replays} replays, {fallbacks} fallbacks")
                     } else {
                         String::new()
                     },
@@ -2181,10 +2889,14 @@ impl Ldfi {
                     continue;
                 }
                 for derivation in &schedule.derivations {
-                    if !clauses.iter().any(|c| c.deps == *derivation) {
+                    if !clauses
+                        .iter()
+                        .any(|c| c.deps == *derivation && c.premises == premises)
+                    {
                         clauses.push(Clause {
                             deps: derivation.clone(),
                             sends: schedule.sends.clone(),
+                            premises: premises.clone(),
                         });
                     }
                 }
@@ -2219,6 +2931,22 @@ impl Ldfi {
                     universe.extend(preserve_points.iter().cloned());
                     let mut universe: Vec<Fault> = universe.into_iter().collect();
                     universe.sort_by_key(order);
+                    if std::env::var("LDFI_SOLVER_DEBUG").is_ok() {
+                        for (i, clause) in clauses.iter().enumerate() {
+                            eprintln!("{tag}: clause #{i}: {}", render_set(&clause.deps));
+                            for (node, sends) in clause.sends.iter() {
+                                eprintln!(
+                                    "{tag}:   sends of {node}: {}",
+                                    sends
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(k, s)| format!("#{k} {s}"))
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                );
+                            }
+                        }
+                    }
                     if self.log {
                         eprintln!(
                             "{tag}: universe {}; preserve points {}; requirements {}",
@@ -2232,12 +2960,26 @@ impl Ldfi {
                             ),
                         );
                     }
-                    next_hypothesis(&universe, &clauses, &tried, self.crash_budget)
+                    next_hypothesis(
+                        &universe,
+                        &clauses,
+                        &required,
+                        &tried,
+                        &vacuous_sets,
+                        self.crash_budget,
+                    )
                 }
                 Strategy::Blind => {
                     let mut universe: Vec<Fault> = observed.iter().cloned().collect();
                     universe.sort_by_key(order);
-                    next_hypothesis(&universe, &[], &tried, self.crash_budget)
+                    next_hypothesis(
+                        &universe,
+                        &[],
+                        &[],
+                        &tried,
+                        &vacuous_sets,
+                        self.crash_budget,
+                    )
                 }
             };
             match next {
@@ -2435,6 +3177,7 @@ impl Ldfi {
                     goal_port: goal_port.map(lineage_port),
                     eff_cut: RefCell::new(None),
                     witnesses: RefCell::new(vec![]),
+                    final_witnesses: RefCell::new(vec![]),
                     requirements: RefCell::new(vec![]),
                     vacuous: Cell::new(false),
                     level: self.level,
@@ -2477,7 +3220,32 @@ impl Ldfi {
 fn next_hypothesis(
     universe: &[Fault],
     clauses: &[Clause],
+    required: &[Clause],
     tried: &BTreeSet<FaultSet>,
+    vacuous: &[FaultSet],
+    crash_budget: usize,
+) -> Option<FaultSet> {
+    // Prefer a hypothesis that preserves some observed derivation of the pre-condition (a
+    // run whose pre-condition fails contributes nothing); if none exists, drop the
+    // preference rather than the search.
+    if !required.is_empty()
+        && let Some(next) =
+            solve_hypothesis(universe, clauses, required, tried, vacuous, crash_budget)
+    {
+        return Some(next);
+    }
+    solve_hypothesis(universe, clauses, &[], tried, vacuous, crash_budget)
+}
+
+/// [`next_hypothesis`] with the pre-condition preference as a hard constraint when
+/// `required` is non-empty: an indicator per required derivation that is 1 only if the
+/// hypothesis kills none of its dependencies, at least one of which must be 1.
+fn solve_hypothesis(
+    universe: &[Fault],
+    clauses: &[Clause],
+    required: &[Clause],
+    tried: &BTreeSet<FaultSet>,
+    vacuous: &[FaultSet],
     crash_budget: usize,
 ) -> Option<FaultSet> {
     use good_lp::{Expression, ProblemVariables, ResolutionError, Solution, SolverModel, variable};
@@ -2493,6 +3261,11 @@ fn next_hypothesis(
         .iter()
         .map(|_| vars.add(variable().binary()))
         .collect();
+    // One indicator per required derivation: 1 only if the hypothesis kills none of it.
+    let preserved: Vec<_> = required
+        .iter()
+        .map(|_| vars.add(variable().binary()))
+        .collect();
     let tie_break = 0.5 / universe.len() as f64;
     let objective: Expression = x
         .iter()
@@ -2501,14 +3274,54 @@ fn next_hypothesis(
         .sum();
     let mut model = vars.minimise(objective).using(good_lp::highs);
 
+    // A clause is covered by killing one of its deliveries, or by leaving out one of its
+    // premises (a crash the derivation was conditional on): Σ hits + Σ (1 - x_p) ≥ 1.
     for clause in clauses {
-        let covering: Expression = x
+        let mut covering: Expression = x
             .iter()
             .enumerate()
             .filter(|(i, _)| clause.hit_by(&universe[*i]))
             .map(|(_, &v)| Expression::from(v))
             .sum();
-        model.add_constraint(covering.geq(1.0));
+        let mut bound = 1.0;
+        for premise in &clause.premises {
+            match index_of(premise) {
+                Some(i) => {
+                    covering -= x[i];
+                    bound -= 1.0;
+                }
+                // A premise outside the universe can never be selected: the clause does
+                // not apply to any hypothesis the solver can produce.
+                None => bound = f64::NEG_INFINITY,
+            }
+        }
+        if bound > f64::NEG_INFINITY {
+            model.add_constraint(covering.geq(bound));
+        }
+    }
+
+    if !required.is_empty() {
+        for (clause, &indicator) in required.iter().zip(&preserved) {
+            for (i, &v) in x.iter().enumerate() {
+                if clause.hit_by(&universe[i]) {
+                    model.add_constraint((Expression::from(v) + indicator).leq(1.0));
+                }
+            }
+            // A required derivation from a crash world is preserved only in a world with
+            // the same crashes.
+            for premise in &clause.premises {
+                match index_of(premise) {
+                    Some(i) => {
+                        model.add_constraint((Expression::from(indicator) - x[i]).leq(0.0));
+                    }
+                    None => {
+                        model.add_constraint(Expression::from(indicator).leq(0.0));
+                    }
+                }
+            }
+        }
+        let any: Expression = preserved.iter().map(|&v| Expression::from(v)).sum();
+        model.add_constraint(any.geq(1.0));
     }
 
     let crashes: Vec<usize> = (0..universe.len())
@@ -2530,6 +3343,16 @@ fn next_hypothesis(
             .map(|&i| Expression::from(x[i]))
             .sum();
         model.add_constraint(per_node.leq(1.0));
+    }
+
+    // No superset of a vacuous hypothesis.
+    for vacuous_set in vacuous {
+        let inside: Vec<usize> = vacuous_set.iter().filter_map(index_of).collect();
+        if inside.len() != vacuous_set.len() {
+            continue;
+        }
+        let selected: Expression = inside.iter().map(|&i| Expression::from(x[i])).sum();
+        model.add_constraint(selected.leq(inside.len() as f64 - 1.0));
     }
 
     for tried_set in tried {
@@ -2600,6 +3423,7 @@ mod tests {
         Clause {
             deps: deps.into_iter().collect(),
             sends: sends.clone(),
+            premises: BTreeSet::new(),
         }
     }
 
@@ -2651,12 +3475,12 @@ mod tests {
         let mut tried = BTreeSet::new();
         // Every minimal hitting set (one literal per clause) comes first, each exactly once...
         for _ in 0..4 {
-            let h = next_hypothesis(&universe, &clauses, &tried, 0).unwrap();
+            let h = next_hypothesis(&universe, &clauses, &[], &tried, &[], 0).unwrap();
             assert_eq!(h.len(), 2);
             assert!(tried.insert(h));
         }
         // ...and only then the non-minimal ones.
-        let h = next_hypothesis(&universe, &clauses, &tried, 0).unwrap();
+        let h = next_hypothesis(&universe, &clauses, &[], &tried, &[], 0).unwrap();
         assert_eq!(h.len(), 3);
     }
 
@@ -2665,7 +3489,7 @@ mod tests {
         let sends = Rc::new(SendSequences::new());
         let clauses = vec![clause([lossy("req", 1)], &sends), clause([], &sends)];
         let universe = universe_of(&clauses);
-        assert!(next_hypothesis(&universe, &clauses, &BTreeSet::new(), 0).is_none());
+        assert!(next_hypothesis(&universe, &clauses, &[], &BTreeSet::new(), &[], 0).is_none());
     }
 
     /// A crash after message `m` kills every send after `m`'s position in the run, so one
@@ -2686,13 +3510,13 @@ mod tests {
         let universe = universe_of(&clauses);
         let tried = BTreeSet::new();
         assert_eq!(
-            next_hypothesis(&universe, &clauses, &tried, 0),
+            next_hypothesis(&universe, &clauses, &[], &tried, &[], 0),
             None,
             "a reliable channel admits no omission; with no crash budget nothing can be done"
         );
         // Weakest first: the crash after `m0` (killing only `m1`) is tried before the crash
         // before any send (killing both).
-        let first = next_hypothesis(&universe, &clauses, &tried, 1).unwrap();
+        let first = next_hypothesis(&universe, &clauses, &[], &tried, &[], 1).unwrap();
         let later = Fault::Crash {
             node: "s".to_owned(),
             after: Some(m0),

@@ -916,9 +916,10 @@ pub(crate) mod harness {
         }
         // The pre-condition: the acknowledgement the goal is conditioned on.
         run.require(&h.client_acks, &Write(1));
-        // The post-condition rests on who the final leader is and on its log.
+        // The post-condition rests on who the final leader is (a final-state fact: the last
+        // view ZK published, which also rests on nothing superseding it) and on its log.
         if !views.is_empty() {
-            run.witness(&h.views, &final_view);
+            run.witness_final(&h.views, &final_view);
         }
         run.witness_member(&h.appended, leader, &Write(1));
         logs[leader as usize].contains(&Write(1))
@@ -995,6 +996,37 @@ mod tests {
     #[test]
     fn ldfi_certifies_clean_election_under_one_crash_dataflow() {
         certifies_clean_election_under_one_crash(Encoding::Dataflow);
+    }
+
+    /// Hunts a false certificate on the closure encoding at load 2 under the opaque-step
+    /// replay (one schedule per hypothesis; the verdict varies with the schedule). Prints
+    /// the search that certified, for diagnosis.
+    #[test]
+    #[ignore = "diagnostic; loops until a certificate appears"]
+    fn ldfi_hunt_false_certificate() {
+        use hydro_lang::sim::ldfi::Level;
+
+        use super::harness::{Shape, compile_with};
+        let shape = Shape {
+            members: 3,
+            rounds: 4,
+            writes: 2,
+        };
+        let level = match std::env::var("LDFI_LEVEL").as_deref() {
+            Ok("replay") => Level::Counterfactual,
+            _ => Level::Record,
+        };
+        let (compiled, h, configure) = compile_with(true, Encoding::Closure, shape, true, 1);
+        for attempt in 0..40 {
+            let outcome = configure(1)
+                .level(level)
+                .exploration(Exploration::Fuzz { instances: 1 })
+                .run(&compiled, async |run| body(&h, run).await);
+            eprintln!("attempt {attempt}: {outcome}");
+            if matches!(outcome, Outcome::Certificate { .. }) {
+                panic!("false certificate on attempt {attempt}");
+            }
+        }
     }
 
     /// The bug needs a specific omission *and* a specific crash: the regime where lineage is

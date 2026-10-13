@@ -702,8 +702,8 @@ slices degrade toward blind and record-level lineage would be the operative vari
 Message identity is `(channel, payload)`; every copy of an omitted payload is dropped while the
 policy stands. Not done: the `Network`-node fault point (fan-out, hook-free paths),
 `cut_after`, reproducer output, occurrence counting, a libFuzzer-guided measurement of the fuzz
-baseline under `cargo sim`, `Reference` captures under the provenance rewrite (Level 2 for the
-closure encoding), and workloads beyond eight records.
+baseline under `cargo sim`, and workloads beyond eight records. (`Reference` captures under
+the provenance rewrite are handled in the next section.)
 
 **Where this leaves the question.** Commit `ldfi-level2` is the checkpoint for everything
 above. What it establishes: on a general-purpose dataflow substrate, lineage-driven fault
@@ -719,6 +719,185 @@ fault points and eight records; and the comparison against a coverage-guided fuz
 closure problem is the next fork: either make the provenance rewrite see through `Reference`
 captures (an open design question, likely a longshot) or accept dataflow style as the price of
 lineage.
+
+## Counterfactual lineage by replay (the closure problem)
+
+The fork above was taken a third way. The rewrite does not see through a `Reference`-capturing
+closure; instead the simulator *re-executes* the node that contains it. The simulator is
+deterministic and records, per tick execution, exactly what every hook released (`Released
+{exec, hook, items}`, as bytes). A hook placed under a **replay policy** (`ReplayScript<T>`, on
+`OmissionPolicy` and `PassthroughPolicy`; `BatchHook::replay`) ignores its buffer and releases
+the recorded set for its *k*-th tick execution, for exactly the recorded number of executions.
+A fresh instance with every hook of node *N* under its recording and every other node's hooks
+under an empty script re-executes *N* alone, with its inputs held fixed, in a few milliseconds
+(`CompiledSim::replay`: quiet, driven by an all-zero entropy source so unhooked in-tick choices
+resolve the same way every time). That makes lineage a counterfactual query: *which of N's
+deliveries does this output need?* Greedy deletion, latest delivery first, each step one replay,
+"still produced" checked on the replay's own events, yields a 1-minimal sufficient set. Every
+kept delivery is a dependency (if a fault could prevent it) and is followed to the send that
+produced it, whose own derivation is computed the same way, memoized per run.
+
+**Where it is used.** Only at an *opaque* step. The provenance rewrite now compiles `Reference`
+captures (`wrap_opaque` in `sim/provenance.rs`: the user's closure is constructed per call over
+plain views of the tagged slots, a scratch `Vec<T>` stands in for a mutable stream handle and is
+appended tagged afterwards, a mutable singleton's provenance is set opaque after the call) and
+tags everything such a closure emits `Prov::OPAQUE`. Under `Level::Record` the closure follows
+record provenance until it meets an opaque record and answers that one step by replay; a
+dataflow program never replays. `Level::Counterfactual` (`LDFI_LEVEL=replay`) replays every
+step, for the comparison below; at 5× the wall time of the recorded levels on the suite it is
+the measurement instrument, not the mechanism. Three details that matter: a candidate set must
+include deliveries *after* the output's execution (a later echo can substitute for the original;
+restricting to earlier ones produced an empty derivation and a false certificate on reliable
+broadcast); a replayed tick execution may legitimately have nothing to do once its only input is
+deleted (the scheduler's `run_tick` assertion is relaxed under replay); and a node that does
+not reproduce the output with every delivery kept (one fed through a hook-free path, such as
+the client) falls back to the recorded lineage for that step (`replay_fallbacks` in the log).
+
+**Two kinds of witness.** The first ablation under replay gave a false certificate on ISR at
+load 2 (one repeat in five). The clause came from a run in which the leader's heartbeat preceded
+its acknowledgement of write 1 in the send order; the replayed derivation of the goal's witness,
+ZK's final view, was two heartbeats, and the solver correctly concluded that a crash after the
+acknowledgement does not hit it. The clause was wrong: two heartbeats make ZK *publish* that
+view, which is what the replay checked, but the goal is about the *last* view, which also rests
+on every later heartbeat that kept the ISR from shrinking. `Run::witness` reads the latest output
+equal to a value and derives it as a monotone fact; Level 2's why-provenance covered the gap by
+accident, because the state fold had touched every heartbeat, and the minimal sufficient set
+removed exactly that. `Run::witness_final` / `witness_member_final` name a final-state fact; its
+replay predicate is "the node's last output on this port equals the value", so a deleted
+heartbeat that changes the final view stays in the derivation. With ISR's view witness declared
+final, 40 of 40 searches at load 2 find the bug, all in 7 hypotheses, and the run-1 derivation
+is the same 12 heartbeats record provenance gives.
+
+**ISR, both encodings, one schedule per hypothesis, five repeats** (`LDFI_GRID_REPLAY=1`
+adds the `L3/replay` column to `ldfi_ablation`; on the closure encoding `L2/record` is record
+provenance up to the step and replay through it). Hypotheses to the bug (unclean) / to the
+certificate (clean); zero spread over the five repeats in every cell; replays per search in
+brackets.
+
+```
+encoding  load | L0/exec   L1/slice  | L2/record         | L3/replay         | blind
+dataflow    1  | 10 / 18   10 / 18   | 10 / 18           |  6 / 14 [305/340] | 23 / 72
+closure     1  | 14 / 27   14 / 27   |  6 / 14 [305/340] |  6 / 14 [305/340] | 23 / 72
+dataflow    2  | 14 / 87   14 / 87   | 11 / 24           |  7 / 17 [354/435] | 34 / 384
+closure     2  | 19 / 103  19 / 103  |  7 / 17 [354/435] |  7 / 17 [354/435] | 37 / >400
+```
+
+Reading it. On the closure encoding, replay turns Levels 0/1's 14 / 27 and 19 / 103 into 6 / 14
+and 7 / 17: the step closure is no longer a wall, and the closure encoding with replay does
+better than the dataflow encoding with record provenance (10 / 18, 11 / 24). The reason is
+visible on the dataflow rows, where `L3/replay` beats `L2/record` by the same margin: the
+counterfactual is a minimal sufficient set and record provenance is a union of everything that
+contributed. On the facts where the two must agree they do (the final view derives to the same
+twelve heartbeats under both); on intermediate sends they differ (a shrink request's replayed
+derivation names the acknowledgement that was missing and the timer, not every message the
+step read that tick), and that is where the hypotheses are saved. So the answer to this round's
+question, *how well does replay approximate real provenance for such closures*, is: it
+reproduces it where the goal's semantics require (once the goal says what it means) and is
+otherwise tighter, soundly, with the one caveat that a sufficient set found by deletion assumes
+the step is monotone in its inputs. The replays are the cost: 300–435 per search at this size,
+against 6–17 hypothesis instances. Each replay runs one node for one protocol run, so it is
+cheaper than a hypothesis instance by roughly the number of nodes, but the count grows with
+deliveries per node times outputs derived, and it is the whole of the 5× wall-time ratio noted
+above.
+
+**Raft** (`hydro_test/src/cluster/raft_ldfi.rs`). `raft_server`'s four batches now take their
+hooks from the guard's payload (`RaftHooks`; every other caller's `nondet!` leaves them `None`).
+Three members, `fail_stop` traffic, members crashable, budget 1. Member 0 wins term 1 and commits
+`x`; two heartbeat rounds; member 1 is elected (its first interrupt is suppressed by the
+heartbeat it saw, the second is not), commits `y`, two heartbeat rounds. Goal: if member 0
+committed `x` (`require_member`), every correct member committed `x` at the same index and term
+(`witness_member`). Leader completeness holds, so the verdict is a certificate: L0 and L1 in 11
+hypotheses, L2 with replay in 10 (one schedule per hypothesis; ~100 replays per search). At one
+request per leader the levels coincide, as they did on every protocol at workload one. The
+derivation is where replay differs: for "member 0 committed `x`" it lists member 1's vote (a
+majority with the leader's own; member 2's vote is correctly absent), both `AppendEntries(x)`
+and their replies, and both heartbeats carrying `leader_commit: 1`, eight messages; Level 1
+lists ten, every message the tick ever saw. That is a minimal quorum explanation read off a
+Rust state machine the IR knows nothing about.
+
+Raft also exposed a Level 0/1 gap: the committed stream passes through an `atomic` boundary, so
+a yield takes two async runs to reach the sink, the "ticks since the previous async run" window
+was empty, and both levels derived `{}` and certified after one hypothesis. An empty window now
+widens to the latest tick execution before the run (an over-approximation, like the rule).
+
+**Not done.** Several derivations per output (ddmin, or re-minimizing from a different order,
+which would save whole runs); pruning the candidate set with the slice; a per-node replay
+driver that does not instantiate the whole dylib; Raft under load.
+
+## A Raft bug the test suite does not catch
+
+The headline of this round. `raft.rs` carries thirteen behavioral tests, including unit tests
+of the §5.4.1 election restriction with an empty-log candidate and with a shorter-log
+candidate, the §5.4.2 commit rule along the Figure 8 history, truncation of conflicting
+uncommitted entries, and two fuzz tests with concurrent elections in quiesce-separated rounds.
+None of them exercise message *loss*: every delivery arrives, so every member's log is
+identical at every quiesce. The injected bug (`RaftConfig::election_restriction_ignores_term`)
+compares last-log **indexes** only, ignoring the last-log term, a mistake shipped in real
+implementations. Forced on unconditionally, all thirteen tests pass. It manifests when a
+member holds a stale entry of an older term at the same index as the others' committed entry,
+which needs a deposed leader's unreplicated entry *and* a lost replication.
+
+The harness (`hydro_test/src/cluster/raft_ldfi.rs`): three members, lossy intra-cluster channel
+(omissions until the end of finite failures), members crashable, budget 1, four simulator
+schedules per hypothesis, goal **agreement** (no two members commit different entries at one
+index) conditioned on member 0 having committed its request. The scenario lets the interleaving
+do half the work: member 1 wins term 1 and receives request `b`; member 0's election timer fires
+in the same phase, so the schedule decides whether member 2 sees `RequestVote(t2)` before or
+after `AppendEntries(b)`, i.e. whether 0 takes term 2 while 1 is left holding `b@1`. If it does,
+0 commits `a@1` with 2's acknowledgement; then 1 campaigns with `(term 1, index 1)` against 0's
+`(term 2, index 1)`; index-only grants, 1 leads term 3, `y` goes to index 2 and `b` overwrites
+the committed `a` on every member. Correct Raft refuses 1 and the goal holds.
+
+```
+searcher             verdict      hypotheses  instances
+lineage (L2+replay)  violated         25         100
+blind                violated        160         640
+random bern  (5×)    none         0 of 5 found within 640 instances each; 66% vacuous
+random k2    (5×)    none         0 of 5 found within 640 instances each; 33% vacuous
+
+correct Raft, same model:
+lineage              certificate     175         700
+blind                budget         >256       >1024
+```
+
+The counterexample is `{omit AppendEntries(a, leader_commit 0)→1, omit AppendEntries(a,
+leader_commit 1)→1}`: the original replication and its heartbeat retransmission (distinct
+payloads, so distinct faults), no crash, under the schedule in which 0 was elected. Random is
+hopeless here for a structural reason: the Bernoulli draw over thirteen omittable messages
+almost always kills the pre-condition (two thirds of its instances are vacuous), and uniform
+`k2` has one chance in several hundred at the right pair before the schedule is considered.
+Blind enumerates pairs weakest-first and arrives at 6.4× lineage's cost. Lineage's 25 are the
+21 singletons (every omission and crash point appears in some derivation), then the pairs the
+clauses demand; the fourth pair is the bug. Every hypothesis comes with the derivation that
+motivated it, read off a Rust state machine the IR knows nothing about.
+
+**What the Raft search forced on the method.** The first attempts exhausted the 256-hypothesis
+budget on *vacuous* runs, fault sets under which member 0 never committed and the run said
+nothing, on correct and buggy Raft alike. Four changes, each a defect in the search rather than
+in the lineage:
+
+1. *Liveness of the producer.* A witnessed or required output depends on its producer being
+   alive to emit it (a crashed node's outputs are suppressed). The derivation now carries
+   `alive(N through send k)`, killed by any crash of `N` before its `k`-th send; its preserve
+   point, the crash right after send `k`, is the weakest crash that keeps the pre-condition.
+2. *Preserve the pre-condition.* A hypothesis must leave at least one observed derivation of
+   the pre-condition intact (an indicator per required derivation in the ILP; dropped if that
+   makes the problem infeasible, so the search degrades rather than stops).
+3. *Crash premises.* A clause observed in a world where a node crashed carries that crash as a
+   premise, and a hypothesis without it is treated as hitting the clause. Agreement is not
+   monotone in a node's presence: the derivation `{votes, acks from 2, AppendEntries→2}` found
+   with member 1 crashed does not guarantee the goal with member 1 alive and buggy, yet the
+   solver had been treating it as universal and forcing a spurious third fault on every later
+   hypothesis. This is the negation problem of lineage-driven search, surfacing on a goal that
+   is a safety property over an election.
+4. *No supersets of a vacuous hypothesis* (a heuristic; vacuity is not strictly monotone).
+
+With these, correct Raft certifies (164–175 hypotheses, ~1 in 4 vacuous) and the bug is found
+in 24–26. The ISR and 2PC results above predate these changes; their verdicts are unchanged and
+their hypothesis counts shift by a few.
+
+**Not done.** Blind and random on correct Raft to the certificate (blind did not finish in
+256); Raft under load; a per-node replay driver.
 
 ## Appendix: comparison with the earlier proposal (`f32054f9`, `docs/design/lfdi-on-sim-hooks.md`)
 

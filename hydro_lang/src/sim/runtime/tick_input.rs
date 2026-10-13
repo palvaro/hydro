@@ -252,6 +252,8 @@ where
 pub struct OmissionPolicy<T> {
     /// Values to discard on arrival.
     pub omit: Vec<T>,
+    /// When set, the hook replays this script instead of delivering what arrives.
+    pub replay: Option<ReplayScript<T>>,
 }
 
 impl<T> ScriptDecision for OmissionPolicy<T>
@@ -259,7 +261,9 @@ where
     T: serde::Serialize + serde::de::DeserializeOwned,
 {
     fn describe(&self) -> String {
-        if self.omit.is_empty() {
+        if let Some(replay) = &self.replay {
+            replay.describe()
+        } else if self.omit.is_empty() {
             "deliver_all()".to_owned()
         } else {
             format!("omit({} value(s))", self.omit.len())
@@ -272,11 +276,64 @@ where
 /// channel admits no omission, so this is the only policy an ordered hook offers; it exists
 /// so such a channel can still be a lineage-traced delivery point for fault injection.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct PassthroughPolicy;
+pub struct PassthroughPolicy<T> {
+    /// When set, the hook replays this script instead of delivering what arrives.
+    pub replay: Option<ReplayScript<T>>,
+}
 
-impl ScriptDecision for PassthroughPolicy {
+impl<T> Default for PassthroughPolicy<T> {
+    fn default() -> Self {
+        PassthroughPolicy { replay: None }
+    }
+}
+
+impl<T> ScriptDecision for PassthroughPolicy<T>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
     fn describe(&self) -> String {
-        "deliver_all()".to_owned()
+        match &self.replay {
+            Some(replay) => replay.describe(),
+            None => "deliver_all()".to_owned(),
+        }
+    }
+}
+
+/// A **replay script** for a batch hook under a standing policy: what the hook releases
+/// into each successive execution of its tick, regardless of what arrives in its buffer
+/// (arrivals are discarded unrecorded). The tick is runnable on this hook's account while
+/// the script has executions left, including executions that release nothing, so a replay
+/// reproduces the recorded execution count of the tick. This is the counterfactual replay
+/// of lineage-driven fault injection (`hydro_lang::sim::ldfi`): a node re-executes alone,
+/// with its recorded inputs held fixed except for the deliveries the lineage query removed.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ReplayScript<T> {
+    /// The releases of each remaining tick execution, front first.
+    pub execs: VecDeque<Vec<T>>,
+}
+
+impl<T> ReplayScript<T> {
+    fn describe(&self) -> String {
+        format!("replay({} execution(s) left)", self.execs.len())
+    }
+
+    /// Discards everything buffered; the tick is runnable while executions remain.
+    fn sweep(&self, input: &RefCell<VecDeque<T>>) -> bool {
+        input.borrow_mut().clear();
+        !self.execs.is_empty()
+    }
+
+    /// Stages the next execution's releases (nothing once the script is exhausted).
+    fn apply(&mut self, input: &RefCell<VecDeque<T>>, trace: &mut PolicyTrace) -> Vec<T>
+    where
+        T: serde::Serialize,
+    {
+        input.borrow_mut().clear();
+        let delivered = self.execs.pop_front().unwrap_or_default();
+        for item in &delivered {
+            trace.delivered.push(bincode::serialize(item).unwrap());
+        }
+        delivered
     }
 }
 
@@ -297,13 +354,20 @@ where
     // Omission on a totally ordered stream would violate the order guarantee the consumer
     // relies on (only `fail_stop` transports yield such streams), so the only standing
     // policy is the traced pass-through.
-    type Policy = PassthroughPolicy;
+    type Policy = PassthroughPolicy<T>;
 
-    fn policy_sweep(&self, _policy: &PassthroughPolicy, _trace: &mut PolicyTrace) -> bool {
+    fn policy_sweep(&self, policy: &PassthroughPolicy<T>, _trace: &mut PolicyTrace) -> bool {
+        if let Some(replay) = &policy.replay {
+            return replay.sweep(&self.input);
+        }
         !self.input.borrow().is_empty()
     }
 
-    fn apply_policy(&mut self, _policy: &mut PassthroughPolicy, trace: &mut PolicyTrace) {
+    fn apply_policy(&mut self, policy: &mut PassthroughPolicy<T>, trace: &mut PolicyTrace) {
+        if let Some(replay) = &mut policy.replay {
+            self.to_release = Some(replay.apply(&self.input, trace));
+            return;
+        }
         let delivered: Vec<T> = self.input.borrow_mut().drain(..).collect();
         for item in &delivered {
             trace.delivered.push(bincode::serialize(item).unwrap());
@@ -388,6 +452,9 @@ where
     type Policy = OmissionPolicy<T>;
 
     fn policy_sweep(&self, policy: &OmissionPolicy<T>, trace: &mut PolicyTrace) -> bool {
+        if let Some(replay) = &policy.replay {
+            return replay.sweep(&self.input);
+        }
         let mut input = self.input.borrow_mut();
         if !policy.omit.is_empty() {
             let (kept, dropped): (Vec<T>, Vec<T>) = input
@@ -402,6 +469,10 @@ where
     }
 
     fn apply_policy(&mut self, policy: &mut OmissionPolicy<T>, trace: &mut PolicyTrace) {
+        if let Some(replay) = &mut policy.replay {
+            self.to_release = Some(replay.apply(&self.input, trace));
+            return;
+        }
         // Anything omitted was already swept at the scheduling query that made the tick
         // runnable, but input may have arrived since; sweep again so a release never
         // contains an omitted element.

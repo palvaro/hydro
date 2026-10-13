@@ -19,12 +19,14 @@
 //! Unsupported operators panic at compile time with their name: the rewrite is complete for
 //! the operators the LDFI examples use and explicit about what it does not cover.
 
+use proc_macro2::Span;
 use syn::parse_quote;
 
 use crate::compile::ir::{
     ClosureExpr, CollectionKind, DebugExpr, DebugType, HydroIrMetadata, HydroNode, HydroRoot,
     transform_bottom_up,
 };
+use crate::handoff_ref::HandoffRefKind;
 use crate::staging_util::get_this_crate;
 
 /// How a collection's elements are laid out after the rewrite.
@@ -301,6 +303,134 @@ fn wrap_scan_acc(acc: &ClosureExpr, input: Rep, output: Rep) -> ClosureExpr {
     })
 }
 
+/// `Tagged<T>` → `T` (the element type of an already rewritten node, un-tagged).
+fn untag(ty: &syn::Type) -> syn::Type {
+    if let syn::Type::Path(path) = ty
+        && let Some(last) = path.path.segments.last()
+        && last.ident == "Tagged"
+        && let syn::PathArguments::AngleBracketed(args) = &last.arguments
+        && args.args.len() == 1
+        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+    {
+        return inner.clone();
+    }
+    parse_quote!(_)
+}
+
+/// What a closure does with its result, for [`wrap_opaque`].
+#[derive(Clone, Copy)]
+enum Shape {
+    /// `Fn(T) -> U`.
+    Map,
+    /// `Fn(T) -> Option<U>`.
+    FilterMap,
+    /// `Fn(T) -> impl IntoIterator<Item = U>`.
+    FlatMap,
+}
+
+/// Wraps a closure that captures `Reference`s (the `by_ref` / `by_mut` handles of the
+/// closure encoding). The rewrite cannot see which of the closure's reads produced which
+/// output, so every output is tagged [`Prov::opaque`](crate::sim::runtime::Prov::opaque) and
+/// every cell the closure may write becomes opaque too; the LDFI closure derives such records
+/// by counterfactual replay of the node instead.
+///
+/// The user's code must still see plain values. The captured handles are bound outside this
+/// expression (see `ClosureExpr::emit_tokens`) to the tagged slots: `&Tagged<T>` /
+/// `&mut Tagged<T>` for singletons, `&Option<Tagged<T>>` for optionals, `&Vec<Tagged<T>>` /
+/// `&mut Vec<Tagged<T>>` for streams. Per call, each handle is shadowed by a plain view
+/// (`&T`, `&mut T`, a cloned `Option<T>` / `Vec<T>`, or a scratch `Vec<T>` for a mutable
+/// stream handle whose contents are appended, opaque, after the call), and the user's
+/// closure is constructed inside the call so it captures the shadows.
+fn wrap_opaque(f: &ClosureExpr, input: Rep, output: Rep, shape: Shape, name: &str) -> ClosureExpr {
+    let root = get_this_crate();
+    let (pat, val) = unwrap_tokens(input);
+    let mut preludes: Vec<syn::Stmt> = vec![];
+    let mut postludes: Vec<syn::Stmt> = vec![];
+    for (i, (node, is_mut)) in f.singleton_refs.iter().enumerate() {
+        let HydroNode::Reference { kind, metadata, .. } = node else {
+            unreachable!("singleton_refs only hold HydroNode::Reference");
+        };
+        let handle = crate::handoff_ref::handoff_ref_ident(i);
+        let local = syn::Ident::new(&format!("__hydro_opaque_local_{i}"), Span::call_site());
+        let real = syn::Ident::new(&format!("__hydro_opaque_real_{i}"), Span::call_site());
+        let prov = syn::Ident::new(&format!("__hydro_opaque_prov_{i}"), Span::call_site());
+        let plain = untag(&element_type(&metadata.collection_kind).0);
+        match (kind, is_mut) {
+            (HandoffRefKind::Singleton, false) => {
+                preludes.push(parse_quote!(let #handle = &(*#handle).0;));
+            }
+            (HandoffRefKind::Singleton, true) => {
+                preludes.push(parse_quote!(
+                    let #root::sim::runtime::Tagged(#local, #prov) = &mut *#handle;
+                ));
+                preludes.push(parse_quote!(let #handle = #local;));
+                postludes.push(parse_quote!(#prov.set_opaque();));
+            }
+            (HandoffRefKind::Optional, false) => {
+                preludes.push(parse_quote!(
+                    let #local: ::std::option::Option<#plain> =
+                        (*#handle).clone().map(|__t| __t.0);
+                ));
+                preludes.push(parse_quote!(let #handle = &#local;));
+            }
+            (HandoffRefKind::Vec, false) => {
+                preludes.push(parse_quote!(
+                    let #local: ::std::vec::Vec<#plain> =
+                        (*#handle).iter().map(|__t| __t.0.clone()).collect();
+                ));
+                preludes.push(parse_quote!(let #handle = &#local;));
+            }
+            (HandoffRefKind::Vec, true) => {
+                preludes.push(parse_quote!(let #real = &mut *#handle;));
+                preludes.push(
+                    parse_quote!(let mut #local: ::std::vec::Vec<#plain> = ::std::vec::Vec::new();),
+                );
+                preludes.push(parse_quote!(let #handle = &mut #local;));
+                postludes.push(parse_quote!(
+                    #real.extend(#local.into_iter().map(|__x| {
+                        #root::sim::runtime::Tagged(__x, #root::sim::runtime::Prov::opaque())
+                    }));
+                ));
+            }
+            (HandoffRefKind::Optional, true) => {
+                panic!(
+                    "the provenance rewrite does not support a mutable optional reference captured by `{name}`"
+                );
+            }
+        }
+    }
+    let call: syn::Expr = match shape {
+        Shape::Map | Shape::FilterMap => parse_quote!(__f(#val)),
+        Shape::FlatMap => parse_quote!(__f(#val).into_iter().collect::<::std::vec::Vec<_>>()),
+    };
+    let opaque: syn::Expr = parse_quote!(#root::sim::runtime::Prov::opaque());
+    let result: syn::Expr = match shape {
+        Shape::Map => wrap_tokens(output, parse_quote!(__out), opaque),
+        Shape::FilterMap => {
+            let one = wrap_tokens(output, parse_quote!(__u), opaque);
+            parse_quote!(__out.map(|__u| #one))
+        }
+        Shape::FlatMap => {
+            let one = wrap_tokens(output, parse_quote!(__u), opaque);
+            parse_quote!(__out.into_iter().map(|__u| #one))
+        }
+    };
+    wrap_closure(f, |f| {
+        parse_quote!({
+            move |#pat| {
+                let _ = &__prov;
+                #(#preludes)*
+                let __out = {
+                    let mut __f = #f;
+                    #call
+                };
+                #(#postludes)*
+                #result
+            }
+        })
+    })
+}
+
 /// A plain `Map` node applying `f` to `input`, with the given (already tagged) metadata.
 fn map_node(f: syn::Expr, input: HydroNode, metadata: HydroIrMetadata) -> HydroNode {
     HydroNode::Map {
@@ -410,6 +540,11 @@ pub fn rewrite(ir: &mut [HydroRoot]) {
                 | HydroNode::Difference { metadata, .. } => {
                     tag_kind(&mut metadata.collection_kind);
                 }
+                // A reference slot (`by_ref` / `by_mut`): holds the tagged value; the closures
+                // that capture it are wrapped by `wrap_opaque`.
+                HydroNode::Reference { metadata, .. } => {
+                    tag_kind(&mut metadata.collection_kind);
+                }
 
                 // Sources: empty provenance.
                 HydroNode::Source { metadata, .. } | HydroNode::ExternalInput { metadata, .. } => {
@@ -451,20 +586,36 @@ pub fn rewrite(ir: &mut [HydroRoot]) {
 
                 // Closures.
                 HydroNode::Map { f, input, metadata } => {
-                    *f = wrap_map(f, input_rep(input), out_rep);
+                    *f = if f.singleton_refs.is_empty() {
+                        wrap_map(f, input_rep(input), out_rep)
+                    } else {
+                        wrap_opaque(f, input_rep(input), out_rep, Shape::Map, &name)
+                    };
                     tag_kind(&mut metadata.collection_kind);
                 }
                 HydroNode::Filter { f, input, metadata }
                 | HydroNode::Inspect { f, input, metadata } => {
+                    assert!(
+                        f.singleton_refs.is_empty(),
+                        "the provenance rewrite does not support references captured by `{name}`"
+                    );
                     *f = wrap_by_ref(f, &input.metadata().collection_kind);
                     tag_kind(&mut metadata.collection_kind);
                 }
                 HydroNode::FilterMap { f, input, metadata } => {
-                    *f = wrap_filter_map(f, input_rep(input), out_rep);
+                    *f = if f.singleton_refs.is_empty() {
+                        wrap_filter_map(f, input_rep(input), out_rep)
+                    } else {
+                        wrap_opaque(f, input_rep(input), out_rep, Shape::FilterMap, &name)
+                    };
                     tag_kind(&mut metadata.collection_kind);
                 }
                 HydroNode::FlatMap { f, input, metadata } => {
-                    *f = wrap_flat_map(f, input_rep(input), out_rep);
+                    *f = if f.singleton_refs.is_empty() {
+                        wrap_flat_map(f, input_rep(input), out_rep)
+                    } else {
+                        wrap_opaque(f, input_rep(input), out_rep, Shape::FlatMap, &name)
+                    };
                     tag_kind(&mut metadata.collection_kind);
                 }
                 HydroNode::Fold {
@@ -614,8 +765,7 @@ pub fn rewrite(ir: &mut [HydroRoot]) {
                     ));
                 }
 
-                HydroNode::Reference { .. }
-                | HydroNode::PartitionSide { .. }
+                HydroNode::PartitionSide { .. }
                 | HydroNode::PartitionShared { .. }
                 | HydroNode::Enumerate { .. }
                 | HydroNode::ResolveFutures { .. }

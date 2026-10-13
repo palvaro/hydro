@@ -63,7 +63,7 @@ use crate::sim::compiled::{
 };
 use crate::sim::runtime::{
     BatchDecision, InlineOrderingDecision, KeyedBatchDecision, KeyedSnapshotDecision,
-    MergeDecision, OmissionPolicy, PassthroughPolicy, PolicyTrace, ScriptDecision,
+    MergeDecision, OmissionPolicy, PassthroughPolicy, PolicyTrace, ReplayScript, ScriptDecision,
     SnapshotDecision, TopLevelOrderingDecision, UnorderedBatchDecision,
     UnorderedKeyedBatchDecision,
 };
@@ -416,7 +416,19 @@ where
     /// no omission, so this is the only standing policy it offers; it makes the channel a
     /// lineage-traced delivery point for fault injection (`hydro_lang::sim::ldfi`).
     pub fn deliver_all(&self) {
-        self.install_policy(&PassthroughPolicy);
+        self.install_policy(&PassthroughPolicy::<T>::default());
+    }
+
+    /// Places the hook under a **replay policy**: it ignores what arrives and releases
+    /// `execs[k]` into the `k`-th execution of its tick from now on, for exactly
+    /// `execs.len()` executions (an empty entry runs the tick with nothing released). The
+    /// counterfactual replay of lineage-driven fault injection (see `hydro_lang::sim::ldfi`).
+    pub fn replay(&self, execs: impl IntoIterator<Item = Vec<T>>) {
+        self.install_policy(&PassthroughPolicy {
+            replay: Some(ReplayScript {
+                execs: execs.into_iter().collect(),
+            }),
+        });
     }
 }
 
@@ -438,6 +450,20 @@ where
     pub fn omit(&self, values: impl IntoIterator<Item = T>) {
         self.install_policy(&OmissionPolicy {
             omit: values.into_iter().collect::<Vec<T>>(),
+            replay: None,
+        });
+    }
+
+    /// Places the hook under a **replay policy**: it ignores what arrives and releases
+    /// `execs[k]` into the `k`-th execution of its tick from now on, for exactly
+    /// `execs.len()` executions (an empty entry runs the tick with nothing released). The
+    /// counterfactual replay of lineage-driven fault injection (see `hydro_lang::sim::ldfi`).
+    pub fn replay(&self, execs: impl IntoIterator<Item = Vec<T>>) {
+        self.install_policy(&OmissionPolicy {
+            omit: vec![],
+            replay: Some(ReplayScript {
+                execs: execs.into_iter().collect(),
+            }),
         });
     }
 

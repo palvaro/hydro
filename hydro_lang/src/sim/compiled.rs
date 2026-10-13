@@ -455,6 +455,15 @@ pub(crate) fn hook_root_location(hook_id: usize, member: Option<u32>) -> (Locati
     (location.location.root().clone(), location.cluster_id)
 }
 
+/// The execution unit (tick location) and member a scripted hook feeds. Panics if called
+/// outside a simulation or if the hook is not bound.
+pub(crate) fn hook_tick_location(hook_id: usize, member: Option<u32>) -> (LocationId, Option<u32>) {
+    let ctx = script_ctx();
+    let hook = ctx.control(hook_id, member);
+    let location = hook.borrow().target().location().clone();
+    (location.location, location.cluster_id)
+}
+
 /// Resolves the per-instance scripting context. Panics if called outside a simulation.
 pub(crate) fn script_ctx() -> ScriptCtx {
     CURRENT_SIM_CONNECTIONS.with(|connections| {
@@ -911,6 +920,7 @@ impl CompiledSim {
                 log,
                 exhaustive: false,
                 deterministic: false,
+                replay: false,
             }),
         )
     }
@@ -1216,6 +1226,34 @@ impl CompiledSim {
                 .block_on(instance.run(thunk));
         })
     }
+
+    /// A quiet instance driven by a fixed, all-zero entropy source: every scheduling choice
+    /// and every unhooked in-tick decision resolves to its first alternative, so two such
+    /// instances of the same program under the same scripts behave identically. For the
+    /// counterfactual replays of `sim::ldfi`, whose hooks are all under replay policies.
+    pub(crate) fn replay(&self, thunk: impl AsyncFnOnce() + RefUnwindSafe) {
+        self.with_instantiator(
+            |instantiator| {
+                let mut instance = instantiator();
+                instance.replay = true;
+                bolero::bolero_engine::any::scope::with(
+                    Box::new(bolero::bolero_engine::driver::object::Object(
+                        bolero::bolero_engine::driver::bytes::Driver::new(
+                            vec![0u8; 1 << 20],
+                            &Default::default(),
+                        ),
+                    )),
+                    || {
+                        tokio::runtime::Builder::new_current_thread()
+                            .build()
+                            .unwrap()
+                            .block_on(instance.run(thunk));
+                    },
+                );
+            },
+            false,
+        )
+    }
 }
 
 // This must be a tuple because it is referenced from generated code in `graph.rs`.
@@ -1243,6 +1281,9 @@ pub struct CompiledSimInstance<'a> {
     log: bool,
     exhaustive: bool,
     deterministic: bool,
+    /// A counterfactual replay (see [`CompiledSim::replay`]): tick executions are scripted by
+    /// replay policies and may legitimately have nothing to do.
+    replay: bool,
 }
 
 impl<'a> CompiledSimInstance<'a> {
@@ -1564,6 +1605,7 @@ impl<'a> CompiledSimInstance<'a> {
             },
             quiescence,
             deterministic: self.deterministic,
+            replay: self.replay,
             lineage,
             next_exec: 0,
             hook_ids,
@@ -2521,6 +2563,9 @@ struct LaunchedSim<W: std::io::Write> {
     /// drawn, every unsafe operator with meaningful input must be scripted, and at most
     /// one tick is ever runnable (see `SimFlow::deterministic`).
     deterministic: bool,
+    /// Whether this is a counterfactual replay, whose scripted tick executions may have
+    /// nothing to do.
+    replay: bool,
     /// The lineage log shared with generated code; the scheduler assigns execution ids
     /// and records executions and hook releases into it.
     lineage: LineageHandles,
@@ -2931,12 +2976,13 @@ impl<W: std::io::Write> LaunchedSim<W> {
                 if !tick.inline_hooks.is_empty() || !tick.scripted_inline_hooks.is_empty() {
                     let mut run_tick_future_pinned = pin!(run_tick_future);
                     let deterministic = self.deterministic;
+                    let replay = self.replay;
 
                     loop {
                         tokio::select! {
                             biased;
                             r = &mut run_tick_future_pinned => {
-                                abort_assert!(r, "runnable tick's DFIR run_tick() returned false");
+                                abort_assert!(r || replay, "runnable tick's DFIR run_tick() returned false");
                                 break;
                             }
                             () = async {} => {
@@ -2987,7 +3033,7 @@ impl<W: std::io::Write> LaunchedSim<W> {
                 } else {
                     let made_progress = run_tick_future.await;
                     abort_assert!(
-                        made_progress,
+                        made_progress || self.replay,
                         "runnable tick's DFIR run_tick() returned false"
                     );
                 }

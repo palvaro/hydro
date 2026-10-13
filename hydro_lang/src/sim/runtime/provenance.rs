@@ -24,6 +24,11 @@ use std::hash::{Hash, Hasher};
 pub struct Prov(Vec<u64>);
 
 impl Prov {
+    /// The delivery id standing for "unknown": the record came out of a closure whose reads
+    /// the rewrite cannot see (a `Reference` capture), so its lineage must be derived by
+    /// counterfactual replay of the node (see `sim::ldfi`, [`Level::Counterfactual`]).
+    pub const OPAQUE: u64 = u64::MAX;
+
     /// No provenance (a constant, an external input, a network arrival at the top level).
     pub const fn empty() -> Self {
         Prov(Vec::new())
@@ -32,6 +37,21 @@ impl Prov {
     /// Exactly one delivery.
     pub fn single(id: u64) -> Self {
         Prov(vec![id])
+    }
+
+    /// The opaque provenance (see [`Self::OPAQUE`]).
+    pub fn opaque() -> Self {
+        Prov(vec![Self::OPAQUE])
+    }
+
+    /// Whether this provenance is opaque.
+    pub fn is_opaque(&self) -> bool {
+        self.0.last() == Some(&Self::OPAQUE)
+    }
+
+    /// Makes this provenance opaque.
+    pub fn set_opaque(&mut self) {
+        self.0 = vec![Self::OPAQUE];
     }
 
     /// The ids, ascending.
