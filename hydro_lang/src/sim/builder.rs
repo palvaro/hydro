@@ -38,6 +38,9 @@ pub struct SimBuilder {
     pub next_hoff_id: crate::Counter<HandoffId>,
     pub test_safety_only: bool,
     pub skip_consistency_assertions: bool,
+    /// The IR was rewritten with record-level provenance: network sends and external
+    /// outputs receive `(value, Vec<delivery id>)` and record the ids.
+    pub provenance: bool,
     pub channel_tables: BTreeMap<u32, syn::Ident>,
     /// Tracks which operators sim hook handles have been bound to, to report double-binds
     /// at flow build time with both operator locations.
@@ -609,13 +612,42 @@ impl DfirBuilder for SimBuilder {
                         None,
                     );
 
-                    self.get_dfir_mut(out_location).add_dfir(
-                        parse_quote! {
-                            #out_ident = source_stream(#hoff_recv_ident);
-                        },
-                        None,
-                        None,
-                    );
+                    if self.provenance {
+                        // Record-level provenance: every released item gets a fresh delivery
+                        // id, recorded against this hook and member.
+                        let tag_lineage_ident =
+                            syn::Ident::new(&format!("__tag_lineage_{hoff_id}"), Span::call_site());
+                        self.add_extra_stmt_internal(
+                            in_location,
+                            syn::parse_quote! {
+                                let #tag_lineage_ident = __hydro_lineage.clone();
+                            },
+                        );
+                        let hook: syn::Expr = match op_meta.sim_hook_id {
+                            Some(id) => syn::parse_quote!(Some(#id)),
+                            None => syn::parse_quote!(None),
+                        };
+                        let member: syn::Expr = match in_location {
+                            LocationId::Cluster(_) => syn::parse_quote!(Some(__current_cluster_id)),
+                            _ => syn::parse_quote!(None),
+                        };
+                        self.get_dfir_mut(out_location).add_dfir(
+                            parse_quote! {
+                                #out_ident = source_stream(#hoff_recv_ident)
+                                    -> map(|__x| #root::sim::runtime::codegen::tag_delivery(&#tag_lineage_ident, #hook, #member, __x));
+                            },
+                            None,
+                            None,
+                        );
+                    } else {
+                        self.get_dfir_mut(out_location).add_dfir(
+                            parse_quote! {
+                                #out_ident = source_stream(#hoff_recv_ident);
+                            },
+                            None,
+                            None,
+                        );
+                    }
                 }
                 CollectionKind::KeyedStream {
                     value_order,
@@ -1974,34 +2006,112 @@ impl DfirBuilder for SimBuilder {
             quote::quote!(-> map(|v| -> ::std::result::Result<_, ()> { Ok(v) }))
         };
 
+        // Lineage and crash faults: every send is recorded against the execution that
+        // produced it, and a send by a crashed node is dropped instead of performed (see
+        // `sim::runtime::lineage`). Embedded (raw-element) channels carry no serialized
+        // payload to record and are not fault points.
+        let lineage_ident =
+            syn::Ident::new(&format!("__lineage_send_{}", tag_id), Span::call_site());
+        let from_ser = serde_json::to_string(from).unwrap();
+        let to_ser = serde_json::to_string(to).unwrap();
+        self.add_extra_stmt_internal(
+            from,
+            syn::parse_quote! {
+                let #lineage_ident = (
+                    __hydro_lineage.clone(),
+                    #root::sim::runtime::parse_location(#from_ser),
+                    #root::sim::runtime::parse_location(#to_ser),
+                );
+            },
+        );
+        let channel_id = tag_id.into_inner();
+        // The receive half records every arrival (before deserialization) against the
+        // execution that took it off the channel.
+        let recv_ident = syn::Ident::new(&format!("__lineage_recv_{}", tag_id), Span::call_site());
+        self.add_extra_stmt_internal(
+            to,
+            syn::parse_quote! {
+                let #recv_ident = (
+                    __hydro_lineage.clone(),
+                    #root::sim::runtime::parse_location(#to_ser),
+                );
+            },
+        );
+        let to_member_recv: proc_macro2::TokenStream = if matches!(to, LocationId::Cluster(_)) {
+            quote::quote!(Some(__current_cluster_id))
+        } else {
+            quote::quote!(None)
+        };
+        let recv_tap: proc_macro2::TokenStream = if external_element_type.is_some() {
+            proc_macro2::TokenStream::new()
+        } else if matches!(from, LocationId::Cluster(_)) {
+            quote::quote!(-> inspect(|(_, v)| #recv_ident.0.record_recv(#channel_id, &#recv_ident.1, #to_member_recv, v)))
+        } else {
+            quote::quote!(-> inspect(|v| #recv_ident.0.record_recv(#channel_id, &#recv_ident.1, #to_member_recv, v)))
+        };
+        // With record-level provenance the input items are `(payload, Vec<delivery id>)`
+        // (see `sim::provenance`): serialize the payload, record the ids with the send.
+        let provenance = self.provenance;
+        let send_guard = |from_member: proc_macro2::TokenStream,
+                          to_member: proc_macro2::TokenStream|
+         -> proc_macro2::TokenStream {
+            if external_element_type.is_some() {
+                quote::quote!(true)
+            } else if provenance {
+                quote::quote!(#lineage_ident.0.record_sent_with(#channel_id, &#lineage_ident.1, #from_member, &#lineage_ident.2, #to_member, &v, __prov))
+            } else {
+                quote::quote!(#lineage_ident.0.record_sent(#channel_id, &#lineage_ident.1, #from_member, &#lineage_ident.2, #to_member, &v))
+            }
+        };
+        let ser_map: proc_macro2::TokenStream = match (serialize, provenance) {
+            (Some(serialize_pipeline), true) => {
+                quote::quote!(-> map(|(__v, __prov)| ((#serialize_pipeline)(__v), __prov)))
+            }
+            (Some(serialize_pipeline), false) => quote::quote!(-> map(#serialize_pipeline)),
+            (None, _) => proc_macro2::TokenStream::new(),
+        };
+        let pat_single: proc_macro2::TokenStream = if provenance {
+            quote::quote!((v, __prov))
+        } else {
+            quote::quote!(v)
+        };
+        let pat_targeted: proc_macro2::TokenStream = if provenance {
+            quote::quote!(((target_member_id, v), __prov))
+        } else {
+            quote::quote!((target_member_id, v))
+        };
+        let send_p2p = send_guard(quote::quote!(None), quote::quote!(None));
+        let send_c2p = send_guard(
+            quote::quote!(Some(__current_cluster_id)),
+            quote::quote!(None),
+        );
+        let send_p2c = send_guard(
+            quote::quote!(None),
+            quote::quote!(Some(#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id))),
+        );
+        let send_c2c = send_guard(
+            quote::quote!(Some(__current_cluster_id)),
+            quote::quote!(Some(#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id))),
+        );
+
         match (from, to) {
             (LocationId::Process(_), LocationId::Process(_)) => {
                 self.extra_stmts_global.push(syn::parse_quote! {
                     let (#sink, #source) = __root_dfir_rs::util::unsync::mpsc::unbounded::<#payload>();
                 });
 
-                if let Some(serialize_pipeline) = serialize {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(|v| #sink.try_send(v).unwrap());
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                } else {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> for_each(|v| #sink.try_send(v).unwrap());
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                }
+                self.get_dfir_mut(from).add_dfir(
+                    parse_quote! {
+                        #input_ident #ser_map -> for_each(|#pat_single| if #send_p2p { #sink.try_send(v).unwrap() });
+                    },
+                    None,
+                    Some(&format!("send{}", tag_id)),
+                );
 
                 if let Some(deserialize_pipeline) = deserialize {
                     self.get_dfir_mut(to).add_dfir(
                         parse_quote! {
-                            #out_ident = source_stream(#source) #ok_wrap -> map(#deserialize_pipeline);
+                            #out_ident = source_stream(#source) #recv_tap #ok_wrap -> map(#deserialize_pipeline);
                         },
                         None,
                         Some(&format!("recv{}", tag_id)),
@@ -2009,7 +2119,7 @@ impl DfirBuilder for SimBuilder {
                 } else {
                     self.get_dfir_mut(to).add_dfir(
                         parse_quote! {
-                            #out_ident = source_stream(#source);
+                            #out_ident = source_stream(#source) #recv_tap;
                         },
                         None,
                         Some(&format!("recv{}", tag_id)),
@@ -2028,28 +2138,18 @@ impl DfirBuilder for SimBuilder {
                         let #sink = #sink.clone();
                     });
 
-                if let Some(serialize_pipeline) = serialize {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(|v| #sink.try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap());
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                } else {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> for_each(|v| #sink.try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap());
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                }
+                self.get_dfir_mut(from).add_dfir(
+                    parse_quote! {
+                        #input_ident #ser_map -> for_each(|#pat_single| if #send_c2p { #sink.try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap() });
+                    },
+                    None,
+                    Some(&format!("send{}", tag_id)),
+                );
 
                 if let Some(deserialize_pipeline) = deserialize {
                     self.get_dfir_mut(to).add_dfir(
                         parse_quote! {
-                            #out_ident = source_stream(#source) #ok_wrap -> map(#deserialize_pipeline);
+                            #out_ident = source_stream(#source) #recv_tap #ok_wrap -> map(#deserialize_pipeline);
                         },
                         None,
                         Some(&format!("recv{}", tag_id)),
@@ -2057,7 +2157,7 @@ impl DfirBuilder for SimBuilder {
                 } else {
                     self.get_dfir_mut(to).add_dfir(
                         parse_quote! {
-                            #out_ident = source_stream(#source);
+                            #out_ident = source_stream(#source) #recv_tap;
                         },
                         None,
                         Some(&format!("recv{}", tag_id)),
@@ -2088,28 +2188,18 @@ impl DfirBuilder for SimBuilder {
                         };
                     });
 
-                if let Some(serialize_pipeline) = serialize {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(|(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send(v).unwrap());
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                } else {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> for_each(|(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send(v).unwrap());
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                }
+                self.get_dfir_mut(from).add_dfir(
+                    parse_quote! {
+                        #input_ident #ser_map -> for_each(|#pat_targeted| if #send_p2c { (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send(v).unwrap() });
+                    },
+                    None,
+                    Some(&format!("send{}", tag_id)),
+                );
 
                 if let Some(deserialize_pipeline) = deserialize {
                     self.get_dfir_mut(to).add_dfir(
                         parse_quote! {
-                            #out_ident = source_stream(#source) #ok_wrap -> map(#deserialize_pipeline);
+                            #out_ident = source_stream(#source) #recv_tap #ok_wrap -> map(#deserialize_pipeline);
                         },
                         None,
                         Some(&format!("recv{}", tag_id)),
@@ -2117,7 +2207,7 @@ impl DfirBuilder for SimBuilder {
                 } else {
                     self.get_dfir_mut(to).add_dfir(
                         parse_quote! {
-                            #out_ident = source_stream(#source);
+                            #out_ident = source_stream(#source) #recv_tap;
                         },
                         None,
                         Some(&format!("recv{}", tag_id)),
@@ -2155,28 +2245,18 @@ impl DfirBuilder for SimBuilder {
                         };
                     });
 
-                if let Some(serialize_pipeline) = serialize {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(|(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap());
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                } else {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> for_each(|(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap());
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                }
+                self.get_dfir_mut(from).add_dfir(
+                    parse_quote! {
+                        #input_ident #ser_map -> for_each(|#pat_targeted| if #send_c2c { (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap() });
+                    },
+                    None,
+                    Some(&format!("send{}", tag_id)),
+                );
 
                 if let Some(deserialize_pipeline) = deserialize {
                     self.get_dfir_mut(to).add_dfir(
                         parse_quote! {
-                            #out_ident = source_stream(#source) #ok_wrap -> map(#deserialize_pipeline);
+                            #out_ident = source_stream(#source) #recv_tap #ok_wrap -> map(#deserialize_pipeline);
                         },
                         None,
                         Some(&format!("recv{}", tag_id)),
@@ -2184,7 +2264,7 @@ impl DfirBuilder for SimBuilder {
                 } else {
                     self.get_dfir_mut(to).add_dfir(
                         parse_quote! {
-                            #out_ident = source_stream(#source);
+                            #out_ident = source_stream(#source) #recv_tap;
                         },
                         None,
                         Some(&format!("recv{}", tag_id)),
@@ -2236,17 +2316,30 @@ impl DfirBuilder for SimBuilder {
         tag_id: StmtId,
     ) {
         let grabbed_ident = syn::Ident::new(&format!("__sink_{tag_id}"), Span::call_site());
+        // The sink is a `LineageOutputSender` (see `SimDeploy::o2e_sink` / `m2e_sink`); naming
+        // its node lets it honor that node's crash.
+        let root = get_this_crate();
+        let on_ser = serde_json::to_string(on).unwrap();
+        let sink_id = tag_id.into_inner();
         self.add_extra_stmt_internal(
             on,
             syn::parse_quote! {
-                let #grabbed_ident = #sink_expr;
+                let #grabbed_ident = #sink_expr.at(#root::sim::runtime::parse_location(#on_ser), #sink_id);
             },
         );
 
-        if let Some(serialize_pipeline) = serialize {
+        // With record-level provenance the input items are `(payload, Vec<delivery id>)`.
+        let ser_map: proc_macro2::TokenStream = match (serialize, self.provenance) {
+            (Some(serialize_pipeline), true) => {
+                quote::quote!(-> map(|(__v, __prov)| ((#serialize_pipeline)(__v), __prov)))
+            }
+            (Some(serialize_pipeline), false) => quote::quote!(-> map(#serialize_pipeline)),
+            (None, _) => proc_macro2::TokenStream::new(),
+        };
+        if self.provenance {
             self.get_dfir_mut(on).add_dfir(
                 parse_quote! {
-                    #input_ident -> map(#serialize_pipeline) -> for_each(|v| #grabbed_ident.try_send(v).unwrap());
+                    #input_ident #ser_map -> for_each(|(v, __prov)| #grabbed_ident.try_send_with(v, __prov).unwrap());
                 },
                 None,
                 Some(&format!("send{}", tag_id)),
@@ -2254,7 +2347,7 @@ impl DfirBuilder for SimBuilder {
         } else {
             self.get_dfir_mut(on).add_dfir(
                 parse_quote! {
-                    #input_ident -> for_each(|v| #grabbed_ident.try_send(v).unwrap());
+                    #input_ident #ser_map -> for_each(|v| #grabbed_ident.try_send(v).unwrap());
                 },
                 None,
                 Some(&format!("send{}", tag_id)),
@@ -2528,30 +2621,21 @@ impl DfirBuilder for SimBuilder {
     }
 }
 
-/// The source position an operator stands for, as `(file:line:col, source line text, caret
-/// indent)`, for hook identities, hook error messages, and the per-tick trace. The return type
-/// mirrors `HookLocationMeta`, but with owned `String`s that will be inlined into the generated
-/// sources.
+/// Extract a location string, line, and caret indent from an op's metadata backtrace.
 ///
-/// An operator created by `sliced!` carries the position of the user's `use::batch(...)` or
-/// `use::snapshot(...)` expression, recorded while the macro expanded (see
-/// [`crate::compile::ir::backtrace::UserLocation`]); that is preferred, because the backtrace
-/// of such an operator names the `sliced!` invocation when the macro is expanded in another
-/// crate. Every other operator is positioned by the first frame of its backtrace.
+/// The return type mirrors `HookLocationMeta`, but with owned `String` that will be inlined
+/// into the generated sources.
 fn location_for_op(op_meta: &HydroIrOpMetadata) -> (String, String, String) {
-    let position = op_meta
+    op_meta
         .backtrace
-        .user_location()
-        .and_then(|u| Some((u.file?.to_owned(), u.line, u.column.saturating_sub(1))))
-        .or_else(|| {
-            op_meta.backtrace.elements().next().and_then(|e| {
-                Some((e.filename.as_deref()?.to_owned(), e.lineno?, e.colno?))
-            })
-        });
+        .elements()
+        .next()
+        .and_then(|e| {
+            let filename = e.filename.as_deref()?;
+            let lineno = e.lineno?;
+            let colno = e.colno?;
 
-    position
-        .map(|(filename, lineno, colno)| {
-            let line = std::fs::read_to_string(&filename)
+            let line = std::fs::read_to_string(filename)
                 .ok()
                 .and_then(|s| {
                     s.lines()
@@ -2560,26 +2644,21 @@ fn location_for_op(op_meta: &HydroIrOpMetadata) -> (String, String, String) {
                 })
                 .unwrap_or_default();
 
-            // Show the path relative to the working directory, or failing that to the nearest
-            // ancestor that contains it (the workspace root for a file in a sibling crate).
             let relative_path = (|| {
-                let cwd = std::env::current_dir().ok()?;
-                let path = std::path::Path::new(&filename);
-                cwd.ancestors()
-                    .filter(|base| base.parent().is_some())
-                    .find_map(|base| path.strip_prefix(base).ok())
-                    .map(|p| p.to_path_buf())
+                std::path::Path::new(filename)
+                    .strip_prefix(std::env::current_dir().ok()?)
+                    .ok()
             })();
 
             let filename_display = relative_path
                 .map(|p| p.display().to_string())
-                .unwrap_or_else(|| filename.clone());
+                .unwrap_or_else(|| filename.to_owned());
 
-            (
+            Some((
                 format!("{}:{}:{}", filename_display, lineno, colno),
                 line,
-                format!("{:>1$}", "", colno.saturating_sub(1).try_into().unwrap()),
-            )
+                format!("{:>1$}", "", (colno - 1).try_into().unwrap()),
+            ))
         })
         .unwrap_or_else(|| ("unknown location".to_owned(), String::new(), String::new()))
 }

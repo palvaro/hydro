@@ -63,8 +63,9 @@ use crate::sim::compiled::{
 };
 use crate::sim::runtime::{
     BatchDecision, InlineOrderingDecision, KeyedBatchDecision, KeyedSnapshotDecision,
-    MergeDecision, ScriptDecision, SnapshotDecision, TopLevelOrderingDecision,
-    UnorderedBatchDecision, UnorderedKeyedBatchDecision,
+    MergeDecision, OmissionPolicy, PassthroughPolicy, PolicyTrace, ReplayScript, ScriptDecision,
+    SnapshotDecision, TopLevelOrderingDecision, UnorderedBatchDecision,
+    UnorderedKeyedBatchDecision,
 };
 pub use crate::sim::runtime::{
     BatchStatus, KeyedSnapshotStatus, MergeStatus, OrderingStatus, SnapshotStatus,
@@ -94,15 +95,10 @@ pub struct DecisionFuture {
 
 impl DecisionFuture {
     fn new(hook_id: usize, member: Option<u32>, decision: &impl ScriptDecision) -> Self {
-        Self::from_blob(hook_id, member, bincode::serialize(decision).unwrap())
-    }
-
-    /// A decision already serialized by the caller (see [`super::extension::install_decision`]).
-    pub(crate) fn from_blob(hook_id: usize, member: Option<u32>, blob: Vec<u8>) -> Self {
         DecisionFuture {
             hook_id,
             member,
-            blob: Some(blob),
+            blob: Some(bincode::serialize(decision).unwrap()),
         }
     }
 }
@@ -370,10 +366,113 @@ where
     }
 }
 
+impl<T, O: Ordering, R: Retries, Scope: ScriptableHookScope> BatchHook<T, O, R, Scope>
+where
+    T: Serialize + DeserializeOwned + PartialEq,
+{
+    /// Every element released by this hook while under a standing policy, in release
+    /// order.
+    pub fn delivered(&self) -> Vec<T> {
+        self.policy_trace()
+            .delivered
+            .iter()
+            .map(|blob| bincode::deserialize(blob).unwrap())
+            .collect()
+    }
+
+    /// Every element discarded by this hook's standing policy, in discard order.
+    pub fn dropped(&self) -> Vec<T> {
+        self.policy_trace()
+            .dropped
+            .iter()
+            .map(|blob| bincode::deserialize(blob).unwrap())
+            .collect()
+    }
+
+    fn policy_trace(&self) -> PolicyTrace {
+        let ctx = script_ctx();
+        let blob = ctx
+            .control(self.id, self.member)
+            .borrow()
+            .policy_trace_blob();
+        bincode::deserialize(&blob).expect("internal error: policy trace blob was malformed")
+    }
+
+    fn install_policy(&self, policy: &impl Serialize) {
+        let ctx = script_ctx();
+        ctx.control(self.id, self.member)
+            .borrow_mut()
+            .install_policy(&bincode::serialize(policy).unwrap());
+    }
+}
+
+impl<T, R: Retries, Scope: ScriptableHookScope> BatchHook<T, TotalOrder, R, Scope>
+where
+    T: Serialize + DeserializeOwned + PartialEq,
+{
+    /// Places the hook under the standing policy that delivers everything as it arrives,
+    /// with no further scripting and no entropy, tracing every delivery (see
+    /// [`Self::delivered`]). An ordered stream comes from a reliable channel, which admits
+    /// no omission, so this is the only standing policy it offers; it makes the channel a
+    /// lineage-traced delivery point for fault injection (`hydro_lang::sim::ldfi`).
+    pub fn deliver_all(&self) {
+        self.install_policy(&PassthroughPolicy::<T>::default());
+    }
+
+    /// Places the hook under a **replay policy**: it ignores what arrives and releases
+    /// `execs[k]` into the `k`-th execution of its tick from now on, for exactly
+    /// `execs.len()` executions (an empty entry runs the tick with nothing released). The
+    /// counterfactual replay of lineage-driven fault injection (see `hydro_lang::sim::ldfi`).
+    pub fn replay(&self, execs: impl IntoIterator<Item = Vec<T>>) {
+        self.install_policy(&PassthroughPolicy {
+            replay: Some(ReplayScript {
+                execs: execs.into_iter().collect(),
+            }),
+        });
+    }
+}
+
 impl<T, R: Retries, Scope: ScriptableHookScope> BatchHook<T, NoOrder, R, Scope>
 where
     T: Serialize + DeserializeOwned + PartialEq,
 {
+    /// Places the hook under a **standing omission policy**: from now on, every buffered
+    /// element equal to one of `values` is discarded on arrival and everything else is
+    /// released into the tick as soon as it arrives, with no further scripting. The hook
+    /// consumes no entropy, is never reported as forgotten, and cannot also take scripted
+    /// decisions. Calling `omit` again replaces the policy.
+    ///
+    /// Every occurrence of an omitted value is discarded while the policy stands, so a
+    /// byte-identical retransmission is omitted too; call [`Self::deliver_all`] to let
+    /// later copies through. This is the omission fault point of lineage-driven fault
+    /// injection (see `hydro_lang::sim::ldfi`): an unordered stream is what a lossy channel
+    /// yields, and omission is the fault such a channel admits.
+    pub fn omit(&self, values: impl IntoIterator<Item = T>) {
+        self.install_policy(&OmissionPolicy {
+            omit: values.into_iter().collect::<Vec<T>>(),
+            replay: None,
+        });
+    }
+
+    /// Places the hook under a **replay policy**: it ignores what arrives and releases
+    /// `execs[k]` into the `k`-th execution of its tick from now on, for exactly
+    /// `execs.len()` executions (an empty entry runs the tick with nothing released). The
+    /// counterfactual replay of lineage-driven fault injection (see `hydro_lang::sim::ldfi`).
+    pub fn replay(&self, execs: impl IntoIterator<Item = Vec<T>>) {
+        self.install_policy(&OmissionPolicy {
+            omit: vec![],
+            replay: Some(ReplayScript {
+                execs: execs.into_iter().collect(),
+            }),
+        });
+    }
+
+    /// Places the hook under the standing policy that delivers everything (the empty
+    /// omission policy): the "no more faults" declaration at the end of finite failures.
+    pub fn deliver_all(&self) {
+        self.omit([]);
+    }
+
     /// Scripts the next batch to contain exactly this multiset of buffered values. Values
     /// are matched independently of arrival order; duplicates request the corresponding
     /// number of equal buffered items. The tick fires once every requested value exists.

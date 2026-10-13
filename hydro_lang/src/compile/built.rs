@@ -185,6 +185,7 @@ impl<'a> BuiltFlow<'a> {
             location_version_group_root: self.location_version_group_root,
             test_safety_only: false,
             skip_consistency_assertions: false,
+            provenance: false,
             unit_test_fuzz_iterations: 8192,
             _phantom: PhantomData,
         }

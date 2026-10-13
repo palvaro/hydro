@@ -355,10 +355,18 @@ impl<'a> Deploy<'a> for SimDeploy {
     ) -> syn::Expr {
         let ident = syn::Ident::new("__hydro_external_out", Span::call_site());
         let p2_port_usize = p2_port.0;
+        let root = get_this_crate();
         syn::parse_quote!({
             let (__sender, __receiver) = __root_dfir_rs::util::unsync::mpsc::unbounded::<__root_dfir_rs::bytes::Bytes>();
             #ident.insert(#p2_port_usize, __receiver);
-            __sender
+            #root::sim::runtime::LineageOutputSender {
+                inner: __sender,
+                sink: 0,
+                port: #p2_port_usize,
+                location: None,
+                member: None,
+                lineage: __hydro_lineage.clone(),
+            }
         })
     }
 
@@ -399,10 +407,18 @@ impl<'a> Deploy<'a> for SimDeploy {
     ) -> syn::Expr {
         let ident = syn::Ident::new("__hydro_cluster_external_out", Span::call_site());
         let p2_port_usize = p2_port.0;
+        let root = get_this_crate();
         syn::parse_quote!({
             let (__sender, __receiver) = __root_dfir_rs::util::unsync::mpsc::unbounded::<__root_dfir_rs::bytes::Bytes>();
             #ident.entry(#p2_port_usize).or_insert_with(::std::collections::HashMap::new).insert(__current_cluster_id, __receiver);
-            __sender
+            #root::sim::runtime::LineageOutputSender {
+                inner: __sender,
+                sink: 0,
+                port: #p2_port_usize,
+                location: None,
+                member: Some(__current_cluster_id),
+                lineage: __hydro_lineage.clone(),
+            }
         })
     }
 
@@ -728,6 +744,7 @@ fn compile_sim_graph_trybuild(
             #root::sim::runtime::ScriptedObservationHooks,
             #root::sim::runtime::ScriptedInlineHooks,
             #root::sim::runtime::ScriptedHookRegistry,
+            #root::sim::runtime::LineageHandles,
         ) {
             macro_rules! println {
                 ($($arg:tt)*) => ({
@@ -780,13 +797,14 @@ fn compile_sim_graph_trybuild(
             let mut __hydro_scripted_observation_hooks: #root::sim::runtime::ScriptedObservationHooks = ::std::collections::HashMap::new();
             let mut __hydro_scripted_inline_hooks: #root::sim::runtime::ScriptedInlineHooks = ::std::collections::HashMap::new();
             let mut __hydro_scripted_registry: #root::sim::runtime::ScriptedHookRegistry = ::std::collections::BTreeMap::new();
+            let __hydro_lineage: #root::sim::runtime::LineageHandles = ::std::default::Default::default();
             #(#extra_stmts_global)*
             #(#cluster_ids_stmts)*
 
             let mut __async_dfirs = vec![#(#process_dfir_exprs),*];
             let mut __tick_dfirs = vec![#(#process_tick_dfir_exprs),*];
             #(#cluster_dfir_stmts)*
-            (__async_dfirs, __tick_dfirs, __hydro_hooks, __hydro_observation_hooks, __hydro_inline_hooks, __hydro_scripted_hooks, __hydro_scripted_observation_hooks, __hydro_scripted_inline_hooks, __hydro_scripted_registry)
+            (__async_dfirs, __tick_dfirs, __hydro_hooks, __hydro_observation_hooks, __hydro_inline_hooks, __hydro_scripted_hooks, __hydro_scripted_observation_hooks, __hydro_scripted_inline_hooks, __hydro_scripted_registry, __hydro_lineage)
         }
 
         #[unsafe(no_mangle)]
@@ -808,6 +826,7 @@ fn compile_sim_graph_trybuild(
             #root::sim::runtime::ScriptedObservationHooks,
             #root::sim::runtime::ScriptedInlineHooks,
             #root::sim::runtime::ScriptedHookRegistry,
+            #root::sim::runtime::LineageHandles,
         ) {
             #root::runtime_support::colored::control::set_override(should_color);
             __hydro_runtime_core(__hydro_external_out, __hydro_external_in, __hydro_cluster_external_out, __hydro_cluster_external_in, __println_handler, __eprintln_handler)

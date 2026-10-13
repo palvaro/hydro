@@ -52,6 +52,8 @@ pub struct SimFlow<'a> {
     /// When false (default), encountering a consistency assertion panics because
     /// validating consistency assertions is not yet supported in the simulator.
     pub(crate) skip_consistency_assertions: bool,
+    /// Compile with record-level provenance (see [`super::provenance`]).
+    pub(crate) provenance: bool,
 
     /// Number of iterations to use for fuzzing, defaults to 8192
     pub(crate) unit_test_fuzz_iterations: usize,
@@ -88,6 +90,17 @@ impl<'a> SimFlow<'a> {
     #[must_use]
     pub fn skip_consistency_assertions(mut self) -> Self {
         self.skip_consistency_assertions = true;
+        self
+    }
+
+    /// Compiles the simulation with record-level provenance: every element carries the set
+    /// of channel deliveries it was computed from, and network sends / external outputs
+    /// record it in the lineage log (LDFI "Level 2" lineage; see [`super::provenance`]).
+    /// Supported for the dataflow operators the LDFI examples use; unsupported operators
+    /// panic at compile time.
+    #[must_use]
+    pub fn with_provenance(mut self) -> Self {
+        self.provenance = true;
         self
     }
 
@@ -139,31 +152,6 @@ impl<'a> SimFlow<'a> {
         self.compiled().deterministic(thunk)
     }
 
-    /// Runs the test body against one execution of the program in which every scheduling
-    /// decision is drawn from the given bolero driver. See
-    /// [`crate::sim::compiled::CompiledSim::run_with_driver`], including why it exists and when
-    /// it should be deleted in favor of [`SimFlow::deterministic`].
-    pub fn run_with_driver<D: bolero::bolero_engine::driver::Driver + 'static>(
-        self,
-        driver: D,
-        thunk: impl AsyncFnOnce() + RefUnwindSafe,
-    ) {
-        self.compiled().run_with_driver(driver, async |instance| {
-            instance.run_with_scheduler(thunk()).await
-        })
-    }
-
-    /// Runs the test body against one execution of the program under the *prompt* schedule:
-    /// every batch releases everything buffered, every snapshot observes the oldest unobserved
-    /// version, and ready ticks run round-robin. See
-    /// [`crate::sim::prompt_schedule::PromptScheduleDriver`]. Unlike
-    /// [`SimFlow::deterministic`], this does not require the program's hooks to be scripted; it
-    /// is the stand-in for `deterministic()` described there, to be deleted once
-    /// `deterministic()` can take its place.
-    pub fn run_prompt(self, thunk: impl AsyncFnOnce() + RefUnwindSafe) {
-        self.run_with_driver(super::prompt_schedule::PromptScheduleDriver::default(), thunk)
-    }
-
     /// Compiles the simulation into a dynamically loadable library, and returns a handle to it.
     pub fn compiled(mut self) -> CompiledSim {
         use dfir_lang::graph::{eliminate_extra_unions_tees, partition_graph};
@@ -183,6 +171,7 @@ impl<'a> SimFlow<'a> {
             next_hoff_id: crate::Counter::default(),
             test_safety_only: self.test_safety_only,
             skip_consistency_assertions: self.skip_consistency_assertions,
+            provenance: self.provenance,
             channel_tables: BTreeMap::new(),
             bound_sim_hooks: HashMap::new(),
         };
@@ -216,6 +205,11 @@ impl<'a> SimFlow<'a> {
                 &self.location_version,
             );
         }
+
+        if self.provenance {
+            super::provenance::rewrite(&mut self.ir);
+        }
+        let slices = Rc::new(super::slice::compute(&mut self.ir));
 
         let mut seen_tees = HashMap::new();
         let mut built_tees = HashMap::new();
@@ -294,6 +288,8 @@ impl<'a> SimFlow<'a> {
             lib,
             externals_port_registry: self.externals_port_registry.take(),
             unit_test_fuzz_iterations: self.unit_test_fuzz_iterations,
+            slices,
+            provenance: self.provenance,
         }
     }
 
