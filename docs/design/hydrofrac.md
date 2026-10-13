@@ -9,10 +9,13 @@ document is the summary.
 
 ## 1. What it is, in one paragraph
 
-Hydrofrac is a test harness that takes a Hydro program, a correctness property written as a Rust
-predicate, and a fault model (which channels may lose messages, which nodes may crash, how many
-crashes), and searches for a combination of faults that makes the property fail. It does this
-with the Hydro simulator: every candidate fault set is one simulator run, and the simulator's own
+Hydrofrac is a test harness that takes a Hydro program, a correctness property, and a fault model
+(which channels may lose messages, which nodes may crash, how many crashes), and searches for a
+combination of faults that makes the property fail. The property is stated twice: as a Rust
+verdict over the program's outputs, which decides pass or fail, and as a declaration of which
+output facts witness it and which it is conditioned on (`witness`, `require`), which is what
+lineage traces; hydrofrac does not check that the two agree (§8.2). It does this with the Hydro
+simulator: every candidate fault set is one simulator run, and the simulator's own
 schedule explorer runs underneath, so a counterexample is a fault set plus an interleaving. The
 search is lineage-driven: after each run in which the property held, hydrofrac computes which
 message deliveries that outcome depended on, and the next fault set is chosen so that it breaks
