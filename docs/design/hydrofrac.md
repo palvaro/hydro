@@ -204,8 +204,26 @@ Because a hook under a policy draws no entropy, the schedule explorer's decision
 hypothesis consists only of the program's remaining nondeterminism (which runnable tick goes
 next). In the measurement grid this had a practical consequence: at one schedule per hypothesis,
 every verdict and counterexample matched the eight-schedule run on the protocols without
-schedule-sensitive bugs, so the fair cost of a hypothesis is one simulator instance. Raft is the
-exception, and the harness samples four schedules per hypothesis there.
+schedule-sensitive bugs, so the fair cost of a hypothesis is one simulator instance.
+
+Raft is the exception. Every other harness runs one schedule per hypothesis
+(`Exploration::Fuzz { instances: 1 }`, `ldfi_grid.rs`); the Raft harness runs four (`SCHEDULES`
+in `raft_ldfi.rs`, passed to both `unit_test_fuzz_iterations` and `Exploration::Fuzz`), so a
+Raft hypothesis costs four instances, which is the rate behind the instance counts in section 9.
+The reason is that the Raft bug is schedule-sensitive (section 3, departure 2): the fault set is
+necessary but not sufficient. The body lands request `b` at member 1 and member 0's election
+timer in the same phase, so the explorer's remaining nondeterminism, which member's tick runs
+next, decides whether 1 broadcasts `AppendEntries(b)` before it sees `RequestVote(term 2)` and
+keeps the leadership (nothing happens), or steps down first holding an unreplicated `b@1` so that
+0 wins term 2. Only in the second interleaving does the lost `AppendEntries(a)` leave 1 with a
+stale log as long as the others', which the index-only check fails to reject. Under one schedule
+the search can land on the harmless interleaving for the critical fault set, see the goal hold,
+and certify a program with a known bug; the other protocols' outcomes do not depend on tick order
+under a fixed fault set, which is what the eight-vs-one measurement showed. The cost is in the
+certificate: with sampled schedules it is relative to the sampled schedules (the doc comment on
+`Exploration::Fuzz` and the `ldfi_certifies_raft_agreement_under_one_crash` docstring both say
+so), and Raft is the one protocol where that caveat bites. `Exploration::Exhaustive` is the sound
+alternative; the Raft harness does not use it, for cost.
 
 ### 5.5 What this fault point cannot do
 
