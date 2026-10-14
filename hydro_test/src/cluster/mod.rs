@@ -15,6 +15,7 @@ pub mod paxos_log_bench;
 pub mod cress_inputs_check;
 #[cfg(feature = "tokio")]
 pub mod paxos_with_client;
+pub mod pure_heartbeat;
 pub mod raft;
 pub mod rpc_retry;
 #[cfg(feature = "cress")]
@@ -24,3 +25,4 @@ pub mod simple_cluster;
 pub mod two_pc;
 #[cfg(feature = "tokio")]
 pub mod two_pc_bench;
+pub mod witnesses;

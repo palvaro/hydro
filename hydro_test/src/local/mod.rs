@@ -4,6 +4,7 @@ pub mod count_elems;
 #[cfg(feature = "tokio")]
 pub mod futures;
 pub mod graph_reachability;
+pub mod productive_tc;
 pub mod singleton_input;
 pub mod singleton_mut;
 pub mod singleton_ref;
