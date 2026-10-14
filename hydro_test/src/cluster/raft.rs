@@ -433,6 +433,56 @@ pub struct RaftStepOutput<T, ClusterTag> {
 ///   arrives, so it rejects any leader of an older term (§5.1's term check reads the
 ///   real term).
 ///
+/// The canonical order `raft_step` applies a tick's messages in. Shared with the
+/// dataflow so that the batch can be sorted *before* the step (see `raft_server`).
+#[doc(hidden)]
+pub fn rpc_sort_key<T, ClusterTag>(rpc: &RaftRpc<T, ClusterTag>) -> (u8, usize, usize, usize) {
+    match rpc {
+        RaftRpc::RequestVote(dto) => (0, dto.term, dto.last_log_term, dto.last_log_index),
+        RaftRpc::RequestVoteResponse(dto) => (1, dto.term, 0, 0),
+        RaftRpc::AppendEntries(request) => (
+            2,
+            request.term,
+            request.prev_log_index,
+            request.entries.len(),
+        ),
+        RaftRpc::AppendEntriesReply(reply) => {
+            (3, reply.term, reply.match_index, usize::from(reply.success))
+        }
+    }
+}
+
+/// A received message together with its canonical sort position. `Ord` compares
+/// `(key, sender)` only — exactly `raft_step`'s comparator — so `Stream::sort` on this
+/// wrapper yields the order `raft_step` would have produced internally.
+///
+/// Public only because staged (`q!`) code must reference it by path; not stable API.
+#[doc(hidden)]
+pub struct CanonicalRpc<T, ClusterTag> {
+    pub key: (u8, usize, usize, usize),
+    pub sender: MemberId<ClusterTag>,
+    pub rpc: RaftRpc<T, ClusterTag>,
+}
+
+impl<T, ClusterTag> PartialEq for CanonicalRpc<T, ClusterTag> {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key && self.sender == other.sender
+    }
+}
+impl<T, ClusterTag> Eq for CanonicalRpc<T, ClusterTag> {}
+impl<T, ClusterTag> PartialOrd for CanonicalRpc<T, ClusterTag> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl<T, ClusterTag> Ord for CanonicalRpc<T, ClusterTag> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.key
+            .cmp(&other.key)
+            .then_with(|| self.sender.cmp(&other.sender))
+    }
+}
+
 /// Message processing is order-insensitive at the batch level: the batch is sorted
 /// into a canonical order first, so the outcome is a function of the batch multiset
 /// (required for deterministic simulation).
@@ -502,24 +552,9 @@ pub fn raft_step<T: Clone, ClusterTag>(
 
     // (a) Process this tick's messages in a canonical order (so the step is a
     // function of the batch multiset), each one sequentially against live state.
-    fn sort_key<T, ClusterTag>(rpc: &RaftRpc<T, ClusterTag>) -> (u8, usize, usize, usize) {
-        match rpc {
-            RaftRpc::RequestVote(dto) => (0, dto.term, dto.last_log_term, dto.last_log_index),
-            RaftRpc::RequestVoteResponse(dto) => (1, dto.term, 0, 0),
-            RaftRpc::AppendEntries(request) => (
-                2,
-                request.term,
-                request.prev_log_index,
-                request.entries.len(),
-            ),
-            RaftRpc::AppendEntriesReply(reply) => {
-                (3, reply.term, reply.match_index, usize::from(reply.success))
-            }
-        }
-    }
     messages.sort_by(|(sender_a, rpc_a), (sender_b, rpc_b)| {
-        sort_key(rpc_a)
-            .cmp(&sort_key(rpc_b))
+        rpc_sort_key(rpc_a)
+            .cmp(&rpc_sort_key(rpc_b))
             .then_with(|| sender_a.cmp(sender_b))
     });
 
@@ -946,19 +981,41 @@ where
 
         // Received messages as an unordered batch; raft_step sorts them into a
         // canonical order, so downstream results depend only on the batch multiset.
-        let message_vec = traffic_batch.fold(
-            q!(|| Vec::new()),
-            q!(
-                |messages, message| {
-                    messages.push(message);
-                },
-                commutative = manual_proof!(
-                    /** the accumulated batch is sorted into a canonical order by
-                    raft_step before being applied, so downstream results depend only
-                    on the batch multiset, never on arrival order */
+        //
+        // EXPERIMENT (sim-count study): the `fold` on a `NoOrder` batch carries a
+        // simulator order hook (k! per batch) even with `manual_proof!`. With
+        // `RAFT_SORTED_BATCH=1` the same canonical order `raft_step` imposes is made
+        // visible to the dataflow via `sort()` (hook-free), and the fold runs on a
+        // `TotalOrder` stream.
+        let message_vec = if std::env::var("RAFT_SORTED_BATCH").is_ok() {
+            traffic_batch
+                .map(q!(|(sender, rpc)| crate::cluster::raft::CanonicalRpc {
+                    key: crate::cluster::raft::rpc_sort_key(&rpc),
+                    sender,
+                    rpc,
+                }))
+                .sort()
+                .fold(
+                    q!(|| Vec::new()),
+                    q!(|messages, canonical| {
+                        messages.push((canonical.sender, canonical.rpc));
+                    }),
                 )
-            ),
-        );
+        } else {
+            traffic_batch.fold(
+                q!(|| Vec::new()),
+                q!(
+                    |messages, message| {
+                        messages.push(message);
+                    },
+                    commutative = manual_proof!(
+                        /** the accumulated batch is sorted into a canonical order by
+                        raft_step before being applied, so downstream results depend only
+                        on the batch multiset, never on arrival order */
+                    )
+                ),
+            )
+        };
 
         // The other members of the cluster, the broadcast targets.
         let other_members = tick.singleton(q!(
@@ -1164,6 +1221,74 @@ mod tests {
     };
 
     const CLUSTER_SIZE: usize = 4;
+
+    /// EXPERIMENT (sim-count study): exhaustive counts for the smallest meaningful
+    /// scenarios, parameterized by cluster size and by the number of client requests
+    /// committed after the election. Run with `--nocapture`; prints
+    /// `RAFT_EXHAUSTIVE <scenario> n=<size> requests=<r> sorted=<0|1> count=<c>`.
+    /// Select with `RAFT_EXHAUSTIVE_N` (cluster size, default 3), `RAFT_EXHAUSTIVE_R`
+    /// (requests, default 0), `RAFT_EXHAUSTIVE_HB` (heartbeat rounds, default 0).
+    fn exhaustive_scenario(n: usize, requests_to_commit: usize, heartbeat_rounds: usize) -> usize {
+        let mut flow = FlowBuilder::new();
+        let cluster = flow.cluster::<Replica>();
+
+        let (interrupt_send, election_timer_interrupts) = cluster.sim_input();
+        let (heartbeat_send, heartbeat_timer_interrupts) = cluster.sim_input();
+        let (request_send, requests) = cluster.sim_input::<String, TotalOrder, ExactlyOnce>();
+        let outputs = raft_server(
+            &cluster,
+            requests,
+            election_timer_interrupts,
+            heartbeat_timer_interrupts,
+            RaftConfig { cluster_size: n },
+            TCP.fail_stop().bincode(),
+            nondet!(/** experiment */),
+        );
+        let view_recv = outputs.leader_views.sim_cluster_output();
+        let committed_recv = outputs.committed.end_atomic().sim_cluster_output();
+
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&cluster, n)
+            .exhaustive(async || {
+                let member_0 = MemberId::<Replica>::from_raw_id(0);
+                // Uncontested election by member 0.
+                interrupt_send.send(0, ());
+                hydro_lang::sim::quiesce().await;
+                let views: Vec<LeaderView<Replica>> = view_recv.collect(0).await;
+                assert_eq!(
+                    views.last(),
+                    Some(&LeaderView { term: 1, leader: Some(member_0.clone()) })
+                );
+                for _ in 0..heartbeat_rounds {
+                    heartbeat_send.send(0, ());
+                    hydro_lang::sim::quiesce().await;
+                }
+                if requests_to_commit > 0 {
+                    for i in 0..requests_to_commit {
+                        request_send.send(0, format!("r{i}"));
+                    }
+                    // Replication needs a heartbeat to carry the entries and a second
+                    // one to advertise the commit index to followers.
+                    heartbeat_send.send(0, ());
+                    hydro_lang::sim::quiesce().await;
+                    heartbeat_send.send(0, ());
+                    hydro_lang::sim::quiesce().await;
+                    let committed: Vec<LogEntry<String>> = committed_recv.collect(0).await;
+                    assert_eq!(committed.len(), requests_to_commit, "leader commits all requests");
+                }
+            })
+    }
+
+    #[test]
+    fn exhaustive_count_experiment() {
+        let n: usize = std::env::var("RAFT_EXHAUSTIVE_N").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+        let r: usize = std::env::var("RAFT_EXHAUSTIVE_R").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let hb: usize = std::env::var("RAFT_EXHAUSTIVE_HB").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let sorted = std::env::var("RAFT_SORTED_BATCH").is_ok() as u8;
+        let count = exhaustive_scenario(n, r, hb);
+        eprintln!("RAFT_EXHAUSTIVE election n={n} requests={r} heartbeats={hb} sorted={sorted} count={count}");
+    }
 
     /// An even-sized cluster (4 members) where two members' election timers fire
     /// simultaneously. In every explored execution (fuzzed simulation; run under
