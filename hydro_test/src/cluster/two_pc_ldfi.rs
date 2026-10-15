@@ -83,12 +83,13 @@ pub fn two_pc<'a>(
     nondet_timeouts: NonDet<Option<TimeoutHook>>,
 ) -> Stream<Txn, Cluster<'a, Participant>, Unbounded, NoOrder> {
     // Phase 1: the coordinator asks every participant to prepare.
-    let prepares = txns.broadcast_closed(participants, TCP.fail_stop().bincode());
+    let prepares = txns.broadcast_closed(participants, TCP.fail_stop().name("prepare").bincode());
 
     // Phase 2: decisions, taken in the coordinator's tick below once every vote is in.
     let (decisions_handle, decisions) =
         coordinator.forward_ref::<Stream<Txn, Process<'a, Coordinator>, Unbounded, NoOrder>>();
-    let commits = decisions.broadcast_closed(participants, TCP.fail_stop().bincode());
+    let commits =
+        decisions.broadcast_closed(participants, TCP.fail_stop().name("commit").bincode());
 
     // Peer traffic (cooperative termination), closing a cycle through the network.
     let (peer_handle, peer_in) =
@@ -157,12 +158,14 @@ pub fn two_pc<'a>(
 
     peer_handle.complete(
         peer_out
-            .broadcast_closed(participants, TCP.fail_stop().bincode())
+            .broadcast_closed(participants, TCP.fail_stop().name("peer").bincode())
             .entries(),
     );
 
     // The coordinator: count votes per transaction; decide once everyone has voted.
-    let vote_entries = votes.send(coordinator, TCP.fail_stop().bincode()).entries();
+    let vote_entries = votes
+        .send(coordinator, TCP.fail_stop().name("vote").bincode())
+        .entries();
     let decided_at_coordinator: Stream<Txn, Process<'a, Coordinator>, Unbounded, NoOrder> = sliced! {
         let vote_batch = use::batch(vote_entries, nondet_votes);
         let mut all_votes = use::state(|l| {
@@ -288,28 +291,20 @@ pub(crate) mod harness {
             timeout_send,
             out,
         };
-        // Fault model: the coordinator and every participant may crash; links are reliable.
-        // Goal: agreement over the correct participants.
+        // Fault model: the coordinator and every participant may crash; links are reliable
+        // (`fail_stop`, so the filter admits no omission on them). Goal: agreement over the
+        // correct participants.
         let configure = move |crashes: usize| {
-            let mut ldfi = Ldfi::new()
+            let ldfi = Ldfi::new()
                 .level_from_env()
                 .crashable("coordinator", &coordinator_id)
                 .crashable_cluster("participant", &participants_id, 0..participants_count)
-                .crash_budget(crashes)
-                .reliable_channel("votes", vote_hook);
-            ldfi = if txn_count == 1 {
+                .crash_budget(crashes);
+            if txn_count == 1 {
                 ldfi.goal_all_members(&out, "participant", 0..participants_count)
             } else {
                 ldfi.goal_witnessed()
-            };
-            for p in 0..participants_count {
-                ldfi = ldfi
-                    .reliable_channel(&format!("prepare@{p}"), prepare_hook.on(p))
-                    .reliable_channel(&format!("commit@{p}"), commit_hook.on(p))
-                    .reliable_channel(&format!("peer@{p}"), peer_hook.on(p))
-                    .input(&format!("timeout@{p}"), timeout_hook.on(p));
             }
-            ldfi
         };
         (compiled, harness, configure)
     }
@@ -379,7 +374,7 @@ mod tests {
         assert_eq!(faults.len(), 1);
         assert!(
             matches!(faults.first(), Some(Fault::Crash { node, after: Some(m) })
-                if node == "coordinator" && m.to_string().starts_with("commit@0:")),
+                if node == "coordinator" && m.to_string().starts_with("commit[→0]:")),
             "expected the coordinator to die after its first commit: {faults:?}"
         );
         assert_eq!(runs.len(), 2);
@@ -412,7 +407,7 @@ mod tests {
             faults
                 .iter()
                 .any(|f| matches!(f, Fault::Crash { node, after: Some(m) }
-                if node == "coordinator" && m.to_string().starts_with("commit@"))),
+                if node == "coordinator" && m.to_string().starts_with("commit["))),
             "the coordinator must die after a commit: {faults:?}"
         );
         assert!(

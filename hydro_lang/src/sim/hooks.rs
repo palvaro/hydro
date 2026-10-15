@@ -413,8 +413,9 @@ where
     /// Places the hook under the standing policy that delivers everything as it arrives,
     /// with no further scripting and no entropy, tracing every delivery (see
     /// [`Self::delivered`]). An ordered stream comes from a reliable channel, which admits
-    /// no omission, so this is the only standing policy it offers; it makes the channel a
-    /// lineage-traced delivery point for fault injection (`hydro_lang::sim::ldfi`).
+    /// no omission, so this is the only standing policy it offers. Lineage-driven fault
+    /// injection (`hydro_lang::sim::ldfi`) places every scripted batch hook under this
+    /// policy, so a hooked batch is a traced, entropy-free delivery point.
     pub fn deliver_all(&self) {
         self.install_policy(&PassthroughPolicy::<T>::default());
     }
@@ -422,7 +423,8 @@ where
     /// Places the hook under a **replay policy**: it ignores what arrives and releases
     /// `execs[k]` into the `k`-th execution of its tick from now on, for exactly
     /// `execs.len()` executions (an empty entry runs the tick with nothing released). The
-    /// counterfactual replay of lineage-driven fault injection (see `hydro_lang::sim::ldfi`).
+    /// counterfactual replay of lineage-driven fault injection (see `hydro_lang::sim::ldfi`),
+    /// which installs it on every scripted batch hook itself.
     pub fn replay(&self, execs: impl IntoIterator<Item = Vec<T>>) {
         self.install_policy(&PassthroughPolicy {
             replay: Some(ReplayScript {
@@ -444,9 +446,9 @@ where
     ///
     /// Every occurrence of an omitted value is discarded while the policy stands, so a
     /// byte-identical retransmission is omitted too; call [`Self::deliver_all`] to let
-    /// later copies through. This is the omission fault point of lineage-driven fault
-    /// injection (see `hydro_lang::sim::ldfi`): an unordered stream is what a lossy channel
-    /// yields, and omission is the fault such a channel admits.
+    /// later copies through. This is a receiver-side loss pattern for scripted tests; the
+    /// simulator's fault point for lineage-driven fault injection is the filter on the
+    /// sending side of every channel (see `hydro_lang::sim::ldfi`), which does not use it.
     pub fn omit(&self, values: impl IntoIterator<Item = T>) {
         self.install_policy(&OmissionPolicy {
             omit: values.into_iter().collect::<Vec<T>>(),
@@ -468,7 +470,7 @@ where
     }
 
     /// Places the hook under the standing policy that delivers everything (the empty
-    /// omission policy): the "no more faults" declaration at the end of finite failures.
+    /// omission policy), tracing every delivery.
     pub fn deliver_all(&self) {
         self.omit([]);
     }

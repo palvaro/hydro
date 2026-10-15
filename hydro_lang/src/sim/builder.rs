@@ -612,42 +612,13 @@ impl DfirBuilder for SimBuilder {
                         None,
                     );
 
-                    if self.provenance {
-                        // Record-level provenance: every released item gets a fresh delivery
-                        // id, recorded against this hook and member.
-                        let tag_lineage_ident =
-                            syn::Ident::new(&format!("__tag_lineage_{hoff_id}"), Span::call_site());
-                        self.add_extra_stmt_internal(
-                            in_location,
-                            syn::parse_quote! {
-                                let #tag_lineage_ident = __hydro_lineage.clone();
-                            },
-                        );
-                        let hook: syn::Expr = match op_meta.sim_hook_id {
-                            Some(id) => syn::parse_quote!(Some(#id)),
-                            None => syn::parse_quote!(None),
-                        };
-                        let member: syn::Expr = match in_location {
-                            LocationId::Cluster(_) => syn::parse_quote!(Some(__current_cluster_id)),
-                            _ => syn::parse_quote!(None),
-                        };
-                        self.get_dfir_mut(out_location).add_dfir(
-                            parse_quote! {
-                                #out_ident = source_stream(#hoff_recv_ident)
-                                    -> map(|__x| #root::sim::runtime::codegen::tag_delivery(&#tag_lineage_ident, #hook, #member, __x));
-                            },
-                            None,
-                            None,
-                        );
-                    } else {
-                        self.get_dfir_mut(out_location).add_dfir(
-                            parse_quote! {
-                                #out_ident = source_stream(#hoff_recv_ident);
-                            },
-                            None,
-                            None,
-                        );
-                    }
+                    self.get_dfir_mut(out_location).add_dfir(
+                        parse_quote! {
+                            #out_ident = source_stream(#hoff_recv_ident);
+                        },
+                        None,
+                        None,
+                    );
                 }
                 CollectionKind::KeyedStream {
                     value_order,
@@ -1954,6 +1925,7 @@ impl DfirBuilder for SimBuilder {
         source: syn::Expr,
         deserialize: Option<&DebugExpr>,
         external_element_type: Option<&syn::Type>,
+        input_element_type: Option<&syn::Type>,
         tag_id: StmtId,
         networking_info: &crate::networking::NetworkingInfo,
     ) {
@@ -1989,31 +1961,30 @@ impl DfirBuilder for SimBuilder {
         }
 
         let root = get_this_crate();
+        let channel_id = tag_id.into_inner();
+        let provenance = self.provenance;
+        // Embedded (raw-element) channels carry no serialized payload: they are not fault
+        // points, carry no delivery id, and are not recorded.
+        let embedded = external_element_type.is_some();
 
-        // For embedded (external) serialization, the raw payload type flows across the in-memory
-        // channel instead of serialized `Bytes`.
+        // The wire format. A serialized channel carries `(delivery id, bytes)`: the id is
+        // minted by the filter at the send half (see `sim::runtime::lineage`) and recorded by
+        // the receive half, so a delivery is attributed to its send exactly.
         let payload: syn::Type = match external_element_type {
             Some(ty) => ty.clone(),
-            None => parse_quote!(__root_dfir_rs::bytes::Bytes),
+            None => parse_quote!((u64, __root_dfir_rs::bytes::Bytes)),
         };
 
         // Bincode channels wrap the received value in a transport `Result` (matching real
         // deployments) which the bincode deserialize expression then unwraps. Embedded channels
         // deliver the raw payload directly, so no such wrapper is inserted.
-        let ok_wrap: proc_macro2::TokenStream = if external_element_type.is_some() {
-            proc_macro2::TokenStream::new()
-        } else {
-            quote::quote!(-> map(|v| -> ::std::result::Result<_, ()> { Ok(v) }))
-        };
-
-        // Lineage and crash faults: every send is recorded against the execution that
-        // produced it, and a send by a crashed node is dropped instead of performed (see
-        // `sim::runtime::lineage`). Embedded (raw-element) channels carry no serialized
-        // payload to record and are not fault points.
-        let lineage_ident =
-            syn::Ident::new(&format!("__lineage_send_{}", tag_id), Span::call_site());
         let from_ser = serde_json::to_string(from).unwrap();
         let to_ser = serde_json::to_string(to).unwrap();
+
+        // The filter: every send is recorded against the execution that produced it and
+        // the fault state decides whether it reaches the wire (omission; the sender's crash).
+        let lineage_ident =
+            syn::Ident::new(&format!("__lineage_send_{}", tag_id), Span::call_site());
         self.add_extra_stmt_internal(
             from,
             syn::parse_quote! {
@@ -2024,9 +1995,8 @@ impl DfirBuilder for SimBuilder {
                 );
             },
         );
-        let channel_id = tag_id.into_inner();
-        // The receive half records every arrival (before deserialization) against the
-        // execution that took it off the channel.
+        // The receive half records every arrival (by delivery id, before deserialization)
+        // against the execution that took it off the channel.
         let recv_ident = syn::Ident::new(&format!("__lineage_recv_{}", tag_id), Span::call_site());
         self.add_extra_stmt_internal(
             to,
@@ -2042,43 +2012,78 @@ impl DfirBuilder for SimBuilder {
         } else {
             quote::quote!(None)
         };
-        let recv_tap: proc_macro2::TokenStream = if external_element_type.is_some() {
-            proc_macro2::TokenStream::new()
-        } else if matches!(from, LocationId::Cluster(_)) {
-            quote::quote!(-> inspect(|(_, v)| #recv_ident.0.record_recv(#channel_id, &#recv_ident.1, #to_member_recv, v)))
+
+        // The payload's `Debug` rendering for reports, when its type has one. The IR names
+        // the element type of the input stream: `Tagged<T>` in provenance mode (the value in
+        // hand is the plain `T`), and `(MemberId, T)` for a cluster-targeted send (the value
+        // in hand is `T`).
+        let display_fn: Option<syn::Expr> = (!embedded)
+            .then_some(input_element_type)
+            .flatten()
+            .map(|ty| {
+                let ty = if provenance {
+                    super::provenance::plain_type(ty)
+                } else {
+                    ty.clone()
+                };
+                let ty = match (&ty, to) {
+                    (syn::Type::Tuple(tuple), LocationId::Cluster(_)) if tuple.elems.len() == 2 => {
+                        tuple.elems[1].clone()
+                    }
+                    _ => ty,
+                };
+                parse_quote!(#root::__maybe_debug__!(#ty))
+            });
+        let display_ident =
+            syn::Ident::new(&format!("__lineage_display_{}", tag_id), Span::call_site());
+        // The rendering is taken before serialization consumes the value (the element type
+        // need not be `Clone`), and travels alongside the bytes to the filter.
+        let targeted = matches!(to, LocationId::Cluster(_));
+        let render: proc_macro2::TokenStream = if let Some(f) = &display_fn {
+            self.add_extra_stmt_internal(
+                from,
+                syn::parse_quote! {
+                    let #display_ident = #f;
+                },
+            );
+            if targeted {
+                quote::quote!(#root::sim::runtime::codegen::display_payload(#display_ident, &__v))
+            } else {
+                quote::quote!(#display_ident(&__v))
+            }
         } else {
-            quote::quote!(-> inspect(|v| #recv_ident.0.record_recv(#channel_id, &#recv_ident.1, #to_member_recv, v)))
+            quote::quote!(None)
         };
+
         // With record-level provenance the input items are `(payload, Vec<delivery id>)`
         // (see `sim::provenance`): serialize the payload, record the ids with the send.
-        let provenance = self.provenance;
         let send_guard = |from_member: proc_macro2::TokenStream,
                           to_member: proc_macro2::TokenStream|
          -> proc_macro2::TokenStream {
-            if external_element_type.is_some() {
-                quote::quote!(true)
-            } else if provenance {
-                quote::quote!(#lineage_ident.0.record_sent_with(#channel_id, &#lineage_ident.1, #from_member, &#lineage_ident.2, #to_member, &v, __prov))
+            if provenance {
+                quote::quote!(#lineage_ident.0.record_sent_with(#channel_id, &#lineage_ident.1, #from_member, &#lineage_ident.2, #to_member, &v, __display, __prov))
             } else {
-                quote::quote!(#lineage_ident.0.record_sent(#channel_id, &#lineage_ident.1, #from_member, &#lineage_ident.2, #to_member, &v))
+                quote::quote!(#lineage_ident.0.record_sent(#channel_id, &#lineage_ident.1, #from_member, &#lineage_ident.2, #to_member, &v, __display))
             }
         };
         let ser_map: proc_macro2::TokenStream = match (serialize, provenance) {
             (Some(serialize_pipeline), true) => {
-                quote::quote!(-> map(|(__v, __prov)| ((#serialize_pipeline)(__v), __prov)))
+                quote::quote!(-> map(|(__v, __prov)| { let __display: Option<String> = #render; (#root::sim::runtime::codegen::apply(__v, #serialize_pipeline), __display, __prov) }))
             }
-            (Some(serialize_pipeline), false) => quote::quote!(-> map(#serialize_pipeline)),
+            (Some(serialize_pipeline), false) => {
+                quote::quote!(-> map(|__v| { let __display: Option<String> = #render; (#root::sim::runtime::codegen::apply(__v, #serialize_pipeline), __display) }))
+            }
             (None, _) => proc_macro2::TokenStream::new(),
         };
         let pat_single: proc_macro2::TokenStream = if provenance {
-            quote::quote!((v, __prov))
+            quote::quote!((v, __display, __prov))
         } else {
-            quote::quote!(v)
+            quote::quote!((v, __display))
         };
         let pat_targeted: proc_macro2::TokenStream = if provenance {
-            quote::quote!(((target_member_id, v), __prov))
+            quote::quote!(((target_member_id, v), __display, __prov))
         } else {
-            quote::quote!((target_member_id, v))
+            quote::quote!(((target_member_id, v), __display))
         };
         let send_p2p = send_guard(quote::quote!(None), quote::quote!(None));
         let send_c2p = send_guard(
@@ -2094,37 +2099,87 @@ impl DfirBuilder for SimBuilder {
             quote::quote!(Some(#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id))),
         );
 
+        // The receive half: record the arrival, unwrap the wire format into what the
+        // deserializer expects (a transport `Result`), and in provenance mode tag the record
+        // with its delivery id.
+        let tag_recv: proc_macro2::TokenStream = if provenance {
+            quote::quote!(-> map(|(__id, __v)| #root::sim::runtime::codegen::tag_recv(__id, __v)))
+        } else {
+            quote::quote!(-> map(|(_, __v)| __v))
+        };
+        let recv_from_process: proc_macro2::TokenStream = quote::quote! {
+            -> map(|(__id, v)| {
+                #recv_ident.0.record_recv(#channel_id, &#recv_ident.1, #to_member_recv, __id);
+                (__id, ::std::result::Result::<_, ()>::Ok(v))
+            })
+        };
+        let recv_from_cluster: proc_macro2::TokenStream = quote::quote! {
+            -> map(|(__m, (__id, v))| {
+                #recv_ident.0.record_recv(#channel_id, &#recv_ident.1, #to_member_recv, __id);
+                (__id, ::std::result::Result::<_, ()>::Ok((__m, v)))
+            })
+        };
+        let deser: proc_macro2::TokenStream = match deserialize {
+            Some(deserialize_pipeline) => {
+                quote::quote!(-> map(|(__id, __v)| (__id, #root::sim::runtime::codegen::apply(__v, #deserialize_pipeline))))
+            }
+            None => proc_macro2::TokenStream::new(),
+        };
+        // The complete receive pipeline after `source_stream`.
+        let recv_pipeline = |from_cluster: bool| -> proc_macro2::TokenStream {
+            if embedded {
+                match deserialize {
+                    Some(deserialize_pipeline) => quote::quote!(-> map(#deserialize_pipeline)),
+                    None => proc_macro2::TokenStream::new(),
+                }
+            } else {
+                let tap = if from_cluster {
+                    &recv_from_cluster
+                } else {
+                    &recv_from_process
+                };
+                quote::quote!(#tap #deser #tag_recv)
+            }
+        };
+        if embedded {
+            assert!(
+                !provenance,
+                "record-level provenance does not support embedded network channels"
+            );
+        }
+
         match (from, to) {
             (LocationId::Process(_), LocationId::Process(_)) => {
                 self.extra_stmts_global.push(syn::parse_quote! {
                     let (#sink, #source) = __root_dfir_rs::util::unsync::mpsc::unbounded::<#payload>();
                 });
 
-                self.get_dfir_mut(from).add_dfir(
-                    parse_quote! {
-                        #input_ident #ser_map -> for_each(|#pat_single| if #send_p2p { #sink.try_send(v).unwrap() });
-                    },
-                    None,
-                    Some(&format!("send{}", tag_id)),
-                );
-
-                if let Some(deserialize_pipeline) = deserialize {
-                    self.get_dfir_mut(to).add_dfir(
+                if embedded {
+                    self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #out_ident = source_stream(#source) #recv_tap #ok_wrap -> map(#deserialize_pipeline);
+                            #input_ident -> for_each(|v| #sink.try_send(v).unwrap());
                         },
                         None,
-                        Some(&format!("recv{}", tag_id)),
+                        Some(&format!("send{}", tag_id)),
                     );
                 } else {
-                    self.get_dfir_mut(to).add_dfir(
+                    self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #out_ident = source_stream(#source) #recv_tap;
+                            #input_ident #ser_map -> for_each(|#pat_single| if let Some(__id) = #send_p2p { #sink.try_send((__id, v)).unwrap() });
                         },
                         None,
-                        Some(&format!("recv{}", tag_id)),
+                        Some(&format!("send{}", tag_id)),
                     );
                 }
+
+                let pipeline = recv_pipeline(false);
+                self.get_dfir_mut(to).add_dfir(
+                    parse_quote! {
+                        #out_ident = source_stream(#source) #pipeline;
+                    },
+                    None,
+                    Some(&format!("recv{}", tag_id)),
+                );
             }
             (LocationId::Cluster(_), LocationId::Process(_)) => {
                 self.extra_stmts_global.push(syn::parse_quote! {
@@ -2138,31 +2193,32 @@ impl DfirBuilder for SimBuilder {
                         let #sink = #sink.clone();
                     });
 
-                self.get_dfir_mut(from).add_dfir(
-                    parse_quote! {
-                        #input_ident #ser_map -> for_each(|#pat_single| if #send_c2p { #sink.try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap() });
-                    },
-                    None,
-                    Some(&format!("send{}", tag_id)),
-                );
-
-                if let Some(deserialize_pipeline) = deserialize {
-                    self.get_dfir_mut(to).add_dfir(
+                if embedded {
+                    self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #out_ident = source_stream(#source) #recv_tap #ok_wrap -> map(#deserialize_pipeline);
+                            #input_ident -> for_each(|v| #sink.try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap());
                         },
                         None,
-                        Some(&format!("recv{}", tag_id)),
+                        Some(&format!("send{}", tag_id)),
                     );
                 } else {
-                    self.get_dfir_mut(to).add_dfir(
+                    self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #out_ident = source_stream(#source) #recv_tap;
+                            #input_ident #ser_map -> for_each(|#pat_single| if let Some(__id) = #send_c2p { #sink.try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), (__id, v))).unwrap() });
                         },
                         None,
-                        Some(&format!("recv{}", tag_id)),
+                        Some(&format!("send{}", tag_id)),
                     );
                 }
+
+                let pipeline = recv_pipeline(true);
+                self.get_dfir_mut(to).add_dfir(
+                    parse_quote! {
+                        #out_ident = source_stream(#source) #pipeline;
+                    },
+                    None,
+                    Some(&format!("recv{}", tag_id)),
+                );
             }
             (LocationId::Process(_), LocationId::Cluster(_)) => {
                 let sink_writer = syn::Ident::new(
@@ -2188,31 +2244,32 @@ impl DfirBuilder for SimBuilder {
                         };
                     });
 
-                self.get_dfir_mut(from).add_dfir(
-                    parse_quote! {
-                        #input_ident #ser_map -> for_each(|#pat_targeted| if #send_p2c { (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send(v).unwrap() });
-                    },
-                    None,
-                    Some(&format!("send{}", tag_id)),
-                );
-
-                if let Some(deserialize_pipeline) = deserialize {
-                    self.get_dfir_mut(to).add_dfir(
+                if embedded {
+                    self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #out_ident = source_stream(#source) #recv_tap #ok_wrap -> map(#deserialize_pipeline);
+                            #input_ident -> for_each(|(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send(v).unwrap());
                         },
                         None,
-                        Some(&format!("recv{}", tag_id)),
+                        Some(&format!("send{}", tag_id)),
                     );
                 } else {
-                    self.get_dfir_mut(to).add_dfir(
+                    self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #out_ident = source_stream(#source) #recv_tap;
+                            #input_ident #ser_map -> for_each(|#pat_targeted| if let Some(__id) = #send_p2c { (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send((__id, v)).unwrap() });
                         },
                         None,
-                        Some(&format!("recv{}", tag_id)),
+                        Some(&format!("send{}", tag_id)),
                     );
                 }
+
+                let pipeline = recv_pipeline(false);
+                self.get_dfir_mut(to).add_dfir(
+                    parse_quote! {
+                        #out_ident = source_stream(#source) #pipeline;
+                    },
+                    None,
+                    Some(&format!("recv{}", tag_id)),
+                );
             }
             (LocationId::Cluster(_), LocationId::Cluster(_)) => {
                 let sink_writer = syn::Ident::new(
@@ -2245,31 +2302,32 @@ impl DfirBuilder for SimBuilder {
                         };
                     });
 
-                self.get_dfir_mut(from).add_dfir(
-                    parse_quote! {
-                        #input_ident #ser_map -> for_each(|#pat_targeted| if #send_c2c { (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap() });
-                    },
-                    None,
-                    Some(&format!("send{}", tag_id)),
-                );
-
-                if let Some(deserialize_pipeline) = deserialize {
-                    self.get_dfir_mut(to).add_dfir(
+                if embedded {
+                    self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #out_ident = source_stream(#source) #recv_tap #ok_wrap -> map(#deserialize_pipeline);
+                            #input_ident -> for_each(|(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap());
                         },
                         None,
-                        Some(&format!("recv{}", tag_id)),
+                        Some(&format!("send{}", tag_id)),
                     );
                 } else {
-                    self.get_dfir_mut(to).add_dfir(
+                    self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
-                            #out_ident = source_stream(#source) #recv_tap;
+                            #input_ident #ser_map -> for_each(|#pat_targeted| if let Some(__id) = #send_c2c { (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), (__id, v))).unwrap() });
                         },
                         None,
-                        Some(&format!("recv{}", tag_id)),
+                        Some(&format!("send{}", tag_id)),
                     );
                 }
+
+                let pipeline = recv_pipeline(true);
+                self.get_dfir_mut(to).add_dfir(
+                    parse_quote! {
+                        #out_ident = source_stream(#source) #pipeline;
+                    },
+                    None,
+                    Some(&format!("recv{}", tag_id)),
+                );
             }
             _ => {
                 panic!(

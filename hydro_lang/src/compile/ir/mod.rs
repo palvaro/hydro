@@ -610,6 +610,9 @@ pub trait DfirBuilder {
         source: syn::Expr,
         deserialize: Option<&DebugExpr>,
         external_element_type: Option<&syn::Type>,
+        // The type of the elements the send half serializes, when the IR names it (a
+        // `Stream` input); backends that render payloads for diagnostics use it.
+        input_element_type: Option<&syn::Type>,
         tag_id: StmtId,
         networking_info: &crate::networking::NetworkingInfo,
     );
@@ -1068,6 +1071,7 @@ impl DfirBuilder for ProdDfirBuilder {
         source: syn::Expr,
         deserialize: Option<&DebugExpr>,
         _external_element_type: Option<&syn::Type>,
+        _input_element_type: Option<&syn::Type>,
         tag_id: StmtId,
         _networking_info: &crate::networking::NetworkingInfo,
     ) {
@@ -5625,6 +5629,21 @@ impl HydroNode {
                                     }
                                 };
 
+                                let input_element_type: Option<syn::Type> =
+                                    match &input.metadata().collection_kind {
+                                        CollectionKind::Stream { element_type, .. } => {
+                                            Some((*element_type.0).clone())
+                                        }
+                                        CollectionKind::KeyedStream {
+                                            key_type,
+                                            value_type,
+                                            ..
+                                        } => {
+                                            let (k, v) = (&*key_type.0, &*value_type.0);
+                                            Some(syn::parse_quote!((#k, #v)))
+                                        }
+                                        _ => None,
+                                    };
                                 graph_builders.create_network(
                                     &input.metadata().location_id,
                                     &out_location,
@@ -5635,6 +5654,7 @@ impl HydroNode {
                                     source_expr,
                                     deserialize_pipeline.as_ref(),
                                     serialize.external_element_type(),
+                                    input_element_type.as_ref(),
                                     stmt_id,
                                     networking_info,
                                 );

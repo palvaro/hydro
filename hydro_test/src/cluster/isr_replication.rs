@@ -339,7 +339,8 @@ pub fn isr_replication_dataflow<'a>(
     zk_timer: Stream<(), Process<'a, Zk>>,
     hooks: Hooks,
 ) -> Outputs<'a> {
-    let writes_at_replicas = writes.broadcast_closed(replicas, TCP.fail_stop().bincode());
+    let writes_at_replicas =
+        writes.broadcast_closed(replicas, TCP.fail_stop().name("write").bincode());
 
     let (replication_handle, replication_in) = replicas.forward_ref::<Stream<
         (MemberId<Replica>, Write),
@@ -471,18 +472,22 @@ pub fn isr_replication_dataflow<'a>(
 
     replication_handle.complete(
         replicate
-            .demux(replicas, TCP.lossy_delayed_forever().bincode())
+            .demux(replicas, TCP.lossy_delayed_forever().name("repl").bincode())
             .entries(),
     );
     acks_handle.complete(
         acks_out
-            .demux(replicas, TCP.fail_stop().bincode())
+            .demux(replicas, TCP.fail_stop().name("ack").bincode())
             .entries(),
     );
 
     // ZK: heartbeats and shrink requests arrive on their own channels.
-    let heartbeats_in = heartbeats.send(zk, TCP.fail_stop().bincode()).entries();
-    let shrinks_in = shrinks.send(zk, TCP.fail_stop().bincode()).entries();
+    let heartbeats_in = heartbeats
+        .send(zk, TCP.fail_stop().name("hb").bincode())
+        .entries();
+    let shrinks_in = shrinks
+        .send(zk, TCP.fail_stop().name("shrink").bincode())
+        .entries();
     let views: Stream<View, Process<'a, Zk>> = sliced! {
         let hb_batch = use::batch(heartbeats_in, nondet!(/** LDFI delivery point */ hook = hooks.zk_hb));
         let shrink_batch = use::batch(shrinks_in, nondet!(/** LDFI delivery point */ hook = hooks.zk_shrink));
@@ -556,11 +561,13 @@ pub fn isr_replication_dataflow<'a>(
     views_handle.complete(
         views
             .clone()
-            .broadcast_closed(replicas, TCP.fail_stop().bincode()),
+            .broadcast_closed(replicas, TCP.fail_stop().name("view").bincode()),
     );
 
     Outputs {
-        client_acks: client_acks.send(client, TCP.fail_stop().bincode()).values(),
+        client_acks: client_acks
+            .send(client, TCP.fail_stop().name("client-ack").bincode())
+            .values(),
         views,
         appended,
     }
@@ -582,7 +589,8 @@ pub fn isr_replication_closure<'a>(
     zk_timer: Stream<(), Process<'a, Zk>>,
     hooks: Hooks,
 ) -> Outputs<'a> {
-    let writes_at_replicas = writes.broadcast_closed(replicas, TCP.fail_stop().bincode());
+    let writes_at_replicas =
+        writes.broadcast_closed(replicas, TCP.fail_stop().name("write").bincode());
 
     // Cycles through the network: replication (leader → followers, lossy), acks (followers →
     // leader), and views (ZK → replicas).
@@ -687,17 +695,19 @@ pub fn isr_replication_closure<'a>(
 
     replication_handle.complete(
         replicate
-            .demux(replicas, TCP.lossy_delayed_forever().bincode())
+            .demux(replicas, TCP.lossy_delayed_forever().name("repl").bincode())
             .entries(),
     );
     acks_handle.complete(
         acks_out
-            .demux(replicas, TCP.fail_stop().bincode())
+            .demux(replicas, TCP.fail_stop().name("ack").bincode())
             .entries(),
     );
 
     // ZK.
-    let zk_in = to_zk.send(zk, TCP.fail_stop().bincode()).entries();
+    let zk_in = to_zk
+        .send(zk, TCP.fail_stop().name("zk").bincode())
+        .entries();
     let views: Stream<View, Process<'a, Zk>> = sliced! {
         let message_batch = use::batch(zk_in, nondet!(/** LDFI delivery point */ hook = hooks.zk_in));
         let timer_batch = use::batch(zk_timer, nondet!(/** external input */ hook = hooks.zk_timer));
@@ -730,11 +740,13 @@ pub fn isr_replication_closure<'a>(
     views_handle.complete(
         views
             .clone()
-            .broadcast_closed(replicas, TCP.fail_stop().bincode()),
+            .broadcast_closed(replicas, TCP.fail_stop().name("view").bincode()),
     );
 
     Outputs {
-        client_acks: client_acks.send(client, TCP.fail_stop().bincode()).values(),
+        client_acks: client_acks
+            .send(client, TCP.fail_stop().name("client-ack").bincode())
+            .values(),
         views,
         appended: appended.weaken_ordering::<NoOrder>(),
     }
@@ -842,30 +854,15 @@ pub(crate) mod harness {
             views,
             appended,
         };
-        // Fault model: replicas may crash; the replication channel is lossy; everything else
-        // is reliable and the client and ZK do not crash.
+        // Fault model: replicas may crash; the replication channel is lossy (declared by the
+        // protocol's transport); everything else is reliable and the client and ZK do not
+        // crash.
         let configure = move |crashes: usize| {
-            let mut ldfi = Ldfi::new()
+            Ldfi::new()
                 .level_from_env()
                 .crashable_cluster("replica", &replicas_id, 0..members)
                 .crash_budget(crashes)
-                .input("zk-timer", hooks.zk_timer)
-                .goal_witnessed();
-            ldfi = match encoding {
-                Encoding::Closure => ldfi.reliable_channel("zk", hooks.zk_in),
-                Encoding::Dataflow => ldfi
-                    .reliable_channel("hb", hooks.zk_hb)
-                    .reliable_channel("shrink", hooks.zk_shrink),
-            };
-            for m in 0..members {
-                ldfi = ldfi
-                    .reliable_channel(&format!("write@{m}"), hooks.writes.on(m))
-                    .lossy_channel(&format!("repl@{m}"), hooks.replication.on(m))
-                    .reliable_channel(&format!("ack@{m}"), hooks.acks.on(m))
-                    .reliable_channel(&format!("view@{m}"), hooks.views.on(m))
-                    .input(&format!("timer@{m}"), hooks.replica_timer.on(m));
-            }
-            ldfi
+                .goal_witnessed()
         };
         (compiled, harness, configure)
     }

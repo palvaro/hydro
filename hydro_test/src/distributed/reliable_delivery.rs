@@ -12,8 +12,9 @@
 //! lineage must reflect: acks are outputs of the execution that satisfied the goal, not
 //! inputs to it.
 //!
-//! Both channels are `lossy_delayed_forever`, so their outputs are `NoOrder` and their
-//! receiving `batch` operators are the fault points the LDFI harness drives.
+//! Both channels are `lossy_delayed_forever`, so the simulator's filter admits omission on
+//! them (see `hydro_lang::sim::ldfi`); the protocol declares its own fault model and the
+//! harness registers nothing.
 
 use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder};
 use hydro_lang::prelude::*;
@@ -42,9 +43,11 @@ pub struct Ack {
 /// the receiver received, which is where the delivery property is observed.
 ///
 /// # Non-Determinism
-/// - `nondet_messages`: the batching of messages at the receiver. Over a lossy channel this
-///   is where omissions manifest.
-/// - `nondet_acks`: the batching of acks at the sender, likewise.
+/// - `nondet_messages`: the batching of messages at the receiver.
+/// - `nondet_acks`: the batching of acks at the sender.
+///
+/// A simulation test may bind hooks to either batch for precise lineage; the fault points
+/// are the channels themselves.
 pub fn reliable_delivery<'a>(
     sender: &Process<'a, Sender>,
     receiver: &Process<'a, Receiver>,
@@ -80,7 +83,8 @@ pub fn reliable_delivery<'a>(
             .map(q!(|(attempt, _)| Msg { attempt }))
     };
 
-    let messages_at_receiver = messages.send(receiver, TCP.lossy_delayed_forever().bincode());
+    let messages_at_receiver =
+        messages.send(receiver, TCP.lossy_delayed_forever().name("msg").bincode());
 
     let (received, replies): (
         Stream<Msg, Process<'a, Receiver>, Unbounded, NoOrder>,
@@ -93,7 +97,7 @@ pub fn reliable_delivery<'a>(
         (message_batch, replies)
     };
 
-    acks_handle.complete(replies.send(sender, TCP.lossy_delayed_forever().bincode()));
+    acks_handle.complete(replies.send(sender, TCP.lossy_delayed_forever().name("ack").bincode()));
 
     received
 }
@@ -109,23 +113,37 @@ mod tests {
 
     /// Runs LDFI against `reliable_delivery` with `eot` timer rounds, allowing omissions
     /// only in the first `eff` rounds. The goal: the receiver received the message by the
-    /// end of the horizon.
-    fn search(max_attempts: Option<u32>, eot: u32, eff: u32) -> Outcome {
+    /// end of the horizon. With `hooks`, the two batches are bound to scripted hooks (which
+    /// the search traces for exact per-execution lineage); without, the lineage comes from
+    /// the receives alone.
+    fn search(max_attempts: Option<u32>, eot: u32, eff: u32, hooks: bool) -> Outcome {
         let mut flow = FlowBuilder::new();
         let sender = flow.process::<Sender>();
         let receiver = flow.process::<Receiver>();
-        let msg_hook: BatchHook<Msg, NoOrder, ExactlyOnce, OnProcess<Receiver>> = flow.sim_hook();
-        let ack_hook: BatchHook<Ack, NoOrder, ExactlyOnce, OnProcess<Sender>> = flow.sim_hook();
 
         let (timer_send, timer) = sender.sim_input::<u32, TotalOrder, ExactlyOnce>();
-        let received = reliable_delivery(
-            &sender,
-            &receiver,
-            timer,
-            max_attempts,
-            nondet!(/** LDFI fault point: the message channel */ hook = msg_hook),
-            nondet!(/** LDFI fault point: the ack channel */ hook = ack_hook),
-        );
+        let received = if hooks {
+            let msg_hook: BatchHook<Msg, NoOrder, ExactlyOnce, OnProcess<Receiver>> =
+                flow.sim_hook();
+            let ack_hook: BatchHook<Ack, NoOrder, ExactlyOnce, OnProcess<Sender>> = flow.sim_hook();
+            reliable_delivery(
+                &sender,
+                &receiver,
+                timer,
+                max_attempts,
+                nondet!(/** traced for lineage */ hook = msg_hook),
+                nondet!(/** traced for lineage */ hook = ack_hook),
+            )
+        } else {
+            reliable_delivery(
+                &sender,
+                &receiver,
+                timer,
+                max_attempts,
+                nondet!(/** explored by the simulator */),
+                nondet!(/** explored by the simulator */),
+            )
+        };
         let out = received.sim_output();
 
         let mut sim = flow.sim().test_safety_only();
@@ -135,8 +153,6 @@ mod tests {
         let compiled = sim.compiled();
         Ldfi::new()
             .level_from_env()
-            .lossy_channel("msg", msg_hook)
-            .lossy_channel("ack", ack_hook)
             .goal(&out)
             .run(&compiled, async |run| {
                 for round in 1..=eot {
@@ -157,7 +173,18 @@ mod tests {
     /// second, and their union the counterexample. Acks never enter a support.
     #[test]
     fn ldfi_breaks_two_attempts_by_dropping_both() {
-        let outcome = search(Some(2), 4, 2);
+        breaks_two_attempts(false);
+    }
+
+    /// The same search with the batches hooked: the hooks only sharpen lineage, the
+    /// result is the same.
+    #[test]
+    fn ldfi_breaks_two_attempts_by_dropping_both_with_hooks() {
+        breaks_two_attempts(true);
+    }
+
+    fn breaks_two_attempts(hooks: bool) {
+        let outcome = search(Some(2), 4, 2, hooks);
         eprintln!("{outcome}");
         let Outcome::Counterexample {
             faults,
@@ -199,7 +226,7 @@ mod tests {
     /// certificate.
     #[test]
     fn ldfi_certifies_retry_until_ack() {
-        let outcome = search(None, 4, 2);
+        let outcome = search(None, 4, 2, false);
         eprintln!("{outcome}");
         assert!(
             matches!(outcome, Outcome::Certificate { .. }),

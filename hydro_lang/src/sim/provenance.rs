@@ -10,11 +10,11 @@
 //!
 //! Closures are wrapped so the user's code still sees `T`; adapters are inserted where a
 //! DFIR operator destructures pairs (joins, cross products) or where the representation
-//! changes (a `Cast` between a flat and a keyed kind). Sources, external inputs and network
-//! receives produce empty provenance; a scripted batch's releases get fresh delivery ids
-//! (`tag_delivery`); network sends and external outputs are preceded by a map to
-//! `(value, Vec<delivery id>)`, which `SimBuilder` (in provenance mode) serializes and
-//! records.
+//! changes (a `Cast` between a flat and a keyed kind). Sources and external inputs produce
+//! empty provenance; a network receive tags each record with the delivery id of the send
+//! that produced it (the id travels with the message; `SimBuilder` emits the tagging);
+//! network sends and external outputs are preceded by a map to `(value, Vec<delivery id>)`,
+//! which `SimBuilder` (in provenance mode) serializes and records.
 //!
 //! Unsupported operators panic at compile time with their name: the rewrite is complete for
 //! the operators the LDFI examples use and explicit about what it does not cover.
@@ -52,6 +52,29 @@ fn tagged(ty: &DebugType) -> DebugType {
     let inner: &syn::Type = &ty.0;
     let out: syn::Type = parse_quote!(#root::sim::runtime::Tagged<#inner>);
     DebugType::from(out)
+}
+
+/// The inverse of [`tagged`] on a type: `Tagged<T>` → `T`; any other type is returned as is.
+/// For the send sites `SimBuilder` emits in provenance mode, where the IR names the tagged
+/// element type but the value in hand is the plain one.
+pub(crate) fn plain_type(ty: &syn::Type) -> syn::Type {
+    if let syn::Type::Path(path) = ty
+        && let Some(segment) = path.path.segments.last()
+        && segment.ident == "Tagged"
+        && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+        && args.args.len() == 1
+        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+    {
+        return inner.clone();
+    }
+    if let syn::Type::Tuple(tuple) = ty {
+        let mut tuple = tuple.clone();
+        for elem in tuple.elems.iter_mut() {
+            *elem = plain_type(elem);
+        }
+        return syn::Type::Tuple(tuple);
+    }
+    ty.clone()
 }
 
 /// `(A, B)` → `(Tagged<A>, Tagged<B>)` (and `(K, (A, B))` → `(K, (Tagged<A>, Tagged<B>))`
@@ -562,26 +585,49 @@ pub fn rewrite(ir: &mut [HydroRoot]) {
                     tag_kind(&mut metadata.collection_kind);
                 }
 
-                // A scripted batch's releases get fresh delivery ids; `SimBuilder::batch`
-                // emits the tagging (it owns the lineage handle at that point).
+                // A batch passes the tags of what it releases through (a network arrival
+                // carries the id of its send; a local or external item carries none).
                 HydroNode::Batch { metadata, .. } => {
                     tag_kind(&mut metadata.collection_kind);
                     assert_eq!(out_rep, Rep::Flat, "provenance rewrite: keyed batch");
                 }
 
-                // Network: the send side sees `(value, Vec<id>)`; the receive side starts
-                // with empty provenance (the send side recorded the record's).
+                // Network: the send side sees `(value, Vec<id>)` and records the record's
+                // provenance with the send. On the receive side the delivery id travels
+                // with the message: `SimBuilder::create_network` tags each deserialized
+                // record with the id of the send that produced it (it owns the wire format),
+                // so the node's own output is tagged. An embedded channel carries no id and
+                // starts with empty provenance.
                 HydroNode::Network {
-                    input, metadata, ..
+                    input,
+                    serialize,
+                    metadata,
+                    ..
                 } => {
                     let in_rep = input_rep(input);
                     let strip = strip_expr(in_rep);
                     let in_meta = input.metadata().clone();
                     let old = std::mem::replace(input.as_mut(), HydroNode::Placeholder);
                     **input = map_node(strip, old, in_meta);
-                    let mut tagged_meta = metadata.clone();
-                    tag_kind(&mut tagged_meta.collection_kind);
-                    post = Some((empty_tag_expr(out_rep), tagged_meta));
+                    if matches!(serialize, crate::compile::ir::NetworkSend::Embedded { .. }) {
+                        let mut tagged_meta = metadata.clone();
+                        tag_kind(&mut tagged_meta.collection_kind);
+                        post = Some((empty_tag_expr(out_rep), tagged_meta));
+                    } else {
+                        match out_rep {
+                            Rep::Flat => tag_kind(&mut metadata.collection_kind),
+                            // The receive half tags the whole `(k, v)` record; a keyed
+                            // output moves the tag onto the value.
+                            Rep::Keyed => {
+                                let mut tagged_meta = metadata.clone();
+                                tag_kind(&mut tagged_meta.collection_kind);
+                                post = Some((
+                                    parse_quote!(#root::sim::runtime::codegen::key_out),
+                                    tagged_meta,
+                                ));
+                            }
+                        }
+                    }
                 }
 
                 // Closures.

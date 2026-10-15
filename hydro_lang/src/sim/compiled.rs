@@ -77,7 +77,7 @@ macro_rules! abort_assert {
 
 use core::{fmt, panic};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::panic::RefUnwindSafe;
 use std::path::Path;
@@ -412,29 +412,49 @@ impl ScriptCtx {
 
 /// A snapshot of the current simulation instance's lineage events (see
 /// [`LineageEvent`]). Panics if called outside a simulation.
+#[cfg_attr(
+    not(feature = "ldfi"),
+    expect(dead_code, reason = "used by `sim::ldfi`")
+)]
 pub(crate) fn lineage_events() -> Vec<LineageEvent> {
     CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().lineage.events.borrow().clone())
 }
 
 /// Whether the current simulation instance was compiled with record-level provenance.
+#[cfg_attr(
+    not(feature = "ldfi"),
+    expect(dead_code, reason = "used by `sim::ldfi`")
+)]
 pub(crate) fn lineage_provenance_enabled() -> bool {
     CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().provenance)
 }
 
 /// The static dependency slices of the current simulation instance's program. Panics if
 /// called outside a simulation.
+#[cfg_attr(
+    not(feature = "ldfi"),
+    expect(dead_code, reason = "used by `sim::ldfi`")
+)]
 pub(crate) fn lineage_slices() -> Rc<Slices> {
     CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().slices.clone())
 }
 
 /// The current simulation instance's shared lineage/crash handles. Panics if called outside
 /// a simulation.
+#[cfg_attr(
+    not(feature = "ldfi"),
+    expect(dead_code, reason = "used by `sim::ldfi`")
+)]
 pub(crate) fn lineage_handles() -> LineageHandles {
     CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().lineage.clone())
 }
 
 /// The raw simulator port number that lineage [`LineageEvent::Output`] events use for an
 /// external output port. Panics if called outside a simulation.
+#[cfg_attr(
+    not(feature = "ldfi"),
+    expect(dead_code, reason = "used by `sim::ldfi`")
+)]
 pub(crate) fn lineage_port(port: ExternalPortId) -> usize {
     CURRENT_SIM_CONNECTIONS.with(|connections| {
         connections
@@ -446,22 +466,56 @@ pub(crate) fn lineage_port(port: ExternalPortId) -> usize {
     })
 }
 
-/// The receiving process/cluster location and member of a scripted hook. Panics if called
-/// outside a simulation or if the hook is not bound.
-pub(crate) fn hook_root_location(hook_id: usize, member: Option<u32>) -> (LocationId, Option<u32>) {
-    let ctx = script_ctx();
-    let hook = ctx.control(hook_id, member);
-    let location = hook.borrow().target().location().clone();
-    (location.location.root().clone(), location.cluster_id)
+/// A scripted tick-input hook the fault-injection layer drives without knowing its element
+/// type: its handle id and member, the node it belongs to, and the tick it feeds.
+#[cfg(feature = "ldfi")]
+#[derive(Clone, Debug)]
+pub(crate) struct TracedHook {
+    pub hook_id: usize,
+    pub member: Option<u32>,
+    pub node: (LocationId, Option<u32>),
+    pub tick: (LocationId, Option<u32>),
 }
 
-/// The execution unit (tick location) and member a scripted hook feeds. Panics if called
-/// outside a simulation or if the hook is not bound.
-pub(crate) fn hook_tick_location(hook_id: usize, member: Option<u32>) -> (LocationId, Option<u32>) {
+/// Places every scripted tick-input hook of the current instance that has a traced
+/// pass-through policy under it (see `ScriptableHook::passthrough_policy`), so it delivers
+/// everything as it arrives without entropy and its releases are logged, and returns those
+/// hooks. Panics if called outside a simulation.
+#[cfg(feature = "ldfi")]
+pub(crate) fn trace_all_hooks() -> Vec<TracedHook> {
     let ctx = script_ctx();
-    let hook = ctx.control(hook_id, member);
-    let location = hook.borrow().target().location().clone();
-    (location.location, location.cluster_id)
+    let mut traced = vec![];
+    for ((hook_id, member), hook) in ctx.hooks.iter() {
+        let mut hook = hook.borrow_mut();
+        let ScriptTarget::Tick { location } = hook.target() else {
+            continue;
+        };
+        if hook.install_passthrough() {
+            traced.push(TracedHook {
+                hook_id: *hook_id,
+                member: *member,
+                node: (location.location.root().clone(), location.cluster_id),
+                tick: (location.location, location.cluster_id),
+            });
+        }
+    }
+    traced
+}
+
+/// Places every traced hook of the current instance under a replay policy: `scripts[hook]`
+/// (serialized items per execution of its tick) where given, an empty script otherwise (the
+/// tick never runs on that hook's account). Panics if called outside a simulation.
+#[cfg(feature = "ldfi")]
+pub(crate) fn replay_all_hooks(scripts: &HashMap<(usize, Option<u32>), Vec<Vec<Vec<u8>>>>) {
+    let ctx = script_ctx();
+    for (key, hook) in ctx.hooks.iter() {
+        let mut hook = hook.borrow_mut();
+        if !matches!(hook.target(), ScriptTarget::Tick { .. }) {
+            continue;
+        }
+        let script = scripts.get(key).cloned().unwrap_or_default();
+        hook.install_replay(script);
+    }
 }
 
 /// Resolves the per-instance scripting context. Panics if called outside a simulation.
@@ -841,6 +895,9 @@ pub struct CompiledSim {
     pub(super) slices: Rc<Slices>,
     /// Compiled with record-level provenance (see [`super::provenance`]).
     pub(super) provenance: bool,
+    /// Locations whose ticks run as soon as they are runnable, outside the schedule choice
+    /// (see `SimFlow::eager_locations`).
+    pub(super) eager_locations: Rc<HashSet<LocationId>>,
 }
 
 #[sealed::sealed]
@@ -916,6 +973,7 @@ impl CompiledSim {
                 externals_port_registry: self.externals_port_registry.clone(),
                 slices: self.slices.clone(),
                 provenance: self.provenance,
+                eager_locations: self.eager_locations.clone(),
                 dylib_result: None,
                 log,
                 exhaustive: false,
@@ -1231,6 +1289,10 @@ impl CompiledSim {
     /// and every unhooked in-tick decision resolves to its first alternative, so two such
     /// instances of the same program under the same scripts behave identically. For the
     /// counterfactual replays of `sim::ldfi`, whose hooks are all under replay policies.
+    #[cfg_attr(
+        not(feature = "ldfi"),
+        expect(dead_code, reason = "used by `sim::ldfi`")
+    )]
     pub(crate) fn replay(&self, thunk: impl AsyncFnOnce() + RefUnwindSafe) {
         self.with_instantiator(
             |instantiator| {
@@ -1277,6 +1339,7 @@ pub struct CompiledSimInstance<'a> {
     externals_port_registry: SimExternalPortRegistry,
     slices: Rc<Slices>,
     provenance: bool,
+    eager_locations: Rc<HashSet<LocationId>>,
     dylib_result: Option<DylibResult>,
     log: bool,
     exhaustive: bool,
@@ -1371,6 +1434,15 @@ impl<'a> CompiledSimInstance<'a> {
 
         let scripted_hooks = Rc::new(std::mem::take(&mut dylib_result.8));
         let lineage = dylib_result.9.clone();
+        // The filter enforces the program's declared fault model: only channels whose
+        // transport admits loss accept omissions.
+        lineage.faults.borrow_mut().lossy = self
+            .slices
+            .channels
+            .values()
+            .filter(|channel| channel.lossy)
+            .map(|channel| channel.id)
+            .collect();
         self.dylib_result = Some(dylib_result);
 
         CURRENT_SIM_CONNECTIONS
@@ -1609,6 +1681,7 @@ impl<'a> CompiledSimInstance<'a> {
             lineage,
             next_exec: 0,
             hook_ids,
+            eager_locations: self.eager_locations.clone(),
         }
     }
 }
@@ -2574,6 +2647,10 @@ struct LaunchedSim<W: std::io::Write> {
     /// Scripted hook object identity → `(hook_id, member)`, from the registry; lets the
     /// scheduler attribute a release to the handle the test knows it by.
     hook_ids: HashMap<*const (), (usize, Option<u32>)>,
+    /// Locations whose runnable ticks are run first, without a schedule choice: they only
+    /// consume (a specification's observer), so their interleaving is unobservable to the
+    /// program and exploring it would only multiply schedules.
+    eager_locations: Rc<HashSet<LocationId>>,
 }
 
 /// The items a scripted hook has delivered under a standing policy (empty when it has
@@ -2860,7 +2937,13 @@ impl<W: std::io::Write> LaunchedSim<W> {
                 observation_start + self.possibly_ready_observations.len();
             let candidate_count =
                 scripted_observation_index + usize::from(scripted_observation_runnable);
-            let next_tick_or_obs = if self.deterministic {
+            let eager_tick = self
+                .possibly_ready_ticks
+                .iter()
+                .position(|tick| self.eager_locations.contains(tick.parent_location.root()));
+            let next_tick_or_obs = if let Some(index) = eager_tick {
+                index
+            } else if self.deterministic {
                 for tick in self.possibly_ready_ticks.iter().chain(
                     self.current_scripted_tick
                         .iter()

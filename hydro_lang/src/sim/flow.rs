@@ -31,6 +31,10 @@ pub struct SimFlow<'a> {
     /// [`SimExternal`] for each External.
     pub(crate) externals: SparseSecondaryMap<LocationKey, SimExternal>,
 
+    /// Locations whose ticks the scheduler runs as soon as they are runnable, without making
+    /// their interleaving a schedule choice (a specification's observer, which only consumes).
+    pub(crate) eager_locations: HashSet<LocationId>,
+
     /// Max size of each cluster.
     pub(crate) cluster_max_sizes: SparseSecondaryMap<LocationKey, usize>,
     /// Handle to state handling `external`s' ports.
@@ -290,6 +294,7 @@ impl<'a> SimFlow<'a> {
             unit_test_fuzz_iterations: self.unit_test_fuzz_iterations,
             slices,
             provenance: self.provenance,
+            eager_locations: Rc::new(self.eager_locations),
         }
     }
 

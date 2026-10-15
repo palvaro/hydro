@@ -10,37 +10,51 @@
 //! bug within the fault model) or no fault set can hit every support (a certificate within
 //! bounds).
 //!
+//! # The fault point
+//!
+//! The simulator puts a **filter** in front of every network send (see
+//! [`sim::runtime::lineage`](crate::sim::runtime)). Every `Network` node of the program is a
+//! fault point by construction; nothing in the program or the harness registers channels.
+//! The transport the program declared is its fault model: a `lossy_delayed_forever` channel
+//! admits omission, a `fail_stop` channel admits only its sender's crash.
+//!
 //! # Fault vocabulary
 //!
-//! - **Omission** `omit(channel, payload)`, available on channels registered with
-//!   [`Ldfi::lossy_channel`]: the receiving hook is placed under a standing
-//!   [omission policy](crate::sim::hooks::BatchHook::omit). Only unordered (`NoOrder`)
-//!   hooks offer it, which is the guarantee a lossy transport yields.
-//! - **Crash** `crash(node, after k sends)`, available for nodes registered with
-//!   [`Ldfi::crashable`] / [`Ldfi::crashable_cluster`]: the node performs its first `k`
-//!   sends and every later send is dropped at the send half (and its external outputs are
-//!   suppressed once it is dead); see `sim::runtime::lineage`. This is Molly's definition
-//!   of a crash, and it can split the fan-out of one broadcast. Channels registered with
-//!   [`Ldfi::reliable_channel`] admit no omission; crashes of their senders are their only
-//!   faults, which is what `fail_stop` declares.
+//! - **Omission** `omit(message)`: the filter drops the send, identified by its channel,
+//!   sender, destination and wire bytes. Every byte-identical copy on that channel is
+//!   dropped while finite failures last ([`Run::end_of_finite_failures`]), so a
+//!   retransmission with the same payload is the same message.
+//! - **Crash** `crash(node after m)`, available for nodes registered with
+//!   [`Ldfi::crashable`] / [`Ldfi::crashable_cluster`]: the node performs every send up to
+//!   and including `m` and every later send is dropped at the filter (and its external
+//!   outputs are suppressed once it is dead). This is Molly's definition of a crash, named
+//!   by a message rather than a send count so the fault means the same thing in every run,
+//!   and it can split the fan-out of one broadcast.
 //!
 //! # Lineage
 //!
 //! Lineage is **execution-granular**. The simulator records every execution (an async run
-//! or a tick execution), which hook releases fed each tick execution, which execution sent
-//! each network message (and which node, as its `j`-th send), and which execution produced
-//! each `sim_output` value. The support of a goal output is the backward closure from the
-//! execution that produced it: a tick execution depends on the channel messages its hooks
-//! released into it (each traced to the execution that sent it) and, as a sound
-//! over-approximation of persisted state, on the earlier executions of the same tick; an
-//! async run depends on the tick executions at its location since its previous run.
-//! Messages that arrive through an unregistered path are invisible, so every channel a
-//! goal can depend on must be registered for the closure to be sound.
+//! or a tick execution), every send with its fate and a delivery id, every receive by the
+//! delivery id it took off the channel, which hook releases fed each tick execution, and
+//! which execution produced each `sim_output` value. The support of a goal output is the
+//! backward closure from the execution that produced it: a tick execution depends on the
+//! channel messages its hooked batches released into it, on the arrivals at its node that
+//! an unhooked batch may have released into it, and, as a sound over-approximation of
+//! persisted state, on the earlier executions of the same tick; an async run depends on
+//! what it received and on the tick executions at its location since its previous run. A
+//! static slice of the program ([`Level::Slice`]) narrows these rules per sink; record-level
+//! provenance ([`Level::Record`]) and counterfactual replay ([`Level::Counterfactual`])
+//! replace them.
+//!
+//! Scripted batch hooks are optional precision, not a soundness requirement: a hooked
+//! batch's releases say exactly which tick execution consumed a message, and are what
+//! counterfactual replay feeds. The search places every scripted batch hook of the program
+//! under a traced pass-through policy; the harness never scripts them.
 //!
 //! A support is a set of [`Dependency`]s (message, sender, ordinal). A fault *kills* a
-//! dependency if it is `omit` of that message on a lossy channel, or `crash(sender, k)`
-//! with `k ≤` the message's ordinal among the sender's sends. A hypothesis is a hitting
-//! set under `kills`; crash literals are capped by [`Ldfi::crash_budget`].
+//! dependency if it is `omit` of that message on a lossy channel, or `crash(sender, m)`
+//! with `m` sent before the dependency. A hypothesis is a hitting set under `kills`; crash
+//! literals are capped by [`Ldfi::crash_budget`].
 //!
 //! # Goals
 //!
@@ -49,6 +63,7 @@
 //!   a cluster, as in reliable broadcast's agreement: a derivation of the conjunction is one
 //!   derivation per correct member, unioned. If no correct member produced output the goal
 //!   held vacuously and contributes no clause.
+//! - [`Ldfi::goal_witnessed`]: the body names the facts ([`Run::witness`], [`Run::require`]).
 //!
 //! The body itself decides whether the goal held (it receives the [`Run`] and can ask which
 //! nodes crashed), so a conditional invariant like "if any correct member delivered, all
@@ -56,11 +71,11 @@
 //!
 //! # Composition with the schedule explorer, and bounds
 //!
-//! Each hypothesis is run under [`CompiledSim::exhaustive`]: the fault set is fixed and the
-//! simulator explores every batching/ordering schedule under it. The body drives time
-//! (timers are `sim_input`s), so the horizon `EOT` is what the body fires; the end of finite
-//! failures `EFF` is declared by [`Run::end_of_finite_failures`], after which omissions
-//! stop and only messages delivered before it are omission candidates.
+//! Each hypothesis is run under [`CompiledSim::exhaustive`] or a sampled exploration: the
+//! fault set is fixed and the simulator explores the batching/ordering schedules under it.
+//! The body drives time (timers are `sim_input`s), so the horizon `EOT` is what the body
+//! fires; the end of finite failures `EFF` is declared by [`Run::end_of_finite_failures`],
+//! after which omissions stop and only messages sent before it are omission candidates.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -69,37 +84,93 @@ use std::panic::RefUnwindSafe;
 use std::rc::Rc;
 
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 
 use crate::compile::builder::ExternalPortId;
-use crate::live_collections::stream::{NoOrder, Ordering, Retries, TotalOrder};
+use crate::live_collections::stream::{Ordering, Retries};
 use crate::location::dynamic::LocationId;
 use crate::location::{Cluster, Location, Process, TaglessMemberId};
 use crate::sim::compiled::{
-    CompiledSim, hook_root_location, hook_tick_location, lineage_events, lineage_handles,
-    lineage_port, lineage_provenance_enabled, lineage_slices,
+    CompiledSim, TracedHook, lineage_events, lineage_handles, lineage_port,
+    lineage_provenance_enabled, lineage_slices, replay_all_hooks, trace_all_hooks,
 };
-use crate::sim::hooks::{BatchHook, ScriptableHookScope};
-use crate::sim::runtime::{CrashPoint, ExecId, LineageEvent, NodeKey};
-use crate::sim::slice::{SinkSlice, SliceInput, Slices};
+use crate::sim::runtime::{
+    CrashPoint, DeliveryId, ExecId, LineageEvent, NodeKey, SendFate, SendKey,
+};
+use crate::sim::slice::{ChannelInfo, SinkSlice, SliceInput, Slices};
+use crate::sim::spec::{Spec, SpecParts};
 use crate::sim::{SimClusterReceiver, SimReceiver};
 
-/// A message as the omission vocabulary names it: the channel it travelled on (the label of
-/// its fault point) and its payload. Identity is by channel and payload value: omitting a
-/// message omits every byte-identical copy on that channel while the policy stands.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+/// A message as the omission vocabulary names it: the channel it travelled on, its sender
+/// and destination (members, for cluster endpoints), and its payload. Identity is by those
+/// four: omitting a message omits every byte-identical copy from that sender to that
+/// destination on that channel while finite failures last.
+#[derive(Clone)]
 pub struct Message {
-    /// The fault point's label.
+    /// The channel's label (see [`ChannelInfo::label`]).
     pub channel: String,
-    /// The bincode-serialized payload.
+    /// The channel's sink id.
+    channel_id: usize,
+    /// The sending member, for a channel out of a cluster.
+    pub from_member: Option<u32>,
+    /// The receiving member, for a channel into a cluster.
+    pub to_member: Option<u32>,
+    /// The wire bytes.
     payload: Vec<u8>,
     /// The payload's `Debug` rendering, for reports.
     pub display: String,
 }
 
+impl Message {
+    fn key(&self) -> (usize, Option<u32>, Option<u32>, &[u8]) {
+        (
+            self.channel_id,
+            self.from_member,
+            self.to_member,
+            &self.payload,
+        )
+    }
+
+    /// `label[from→to]`: the channel with its endpoints, omitting the brackets for a
+    /// process-to-process channel.
+    fn endpoint(&self) -> String {
+        render_endpoint(&self.channel, self.from_member, self.to_member)
+    }
+}
+
+fn render_endpoint(label: &str, from_member: Option<u32>, to_member: Option<u32>) -> String {
+    match (from_member, to_member) {
+        (None, None) => label.to_owned(),
+        (from, to) => format!(
+            "{label}[{}→{}]",
+            from.map(|m| m.to_string()).unwrap_or_default(),
+            to.map(|m| m.to_string()).unwrap_or_default()
+        ),
+    }
+}
+
+impl PartialEq for Message {
+    fn eq(&self, other: &Self) -> bool {
+        self.key() == other.key()
+    }
+}
+
+impl Eq for Message {}
+
+impl PartialOrd for Message {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Message {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.key().cmp(&other.key())
+    }
+}
+
 impl Debug for Message {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.channel, self.display)
+        write!(f, "{}:{}", self.endpoint(), self.display)
     }
 }
 
@@ -281,187 +352,6 @@ impl Display for Dependency {
 /// A derivation of the goal: the deliveries it depended on. Killing any one of them kills
 /// the derivation.
 pub type Derivation = BTreeSet<Dependency>;
-
-/// The batch hooks that can be fault points: ordered (reliable channel) and unordered
-/// (lossy channel) batch hooks, under a standing policy.
-#[sealed::sealed]
-pub trait PolicyHook<T>: RefUnwindSafe {
-    #[doc(hidden)]
-    fn key(&self) -> (usize, Option<u32>);
-    /// Installs the policy omitting `omit` (which is empty for ordered hooks).
-    #[doc(hidden)]
-    fn install(&self, omit: Vec<T>);
-    /// Installs a replay policy (see [`BatchHook::replay`]).
-    #[doc(hidden)]
-    fn replay(&self, execs: Vec<Vec<T>>);
-    #[doc(hidden)]
-    fn delivered(&self) -> Vec<T>;
-    #[doc(hidden)]
-    fn dropped(&self) -> Vec<T>;
-}
-
-#[sealed::sealed]
-impl<T, R, S> PolicyHook<T> for BatchHook<T, NoOrder, R, S>
-where
-    T: Serialize + DeserializeOwned + PartialEq,
-    R: Retries,
-    S: ScriptableHookScope,
-{
-    fn key(&self) -> (usize, Option<u32>) {
-        (self.id, self.member)
-    }
-    fn install(&self, omit: Vec<T>) {
-        self.omit(omit);
-    }
-    fn replay(&self, execs: Vec<Vec<T>>) {
-        BatchHook::<T, NoOrder, R, S>::replay(self, execs);
-    }
-    fn delivered(&self) -> Vec<T> {
-        BatchHook::delivered(self)
-    }
-    fn dropped(&self) -> Vec<T> {
-        BatchHook::dropped(self)
-    }
-}
-
-#[sealed::sealed]
-impl<T, R, S> PolicyHook<T> for BatchHook<T, TotalOrder, R, S>
-where
-    T: Serialize + DeserializeOwned + PartialEq,
-    R: Retries,
-    S: ScriptableHookScope,
-{
-    fn key(&self) -> (usize, Option<u32>) {
-        (self.id, self.member)
-    }
-    fn install(&self, omit: Vec<T>) {
-        assert!(
-            omit.is_empty(),
-            "internal error: omission requested on a reliable channel"
-        );
-        self.deliver_all();
-    }
-    fn replay(&self, execs: Vec<Vec<T>>) {
-        BatchHook::<T, TotalOrder, R, S>::replay(self, execs);
-    }
-    fn delivered(&self) -> Vec<T> {
-        BatchHook::delivered(self)
-    }
-    fn dropped(&self) -> Vec<T> {
-        BatchHook::dropped(self)
-    }
-}
-
-/// A type-erased fault point: one channel's receiving hook.
-trait FaultPoint: RefUnwindSafe {
-    fn label(&self) -> &str;
-    fn hook_key(&self) -> (usize, Option<u32>);
-    /// Whether omission is in this channel's vocabulary.
-    fn lossy(&self) -> bool;
-    fn decode(&self, payload: &[u8]) -> Message;
-    /// Installs this channel's share of `faults`.
-    fn install(&self, faults: &FaultSet);
-    fn deliver_all(&self);
-    /// Places the hook under a replay policy: `execs[k]` (serialized items) is released into
-    /// the `k`-th execution of its tick.
-    fn replay(&self, execs: Vec<Vec<Vec<u8>>>);
-    fn delivered(&self) -> Vec<Message>;
-    fn dropped(&self) -> Vec<Message>;
-}
-
-struct ChannelPoint<T, H> {
-    label: String,
-    hook: H,
-    /// `false` for a channel registered as reliable even though its hook is unordered.
-    lossy: bool,
-    _phantom: std::marker::PhantomData<fn(T)>,
-}
-
-impl<T, H> ChannelPoint<T, H>
-where
-    T: Serialize + DeserializeOwned + Debug,
-{
-    fn message(&self, payload: &T) -> Message {
-        Message {
-            channel: self.label.clone(),
-            payload: bincode::serialize(payload).unwrap(),
-            display: format!("{payload:?}"),
-        }
-    }
-}
-
-impl<T, H> FaultPoint for ChannelPoint<T, H>
-where
-    T: Serialize + DeserializeOwned + PartialEq + Debug,
-    H: PolicyHook<T>,
-{
-    fn label(&self) -> &str {
-        &self.label
-    }
-
-    fn hook_key(&self) -> (usize, Option<u32>) {
-        self.hook.key()
-    }
-
-    fn lossy(&self) -> bool {
-        self.lossy
-    }
-
-    fn decode(&self, payload: &[u8]) -> Message {
-        let value: T = bincode::deserialize(payload)
-            .expect("a released payload did not decode as the hook's element type");
-        self.message(&value)
-    }
-
-    fn install(&self, faults: &FaultSet) {
-        let omit: Vec<T> = faults
-            .iter()
-            .filter_map(|fault| match fault {
-                Fault::Omit(m) if m.channel == self.label => {
-                    Some(bincode::deserialize(&m.payload).unwrap())
-                }
-                _ => None,
-            })
-            .collect();
-        self.hook.install(omit);
-    }
-
-    fn deliver_all(&self) {
-        self.hook.install(vec![]);
-    }
-
-    fn replay(&self, execs: Vec<Vec<Vec<u8>>>) {
-        let execs: Vec<Vec<T>> = execs
-            .iter()
-            .map(|items| {
-                items
-                    .iter()
-                    .map(|payload| {
-                        bincode::deserialize(payload)
-                            .expect("a recorded release did not decode as the hook's element type")
-                    })
-                    .collect()
-            })
-            .collect();
-        self.hook.replay(execs);
-    }
-
-    fn delivered(&self) -> Vec<Message> {
-        self.hook
-            .delivered()
-            .iter()
-            .map(|payload| self.message(payload))
-            .collect()
-    }
-
-    fn dropped(&self) -> Vec<Message> {
-        self.hook
-            .dropped()
-            .iter()
-            .map(|payload| self.message(payload))
-            .collect()
-    }
-}
 
 /// One explored schedule of one hypothesis run.
 #[derive(Clone, Debug)]
@@ -744,7 +634,6 @@ pub enum Strategy {
 }
 
 /// How a goal's derivations are read off the outputs.
-#[derive(Clone, Debug)]
 enum Goal {
     /// Every output on the port is one derivation.
     Any { port: ExternalPortId },
@@ -757,6 +646,10 @@ enum Goal {
     /// The body names the outputs that witness the goal ([`Run::witness`] /
     /// [`Run::witness_member`]); the derivation is the union of their lineages.
     Witnessed,
+    /// A [`Spec`]: `PRE` and `POST` views evaluated at the end of the run. The goal is
+    /// violated when `PRE` holds and `POST` does not; `POST`'s derivation is the clause and
+    /// `PRE`'s the requirement.
+    Spec(SpecParts),
 }
 
 /// The per-run handle the harness body receives: the installed faults and the one bound the
@@ -778,6 +671,8 @@ pub struct Run<'a> {
     vacuous: Cell<bool>,
     /// Which lineage to derive with.
     level: Level,
+    /// The scripted batch hooks placed under a traced pass-through policy at install.
+    hooks: RefCell<Vec<TracedHook>>,
 }
 
 impl Run<'_> {
@@ -902,9 +797,11 @@ impl Run<'_> {
         ));
     }
 
-    /// Declares the end of finite failures (`EFF`): every lossy channel delivers everything
-    /// from here on, and only messages delivered so far are omission candidates. Call it at
-    /// most once; without it, `EFF = EOT`.
+    /// Declares the end of finite failures (Molly's `EFF`): the filter delivers everything
+    /// from here on (crashes stand), and only messages sent so far are omission candidates.
+    /// Optional: a bound a body may impose on where omissions can fall (a protocol that gives
+    /// up after `n` rounds fails only if the losses fall in those rounds); without it, any
+    /// send of the run may be omitted. Call it at most once.
     pub fn end_of_finite_failures(&self) {
         let mut cut = self.eff_cut.borrow_mut();
         assert!(
@@ -912,46 +809,105 @@ impl Run<'_> {
             "end_of_finite_failures() was called twice in one run"
         );
         *cut = Some(lineage_events().len());
-        for point in &self.search.points {
-            point.deliver_all();
-        }
+        lineage_handles().faults.borrow_mut().end_finite_failures();
     }
 
+    /// Installs the hypothesis into the instance's filter and places every scripted batch
+    /// hook under a traced pass-through policy.
     fn install(&self) {
-        for point in &self.search.points {
-            point.install(self.faults);
-        }
+        let slices = lineage_slices();
         let handles = lineage_handles();
-        let mut crashes = handles.crashes.borrow_mut();
+        let mut faults = handles.faults.borrow_mut();
         for fault in self.faults {
-            if let Fault::Crash { node, after } = fault {
-                let key = self
-                    .search
-                    .nodes
-                    .get(node)
-                    .unwrap_or_else(|| panic!("crash fault names unregistered node {node:?}"));
-                let point = match after {
-                    None => CrashPoint::BeforeAnySend,
-                    Some(send) => CrashPoint::AfterSend {
-                        channel: send.channel,
-                        to_member: send.to_member,
-                        bytes: send.bytes.clone(),
-                    },
-                };
-                crashes.install(key.clone(), point);
+            match fault {
+                Fault::Omit(message) => {
+                    let channel = slices.channel(message.channel_id).unwrap_or_else(|| {
+                        panic!("omission names unknown channel #{}", message.channel_id)
+                    });
+                    faults.omit(SendKey {
+                        channel: message.channel_id,
+                        from: (channel.from.clone(), message.from_member),
+                        to_member: message.to_member,
+                        bytes: message.payload.clone(),
+                    });
+                }
+                Fault::Crash { node, after } => {
+                    let key =
+                        self.search.nodes.get(node).unwrap_or_else(|| {
+                            panic!("crash fault names unregistered node {node:?}")
+                        });
+                    let point = match after {
+                        None => CrashPoint::BeforeAnySend,
+                        Some(send) => CrashPoint::AfterSend {
+                            channel: send.channel,
+                            to_member: send.to_member,
+                            bytes: send.bytes.clone(),
+                        },
+                    };
+                    faults.install(key.clone(), point);
+                }
+            }
+        }
+        drop(faults);
+        *self.hooks.borrow_mut() = trace_all_hooks();
+        // The specification's view of the fault model: which members stay up.
+        if let Some(Goal::Spec(spec)) = &self.search.goal {
+            let crashed: std::collections::HashSet<NodeKey> = self
+                .faults
+                .iter()
+                .filter_map(|fault| match fault {
+                    Fault::Crash { node, .. } => self.search.nodes.get(node).cloned(),
+                    Fault::Omit(_) => None,
+                })
+                .collect();
+            for feed in &spec.correct {
+                feed.feed(&crashed);
             }
         }
     }
 
-    fn finish(self, goal_held: bool) -> RunRecord {
-        let points = &self.search.points;
-        let delivered: Vec<Message> = points.iter().flat_map(|p| p.delivered()).collect();
-        let dropped: Vec<Message> = points.iter().flat_map(|p| p.dropped()).collect();
+    fn finish(self, mut goal_held: bool) -> RunRecord {
         let events = lineage_events();
         let eff_cut = (*self.eff_cut.borrow()).unwrap_or(events.len());
+        // A specification decides the verdict from its views' final values.
+        let mut spec_pre: Option<(usize, Vec<u8>)> = None;
+        let mut spec_post: Option<(usize, Vec<u8>)> = None;
+        if let Some(Goal::Spec(spec)) = &self.search.goal {
+            let last_output = |port: usize| -> Option<Vec<u8>> {
+                events.iter().rev().find_map(|event| match event {
+                    LineageEvent::Output {
+                        port: p,
+                        bytes,
+                        dropped: false,
+                        ..
+                    } if *p == port => Some(bytes.clone()),
+                    _ => None,
+                })
+            };
+            let pre = match spec.pre {
+                Some(port) => {
+                    let port = lineage_port(port);
+                    let last = last_output(port);
+                    let holds = Spec::holds(last.as_deref());
+                    spec_pre = last.filter(|_| holds).map(|bytes| (port, bytes));
+                    holds
+                }
+                None => true,
+            };
+            let post_port = lineage_port(spec.post);
+            let last = last_output(post_port);
+            let post = Spec::holds(last.as_deref());
+            spec_post = last.filter(|_| post).map(|bytes| (post_port, bytes));
+            if !pre {
+                self.vacuous.set(true);
+            }
+            goal_held = !pre || post;
+        }
         RunRecord {
             goal_held,
             vacuous: self.vacuous.get(),
+            spec_pre,
+            spec_post,
             faults: self.faults.clone(),
             goal_port: self.goal_port,
             level: self.level,
@@ -960,9 +916,11 @@ impl Run<'_> {
             witnesses: self.witnesses.into_inner(),
             final_witnesses: self.final_witnesses.into_inner(),
             requirements: self.requirements.into_inner(),
-            delivered,
-            dropped,
-            context: InstanceContext::capture(self.search),
+            context: InstanceContext {
+                slices: lineage_slices(),
+                provenance: lineage_provenance_enabled(),
+                hooks: self.hooks.into_inner(),
+            },
         }
     }
 }
@@ -974,35 +932,8 @@ struct InstanceContext {
     slices: Rc<Slices>,
     /// Whether the program was compiled with record-level provenance.
     provenance: bool,
-    /// Receiving node of each point's hook.
-    point_nodes: Vec<NodeKey>,
-    /// The tick (execution unit) and member each point's hook feeds.
-    point_ticks: Vec<NodeKey>,
-}
-
-impl InstanceContext {
-    fn capture(search: &Search) -> Self {
-        InstanceContext {
-            slices: lineage_slices(),
-            provenance: lineage_provenance_enabled(),
-            point_nodes: search
-                .points
-                .iter()
-                .map(|p| {
-                    let (hook_id, member) = p.hook_key();
-                    hook_root_location(hook_id, member)
-                })
-                .collect(),
-            point_ticks: search
-                .points
-                .iter()
-                .map(|p| {
-                    let (hook_id, member) = p.hook_key();
-                    hook_tick_location(hook_id, member)
-                })
-                .collect(),
-        }
-    }
+    /// The scripted batch hooks under a traced pass-through policy.
+    hooks: Vec<TracedHook>,
 }
 
 /// Everything one run of the body produced, taken out of the instance; turned into a
@@ -1010,6 +941,9 @@ impl InstanceContext {
 struct RunRecord {
     goal_held: bool,
     vacuous: bool,
+    /// Under a [`Spec`]: the port and final value of `PRE` / `POST`, when each held.
+    spec_pre: Option<(usize, Vec<u8>)>,
+    spec_post: Option<(usize, Vec<u8>)>,
     faults: FaultSet,
     goal_port: Option<usize>,
     level: Level,
@@ -1018,8 +952,6 @@ struct RunRecord {
     witnesses: Vec<(usize, Option<u32>, Vec<u8>)>,
     final_witnesses: Vec<(usize, Option<u32>, Vec<u8>)>,
     requirements: Vec<(usize, Option<u32>, Vec<u8>)>,
-    delivered: Vec<Message>,
-    dropped: Vec<Message>,
     context: InstanceContext,
 }
 
@@ -1040,11 +972,20 @@ impl RunRecord {
             &self.context,
             replayer,
         );
-        let crashed_sends = lineage
-            .sent
-            .iter()
-            .filter(|s| s.dropped)
+        let protocol = lineage.sent.iter().filter(|s| !s.observation);
+        let crashed_sends = protocol
+            .clone()
+            .filter(|s| s.fate == SendFate::Crashed)
             .filter_map(|s| s.sender.clone())
+            .collect();
+        let delivered = protocol
+            .clone()
+            .filter(|s| s.fate == SendFate::Delivered)
+            .map(|s| lineage.message(s))
+            .collect();
+        let dropped = protocol
+            .filter(|s| s.fate == SendFate::Omitted)
+            .map(|s| lineage.message(s))
             .collect();
         let derivations = match (&search.goal, self.goal_port) {
             (Some(Goal::Any { .. }), Some(port)) => lineage.any_output(port),
@@ -1070,20 +1011,30 @@ impl RunRecord {
                     vec![derivation]
                 }
             }
+            // PRE held and POST held: POST's final value is the fact to derive.
+            (Some(Goal::Spec(_)), _) => match (&self.spec_pre, &self.spec_post) {
+                (_, Some((port, bytes))) if !self.vacuous => {
+                    vec![lineage.witnessed_final(&[(*port, None, bytes.clone())])]
+                }
+                _ => vec![],
+            },
             // No goal registered: everything delivered before EFF is the one derivation.
             _ => vec![lineage.all_pre_eff_deliveries()],
         };
-        let requirements = if self.requirements.is_empty() {
+        let mut requirements = if self.requirements.is_empty() {
             Derivation::new()
         } else {
             lineage.witnessed(&self.requirements)
         };
+        if let Some((port, bytes)) = &self.spec_pre {
+            requirements.extend(lineage.witnessed_final(&[(*port, None, bytes.clone())]));
+        }
         Schedule {
             goal_held: self.goal_held,
             derivations,
             observed: lineage.all_deliveries(),
-            delivered: self.delivered.clone(),
-            dropped: self.dropped.clone(),
+            delivered,
+            dropped,
             crashed_sends,
             sends: Rc::new(lineage.send_sequences()),
             requirements,
@@ -1099,26 +1050,30 @@ impl RunRecord {
 struct SentRecord {
     exec: ExecId,
     channel: usize,
+    from: NodeKey,
     to: NodeKey,
-    from_member: Option<u32>,
     bytes: Vec<u8>,
-    /// `(node label, ordinal)` when the sender is crashable.
+    /// The payload's `Debug` rendering, when its type has one.
+    display: Option<String>,
+    /// `(node label, ordinal)` when the sender is crashable. For an observation the ordinal
+    /// is the number of protocol sends the node had performed by then (it is not a send of
+    /// the protocol itself).
     sender: Option<(String, u64)>,
-    dropped: bool,
+    fate: SendFate,
+    /// Whether the send happened before the end of finite failures (an omission candidate,
+    /// if its channel is lossy).
+    pre_eff: bool,
+    /// A send to the specification's observer: not a message of the protocol, not a fault
+    /// point, transparent to lineage except for the sender having been alive to perform it.
+    observation: bool,
     /// Delivery ids the record was computed from (record-level provenance; empty without).
     prov: Vec<u64>,
 }
 
 /// A hook release, resolved against the sends.
 struct ReleaseRecord {
-    point: usize,
     hook_id: usize,
     payload: Vec<u8>,
-    pre_eff: bool,
-    /// `(node label, ordinal)` of the matched send when its sender is crashable.
-    sender: Option<(String, u64)>,
-    /// The execution that performed the matched send, and the channel it used.
-    producer: Option<(ExecId, usize)>,
     /// Index into `sent` of the matched send.
     send: Option<usize>,
 }
@@ -1134,23 +1089,10 @@ struct OutputRecord {
     prov: Vec<u64>,
 }
 
-/// A delivery id assigned by the provenance rewrite to one item a batch released, resolved
-/// against the sends like a release.
-struct TagRecord {
-    /// The registered fault point of the batch's hook, if any.
-    point: Option<usize>,
-    bytes: Vec<u8>,
-    pre_eff: bool,
-    /// `(node label, ordinal)` of the matched send when its sender is crashable.
-    sender: Option<(String, u64)>,
-    /// Index into `sent` of the matched send.
-    producer: Option<usize>,
-}
-
-/// A top-level receive, resolved against the sends (by arrival order on its channel).
+/// A top-level receive, resolved against the sends by delivery id.
 struct RecvRecord {
     channel: usize,
-    /// Index into `sent` of the matching send.
+    /// Index into `sent` of the send.
     producer: Option<usize>,
 }
 
@@ -1168,20 +1110,20 @@ struct Lineage<'a> {
     released: HashMap<ExecId, Vec<ReleaseRecord>>,
     /// Top-level receives by each async run.
     recvs: HashMap<ExecId, Vec<RecvRecord>>,
+    /// Receives per node, in event order: `(exec, index into sent)`.
+    recvs_at: HashMap<NodeKey, Vec<(ExecId, usize)>>,
     sent: Vec<SentRecord>,
+    /// Index into `sent` by delivery id.
+    by_id: HashMap<DeliveryId, usize>,
     /// Delivered goal-candidate outputs.
     outputs: Vec<OutputRecord>,
-    /// Delivery ids (record-level provenance), by id.
-    tags: HashMap<u64, TagRecord>,
     /// Which lineage the closure uses.
     level: Level,
     /// Whether the program was compiled with record-level provenance.
     provenance: bool,
-    /// Receiving node of each point's hook.
-    point_nodes: Vec<NodeKey>,
-    /// The tick and member each point's hook feeds.
-    point_ticks: Vec<NodeKey>,
-    /// Releases that matched no send (diagnostic).
+    /// The scripted batch hooks under a traced pass-through policy, by `(hook id, member)`.
+    hooks: HashMap<(usize, Option<u32>), TracedHook>,
+    /// Releases that matched no send although their hook batches a channel (diagnostic).
     unmatched_releases: usize,
     /// The replay oracle ([`Level::Counterfactual`]).
     replayer: Option<&'a Replayer<'a>>,
@@ -1215,13 +1157,17 @@ impl<'a> Lineage<'a> {
             asyncs_at: HashMap::new(),
             released: HashMap::new(),
             recvs: HashMap::new(),
+            recvs_at: HashMap::new(),
             sent: vec![],
+            by_id: HashMap::new(),
             outputs: vec![],
-            tags: HashMap::new(),
             level,
             provenance: context.provenance,
-            point_nodes: context.point_nodes.clone(),
-            point_ticks: context.point_ticks.clone(),
+            hooks: context
+                .hooks
+                .iter()
+                .map(|hook| ((hook.hook_id, hook.member), hook.clone()))
+                .collect(),
             unmatched_releases: 0,
             replayer,
             send_memo: RefCell::new(HashMap::new()),
@@ -1229,12 +1175,10 @@ impl<'a> Lineage<'a> {
             replay_fallbacks: Cell::new(0),
         };
         let mut send_counts: HashMap<NodeKey, u64> = HashMap::new();
-        // `(exec, point, payload, pre_eff)` in event order, matched to sends below.
-        let mut raw_releases: Vec<(ExecId, usize, Vec<u8>, bool)> = vec![];
-        // `(exec, channel, node)` in event order, matched to sends below.
-        let mut raw_recvs: Vec<(ExecId, usize, NodeKey)> = vec![];
-        // `(exec, id, hook, member, bytes, pre_eff)` in event order, matched to sends below.
-        let mut raw_tags: Vec<(ExecId, u64, Option<usize>, Option<u32>, Vec<u8>, bool)> = vec![];
+        // `(exec, hook, member, payload)` in event order, matched to sends below.
+        let mut raw_releases: Vec<(ExecId, usize, Option<u32>, Vec<u8>)> = vec![];
+        // `(exec, channel, node, delivery id)` in event order.
+        let mut raw_recvs: Vec<(ExecId, usize, NodeKey, DeliveryId)> = vec![];
         for (index, event) in events.iter().enumerate() {
             match event {
                 LineageEvent::Exec {
@@ -1259,43 +1203,46 @@ impl<'a> Lineage<'a> {
                     member,
                     items,
                 } => {
-                    if let Some(point) = search
-                        .points
-                        .iter()
-                        .position(|p| p.hook_key() == (*hook_id, *member))
-                    {
-                        raw_releases.extend(
-                            items
-                                .iter()
-                                .map(|item| (*exec, point, item.clone(), index < eff_cut)),
-                        );
-                    }
+                    raw_releases.extend(
+                        items
+                            .iter()
+                            .map(|item| (*exec, *hook_id, *member, item.clone())),
+                    );
                 }
                 LineageEvent::Sent {
                     exec,
+                    id,
                     channel,
                     from,
                     from_member,
                     to,
                     to_member,
                     bytes,
-                    dropped,
+                    display,
+                    fate,
                     prov,
                 } => {
                     let node = (from.clone(), *from_member);
+                    let observation = search.observer() == Some(to);
                     let ordinal = send_counts.entry(node.clone()).or_insert(0);
                     let sender = labels_by_node
                         .get(&node)
                         .map(|label| ((*label).clone(), *ordinal));
-                    *ordinal += 1;
+                    if !observation {
+                        *ordinal += 1;
+                    }
+                    lineage.by_id.insert(*id, lineage.sent.len());
                     lineage.sent.push(SentRecord {
                         exec: *exec,
+                        observation,
                         channel: *channel,
+                        from: node,
                         to: (to.clone(), *to_member),
-                        from_member: *from_member,
                         bytes: bytes.clone(),
+                        display: display.clone(),
                         sender,
-                        dropped: *dropped,
+                        fate: *fate,
+                        pre_eff: index < eff_cut,
                         prov: prov.clone(),
                     });
                 }
@@ -1304,9 +1251,9 @@ impl<'a> Lineage<'a> {
                     channel,
                     to,
                     to_member,
-                    ..
+                    send,
                 } => {
-                    raw_recvs.push((*exec, *channel, (to.clone(), *to_member)));
+                    raw_recvs.push((*exec, *channel, (to.clone(), *to_member), *send));
                 }
                 LineageEvent::Output {
                     exec,
@@ -1328,91 +1275,19 @@ impl<'a> Lineage<'a> {
                         });
                     }
                 }
-                LineageEvent::Tag {
-                    exec,
-                    id,
-                    hook_id,
-                    member,
-                    bytes,
-                } => {
-                    raw_tags.push((
-                        *exec,
-                        *id,
-                        *hook_id,
-                        *member,
-                        bytes.clone(),
-                        index < eff_cut,
-                    ));
-                }
             }
         }
 
-        // Match each release to the send that produced it. The static slice names the
-        // channel(s) a hook batches, so a release is matched only against sends on those
-        // channels to the receiving node, and otherwise against any send to that node (a
-        // hook the slice could not resolve). A send is delivered at most once, so releases
-        // (in event order) take the earliest unmatched send with the same bytes that
-        // happened before the release.
-        let mut matched = vec![false; lineage.sent.len()];
-        for (exec, point, payload, pre_eff) in raw_releases {
-            let to = &lineage.point_nodes[point];
-            let hook_id = search.points[point].hook_key().0;
-            let channels = lineage
-                .slices
-                .hook_channels
-                .get(&hook_id)
-                .filter(|c| !c.is_empty());
-            let hit = lineage.sent.iter().enumerate().position(|(i, record)| {
-                !matched[i]
-                    && !record.dropped
-                    && record.exec < exec
-                    && record.to == *to
-                    && channels.is_none_or(|c| c.contains(&record.channel))
-                    && payload_matches(&payload, &record.bytes, record.from_member)
-            });
-            let (sender, producer, send) = if let Some(i) = hit {
-                matched[i] = true;
-                (
-                    lineage.sent[i].sender.clone(),
-                    Some((lineage.sent[i].exec, lineage.sent[i].channel)),
-                    Some(i),
-                )
-            } else {
-                if channels.is_some() {
-                    lineage.unmatched_releases += 1;
-                }
-                (None, None, None)
-            };
-            lineage
-                .released
-                .entry(exec)
-                .or_default()
-                .push(ReleaseRecord {
-                    point,
-                    hook_id,
-                    payload,
-                    pre_eff,
-                    sender,
-                    producer,
-                    send,
-                });
-        }
-
-        // Arrivals on one channel at one node are in send order: the k-th receive is the
-        // k-th non-dropped send.
-        let mut recv_counts: HashMap<(usize, NodeKey), usize> = HashMap::new();
-        for (exec, channel, node) in raw_recvs {
-            let k = recv_counts.entry((channel, node.clone())).or_insert(0);
-            let producer = lineage
-                .sent
-                .iter()
-                .enumerate()
-                .filter(|(_, record)| {
-                    !record.dropped && record.channel == channel && record.to == node
-                })
-                .nth(*k)
-                .map(|(i, _)| i);
-            *k += 1;
+        // A receive names its send by delivery id.
+        for (exec, channel, node, id) in raw_recvs {
+            let producer = lineage.by_id.get(&id).copied();
+            if let Some(i) = producer {
+                lineage
+                    .recvs_at
+                    .entry(node.clone())
+                    .or_default()
+                    .push((exec, i));
+            }
             lineage
                 .recvs
                 .entry(exec)
@@ -1420,46 +1295,46 @@ impl<'a> Lineage<'a> {
                 .push(RecvRecord { channel, producer });
         }
 
-        // Match each delivery id to the send that produced it, with the same one-to-one
-        // discipline as releases (a tag and its release are the same delivery, so they are
-        // matched independently).
+        // Match each hook release to the send that produced it. A hook's releases are the
+        // deserialized items of what it batches, so the static slice names the channel(s)
+        // whose sends it may release, and a release is matched against sends on those
+        // channels to the hook's node (any send to that node when the slice could not
+        // resolve the hook's feeds). A send is delivered at most once, so releases (in event
+        // order) take the earliest unmatched delivered send with the same bytes that happened
+        // before the release.
         let mut matched = vec![false; lineage.sent.len()];
-        for (exec, id, hook_id, member, bytes, pre_eff) in raw_tags {
-            let Some((location, _, _)) = lineage.execs.get(&exec) else {
+        for (exec, hook_id, member, payload) in raw_releases {
+            let Some(hook) = lineage.hooks.get(&(hook_id, member)) else {
                 continue;
             };
-            let to = (location.root().clone(), member);
-            let point = hook_id.and_then(|hook| {
-                search
-                    .points
-                    .iter()
-                    .position(|p| p.hook_key() == (hook, member))
-            });
-            let channels = hook_id
-                .and_then(|hook| lineage.slices.hook_channels.get(&hook))
+            let to = hook.node.clone();
+            let channels = lineage
+                .slices
+                .hook_channels
+                .get(&hook_id)
                 .filter(|c| !c.is_empty());
             let hit = lineage.sent.iter().enumerate().position(|(i, record)| {
                 !matched[i]
-                    && !record.dropped
+                    && record.fate == SendFate::Delivered
                     && record.exec < exec
                     && record.to == to
                     && channels.is_none_or(|c| c.contains(&record.channel))
-                    && payload_matches(&bytes, &record.bytes, record.from_member)
+                    && payload_matches(&payload, &record.bytes, record.from.1)
             });
-            let sender = hit.and_then(|i| {
+            if let Some(i) = hit {
                 matched[i] = true;
-                lineage.sent[i].sender.clone()
-            });
-            lineage.tags.insert(
-                id,
-                TagRecord {
-                    point,
-                    bytes,
-                    pre_eff,
-                    sender,
-                    producer: hit,
-                },
-            );
+            } else if channels.is_some() {
+                lineage.unmatched_releases += 1;
+            }
+            lineage
+                .released
+                .entry(exec)
+                .or_default()
+                .push(ReleaseRecord {
+                    hook_id,
+                    payload,
+                    send: hit,
+                });
         }
         if std::env::var("LDFI_LINEAGE_DEBUG").is_ok() {
             #[expect(clippy::disallowed_methods, reason = "counts; order is irrelevant")]
@@ -1474,14 +1349,22 @@ impl<'a> Lineage<'a> {
             #[expect(clippy::disallowed_methods, reason = "counts; order is irrelevant")]
             let recvs: usize = lineage.recvs.values().map(Vec::len).sum();
             eprintln!(
-                "lineage: {} execs, {} sends ({} dropped), {} releases ({matched} matched to sends), {} recvs, {} outputs, {} tags",
+                "lineage: {} execs, {} sends ({} omitted, {} lost to crashes), {} releases ({matched} matched to sends), {} recvs, {} outputs",
                 lineage.execs.len(),
                 lineage.sent.len(),
-                lineage.sent.iter().filter(|s| s.dropped).count(),
+                lineage
+                    .sent
+                    .iter()
+                    .filter(|s| s.fate == SendFate::Omitted)
+                    .count(),
+                lineage
+                    .sent
+                    .iter()
+                    .filter(|s| s.fate == SendFate::Crashed)
+                    .count(),
                 releases,
                 recvs,
                 lineage.outputs.len(),
-                lineage.tags.len(),
             );
             for output in &lineage.outputs {
                 eprintln!(
@@ -1512,75 +1395,83 @@ impl<'a> Lineage<'a> {
         lineage
     }
 
-    /// The identity of a recorded send as a crash point, with a readable rendering: the
-    /// receiving fault point's label and decoded payload when the channel is registered.
+    /// The channel a send travelled on.
+    fn channel(&self, record: &SentRecord) -> Option<&ChannelInfo> {
+        self.slices.channel(record.channel)
+    }
+
+    /// The channel's label, `ch#id` if the channel is unknown.
+    fn channel_label(&self, channel: usize) -> String {
+        self.slices
+            .channel(channel)
+            .map(|c| c.label.clone())
+            .unwrap_or_else(|| format!("ch{channel}"))
+    }
+
+    /// A send as the omission vocabulary names it.
+    fn message(&self, record: &SentRecord) -> Message {
+        Message {
+            channel: self.channel_label(record.channel),
+            channel_id: record.channel,
+            from_member: record.from.1,
+            to_member: record.to.1,
+            payload: record.bytes.clone(),
+            display: render_payload(record),
+        }
+    }
+
+    /// The identity of a recorded send as a crash point, with a readable rendering.
     fn send_id(&self, record: &SentRecord) -> SendId {
-        let display = self
-            .search
-            .points
-            .iter()
-            .enumerate()
-            .find(|(i, point)| {
-                self.point_nodes[*i] == record.to
-                    && self
-                        .slices
-                        .hook_channels
-                        .get(&point.hook_key().0)
-                        .is_some_and(|channels| channels.contains(&record.channel))
-            })
-            .map(|(_, point)| {
-                // The point decodes what the receiver sees: a cluster-sourced channel
-                // carries the sender's member id before the payload.
-                let received = match record.from_member {
-                    Some(m) => {
-                        let mut bytes =
-                            bincode::serialize(&TaglessMemberId::from_raw_id(m)).unwrap();
-                        bytes.extend_from_slice(&record.bytes);
-                        bytes
-                    }
-                    None => record.bytes.clone(),
-                };
-                format!("{:?}", point.decode(&received))
-            })
-            .unwrap_or_else(|| {
-                let bytes: String =
-                    record
-                        .bytes
-                        .iter()
-                        .take(8)
-                        .fold(String::new(), |mut acc, b| {
-                            use std::fmt::Write as _;
-                            let _ = write!(acc, "{b:02x}");
-                            acc
-                        });
-                format!(
-                    "ch{}→{:?}{}:{bytes}{}",
-                    record.channel,
-                    record.to.0,
-                    record.to.1.map(|m| format!("@{m}")).unwrap_or_default(),
-                    if record.bytes.len() > 8 { "…" } else { "" }
-                )
-            });
         SendId {
             channel: record.channel,
             to_member: record.to.1,
             bytes: record.bytes.clone(),
-            display,
+            display: format!(
+                "{}:{}",
+                render_endpoint(
+                    &self.channel_label(record.channel),
+                    record.from.1,
+                    record.to.1
+                ),
+                render_payload(record)
+            ),
         }
     }
 
-    /// A dependency on a send itself (a receive on a channel with no fault point): not
-    /// omittable, killed by its sender's crash.
-    fn send_dependency(&self, record: &SentRecord) -> Dependency {
-        let id = self.send_id(record);
+    /// The dependency on a send: omittable if its channel is lossy and it happened before the
+    /// end of finite failures, killed by its sender's crash if the sender is crashable. An
+    /// observation is never omittable; its dependency is on the observed node having been
+    /// alive to produce the fact, which the crash of that node before its `k`-th protocol
+    /// send kills.
+    fn send_dependency(&self, i: usize) -> Dependency {
+        let record = &self.sent[i];
+        if record.observation {
+            let node = record
+                .sender
+                .as_ref()
+                .map(|(label, _)| label.clone())
+                .unwrap_or_else(|| format!("{:?}", record.from));
+            let through = record.sender.as_ref().map_or(0, |(_, k)| *k);
+            return Dependency {
+                message: Message {
+                    channel: "observed".to_owned(),
+                    channel_id: record.channel,
+                    from_member: record.from.1,
+                    to_member: None,
+                    payload: record.bytes.clone(),
+                    display: format!(
+                        "{} from {node} through send #{through}",
+                        render_payload(record)
+                    ),
+                },
+                sender: record.sender.clone(),
+                lossy: false,
+            };
+        }
         Dependency {
-            message: Message {
-                channel: format!("ch{}", record.channel),
-                payload: record.bytes.clone(),
-                display: id.display,
-            },
+            message: self.message(record),
             sender: record.sender.clone(),
-            lossy: false,
+            lossy: record.pre_eff && self.channel(record).is_some_and(|c| c.lossy),
         }
     }
 
@@ -1588,7 +1479,7 @@ impl<'a> Lineage<'a> {
     fn send_sequences(&self) -> SendSequences {
         let mut sequences: SendSequences = BTreeMap::new();
         for record in &self.sent {
-            if record.dropped {
+            if record.fate == SendFate::Crashed || record.observation {
                 continue;
             }
             if let Some((node, _)) = &record.sender {
@@ -1721,13 +1612,11 @@ impl<'a> Lineage<'a> {
         execs
     }
 
-    /// Whether removing this delivery from a replay could change what the solver sees:
-    /// it is a fault candidate itself, or it leads to a send with lineage of its own.
+    /// Whether removing this delivery from a replay could change what the solver sees: it
+    /// came off a channel, so it is a fault candidate or leads to a send with lineage of its
+    /// own. A release that matched no send is a local or external item.
     fn matters(&self, release: &ReleaseRecord) -> bool {
-        let dependency = self.dependency(release);
-        (dependency.lossy && release.pre_eff)
-            || dependency.sender.is_some()
-            || release.send.is_some()
+        release.send.is_some()
     }
 
     /// One counterfactual derivation step at `node`: greedy deletion over the deliveries
@@ -1792,10 +1681,17 @@ impl<'a> Lineage<'a> {
                     node,
                     removed.len(),
                     candidate_count,
-                    scripts
-                        .iter()
-                        .map(|s| s.iter().map(Vec::len).collect::<Vec<_>>())
-                        .collect::<Vec<_>>()
+                    {
+                        #[expect(
+                            clippy::disallowed_methods,
+                            reason = "collected into an ordered map; iteration order is irrelevant"
+                        )]
+                        let sizes: BTreeMap<_, _> = scripts
+                            .iter()
+                            .map(|(hook, s)| (hook, s.iter().map(Vec::len).collect::<Vec<_>>()))
+                            .collect();
+                        sizes
+                    }
                 );
             }
             hit
@@ -1824,43 +1720,40 @@ impl<'a> Lineage<'a> {
                 continue;
             }
             let release = &self.released[e][*i];
-            let mut dependency = self.dependency(release);
-            if !release.pre_eff {
-                dependency.lossy = false;
-            }
-            if dependency.lossy || dependency.sender.is_some() {
-                derivation.insert(dependency);
-            }
             if let Some(send) = release.send {
+                let dependency = self.send_dependency(send);
+                if dependency.lossy || dependency.sender.is_some() {
+                    derivation.insert(dependency);
+                }
                 derivation.extend(self.send_derivation(send));
             }
         }
         derivation
     }
 
-    /// The replay scripts for every fault point: at `node`, each point's recorded releases
-    /// per execution of its tick minus `removed`; elsewhere nothing (the tick never runs).
+    /// The replay scripts for the hooks at `node`: each hook's recorded releases per
+    /// execution of its tick minus `removed`. Hooks elsewhere get no script (their tick never
+    /// runs).
     fn replay_scripts(
         &self,
         node: &NodeKey,
         tick_execs: &[ExecId],
         removed: &BTreeSet<(ExecId, usize)>,
-    ) -> Vec<Vec<Vec<Vec<u8>>>> {
-        self.search
-            .points
-            .iter()
-            .enumerate()
-            .map(|(point, _)| {
-                if self.point_nodes[point] != *node {
-                    return vec![];
-                }
-                let tick = &self.point_ticks[point];
-                tick_execs
+    ) -> HashMap<(usize, Option<u32>), Vec<Vec<Vec<u8>>>> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "re-keyed into a HashMap; iteration order is irrelevant"
+        )]
+        self.hooks
+            .values()
+            .filter(|hook| hook.node == *node)
+            .map(|hook| {
+                let script = tick_execs
                     .iter()
                     .filter(|e| {
                         self.execs
                             .get(e)
-                            .is_some_and(|(l, m, _)| (l, *m) == (&tick.0, tick.1))
+                            .is_some_and(|(l, m, _)| (l, *m) == (&hook.tick.0, hook.tick.1))
                     })
                     .map(|e| {
                         self.released
@@ -1869,24 +1762,25 @@ impl<'a> Lineage<'a> {
                             .flatten()
                             .enumerate()
                             .filter(|(i, release)| {
-                                release.point == point && !removed.contains(&(*e, *i))
+                                release.hook_id == hook.hook_id && !removed.contains(&(*e, *i))
                             })
                             .map(|(_, release)| release.payload.clone())
                             .collect()
                     })
-                    .collect()
+                    .collect();
+                ((hook.hook_id, hook.member), script)
             })
             .collect()
     }
 
     /// The record-level backward closure: delivery ids → the sends that produced them →
-    /// their delivery ids. A send recorded without provenance (a path the rewrite does not
-    /// tag, or a simulation compiled without it) falls back to the slice-level closure of
-    /// its execution.
+    /// their delivery ids. Without record-level provenance in the program this is the
+    /// slice-level closure of the execution. With it, a record's provenance is exact: every
+    /// network arrival carries the id of its send, and an empty set means the record was
+    /// computed from nothing that came off a channel (a constant, a timer, an external
+    /// input).
     fn record_closure(&self, prov: &[u64], exec: ExecId, sink: Option<usize>) -> Derivation {
-        // No provenance on the record itself: a simulation compiled without it, or an output
-        // on a path with no hook (a top-level `sim_output` of what a channel delivered).
-        if !self.provenance || prov.is_empty() {
+        if !self.provenance {
             return self.closure(exec, sink);
         }
         let mut derivation = Derivation::new();
@@ -1896,29 +1790,18 @@ impl<'a> Lineage<'a> {
             if !visited.insert(id) {
                 continue;
             }
-            let Some(tag) = self.tags.get(&id) else {
+            let Some(&i) = self.by_id.get(&id) else {
                 continue;
             };
-            if let Some(point) = tag.point {
-                let fault_point = &self.search.points[point];
-                let dependency = Dependency {
-                    message: fault_point.decode(&tag.bytes),
-                    sender: tag.sender.clone(),
-                    lossy: fault_point.lossy() && tag.pre_eff,
-                };
-                if dependency.lossy || dependency.sender.is_some() {
-                    derivation.insert(dependency);
-                }
+            let dependency = self.send_dependency(i);
+            if dependency.lossy || dependency.sender.is_some() {
+                derivation.insert(dependency);
             }
-            if let Some(i) = tag.producer {
-                let record = &self.sent[i];
-                if record.prov.is_empty() {
-                    derivation.extend(self.closure(record.exec, Some(record.channel)));
-                } else if is_opaque(&record.prov) {
-                    derivation.extend(self.send_derivation(i));
-                } else {
-                    stack.extend(record.prov.iter().copied());
-                }
+            let record = &self.sent[i];
+            if is_opaque(&record.prov) {
+                derivation.extend(self.send_derivation(i));
+            } else {
+                stack.extend(record.prov.iter().copied());
             }
         }
         derivation
@@ -2004,7 +1887,8 @@ impl<'a> Lineage<'a> {
             .sent
             .iter()
             .filter(|s| {
-                !s.dropped
+                s.fate != SendFate::Crashed
+                    && !s.observation
                     && s.exec <= output.exec
                     && s.sender.as_ref().is_some_and(|(l, _)| *l == label)
             })
@@ -2012,6 +1896,9 @@ impl<'a> Lineage<'a> {
         Some(Dependency {
             message: Message {
                 channel: "alive".to_owned(),
+                channel_id: usize::MAX,
+                from_member: None,
+                to_member: None,
                 payload: bincode::serialize(&(label.clone(), sends)).unwrap(),
                 display: format!("{label} through send #{sends}"),
             },
@@ -2082,47 +1969,25 @@ impl<'a> Lineage<'a> {
         self.counterfactual(&node, output.exec, &produced, fallback)
     }
 
-    /// Every pre-EFF delivery through a registered channel, as one derivation.
+    /// Every pre-EFF delivered send, as one derivation.
     fn all_pre_eff_deliveries(&self) -> Derivation {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "collected into an ordered set; iteration order is irrelevant"
-        )]
-        self.released
-            .values()
-            .flatten()
-            .filter(|release| release.pre_eff)
-            .map(|release| self.dependency(release))
-            .collect()
-    }
-
-    /// Every delivery some fault could prevent (omission only before EFF), regardless of
-    /// whether the goal depended on it.
-    fn all_deliveries(&self) -> Derivation {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "collected into an ordered set; iteration order is irrelevant"
-        )]
-        self.released
-            .values()
-            .flatten()
-            .filter_map(|release| {
-                let mut dependency = self.dependency(release);
-                if !release.pre_eff {
-                    dependency.lossy = false;
-                }
-                (dependency.lossy || dependency.sender.is_some()).then_some(dependency)
+        (0..self.sent.len())
+            .filter(|i| {
+                let record = &self.sent[*i];
+                record.fate == SendFate::Delivered && record.pre_eff && !record.observation
             })
+            .map(|i| self.send_dependency(i))
             .collect()
     }
 
-    fn dependency(&self, release: &ReleaseRecord) -> Dependency {
-        let fault_point = &self.search.points[release.point];
-        Dependency {
-            message: fault_point.decode(&release.payload),
-            sender: release.sender.clone(),
-            lossy: fault_point.lossy(),
-        }
+    /// Every delivered send some fault could have prevented (omission only before EFF),
+    /// regardless of whether the goal depended on it.
+    fn all_deliveries(&self) -> Derivation {
+        (0..self.sent.len())
+            .filter(|i| self.sent[*i].fate == SendFate::Delivered && !self.sent[*i].observation)
+            .map(|i| self.send_dependency(i))
+            .filter(|dependency| dependency.lossy || dependency.sender.is_some())
+            .collect()
     }
 
     /// The backward closure of what execution `root` produced through sink `sink` (`None`:
@@ -2142,54 +2007,61 @@ impl<'a> Lineage<'a> {
             };
             let slice = sink.and_then(|s| self.slices.precise(s));
             let node = (location.clone(), *member);
+            let root_node = (location.root().clone(), *member);
 
-            // A release is a dependency (a fault could prevent it), and leads to the
-            // execution that sent it.
+            // A send is a dependency (a fault could prevent its delivery), and leads to the
+            // execution that performed it.
+            let take_send = |i: usize,
+                             derivation: &mut Derivation,
+                             stack: &mut Vec<(ExecId, Option<usize>)>| {
+                let dependency = self.send_dependency(i);
+                if dependency.lossy || dependency.sender.is_some() {
+                    derivation.insert(dependency);
+                }
+                let record = &self.sent[i];
+                stack.push((record.exec, Some(record.channel)));
+            };
+
+            // A hook release that came off a channel is a dependency on its send; one that
+            // did not is the output of a local tick, batched.
             let take_release =
                 |release: &ReleaseRecord,
                  derivation: &mut Derivation,
-                 stack: &mut Vec<(ExecId, Option<usize>)>| {
-                    let mut dependency = self.dependency(release);
-                    // A message delivered after EFF cannot be omitted; its sender's crash is
-                    // still a candidate.
-                    if !release.pre_eff {
-                        dependency.lossy = false;
-                    }
-                    if dependency.lossy || dependency.sender.is_some() {
-                        derivation.insert(dependency);
-                    }
-                    match release.producer {
-                        Some((producer, channel)) => stack.push((producer, Some(channel))),
-                        None => {
-                            // Not a channel delivery: output of a local tick, batched.
-                            for tick in self
-                                .slices
-                                .hook_yields
-                                .get(&release.hook_id)
-                                .into_iter()
-                                .flatten()
-                            {
-                                self.push_ticks_before(tick, *member, exec, None, None, stack);
-                            }
+                 stack: &mut Vec<(ExecId, Option<usize>)>| match release.send {
+                    Some(i) => take_send(i, derivation, stack),
+                    None => {
+                        for tick in self
+                            .slices
+                            .hook_yields
+                            .get(&release.hook_id)
+                            .into_iter()
+                            .flatten()
+                        {
+                            self.push_ticks_before(tick, *member, exec, None, None, stack);
                         }
                     }
                 };
 
-            // A top-level receive on an unregistered channel is not a fault point, but the
-            // send that produced it can be killed by its sender's crash, so it is a
-            // dependency on that send (and leads to the sending execution).
             let take_recv = |recv: &RecvRecord,
                              derivation: &mut Derivation,
                              stack: &mut Vec<(ExecId, Option<usize>)>| {
-                let Some(i) = recv.producer else {
-                    return;
-                };
-                let record = &self.sent[i];
-                if record.sender.is_some() {
-                    derivation.insert(self.send_dependency(record));
+                if let Some(i) = recv.producer {
+                    take_send(i, derivation, stack);
                 }
-                stack.push((record.exec, Some(record.channel)));
             };
+
+            // Every arrival on `channel` at this node before `exec`: what an unscripted
+            // batch may have released into it.
+            let take_arrivals_before =
+                |channel: Option<usize>,
+                 derivation: &mut Derivation,
+                 stack: &mut Vec<(ExecId, Option<usize>)>| {
+                    for (recv_exec, i) in self.recvs_at.get(&root_node).into_iter().flatten() {
+                        if *recv_exec < exec && channel.is_none_or(|c| self.sent[*i].channel == c) {
+                            take_send(*i, derivation, stack);
+                        }
+                    }
+                };
 
             if *is_tick {
                 if let Some(slice) = slice {
@@ -2216,19 +2088,42 @@ impl<'a> Lineage<'a> {
                             }
                         }
                     }
+                    // Channels and local ticks consumed through unscripted batches.
+                    for input in slice.direct.iter().chain(&slice.carried) {
+                        match input {
+                            SliceInput::Channel(channel) => {
+                                take_arrivals_before(Some(*channel), &mut derivation, &mut stack);
+                            }
+                            SliceInput::Yield(tick) => {
+                                self.push_ticks_before(tick, *member, exec, None, None, &mut stack);
+                            }
+                            SliceInput::Hook(_) => {}
+                        }
+                    }
                 } else {
                     for release in self.released.get(&exec).into_iter().flatten() {
                         take_release(release, &mut derivation, &mut stack);
                     }
-                    // Persisted state: earlier executions of the same tick.
-                    if let Some(ticks) = self.ticks_at.get(&node) {
-                        stack.extend(
-                            ticks
-                                .iter()
-                                .copied()
-                                .filter(|t| *t < exec)
-                                .map(|t| (t, None)),
-                        );
+                    // Every arrival at the node so far (an unscripted batch may have
+                    // released it), and persisted state: earlier executions of the same
+                    // tick and of every other tick at the node (their yields may have been
+                    // batched).
+                    take_arrivals_before(None, &mut derivation, &mut stack);
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "pushes onto a stack whose order does not affect the closure"
+                    )]
+                    for (tick_location, tick_member) in self.ticks_at.keys() {
+                        if tick_location.root() == location.root() && tick_member == member {
+                            self.push_ticks_before(
+                                tick_location,
+                                *member,
+                                exec,
+                                None,
+                                None,
+                                &mut stack,
+                            );
+                        }
                     }
                 }
             } else {
@@ -2340,6 +2235,23 @@ fn is_opaque(prov: &[u64]) -> bool {
     prov.contains(&crate::sim::runtime::Prov::OPAQUE)
 }
 
+/// The payload rendering of a send for reports: its `Debug` form when the type has one, else
+/// a hex prefix of the wire bytes.
+fn render_payload(record: &SentRecord) -> String {
+    record.display.clone().unwrap_or_else(|| {
+        let bytes: String = record
+            .bytes
+            .iter()
+            .take(8)
+            .fold(String::new(), |mut acc, b| {
+                use std::fmt::Write as _;
+                let _ = write!(acc, "{b:02x}");
+                acc
+            });
+        format!("{bytes}{}", if record.bytes.len() > 8 { "…" } else { "" })
+    })
+}
+
 /// Whether a payload released at a receiving hook is the serialized message `sent`. A
 /// cluster-sourced channel delivers `(MemberId, T)`, so the received bytes carry the
 /// serialized sender member id as a prefix.
@@ -2353,29 +2265,36 @@ fn payload_matches(received: &[u8], sent: &[u8], from_member: Option<u32>) -> bo
         })
 }
 
-/// A human-readable summary of every sink's slice, with hooks named by their registered
-/// labels where possible.
-fn describe_slices(slices: &Slices, search: &Search) -> String {
-    let hook_label = |hook: usize| -> String {
-        search
-            .points
-            .iter()
-            .find(|p| p.hook_key().0 == hook)
-            .map(|p| p.label().to_owned())
-            .unwrap_or_else(|| format!("hook#{hook}"))
+/// A human-readable summary of the program's channels and of every sink's slice.
+fn describe_slices(slices: &Slices) -> String {
+    let channel_label = |channel: usize| -> String {
+        slices
+            .channel(channel)
+            .map(|c| c.label.clone())
+            .unwrap_or_else(|| format!("ch{channel}"))
     };
     let render = |inputs: &BTreeSet<SliceInput>| -> String {
         inputs
             .iter()
             .map(|input| match input {
-                SliceInput::Hook(h) => hook_label(*h),
-                SliceInput::Channel(c) => format!("channel#{c}"),
+                SliceInput::Hook(h) => format!("hook#{h}"),
+                SliceInput::Channel(c) => channel_label(*c),
                 SliceInput::Yield(t) => format!("yield({t:?})"),
             })
             .collect::<Vec<_>>()
             .join(", ")
     };
     let mut lines: Vec<String> = vec![];
+    for channel in slices.channels.values() {
+        lines.push(format!(
+            "  channel#{} {:?}: {:?} → {:?}, {}",
+            channel.id,
+            channel.label,
+            channel.from,
+            channel.to,
+            if channel.lossy { "lossy" } else { "reliable" }
+        ));
+    }
     #[expect(
         clippy::disallowed_methods,
         reason = "collected into an ordered map; iteration order is irrelevant"
@@ -2402,26 +2321,25 @@ fn member_label(cluster: &str, member: u32) -> String {
 }
 
 /// The counterfactual replay oracle ([`Level::Counterfactual`]): runs one node alone, every
-/// fault point under a replay policy, in a quiet deterministic instance, and returns what
-/// the instance recorded.
+/// scripted batch hook under a replay policy, in a quiet deterministic instance, and returns
+/// what the instance recorded.
 struct Replayer<'a> {
     sim: &'a CompiledSim,
-    search: &'a Search,
     log: bool,
     tag: &'static str,
 }
 
 impl Replayer<'_> {
-    /// Replays with `scripts[p]` (serialized items per tick execution) installed on fault
-    /// point `p`; an empty script keeps that point's tick from ever running.
-    fn replay(&self, scripts: &[Vec<Vec<Vec<u8>>>]) -> Vec<LineageEvent> {
+    /// Replays with `scripts[hook]` (serialized items per tick execution) installed on each
+    /// hook; a hook with no script gets an empty one, which keeps its tick from ever running.
+    fn replay(
+        &self,
+        scripts: &HashMap<(usize, Option<u32>), Vec<Vec<Vec<u8>>>>,
+    ) -> Vec<LineageEvent> {
         let mut events: Vec<LineageEvent> = vec![];
         let out = &mut events;
-        let points = &self.search.points;
         self.sim.replay(async || {
-            for (point, script) in points.iter().zip(scripts) {
-                point.replay(script.clone());
-            }
+            replay_all_hooks(scripts);
             crate::sim::compiled::quiesce().await;
             *out = lineage_events();
         });
@@ -2429,12 +2347,22 @@ impl Replayer<'_> {
     }
 }
 
-/// The registered fault points, crashable nodes, and goal.
+/// The crashable nodes and the goal.
 struct Search {
-    points: Vec<Box<dyn FaultPoint>>,
     /// Node label → node.
     nodes: BTreeMap<String, NodeKey>,
     goal: Option<Goal>,
+}
+
+impl Search {
+    /// The specification's observer location, if the goal is a [`Spec`]: sends to it are
+    /// observations, not messages of the protocol.
+    fn observer(&self) -> Option<&LocationId> {
+        match &self.goal {
+            Some(Goal::Spec(spec)) => Some(&spec.observer),
+            _ => None,
+        }
+    }
 }
 
 /// Which lineage the backward closure follows.
@@ -2457,8 +2385,8 @@ pub enum Level {
     Counterfactual,
 }
 
-/// An LDFI search configuration: the fault points, the crashable nodes, the goal, and the
-/// budgets.
+/// An LDFI search configuration: the crashable nodes, the goal, and the budgets. The
+/// program's channels are fault points by construction (see the module docs).
 pub struct Ldfi {
     search: Search,
     strategy: Strategy,
@@ -2476,12 +2404,11 @@ impl Default for Ldfi {
 }
 
 impl Ldfi {
-    /// A search with no fault points, no crashable nodes, a crash budget of 0, and a budget
-    /// of 256 hypotheses.
+    /// A search with no crashable nodes, a crash budget of 0, and a budget of 256
+    /// hypotheses. Omission is available on every lossy channel of the program.
     pub fn new() -> Self {
         Ldfi {
             search: Search {
-                points: vec![],
                 nodes: BTreeMap::new(),
                 goal: None,
             },
@@ -2527,71 +2454,6 @@ impl Ldfi {
     pub fn exploration(mut self, exploration: Exploration) -> Self {
         self.exploration = exploration;
         self
-    }
-
-    fn add_point<T, H>(&mut self, label: &str, hook: H, lossy: bool)
-    where
-        T: Serialize + DeserializeOwned + PartialEq + Debug + 'static,
-        H: PolicyHook<T> + 'static,
-    {
-        assert!(
-            self.search.points.iter().all(|p| p.label() != label),
-            "duplicate LDFI channel label {label:?}"
-        );
-        self.search.points.push(Box::new(ChannelPoint {
-            label: label.to_owned(),
-            hook,
-            lossy,
-            _phantom: std::marker::PhantomData,
-        }));
-    }
-
-    /// Registers the receiving hook of a lossy channel as a fault point under `label`:
-    /// its messages can be omitted. The hook must be bound to the `batch` that consumes the
-    /// channel's output; for a hook on a cluster, register each member's instance
-    /// separately with `hook.on(member)`.
-    #[must_use]
-    pub fn lossy_channel<T, R, S>(mut self, label: &str, hook: BatchHook<T, NoOrder, R, S>) -> Self
-    where
-        T: Serialize + DeserializeOwned + PartialEq + Debug + 'static,
-        R: Retries + 'static,
-        S: ScriptableHookScope + 'static,
-    {
-        self.add_point(label, hook, true);
-        self
-    }
-
-    /// Registers the receiving hook of a reliable channel under `label`: its deliveries
-    /// are traced for lineage but never omitted; the only faults that can kill them are
-    /// crashes of their senders. Accepts ordered hooks (a `fail_stop` channel's output) and
-    /// unordered ones (e.g. the `entries()` of a keyed stream from a reliable channel).
-    #[must_use]
-    pub fn reliable_channel<T, O, R, S>(mut self, label: &str, hook: BatchHook<T, O, R, S>) -> Self
-    where
-        T: Serialize + DeserializeOwned + PartialEq + Debug + 'static,
-        O: Ordering + 'static,
-        R: Retries + 'static,
-        S: ScriptableHookScope + 'static,
-        BatchHook<T, O, R, S>: PolicyHook<T>,
-    {
-        self.add_point(label, hook, false);
-        self
-    }
-
-    /// Registers the hook on a batch of external input (a timer, a client request stream) so
-    /// it is consumed deterministically as it arrives, keeping the schedule explorer focused
-    /// on the program's own non-determinism. Such input is not a fault point: it has no
-    /// sender in the system, so it never enters a derivation.
-    #[must_use]
-    pub fn input<T, O, R, S>(self, label: &str, hook: BatchHook<T, O, R, S>) -> Self
-    where
-        T: Serialize + DeserializeOwned + PartialEq + Debug + 'static,
-        O: Ordering + 'static,
-        R: Retries + 'static,
-        S: ScriptableHookScope + 'static,
-        BatchHook<T, O, R, S>: PolicyHook<T>,
-    {
-        self.reliable_channel(label, hook)
     }
 
     /// Registers a process as crashable under `label`.
@@ -2671,6 +2533,16 @@ impl Ldfi {
         self
     }
 
+    /// The goal is a [`Spec`]: `PRE` and `POST` views over the program's outputs, written in
+    /// Hydro. A run violates the goal when `PRE` holds and `POST` does not at its end; the
+    /// derivation of `POST` is the clause, the derivation of `PRE` the requirement, and a run
+    /// in which `PRE` does not hold is vacuous. Run such a search with [`Self::search`].
+    #[must_use]
+    pub fn spec(mut self, spec: Spec<'_>) -> Self {
+        self.search.goal = Some(Goal::Spec(spec.into_parts()));
+        self
+    }
+
     /// Caps the number of hypotheses (including the failure-free run).
     #[must_use]
     pub fn max_hypotheses(mut self, n: usize) -> Self {
@@ -2685,9 +2557,28 @@ impl Ldfi {
         self
     }
 
-    /// Runs the search. `body` is the test body for one run: it drives inputs and time,
-    /// may call [`Run::end_of_finite_failures`], and returns whether the goal held. It is
-    /// run under [`CompiledSim::exhaustive`] for every hypothesis, starting with no faults.
+    /// Runs the search against a [`Spec`] (see [`Self::spec`]). `body` drives one run: it
+    /// sends inputs, fires timers and awaits `quiesce()`; the verdict comes from the
+    /// specification's views at the end of the run, not from the body.
+    pub fn search(
+        self,
+        sim: &CompiledSim,
+        body: impl AsyncFn(&Run<'_>) + RefUnwindSafe,
+    ) -> Outcome {
+        assert!(
+            matches!(self.search.goal, Some(Goal::Spec(_))),
+            "`Ldfi::search` needs a specification (`Ldfi::spec`); use `Ldfi::run` with a goal and a body that returns the verdict"
+        );
+        self.run(sim, async |run| {
+            body(run).await;
+            true
+        })
+    }
+
+    /// Runs the search. `body` is the test body for one run: it drives inputs and time and
+    /// returns whether the goal held (ignored under a [`Spec`], whose views decide). It is
+    /// run under the configured [`Exploration`] for every hypothesis, starting with no
+    /// faults.
     pub fn run(
         self,
         sim: &CompiledSim,
@@ -2696,7 +2587,7 @@ impl Ldfi {
         let search = &self.search;
         let goal_port = match &search.goal {
             Some(Goal::Any { port } | Goal::AllMembers { port, .. }) => Some(*port),
-            Some(Goal::Witnessed) | None => None,
+            Some(Goal::Witnessed | Goal::Spec(_)) | None => None,
         };
         let mut runs: Vec<Hypothesis> = vec![];
         let mut clauses: Vec<Clause> = vec![];
@@ -2747,6 +2638,7 @@ impl Ldfi {
                         requirements: RefCell::new(vec![]),
                         vacuous: Cell::new(false),
                         level: self.level,
+                        hooks: RefCell::new(vec![]),
                     };
                     run.install();
                     let goal_held = body_ref(&run).await;
@@ -2768,7 +2660,6 @@ impl Ldfi {
             // instances of their own.
             let replayer = Replayer {
                 sim,
-                search,
                 log: self.log,
                 tag,
             };
@@ -2783,6 +2674,16 @@ impl Ldfi {
                 .filter(|s| s.goal_held)
                 .flat_map(|s| s.derivations.iter().cloned())
                 .collect();
+            if self.log
+                && matches!(search.goal, Some(Goal::Spec(_)))
+                && schedules.iter().any(|s| {
+                    s.goal_held && !s.vacuous && s.derivations.iter().any(BTreeSet::is_empty)
+                })
+            {
+                eprintln!(
+                    "{tag}: warning: POST held with an empty derivation (nothing delivered contributes to it); a view derived through negation has no lineage, state POST positively"
+                );
+            }
             // The crashes of this hypothesis: premises of every clause it yields.
             let premises: BTreeSet<Fault> = faults
                 .iter()
@@ -2842,7 +2743,10 @@ impl Ldfi {
                 && runs.is_empty()
                 && let Some(slices) = &slices
             {
-                eprintln!("{tag}: static slices:\n{}", describe_slices(slices, search));
+                eprintln!(
+                    "{tag}: channels and static slices:\n{}",
+                    describe_slices(slices)
+                );
             }
             if self.log {
                 let unmatched: usize = schedules.iter().map(|s| s.unmatched_releases).sum();
@@ -3088,7 +2992,7 @@ impl Ldfi {
         let search = &self.search;
         let goal_port = match &search.goal {
             Some(Goal::Any { port } | Goal::AllMembers { port, .. }) => Some(*port),
-            Some(Goal::Witnessed) | None => None,
+            Some(Goal::Witnessed | Goal::Spec(_)) | None => None,
         };
         let crash_budget = self.crash_budget;
         let FuzzConfig {
@@ -3181,6 +3085,7 @@ impl Ldfi {
                     requirements: RefCell::new(vec![]),
                     vacuous: Cell::new(false),
                     level: self.level,
+                    hooks: RefCell::new(vec![]),
                 };
                 run.install();
                 let goal_held = body_ref(&run).await;
@@ -3386,13 +3291,21 @@ fn solve_hypothesis(
 mod tests {
     use super::*;
 
+    fn message(channel: &str, payload: u32) -> Message {
+        Message {
+            channel: channel.to_owned(),
+            // Identity is by channel id; derive a distinct one per label.
+            channel_id: channel.bytes().fold(0usize, |h, b| h * 31 + b as usize),
+            from_member: None,
+            to_member: None,
+            payload: bincode::serialize(&payload).unwrap(),
+            display: payload.to_string(),
+        }
+    }
+
     fn lossy(channel: &str, payload: u32) -> Dependency {
         Dependency {
-            message: Message {
-                channel: channel.to_owned(),
-                payload: bincode::serialize(&payload).unwrap(),
-                display: payload.to_string(),
-            },
+            message: message(channel, payload),
             sender: None,
             lossy: true,
         }
@@ -3400,11 +3313,7 @@ mod tests {
 
     fn reliable(channel: &str, payload: u32, sender: &str, ordinal: u64) -> Dependency {
         Dependency {
-            message: Message {
-                channel: channel.to_owned(),
-                payload: bincode::serialize(&payload).unwrap(),
-                display: payload.to_string(),
-            },
+            message: message(channel, payload),
             sender: Some((sender.to_owned(), ordinal)),
             lossy: false,
         }

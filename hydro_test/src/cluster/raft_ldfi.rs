@@ -73,7 +73,7 @@ mod tests {
                 cluster_size: MEMBERS as usize,
                 election_restriction_ignores_term: bug,
             },
-            TCP.lossy_delayed_forever().bincode(),
+            TCP.lossy_delayed_forever().name("rpc").bincode(),
             nondet!(
                 /// Every batch is bound to a hook under a fault-injection policy; the
                 /// search owns the non-determinism.
@@ -105,26 +105,12 @@ mod tests {
             // The step closure is opaque to the recorded lineage levels; record provenance
             // with replay at the opaque step is this harness's default (`LDFI_LEVEL`
             // overrides).
-            let mut ldfi = Ldfi::new()
+            Ldfi::new()
                 .level(Level::Record)
                 .level_from_env()
                 .crashable_cluster("raft", &cluster_id, 0..MEMBERS)
                 .crash_budget(crashes)
-                .goal_witnessed();
-            for m in 0..MEMBERS {
-                ldfi = ldfi
-                    .lossy_channel(&format!("rpc@{m}"), hooks.traffic.unwrap().on(m))
-                    .input(&format!("request@{m}"), hooks.requests.unwrap().on(m))
-                    .input(
-                        &format!("election@{m}"),
-                        hooks.election_timer.unwrap().on(m),
-                    )
-                    .input(
-                        &format!("heartbeat@{m}"),
-                        hooks.heartbeat_timer.unwrap().on(m),
-                    );
-            }
-            ldfi
+                .goal_witnessed()
         };
         (compiled, harness, configure)
     }

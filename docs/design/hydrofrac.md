@@ -1,7 +1,9 @@
 # Hydrofrac: lineage-driven fault injection on the Hydro simulator
 
-Status: working prototype on the `ldfi-level2` branch (feature `ldfi` of `hydro_lang`, tests in
-`hydro_test`). This document is written for the Hydro core team. It explains what hydrofrac is,
+Status: working prototype (feature `ldfi` of `hydro_lang`, tests in `hydro_test`), on its second
+fault substrate: the sender-side filter of section 5, which replaced the receiver-side hook
+policies of the first version (section 11 records the redesign). This document is written for
+the Hydro core team. It explains what hydrofrac is,
 how it relates to LDFI as published, exactly how it uses the simulator's hooks to inject faults
 and to collect lineage, and what a user has to write to run it on a protocol. The research log
 with every experiment and every soundness bug along the way is `ldfi-on-sim-hooks.md`; this
@@ -72,8 +74,11 @@ It departs from Molly in five ways.
    exhaustive or sampled schedule exploration. A counterexample is a (fault set, schedule) pair.
    The Raft bug in section 9 needs a specific interleaving as well as a specific lost message,
    and only the combination finds it.
-3. **The fault point is the receiving `batch`, not the network.** This is the main structural
-   choice and the main limitation (section 5).
+3. **The fault point is a filter on every network send, inserted by the simulator.** Every
+   `Network` node of the program is a fault point; the transport the program declared
+   (`lossy_delayed_forever` or `fail_stop`) is its fault model (section 5). The first version
+   put the fault point on the receiving `batch` instead, and section 11 explains why that was
+   wrong.
 4. **Crash points are named by messages, not by time.** Molly's `crash(node, t)` uses a logical
    clock; hydrofrac's `crash(node after sending m)` names the last message the node sends, so
    the fault means the same thing in every run even when the schedule changes.
@@ -110,101 +115,115 @@ handle talks to the instance inside the compiled dylib through a bincode-seriali
 blob, because `TypeId`s and thread-locals do not cross the dylib boundary.
 
 Originally the scripted layer offered only per-execution decisions (`release_values`,
-`release_all`, `pause`). Hydrofrac added a second mode to the same hooks: a **standing policy**.
+`release_all`, `pause`). Hydrofrac added a second mode to the same hooks: a **standing policy**,
+a filter applied autonomously at every execution with no entropy and no scripting. Hooks are
+optional in hydrofrac: a hooked batch gives lineage an exact record of which tick execution
+consumed which message and is what counterfactual replay drives, but the fault point is
+elsewhere.
 
-## 5. Fault injection through the hooks
+## 5. Fault injection: the filter on every send
 
-### 5.1 Omission: a standing policy on the receiving batch
+### 5.1 The filter
 
-A `BatchHook` on a `NoOrder` stream accepts an `OmissionPolicy`
-(`hydro_lang/src/sim/runtime/tick_input.rs:252`):
+The simulator's compilation of a `Network` node (`sim/builder.rs`, `create_network`) emits a
+send half and a receive half joined by an in-memory channel. Every send half calls
+`LineageHandles::record_sent` (`sim/runtime/lineage.rs`) before putting anything on the wire.
+That call is the filter: it consults the instance's `FaultState` and returns the send's fate.
 
 ```rust
-pub struct OmissionPolicy<T> {
-    pub omit: Vec<T>,                   // values to discard on arrival
-    pub replay: Option<ReplayScript<T>>, // section 6.4
+pub enum SendFate { Delivered, Omitted, Crashed }
+
+pub struct SendKey {            // the identity of a send
+    pub channel: usize,         // the Network node's sink id
+    pub from: NodeKey,          // sending location and member
+    pub to_member: Option<u32>, // destination member
+    pub bytes: Vec<u8>,         // wire bytes
+}
+
+pub struct FaultState {
+    pub lossy: HashSet<usize>,            // channels whose transport admits loss
+    pub omissions: HashSet<SendKey>,      // sends to drop while finite failures last
+    pub finite_failures_ended: bool,      // the EFF switch
+    pub crash_points: HashMap<NodeKey, CrashPoint>,
+    pub dead: HashSet<NodeKey>,
+    ...
 }
 ```
 
-Installing it (`hook.omit(values)` on the test side) changes the hook's behaviour in three ways.
-It stops drawing entropy and stops needing per-execution decisions. At every scheduling query,
-the hook sweeps its buffer: any buffered element equal to one of `omit` is discarded and
-recorded in the hook's `dropped` trace (`policy_sweep`, `tick_input.rs:454`). The tick becomes
-runnable as soon as the buffer is non-empty after the sweep, and when it runs, the hook releases
-everything left and records each item in its `delivered` trace (`apply_policy`,
-`tick_input.rs:471`). Omission is a real drop, not a hold: a message in `omit` never reaches the
-program, and later byte-identical copies on that channel are also dropped for as long as the
-policy stands. The empty omission policy is `deliver_all()`.
+The filter is there whether or not the test asked for it; the program does not mention it, and
+the harness registers no channels. The `lossy` set is installed by the host from the program's
+declared networking before the instance runs: a `lossy_delayed_forever` channel admits omission,
+a `fail_stop` channel admits only its sender's crash. The transport type is the program's own
+statement of its fault model, and the filter enforces it at the sender, where the model is about
+the channel rather than about one consumer of it.
 
-A `BatchHook` on a `TotalOrder` stream only accepts a `PassthroughPolicy`
-(`tick_input.rs:279`), which delivers everything and traces it. A totally ordered stream only
-comes out of a `fail_stop` transport, which promises no loss, so omission is not in its
-vocabulary. This is deliberate: the transport type the program declares is the program's own
-statement of its fault model, and the fault point enforces it.
+A send that is delivered carries a fresh **delivery id** on the wire (`(u64, Bytes)`); the
+receive half records it (`Recv`) before deserialization. An omitted or crashed send produces no
+`Recv`.
 
-On the hydrofrac side, each registered channel is a `ChannelPoint` (`sim/ldfi.rs:372`) wrapping
-one hook instance. `Ldfi::lossy_channel(label, hook)` registers it with omission allowed;
-`Ldfi::reliable_channel(label, hook)` and `Ldfi::input(label, hook)` register it with omission
-disallowed. At the start of each run, `Run::install` (`ldfi.rs:920`) asks every point to install
-its share of the hypothesis: the point filters the fault set for `Omit` faults with its label,
-deserializes their payloads, and calls `hook.omit(those)`; a reliable point calls
-`deliver_all()`. At the end of the run, each point's `delivered()` and `dropped()` traces are
-read back.
+### 5.2 Omission
 
-What a message *is*: `Message { channel: label, payload: bincode bytes }`. Two messages are the
-same if they are on the same labelled channel and serialize to the same bytes. A retransmission
-with an identical payload is the same message for omission purposes; a retransmission with a
-different payload (Raft's heartbeat with a higher `leader_commit`) is a different one.
+`Fault::Omit(message)` names a `SendKey`. `Run::install` puts it in `omissions`; the filter drops
+every send whose key matches while the channel is lossy and finite failures last. Identity is by
+channel, sender, destination and bytes, not by send ordinal, so the same fault means the same
+thing in every run even when the sender's send sequence shifts, and a byte-identical
+retransmission is omitted too for as long as the fault stands; a retransmission with a different
+payload (Raft's heartbeat with a higher `leader_commit`) is a different message. This is Molly's
+omission.
 
-### 5.2 Crash: a cut at the send half, in generated code
+What a message *is* to the user: `Message { channel: label, from_member, to_member, payload }`,
+rendered as `label[from→to]:payload` (`rpc[0→1]:AppendEntries(..)`, `initial[→1]:Payload(42)`,
+`msg:Msg { attempt: 1 }`). The label is the channel's name if the program gave it one
+(`TCP.lossy_delayed_forever().name("rpc").bincode()`), else the `file:line` of the `send`, else
+`ch#id`.
 
-Crashes are not implemented through hooks. The simulator's `create_network` emits a send half
-for every `Network` node, and the lineage build adds a call to `LineageHandles::record_sent`
-(`sim/runtime/lineage.rs:203`) before every send. That function consults a `CrashState`:
+### 5.3 Crash: a pattern of applications of the same filter
 
-```rust
-pub enum CrashPoint {
-    BeforeAnySend,
-    AfterSend { channel: usize, to_member: Option<u32>, bytes: Vec<u8> },
-}
-```
-
-`note_send` (`lineage.rs:158`) counts the send; if the node is already dead, the send is dropped
-(nothing is put on the wire, and the `Sent` event is recorded with `dropped: true`); if this
-send matches the node's crash point, the node is marked dead afterwards. Every `sim_output`
-sink of a dead node is suppressed the same way (`LineageOutputSender::try_send_with`,
-`lineage.rs:314`), so the test body does not see outputs from a node that has died, which is
-what the body's `run.crashed_member(..)` check is for.
+`CrashPoint::AfterSend { channel, to_member, bytes }` and `CrashPoint::BeforeAnySend` are as in
+the first version. The filter counts the send; if the node is already dead the send is
+`Crashed`; if this send matches the node's crash point the node is marked dead afterwards (the
+node performed the send; whether the network also lost it is the omission's business). Every
+`sim_output` sink of a dead node is suppressed the same way (`LineageOutputSender`), so the
+test body does not see outputs from a node that has died, which is what `run.crashed_member(..)`
+is for.
 
 So `crash(node after sending m)` means: the node runs normally, performs every send up to and
 including `m`, and then every later send on every channel is lost and every later external
-output is suppressed. It never restarts. This is Molly's crash. Because the cut is at the send
-half, one crash point can split the fan-out of a single broadcast: in the plain-broadcast
-counterexample, the broadcaster dies after its second of three sends, and members 0 and 1
-receive while member 2 does not.
+output is suppressed. It never restarts. Because the cut is at the sender, one crash point can
+split the fan-out of a single broadcast: in the plain-broadcast counterexample, the broadcaster
+dies after its second of three sends, and members 0 and 1 receive while member 2 does not.
 
 Why the crash point is a message and not a count: the first version used `crash(node after k
 sends)`. Under a different hypothesis the node's send sequence shifted (a background transaction
 it would have decided was not there), so `send #7` named a different message, the solver's
 constraints meant something else in the bug's world, and the search certified a program with a
-known bug. With `AfterSend { channel, to_member, bytes }`, if the named message is never sent,
-the node simply survives.
+known bug. With a message as the identity, if the named message is never sent the node simply
+survives.
 
-### 5.3 End of finite failures and the horizon
+### 5.4 End of finite failures and the horizon
 
-`Run::end_of_finite_failures()` (`ldfi.rs:908`) does two things: it calls `deliver_all()` on
-every registered point, replacing any omission policy, and it records the current length of the
-event log. Only deliveries recorded before that index are omission candidates in later
-hypotheses. The horizon `EOT` is whatever the test body drives: timers in Hydro are `sim_input`s
-the body fires, and `hydro_lang::sim::quiesce().await` is a phase barrier.
+`Run::end_of_finite_failures()` flips `finite_failures_ended` and records the current length of
+the event log. From then on omissions are ignored (crashes are permanent, as in Molly), and only
+sends recorded before that index are omission candidates in later hypotheses. The horizon `EOT`
+is whatever the test body drives: timers in Hydro are `sim_input`s the body fires, and
+`hydro_lang::sim::quiesce().await` is a phase barrier.
 
-### 5.4 What the hooks give for free
+### 5.5 What the hooks do now
+
+A hooked `batch` is no longer a fault point. At the start of every run hydrofrac walks the
+instance's registry of scripted hooks and places every batch hook under its traced
+pass-through policy (`trace_all_hooks`, a type-erased `install_passthrough` on the hook shell),
+so a hooked batch draws no entropy and its releases are logged against the tick execution they
+fed. That is optional precision for lineage (section 6), and what counterfactual replay drives
+(section 6.4). A program with no hooks at all is faultable and traceable; a program with hooks
+needs nothing from the harness to use them.
 
 Because a hook under a policy draws no entropy, the schedule explorer's decision space under a
 hypothesis consists only of the program's remaining nondeterminism (which runnable tick goes
-next). In the measurement grid this had a practical consequence: at one schedule per hypothesis,
-every verdict and counterexample matched the eight-schedule run on the protocols without
-schedule-sensitive bugs, so the fair cost of a hypothesis is one simulator instance.
+next, and what an unhooked batch releases). In the measurement grid this had a practical
+consequence: at one schedule per hypothesis, every verdict and counterexample matched the
+eight-schedule run on the protocols without schedule-sensitive bugs, so the fair cost of a
+hypothesis is one simulator instance.
 
 Raft is the exception. Every other harness runs one schedule per hypothesis
 (`Exploration::Fuzz { instances: 1 }`, `ldfi_grid.rs`); the Raft harness runs four (`SCHEDULES`
@@ -225,87 +244,89 @@ certificate: with sampled schedules it is relative to the sampled schedules (the
 so), and Raft is the one protocol where that caveat bites. `Exploration::Exhaustive` is the sound
 alternative; the Raft harness does not use it, for cost.
 
-### 5.5 What this fault point cannot do
+### 5.6 What this fault point cannot do
 
-The fault point is the consumer's batch, not the channel. Three consequences:
-
-- A channel whose output is consumed without a hooked `batch` (a `recv.map(f).send(..)`
-  forwarding path, a `sim_output` straight from the channel) cannot be faulted and is invisible
-  to lineage except through the `Recv` event (section 6.1). The design calls for a hook on the
-  `Network` node itself to close this gap; it is not built.
-- If a channel's output is `tee`d to several consumers, an omission at one consumer's hook does
-  not remove the message at the others. None of the test protocols do this.
+- Embedded (raw-element) channels carry no serialized payload, no delivery id, and are not
+  fault points.
 - There is no `cut_after(n)` for a `fail_stop` connection dying on its own; the only fault on a
   reliable channel is the sender's crash.
+- Delay and reordering (hold instead of drop) and partitions (a predicate on the destination
+  set) are expressible at this filter and are not built.
 
-## 6. Lineage collection through the hooks
+## 6. Lineage collection
 
 ### 6.1 The event log
 
-One simulator instance produces one `Vec<LineageEvent>` (`sim/runtime/lineage.rs:45`). The host
-scheduler writes two kinds of event and the generated code writes four.
+One simulator instance produces one `Vec<LineageEvent>` (`sim/runtime/lineage.rs`). The host
+scheduler writes two kinds of event and the generated code writes three.
 
 | Event | Written by | When | Contents |
 |---|---|---|---|
 | `Exec` | host | before each async run or tick execution | `ExecId`, location, member, tick-or-async |
 | `Released` | host | right after a policy hook's trace grows during a tick execution | `exec`, `hook_id`, `member`, released items as bytes |
-| `Sent` | generated send half | every network send | `exec`, channel (sink id), from/to node, bytes, `dropped`, record provenance ids |
-| `Recv` | generated receive half | every network receive, before deserialization | `exec`, channel, to node, bytes |
+| `Sent` | the filter, at the send half | every network send | `exec`, delivery id, channel (sink id), from/to node, bytes, `Debug` rendering, `fate`, record provenance ids |
+| `Recv` | generated receive half | every delivered arrival, before deserialization | `exec`, channel, to node, delivery id |
 | `Output` | generated `sim_output` sink | every external output | `exec`, sink, port, member, bytes, `dropped`, record provenance ids |
-| `Tag` | generated code after a hooked batch (provenance build only) | every item a hooked batch releases | `exec`, fresh delivery id, `hook_id`, member, bytes |
 
-The host sets `current_exec` in a shared `Rc<Cell<ExecId>>` before each execution
-(`compiled.rs:2935`) and compares each hook's `delivered` trace length before and after the
-hooks run to produce `Released` (`compiled.rs:2954`). Generated code reads `current_exec` when it
-records `Sent`, `Recv`, `Output`, `Tag`. All of this state is created in the dylib and handed to
-the host as `Rc`s, following the existing hook pattern.
+The host sets `current_exec` in a shared `Rc<Cell<ExecId>>` before each execution and compares
+each policy hook's `delivered` trace length before and after the hooks run to produce
+`Released`. Generated code reads `current_exec` when it records `Sent`, `Recv`, `Output`. All
+of this state is created in the dylib and handed to the host as `Rc`s, following the existing
+hook pattern.
 
-A delivery is attributed to its send by matching: a `Released` item is matched to the earliest
-unmatched `Sent` with the same bytes, to the same node, on a channel that the static slice says
-feeds this hook. Matching by bytes alone was wrong (2PC's `commit` was attributed to the
-`prepare` of the same transaction, which carried the same payload); channel-scoped matching
-fixed it. A `Recv` on a channel with no hook still yields a dependency on its send, killable by
-the sender's crash.
+A receive names its send by delivery id, exactly. A hooked batch's release is the deserialized
+item, so it is matched to a send by bytes: the earliest unmatched delivered `Sent` with the
+same bytes, to the hook's node, on a channel the static slice says feeds the hook. (Matching by
+bytes alone was wrong in the first version, where 2PC's `commit` was attributed to the
+`prepare` of the same transaction, which carried the same payload; channel-scoped matching fixed
+it.) A release that matches no send is a local or external item and is not a dependency.
 
 ### 6.2 Levels 0 and 1: execution lineage and the static slice
 
 The support of an output is the backward closure from the execution that produced it. At
 **Level 0** (`Level::Execution`) the rules are: a tick execution depends on every message its
-hooks released into it, and, as an over-approximation of persisted state, on every earlier
-execution of the same tick; an async run depends on the tick executions at its location since
-its previous run; a message depends on the execution that sent it. Everything a goal output
-transitively reaches is in its derivation.
+hooks released into it, on every arrival at its node before it (an unhooked batch may have
+released any of them), and, as an over-approximation of persisted state, on every earlier
+execution of every tick at the node; an async run depends on what it received and on the tick
+executions at its location since its previous run; a message depends on the execution that sent
+it. Everything a goal output transitively reaches is in its derivation.
 
 **Level 1** (`Level::Slice`, the default) narrows the first rule with a static slice of the
 Hydro IR (`sim/slice.rs`), computed once per compiled program with the same traversal that emits
 the simulator. For each network send and each `sim_output` sink, the slice walks upstream and
-collects the hooked batches it can reach, split into `direct` (same execution) and `carried`
-(through at least one `defer_tick`, so earlier executions). Closures that read state through
-`Reference` captures add the slice of every closure that writes the same cell. A sink whose
-slice reaches an unhooked batch is `opaque` and falls back to the Level 0 rule. The LDFI log
-prints the slices at the start of every search:
+collects the inputs it can reach, split into `direct` (same execution) and `carried` (through
+at least one `defer_tick`, so earlier executions): hooked batches, channels consumed at the top
+level or through an unhooked batch (for the latter, every arrival on the channel at the node
+before the execution, since the log does not say which execution released it), and the yields
+of local ticks. Closures that read state through `Reference` captures add the slice of every
+closure that writes the same cell. Only a multi-version network makes a sink `opaque`, which
+falls back to the Level 0 rule. The LDFI log prints the channels and slices at the start of
+every search:
 
 ```
-ldfi: static slices:
-  sink#51 (async): direct {initial@0, echo@0, yield(...)} carried {initial@0, echo@0}
+ldfi: channels and static slices:
+  channel#29 "initial": Process(loc1v1) → Cluster(loc2v1), reliable
+  channel#51 "echo": Cluster(loc2v1) → Cluster(loc2v1), reliable
+  sink#51 (async): direct {hook#0, hook#1, yield(...)} carried {hook#0, hook#1}
 ```
 
-Both levels need nothing from the program beyond the hooks. Both have the same weakness: a
-protocol written as one step closure over a state struct is one IR node, so the slice says every
-output depends on every input across all executions, which is Level 0 again.
+Both levels need nothing from the program. Both have the same weakness: a protocol written as
+one step closure over a state struct is one IR node, so the slice says every output depends on
+every input across all executions, which is Level 0 again.
 
 ### 6.3 Level 2: record-level provenance by IR rewrite
 
 `SimFlow::with_provenance()` runs a sim-only rewrite (`sim/provenance.rs`) that wraps every
 collection element as `Tagged<T>`: the value plus the set of delivery ids it was computed from.
 `Tagged<T>` compares, hashes, orders, prints and serializes as `T`, so deduplication, joins,
-set difference and the hook policies are unchanged. Each item a hooked batch releases gets a
-fresh delivery id (the `Tag` event). `map`/`filter` pass the set through; `join`/`cross` union
-both sides; `fold`/`reduce`/`scan` accumulate every contribution; cycles carry it; a network send
-or `sim_output` strips the set from the wire payload and records it in the `Sent`/`Output`
-event's `prov` field. The closure then follows record-to-record edges: delivery id → the `Tag`
-that assigned it → the `Sent` that produced that record → its `prov` ids, and so on. Where a
-record carries no provenance (a top-level path with no hook), the closure falls back to Level 1.
+set difference and the hook policies are unchanged. The receive half of every channel tags
+each deserialized record with the delivery id of the send that produced it (the id travelled
+with the message). `map`/`filter` pass the set through; `join`/`cross` union both sides;
+`fold`/`reduce`/`scan` accumulate every contribution; cycles carry it; a network send or
+`sim_output` strips the set from the wire payload and records it in the `Sent`/`Output` event's
+`prov` field. The closure then follows record-to-record edges: delivery id → the `Sent` that
+produced the record → its `prov` ids, and so on. An empty set is exact: the record was computed
+from nothing that came off a channel (a constant, a timer, an external input).
 
 The rewrite supports the operators the test protocols use (about 26 `HydroNode` variants) and
 panics at compile time, by variant name, on anything else. Closures that capture state through
@@ -320,13 +341,16 @@ The simulator is deterministic and the event log records exactly what every hook
 every execution. That makes it possible to ask the lineage question directly: *if this delivery
 had not happened, would the node still have produced this output?*
 
-The mechanism is the `replay` field on the policies. A `ReplayScript<T>` (`tick_input.rs:310`)
-is a queue of per-execution release lists. A hook under a replay script ignores its buffer and
+The mechanism is the `replay` field on the policies. A `ReplayScript<T>` (`tick_input.rs`) is
+a queue of per-execution release lists. A hook under a replay script ignores its buffer and
 releases `execs[k]` into the `k`-th execution of its tick, for exactly `execs.len()` executions,
-including executions that release nothing. `CompiledSim::replay` (`compiled.rs:1234`) runs a
-fresh instance with every hook of node *N* under its recorded script (minus the deliveries being
-tested) and every other node's hooks under an empty script, driven by an all-zero entropy source
-so any unhooked in-tick choice resolves the same way every time, with no body and no logging.
+including executions that release nothing. `CompiledSim::replay` runs a fresh instance with
+every hook of node *N* under its recorded script (minus the deliveries being tested) and every
+other node's hooks under an empty script (`replay_all_hooks`, installed type-erased from the
+recorded bytes), driven by an all-zero entropy source so any unhooked in-tick choice resolves
+the same way every time, with no body and no logging. Replay therefore needs the node's batches
+to be hooked: it is the one place where hooks are still load-bearing, because only a hook
+records what each tick execution consumed in a form the simulator can feed back.
 The instance runs *N* alone with its inputs held fixed, in a few milliseconds, and its own event
 log says whether the output appeared.
 
@@ -345,22 +369,85 @@ replays. `Level::Counterfactual` (`LDFI_LEVEL=replay`) replays every step and ex
 comparison; it costs about 5× the wall time of the recorded levels and 300–435 replays per
 search on ISR.
 
-### 6.5 Two kinds of fact
+### 6.5 Specifications: `PRE` and `POST` as views
 
-A derivation is computed for a *fact* the body names. `Run::witness(output, value)` means "this
-value was output at some point"; the derivation is taken from the latest output equal to it, and
-under replay the predicate is "the value still appears". `Run::witness_final(output, value)`
-means "this value was the *last* output"; under replay the predicate is "the node's last output
-on this port equals the value", so a deleted heartbeat that would have changed the final view
-stays in the derivation. ISR's final leader view had to be declared `witness_final` to avoid a
-false certificate: two heartbeats are enough to *publish* a view, but the goal was about the
-view that *stood* at the end, which rests on every later heartbeat too.
+In LDFI as published, the program and its specification are written in the same language, so
+the specification has lineage: the search is not for a run that fails to deliver one concrete
+message, but for a run in which a view `PRE` holds and a view `POST` does not, and the
+derivations of `POST` are what the search negates. Hydrofrac's first version did not have this.
+A goal was a shape (`goal`, `goal_all_members`) or a set of facts the body named by hand
+(`witness`, `witness_final`, `require`) alongside a Rust verdict, and the two could disagree
+(section 8.4 of the first version listed this as the main source of false certificates).
 
-`Run::require(output, value)` names a fact the goal is conditioned on ("if the write was
-acknowledged, then..."). Its derivation is not negated; instead the search tries to *preserve*
-it, and the crash right after each send in it joins the candidate universe, because the weakest
-crash that keeps the pre-condition and kills what follows is often the bug (the leader dies
-between acknowledging and replicating).
+A [`Spec`](../../hydro_lang/src/sim/spec.rs) is the published formulation for a Hydro program.
+It is a small Hydro dataflow of its own, on an **observer** process the simulator adds to the
+program, that receives the outputs the specification is about and derives two views from them.
+Reliable broadcast's agreement, in full:
+
+```rust
+let mut spec = Spec::new(&mut flow);
+let delivered = spec.observe_cluster(deliveries);        // (member, payload) facts so far
+let correct = spec.correct_members(&members, 0..3);      // the members that do not crash
+
+// PRE: some member delivered m.
+let delivered_m = delivered.filter(q!(|(_, p)| p.0 == 42));
+spec.pre(delivered_m.clone().first());
+// POST: every correct member delivered m.
+let delivering = delivered_m.map(q!(|(m, _)| (m, ()))).unique();
+let correct_delivering = correct.clone().map(q!(|m| (m, ()))).join(delivering).count();
+spec.post(correct_delivering.zip(correct.count()).filter(q!(|(d, n)| d == n)));
+
+Ldfi::new().crashable(..).crashable_cluster(..).crash_budget(1).spec(spec)
+    .search(&compiled, async |_| { source.send(Payload(42)); quiesce().await; })
+```
+
+The same specification separates the protocols: with `echo = false` the search finds the
+mid-fan-out crash in two runs; with `echo = true` it certifies under one and two crashes. The
+body only drives the run; the verdict is the views' final values.
+
+What the pieces are:
+
+- **Observation.** `observe` / `observe_cluster` send an output stream to the observer over an
+  ordinary channel and present it in the observer's tick as the *set of facts so far*: a
+  bounded, sorted stream accumulated across the tick's executions. Views are ordinary Hydro over
+  bounded collections (`filter`, `map`, `join`, `unique`, `count`, `first`, `zip`). The tick runs
+  whenever a fact arrives; its last execution sees every fact. The scheduler runs the observer's
+  ticks *eagerly*, as soon as they are runnable and outside the schedule choice: the observer
+  only consumes, so its interleaving is unobservable to the program, and exploring it would
+  multiply schedules (it did, by 64×, before this rule).
+- **The fault model's facts.** `correct_members(cluster, members)` is the complement of Molly's
+  `crash` relation: the members the hypothesis under test does not crash, fed by the search
+  before each run through a `sim_input` on the observer.
+- **`PRE` and `POST`.** Each is a bounded `Optional` in the observer's tick; the view holds if
+  it is non-empty at the end of the run, as a Datalog goal holds if it is derivable at fixpoint.
+  Each is published once per tick execution as an `Option<T>` on an external port, and the
+  search reads the last value. `PRE` false makes the run vacuous; `PRE` true and `POST` false is
+  the counterexample; both true yields `POST`'s derivation as the clause and `PRE`'s as the
+  requirement to preserve (the first version's `require`).
+- **Lineage through observations.** The observation channels are network sends through the
+  filter, so a view's lineage runs through them to the executions that produced the outputs,
+  but they are not fault points: the search never omits them (they are `fail_stop`) and never
+  names a crash point by one of them (they are excluded from the send sequences). A view's
+  dependency on an observed fact is rendered `observed[m→]:v from member@m through send #k`,
+  killed by a crash of `m` before its `k`-th protocol send, plus whatever the fact itself was
+  derived from. Under record-level provenance the derivation of a view is exactly the set of
+  deliveries its value was computed from, which is why the broadcast harness compiles with
+  provenance by default.
+
+Two things the author has to know. First, write `POST` **positively**. A view derived through
+negation (`filter_not_in`, an empty `count`) depends on the *absence* of facts, which has no
+lineage; its derivation is empty, and an empty derivation certifies immediately. The search
+warns when `POST` holds with an empty derivation. A universal is positive as an aggregate over
+the matches compared with an aggregate over the domain, as above. Second, a deduplicating view
+(`unique`, `first`) keeps one derivation per run, so alternatives surface one hypothesis at a
+time: reliable broadcast under one crash takes 15 hypotheses (13 crash points, each refuted by
+its own run) where the first version's `goal_all_members` took 4, because the first version's
+universe never contained the members' crash points at all. The complete answer is lineage that
+carries alternatives (a set of derivations per record); it is not built.
+
+The first version's `witness` / `witness_final` / `require` API remains for the harnesses that
+have not been ported (2PC, ISR, Raft). `witness_final` ("the fact is that this value was the
+*last* output") is what a specification's final-value semantics gives every view for free.
 
 ## 7. The search loop
 
@@ -417,98 +504,52 @@ one of them is the broadcaster dying after its second send. That hypothesis viol
 There is no specification language. A hydrofrac test is ordinary Rust in three parts, and the
 user writes all three.
 
-### 8.1 Program side: expose the batches
+### 8.1 Program side: nothing required, two things optional
 
-Every channel that may be faulted, and every channel the goal can depend on, must be consumed
-through a `batch` that carries a hook. That means the protocol function takes a
-`NonDet<Option<BatchHook<..>>>` parameter per such batch (or a struct of them) and passes it to
-`use::batch(stream, nondet)`. Callers that do not care pass `nondet!(/** reason */)` and the
-program's behaviour is unchanged.
+Every network channel of the program is a fault point and is traced, by construction. The
+program's transport declarations are its fault model: a `lossy_delayed_forever` channel admits
+omission, a `fail_stop` channel admits only its sender's crash. The soundness rule of the first
+version, *every channel a goal can depend on must be registered*, is discharged by the compiler.
 
-Broadcast (`hydro_test/src/cluster/reliable_broadcast.rs:49`) takes two:
+Two things help and are optional.
 
-```rust
-pub fn broadcast<'a>(members, source, echo: bool,
-    nondet_initial: NonDet<Option<InitialHook>>,
-    nondet_echo: NonDet<Option<EchoHook>>) -> ... {
-    ...
-    let from_broadcaster = use::batch(initial, nondet_initial);
-    let from_members     = use::batch(echoes,  nondet_echo);
-```
-
-Raft (`hydro_test/src/cluster/raft.rs:894`) bundles four into `RaftHooks { requests,
-election_timer, heartbeat_timer, traffic }`, each `Option`, with a `SimHook` impl so
-`flow.sim_hook()` creates all four at once; `raft_server` takes `NonDet<RaftHooks<..>>` and
-`take_hook()`s it. That is about 50 lines of declarations plus changing four `nondet!(..)`
-arguments at the batch sites. Every other caller of `raft_server` passes `nondet!(/** .. */)`
-and gets `None` everywhere.
-
-This is a requirement on code structure, not on behaviour. The soundness rule is: *every channel
-a goal can depend on must be registered*, because an unhooked path is invisible to lineage and a
-missing dependency can manufacture a certificate. In practice that means hooking every batch in
-the protocol.
+- **Name the channels.** `TCP.lossy_delayed_forever().name("rpc").bincode()` makes the label in
+  reports `rpc[0→1]:AppendEntries(..)` instead of `raft.rs:1151[0→1]:..`. The name is the same
+  one multi-version deployments use.
+- **Hook the batches**, for Level 3. A batch bound to a scripted hook (`use::batch(stream,
+  nondet)` with a `NonDet<Option<BatchHook<..>>>` parameter the caller fills in with
+  `nondet!(hook = h)`) records exactly which tick execution consumed which message, and is what
+  counterfactual replay feeds. Raft (`hydro_test/src/cluster/raft.rs`) bundles four into
+  `RaftHooks`, about 50 lines of declarations plus four `nondet!(..)` arguments; every other
+  caller passes `nondet!(/** .. */)` and gets `None` everywhere. Without hooks, Levels 0 to 2
+  work unchanged and Level 3 falls back to the recorded lineage at every step.
 
 For Level 2, the program is compiled with `.with_provenance()`. The rewrite is automatic but
 supports a fixed set of operators; using one it does not support fails at compile time by name.
 Adding an operator is a `syn` closure-wrapping rule in `sim/provenance.rs`.
 
-### 8.2 Test side: the harness
+### 8.2 Test side: the specification and the body
 
-The harness builds the flow with hooks, compiles the simulator, declares the fault model and the
-goal, and writes the body. The broadcast harness (`reliable_broadcast.rs:108`) is about 55 lines:
+The harness builds the flow, writes the specification, compiles the simulator, declares the
+crash model, and writes the body. The broadcast harness (`reliable_broadcast.rs`) is the
+listing in section 6.5, about 45 lines. The parts, and what each demands of the author:
 
-```rust
-let initial_hook: InitialHook = flow.sim_hook();
-let echo_hook: EchoHook = flow.sim_hook();
-let deliveries = broadcast(&members, source, echo,
-    nondet!(/** LDFI delivery point */ hook = initial_hook),
-    nondet!(/** LDFI delivery point */ hook = echo_hook));
-let out = deliveries.sim_cluster_output();
-let compiled = flow.sim().skip_consistency_assertions()
-    .with_cluster_size(&members, 3).compiled();
+- **Specification.** Which outputs to observe, which cluster's correct members the views need,
+  and `PRE` / `POST` as Hydro over the observed facts. This is where the thinking is: the views
+  must say what the property means ("every correct member delivered `m`", not "member 2
+  delivered `m`"), and `POST` must be stated positively (section 6.5).
+- **Crash model.** Which nodes are `crashable` (processes) or `crashable_cluster` (members),
+  and the budget. Omission needs no declaration: it is available on every lossy channel.
+- **Body.** Drives the run: sends inputs, fires timers, awaits `quiesce()`. It returns nothing;
+  the verdict is the views'.
 
-let mut ldfi = Ldfi::new()
-    .crashable("broadcaster", &broadcaster)
-    .crashable_cluster("member", &members, 0..3)
-    .crash_budget(crashes)
-    .goal_all_members(&out, "member", 0..3);
-for m in 0..3 {
-    ldfi = ldfi.reliable_channel(&format!("initial@{m}"), initial_hook.on(m))
-               .reliable_channel(&format!("echo@{m}"), echo_hook.on(m));
-}
-ldfi.run(&compiled, async |run| {
-    source_send.send(Payload(42));
-    hydro_lang::sim::quiesce().await;
-    let delivered: Vec<bool> = (0..3)
-        .filter(|m| !run.crashed_member("member", *m))
-        .map(|m| out.collect_sorted(m).await.contains(&Payload(42)))
-        .collect();
-    delivered.iter().all(|d| *d) || delivered.iter().all(|d| !*d)   // agreement
-})
-```
-
-The parts, and what each demands of the author:
-
-- **Fault model.** Which hooks are `lossy_channel` (omission allowed; must be `NoOrder`), which
-  are `reliable_channel` (traced only), which are `input` (external, never a fault; timers and
-  client requests). Which nodes are `crashable`. The budget. Labels are free strings used in
-  reports and fault names.
-- **Goal shape.** This tells lineage what to trace. `goal(&out)` is "some value appears";
-  `goal_all_members(&out, cluster, members)` is "every non-crashed member produced a value";
-  `goal_witnessed()` defers to the body, which names the facts with `witness`,
-  `witness_member`, `witness_final`, `witness_member_final`, and the pre-conditions with
-  `require`, `require_member`. Choosing between `witness` and `witness_final` is a judgement
-  about the property (is it "ever" or "at the end") and getting it wrong produced a false
-  certificate once.
-- **Body.** Drives the run: sends inputs, fires timers, awaits `quiesce()`, calls
-  `end_of_finite_failures()` at the right point, skips crashed nodes, and returns the verdict.
-  The verdict is the ground truth; the goal shape is only lineage's hint. The two must agree,
-  and hydrofrac does not check that they do. A body whose pre-condition fails should call
-  `mark_vacuous()` and return `true`.
-
-The Raft harness (`raft_ldfi.rs`) is about 200 lines including the body, the comparison test
-and the shared `compile` helper; the body alone is 60 lines, most of it the scenario (which
-timers fire when) and the agreement check.
+The first version's API is still there for the harnesses not yet ported: `goal(&out)` ("some
+value appears"), `goal_all_members(&out, cluster, members)`, and `goal_witnessed()` with the
+body naming facts (`witness`, `witness_final`, `require`) and returning the verdict. Its hazards
+(section 10) are the reason for the specification layer. The Raft harness (`raft_ldfi.rs`) is
+about 180 lines on that API; its body alone is 60 lines, most of it the scenario (which timers
+fire when) and the agreement check, and porting it to a `Spec` means writing Raft's agreement
+as views over the members' committed logs and leader views.
 
 ### 8.3 Running it
 
@@ -529,45 +570,49 @@ toolchain and `libclang`. The `ldfi` feature of `hydro_lang` gates everything.
 
 | Protocol | Program change | Test module | Notes |
 |---|---|---|---|
-| Reliable delivery | 2 hook parameters (messages, acks) | ~110 lines | first example |
-| Broadcast | 2 hook parameters | ~115 lines (harness ~55) | the harness above |
-| 2PC + CTP | 5 hook parameters (prepares, commits, peers, votes, timeouts) | ~210 lines + a comparison harness | goal conditioned on a commit |
-| ISR replication | `Hooks` struct with 9 hooks; protocol written in two encodings | ~190 lines + the measurement grid | `witness_final` on the view |
-| Raft | `RaftHooks` struct, 4 batch sites, ~50 lines | ~200 lines, body ~60 | 4 schedules/hypothesis |
+| Reliable delivery | none required; channels named | ~130 lines (two harness variants) | first example; run with and without hooks |
+| Broadcast | none required; channels named | ~130 lines (harness ~45) | the only harness on a `Spec` so far |
+| 2PC + CTP | none required; channels named | ~200 lines + a comparison harness | goal conditioned on a commit |
+| ISR replication | `Hooks` struct with 9 hooks, kept for Level 3; channels named | ~180 lines + the measurement grid | `witness_final` on the view |
+| Raft | `RaftHooks` struct, 4 batch sites, ~50 lines, kept for Level 3 | ~180 lines, body ~60 | 4 schedules/hypothesis |
 
-The protocols themselves were written or ported for this work, so the "program change" column
-is what a protocol author adds, not what a retrofit on existing code cost; no retrofit has been
-tried except Raft, where the four batches already existed and only their `nondet!` arguments
-changed.
+The hook structs predate the filter; they stay because counterfactual replay needs them (section
+6.4), and because the protocols' other tests script them. Nothing else in the protocols exists
+for hydrofrac.
 
-The recurring cost is not the lines. It is three judgement calls the tool cannot make: which
-facts witness the property and whether they are "ever" or "final" facts; which facts are
-pre-conditions; and whether every channel the property could depend on is registered. Each of
-the three false certificates found during development was one of these judgements made wrong,
-or a vocabulary bug in the tool (count-indexed crashes) that the same kind of judgement
-exposed. Users should expect to read the first run's derivation and check that it names the
-messages they expected.
+The recurring cost is not the lines. It is writing the property down as views, which is the
+same judgement as writing it in Datalog: what the facts are, what `PRE` conditions on, and
+stating `POST` without negation. (The first version had further hazards of its own, whether a
+fact was "ever" or "final" and whether every channel was registered, and its false certificates
+came from them.) Users should expect to read the first run's derivation and check that it names
+the messages they expected.
 
 ## 9. What it has found
 
 On the paper's examples it reproduces the paper: tries-twice reliable delivery breaks under two
-omissions in 3 runs; plain broadcast breaks under one mid-fan-out crash in 2 runs; reliable
-broadcast certifies under one and two crashes; 2PC breaks under one coordinator crash, 2PC with
+omissions in 3 runs; plain broadcast breaks under one mid-fan-out crash in 2 runs and reliable
+broadcast certifies under one and two crashes (15 and 89 hypotheses), both under the one
+agreement specification of section 6.5; 2PC breaks under one coordinator crash, 2PC with
 cooperative termination certifies under one crash and breaks under two (coordinator after one
 commit, then the participant that got it); ISR's unclean election reproduces the Kafka bug.
 
 The headline is Raft. `raft.rs` has thirteen behavioural tests including unit tests of the
 §5.4.1 election restriction and two fuzz tests of concurrent elections; none exercises message
 loss. An injected bug that compares last-log index only, ignoring term (a mistake shipped in
-real implementations), passes all thirteen. Hydrofrac finds it in 25 hypotheses (100 simulator
-instances at 4 schedules each) with the counterexample `{omit AppendEntries(a, leader_commit
-0)→1, omit AppendEntries(a, leader_commit 1)→1}` under the schedule in which member 0 takes term
-2. Blind enumeration needs 160 hypotheses (640 instances). Random fault injection with the same
-vocabulary found it in 0 of 5 repeats within 640 instances each (two thirds of its instances
-were vacuous). On correct Raft, hydrofrac certifies in 175 hypotheses; blind exhausted its
-budget at 256.
+real implementations), passes all thirteen. Hydrofrac finds it in 20 hypotheses (80 simulator
+instances at 4 schedules each; 25 on the first substrate) with the counterexample `{omit
+rpc[0→1]:AppendEntries(a, leader_commit 0), omit rpc[0→1]:AppendEntries(a, leader_commit 1)}`
+under the schedule in which member 0 takes term 2. Blind enumeration needs 160 hypotheses (640
+instances). Random fault injection with the same vocabulary found it in 0 of 5 repeats within
+640 instances each (two thirds of its instances were vacuous). On correct Raft, hydrofrac
+certifies in 133 hypotheses (175 on the first substrate); blind exhausted its budget at 256.
+The improvement comes from exact delivery ids on the receive side: the record provenance of a
+Raft step names its sends precisely where the first version matched releases to sends by bytes.
 
-Measurement grid (ISR, 2PC at n = 2..6, workload 1..8; all in `ldfi-on-sim-hooks.md`): lineage
+Measurement grid (ISR, 2PC at n = 2..6, workload 1..8; all in `ldfi-on-sim-hooks.md`, measured
+on the first substrate; the per-protocol unit tests reproduce their counts on the filter, except
+that ISR's dataflow encoding now certifies in 33 hypotheses rather than 20 because channels the
+first harness never hooked, the client acknowledgements and the views, are fault points): lineage
 beats blind enumeration everywhere, by 2–7× on certificates; against uninformed random it wins
 on 2PC at every size by a margin that grows with size and never misses, while random misses in
 2–4 of 10 repeats from n = 5; on ISR at small sizes random is competitive because the fault
@@ -578,15 +623,27 @@ encoding under record provenance (10/18).
 
 ## 10. Limitations and what is not built
 
-- **Fault point.** Hook-free consumption paths and `tee`d channel outputs are outside the fault
-  model (section 5.5). A `Network`-node hook would close this.
-- **Program intrusion.** Every faultable or traced batch needs a hook parameter. There is no
-  way to point hydrofrac at a protocol that was not written with this in mind.
-- **Properties are checked at quiesce.** "Eventually" means "by the end of the run after EFF".
-  Properties that need an unbounded future are out of scope, as in Molly.
-- **The spec is unchecked.** The goal shape and the body's verdict can disagree. The body can
-  forget a requirement, declare a final fact as an "ever" fact, or omit a channel from
-  registration, and the result is a wrong certificate with no warning.
+- **The filter is a simulator artefact.** It lives in the simulator's compilation of `Network`
+  nodes, not in the IR, so it does not exist under `deploy` (section 11.3). Embedded channels
+  are not fault points. Delay, reordering and partitions are not built.
+- **Level 3 needs hooks.** Counterfactual replay feeds a node its recorded per-execution inputs,
+  which only a hooked batch records; a protocol without hooks gets the recorded lineage levels.
+  The receive-side "source" of section 11.3 would remove this.
+- **Properties are checked at quiesce.** "Eventually" means "by the end of the run the body
+  drove". Properties that need an unbounded future are out of scope, as in Molly.
+- **`EFF` is a leftover.** Molly's end of finite failures and horizon `EOT` were how a search
+  over logical time was bounded. In the simulator the horizon is what the body drives, and
+  omission candidates are the sends the run observed, so `end_of_finite_failures` is only an
+  optional bound a body may impose (reliable delivery uses it to make "try twice" fail in bounded
+  rounds). It should not shape the design further.
+- **Hand-named goals are unchecked.** Under the first version's goal API the goal shape and the
+  body's verdict can disagree, and a forgotten requirement or an "ever" fact that should have
+  been "final" is a wrong certificate with no warning. A [`Spec`](#65-specifications-pre-and-post-as-views)
+  removes this: the verdict and the lineage are the same views. Its own gap is negation
+  (section 6.5): a `POST` stated through absence has an empty derivation, which the search
+  warns about but cannot repair.
+- **One derivation per record.** Deduplicating operators keep the first provenance seen, so a
+  view's alternatives surface one hypothesis at a time (section 6.5).
 - **Replay assumes monotone steps.** A 1-minimal sufficient set found by greedy deletion is one
   derivation, not all of them, and the deletion order can matter for a step that is not monotone
   in its inputs. Several derivations per output (ddmin) are not implemented.
@@ -597,3 +654,134 @@ encoding under record provenance (10/18).
 - **Not measured.** A coverage-guided fuzzer (libFuzzer under `cargo sim`) as a baseline; blind
   and random to the certificate on correct Raft; Raft under load; a per-node replay driver that
   does not instantiate the whole dylib.
+
+## 11. The redesign: sender-side filters
+
+The first version put the fault point on the receiving `batch`: a hook on a `NoOrder` stream
+accepted an `OmissionPolicy` (values to discard on arrival), a hook on a `TotalOrder` stream a
+`PassthroughPolicy`, and the harness registered each hook as a `lossy_channel`,
+`reliable_channel` or `input` with a label. That conflated two things the simulator provides: a
+place to interpose, the `BatchHook`, and deterministic control of the schedule. LDFI needs the
+second. The fault model was built on the first because interposition there was free: the
+scripted-hook layer already existed, a standing policy was a small addition to it, and the hooks
+were already the place where lineage could see what a tick consumed. The cost was a list of
+limitations. A channel consumed without a hooked `batch` (a `recv.map(f).send(..)` forwarding
+path, a `sim_output` straight from the channel) could not be faulted and was invisible to lineage
+except through a special rule for `Recv` events; a `tee`d channel output omitted at one consumer
+was still delivered at the others; every faultable batch was a hook parameter threaded through
+the protocol's signature; crashes needed a separate mechanism in the generated send half because
+a receiving hook cannot stop a node from sending; omission was a standing policy on bytes because
+a receiving hook has no notion of a message instance; and the soundness of every certificate
+rested on the harness author having registered every channel. All of these followed from one
+choice: the fault point was a receiver-side test seam, not a model of the network.
+
+Section 5 describes what replaced it. This section records the proposal as it was made, what
+of it is built, and what is not.
+
+### 11.1 The proposal
+
+The compiler inserts a **filter** node in front of every `Network` send and every external output
+sink. The filter belongs to the fault model, not to the program: it is there whether or not the
+author asked for it, and the author's code does not mention it.
+
+Omission is one application of the filter: drop the sends that match a predicate keyed by `(send
+site, destination, bytes)`. This is the identity `CrashPoint::AfterSend` already uses, and the
+lesson of section 5.3 stands: do not key on send ordinals, because they shift between hypotheses
+and a constraint written against one world then means something else in another.
+
+Crash is a pattern of applications: after send `m`, drop every send on every channel from the
+node and suppress every external output. One mechanism, two patterns; this is Molly's own
+formulation of its fault vocabulary, which section 5.3 reached by a different route.
+
+`end_of_finite_failures` flips a runtime switch on every filter rather than replacing every hook's
+policy with `deliver_all()`.
+
+The transport type keeps its role. A `lossy` connection permits omission at its
+filter; a `fail_stop` connection permits only the sender's crash. The program still states its own
+fault model, and the filter enforces it at the sender, where the model is about the channel rather
+than about one consumer of it.
+
+### 11.2 What it fixes, and what it adds
+
+Against the limitations listed at the top of this section, item by item:
+
+- Hook-free consumption paths and `tee`d outputs: every send passes through the filter, so what
+  the receiver does with the channel is irrelevant.
+- Program intrusion: no `nondet!(hook = ..)` threading, no `RaftHooks` struct. Every `Network`
+  node is faultable by default, and the first version's soundness rule ("every channel a goal can
+  depend on must be registered") is discharged by construction.
+- Crash as a separate mechanism in the send half: subsumed.
+- Omission as a standing policy, and EFF as policy replacement: a predicate and a switch.
+
+Beyond the current vocabulary, the same node gives the faults the hooks could not. Hold instead of
+drop is delay and reordering; a predicate on the destination set is a partition; and because the
+filter is an IR node rather than a simulator artefact, it exists under `deploy` as well as `sim`.
+
+### 11.3 What the simulator must still provide
+
+Moving the fault point out of the simulator does not make the simulator optional. Four things
+stay on its side.
+
+Deterministic re-execution of a fault set. This is Molly's third requirement, and the search loop
+depends on it: "the outcome still held, so the program has another derivation" is only a valid
+inference if the run differed from the last one by the fault set alone.
+
+Schedule exploration. The Raft counterexample of section 9 is a (fault set, interleaving) pair; a
+filter under `deploy` yields one interleaving per run, chosen by the operating system, which is
+Molly's fixed schedule or worse.
+
+Level 3 replay. Counterfactual lineage re-runs one node with a recorded set of deliveries fed into
+it and everything else withheld. That is inherently receiver-side. Its natural form in this
+design is the mirror image of the filter: a compiler-inserted **source** at every `Network`
+receive that, under replay, feeds recorded bytes instead of the wire. With the filter on the send
+side and the source on the receive side, `BatchHook` drops out of both fault injection and
+lineage and goes back to being what it was built for.
+
+Phase barriers and timers. `quiesce()` and the `sim_input` timers are how the body defines the
+horizon; a deployment would need wall-clock equivalents.
+
+The division of labour this leaves is the one the prototype should have started from: the
+simulator's job is determinism, schedules and replay; the fault model's job is the IR.
+
+### 11.4 Migration points for lineage
+
+Two things in the first version's lineage change.
+
+Delivery ids are minted at the `Sent` event, not at the hooked batch's `Tag`. One id per send,
+carried to the receiver as the record's provenance; the `Tag` event goes away, and the
+delivery-to-send matching (earliest unmatched `Sent` with the same bytes on a channel the slice
+says feeds this hook) becomes unnecessary for receives because the id travels with the message
+(it remains for the releases of a hooked batch, whose items are deserialized). Level 1's slice
+becomes "network receives reachable from the sink" where there is no hook, instead of marking
+the sink opaque.
+
+An omitted send is recorded as `Sent { fate: Omitted }`, exactly as a crashed node's send is,
+and produces no `Recv`. The receiver-side drop recorded a `Recv` for a message that was never
+delivered, which was wrong. The first version's rule that a `Recv` on a channel with no hook
+still yields a dependency on its send was a workaround for the gap the filter closes; it is now
+simply the rule for every receive.
+
+### 11.5 Status
+
+Built, in the simulator rather than in the IR, with the following correspondence to the proposal.
+
+- The filter (11.1) is `FaultState::filter` behind `LineageHandles::record_sent`, which the
+  simulator's `create_network` emits at every send half. Omission is a predicate on `(send site,
+  sender, destination, bytes)`; crash is the pattern of applications; `end_of_finite_failures`
+  is a switch. External output sinks are filtered for crashes only (there is no omission of an
+  output).
+- Channels are fault points by construction (11.2): `Ldfi::lossy_channel`, `reliable_channel`
+  and `input` are gone; the transport type decides what the filter admits; labels come from the
+  channel's name or the `send`'s source line.
+- Delivery ids are minted at the send and travel on the wire (11.4); `Recv` names its send by
+  id; the `Tag` event and the batch-side tagging are gone; the receive half tags records under
+  provenance; an omitted send is `Sent { fate: Omitted }` and produces no `Recv`; the special
+  `Recv` rule is gone, replaced by the ordinary rule that a receive depends on its send.
+- Hooks are optional precision (5.5). The search drives every scripted batch hook of the
+  program itself, type-erased, so the harness never scripts them; Level 3 still needs them.
+
+Not built: the filter as an IR node, so that it exists under `deploy`; delay, reordering and
+partitions at the filter; the receive-side source that would let replay feed recorded bytes
+into a node without hooks, which is what would let `BatchHook` drop out of lineage entirely.
+The simulator-side obligations of 11.3 (determinism, schedule exploration, replay, barriers)
+are unchanged.

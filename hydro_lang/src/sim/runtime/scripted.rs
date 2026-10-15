@@ -70,9 +70,9 @@ pub trait ScriptableHook: RuntimeHook {
     /// A **standing policy** this kind can be placed under instead of a schedule of
     /// decisions: a filter that is applied autonomously (without entropy and without a
     /// per-execution decision) whenever the hook's tick runs, for as long as it is
-    /// installed. Used by fault injection, where a channel's receiving hook is told
-    /// "deliver everything except these" once. Kinds without such a policy use
-    /// [`NoPolicy`].
+    /// installed. Used by fault injection, which places every scripted batch hook under
+    /// its traced pass-through (or, for counterfactual replay, a replay script) once. Kinds
+    /// without such a policy use [`NoPolicy`].
     type Policy: ScriptDecision;
 
     /// Sweeps the buffered input under the standing policy: discards (and records in
@@ -90,6 +90,20 @@ pub trait ScriptableHook: RuntimeHook {
     /// a policy is installed.
     fn apply_policy(&mut self, _policy: &mut Self::Policy, _trace: &mut PolicyTrace) {
         abort!("this hook kind does not support a standing policy");
+    }
+
+    /// The standing policy that delivers everything as it arrives, tracing it, for kinds
+    /// that have one. Lets a type-erased driver (fault injection) make every scripted batch
+    /// a traced, entropy-free delivery point without knowing its element type.
+    fn passthrough_policy() -> Option<Self::Policy> {
+        None
+    }
+
+    /// A replay policy over bincode-serialized items per execution (as a policy trace
+    /// records them), for kinds that have one; `None` if the kind has none or an item does
+    /// not decode as the element type.
+    fn replay_policy(_execs: Vec<Vec<Vec<u8>>>) -> Option<Self::Policy> {
+        None
     }
 
     /// Whether the decision could be honored right now, against the current buffer.
@@ -162,6 +176,13 @@ pub trait ScriptedHookControl {
     /// The bincode-serialized [`PolicyTrace`] of everything this hook has delivered and
     /// discarded while under a standing policy.
     fn policy_trace_blob(&self) -> Vec<u8>;
+    /// Places the hook under its kind's traced pass-through policy
+    /// ([`ScriptableHook::passthrough_policy`]), replacing any policy or queued decision.
+    /// Returns `false` if the kind has none.
+    fn install_passthrough(&mut self) -> bool;
+    /// Places the hook under a replay policy over serialized items
+    /// ([`ScriptableHook::replay_policy`]). Returns `false` if the kind has none.
+    fn install_replay(&mut self, execs: Vec<Vec<Vec<u8>>>) -> bool;
 }
 
 /// The scheduler-facing interface shared by all scripted top-level hooks; refined by
@@ -482,6 +503,28 @@ impl<H: ScriptableHook> ScriptedHookControl for Scripted<H> {
     fn policy_trace_blob(&self) -> Vec<u8> {
         bincode::serialize(&*self.policy_trace.borrow()).unwrap()
     }
+
+    fn install_passthrough(&mut self) -> bool {
+        match H::passthrough_policy() {
+            Some(policy) => {
+                self.next_decision = None;
+                self.policy = Some(policy);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn install_replay(&mut self, execs: Vec<Vec<Vec<u8>>>) -> bool {
+        match H::replay_policy(execs) {
+            Some(policy) => {
+                self.next_decision = None;
+                self.policy = Some(policy);
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 impl<H: ScriptableHook> ScriptedRuntimeHook for Scripted<H> {
@@ -592,6 +635,12 @@ impl<H: ScriptableInlineHook> ScriptedHookControl for ScriptedInline<H> {
     }
     fn policy_trace_blob(&self) -> Vec<u8> {
         bincode::serialize(&PolicyTrace::default()).unwrap()
+    }
+    fn install_passthrough(&mut self) -> bool {
+        false
+    }
+    fn install_replay(&mut self, _execs: Vec<Vec<Vec<u8>>>) -> bool {
+        false
     }
 }
 

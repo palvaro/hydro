@@ -16,28 +16,36 @@
 //! * which feed it only through at least one `defer_tick` (`carried` inputs: deliveries
 //!   in *earlier* executions of the same tick),
 //!
-//! resolving `forward_ref` cycles to a fixpoint. A sink whose slice reaches an input the
-//! lineage log cannot observe (an unscripted batch, a multi-version network) is marked
-//! `opaque`, and the lineage falls back to the coarse rule for it.
+//! resolving `forward_ref` cycles to a fixpoint. A channel consumed through an unscripted
+//! `batch` is a `carried` [`SliceInput::Channel`]: the log does not say which execution
+//! released each arrival, so every arrival at the node before the execution counts. A sink
+//! whose slice reaches an input the lineage log cannot observe at all (a multi-version
+//! network) is marked `opaque`, and the lineage falls back to the coarse rule for it.
+//!
+//! The same traversal collects the program's **channels** ([`ChannelInfo`]): every `Network`
+//! node, with its endpoints, whether its transport admits loss, and a label.
 //!
 //! Sinks are keyed by the `StmtId` the emitter assigns to the `Network` node or the
 //! `SendExternal` root; generated code tags `Sent` / `Output` events with the same id.
 //! The IR is traversed with [`traverse_dfir`], which assigns ids exactly as `emit` does.
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::compile::builder::CycleId;
 use crate::compile::ir::{ClosureExpr, HydroNode, HydroRoot, SharedNode, traverse_dfir};
 use crate::location::dynamic::LocationId;
+use crate::networking::{NetworkingInfo, TcpFault};
 
 /// One observable input of a sink's slice.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SliceInput {
     /// A scripted batch hook (by handle id); its releases appear as `Released` events.
     Hook(usize),
-    /// A network channel consumed at the top level (by sink id); its arrivals appear as
-    /// `Recv` events.
+    /// A network channel (by sink id); its arrivals appear as `Recv` events. In a top-level
+    /// sink's slice the channel is consumed directly; in a tick sink's slice it is consumed
+    /// through an unscripted `batch`, whose releases are not logged, so every arrival at the
+    /// node before the execution is a possible input (always `carried`).
     Channel(usize),
     /// Output yielded by a local tick (by tick location) into the top level. The slice's
     /// hooks name what the yielded stream was computed from inside that tick.
@@ -76,7 +84,26 @@ impl SinkSlice {
     }
 }
 
-/// The slices of every sink in a compiled program.
+/// One network channel of the program: a `Network` node, which is a fault point of the
+/// simulator (see [`super::runtime::lineage`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelInfo {
+    /// The sink id (the `StmtId` the emitter assigns to the node).
+    pub id: usize,
+    /// The sending location (a process or cluster).
+    pub from: LocationId,
+    /// The receiving location (a process or cluster).
+    pub to: LocationId,
+    /// Whether the declared transport admits message loss, so omission is in the channel's
+    /// fault vocabulary. A `fail_stop` channel admits only its sender's crash.
+    pub lossy: bool,
+    /// A label for reports and fault names: the channel's name if the program gave it one
+    /// (`.name("..")` on the networking config), else the `file:line` of the `send`, else
+    /// `ch#id`. Made unique across the program.
+    pub label: String,
+}
+
+/// The slices of every sink in a compiled program, and the program's channels.
 #[derive(Clone, Debug, Default)]
 pub struct Slices {
     /// Sink id → slice.
@@ -87,12 +114,19 @@ pub struct Slices {
     pub hook_yields: HashMap<usize, BTreeSet<LocationId>>,
     /// Whether each sink is inside a tick (`true`) or at the top level.
     pub sink_in_tick: HashMap<usize, bool>,
+    /// Every network channel, by sink id.
+    pub channels: BTreeMap<usize, ChannelInfo>,
 }
 
 impl Slices {
     /// The slice of `sink`, if known and fully observable.
     pub fn precise(&self, sink: usize) -> Option<&SinkSlice> {
         self.sinks.get(&sink).filter(|slice| !slice.opaque)
+    }
+
+    /// The channel with this sink id.
+    pub fn channel(&self, id: usize) -> Option<&ChannelInfo> {
+        self.channels.get(&id)
     }
 }
 
@@ -174,9 +208,21 @@ impl Walker<'_> {
                     put(&mut self.raw.slice, SliceInput::Hook(hook));
                     collect_feeds(inner, self.hook_feeds.entry(hook).or_default());
                 } else {
-                    // Entropy-driven batch: its releases are not in the lineage log.
-                    debug_log(|| format!("opaque at unscripted batch {}", node.print_root()));
-                    self.raw.slice.opaque = true
+                    // Entropy-driven batch: its releases are not in the lineage log, but
+                    // what feeds it is. Whatever arrived at the node before the execution
+                    // may have been released into it, so its channels, yields and cycles
+                    // are inputs carried from any earlier point of the run.
+                    let mut feeds = RawFeeds::default();
+                    collect_feeds(inner, &mut feeds);
+                    for channel in feeds.channels {
+                        self.raw.channels.insert((channel, true));
+                    }
+                    for tick in feeds.yields {
+                        self.raw.slice.carried.insert(SliceInput::Yield(tick));
+                    }
+                    for cycle in feeds.cycles {
+                        self.raw.cycles.insert((cycle, true));
+                    }
                 }
             }
             HydroNode::DeferTick { input, .. } => self.walk(input, true),
@@ -269,6 +315,15 @@ pub fn compute(ir: &mut [HydroRoot]) -> Slices {
         hook_feeds: HashMap<usize, RawFeeds>,
         /// State cell → the merged slice of every node whose closure mutates it.
         writers: HashMap<*const HydroNode, RawSlice>,
+        /// Every `Network` node, in traversal order: `(id, from, to, lossy, name, span)`.
+        channels: Vec<(
+            usize,
+            LocationId,
+            LocationId,
+            bool,
+            Option<String>,
+            Option<String>,
+        )>,
     }
     let state = RefCell::new(State::default());
 
@@ -319,7 +374,7 @@ pub fn compute(ir: &mut [HydroRoot]) -> Slices {
     }
 
     if std::env::var("HYDRO_IR_VARIANTS").is_ok() {
-        let counts: RefCell<std::collections::BTreeMap<String, usize>> = Default::default();
+        let counts: RefCell<BTreeMap<String, usize>> = Default::default();
         traverse_dfir(
             ir,
             |root, _| {
@@ -370,6 +425,27 @@ pub fn compute(ir: &mut [HydroRoot]) -> Slices {
                 let raw = slice_of(&mut state, input);
                 let in_tick = !input.metadata().location_id.is_top_level();
                 state.raw_sinks.push((id, in_tick, raw));
+                let from = input.metadata().location_id.root().clone();
+                if let HydroNode::Network {
+                    name,
+                    networking_info,
+                    metadata,
+                    ..
+                } = node
+                {
+                    let lossy = match networking_info {
+                        NetworkingInfo::Tcp { fault } => !matches!(fault, TcpFault::FailStop),
+                        NetworkingInfo::Udp { .. } => true,
+                    };
+                    state.channels.push((
+                        id,
+                        from,
+                        metadata.location_id.root().clone(),
+                        lossy,
+                        name.clone(),
+                        user_span(&metadata.op.backtrace),
+                    ));
+                }
             }
         },
     );
@@ -379,6 +455,7 @@ pub fn compute(ir: &mut [HydroRoot]) -> Slices {
         raw_cycles,
         hook_feeds,
         writers,
+        channels,
     } = state.into_inner();
 
     // Network nodes are numbered by the traversal, so channel inputs resolve only now.
@@ -496,7 +573,65 @@ pub fn compute(ir: &mut [HydroRoot]) -> Slices {
         slices.hook_channels.insert(hook, ids);
         slices.hook_yields.insert(hook, yields);
     }
+    // Channel labels: the program's name, else the `send`'s source line, else the id; made
+    // unique with the id where two channels would otherwise share a label.
+    let base_labels: Vec<String> = channels
+        .iter()
+        .map(|(id, _, _, _, name, span)| {
+            name.clone()
+                .or_else(|| {
+                    span.as_ref().map(|span| {
+                        span.rsplit(['/', '\\'])
+                            .next()
+                            .unwrap_or(span.as_str())
+                            .to_owned()
+                    })
+                })
+                .unwrap_or_else(|| format!("ch{id}"))
+        })
+        .collect();
+    for (i, (id, from, to, lossy, _, _)) in channels.into_iter().enumerate() {
+        let label = &base_labels[i];
+        let unique = base_labels.iter().filter(|l| *l == label).count() == 1;
+        let label = if unique {
+            label.clone()
+        } else {
+            format!("{label}#{id}")
+        };
+        slices.channels.insert(
+            id,
+            ChannelInfo {
+                id,
+                from,
+                to,
+                lossy,
+                label,
+            },
+        );
+    }
     slices
+}
+
+/// The `file:line` of the first frame of `backtrace` outside `hydro_lang` itself: where the
+/// program called `send`, rather than the networking layer's own frames.
+#[cfg(feature = "build")]
+fn user_span(backtrace: &crate::compile::ir::backtrace::Backtrace) -> Option<String> {
+    let own = concat!("hydro_lang", "/src/");
+    backtrace
+        .elements()
+        .find_map(|element| {
+            let file = element.filename.as_ref()?;
+            if file.contains(own) {
+                return None;
+            }
+            Some(format!("{file}:{}", element.lineno?))
+        })
+        .or_else(|| backtrace.format_span())
+}
+
+#[cfg(not(feature = "build"))]
+fn user_span(backtrace: &crate::compile::ir::backtrace::Backtrace) -> Option<String> {
+    backtrace.format_span()
 }
 
 /// Prints a slicing diagnostic when `HYDRO_SLICE_DEBUG` is set.

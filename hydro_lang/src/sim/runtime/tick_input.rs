@@ -274,7 +274,7 @@ where
 /// A standing policy for a totally ordered batch hook (see [`ScriptableHook::Policy`]):
 /// deliver everything as it arrives, tracing every delivery. A reliable (`fail_stop`)
 /// channel admits no omission, so this is the only policy an ordered hook offers; it exists
-/// so such a channel can still be a lineage-traced delivery point for fault injection.
+/// so a hooked batch can be a lineage-traced delivery point for fault injection.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PassthroughPolicy<T> {
     /// When set, the hook replays this script instead of delivering what arrives.
@@ -317,6 +317,24 @@ impl<T> ReplayScript<T> {
         format!("replay({} execution(s) left)", self.execs.len())
     }
 
+    /// Decodes a script from bincode-serialized items per execution (as a policy trace
+    /// records them); `None` if an item does not decode as `T`.
+    fn decode(execs: Vec<Vec<Vec<u8>>>) -> Option<Self>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let execs = execs
+            .into_iter()
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| bincode::deserialize(item).ok())
+                    .collect::<Option<Vec<T>>>()
+            })
+            .collect::<Option<VecDeque<Vec<T>>>>()?;
+        Some(ReplayScript { execs })
+    }
+
     /// Discards everything buffered; the tick is runnable while executions remain.
     fn sweep(&self, input: &RefCell<VecDeque<T>>) -> bool {
         input.borrow_mut().clear();
@@ -355,6 +373,16 @@ where
     // relies on (only `fail_stop` transports yield such streams), so the only standing
     // policy is the traced pass-through.
     type Policy = PassthroughPolicy<T>;
+
+    fn passthrough_policy() -> Option<PassthroughPolicy<T>> {
+        Some(PassthroughPolicy::default())
+    }
+
+    fn replay_policy(execs: Vec<Vec<Vec<u8>>>) -> Option<PassthroughPolicy<T>> {
+        Some(PassthroughPolicy {
+            replay: Some(ReplayScript::decode(execs)?),
+        })
+    }
 
     fn policy_sweep(&self, policy: &PassthroughPolicy<T>, _trace: &mut PolicyTrace) -> bool {
         if let Some(replay) = &policy.replay {
@@ -450,6 +478,20 @@ where
     type Decision = UnorderedBatchDecision<T>;
     type Status = BatchStatus;
     type Policy = OmissionPolicy<T>;
+
+    fn passthrough_policy() -> Option<OmissionPolicy<T>> {
+        Some(OmissionPolicy {
+            omit: vec![],
+            replay: None,
+        })
+    }
+
+    fn replay_policy(execs: Vec<Vec<Vec<u8>>>) -> Option<OmissionPolicy<T>> {
+        Some(OmissionPolicy {
+            omit: vec![],
+            replay: Some(ReplayScript::decode(execs)?),
+        })
+    }
 
     fn policy_sweep(&self, policy: &OmissionPolicy<T>, trace: &mut PolicyTrace) -> bool {
         if let Some(replay) = &policy.replay {

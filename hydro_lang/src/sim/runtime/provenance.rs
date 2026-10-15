@@ -2,13 +2,13 @@
 //!
 //! When a simulation is compiled with provenance (`SimFlow::with_provenance`), a sim-only IR
 //! rewrite (`sim::provenance`) wraps every collection element in [`Tagged`]: the value plus
-//! the set of **delivery ids** it was computed from. Each item a scripted batch releases into
-//! a tick gets a fresh id (recorded as a [`LineageEvent::Tag`](super::LineageEvent::Tag));
-//! operators propagate ids by what they actually did (a join unions both sides, a fold
-//! accumulates every contribution, a map passes through); and a network send or external
-//! output strips the tag from the wire payload and writes it into the `Sent` / `Output`
-//! lineage event. The LDFI harness then follows record-to-record edges instead of
-//! execution-to-execution ones.
+//! the set of **delivery ids** it was computed from. Each send that reaches the wire has a
+//! delivery id (minted by the filter, see [`LineageEvent::Sent`](super::LineageEvent::Sent)),
+//! which the receive half attaches to the deserialized record; operators propagate ids by
+//! what they actually did (a join unions both sides, a fold accumulates every contribution,
+//! a map passes through); and a network send or external output strips the tag from the
+//! wire payload and writes it into the `Sent` / `Output` lineage event. The LDFI harness
+//! then follows record-to-record edges instead of execution-to-execution ones.
 //!
 //! `Tagged<T>` compares, hashes, orders, prints, and serializes **as `T`**, so the program's
 //! semantics (deduplication, joins, set difference, hook policies that match payload bytes)
@@ -174,19 +174,28 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Tagged<T> {
 #[doc(hidden)]
 pub mod codegen {
     use super::{Prov, Tagged};
-    use crate::sim::runtime::LineageHandles;
 
-    /// Tags a value released by a scripted batch with a fresh delivery id, recording it.
-    pub fn tag_delivery<T: serde::Serialize>(
-        lineage: &LineageHandles,
-        hook_id: Option<usize>,
-        member: Option<u32>,
-        mut item: Tagged<T>,
-    ) -> Tagged<T> {
-        let bytes = bincode::serialize(&item.0).expect("tagged item should serialize");
-        let id = lineage.record_tag(hook_id, member, bytes);
-        item.1.insert(id);
-        item
+    /// Tags a record deserialized at a network receive with the delivery id of the send that
+    /// produced it (the id travelled with the message; see `sim::runtime::lineage`).
+    pub fn tag_recv<T>(id: u64, value: T) -> Tagged<T> {
+        Tagged(value, Prov::single(id))
+    }
+
+    /// Renders the payload of a cluster-targeted send `(member, payload)` with `display`.
+    /// Exists so generated code need not project the tuple itself, whose type may not be
+    /// inferred yet where the closure is type-checked.
+    pub fn display_payload<K, V>(
+        display: fn(&V) -> Option<String>,
+        value: &(K, V),
+    ) -> Option<String> {
+        display(&value.1)
+    }
+
+    /// Applies a (de)serialization closure to one value. Exists so generated code can call a
+    /// closure whose parameter type is only known from its argument: the argument is
+    /// type-checked first here, where an immediately-invoked closure would not infer it.
+    pub fn apply<I, O>(value: I, f: impl FnOnce(I) -> O) -> O {
+        f(value)
     }
 
     /// `(Tagged(a), Tagged(b))` → `Tagged((a, b))` with the union of both provenances.

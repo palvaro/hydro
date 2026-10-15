@@ -53,7 +53,7 @@ pub fn broadcast<'a>(
     nondet_initial: NonDet<Option<InitialHook>>,
     nondet_echo: NonDet<Option<EchoHook>>,
 ) -> Stream<Payload, Cluster<'a, Member>, Unbounded, NoOrder> {
-    let initial = source.broadcast_closed(members, TCP.fail_stop().bincode());
+    let initial = source.broadcast_closed(members, TCP.fail_stop().name("initial").bincode());
 
     // The echo cycle: declared on the location the initial broadcast yields, so the
     // completing stream (also from `broadcast_closed` over `fail_stop`) matches its type.
@@ -85,7 +85,7 @@ pub fn broadcast<'a>(
 
     echo_handle.complete(
         to_echo
-            .broadcast_closed(members, TCP.fail_stop().bincode())
+            .broadcast_closed(members, TCP.fail_stop().name("echo").bincode())
             .entries(),
     );
 
@@ -96,15 +96,22 @@ pub fn broadcast<'a>(
 mod tests {
     use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
     use hydro_lang::prelude::*;
-    use hydro_lang::sim::ldfi::{Fault, Ldfi, Outcome};
+    use hydro_lang::sim::ldfi::{Fault, Ldfi, Level, Outcome};
+    use hydro_lang::sim::spec::Spec;
 
     use super::{Broadcaster, EchoHook, InitialHook, Member, Payload, broadcast};
 
     const MEMBERS: u32 = 3;
 
-    /// Runs LDFI against the broadcast with or without echo. Fault model: the broadcaster and
-    /// every member may crash (budget `crashes`); links are reliable. Goal: agreement over
-    /// the correct members.
+    /// Runs LDFI against the broadcast with or without echo, under one specification written
+    /// as Hydro views over the members' deliveries (see `hydro_lang::sim::spec`):
+    ///
+    /// - `PRE`: some member delivered `m`.
+    /// - `POST`: every correct member delivered `m`.
+    ///
+    /// Fault model: the broadcaster and every member may crash (budget `crashes`); links are
+    /// reliable. The same specification separates the two protocols: plain broadcast violates
+    /// it, reliable broadcast satisfies it.
     fn search(echo: bool, crashes: usize) -> Outcome {
         let mut flow = FlowBuilder::new();
         let broadcaster = flow.process::<Broadcaster>();
@@ -117,53 +124,63 @@ mod tests {
             &members,
             source,
             echo,
-            nondet!(/** LDFI delivery point: the broadcaster's channel */ hook = initial_hook),
-            nondet!(/** LDFI delivery point: the echo channel */ hook = echo_hook),
+            nondet!(/** traced by the search */ hook = initial_hook),
+            nondet!(/** traced by the search */ hook = echo_hook),
         );
-        let out = deliveries.sim_cluster_output();
 
+        // The specification, as views over the facts the run produces.
+        let mut spec = Spec::new(&mut flow);
+        let delivered = spec.observe_cluster(deliveries);
+        let correct = spec.correct_members(&members, 0..MEMBERS);
+        let delivered_m = delivered.filter(q!(|(_, p)| p.0 == 42));
+        // PRE: a member delivered m.
+        spec.pre(delivered_m.clone().first());
+        // POST: every correct member delivered m, stated positively as "the correct members
+        // that delivered m are as many as the correct members" so that each one's delivery
+        // is in the view's lineage.
+        let delivering = delivered_m.map(q!(|(m, _)| (m, ()))).unique();
+        let correct_delivering = correct
+            .clone()
+            .map(q!(|m| (m, ())))
+            .join(delivering)
+            .count();
+        spec.post(
+            correct_delivering
+                .zip(correct.count())
+                .filter(q!(|(delivering, correct)| delivering == correct)),
+        );
+
+        // Record-level provenance is the natural lineage for a specification: the
+        // derivation of a view is exactly the deliveries its value was computed from. The
+        // recorded levels work too (`LDFI_NO_PROVENANCE`), with coarser derivations and a
+        // much slower closure over the hundreds of schedules of the echo variant.
         let mut sim = flow
             .sim()
             .skip_consistency_assertions()
             .with_cluster_size(&members, MEMBERS as usize);
-        if std::env::var("LDFI_PROVENANCE").is_ok() {
+        if std::env::var("LDFI_NO_PROVENANCE").is_err() {
             sim = sim.with_provenance();
         }
         let compiled = sim.compiled();
 
-        let mut ldfi = Ldfi::new()
+        Ldfi::new()
+            .level(Level::Record)
             .level_from_env()
             .crashable("broadcaster", &broadcaster)
             .crashable_cluster("member", &members, 0..MEMBERS)
             .crash_budget(crashes)
-            .goal_all_members(&out, "member", 0..MEMBERS);
-        for m in 0..MEMBERS {
-            ldfi = ldfi
-                .reliable_channel(&format!("initial@{m}"), initial_hook.on(m))
-                .reliable_channel(&format!("echo@{m}"), echo_hook.on(m));
-        }
-
-        ldfi.run(&compiled, async |run| {
-            source_send.send(Payload(42));
-            hydro_lang::sim::quiesce().await;
-
-            let mut delivered = vec![];
-            for m in 0..MEMBERS {
-                if run.crashed_member("member", m) {
-                    continue;
-                }
-                let got: Vec<Payload> = out.collect_sorted(m).await;
-                delivered.push(got.contains(&Payload(42)));
-            }
-            // Agreement: the correct members all delivered, or none did.
-            delivered.iter().all(|d| *d) || delivered.iter().all(|d| !*d)
-        })
+            .spec(spec)
+            .search(&compiled, async |_run| {
+                source_send.send(Payload(42));
+                hydro_lang::sim::quiesce().await;
+            })
     }
 
     /// Plain broadcast violates agreement under one crash: the broadcaster dies after its
     /// second send, members 0 and 1 deliver, member 2 never does. Lineage makes the search
-    /// two runs: the failure-free derivation is the fan-out `{b→0, b→1, b→2}`, so the
-    /// candidate crashes are the broadcaster's at each send, weakest first.
+    /// two runs: the failure-free derivation of `POST` is the three deliveries, each resting
+    /// on one fan-out send `{b→0, b→1, b→2}`, so the candidate crashes are the broadcaster's
+    /// at each send, weakest first.
     #[test]
     fn ldfi_breaks_plain_broadcast_with_a_mid_fanout_crash() {
         let outcome = search(false, 1);
@@ -175,15 +192,18 @@ mod tests {
         assert_eq!(faults.len(), 1);
         assert!(
             matches!(faults.first(), Some(Fault::Crash { node, after: Some(m) })
-                if node == "broadcaster" && m.to_string().starts_with("initial@1:")),
+                if node == "broadcaster" && m.to_string().starts_with("initial[→1]:")),
             "expected the broadcaster to die after its second send: {faults:?}"
         );
         assert_eq!(runs.len(), 2);
     }
 
     /// Reliable broadcast survives one crash: under the same fault, the echoes of members 0
-    /// and 1 deliver to member 2, which appears as a new derivation through the echo channel.
-    /// No single crash kills every derivation, so the search ends with a certificate.
+    /// and 1 deliver to member 2, which appears as a new derivation of `POST` through the
+    /// echo channel. Because a member's delivery may rest on an echo rather than on the
+    /// broadcaster's send, every member's crash points are candidates too, and each is
+    /// refuted by a run of its own; no single crash kills every derivation, so the search
+    /// ends with a certificate.
     #[test]
     fn ldfi_certifies_reliable_broadcast_under_one_crash() {
         let outcome = search(true, 1);
