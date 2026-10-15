@@ -40,7 +40,7 @@ use hydro_lang::live_collections::keyed_stream::KeyedStream;
 use hydro_lang::live_collections::stream::{Ordering, Retries, Stream};
 use hydro_lang::location::cluster::Consistency;
 use hydro_lang::location::dynamic::LocationId;
-use hydro_lang::location::{Cluster, Location, Process};
+use hydro_lang::location::{Atomic, Cluster, Location, Process};
 use hydro_lang::sim::extension::{cluster_receiver_port, receiver_port};
 
 /// A value the generated harness can feed to a data input. See the [module docs](self).
@@ -241,6 +241,26 @@ where
             root,
             numeric: is_numeric::<T>(),
         });
+    }
+}
+
+/// A stream on an [`Atomic`] location is sunk as the stream on the underlying top-level
+/// location: `end_atomic` yields it back into the asynchronous context, where `sim_output`
+/// applies. The checker counts the same records either way.
+impl<'a, T, L, B, O, R> SimOutputs for Stream<T, Atomic<L>, B, O, R>
+where
+    L: Location<'a>,
+    B: Boundedness,
+    O: Ordering,
+    R: Retries,
+    Stream<T, L, B, O, R>: SimOutputs,
+{
+    fn sink_all(self) {
+        self.end_atomic().sink_all();
+    }
+
+    fn sink_named(self, name: &str, outputs: &mut OutputPorts) {
+        self.end_atomic().sink_named(name, outputs);
     }
 }
 

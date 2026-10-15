@@ -14,6 +14,9 @@ pub struct Sample {
     pub value: Option<f64>,
     /// The record's id, when it carries one.
     pub id: Option<u64>,
+    /// The cluster member that produced the record, for streams on clusters. A level from a
+    /// cluster is kept per member and reported as the sum over members.
+    pub member: Option<u32>,
 }
 
 /// Everything a harness tells the recorder, timestamped on arrival. Shared between the generator
@@ -170,6 +173,7 @@ impl Recorder {
             Sample {
                 value: Some(value),
                 id: None,
+                member: None,
             },
         );
     }
@@ -239,12 +243,19 @@ impl Recorder {
             // Records arriving after `total` (in the grace period) would all land in the last
             // bucket and inflate its rate, so they are left out of the per-second rows; fates
             // read from them above still count.
+            //
+            // A value is the latest sample, summed over cluster members (a process stream has one
+            // "member", `None`): each member's depth is its own, and the program's backlog is
+            // their total.
+            let mut latest_by_member: BTreeMap<Option<u32>, f64> = BTreeMap::new();
             for &(t, s) in samples.iter().filter(|(t, _)| *t < total) {
                 let b = &mut buckets[idx(t)];
                 *b.stream_records.entry(name.clone()).or_default() += 1;
                 if let Some(v) = s.value {
                     // The last sample in the second wins; samples are pushed in time order.
-                    b.stream_values.insert(name.clone(), v);
+                    latest_by_member.insert(s.member, v);
+                    b.stream_values
+                        .insert(name.clone(), latest_by_member.values().sum());
                 }
             }
         }
@@ -457,5 +468,23 @@ mod tests {
         let tsv = t.to_tsv();
         assert!(tsv.starts_with("second\trounds\toffered\toffered_completed\toffered_abandoned\toffered_outstanding\toffered_p50_ms\toffered_p99_ms\tcompleted\tabandoned\tp50_ms\tp99_ms\tmax_ms\tbacklog_n\tretried_n\tbacklog_v\n"), "{tsv}");
         assert_eq!(tsv.lines().count(), 4);
+    }
+
+    #[test]
+    fn cluster_levels_are_summed_over_members() {
+        let r = Recorder::new();
+        let depth = |m: u32, v: f64| Sample {
+            value: Some(v),
+            id: None,
+            member: Some(m),
+        };
+        r.record("inbox", depth(0, 3.0));
+        r.record("inbox", depth(1, 4.0));
+        r.record("inbox", depth(0, 1.0));
+        let t = r.trace(Duration::from_secs(2), None);
+        assert_eq!(t.buckets[0].stream_records["inbox"], 3);
+        // Member 0's latest is 1, member 1's is 4.
+        assert_eq!(t.buckets[0].stream_values["inbox"], 5.0);
+        assert_eq!(t.buckets[1].stream_values["inbox"], 5.0);
     }
 }

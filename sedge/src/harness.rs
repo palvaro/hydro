@@ -349,30 +349,53 @@ pub fn host(deployment: &mut Deployment, run: &RunConfig) -> TrybuildHost {
 }
 
 /// One of the program's timers, driven by the harness over an external port so that its period
-/// can be changed during the trigger (see [`RunConfig::dips`]).
+/// can be changed during the trigger (see [`RunConfig::dips`]). A timer on a cluster of `members`
+/// fires at every member once per period, the members staggered by `period / members`: the
+/// deployment's deterministic form of the per-member phase a real deployment's independent clocks
+/// (or Raft's randomized election timeouts) have, and the shape Cress's staggered timer closures
+/// take. A process is a cluster of one.
 pub struct TimerDrive {
     pub name: String,
     pub period: Duration,
-    pub sink: Pin<Box<dyn Sink<(), Error = std::io::Error>>>,
+    /// `(member raw id, ())`; for a process the member is always 0.
+    pub sink: Pin<Box<dyn Sink<(u32, ()), Error = std::io::Error>>>,
+    pub members: u32,
 }
 
-/// Drives one timer from `start`: an element every `period`, stretched by the dip factor while
-/// the profile is in its trigger window. Runs until the sink closes.
+/// A process timer's sink, which takes `()`, as the `(member, ())` sink [`TimerDrive`] wants.
+pub fn process_timer_sink(
+    sink: Pin<Box<dyn Sink<(), Error = std::io::Error>>>,
+) -> Pin<Box<dyn Sink<(u32, ()), Error = std::io::Error>>> {
+    Box::pin(sink.with(|(_, ()): (u32, ())| futures::future::ready(Ok::<(), std::io::Error>(()))))
+}
+
+/// Drives one timer from `start`: at every member, an element every `period`, the members
+/// staggered by `period / members`, the period stretched by the dip factor while the profile is in
+/// its trigger window. Runs until the sink closes.
 async fn drive_timer(mut timer: TimerDrive, start: Instant, profile: Profile, dip: Option<f64>) {
-    let mut next = start;
+    let members = timer.members.max(1);
+    let mut next: Vec<Instant> = (0..members)
+        .map(|m| start + timer.period.mul_f64(m as f64 / members as f64))
+        .collect();
     loop {
-        tokio::time::sleep_until(next.into()).await;
-        if timer.sink.send(()).await.is_err() {
+        let (m, due) = next
+            .iter()
+            .copied()
+            .enumerate()
+            .min_by_key(|(_, t)| *t)
+            .unwrap();
+        tokio::time::sleep_until(due.into()).await;
+        if timer.sink.send((m as u32, ())).await.is_err() {
             return;
         }
-        let t = next.saturating_duration_since(start);
+        let t = due.saturating_duration_since(start);
         let stretched = dip.is_some_and(|_| t >= profile.trigger_start() && t < profile.trigger_end());
         let period = if stretched {
             timer.period.mul_f64(dip.unwrap())
         } else {
             timer.period
         };
-        next += period;
+        next[m] = due + period;
     }
 }
 
@@ -556,6 +579,7 @@ where
                             Sample {
                                 value: o.value,
                                 id: o.id,
+                                member: o.member,
                             },
                         );
                     }
@@ -620,9 +644,16 @@ where
         eprintln!("  (deployment did not stop cleanly: {e})");
     }
 
+    // A dip run at the same factor is a different experiment and must not overwrite the burst
+    // run's trace, so the dips are part of the name.
+    let dip_tag: String = run
+        .dips
+        .iter()
+        .map(|(n, k)| format!(".dip-{n}x{k}"))
+        .collect();
     let trace_name = format!(
-        "{}.{}.{}.factor{}.trial{}.tsv",
-        meta.crate_name, meta.function, meta.configuration, factor, trial
+        "{}.{}.{}.factor{}.trial{}{}.tsv",
+        meta.crate_name, meta.function, meta.configuration, factor, trial, dip_tag
     );
     let trace_path = run.results_dir.join("traces").join(trace_name);
     let trace_path = match fs::write(&trace_path, trace.to_tsv()) {
