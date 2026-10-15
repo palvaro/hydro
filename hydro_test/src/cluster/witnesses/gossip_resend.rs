@@ -23,6 +23,20 @@
 //!   `sim_input`. Each element advances that member's clock by one, releases one budget of
 //!   merges, and judges the outstanding table against the timeout.
 //!
+//! # Deployed constants (Sedge)
+//!
+//! The Cress and Sedge attributes below share one workload: a round is one timer element at every
+//! member (50 ms deployed) and one local update at every member. With five members each update
+//! is four deltas on the wire and four merges spread over the peers, so a member merges four
+//! deltas per round against a budget of `max_merges_per_tick = 5` per tick: at 20 ticks/s that is
+//! 100 merges/s per member, so the capacity is `mu = 25` rounds/s. The timeout of 3 ticks is
+//! 150 ms; a healthy acknowledgement takes one or two ticks (the receiver merges on its next tick,
+//! the sender sees the acknowledgement on its next). The rate model for re-sending on: after a
+//! trigger that has built inboxes deeper than the timeout, every member re-sends one delta per
+//! peer per tick, 80 deltas/s into each member, on top of `4ρ` new ones; the inboxes keep growing
+//! while `4ρ + 80 > 100`, that is while `ρ > 5` rounds/s, so the critical factor is `f = 5` and
+//! factors 2 and 4 should collapse where 8 should recover.
+//!
 //! The label is **hazardous** with re-sending on: a delayed acknowledgement makes the sender put
 //! a delta on the wire, and the receiver merge it, that the input did not ask for. With
 //! `ack_timeout_ticks = 0` the program is benign: every delta is sent once per peer and merged
@@ -46,6 +60,8 @@
 //! `sim_tests` predicts, and half of every tail merge is of a delta already merged.
 
 use std::marker::PhantomData;
+#[cfg(any(feature = "cress", feature = "sedge"))]
+use std::time::Duration;
 
 use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
 use hydro_lang::location::cluster::{CLUSTER_SELF_ID, ClusterIds};
@@ -83,6 +99,7 @@ pub struct GossipConfig {
 }
 
 #[cfg_attr(feature = "cress", derive(SimOutputs))]
+#[cfg_attr(feature = "sedge", derive(sedge::SedgeOutputs))]
 pub struct Outputs<'a> {
     /// Every delta a member puts on the wire, as `(destination raw id, delta)`, first sends and
     /// re-sends alike.
@@ -100,16 +117,50 @@ pub struct Outputs<'a> {
 #[cfg_attr(feature = "cress", amplification_check(
     name = resend_on,
     cluster = 5,
-    workload(local_updates = 1),
     workload_rounds = 125,
     config = GossipConfig { max_merges_per_tick: 5, ack_timeout_ticks: 3 },
+    timers(timer = Duration::from_millis(50)),
+    round_data = |round, inputs| {
+        for m in 0..inputs.cluster_members {
+            inputs.local_updates.send(m, round as u64 * inputs.cluster_members as u64 + m as u64);
+        }
+    },
 ))]
 #[cfg_attr(feature = "cress", amplification_check(
     name = resend_off,
     cluster = 5,
-    workload(local_updates = 1),
     workload_rounds = 125,
     config = GossipConfig { max_merges_per_tick: 5, ack_timeout_ticks: 0 },
+    timers(timer = Duration::from_millis(50)),
+    round_data = |round, inputs| {
+        for m in 0..inputs.cluster_members {
+            inputs.local_updates.send(m, round as u64 * inputs.cluster_members as u64 + m as u64);
+        }
+    },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = resend_on,
+    cluster = 5,
+    config = GossipConfig { max_merges_per_tick: 5, ack_timeout_ticks: 3 },
+    mu = 25,
+    timers(timer = Duration::from_millis(50)),
+    round_data = |round, inputs| {
+        for m in 0..inputs.cluster_members {
+            inputs.local_updates.send(m, round as u64 * inputs.cluster_members as u64 + m as u64);
+        }
+    },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = resend_off,
+    cluster = 5,
+    config = GossipConfig { max_merges_per_tick: 5, ack_timeout_ticks: 0 },
+    mu = 25,
+    timers(timer = Duration::from_millis(50)),
+    round_data = |round, inputs| {
+        for m in 0..inputs.cluster_members {
+            inputs.local_updates.send(m, round as u64 * inputs.cluster_members as u64 + m as u64);
+        }
+    },
 ))]
 pub fn gossip_with_resend<'a>(
     cluster: &Cluster<'a, Node>,
