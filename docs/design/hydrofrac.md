@@ -597,3 +597,104 @@ encoding under record provenance (10/18).
 - **Not measured.** A coverage-guided fuzzer (libFuzzer under `cargo sim`) as a baseline; blind
   and random to the certificate on correct Raft; Raft under load; a per-node replay driver that
   does not instantiate the whole dylib.
+
+## 11. Proposed redesign: sender-side filters in the IR
+
+The prototype conflated two things the simulator provides: a place to interpose, the `BatchHook`,
+and deterministic control of the schedule. LDFI needs the second. The fault model was built on the
+first because interposition there was free: the scripted-hook layer already existed, a standing
+policy was a small addition to it, and the hooks were already the place where lineage could see
+what a tick consumed. The cost shows up as every limitation in sections 5.5 and 10. Hook-free
+consumption paths and `tee`d channel outputs cannot be faulted; every faultable batch is a hook
+parameter threaded through the protocol's signature; crashes needed a separate mechanism in the
+generated send half because a receiving hook cannot stop a node from sending; omission is a
+standing policy on bytes because a receiving hook has no notion of a message instance; and a
+`Recv` with no hook behind it had to be given a dependency rule of its own. All of these follow
+from one choice: the fault point is a receiver-side test seam, not a model of the network.
+
+### 11.1 The proposal
+
+The compiler inserts a **filter** node in front of every `Network` send and every external output
+sink. The filter belongs to the fault model, not to the program: it is there whether or not the
+author asked for it, and the author's code does not mention it.
+
+Omission is one application of the filter: drop the sends that match a predicate keyed by `(send
+site, destination, bytes)`. This is the identity `CrashPoint::AfterSend` already uses, and the
+lesson of section 5.2 stands: do not key on send ordinals, because they shift between hypotheses
+and a constraint written against one world then means something else in another.
+
+Crash is a pattern of applications: after send `m`, drop every send on every channel from the
+node and suppress every external output. One mechanism, two patterns; this is Molly's own
+formulation of its fault vocabulary, which section 5.2 reached by a different route.
+
+`end_of_finite_failures` flips a runtime switch on every filter rather than replacing every hook's
+policy with `deliver_all()`.
+
+The transport type keeps its role from section 5.1. A `lossy` connection permits omission at its
+filter; a `fail_stop` connection permits only the sender's crash. The program still states its own
+fault model, and the filter enforces it at the sender, where the model is about the channel rather
+than about one consumer of it.
+
+### 11.2 What it fixes, and what it adds
+
+Against section 5.5 and section 10, item by item:
+
+- Hook-free consumption paths and `tee`d outputs: every send passes through the filter, so what
+  the receiver does with the channel is irrelevant. The `Network`-node hook that section 5.5 calls
+  for is this filter.
+- Program intrusion: no `nondet!(hook = ..)` threading, no `RaftHooks` struct. Every `Network`
+  node is faultable by default, and the soundness rule of section 8.1 ("every channel a goal can
+  depend on must be registered") is discharged by construction.
+- Crash as a separate mechanism in the send half: subsumed.
+- Omission as a standing policy, and EFF as policy replacement: a predicate and a switch.
+
+Beyond the current vocabulary, the same node gives the faults the hooks could not. Hold instead of
+drop is delay and reordering; a predicate on the destination set is a partition; and because the
+filter is an IR node rather than a simulator artefact, it exists under `deploy` as well as `sim`.
+
+### 11.3 What the simulator must still provide
+
+Moving the fault point out of the simulator does not make the simulator optional. Four things
+stay on its side.
+
+Deterministic re-execution of a fault set. This is Molly's third requirement, and the search loop
+depends on it: "the outcome still held, so the program has another derivation" is only a valid
+inference if the run differed from the last one by the fault set alone.
+
+Schedule exploration. The Raft counterexample of section 9 is a (fault set, interleaving) pair; a
+filter under `deploy` yields one interleaving per run, chosen by the operating system, which is
+Molly's fixed schedule or worse.
+
+Level 3 replay. Counterfactual lineage re-runs one node with a recorded set of deliveries fed into
+it and everything else withheld. That is inherently receiver-side. Its natural form in this
+design is the mirror image of the filter: a compiler-inserted **source** at every `Network`
+receive that, under replay, feeds recorded bytes instead of the wire. With the filter on the send
+side and the source on the receive side, `BatchHook` drops out of both fault injection and
+lineage and goes back to being what it was built for.
+
+Phase barriers and timers. `quiesce()` and the `sim_input` timers are how the body defines the
+horizon; a deployment would need wall-clock equivalents.
+
+The division of labour this leaves is the one the prototype should have started from: the
+simulator's job is determinism, schedules and replay; the fault model's job is the IR.
+
+### 11.4 Migration points for lineage
+
+Two things in section 6 change.
+
+Delivery ids are minted at the `Sent` event, not at the hooked batch's `Tag`. One id per send,
+carried to the receiver as the record's provenance; the `Tag` event goes away, and the
+delivery-to-send matching of section 6.1 (earliest unmatched `Sent` with the same bytes on a
+channel the slice says feeds this hook) becomes unnecessary because the id travels with the
+message. Level 1's slice becomes "network receives reachable from the sink" instead of "hooked
+batches reachable from the sink".
+
+An omitted send is recorded as `Sent { dropped: true }`, exactly as a crashed node's send is
+today, and produces no `Recv`. The receiver-side drop recorded a `Recv` for a message that was
+never delivered, which was wrong. The section 6.1 rule that a `Recv` on a channel with no hook
+still yields a dependency on its send was a workaround for the gap the filter closes, and is
+removed.
+
+### 11.5 Status
+
+Proposed, not built.
