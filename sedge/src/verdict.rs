@@ -58,6 +58,10 @@ pub struct StreamWindow {
     pub kind: StreamKind,
     /// Mean records per second over the window.
     pub rate: f64,
+    /// Records per round the generator offered in the window, when it offered any: for a
+    /// conserved stream this is fixed by the workload, so comparing it between windows reads
+    /// goodput without the Poisson noise of a short window's arrival count.
+    pub per_round: Option<f64>,
     /// For a level: its mean value over the first and the second half of the window.
     pub halves: Option<(f64, f64)>,
 }
@@ -127,6 +131,7 @@ impl WindowStats {
 
 fn stats(buckets: &[Bucket], kinds: &StreamKinds) -> WindowStats {
     let offered = buckets.iter().map(|b| b.offered).sum();
+    let rounds: u64 = buckets.iter().map(|b| b.rounds).sum();
     let completed = buckets.iter().map(|b| b.offered_completed).sum();
     let abandoned = buckets.iter().map(|b| b.offered_abandoned).sum();
     let outstanding = buckets.iter().map(|b| b.offered_outstanding).sum();
@@ -169,6 +174,7 @@ fn stats(buckets: &[Bucket], kinds: &StreamKinds) -> WindowStats {
                 name: name.clone(),
                 kind: *kind,
                 rate,
+                per_round: (rounds > 0).then(|| records as f64 / rounds as f64),
                 halves,
             }
         })
@@ -205,7 +211,8 @@ pub struct Verdict {
     /// stream rates.
     pub by_id: bool,
     /// Tail goodput as a fraction of the baseline's: completion fractions when `by_id`, else the
-    /// smallest tail/baseline rate ratio over the conserved streams (1 when there are none).
+    /// smallest tail/baseline ratio of records per offered round over the conserved streams (1
+    /// when there are none).
     pub relative_goodput: f64,
     /// The largest tail/baseline rate ratio over the amplified and unclassified streams, with the
     /// stream's name; 1 when there are none.
@@ -245,7 +252,16 @@ impl fmt::Display for Verdict {
                         s.name,
                         s.kind.word()
                     )?,
-                    None => writeln!(f, "    {} ({}): {:.1}/s", s.name, s.kind.word(), s.rate)?,
+                    None => match (s.kind, s.per_round) {
+                        (StreamKind::Conserved, Some(pr)) => writeln!(
+                            f,
+                            "    {} ({}): {:.1}/s, {pr:.2} per round",
+                            s.name,
+                            s.kind.word(),
+                            s.rate
+                        )?,
+                        _ => writeln!(f, "    {} ({}): {:.1}/s", s.name, s.kind.word(), s.rate)?,
+                    },
                 }
             }
         }
@@ -326,9 +342,17 @@ pub fn judge_with_kinds(
     let tail_from = profile.trigger_end() + profile.tail / 2;
     let tail = stats(trace.window(tail_from, profile.total()), kinds);
 
+    // A conserved stream's tail against its baseline, per offered round when both windows
+    // offered rounds (the workload fixes a conserved stream's records per round, so the ratio is
+    // not disturbed by how many arrivals the Poisson process happened to put in a short window),
+    // per second otherwise.
     let rate_ratio = |name: &str| -> Option<f64> {
-        let b = baseline.stream(name)?.rate;
-        let t = tail.stream(name)?.rate;
+        let bs = baseline.stream(name)?;
+        let ts = tail.stream(name)?;
+        let (b, t) = match (bs.per_round, ts.per_round) {
+            (Some(b), Some(t)) => (b, t),
+            _ => (bs.rate, ts.rate),
+        };
         Some(if b > 0.0 { t / b } else if t > 0.0 { f64::INFINITY } else { 1.0 })
     };
     let relative_goodput = if by_id {
@@ -609,6 +633,42 @@ mod tests {
             &profile(),
         );
         assert_eq!(v.outcome, Outcome::Collapsed, "{v}");
+    }
+
+    /// A conserved stream read by rate alone would be at the mercy of how many rounds the Poisson
+    /// process put in a short baseline window; per round it is exact.
+    #[test]
+    fn conserved_goodput_is_read_per_round() {
+        let p = profile();
+        let n = p.total().as_secs();
+        let buckets: Vec<Bucket> = (0..n)
+            .map(|s| {
+                let in_tail = s >= p.trigger_end().as_secs();
+                // Baseline seconds happen to carry 13 rounds, tail seconds 7; the program emits
+                // exactly 4 records per round in both.
+                let rounds = if in_tail { 7 } else { 13 };
+                let mut records = std::collections::BTreeMap::new();
+                records.insert("sent".to_owned(), rounds * 4);
+                Bucket {
+                    second: s,
+                    rounds,
+                    offered: rounds,
+                    stream_records: records,
+                    ..Bucket::default()
+                }
+            })
+            .collect();
+        let trace = Trace {
+            buckets,
+            outstanding: 0,
+            stream_names: vec!["sent".to_owned()],
+            valued_names: vec![],
+        };
+        let mut kinds = StreamKinds::new();
+        kinds.insert("sent".to_owned(), StreamKind::Conserved);
+        let v = judge_with_kinds(&trace, &p, &kinds, false);
+        assert_eq!(v.outcome, Outcome::Recovered, "{v}");
+        assert!((v.relative_goodput - 1.0).abs() < 1e-9, "{v}");
     }
 
     #[test]

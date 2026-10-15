@@ -832,6 +832,7 @@ pub fn raft_step<T: Clone, ClusterTag>(
 
 /// The streams produced by the unified RAFT server component.
 #[cfg_attr(feature = "cress", derive(SimOutputs))]
+#[cfg_attr(feature = "sedge", derive(sedge::SedgeOutputs))]
 pub struct RaftOutputs<'a, T, ClusterTag> {
     /// The committed log entries, emitted on every member in log order. This stream
     /// is eventually consistent: all members observe the same sequence, though at
@@ -1182,6 +1183,73 @@ pub fn raft_check<'a>(
         TCP.fail_stop().bincode(),
         nondet!(
             /// The checker's own schedule is the non-determinism under study; the protocol's
+            /// committed sequence is consistent under all of it.
+        ),
+    )
+}
+
+/// Sedge's entry point: the same pinning as [`raft_check`], deployed. The two timers are driven
+/// by the harness: heartbeats every 50 ms at every member, the election timer every 300 ms at
+/// every member staggered by 100 ms between members (the harness's deterministic form of RAFT's
+/// randomized timeouts; the ratio of 6 is the one `raft_check`'s `contested` configuration uses).
+/// A round is one request; `mu` is nominal, since the leader's cost per request is a batch entry
+/// and the protocol has no per-tick cap, so the headroom factor here only scales the offered rate.
+///
+/// * `pinned`: every request goes to member 0, which the stagger makes the first leader; a leader
+///   change turns its requests into redirects (the pinned client of `contested`).
+/// * `broadcast`: every request goes to every member, so the leader commits it once and the two
+///   others redirect it, whoever leads (`contested_broadcast`'s shape): `committed` is three per
+///   round (one per member), `redirected` two.
+///
+/// A load burst does not delay the harness-driven heartbeats, so the mechanism Cress found (a
+/// delay on the heartbeat path starts an election) is reached with the capacity dip,
+/// `--trigger-multiple 1 --dip heartbeat_timer_interrupts=8`, which stretches the heartbeat
+/// period past the election timeout for the trigger window.
+#[cfg(feature = "sedge")]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = pinned,
+    cluster = 3,
+    cluster_size = 3,
+    mu = 200,
+    timers(
+        heartbeat_timer_interrupts = std::time::Duration::from_millis(50),
+        election_timer_interrupts = std::time::Duration::from_millis(300),
+    ),
+    round_data = |round, inputs| {
+        inputs.requests.send(0, format!("request-{round}"));
+    },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = broadcast,
+    cluster = 3,
+    cluster_size = 3,
+    mu = 200,
+    timers(
+        heartbeat_timer_interrupts = std::time::Duration::from_millis(50),
+        election_timer_interrupts = std::time::Duration::from_millis(300),
+    ),
+    round_data = |round, inputs| {
+        for member in 0..inputs.cluster_members {
+            inputs.requests.send(member, format!("request-{round}"));
+        }
+    },
+))]
+pub fn raft_sedge_check<'a>(
+    cluster: &Cluster<'a, Replica>,
+    requests: Stream<String, Cluster<'a, Replica>, Unbounded, TotalOrder>,
+    election_timer_interrupts: Stream<(), Cluster<'a, Replica>>,
+    heartbeat_timer_interrupts: Stream<(), Cluster<'a, Replica>>,
+    cluster_size: usize,
+) -> RaftOutputs<'a, String, Replica> {
+    raft_server(
+        cluster,
+        requests,
+        election_timer_interrupts,
+        heartbeat_timer_interrupts,
+        RaftConfig { cluster_size },
+        TCP.fail_stop().bincode(),
+        nondet!(
+            /// The deployment's arrival order is the non-determinism under study; the protocol's
             /// committed sequence is consistent under all of it.
         ),
     )
