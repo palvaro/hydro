@@ -28,6 +28,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::marker::PhantomData;
 
+#[cfg(feature = "cress")]
+use cress::{SimOutputs, amplification_check};
 use hydro_lang::forward_handle::ForwardHandle;
 use hydro_lang::live_collections::stream::{MinOrder, NoOrder, Ordering, TotalOrder};
 use hydro_lang::location::cluster::{
@@ -111,6 +113,19 @@ impl<T: Clone, ClusterTag> Clone for AppendEntriesRequest<T, ClusterTag> {
     }
 }
 
+impl<T: PartialEq, ClusterTag> PartialEq for AppendEntriesRequest<T, ClusterTag> {
+    fn eq(&self, other: &Self) -> bool {
+        self.term == other.term
+            && self.leader == other.leader
+            && self.prev_log_index == other.prev_log_index
+            && self.prev_log_term == other.prev_log_term
+            && self.entries == other.entries
+            && self.leader_commit == other.leader_commit
+    }
+}
+
+impl<T: Eq, ClusterTag> Eq for AppendEntriesRequest<T, ClusterTag> {}
+
 impl<T: Debug, ClusterTag> Debug for AppendEntriesRequest<T, ClusterTag> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppendEntriesRequest")
@@ -181,6 +196,20 @@ impl<T: Clone, ClusterTag> Clone for RaftRpc<T, ClusterTag> {
     }
 }
 
+impl<T: PartialEq, ClusterTag> PartialEq for RaftRpc<T, ClusterTag> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (RaftRpc::RequestVote(a), RaftRpc::RequestVote(b)) => a == b,
+            (RaftRpc::RequestVoteResponse(a), RaftRpc::RequestVoteResponse(b)) => a == b,
+            (RaftRpc::AppendEntries(a), RaftRpc::AppendEntries(b)) => a == b,
+            (RaftRpc::AppendEntriesReply(a), RaftRpc::AppendEntriesReply(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl<T: Eq, ClusterTag> Eq for RaftRpc<T, ClusterTag> {}
+
 impl<T: Debug, ClusterTag> Debug for RaftRpc<T, ClusterTag> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -202,7 +231,7 @@ impl<T: Debug, ClusterTag> Debug for RaftRpc<T, ClusterTag> {
 ///
 /// Public only because staged (`q!`) code must reference it by path; not stable API.
 #[doc(hidden)]
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RequestVoteDto {
     /// The candidate's term.
     pub term: usize,
@@ -218,7 +247,7 @@ pub struct RequestVoteDto {
 ///
 /// Public only because staged (`q!`) code must reference it by path; not stable API.
 #[doc(hidden)]
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RequestVoteResponseDto {
     /// The term the vote is granted for.
     pub term: usize,
@@ -802,6 +831,7 @@ pub fn raft_step<T: Clone, ClusterTag>(
 }
 
 /// The streams produced by the unified RAFT server component.
+#[cfg_attr(feature = "cress", derive(SimOutputs))]
 pub struct RaftOutputs<'a, T, ClusterTag> {
     /// The committed log entries, emitted on every member in log order. This stream
     /// is eventually consistent: all members observe the same sequence, though at
@@ -1054,6 +1084,107 @@ where
         redirected,
         leader_views: view_transitions,
     }
+}
+
+/// [`raft_server`] with the type-level choices fixed the way the simulation tests fix them, so
+/// that the Cress schedule-amplification checker (`./scripts/cress hydro_test raft`) can build
+/// it from the signature alone: `String` requests in `TotalOrder`, the `Replica` tag,
+/// `TCP.fail_stop().bincode()` as the intra-cluster channel. The protocol is untouched; this
+/// only pins parameters the attribute cannot name (`net`, `nondet_raft`).
+///
+/// The attributes describe the workload per round, which is one element of the heartbeat
+/// clock. In `steady_leader` and `contested`, requests go to member 0 only, one per round in
+/// rounds `1..125`, so that in the unheld run every request reaches the leader and the
+/// `committed` output can be read for conservation. Member 0's election timer fires in round 0,
+/// before any request, which is how the leader is chosen; the simulation tests do the same.
+/// The configurations differ in the election timer afterwards and in where requests go:
+///
+/// * `steady_leader`: it never fires again. This isolates the replication path: the only
+///   mechanism that can react to delay is the leader's re-send of each follower's outstanding
+///   suffix on every heartbeat.
+/// * `contested`: it fires every 6 rounds on every member, staggered by 2 rounds between
+///   members (RAFT's randomized timeouts, made deterministic): member `m` fires in rounds
+///   `r` with `(r + 2m) % 6 == 0`. With heartbeats arriving every round these firings are
+///   suppressed; a delay of 6 or more rounds on the heartbeat path starts elections.
+/// * `contested_broadcast`: the same timers, but each request is sent to every member, so
+///   that whichever member leads receives it and the other two redirect it. This separates
+///   what a leader change does to the protocol from what it does to a client pinned to the
+///   deposed leader: in `contested` a request sent to member 0 after it has been deposed can
+///   only be redirected.
+#[cfg(feature = "cress")]
+#[cfg_attr(feature = "cress", amplification_check(
+    name = steady_leader,
+    cluster = 3,
+    cluster_size = 3,
+    workload_rounds = 125,
+    skip_consistency_assertions,
+    round = |round, inputs| {
+        if round == 0 {
+            inputs.election_timer_interrupts.send(0, ());
+        }
+        if (1..125).contains(&round) {
+            inputs.requests.send(0, format!("request-{round}"));
+        }
+        for member in 0..inputs.cluster_members {
+            inputs.heartbeat_timer_interrupts.send(member, ());
+        }
+    },
+))]
+#[cfg_attr(feature = "cress", amplification_check(
+    name = contested,
+    cluster = 3,
+    cluster_size = 3,
+    workload_rounds = 125,
+    skip_consistency_assertions,
+    round = |round, inputs| {
+        if (1..125).contains(&round) {
+            inputs.requests.send(0, format!("request-{round}"));
+        }
+        for member in 0..inputs.cluster_members {
+            inputs.heartbeat_timer_interrupts.send(member, ());
+            if (round + 2 * member as usize) % 6 == 0 {
+                inputs.election_timer_interrupts.send(member, ());
+            }
+        }
+    },
+))]
+#[cfg_attr(feature = "cress", amplification_check(
+    name = contested_broadcast,
+    cluster = 3,
+    cluster_size = 3,
+    workload_rounds = 125,
+    skip_consistency_assertions,
+    round = |round, inputs| {
+        for member in 0..inputs.cluster_members {
+            if (1..125).contains(&round) {
+                inputs.requests.send(member, format!("request-{round}"));
+            }
+            inputs.heartbeat_timer_interrupts.send(member, ());
+            if (round + 2 * member as usize) % 6 == 0 {
+                inputs.election_timer_interrupts.send(member, ());
+            }
+        }
+    },
+))]
+pub fn raft_check<'a>(
+    cluster: &Cluster<'a, Replica>,
+    requests: Stream<String, Cluster<'a, Replica>, Unbounded, TotalOrder>,
+    election_timer_interrupts: Stream<(), Cluster<'a, Replica>>,
+    heartbeat_timer_interrupts: Stream<(), Cluster<'a, Replica>>,
+    cluster_size: usize,
+) -> RaftOutputs<'a, String, Replica> {
+    raft_server(
+        cluster,
+        requests,
+        election_timer_interrupts,
+        heartbeat_timer_interrupts,
+        RaftConfig { cluster_size },
+        TCP.fail_stop().bincode(),
+        nondet!(
+            /// The checker's own schedule is the non-determinism under study; the protocol's
+            /// committed sequence is consistent under all of it.
+        ),
+    )
 }
 
 /// Given a non-consistent stream of events on a Cluster, `raft` will merge them to
