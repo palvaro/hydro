@@ -1,0 +1,53 @@
+hydro_test::cluster::witnesses::gossip_resend gossip_with_resend (resend_off) workload cluster=5 members, round_data closure, timer=1/round, data in rounds 0..125
+
+cress amplification check: 1000 rounds of workload, every hold begins at round 1
+horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
+run time: 96.4 s including compilation
+input: data in rounds 0..125, timers only afterwards; finite holds that outlast the input: 128, 256, 512
+unheld run: 10625 records admitted at decision points, 5000 network messages sent, 4 decision points had buffered input
+
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length: records admitted, messages from the busiest sender (what the verdict reads), and messages from all senders together (which stays flat when work only moved from one sender to another).
+
+hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
+hydro_test/src/cluster/witnesses/gossip_resend.rs:190, batch of (usize, ()): no extra work at any hold length
+hydro_test/src/cluster/witnesses/gossip_resend.rs:191, batch of (usize, u64): no extra work at any hold length
+hydro_test/src/cluster/witnesses/gossip_resend.rs:192, batch of Delta: no extra work at any hold length
+hydro_test/src/cluster/witnesses/gossip_resend.rs:193, batch of Ack: no extra work at any hold length
+
+output streams across the sweep: a stream is conserved when its count is the unheld run's under every finite hold (fixed by the input), amplified when some hold raised it, a level when it emits exactly one record per execution of a tick at its location, shed when holds only lowered it.
+stream                  kind         unheld  finite holds      hold to the end   largest at
+wire                    conserved      2500  2500              20..2500          -
+merged                  conserved      2500  2500              10..2500          -
+acks_sent               conserved      2500  2500              10..2500          -
+inbox_depth             level          6250  5266..7224        1875..6250        one per execution of Tick(Some(ClockId(0)), Cluster(loc1v1))
+outstanding_depth       level          6250  5266..7224        1875..6250        one per execution of Tick(Some(ClockId(0)), Cluster(loc1v1))
+
+count by hold length (rounds)             1      2      4      8     16     32     64    128    256    512    999
+wire (conserved, unheld 2500)
+    hydro_test/src/cluster/witnesses/gossip_resend.rs:190, batch of (usize, ())   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500
+    hydro_test/src/cluster/witnesses/gossip_resend.rs:191, batch of (usize, u64)   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500     20
+    hydro_test/src/cluster/witnesses/gossip_resend.rs:192, batch of Delta   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500
+    hydro_test/src/cluster/witnesses/gossip_resend.rs:193, batch of Ack   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500
+merged (conserved, unheld 2500)
+    hydro_test/src/cluster/witnesses/gossip_resend.rs:190, batch of (usize, ())   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500     10
+    hydro_test/src/cluster/witnesses/gossip_resend.rs:191, batch of (usize, u64)   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500     20
+    hydro_test/src/cluster/witnesses/gossip_resend.rs:192, batch of Delta   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500     20
+    hydro_test/src/cluster/witnesses/gossip_resend.rs:193, batch of Ack   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500
+acks_sent (conserved, unheld 2500)
+    hydro_test/src/cluster/witnesses/gossip_resend.rs:190, batch of (usize, ())   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500     10
+    hydro_test/src/cluster/witnesses/gossip_resend.rs:191, batch of (usize, u64)   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500     20
+    hydro_test/src/cluster/witnesses/gossip_resend.rs:192, batch of Delta   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500     20
+    hydro_test/src/cluster/witnesses/gossip_resend.rs:193, batch of Ack   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500
+inbox_depth (level, unheld 6250)
+    hydro_test/src/cluster/witnesses/gossip_resend.rs:190, batch of (usize, ())   6250   6250   6250   6250   6250   6324   6644   7224   6584   5304   1875
+    hydro_test/src/cluster/witnesses/gossip_resend.rs:191, batch of (usize, u64)   6240   6230   6210   6170   6090   6001   6001   5272   5272   5272   5010
+    hydro_test/src/cluster/witnesses/gossip_resend.rs:192, batch of Delta   6240   6230   6210   6170   6090   6001   6001   5266   5266   5266   5010
+    hydro_test/src/cluster/witnesses/gossip_resend.rs:193, batch of Ack   6250   6250   6250   6250   6250   6250   6250   6250   6250   6250   6250
+outstanding_depth (level, unheld 6250)
+    hydro_test/src/cluster/witnesses/gossip_resend.rs:190, batch of (usize, ())   6250   6250   6250   6250   6250   6324   6644   7224   6584   5304   1875
+    hydro_test/src/cluster/witnesses/gossip_resend.rs:191, batch of (usize, u64)   6240   6230   6210   6170   6090   6001   6001   5272   5272   5272   5010
+    hydro_test/src/cluster/witnesses/gossip_resend.rs:192, batch of Delta   6240   6230   6210   6170   6090   6001   6001   5266   5266   5266   5010
+    hydro_test/src/cluster/witnesses/gossip_resend.rs:193, batch of Ack   6250   6250   6250   6250   6250   6250   6250   6250   6250   6250   6250
+
+verdict: benign
+  no reaction to a delay of up to 999 rounds was found at any decision point
