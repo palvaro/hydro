@@ -74,6 +74,9 @@
 //! collapse and does not: the redundant fills for a key arrive spread over the queueing delay and
 //! each restarts the key's life, so no new fetches are issued while the queue drains.
 
+#[cfg(any(feature = "cress", feature = "sedge"))]
+use std::time::Duration;
+
 use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
 use hydro_lang::prelude::*;
 #[cfg(feature = "cress")]
@@ -136,8 +139,11 @@ pub struct OriginConfig {
     pub max_fetch_per_tick: u32,
 }
 
-/// Everything observable about a run.
+/// Everything observable about a run. Sedge observes every field whole, without a hand-written
+/// `Observed` impl; which fields it reads as goodput, cost and backlog comes from Cress's
+/// conservation table for the configuration.
 #[cfg_attr(feature = "cress", derive(SimOutputs))]
+#[cfg_attr(feature = "sedge", derive(sedge::SedgeOutputs))]
 pub struct CacheOutputs<'a> {
     /// Every lookup, once, when its key was served.
     pub completed: Stream<Completion, Process<'a, Cache>, Unbounded, NoOrder, ExactlyOnce>,
@@ -161,20 +167,31 @@ pub struct CacheOutputs<'a> {
 /// Builds the cache/origin program. `lookups` is the application's lookup stream at the cache;
 /// ids are assigned in arrival order.
 ///
-/// The checks use a `round` closure because the steady workload walks ten hot keys round-robin,
-/// eight lookups per round, and sequential keys would never hit.
+/// # Checks
+///
+/// The workload is written once, in the split form both tools accept: `round_data` sends one
+/// round of data (eight lookups walking ten hot keys round-robin; sequential keys would never
+/// hit), and `timers(...)` names the two clocks with their deployed periods. Cress feeds each
+/// clock one element per round (both periods are equal), and the data for the first 125 of 1000
+/// rounds; Sedge drives the clocks at 50 ms on localhost and offers rounds at a Poisson rate.
+///
+/// Deployed, the origin serves `max_fetch_per_tick = 4` per 50 ms origin tick, 80 fetches/s, and
+/// an entry lives `ttl_ticks = 20` cache ticks = 1 s. `mu = 80` rounds/s is a nominal figure: the
+/// rounds per second the origin sustains depends on the state the cache is in. Healthy, a round
+/// costs about 0.06 fetches (ten keys expiring once a second against eight lookups per round),
+/// so the origin would sustain well over a thousand rounds per second; in a full herd every
+/// lookup is a fetch, a round costs eight, and the origin sustains ten rounds per second. The
+/// headroom factor therefore reads against the herd: `f = 8` is where a herd, once formed, stops
+/// being self-sustaining under the non-coalescing configurations.
 #[cfg_attr(feature = "cress", amplification_check(
     name = request_dated_no_coalesce,
     cache_config = CacheConfig { ttl_ticks: 20, coalesce: false, request_dated: true },
     origin_config = OriginConfig { max_fetch_per_tick: 4 },
     workload_rounds = 125,
-    round = |round, inputs| {
-        inputs.cache_clock.send(());
-        inputs.origin_clock.send(());
-        if round < 125 {
-            for i in 0..8u64 {
-                inputs.lookups.send(((round as u64 * 8 + i) % 10) as Key);
-            }
+    timers(cache_clock = Duration::from_millis(50), origin_clock = Duration::from_millis(50)),
+    round_data = |round, inputs| {
+        for i in 0..8u64 {
+            inputs.lookups.send(((round as u64 * 8 + i) % 10) as Key);
         }
     },
 ))]
@@ -183,13 +200,10 @@ pub struct CacheOutputs<'a> {
     cache_config = CacheConfig { ttl_ticks: 20, coalesce: false, request_dated: false },
     origin_config = OriginConfig { max_fetch_per_tick: 4 },
     workload_rounds = 125,
-    round = |round, inputs| {
-        inputs.cache_clock.send(());
-        inputs.origin_clock.send(());
-        if round < 125 {
-            for i in 0..8u64 {
-                inputs.lookups.send(((round as u64 * 8 + i) % 10) as Key);
-            }
+    timers(cache_clock = Duration::from_millis(50), origin_clock = Duration::from_millis(50)),
+    round_data = |round, inputs| {
+        for i in 0..8u64 {
+            inputs.lookups.send(((round as u64 * 8 + i) % 10) as Key);
         }
     },
 ))]
@@ -198,13 +212,46 @@ pub struct CacheOutputs<'a> {
     cache_config = CacheConfig { ttl_ticks: 20, coalesce: true, request_dated: true },
     origin_config = OriginConfig { max_fetch_per_tick: 4 },
     workload_rounds = 125,
-    round = |round, inputs| {
-        inputs.cache_clock.send(());
-        inputs.origin_clock.send(());
-        if round < 125 {
-            for i in 0..8u64 {
-                inputs.lookups.send(((round as u64 * 8 + i) % 10) as Key);
-            }
+    timers(cache_clock = Duration::from_millis(50), origin_clock = Duration::from_millis(50)),
+    round_data = |round, inputs| {
+        for i in 0..8u64 {
+            inputs.lookups.send(((round as u64 * 8 + i) % 10) as Key);
+        }
+    },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = request_dated_no_coalesce,
+    cache_config = CacheConfig { ttl_ticks: 20, coalesce: false, request_dated: true },
+    origin_config = OriginConfig { max_fetch_per_tick: 4 },
+    mu = 80,
+    timers(cache_clock = Duration::from_millis(50), origin_clock = Duration::from_millis(50)),
+    round_data = |round, inputs| {
+        for i in 0..8u64 {
+            inputs.lookups.send(((round * 8 + i) % 10) as Key);
+        }
+    },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = fill_dated_no_coalesce,
+    cache_config = CacheConfig { ttl_ticks: 20, coalesce: false, request_dated: false },
+    origin_config = OriginConfig { max_fetch_per_tick: 4 },
+    mu = 80,
+    timers(cache_clock = Duration::from_millis(50), origin_clock = Duration::from_millis(50)),
+    round_data = |round, inputs| {
+        for i in 0..8u64 {
+            inputs.lookups.send(((round * 8 + i) % 10) as Key);
+        }
+    },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = coalesce,
+    cache_config = CacheConfig { ttl_ticks: 20, coalesce: true, request_dated: true },
+    origin_config = OriginConfig { max_fetch_per_tick: 4 },
+    mu = 80,
+    timers(cache_clock = Duration::from_millis(50), origin_clock = Duration::from_millis(50)),
+    round_data = |round, inputs| {
+        for i in 0..8u64 {
+            inputs.lookups.send(((round * 8 + i) % 10) as Key);
         }
     },
 ))]

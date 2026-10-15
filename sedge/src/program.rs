@@ -7,8 +7,17 @@
 //! `#[cfg(stageleft_runtime)]`, which keeps it out of the staged copy of this crate that the
 //! deployed binaries compile against.
 
+use std::cell::RefCell;
+#[cfg(stageleft_runtime)]
+use std::pin::Pin;
 use std::time::Duration;
 
+#[cfg(stageleft_runtime)]
+use futures::Stream as FStream;
+#[cfg(stageleft_runtime)]
+use hydro_lang::compile::deploy::DeployResult;
+#[cfg(stageleft_runtime)]
+use hydro_lang::deploy::HydroDeploy;
 use hydro_lang::live_collections::boundedness::Unbounded;
 use hydro_lang::live_collections::stream::{
     AtLeastOnce, ExactlyOnce, NoOrder, Ordering, Retries, Stream, TotalOrder,
@@ -56,6 +65,41 @@ load_item_int!(
     u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize
 );
 
+/// One data stream's end of the `round_data` closure's `inputs`: the closure calls
+/// [`RoundSender::send`] for each record a round carries, and the harness takes what was
+/// buffered after the closure returns and writes it to the stream's port, in order. The harness
+/// numbers every record it sends on a stream from zero, so a program that enumerates its input
+/// sees the same sequence numbers (see [`Observer::completions`]).
+#[derive(Debug)]
+pub struct RoundSender<T> {
+    buffered: RefCell<Vec<T>>,
+}
+
+impl<T> Default for RoundSender<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> RoundSender<T> {
+    /// An empty buffer.
+    pub fn new() -> Self {
+        Self {
+            buffered: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Queues `item` for this round.
+    pub fn send(&self, item: T) {
+        self.buffered.borrow_mut().push(item);
+    }
+
+    /// Everything queued since the last take, in send order.
+    pub fn take(&self) -> Vec<T> {
+        std::mem::take(&mut *self.buffered.borrow_mut())
+    }
+}
+
 /// A `()` stream that fires every `period`, for a program's timer parameters.
 pub fn timer<'a, L>(
     location: &Process<'a, L>,
@@ -79,7 +123,7 @@ pub fn load_input<'a, L, T>(
     Stream<T, Process<'a, L>, Unbounded, TotalOrder, ExactlyOnce>,
 )
 where
-    T: LoadItem,
+    T: Serialize + DeserializeOwned + 'static,
 {
     location.source_external_bincode::<_, T, TotalOrder, ExactlyOnce>(external)
 }
@@ -98,6 +142,73 @@ pub struct Observer<'a> {
     pub(crate) abandoned: Option<Port<u64>>,
     pub(crate) gauges: Vec<(String, Port<f64>)>,
     pub(crate) counters: Vec<(String, Port<f64>)>,
+    /// Output streams registered whole with [`Observer::stream`], to be connected once the
+    /// deployment is up.
+    pub(crate) streams: Vec<ObservedStream<'a>>,
+}
+
+#[cfg(stageleft_runtime)]
+/// What the harness reads from one record of an output stream registered with
+/// [`Observer::stream`]: the record is serialized to JSON on the harness side and read back
+/// generically, so that no `q!` closure is needed in the program's crate. A plain number is a
+/// level sample (and, if it is an integer, possibly an id); a record with an integer field named
+/// `id` carries an id; anything else is counted and nothing more.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Observation {
+    /// The record's numeric value, when the record is a plain number.
+    pub value: Option<f64>,
+    /// The record's id: the number itself for an integer record, or its `id` field.
+    pub id: Option<u64>,
+}
+
+#[cfg(stageleft_runtime)]
+impl Observation {
+    /// Reads a record generically through serde.
+    pub fn of<T: Serialize>(record: &T) -> Self {
+        match serde_json::to_value(record) {
+            Ok(serde_json::Value::Number(n)) => Observation {
+                value: n.as_f64(),
+                id: n.as_u64(),
+            },
+            Ok(serde_json::Value::Object(map)) => Observation {
+                value: None,
+                id: map.get("id").and_then(|v| v.as_u64()),
+            },
+            _ => Observation {
+                value: None,
+                id: None,
+            },
+        }
+    }
+}
+
+#[cfg(stageleft_runtime)]
+/// A stream of observations as the harness reads it.
+pub type ObservationStream = Pin<Box<dyn FStream<Item = Observation>>>;
+
+#[cfg(stageleft_runtime)]
+/// An output stream registered whole; `connect` turns the deployed port into observations.
+pub struct ObservedStream<'a> {
+    pub name: String,
+    /// Whether the stream's item type is a plain number, read from its type name; what a
+    /// per-tick level looks like.
+    pub numeric: bool,
+    #[allow(clippy::type_complexity)]
+    pub connect: Box<
+        dyn for<'n> FnOnce(
+                &'n DeployResult<'a, HydroDeploy>,
+            ) -> Pin<Box<dyn Future<Output = ObservationStream> + 'n>>
+            + 'a,
+    >,
+}
+
+#[cfg(stageleft_runtime)]
+fn is_numeric<T>() -> bool {
+    matches!(
+        std::any::type_name::<T>(),
+        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128"
+            | "isize" | "f32" | "f64"
+    )
 }
 
 #[cfg(stageleft_runtime)]
@@ -114,7 +225,35 @@ impl<'a> Observer<'a> {
             abandoned: None,
             gauges: Vec::new(),
             counters: Vec::new(),
+            streams: Vec::new(),
         }
+    }
+
+    /// An output stream registered whole, under its field name: the harness counts its records
+    /// per second, keeps the latest value when the records are numbers, and reads ids from a
+    /// `u64` item or an `id` field. Which of these the verdict uses depends on the stream's kind
+    /// (conserved, amplified or level), which comes from Cress's conservation table when one has
+    /// been written for this function and configuration, and otherwise from whether the item
+    /// type is numeric. `#[derive(sedge::SedgeOutputs)]` on a program's output struct registers
+    /// every field this way.
+    pub fn stream<L, T, O, R>(&mut self, name: &str, stream: Stream<T, Process<'a, L>, Unbounded, O, R>)
+    where
+        T: Serialize + DeserializeOwned + 'static,
+        O: Ordering,
+        R: Retries,
+    {
+        let port = self.port(stream);
+        self.streams.push(ObservedStream {
+            name: name.to_owned(),
+            numeric: is_numeric::<T>(),
+            connect: Box::new(move |nodes| {
+                Box::pin(async move {
+                    use futures::StreamExt as _;
+                    let s = nodes.connect(port).await;
+                    Box::pin(s.map(|t: T| Observation::of(&t))) as ObservationStream
+                })
+            }),
+        });
     }
 
     fn port<L, T, O, R>(&self, stream: Stream<T, Process<'a, L>, Unbounded, O, R>) -> Port<T>

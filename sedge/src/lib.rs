@@ -63,14 +63,16 @@ pub use generator::drive;
 pub use profile::{Arrivals, Profile};
 pub use program::timer;
 #[cfg(stageleft_runtime)]
-pub use program::{LoadItem, Observed, Observer, load_input};
-pub use trace::{Bucket, Recorder, Trace};
-pub use verdict::{Outcome, Verdict, judge};
+pub use program::{LoadItem, Observation, Observed, Observer, load_input};
+pub use program::RoundSender;
+pub use trace::{Bucket, Recorder, Sample, Trace};
+pub use verdict::{Outcome, StreamKind, StreamKinds, Verdict, judge, judge_with_kinds};
 
 /// Paths the generated harness code reaches through this crate, so that a crate under check
 /// need not depend on `hydro_lang` or `hydro_deploy` itself.
 #[doc(hidden)]
 pub mod __private {
+    pub use futures;
     pub use hydro_deploy;
     pub use hydro_lang;
 }
@@ -78,3 +80,6 @@ pub mod __private {
 /// Registers a Hydro function with the `sedge` command. See the
 /// [macro's documentation](sedge_macro::overload_check).
 pub use sedge_macro::overload_check;
+/// Implements [`Observed`] for a struct of output streams by registering every field whole with
+/// [`Observer::stream`]. See the [macro's documentation](sedge_macro::SedgeOutputs).
+pub use sedge_macro::SedgeOutputs;

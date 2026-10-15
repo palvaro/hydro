@@ -13,20 +13,20 @@ use std::fmt;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use futures::{SinkExt, StreamExt};
+use futures::{Sink, SinkExt, StreamExt};
 use hydro_deploy::Deployment;
 use hydro_lang::compile::deploy::DeployResult;
 use hydro_lang::deploy::{HydroDeploy, TrybuildHost};
-use hydro_lang::location::external_process::{ExternalBincodeSink, NotMany};
 
 use crate::generator::drive;
 use crate::profile::Profile;
-use crate::program::{LoadItem, Observer};
-use crate::trace::Recorder;
-use crate::verdict::{Outcome, Verdict, judge};
+use crate::program::Observer;
+use crate::trace::{Recorder, Sample};
+use crate::verdict::{Outcome, StreamKind, StreamKinds, Verdict, judge_with_kinds};
 
 /// What the command asks for: which checks, at which overprovisioning factors, how many times,
 /// and the shape of the load profile.
@@ -42,7 +42,7 @@ pub struct RunConfig {
     pub factors: Vec<f64>,
     /// Trials per factor.
     pub trials: usize,
-    /// Overrides the check's `mu` (requests per second the service can sustain).
+    /// Overrides the check's `mu` (rounds of workload per second the service can sustain).
     pub mu: Option<f64>,
     /// Trigger offered load as a multiple of `μ`.
     pub trigger_multiple: f64,
@@ -61,6 +61,10 @@ pub struct RunConfig {
     /// Extra Cargo features to build the deployed program with (the crate's `sedge` feature is
     /// always on).
     pub features: Vec<String>,
+    /// Capacity dips: during the trigger window, the named timer's period is multiplied by the
+    /// factor. A dip with `--trigger-multiple 1` is a trigger that removes capacity instead of
+    /// adding load.
+    pub dips: Vec<(String, f64)>,
 }
 
 impl Default for RunConfig {
@@ -80,6 +84,7 @@ impl Default for RunConfig {
             seed: 1,
             results_dir: results_dir(),
             features: Vec::new(),
+            dips: Vec::new(),
         }
     }
 }
@@ -171,6 +176,19 @@ impl RunConfig {
                         .parse()
                         .map_err(|_| format!("--seed wants an integer, got `{v}`"))?;
                 }
+                "--dip" => {
+                    let v = value("--dip")?;
+                    let (name, k) = v
+                        .split_once('=')
+                        .ok_or_else(|| format!("--dip wants `timer=factor`, got `{v}`"))?;
+                    let k = k
+                        .trim()
+                        .parse::<f64>()
+                        .ok()
+                        .filter(|k| *k > 0.0)
+                        .ok_or_else(|| format!("--dip wants a positive factor, got `{k}`"))?;
+                    cfg.dips.push((name.trim().to_owned(), k));
+                }
                 "--features" => {
                     cfg.features = value("--features")?
                         .split(',')
@@ -205,6 +223,7 @@ usage: sedge [options] <crate> [function-substring]
   --tail S                 seconds of baseline after the trigger (default 45)
   --grace S                seconds to wait for stragglers after the last request (default 2)
   --seed N                 seed of the first trial's arrivals (default 1)
+  --dip TIMER=K            stretch TIMER's period by K during the trigger (a capacity dip; repeatable)
   --features A,B           extra Cargo features for the deployed program";
 
 /// The directory results are written to: `$SEDGE_RESULTS_DIR` if set, otherwise `target/sedge/`
@@ -329,40 +348,131 @@ pub fn host(deployment: &mut Deployment, run: &RunConfig) -> TrybuildHost {
     host
 }
 
-/// Deploys, runs and judges one trial. `nodes` is the deployed flow; `load` is the generator's
-/// port; `observer` holds the program's registered outputs.
+/// One of the program's timers, driven by the harness over an external port so that its period
+/// can be changed during the trigger (see [`RunConfig::dips`]).
+pub struct TimerDrive {
+    pub name: String,
+    pub period: Duration,
+    pub sink: Pin<Box<dyn Sink<(), Error = std::io::Error>>>,
+}
+
+/// Drives one timer from `start`: an element every `period`, stretched by the dip factor while
+/// the profile is in its trigger window. Runs until the sink closes.
+async fn drive_timer(mut timer: TimerDrive, start: Instant, profile: Profile, dip: Option<f64>) {
+    let mut next = start;
+    loop {
+        tokio::time::sleep_until(next.into()).await;
+        if timer.sink.send(()).await.is_err() {
+            return;
+        }
+        let t = next.saturating_duration_since(start);
+        let stretched = dip.is_some_and(|_| t >= profile.trigger_start() && t < profile.trigger_end());
+        let period = if stretched {
+            timer.period.mul_f64(dip.unwrap())
+        } else {
+            timer.period
+        };
+        next += period;
+    }
+}
+
+/// Reads Cress's conservation table for `meta`'s function and configuration, if one has been
+/// written: `$CRESS_RESULTS_DIR/conservation.tsv`, or `conservation.tsv` under the `cress/`
+/// sibling of the results directory (`target/cress/` beside `target/sedge/`). Later rows for the
+/// same stream win. Returns the kind of every stream named there.
+pub fn cress_kinds(run: &RunConfig, meta: &Meta) -> StreamKinds {
+    let path = match std::env::var_os("CRESS_RESULTS_DIR") {
+        Some(dir) => PathBuf::from(dir).join("conservation.tsv"),
+        None => run
+            .results_dir
+            .parent()
+            .map(|p| p.join("cress").join("conservation.tsv"))
+            .unwrap_or_else(|| PathBuf::from("target/cress/conservation.tsv")),
+    };
+    let mut kinds = StreamKinds::new();
+    let Ok(text) = fs::read_to_string(&path) else {
+        return kinds;
+    };
+    for line in text.lines() {
+        let f: Vec<&str> = line.split('\t').collect();
+        if f.len() < 5 || f[1] != meta.function || f[2] != meta.configuration {
+            continue;
+        }
+        if let Some(kind) = StreamKind::parse(f[4]) {
+            kinds.insert(f[3].to_owned(), kind);
+        }
+    }
+    if !kinds.is_empty() {
+        eprintln!(
+            "  stream kinds from {}: {}",
+            path.display(),
+            kinds
+                .iter()
+                .map(|(n, k)| format!("{n}={}", k.word()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    kinds
+}
+
+/// Deploys, runs and judges one trial. The deployment must already be deployed (not started):
+/// the generated code deploys it, connects the generator's and the timers' ports, and builds
+/// `send_round`, which writes one round of the workload and returns how many records it wrote.
+/// `observer` holds the program's registered outputs.
 #[expect(clippy::too_many_arguments, reason = "called only by generated code")]
-pub async fn run_trial<T>(
+pub async fn run_trial<'a, F, E>(
     deployment: &mut Deployment,
-    nodes: &DeployResult<'_, HydroDeploy>,
-    load: ExternalBincodeSink<T, NotMany>,
-    observer: Observer<'_>,
+    nodes: &DeployResult<'a, HydroDeploy>,
+    send_round: F,
+    timers: Vec<TimerDrive>,
+    observer: Observer<'a>,
     meta: &Meta,
     run: &RunConfig,
     factor: f64,
     trial: usize,
 ) -> TrialResult
 where
-    T: LoadItem,
+    F: AsyncFnMut(u64) -> Result<u64, E>,
+    E: fmt::Display,
 {
     let mu = run.mu.or(meta.mu).unwrap_or_else(|| {
         panic!(
-            "{} ({}) gives no `mu`; add `mu = <requests per second>` to the attribute or pass --mu",
+            "{} ({}) gives no `mu`; add `mu = <rounds per second>` to the attribute or pass --mu",
             meta.function, meta.configuration
         )
     });
     let profile = run.profile(mu, factor);
     let seed = run.seed + trial as u64;
+    let dips: Vec<String> = run
+        .dips
+        .iter()
+        .map(|(n, k)| format!("{n} period ×{k}"))
+        .collect();
+    for (n, _) in &run.dips {
+        assert!(
+            timers.iter().any(|t| t.name == *n),
+            "--dip names timer `{n}`, which {} has no timer parameter of (timers: {})",
+            meta.function,
+            timers.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", ")
+        );
+    }
     eprintln!(
-        "  factor {factor}, trial {trial}: μ = {mu:.0} rps, λ = {:.1} rps, trigger {:.0} rps for {:.0}s, tail {:.0}s",
+        "  factor {factor}, trial {trial}: μ = {mu:.0} rounds/s, ρ = {:.1} rounds/s, trigger {:.0} rounds/s{} for {:.0}s, tail {:.0}s",
         profile.baseline_rps,
         profile.trigger_rps,
+        if dips.is_empty() {
+            String::new()
+        } else {
+            format!(" with {}", dips.join(", "))
+        },
         run.trigger.as_secs_f64(),
         run.tail.as_secs_f64()
     );
 
-    deployment.deploy().await.expect("deployment failed");
-    let mut load = nodes.connect(load).await;
+    // Stream kinds: explicit registrations first, Cress's table for the rest, the item type
+    // when neither says.
+    let mut kinds = StreamKinds::new();
     let mut completions = match observer.completions {
         Some(p) => Some(nodes.connect(p).await),
         None => None,
@@ -373,17 +483,37 @@ where
     };
     let mut gauges = Vec::new();
     for (name, p) in observer.gauges {
+        kinds.insert(name.clone(), StreamKind::Level);
         gauges.push((name, nodes.connect(p).await));
     }
     let mut counters = Vec::new();
     for (name, p) in observer.counters {
+        kinds.insert(name.clone(), StreamKind::Work);
         counters.push((name, nodes.connect(p).await));
     }
+    let from_cress = cress_kinds(run, meta);
+    let mut streams = Vec::new();
+    for s in observer.streams {
+        let kind = from_cress.get(&s.name).copied().unwrap_or(if s.numeric {
+            StreamKind::Level
+        } else {
+            StreamKind::Work
+        });
+        kinds.insert(s.name.clone(), kind);
+        streams.push((s.name, (s.connect)(nodes).await));
+    }
+    let explicit_ids = completions.is_some();
     deployment.start().await.expect("deployment did not start");
-    // Let the processes settle and their timers start before time zero.
+    // Let the processes settle before time zero; the timers start with the trial.
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     let recorder = Recorder::new();
+    let start = recorder.start();
+    let timers_running = futures::future::join_all(timers.into_iter().map(|t| {
+        let dip = run.dips.iter().find(|(n, _)| *n == t.name).map(|(_, k)| *k);
+        drive_timer(t, start, profile, dip)
+    }));
+    let mut timers_running = std::pin::pin!(timers_running);
     let readers = {
         let r = recorder.clone();
         async move {
@@ -417,21 +547,42 @@ where
                     }
                 }
             }));
-            futures::join!(read_completions, read_abandoned, read_gauges, read_counters);
+            let read_streams = futures::future::join_all(streams.iter_mut().map(|(name, s)| {
+                let r = r.clone();
+                async move {
+                    while let Some(o) = s.next().await {
+                        r.record(
+                            name,
+                            Sample {
+                                value: o.value,
+                                id: o.id,
+                            },
+                        );
+                    }
+                }
+            }));
+            futures::join!(
+                read_completions,
+                read_abandoned,
+                read_gauges,
+                read_counters,
+                read_streams
+            );
         }
     };
     let mut readers = std::pin::pin!(readers);
 
     let driven = tokio::select! {
-        d = drive(profile, seed, &recorder, async |id| load.send(T::from_id(id)).await) => d,
+        d = drive(profile, seed, &recorder, send_round) => d,
         () = &mut readers => panic!("the program's output streams ended while the trial was running"),
+        _ = &mut timers_running => panic!("a timer port closed while the trial was running"),
     };
     let driven = match driven {
         Ok(d) => d,
         Err((e, d)) => {
             eprintln!(
-                "  generator stopped early after {} requests: {e}",
-                d.offered
+                "  generator stopped early after {} rounds ({} records): {e}",
+                d.rounds, d.offered
             );
             d
         }
@@ -439,10 +590,32 @@ where
     tokio::select! {
         () = tokio::time::sleep(run.grace) => {}
         () = &mut readers => panic!("the program's output streams ended while the trial was running"),
+        _ = &mut timers_running => panic!("a timer port closed while the trial was running"),
     }
 
-    let trace = recorder.trace(profile.total());
-    let verdict = judge(&trace, &profile);
+    // The id overlay: explicit completions, or else the one conserved stream whose records carry
+    // ids (the item is a `u64` or has an `id` field). Streams whose kind came from the item type
+    // alone do not qualify, since a numeric stream could as well be a level.
+    let completion_stream = if explicit_ids {
+        None
+    } else {
+        let candidates: Vec<&String> = kinds
+            .iter()
+            .filter(|(n, k)| **k == StreamKind::Conserved && from_cress.contains_key(*n))
+            .map(|(n, _)| n)
+            .filter(|n| recorder.has_ids(n))
+            .collect();
+        match candidates.as_slice() {
+            [one] => Some((*one).clone()),
+            _ => None,
+        }
+    };
+    let by_id = explicit_ids || completion_stream.is_some();
+    if let Some(name) = &completion_stream {
+        eprintln!("  reading goodput and latency from the ids in `{name}`");
+    }
+    let trace = recorder.trace(profile.total(), completion_stream.as_deref());
+    let verdict = judge_with_kinds(&trace, &profile, &kinds, by_id);
     if let Err(e) = deployment.stop().await {
         eprintln!("  (deployment did not stop cleanly: {e})");
     }
@@ -471,7 +644,7 @@ where
         late: driven.late,
         trace_path,
     };
-    eprintln!("  {}", result.verdict.outcome);
+    eprintln!("  {}", result.verdict);
     record(run, &result);
     result
 }
@@ -492,12 +665,12 @@ fn record(run: &RunConfig, r: &TrialResult) {
         if new {
             writeln!(
                 f,
-                "function\tconfiguration\tfactor\ttrial\tseed\tmu\tlambda\toutcome\ttail_goodput\ttail_p50_ms\ttail_p99_ms\ttail_abandoned\toutstanding\tlate\treason\ttrace"
+                "function\tconfiguration\tfactor\ttrial\tseed\tmu\tlambda\toutcome\ttail_goodput\ttail_p50_ms\ttail_p99_ms\ttail_abandoned\toutstanding\tlate\tby_id\trelative_goodput\tamplified_stream\tamplification\treason\ttrace"
             )?;
         }
         writeln!(
             f,
-            "{}\t{}\t{}\t{}\t{}\t{:.1}\t{:.2}\t{}\t{:.3}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{:.1}\t{:.2}\t{}\t{:.3}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.3}\t{}\t{:.2}\t{}\t{}",
             r.function,
             r.configuration,
             r.factor,
@@ -512,6 +685,10 @@ fn record(run: &RunConfig, r: &TrialResult) {
             r.verdict.tail.abandoned,
             r.verdict.outstanding,
             r.late,
+            r.verdict.by_id,
+            r.verdict.relative_goodput,
+            r.verdict.amplification.0,
+            r.verdict.amplification.1,
             r.verdict.reason,
             r.trace_path
                 .as_ref()

@@ -14,11 +14,16 @@
 //! ## What the macro reads from the signature
 //!
 //! * `&Process<'a, X>` is a location. The harness deploys it as one process on localhost.
-//! * The `Stream<T, Process<'a, X>, Unbounded, O, R>` parameter named by `load = ...` is the
-//!   program's request input. The harness feeds it from an external port with values of `T` made
-//!   from the request's sequence number by `sedge::LoadItem`.
-//! * Every other `Stream<(), Process<'a, X>, Unbounded, ..>` parameter is a timer and needs a
-//!   period in `timers(...)`.
+//! * Every `Stream<T, Process<'a, X>, Unbounded, O, R>` parameter named in `timers(...)` is a
+//!   timer: a stream of `()` the harness drives over an external port, one element per period,
+//!   so that the command's `--dip timer=K` can stretch its period during the trigger.
+//! * Every other stream parameter is a data stream, fed from an external port. With
+//!   `load = param` there must be exactly one, and the generator sends it one value of `T` per
+//!   round, made from the round number by `sedge::LoadItem`. With `round_data = |round, inputs|
+//!   { ... }` there may be several, and the closure decides what each round carries: `inputs` has
+//!   one `sedge::RoundSender<T>` field per data stream, named after the parameter, with a
+//!   `send(T)` method. This is the same shape as Cress's `round_data`, so one closure describes
+//!   both tools' workloads; the harness numbers the records of each stream from zero.
 //! * Anything else is a plain value that must be given in the attribute by the parameter's name,
 //!   for example `policy = RetryPolicy { timeout_ticks: 40, max_attempts: 3 }`.
 //!
@@ -27,19 +32,24 @@
 //! and are reported as errors.
 //!
 //! The function's return value is handed to `sedge::Observed::observe`, which the program's crate
-//! implements to name its completion, abandonment, gauge and counter outputs.
+//! implements to name its completion, abandonment, gauge and counter outputs, or derives with
+//! `#[derive(sedge::SedgeOutputs)]` to register every output stream whole (see
+//! [`SedgeOutputs`](macro@SedgeOutputs)).
 //!
 //! ## What the attribute accepts
 //!
 //! * `name = ident` or `name = "string"`: the configuration's name, shown with its verdict.
 //! * `T = Type`: the concrete type for generic parameter `T`.
 //! * `param = expr`: the value of a plain parameter.
-//! * `load = param`: which stream parameter the generator feeds. Required.
+//! * `load = param`: which stream parameter the generator feeds one value per round. Exactly one
+//!   of `load` and `round_data` is required.
+//! * `round_data = |round, inputs| { ... }`: what one round of workload sends on the data
+//!   streams (see above).
 //! * `timers(param = Duration-expr, ...)`: the period of each timer parameter. Required for
-//!   every `()` stream parameter other than the load.
-//! * `mu = expr`: the service capacity in requests per second, the `μ` that the command's
-//!   overprovisioning factors divide. The command's `--mu` overrides it; one or the other must
-//!   be given.
+//!   every `()` stream parameter that is not data.
+//! * `mu = expr`: the service capacity in rounds of workload per second, the `μ` that the
+//!   command's overprovisioning factors divide. The command's `--mu` overrides it; one or the
+//!   other must be given.
 //! * `ignore = "reason"`: omits this check from the command unless its `--include-ignored` option
 //!   is given.
 //! * `sedge = path`: the path to the `sedge` crate, `::sedge` by default.
@@ -91,9 +101,14 @@ impl Parse for Entry {
         let key: Ident = input.parse()?;
         if input.peek(Token![=]) {
             input.parse::<Token![=]>()?;
-            // Raw tokens up to the next comma, because a type such as `Vec<(u32, u32)>` is not
-            // an expression.
-            let value = tokens_until_comma(input)?;
+            // A closure's parameter list has top-level commas, so `round_data` is parsed as an
+            // expression; every other value is the raw tokens up to the next comma, because a
+            // type such as `Vec<(u32, u32)>` is not an expression.
+            let value = if key == "round_data" {
+                input.parse::<Expr>()?.to_token_stream()
+            } else {
+                tokens_until_comma(input)?
+            };
             if value.is_empty() {
                 return Err(syn::Error::new(key.span(), "expected a value after `=`"));
             }
@@ -291,6 +306,7 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
     let mut ignore: Option<LitStr> = None;
     let mut sedge: syn::Path = syn::parse_quote!(::sedge);
     let mut load: Option<Ident> = None;
+    let mut round_data: Option<Expr> = None;
     let mut mu: Option<Expr> = None;
     let mut timers: Vec<(Ident, Expr)> = Vec::new();
     let mut generic_types: Vec<(String, Type)> = Vec::new();
@@ -312,6 +328,7 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
             ("ignore", Some(v), _) => ignore = Some(syn::parse2(v.clone())?),
             ("sedge", Some(v), _) => sedge = syn::parse2(v.clone())?,
             ("load", Some(v), _) => load = Some(syn::parse2(v.clone())?),
+            ("round_data", Some(v), _) => round_data = Some(syn::parse2(v.clone())?),
             ("mu", Some(v), _) => mu = Some(syn::parse2(v.clone())?),
             ("timers", None, Some(g)) => {
                 for t in g {
@@ -350,12 +367,12 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
             ));
         }
     }
-    let Some(load) = load else {
+    if load.is_some() == round_data.is_some() {
         return Err(syn::Error::new(
             Span::call_site(),
-            "`load = <stream parameter>` names the request input the generator feeds; it is required",
+            "exactly one of `load = <stream parameter>` (one value per round) and `round_data = |round, inputs| { ... }` (what each round sends) is required",
         ));
-    };
+    }
     let hydro: syn::Path = syn::parse_quote!(#sedge::__private::hydro_lang);
     let mut subst = Substitute {
         map: &generic_types,
@@ -449,21 +466,21 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
             let retries = targs.get(4).copied().cloned().unwrap_or_else(
                 || syn::parse_quote!(#hydro::live_collections::stream::ExactlyOnce),
             );
-            let is_load = pname == load;
+            let is_load = load.as_ref().is_some_and(|l| *l == pname);
             let is_timer = timers.iter().any(|(t, _)| *t == pname);
-            if !is_load && !is_timer {
-                if is_unit(&item) {
-                    return Err(syn::Error::new(
-                        pname.span(),
-                        format!(
-                            "timer `{pname}` needs a period in the attribute, as `timers({pname} = Duration::from_millis(..))`"
-                        ),
-                    ));
-                }
+            if !is_timer && !is_load && is_unit(&item) {
                 return Err(syn::Error::new(
                     pname.span(),
                     format!(
-                        "stream `{pname}` is neither the load nor a timer; #[overload_check] feeds one data stream, named by `load = ...`"
+                        "timer `{pname}` needs a period in the attribute, as `timers({pname} = Duration::from_millis(..))`"
+                    ),
+                ));
+            }
+            if load.is_some() && !is_load && !is_timer {
+                return Err(syn::Error::new(
+                    pname.span(),
+                    format!(
+                        "stream `{pname}` is neither the load nor a timer; with `load = ...` #[overload_check] feeds one data stream (use `round_data = ...` for several)"
                     ),
                 ));
             }
@@ -492,10 +509,19 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
         }
         params.push(Param::Plain(pname));
     }
-    if !streams.iter().any(|s| s.name == load) {
+    if let Some(load) = &load
+        && !streams.iter().any(|s| s.name == *load)
+    {
         return Err(syn::Error::new(
             load.span(),
             format!("`{load}` is not a stream parameter of `{fn_name}`"),
+        ));
+    }
+    let is_data = |s: &StreamParam| !timers.iter().any(|(t, _)| *t == s.name);
+    if round_data.is_some() && !streams.iter().any(is_data) {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "`round_data` needs at least one data stream (a stream parameter not named in `timers(...)`)",
         ));
     }
     for (t, _) in &timers {
@@ -545,21 +571,25 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
         quote!(let #var = __flow.process::<#marker>();)
     });
 
+    let port_var = |s: &StreamParam| format_ident!("__port_{}", s.name);
+    let sink_var = |s: &StreamParam| format_ident!("__sink_{}", s.name);
     let make_inputs = streams.iter().map(|s| {
         let sv = &s.name;
         let (item, order, retries) = (&s.item, &s.order, &s.retries);
         let locv = &locs[s.loc].var;
-        if s.name == load {
+        if is_data(s) {
+            let pv = port_var(s);
             quote!(
-                let (__load, #sv) = #sedge::load_input::<_, #item>(&#locv, &__external);
+                let (#pv, #sv) = #sedge::load_input::<_, #item>(&#locv, &__external);
                 let #sv = #sv.weaken_ordering::<#order>().weaken_retries::<#retries>();
             )
         } else {
-            let period = &timers.iter().find(|(t, _)| *t == s.name).unwrap().1;
+            // A timer is driven by the harness over an external port, so that its period can be
+            // changed during the trigger (a capacity dip).
+            let pv = port_var(s);
             quote!(
-                let #sv = #sedge::timer(&#locv, (#period))
-                    .weaken_ordering::<#order>()
-                    .weaken_retries::<#retries>();
+                let (#pv, #sv) = #sedge::load_input::<_, ()>(&#locv, &__external);
+                let #sv = #sv.weaken_ordering::<#order>().weaken_retries::<#retries>();
             )
         }
     });
@@ -584,6 +614,78 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
             let __outputs = #fn_name(#(#call_args),*);
             #sedge::Observed::observe(__outputs, &mut __observer);
         ),
+    };
+
+    // Connecting the data and timer ports once deployed, and the round sender.
+    let connect_sinks = streams.iter().map(|s| {
+        let pv = port_var(s);
+        let sk = sink_var(s);
+        quote!(let mut #sk = __nodes.connect(#pv).await;)
+    });
+    let make_timers = streams.iter().filter(|s| !is_data(s)).map(|s| {
+        let sk = sink_var(s);
+        let name = s.name.to_string();
+        let period = &timers.iter().find(|(t, _)| *t == s.name).unwrap().1;
+        quote!(#sedge::harness::TimerDrive {
+            name: #name.to_owned(),
+            period: ::std::time::Duration::from(#period),
+            sink: #sk,
+        },)
+    });
+    let send_round = match (&load, &round_data) {
+        (Some(_), _) => {
+            let s = streams.iter().find(|s| is_data(s)).unwrap();
+            let sk = sink_var(s);
+            let item = &s.item;
+            quote!(
+                let __send_round = async |__round: u64| -> ::std::result::Result<u64, ::std::string::String> {
+                    #sedge::__private::futures::SinkExt::send(
+                        &mut #sk,
+                        <#item as #sedge::LoadItem>::from_id(__round),
+                    )
+                    .await
+                    .map_err(|e| ::std::string::ToString::to_string(&e))?;
+                    ::std::result::Result::Ok(1)
+                };
+            )
+        }
+        (None, Some(closure)) => {
+            let fields = streams.iter().filter(|s| is_data(s)).map(|s| {
+                let n = &s.name;
+                let item = &s.item;
+                quote!(pub #n: #sedge::RoundSender<#item>,)
+            });
+            let inits = streams.iter().filter(|s| is_data(s)).map(|s| {
+                let n = &s.name;
+                quote!(#n: #sedge::RoundSender::new(),)
+            });
+            let flushes = streams.iter().filter(|s| is_data(s)).map(|s| {
+                let n = &s.name;
+                let sk = sink_var(s);
+                quote!(
+                    for __item in __inputs.#n.take() {
+                        #sedge::__private::futures::SinkExt::send(&mut #sk, __item)
+                            .await
+                            .map_err(|e| ::std::string::ToString::to_string(&e))?;
+                        __n += 1;
+                    }
+                )
+            });
+            quote!(
+                #[allow(non_camel_case_types, dead_code)]
+                struct __Inputs { #(#fields)* }
+                fn __coerce<F: ::std::ops::FnMut(u64, &__Inputs)>(f: F) -> F { f }
+                let __inputs = __Inputs { #(#inits)* };
+                let mut __user_round = __coerce(#closure);
+                let __send_round = async |__round: u64| -> ::std::result::Result<u64, ::std::string::String> {
+                    __user_round(__round, &__inputs);
+                    let mut __n = 0u64;
+                    #(#flushes)*
+                    ::std::result::Result::Ok(__n)
+                };
+            )
+        }
+        (None, None) => unreachable!(),
     };
 
     let with_processes = locs.iter().map(|l| {
@@ -634,11 +736,16 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
                         #(#with_processes)*
                         .with_external(&__external, __deployment.Localhost())
                         .deploy(&mut __deployment);
+                    __deployment.deploy().await.expect("deployment failed");
+                    #(#connect_sinks)*
+                    let __timers = ::std::vec![#(#make_timers)*];
+                    #send_round
                     __results.push(
                         #sedge::harness::run_trial(
                             &mut __deployment,
                             &__nodes,
-                            __load,
+                            __send_round,
+                            __timers,
                             __observer,
                             &__meta,
                             __run,
@@ -664,4 +771,76 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
             }
         }
     ))
+}
+
+// ---------------------------------------------------------------------------------------------
+// The derive
+
+/// Implements `sedge::Observed` for a struct whose fields are `Stream`s on `Process` locations by
+/// registering every field whole with `sedge::Observer::stream`, under the field's name. The
+/// harness then counts each stream's records per second, keeps the latest value of numeric
+/// streams, and reads ids from `u64` items or `id` fields; which of these the verdict uses is
+/// decided by the stream's kind, which comes from Cress's conservation table when one exists for
+/// the function and configuration (see `cress::Conservation`), and otherwise from the item type.
+/// No `q!` closure is needed in the program's crate. The struct must have exactly one lifetime
+/// parameter, the `'a` of its streams' locations. The derive always names the crate `::sedge`.
+#[proc_macro_derive(SedgeOutputs)]
+pub fn derive_sedge_outputs(item: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(item as syn::DeriveInput);
+    let name = &input.ident;
+    let sedge: syn::Path = syn::parse_quote!(::sedge);
+    let syn::Data::Struct(data) = &input.data else {
+        return syn::Error::new(input.span(), "#[derive(SedgeOutputs)] only supports structs")
+            .to_compile_error()
+            .into();
+    };
+    let lifetimes: Vec<&syn::Lifetime> = input
+        .generics
+        .params
+        .iter()
+        .filter_map(|p| match p {
+            GenericParam::Lifetime(l) => Some(&l.lifetime),
+            _ => None,
+        })
+        .collect();
+    let [lt] = lifetimes.as_slice() else {
+        return syn::Error::new(
+            input.generics.span(),
+            "#[derive(SedgeOutputs)] needs exactly one lifetime parameter, the `'a` of the streams' locations",
+        )
+        .to_compile_error()
+        .into();
+    };
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+    let registrations: Vec<TokenStream2> = match &data.fields {
+        syn::Fields::Named(f) => f
+            .named
+            .iter()
+            .map(|fld| {
+                let id = fld.ident.as_ref().unwrap();
+                let name = id.to_string();
+                quote!(__observer.stream(#name, self.#id);)
+            })
+            .collect(),
+        syn::Fields::Unnamed(f) => f
+            .unnamed
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                let idx = syn::Index::from(i);
+                let name = i.to_string();
+                quote!(__observer.stream(#name, self.#idx);)
+            })
+            .collect(),
+        syn::Fields::Unit => Vec::new(),
+    };
+    quote!(
+        #[automatically_derived]
+        impl #impl_generics #sedge::Observed<#lt> for #name #ty_generics #where_clause {
+            fn observe(self, __observer: &mut #sedge::Observer<#lt>) {
+                #(#registrations)*
+            }
+        }
+    )
+    .into()
 }
