@@ -487,10 +487,18 @@ A deduplicating view (`unique`, `first`) keeps one derivation per run, so altern
 one hypothesis at a time; the complete answer is lineage that carries alternatives (a set of
 derivations per record), which is not built.
 
-Broadcast, 2PC and ISR run on specifications: agreement for the first two (`PRE`: someone
+Every harness runs on a specification: agreement for broadcast and 2PC (`PRE`: someone
 delivered / committed; `POST`: every correct member did), durability for ISR (`PRE`: the client
-was acknowledged and the final view names a leader; `POST`: that leader's log holds the write).
-The first version's `witness` / `witness_final` / `require` API remains for Raft.
+was acknowledged and the final view names a leader; `POST`: that leader's log holds the write),
+and state-machine safety for Raft (`PRE`: member 0 committed its request `a`; `POST`: among the
+correct members' commits and member 0's own, the distinct `(index, message)` pairs are as many
+as the distinct indices, i.e. no two committed entries disagree at an index). Raft's `POST` is
+the other everyday non-monotone view: agreement is the *absence* of a conflict, and a hypothesis
+breaks it by making a member commit something else. The search still finds the bug because the
+same hypothesis removes that member's recorded commit of `a` (the lost `AppendEntries(a)`), which
+is in the derivation; a conflict that appeared without displacing a recorded commit would not
+be proposed. The first version's `witness` / `witness_final` / `require` API remains available;
+no harness uses it.
 
 ## 7. The search loop
 
@@ -587,13 +595,12 @@ listing in section 6.5, about 45 lines. The parts, and what each demands of the 
 - **Body.** Drives the run: sends inputs, fires timers, awaits `quiesce()`. It returns nothing;
   the verdict is the views'.
 
-The first version's API is still there for Raft: `goal(&out)` ("some value appears"),
-`goal_all_members(&out, cluster, members)`, and `goal_witnessed()` with the body naming facts
-(`witness`, `witness_final`, `require`) and returning the verdict. Its hazards (section 10) are
-the reason for the specification layer. The Raft harness (`raft_ldfi.rs`) is about 180 lines on
-that API; its body alone is 60 lines, most of it the scenario (which timers fire when) and the
-agreement check, and porting it to a `Spec` means writing Raft's agreement as views over the
-members' committed logs and leader views.
+The first version's API is still available and no harness uses it: `goal(&out)` ("some value
+appears"), `goal_all_members(&out, cluster, members)`, and `goal_witnessed()` with the body
+naming facts (`witness`, `witness_final`, `require`) and returning the verdict. Its hazards
+(section 10) are the reason for the specification layer. The Raft harness (`raft_ldfi.rs`) is
+about 170 lines on a `Spec`; its body is 25 lines, all scenario (which timers fire when), where
+the first version's was 60 with the agreement check and the witness bookkeeping written by hand.
 
 ### 8.3 Running it
 
@@ -644,15 +651,18 @@ commit, then the participant that got it); ISR's unclean election reproduces the
 The headline is Raft. `raft.rs` has thirteen behavioural tests including unit tests of the
 §5.4.1 election restriction and two fuzz tests of concurrent elections; none exercises message
 loss. An injected bug that compares last-log index only, ignoring term (a mistake shipped in
-real implementations), passes all thirteen. Hydrofrac finds it in 20 hypotheses (80 simulator
-instances at 4 schedules each; 25 on the first substrate) with the counterexample `{omit
-rpc[0→1]:AppendEntries(a, leader_commit 0), omit rpc[0→1]:AppendEntries(a, leader_commit 1)}`
-under the schedule in which member 0 takes term 2. Blind enumeration needs 160 hypotheses (640
-instances). Random fault injection with the same vocabulary found it in 0 of 5 repeats within
-640 instances each (two thirds of its instances were vacuous). On correct Raft, hydrofrac
-certifies in 133 hypotheses (175 on the first substrate); blind exhausted its budget at 256.
-The improvement comes from exact delivery ids on the receive side: the record provenance of a
-Raft step names its sends precisely where the first version matched releases to sends by bytes.
+real implementations), passes all thirteen. Hydrofrac finds it in 17 hypotheses (68 simulator
+instances at 4 schedules each; 25 on the first substrate with its hand-named goal, 20 on the
+filter) with the counterexample `{omit rpc[0→1]:AppendEntries(a, leader_commit 0), omit
+rpc[0→1]:AppendEntries(a, leader_commit 1)}` under the schedule in which member 0 takes term 2.
+Blind enumeration needs 160 hypotheses (640 instances). Random fault injection with the same
+vocabulary found it in 0 of 5 repeats within 640 instances each (two thirds of its instances
+were vacuous). On correct Raft, hydrofrac certifies in 89 hypotheses (175 on the first
+substrate, 133 on the filter with the hand-named goal); blind exhausted its budget at 256. The
+improvements come from exact delivery ids on the receive side (the record provenance of a Raft
+step names its sends precisely where the first version matched releases to sends by bytes) and
+from the specification's views deriving one lineage for the whole agreement fact rather than one
+per hand-named witness.
 
 Measurement grid (ISR, 2PC at n = 2..6, workload 1..8; all in `ldfi-on-sim-hooks.md`, measured
 on the first substrate; the per-protocol unit tests reproduce their counts on the filter, except
