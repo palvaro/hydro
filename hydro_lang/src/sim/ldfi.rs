@@ -1014,7 +1014,7 @@ impl RunRecord {
             // PRE held and POST held: POST's final value is the fact to derive.
             (Some(Goal::Spec(_)), _) => match (&self.spec_pre, &self.spec_post) {
                 (_, Some((port, bytes))) if !self.vacuous => {
-                    vec![lineage.witnessed_final(&[(*port, None, bytes.clone())])]
+                    vec![lineage.spec_view(*port, bytes)]
                 }
                 _ => vec![],
             },
@@ -1027,7 +1027,7 @@ impl RunRecord {
             lineage.witnessed(&self.requirements)
         };
         if let Some((port, bytes)) = &self.spec_pre {
-            requirements.extend(lineage.witnessed_final(&[(*port, None, bytes.clone())]));
+            requirements.extend(lineage.spec_view(*port, bytes));
         }
         Schedule {
             goal_held: self.goal_held,
@@ -1928,6 +1928,50 @@ impl<'a> Lineage<'a> {
         derivation
     }
 
+    /// The derivation of a specification view's final value (see [`crate::sim::spec`]):
+    /// `bytes` is the last value published on `port`. The step at the observer is always
+    /// counterfactual: the observer is replayed with observed facts removed one at a time,
+    /// and a fact is in the derivation iff the view's final value changes without it. That
+    /// asks "which of what the observer saw does the view rest on?" by intervention, so it
+    /// is the same question whether the view is written positively or through negation (a
+    /// view that holds by the *absence* of facts has no record provenance, but removing a
+    /// fact it rests on still falsifies it). Each kept observation then continues into the
+    /// observed node's own lineage at the configured level.
+    fn spec_view(&self, port: usize, bytes: &[u8]) -> Derivation {
+        let Some(output) = self
+            .outputs
+            .iter()
+            .filter(|o| o.port == port && o.member.is_none())
+            .max_by_key(|o| o.exec)
+        else {
+            return Derivation::new();
+        };
+        if output.bytes != bytes {
+            return Derivation::new();
+        }
+        let fallback = || self.derive(output);
+        let Some(node) = self.exec_node(output.exec) else {
+            return fallback();
+        };
+        let (member, bytes) = (output.member, output.bytes.clone());
+        let produced = move |events: &[LineageEvent]| {
+            events
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    LineageEvent::Output {
+                        port: p,
+                        member: m,
+                        bytes: b,
+                        ..
+                    } if *p == port && *m == member => Some(b == &bytes),
+                    _ => None,
+                })
+                .unwrap_or(false)
+        };
+        self.counterfactual(&node, output.exec, &produced, fallback)
+    }
+
     /// The derivation of an output as a final-state fact: under replay, the deliveries
     /// without which the node's *last* output on the port differs; otherwise as
     /// [`Self::derive`].
@@ -2681,7 +2725,7 @@ impl Ldfi {
                 })
             {
                 eprintln!(
-                    "{tag}: warning: POST held with an empty derivation (nothing delivered contributes to it); a view derived through negation has no lineage, state POST positively"
+                    "{tag}: warning: POST held with an empty derivation: no observed fact's removal changes its final value (is it independent of the protocol's outputs?); the search will certify immediately"
                 );
             }
             // The crashes of this hypothesis: premises of every clause it yields.

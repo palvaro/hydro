@@ -434,16 +434,43 @@ What the pieces are:
   deliveries its value was computed from, which is why the broadcast harness compiles with
   provenance by default.
 
-Two things the author has to know. First, write `POST` **positively**. A view derived through
-negation (`filter_not_in`, an empty `count`) depends on the *absence* of facts, which has no
-lineage; its derivation is empty, and an empty derivation certifies immediately. The search
-warns when `POST` holds with an empty derivation. A universal is positive as an aggregate over
-the matches compared with an aggregate over the domain, as above. Second, a deduplicating view
-(`unique`, `first`) keeps one derivation per run, so alternatives surface one hypothesis at a
-time: reliable broadcast under one crash takes 15 hypotheses (13 crash points, each refuted by
-its own run) where the first version's `goal_all_members` took 4, because the first version's
-universe never contained the members' crash points at all. The complete answer is lineage that
-carries alternatives (a set of derivations per record); it is not built.
+**Negation.** A view derived through negation (`filter_not_in`, an empty `count`) holds by
+the *absence* of facts, which has no record provenance: under Level 2 alone the negated
+agreement `POST` ("no correct member is missing") has an empty derivation, and an empty
+derivation certified plain broadcast after one run. Molly struggled here too (bounded walks of
+De Morgan-rewritten programs). The simulator has a better tool: it is a counterfactual oracle at
+the run's nondeterministic decision points, and "what the observer's batch released" is one of
+them. The derivation of a view is therefore always computed counterfactually at the observer:
+the observer is replayed alone with observed facts removed one at a time (its batches are
+hooked, so the simulator feeds it exactly what it saw), a fact is kept iff the view's final
+value changes without it, and each kept fact continues into the observed node's lineage at the
+configured level. That asks the same question of both formulations. The broadcast harness
+states agreement positively and through negation and gets identical derivations
+(`{initial[→0], initial[→1], initial[→2], observed[0→], observed[1→], observed[2→]}`), the same
+two-run counterexample, and the same certificate; the observer replays cost about 8 per
+schedule. The intervention also found the *minimal* set where the record provenance of the
+positive view had accumulated more: the one-crash certificate went from 15 hypotheses to 10 and
+the two-crash from 89 to 32.
+
+What the observer replay cannot intervene on is the limit of this. It cannot alter a decision
+inside an observed node (which arrival a member's deduplication picked is the record
+provenance's business, and it is exact there), and it cannot alter the fault model's own facts:
+`correct_members` comes from the hypothesis, not from a replayed decision. So a view that is
+only falsified by *adding* a fault without removing any observed fact gets an empty derivation.
+"Every member that delivered `m` is correct" is such a view: under no faults every deliverer is
+correct, no fact's removal changes that, the derivation is `{}` and the search certifies after
+one run. On this protocol that certificate happens to be right (the delivery is a member's last
+act, so no crash point in the vocabulary follows it); on a protocol where a node sends anything
+after delivering it would be wrong, and the search cannot tell the difference. The same
+monotonicity gap is why the hitting-set inference ("a fault set that leaves the derivation
+intact cannot break `POST`") is only an argument for views monotone in their support; the
+greedy deletion finds a 1-minimal sufficient set of the facts, and for a non-monotone view a
+superset of a sufficient set need not be sufficient. The search warns whenever `POST` holds with
+an empty derivation.
+
+A deduplicating view (`unique`, `first`) keeps one derivation per run, so alternatives surface
+one hypothesis at a time; the complete answer is lineage that carries alternatives (a set of
+derivations per record), which is not built.
 
 The first version's `witness` / `witness_final` / `require` API remains for the harnesses that
 have not been ported (2PC, ISR, Raft). `witness_final` ("the fact is that this value was the
@@ -537,7 +564,8 @@ listing in section 6.5, about 45 lines. The parts, and what each demands of the 
 - **Specification.** Which outputs to observe, which cluster's correct members the views need,
   and `PRE` / `POST` as Hydro over the observed facts. This is where the thinking is: the views
   must say what the property means ("every correct member delivered `m`", not "member 2
-  delivered `m`"), and `POST` must be stated positively (section 6.5).
+  delivered `m`"); whether `POST` is stated positively or through negation does not matter
+  (section 6.5), but a view only falsifiable by adding a fault has no derivation.
 - **Crash model.** Which nodes are `crashable` (processes) or `crashable_cluster` (members),
   and the budget. Omission needs no declaration: it is available on every lossy channel.
 - **Body.** Drives the run: sends inputs, fires timers, awaits `quiesce()`. It returns nothing;
@@ -591,7 +619,7 @@ the messages they expected.
 
 On the paper's examples it reproduces the paper: tries-twice reliable delivery breaks under two
 omissions in 3 runs; plain broadcast breaks under one mid-fan-out crash in 2 runs and reliable
-broadcast certifies under one and two crashes (15 and 89 hypotheses), both under the one
+broadcast certifies under one and two crashes (10 and 32 hypotheses), both under the one
 agreement specification of section 6.5; 2PC breaks under one coordinator crash, 2PC with
 cooperative termination certifies under one crash and breaks under two (coordinator after one
 commit, then the participant that got it); ISR's unclean election reproduces the Kafka bug.
@@ -639,9 +667,10 @@ encoding under record provenance (10/18).
 - **Hand-named goals are unchecked.** Under the first version's goal API the goal shape and the
   body's verdict can disagree, and a forgotten requirement or an "ever" fact that should have
   been "final" is a wrong certificate with no warning. A [`Spec`](#65-specifications-pre-and-post-as-views)
-  removes this: the verdict and the lineage are the same views. Its own gap is negation
-  (section 6.5): a `POST` stated through absence has an empty derivation, which the search
-  warns about but cannot repair.
+  removes this: the verdict and the lineage are the same views. Its own gap is a view that is
+  only falsifiable by adding a fault without removing an observed fact (section 6.5): the
+  observer's counterfactual cannot intervene on the fault model's facts, the derivation is
+  empty, and the search warns but cannot repair it.
 - **One derivation per record.** Deduplicating operators keep the first provenance seen, so a
   view's alternatives surface one hypothesis at a time (section 6.5).
 - **Replay assumes monotone steps.** A 1-minimal sufficient set found by greedy deletion is one
