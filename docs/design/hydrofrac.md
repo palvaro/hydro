@@ -458,9 +458,11 @@ configured level. That asks the same question of both formulations. The broadcas
 states agreement positively and through negation and gets identical derivations
 (`{initial[→0], initial[→1], initial[→2], observed[0→], observed[1→], observed[2→]}`), the same
 two-run counterexample, and the same certificate; the observer replays cost about 8 per
-schedule. The intervention also found the *minimal* set where the record provenance of the
-positive view had accumulated more: the one-crash certificate went from 15 hypotheses to 10 and
-the two-crash from 89 to 32.
+schedule. When it landed, the intervention also found the *minimal* set where the record
+provenance of the positive view had accumulated more (the one-crash certificate went from 15
+hypotheses to 10 and the two-crash from 89 to 32); the record provenance has since been tightened
+to the point that on these views the two derivations coincide, and both certificates are 10 and
+32 whichever derivation is used.
 
 What the observer replay cannot intervene on is the limit of this. It cannot alter a decision
 inside an observed node (which arrival a member's deduplication picked is the record
@@ -488,10 +490,43 @@ promote the stale follower) kills neither — it adds a later view. Record prove
 view into the aggregate and so keeps the heartbeats that kept the leader, and with them the
 crash after the acknowledgement. `spec_view` therefore takes the **union** of the counterfactual
 and the recorded derivation at the observer: sound where either is, minimal only where both
-agree. That costs the minimality gain above (broadcast certificates are back to 15 and 89
-hypotheses) until the observer's dataflow is checked for monotonicity, which is what would
-license the counterfactual alone. `hydrofrac-negation.md` has the analysis and the proposed
-check.
+agree. `hydrofrac-negation.md` has the analysis.
+
+**The polarity check.** What licenses the counterfactual alone, and what the hitting-set
+inference needs in any case, is monotonicity of the view in the observed facts; `polarity.rs`
+reads it off the observer's dataflow (`hydrofrac-negation.md` §4 has the rules). Once, before the
+provenance rewrite wraps the user's closures, each published view is walked from its publication
+back to its leaves carrying a sign. A receive at the observer from another location is an
+observed fact; a `sim_input` or a constant is the fault model's own and carries no sign. The
+operators that move the sign: `filter_not_in` / `anti_join` reach the subtracted side with the
+opposite sign; a predicate on an aggregate's value is read as a comparison with a literal
+(`== 0`, `<= k`, `< k` flip; `!= 0`, `>= k`, `> k` keep; `== k` for `k > 0` is both ways); a
+`count` grows with its input; a `reduce` over a sequenced observation is a final value, which a
+later fact changes. A view whose observed facts are all reached positively, with no operator the
+walk has no rule for in between, is graded `Monotone`. An observed fact reached negatively or both
+ways, or a final value, grades it `NonMonotone`. Anything else is `Unknown`, with the reasons: a
+predicate comparing two aggregates (`delivering == correct` is a `zip` then a predicate on the
+pair, and the walk does not relate the sides), a stateful generator (`first()` is a `scan`), a fold
+whose accumulator is not a count. The grade does two things. A `Monotone` `POST` takes the
+counterfactual derivation alone; any other grade keeps the union. And every certificate under a
+specification carries `POST`'s grade: *within the fault model and the explored schedules* when
+monotone, *relative to the recorded derivations persisting under the excluded fault sets*
+otherwise, with the reasons printed. The search prints both views' grades before its first run.
+
+On the harnesses: broadcast's negated `POST` (`correct.filter_not_in(delivering).count() == 0`)
+grades monotone, as the rule in `hydrofrac-negation.md` says it should (the only negation is of
+the hypothesis's own facts), and its certificate is the first graded within the fault model. The
+positive `POST`s of broadcast, 2PC and Raft all compare two aggregates and grade unknown; ISR's
+final view grades non-monotone (`max` over a sequenced observation). The control is integrity,
+"no member delivered `m` twice" (a count per member, no count above one): true of the broadcast,
+non-monotone in the deliveries (a further one can falsify it), with an empty derivation (no
+delivery's removal changes it, and the absence of a duplicate has no record provenance) — the
+search certifies it after the failure-free run having checked nothing, and the grade says
+*relative*, which is the honest label for that certificate. `PRE` views written with `first()`
+grade unknown, at no cost: `PRE`'s grade only decides whether its requirements take the union.
+What the walk cannot classify it says so; it never grades monotone by default. On the broadcast
+views the recorded and counterfactual derivations coincide today, so the grade's effect on the
+hypothesis count is nil there (10 and 32 either way); its value is on the certificate.
 
 A deduplicating view (`unique`, `first`) keeps one derivation per run, so alternatives surface
 one hypothesis at a time; the complete answer is lineage that carries alternatives (a set of
@@ -652,9 +687,9 @@ the messages they expected.
 
 On the paper's examples it reproduces the paper: tries-twice reliable delivery breaks under two
 omissions in 3 runs; plain broadcast breaks under one mid-fan-out crash in 2 runs and reliable
-broadcast certifies under one and two crashes (15 and 89 hypotheses with the union derivation of
-section 6.5; 10 and 32 with the counterfactual alone), both under the one
-agreement specification of section 6.5; 2PC breaks under one coordinator crash, 2PC with
+broadcast certifies under one and two crashes (10 and 32 hypotheses), both under the one
+agreement specification of section 6.5, with the negated form's certificate graded within the
+fault model and the positive form's relative (the polarity check of section 6.5); 2PC breaks under one coordinator crash, 2PC with
 cooperative termination certifies under one crash and breaks under two (coordinator after one
 commit, then the participant that got it); ISR's unclean election reproduces the Kafka bug.
 
@@ -751,9 +786,14 @@ exercises. Different tools find different failure classes.
   derivation was made the union of counterfactual and recorded lineage. The search now finds
   these bugs because the breaking hypothesis also displaces a recorded fact in `POST`'s
   derivation; a conflict that appeared without displacing one would not be proposed. The
-  certificate for such a property is relative to that, and nothing in the tool yet says so: a
-  polarity check of the observer's dataflow that grades the certificate is the next piece of
-  work (section 12). The first version's hand-named goal API (`goal`, `witness`, `require`) is
+  certificate for such a property is relative to that, and the polarity check (section 6.5)
+  now says so on the certificate: graded *within the fault model* only when `POST` is monotone
+  in the observed facts, *relative* otherwise, with the reasons. The check is syntactic and
+  conservative: it reads comparisons with literals, counts, differences and sequenced reduces,
+  and grades everything else unknown (which is also relative). Agreement written as "as many
+  distinct pairs as distinct indices" is unknown to it, not non-monotone; writing it as "no
+  index with two messages, counted, is zero" would grade it non-monotone, and neither grade
+  repairs the inference. The first version's hand-named goal API (`goal`, `witness`, `require`) is
   still present and unused; it had the same gap and more (a forgotten requirement or an "ever"
   fact that should have been "final" was a wrong certificate with no warning).
 - **One derivation per record.** Deduplicating operators keep the first provenance seen, so a
@@ -911,23 +951,26 @@ same harness shape (reliable delivery, broadcast, 2PC with cooperative terminati
 replication, Raft), each reproducing its published or injected bug and certifying the correct
 variant; and a comparison against Maelstrom on the Raft bug (section 9.1).
 
+Also built, in the fourth round: the polarity check of the specification (section 6.5), a walk
+over the observer's dataflow from each published view to the observed leaves whose output is a
+grade on the certificate, not a gate on the search — "within the fault model and the explored
+schedules" for a monotone `POST`, "relative to the recorded derivations persisting" otherwise,
+with the operators that decided it. A monotone `POST` also takes the counterfactual derivation
+alone. Of the harness `POST`s only the negated broadcast agreement grades monotone; the positive
+agreements grade unknown (two aggregates compared) and ISR's final view non-monotone. The check
+is deliberately shallow (comparisons with literals, counts, differences, sequenced reduces) and
+says what it could not classify.
+
 Next, in the order that soundness requires.
 
-1. **Polarity check of the specification.** A walk over the observer's dataflow assigning
-   polarities from the `POST` sink to the observed leaves (`hydrofrac-negation.md` §4 has the
-   per-operator rules). Its output is a *grade* on the certificate, not a gate on the search:
-   "monotone view, certificate within the fault model and the explored schedules" versus
-   "non-monotone view (operators: ...), certificate relative to the recorded derivations
-   persisting". Where the view is monotone it also licenses the counterfactual derivation alone,
-   recovering the minimal derivations (broadcast 10 / 32 hypotheses instead of 15 / 89).
-2. **Decision-trace replay.** Record every nondeterministic decision of a run (the scheduler's
+1. **Decision-trace replay.** Record every nondeterministic decision of a run (the scheduler's
    draws, the hooks' releases, the filter's fates) and replay a prefix exactly with one decision
    overridden. This is the general counterfactual oracle of which node-level replay is the
    coarse instance: why and why-not for any fact at any step, without hooks, and a decision
    sequence rather than entropy bytes as the counterexample's schedule. It is worth building only
-   if (1) shows the certificates it would strengthen are the ones users want; it does not by
-   itself repair the inference for non-monotone views.
-3. **More protocols.** Section 9 covers the paper's examples plus Raft. Candidates in the
+   if the graded certificates show the ones it would strengthen are the ones users want; it does
+   not by itself repair the inference for non-monotone views.
+2. **More protocols.** Section 9 covers the paper's examples plus Raft. Candidates in the
    repository: the Paxos family (`paxos.rs`, `compartmentalized_paxos.rs`, `paxos_with_client.rs`)
    with agreement and validity as views, and the replicated key-value store (`kv_replica`) with
    a linearizability-shaped specification; each is a protocol written without hydrofrac in mind,

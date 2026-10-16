@@ -116,6 +116,9 @@ pub struct Slices {
     pub sink_in_tick: HashMap<usize, bool>,
     /// Every network channel, by sink id.
     pub channels: BTreeMap<usize, ChannelInfo>,
+    /// The polarity of each specification view published by an observer, by external port
+    /// (see [`super::polarity`]).
+    pub view_polarity: BTreeMap<crate::compile::builder::ExternalPortId, super::polarity::Polarity>,
 }
 
 impl Slices {

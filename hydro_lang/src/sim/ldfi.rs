@@ -93,6 +93,7 @@ use crate::sim::compiled::{
     CompiledSim, TracedHook, lineage_events, lineage_handles, lineage_port,
     lineage_provenance_enabled, lineage_slices, replay_all_hooks, trace_all_hooks,
 };
+use crate::sim::polarity::Polarity;
 use crate::sim::runtime::{
     CrashPoint, DeliveryId, ExecId, LineageEvent, NodeKey, SendFate, SendKey,
 };
@@ -447,6 +448,11 @@ pub enum Outcome {
         /// How each hypothesis's schedules were explored; a certificate is a proof only under
         /// [`Exploration::Exhaustive`].
         exploration: Exploration,
+        /// Under a [`Spec`], the polarity of `POST` in the facts it observes (see
+        /// [`crate::sim::polarity`]). The hitting-set inference behind a certificate is
+        /// valid only for a monotone view; otherwise the certificate is relative to the
+        /// recorded derivations persisting under the fault sets it excluded.
+        polarity: Option<Polarity>,
     },
     /// The hypothesis budget ran out before the search finished.
     Budget {
@@ -527,6 +533,15 @@ impl Outcome {
             _ => None,
         }
     }
+
+    /// A certificate's grade: the polarity of `POST` under a [`Spec`], which decides whether
+    /// the certificate is within the fault model (`POST` monotone) or relative (not).
+    pub fn polarity(&self) -> Option<&Polarity> {
+        match self {
+            Outcome::Certificate { polarity, .. } => polarity.as_ref(),
+            _ => None,
+        }
+    }
 }
 
 fn render_set<T: Display>(items: impl IntoIterator<Item = T>) -> String {
@@ -574,6 +589,7 @@ impl Display for Outcome {
                 derivations,
                 runs,
                 exploration,
+                polarity,
             } => {
                 match exploration {
                     Exploration::Exhaustive => writeln!(
@@ -586,6 +602,17 @@ impl Display for Outcome {
                         "LDFI: no fault set within bounds violated the goal in {instances} sampled schedule(s) per hypothesis ({} hypothesis run(s)); not a proof",
                         runs.len()
                     )?,
+                }
+                match polarity {
+                    Some(Polarity::Monotone) => writeln!(
+                        f,
+                        "  certificate within the fault model and the explored schedules: POST is monotone in the observed facts"
+                    )?,
+                    Some(polarity) => writeln!(
+                        f,
+                        "  certificate RELATIVE to the recorded derivations persisting under the excluded fault sets: POST is {polarity}"
+                    )?,
+                    None => {}
                 }
                 for derivation in derivations {
                     writeln!(f, "  derivation: {}", render_set(derivation))?;
@@ -1012,9 +1039,10 @@ impl RunRecord {
                 }
             }
             // PRE held and POST held: POST's final value is the fact to derive.
-            (Some(Goal::Spec(_)), _) => match (&self.spec_pre, &self.spec_post) {
+            (Some(Goal::Spec(spec)), _) => match (&self.spec_pre, &self.spec_post) {
                 (_, Some((port, bytes))) if !self.vacuous => {
-                    vec![lineage.spec_view(*port, bytes)]
+                    let monotone = lineage.view_is_monotone(spec.post);
+                    vec![lineage.spec_view(*port, bytes, monotone)]
                 }
                 _ => vec![],
             },
@@ -1026,8 +1054,9 @@ impl RunRecord {
         } else {
             lineage.witnessed(&self.requirements)
         };
-        if let Some((port, bytes)) = &self.spec_pre {
-            requirements.extend(lineage.spec_view(*port, bytes));
+        if let (Some((port, bytes)), Some(Goal::Spec(spec))) = (&self.spec_pre, &search.goal) {
+            let monotone = spec.pre.is_some_and(|pre| lineage.view_is_monotone(pre));
+            requirements.extend(lineage.spec_view(*port, bytes, monotone));
         }
         Schedule {
             goal_held: self.goal_held,
@@ -1945,11 +1974,12 @@ impl<'a> Lineage<'a> {
     ///   reproduces the value, while in the real system later views decide it — so the
     ///   contributions are needed for the derivation to name what the final value rests on.
     ///
-    /// The union is sound where either is; it costs minimality for monotone views (which the
-    /// counterfactual alone would give) until the observer's dataflow is checked for
-    /// monotonicity (see `hydrofrac-negation.md`). Each kept observation then continues into
-    /// the observed node's own lineage at the configured level.
-    fn spec_view(&self, port: usize, bytes: &[u8]) -> Derivation {
+    /// The union is sound where either is; it costs minimality. When the polarity check
+    /// ([`crate::sim::polarity`]) has graded the view `monotone`, the counterfactual alone is
+    /// licensed: a 1-minimal sufficient set of a monotone view is a derivation, and the
+    /// recorded contributions are only an over-approximation of it. Each kept observation
+    /// then continues into the observed node's own lineage at the configured level.
+    fn spec_view(&self, port: usize, bytes: &[u8], monotone: bool) -> Derivation {
         let Some(output) = self
             .outputs
             .iter()
@@ -1983,8 +2013,18 @@ impl<'a> Lineage<'a> {
                 .unwrap_or(false)
         };
         let mut derivation = self.counterfactual(&node, output.exec, &produced, fallback);
-        derivation.extend(recorded);
+        if !monotone {
+            derivation.extend(recorded);
+        }
         derivation
+    }
+
+    /// Whether the polarity check graded the view published on `port` monotone.
+    fn view_is_monotone(&self, port: ExternalPortId) -> bool {
+        self.slices
+            .view_polarity
+            .get(&port)
+            .is_some_and(Polarity::is_monotone)
     }
 
     /// The derivation of an output as a final-state fact: under replay, the deliveries
@@ -2806,6 +2846,19 @@ impl Ldfi {
                     "{tag}: channels and static slices:\n{}",
                     describe_slices(slices)
                 );
+                if let Some(Goal::Spec(spec)) = &search.goal {
+                    let grade = |port: ExternalPortId| -> String {
+                        slices
+                            .view_polarity
+                            .get(&port)
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| "not analysed".to_owned())
+                    };
+                    eprintln!("{tag}: POST is {}", grade(spec.post));
+                    if let Some(pre) = spec.pre {
+                        eprintln!("{tag}: PRE is {}", grade(pre));
+                    }
+                }
             }
             if self.log {
                 let unmatched: usize = schedules.iter().map(|s| s.unmatched_releases).sum();
@@ -2953,6 +3006,18 @@ impl Ldfi {
                             derivations: clauses.into_iter().map(|c| c.deps).collect(),
                             runs,
                             exploration: self.exploration,
+                            polarity: match (&search.goal, &slices) {
+                                (Some(Goal::Spec(spec)), Some(slices)) => Some(
+                                    slices
+                                        .view_polarity
+                                        .get(&spec.post)
+                                        .cloned()
+                                        .unwrap_or_else(|| Polarity::Unknown {
+                                            reasons: vec!["the view was not analysed".to_owned()],
+                                        }),
+                                ),
+                                _ => None,
+                            },
                         },
                         Strategy::Blind => Outcome::Exhausted { runs },
                     };
