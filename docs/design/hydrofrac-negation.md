@@ -168,9 +168,27 @@ Two concrete non-monotone `POST`s over the broadcast facts:
   member 1 deliver too breaks `POST`, and the constraint excludes it. The search can certify a
   property that fails in the failure-free run of a slightly different schedule.
 
-Neither is a property anyone wants, which is the point: the failure mode is not that negation is
-forbidden, it is that a view which can become *true* by *removing* facts, or *false* by *adding*
-them, is outside the inference the search performs. The agreement `POST` written with
+A third one *is* a property someone wants, and it produced a false certificate the day the
+observer-level counterfactual landed. ISR's durability `POST` is "the **final** leader's log holds
+the acknowledged write", with the final leader read off `observe_sequenced(views).max()`. In the
+failure-free run every view ZK published names replica 0. The single-fact counterfactual at the
+observer deletes views latest-first and keeps `POST`'s value (`(replica 0, leader 0)`) unchanged
+each time, because the earlier view it falls back to names the same leader; the 1-minimal
+sufficient set is `{the leader's appended write, the initial view}`, whose lineage is empty of
+heartbeats. The clause then says "to break `POST`, kill the appended write or the initial view",
+and the hypothesis that actually breaks it — lose one replication, crash the leader after it
+acknowledged, let ZK promote the stale follower — kills neither: it *adds* a later view. Six
+hypotheses, certificate, bug present. `max` over a sequence is not monotone in the facts (a later
+fact changes it), and the counterfactual's minimal sufficient set is exactly the wrong answer for
+it: it is sufficient only in a world where no later view exists. Record provenance, which folds
+every contribution of an aggregate into its value, keeps all the views and through them the
+heartbeats that kept replica 0 the leader, and the crash after the acknowledgement is back in the
+universe (found in 9 hypotheses, as before). This is why `spec_view` now takes the **union** of the
+two derivations: sound where either is, minimal only where both agree.
+
+So the failure mode is not that negation is forbidden, it is that a view which can become *true*
+by *removing* facts, or *false* by *adding* them, is outside the inference the search performs —
+and a final-value view is the everyday instance. The agreement `POST` written with
 `filter_not_in` is not such a view. Adding a delivery can only remove an element from `missing`,
 never add one; `missing.count() == 0` is therefore monotone in the deliveries. The negation is over
 `correct`, a domain relation the fault model fixes before the run, not a fact a decision can remove,

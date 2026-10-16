@@ -59,23 +59,37 @@
 //!
 //! # Lineage
 //!
+//! The derivation of a view is computed in two steps. At the observer the step is
+//! **counterfactual**: the observer is replayed alone (its batches are hooked, so the
+//! simulator can feed it exactly what it saw) with observed facts removed one at a time, and
+//! a fact is in the derivation iff the view's final value changes without it. This is an
+//! intervention on a nondeterministic decision of the run, "what the observer's batch
+//! released", and it asks the same question of every formulation of a view: a view written
+//! through negation (`filter_not_in`, an empty count) has no record provenance, since it
+//! holds by the *absence* of facts, but removing a fact it rests on still falsifies it. The
+//! broadcast harness states agreement both ways and gets the same derivations. Each kept
+//! fact then continues into the observed node's own lineage at the configured level.
+//!
 //! The observation channels are ordinary network sends through the simulator's filter, so
-//! the lineage of a view runs through them to the executions that produced the outputs. They
-//! are not fault points: the search never omits them and never names a crash point by one of
+//! that second step runs through them to the executions that produced the outputs. They are
+//! not fault points: the search never omits them and never names a crash point by one of
 //! them; a view's dependency on an observed fact is a dependency on the producing node having
 //! been alive to produce it (killed by an earlier crash of that node), and on whatever the
-//! fact itself was derived from. With record-level provenance ([`super::provenance`]) the
-//! derivation of a view is exactly the set of deliveries its value was computed from.
+//! fact itself was derived from. With record-level provenance ([`super::provenance`]) that is
+//! exactly the set of deliveries the fact was computed from.
 //!
-//! Write `POST` **positively**. A view derived through negation (`filter_not_in`, an empty
-//! count) depends on the *absence* of facts, which has no lineage: its derivation is empty,
-//! and an empty derivation certifies immediately (the search warns when this happens). A
-//! universal ("every correct member delivered") is positive as an aggregate over the
-//! matches compared with an aggregate over the domain, as in the example above: the count of
-//! delivering correct members folds every delivery into the view's provenance.
+//! What the observer replay cannot intervene on: decisions inside the observed nodes (which
+//! arrival a member's deduplication picked is the record provenance's business) and the
+//! fault model's own facts ([`Spec::correct_members`] comes from the hypothesis, not from a
+//! replayed decision). A view that can only be falsified by *adding* a fault without removing
+//! any observed fact (one that depends on a node's correctness positively, as "every member
+//! that delivered is correct" does) therefore gets an empty derivation; the search warns and
+//! certifies, and the certificate is only as good as the vocabulary's inability to produce
+//! such a run.
 
 use std::collections::HashSet;
 use std::panic::RefUnwindSafe;
+use std::rc::Rc;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -96,13 +110,14 @@ use crate::sim_hooks::{BatchHook, OnProcess, SimHook};
 pub enum Observer {}
 
 /// How the search feeds a cluster's correct members to the observer for one run.
+#[derive(Clone)]
 pub(crate) struct CorrectFeed {
     /// The cluster.
     pub cluster: LocationId,
     /// Its members.
     pub members: Vec<u32>,
     /// Sends one member id into the observer.
-    pub send: Box<dyn Fn(u32) + RefUnwindSafe>,
+    pub send: Rc<dyn Fn(u32) + RefUnwindSafe>,
 }
 
 impl CorrectFeed {
@@ -192,6 +207,25 @@ impl<'a> Spec<'a> {
         self.accumulate(at_observer)
     }
 
+    /// Brings an ordered process output into the specification with its **arrival sequence**:
+    /// `(n, value)` facts, `n` the position of the value in the output's order. For views about
+    /// the *last* value of an output (a final leader view, a last committed index), which the
+    /// set of facts alone cannot express: `observe_sequenced(views).max()` is the final view.
+    /// Such a view is not monotone in the facts (a later value changes it); see the module
+    /// docs on what that costs.
+    pub fn observe_sequenced<T, P>(
+        &self,
+        stream: Stream<T, Process<'a, P>, Unbounded, TotalOrder, ExactlyOnce>,
+    ) -> Stream<(usize, T), Tick<Process<'a, Observer>>, Bounded, TotalOrder, ExactlyOnce>
+    where
+        T: Ord + Clone + Serialize + DeserializeOwned + 'a,
+    {
+        let at_observer = stream
+            .send(&self.observer, TCP.fail_stop().name("observe").bincode())
+            .enumerate();
+        self.accumulate(at_observer)
+    }
+
     /// Brings a cluster output into the specification: the `(member, value)` facts it has
     /// produced so far, in the observer's tick.
     pub fn observe_cluster<T, C, O: Ordering, R: Retries>(
@@ -228,7 +262,7 @@ impl<'a> Spec<'a> {
             send: {
                 // The sender holds only a port id and `PhantomData<MemberId<C>>`.
                 let sender = std::panic::AssertUnwindSafe(sender);
-                Box::new(move |member| sender.send(MemberId::from_raw_id(member)))
+                Rc::new(move |member| sender.send(MemberId::from_raw_id(member)))
             },
         });
         self.accumulate(stream)
@@ -270,19 +304,22 @@ impl<'a> Spec<'a> {
         last_output.is_some_and(|bytes| bytes.first() == Some(&1))
     }
 
-    pub(crate) fn into_parts(self) -> SpecParts {
+    /// The specification as the search holds it. A `Spec` can be given to several searches
+    /// over the same compiled program.
+    pub(crate) fn parts(&self) -> SpecParts {
         SpecParts {
             observer: Location::id(&self.observer),
             pre: self.pre,
             post: self
                 .post
                 .expect("a Spec needs a POST (`Spec::post`) before it is given to the search"),
-            correct: self.correct,
+            correct: self.correct.clone(),
         }
     }
 }
 
 /// A [`Spec`] as the search holds it.
+#[derive(Clone)]
 pub(crate) struct SpecParts {
     pub observer: LocationId,
     pub pre: Option<ExternalPortId>,

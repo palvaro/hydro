@@ -569,6 +569,20 @@ pub fn rewrite(ir: &mut [HydroRoot]) {
                     tag_kind(&mut metadata.collection_kind);
                 }
 
+                // Enumerate numbers tagged elements: `(i, Tagged(v, p))` becomes
+                // `Tagged((i, v), p)`; the position carries the element's provenance.
+                HydroNode::Enumerate { metadata, .. } => {
+                    assert_eq!(out_rep, Rep::Flat, "provenance rewrite: keyed enumerate");
+                    let mut tagged_meta = metadata.clone();
+                    tag_kind(&mut tagged_meta.collection_kind);
+                    post = Some((
+                        parse_quote!(|(__i, #root::sim::runtime::Tagged(__v, __p))| {
+                            #root::sim::runtime::Tagged((__i, __v), __p)
+                        }),
+                        tagged_meta,
+                    ));
+                }
+
                 // Sources: empty provenance.
                 HydroNode::Source { metadata, .. } | HydroNode::ExternalInput { metadata, .. } => {
                     let mut tagged_meta = metadata.clone();
@@ -813,7 +827,6 @@ pub fn rewrite(ir: &mut [HydroRoot]) {
 
                 HydroNode::PartitionSide { .. }
                 | HydroNode::PartitionShared { .. }
-                | HydroNode::Enumerate { .. }
                 | HydroNode::ResolveFutures { .. }
                 | HydroNode::ResolveFuturesBlocking { .. }
                 | HydroNode::ResolveFuturesOrdered { .. }

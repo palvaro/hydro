@@ -1014,7 +1014,7 @@ impl RunRecord {
             // PRE held and POST held: POST's final value is the fact to derive.
             (Some(Goal::Spec(_)), _) => match (&self.spec_pre, &self.spec_post) {
                 (_, Some((port, bytes))) if !self.vacuous => {
-                    vec![lineage.witnessed_final(&[(*port, None, bytes.clone())])]
+                    vec![lineage.spec_view(*port, bytes)]
                 }
                 _ => vec![],
             },
@@ -1027,7 +1027,7 @@ impl RunRecord {
             lineage.witnessed(&self.requirements)
         };
         if let Some((port, bytes)) = &self.spec_pre {
-            requirements.extend(lineage.witnessed_final(&[(*port, None, bytes.clone())]));
+            requirements.extend(lineage.spec_view(*port, bytes));
         }
         Schedule {
             goal_held: self.goal_held,
@@ -1928,6 +1928,65 @@ impl<'a> Lineage<'a> {
         derivation
     }
 
+    /// The derivation of a specification view's final value (see [`crate::sim::spec`]):
+    /// `bytes` is the last value published on `port`. The step at the observer is derived
+    /// twice and the two are unioned:
+    ///
+    /// - **Counterfactually**: the observer is replayed with observed facts removed one at a
+    ///   time, and a fact is kept iff the view's final value changes without it. This asks
+    ///   "which of what the observer saw does the view rest on?" by intervention, so it is
+    ///   the same question whether the view is written positively or through negation (a
+    ///   view that holds by the *absence* of facts has no record provenance, but removing a
+    ///   fact it rests on still falsifies it).
+    /// - **From record provenance**, at the configured level: every fact that contributed to
+    ///   the value. For a view that is not monotone in the facts (`max` of a sequence: the
+    ///   final leader view) the counterfactual's 1-minimal sufficient set is *too small* —
+    ///   replaying with only the earliest view that happens to name the same leader
+    ///   reproduces the value, while in the real system later views decide it — so the
+    ///   contributions are needed for the derivation to name what the final value rests on.
+    ///
+    /// The union is sound where either is; it costs minimality for monotone views (which the
+    /// counterfactual alone would give) until the observer's dataflow is checked for
+    /// monotonicity (see `hydrofrac-negation.md`). Each kept observation then continues into
+    /// the observed node's own lineage at the configured level.
+    fn spec_view(&self, port: usize, bytes: &[u8]) -> Derivation {
+        let Some(output) = self
+            .outputs
+            .iter()
+            .filter(|o| o.port == port && o.member.is_none())
+            .max_by_key(|o| o.exec)
+        else {
+            return Derivation::new();
+        };
+        if output.bytes != bytes {
+            return Derivation::new();
+        }
+        let recorded = self.derive(output);
+        let fallback = || recorded.clone();
+        let Some(node) = self.exec_node(output.exec) else {
+            return fallback();
+        };
+        let (member, bytes) = (output.member, output.bytes.clone());
+        let produced = move |events: &[LineageEvent]| {
+            events
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    LineageEvent::Output {
+                        port: p,
+                        member: m,
+                        bytes: b,
+                        ..
+                    } if *p == port && *m == member => Some(b == &bytes),
+                    _ => None,
+                })
+                .unwrap_or(false)
+        };
+        let mut derivation = self.counterfactual(&node, output.exec, &produced, fallback);
+        derivation.extend(recorded);
+        derivation
+    }
+
     /// The derivation of an output as a final-state fact: under replay, the deliveries
     /// without which the node's *last* output on the port differs; otherwise as
     /// [`Self::derive`].
@@ -2538,8 +2597,8 @@ impl Ldfi {
     /// derivation of `POST` is the clause, the derivation of `PRE` the requirement, and a run
     /// in which `PRE` does not hold is vacuous. Run such a search with [`Self::search`].
     #[must_use]
-    pub fn spec(mut self, spec: Spec<'_>) -> Self {
-        self.search.goal = Some(Goal::Spec(spec.into_parts()));
+    pub fn spec(mut self, spec: &Spec<'_>) -> Self {
+        self.search.goal = Some(Goal::Spec(spec.parts()));
         self
     }
 
@@ -2681,7 +2740,7 @@ impl Ldfi {
                 })
             {
                 eprintln!(
-                    "{tag}: warning: POST held with an empty derivation (nothing delivered contributes to it); a view derived through negation has no lineage, state POST positively"
+                    "{tag}: warning: POST held with an empty derivation: no observed fact's removal changes its final value (is it independent of the protocol's outputs?); the search will certify immediately"
                 );
             }
             // The crashes of this hypothesis: premises of every clause it yields.
@@ -3089,10 +3148,12 @@ impl Ldfi {
                 };
                 run.install();
                 let goal_held = body_ref(&run).await;
-                if run.vacuous.get() {
+                // Under a specification the views decide; `finish` reads them.
+                let record = run.finish(goal_held);
+                if record.vacuous {
                     *vacuous_ref += 1;
                 }
-                if !goal_held {
+                if !record.goal_held {
                     *violation_ref = Some(faults);
                 }
             });

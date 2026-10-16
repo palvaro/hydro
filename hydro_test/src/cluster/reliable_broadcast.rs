@@ -103,16 +103,30 @@ mod tests {
 
     const MEMBERS: u32 = 3;
 
+    /// How `POST` ("every correct member delivered `m`") is written.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Post {
+        /// Positively: the correct members that delivered `m` are as many as the correct
+        /// members. Every delivery is a positive contribution to the view, so the recorded
+        /// lineage levels see it.
+        Positive,
+        /// Through negation: no correct member is missing from those that delivered `m`
+        /// (`filter_not_in`). The view holds by the *absence* of facts, so its record
+        /// provenance is empty; the search derives specification views counterfactually at
+        /// the observer, which sees the same dependencies as for [`Post::Positive`].
+        Negated,
+    }
+
     /// Runs LDFI against the broadcast with or without echo, under one specification written
     /// as Hydro views over the members' deliveries (see `hydro_lang::sim::spec`):
     ///
     /// - `PRE`: some member delivered `m`.
-    /// - `POST`: every correct member delivered `m`.
+    /// - `POST`: every correct member delivered `m`, written as `post` says.
     ///
     /// Fault model: the broadcaster and every member may crash (budget `crashes`); links are
     /// reliable. The same specification separates the two protocols: plain broadcast violates
     /// it, reliable broadcast satisfies it.
-    fn search(echo: bool, crashes: usize) -> Outcome {
+    fn search(echo: bool, crashes: usize, post: Post) -> Outcome {
         let mut flow = FlowBuilder::new();
         let broadcaster = flow.process::<Broadcaster>();
         let members = flow.cluster::<Member>();
@@ -135,20 +149,32 @@ mod tests {
         let delivered_m = delivered.filter(q!(|(_, p)| p.0 == 42));
         // PRE: a member delivered m.
         spec.pre(delivered_m.clone().first());
-        // POST: every correct member delivered m, stated positively as "the correct members
-        // that delivered m are as many as the correct members" so that each one's delivery
-        // is in the view's lineage.
-        let delivering = delivered_m.map(q!(|(m, _)| (m, ()))).unique();
-        let correct_delivering = correct
-            .clone()
-            .map(q!(|m| (m, ())))
-            .join(delivering)
-            .count();
-        spec.post(
-            correct_delivering
-                .zip(correct.count())
-                .filter(q!(|(delivering, correct)| delivering == correct)),
-        );
+        // POST: every correct member delivered m.
+        match post {
+            Post::Positive => {
+                // "The correct members that delivered m are as many as the correct members":
+                // each one's delivery is a positive contribution to the view.
+                let delivering = delivered_m.map(q!(|(m, _)| (m, ()))).unique();
+                let correct_delivering = correct
+                    .clone()
+                    .map(q!(|m| (m, ())))
+                    .join(delivering)
+                    .count();
+                spec.post(correct_delivering.zip(correct.count()).filter(q!(|(
+                    delivering,
+                    correct,
+                )| {
+                    delivering == correct
+                })));
+            }
+            Post::Negated => {
+                // "No correct member is missing from those that delivered m": the view holds
+                // by the absence of facts.
+                let delivering = delivered_m.map(q!(|(m, _)| m)).unique();
+                let missing = correct.clone().filter_not_in(delivering);
+                spec.post(missing.count().filter(q!(|n| *n == 0)));
+            }
+        }
 
         // Record-level provenance is the natural lineage for a specification: the
         // derivation of a view is exactly the deliveries its value was computed from. The
@@ -169,7 +195,7 @@ mod tests {
             .crashable("broadcaster", &broadcaster)
             .crashable_cluster("member", &members, 0..MEMBERS)
             .crash_budget(crashes)
-            .spec(spec)
+            .spec(&spec)
             .search(&compiled, async |_run| {
                 source_send.send(Payload(42));
                 hydro_lang::sim::quiesce().await;
@@ -183,7 +209,7 @@ mod tests {
     /// at each send, weakest first.
     #[test]
     fn ldfi_breaks_plain_broadcast_with_a_mid_fanout_crash() {
-        let outcome = search(false, 1);
+        let outcome = search(false, 1, Post::Positive);
         eprintln!("{outcome}");
         let Outcome::Counterexample { faults, runs, .. } = &outcome else {
             panic!("expected a counterexample, got {outcome}");
@@ -206,7 +232,7 @@ mod tests {
     /// ends with a certificate.
     #[test]
     fn ldfi_certifies_reliable_broadcast_under_one_crash() {
-        let outcome = search(true, 1);
+        let outcome = search(true, 1, Post::Positive);
         eprintln!("{outcome}");
         assert!(
             matches!(outcome, Outcome::Certificate { .. }),
@@ -219,7 +245,40 @@ mod tests {
     /// members holds as long as one of them received the message at all.
     #[test]
     fn ldfi_certifies_reliable_broadcast_under_two_crashes() {
-        let outcome = search(true, 2);
+        let outcome = search(true, 2, Post::Positive);
+        eprintln!("{outcome}");
+        assert!(
+            matches!(outcome, Outcome::Certificate { .. }),
+            "expected a certificate, got {outcome}"
+        );
+    }
+
+    /// The same search with `POST` written through negation ([`Post::Negated`]). The record
+    /// provenance of a view that holds by the absence of facts is empty, but the search
+    /// derives specification views counterfactually at the observer (replaying it with
+    /// observed facts removed), which asks the same question of both formulations: removing
+    /// any correct member's delivery falsifies `POST`, so the derivation is the same three
+    /// deliveries and the counterexample the same mid-fan-out crash in two runs.
+    #[test]
+    fn ldfi_breaks_plain_broadcast_with_a_negated_post() {
+        let outcome = search(false, 1, Post::Negated);
+        eprintln!("{outcome}");
+        let Outcome::Counterexample { faults, runs, .. } = &outcome else {
+            panic!("expected a counterexample, got {outcome}");
+        };
+        assert!(
+            matches!(faults.first(), Some(Fault::Crash { node, after: Some(m) })
+                if node == "broadcaster" && m.to_string().starts_with("initial[→1]:")),
+            "expected the broadcaster to die after its second send: {faults:?}"
+        );
+        assert_eq!(runs.len(), 2);
+    }
+
+    /// Reliable broadcast under one crash with the negated `POST`: a certificate, as with the
+    /// positive formulation.
+    #[test]
+    fn ldfi_certifies_reliable_broadcast_with_a_negated_post() {
+        let outcome = search(true, 1, Post::Negated);
         eprintln!("{outcome}");
         assert!(
             matches!(outcome, Outcome::Certificate { .. }),

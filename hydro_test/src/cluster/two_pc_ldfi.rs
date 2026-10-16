@@ -208,8 +208,9 @@ pub(crate) mod harness {
     use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
     use hydro_lang::prelude::*;
     use hydro_lang::sim::compiled::CompiledSim;
-    use hydro_lang::sim::ldfi::{Ldfi, Run};
-    use hydro_lang::sim::{SimClusterReceiver, SimClusterSender, SimSender};
+    use hydro_lang::sim::ldfi::{Ldfi, Level, Run};
+    use hydro_lang::sim::spec::Spec;
+    use hydro_lang::sim::{SimClusterSender, SimSender};
 
     use super::{
         CommitHook, Coordinator, Participant, PeerHook, PrepareHook, TimeoutHook, Txn, VoteHook,
@@ -219,11 +220,10 @@ pub(crate) mod harness {
     /// Everything a search needs besides the compiled simulation.
     pub(crate) struct Harness {
         participants: u32,
-        /// Transactions per run; the goal is checked on the first, the rest are load.
+        /// Transactions per run; the specification is about the first, the rest are load.
         txns: u32,
         txn_send: SimSender<Txn, TotalOrder, ExactlyOnce>,
         timeout_send: SimClusterSender<(), TotalOrder, ExactlyOnce>,
-        out: SimClusterReceiver<Txn, hydro_lang::live_collections::stream::NoOrder, ExactlyOnce>,
     }
 
     /// Builds and compiles 2PC with or without cooperative termination.
@@ -232,13 +232,19 @@ pub(crate) mod harness {
         ctp: bool,
         fuzz_iterations: usize,
     ) -> (CompiledSim, Harness, impl Fn(usize) -> Ldfi) {
-        compile_with(participants_count, ctp, 1, false, fuzz_iterations)
+        compile_with(participants_count, ctp, 1, true, fuzz_iterations)
     }
 
-    /// [`compile`] with `txns` transactions per run (the goal is checked on the first; the
-    /// others are background load) and optional record-level provenance. With more than one
-    /// transaction the goal is the witnessed form (the first transaction's commits at the
-    /// correct participants); with one it is `goal_all_members`, as in the earlier tables.
+    /// [`compile`] with `txns` transactions per run (the specification is about the first;
+    /// the others are background load) and with or without record-level provenance.
+    ///
+    /// The specification is agreement on the first transaction, as views over the
+    /// participants' commits (see `hydro_lang::sim::spec`):
+    ///
+    /// - `PRE`: some participant committed `Txn(1)` (even one that later crashed: a crashed
+    ///   node's earlier outputs were observed).
+    /// - `POST`: every correct participant committed `Txn(1)`, stated as "the correct
+    ///   participants that committed are as many as the correct participants".
     pub(crate) fn compile_with(
         participants_count: u32,
         ctp: bool,
@@ -264,13 +270,30 @@ pub(crate) mod harness {
             txns,
             timeouts,
             ctp,
-            nondet!(/** LDFI delivery point */ hook = prepare_hook),
-            nondet!(/** LDFI delivery point */ hook = commit_hook),
-            nondet!(/** LDFI delivery point */ hook = peer_hook),
-            nondet!(/** LDFI delivery point */ hook = vote_hook),
+            nondet!(/** traced by the search */ hook = prepare_hook),
+            nondet!(/** traced by the search */ hook = commit_hook),
+            nondet!(/** traced by the search */ hook = peer_hook),
+            nondet!(/** traced by the search */ hook = vote_hook),
             nondet!(/** external input, consumed as it arrives */ hook = timeout_hook),
         );
-        let out = committed.sim_cluster_output();
+
+        // The specification.
+        let mut spec = Spec::new(&mut flow);
+        let committed = spec.observe_cluster(committed);
+        let correct = spec.correct_members(&participants, 0..participants_count);
+        let committed_first = committed.filter(q!(|(_, txn)| txn.0 == 1));
+        spec.pre(committed_first.clone().first());
+        let committing = committed_first.map(q!(|(p, _)| (p, ()))).unique();
+        let correct_committing = correct
+            .clone()
+            .map(q!(|p| (p, ())))
+            .join(committing)
+            .count();
+        spec.post(
+            correct_committing
+                .zip(correct.count())
+                .filter(q!(|(committing, correct)| committing == correct)),
+        );
 
         let coordinator_id = coordinator.clone();
         let participants_id = participants.clone();
@@ -279,7 +302,7 @@ pub(crate) mod harness {
             .skip_consistency_assertions()
             .with_cluster_size(&participants, participants_count as usize)
             .unit_test_fuzz_iterations(fuzz_iterations);
-        if provenance || std::env::var("LDFI_PROVENANCE").is_ok() {
+        if provenance && std::env::var("LDFI_NO_PROVENANCE").is_err() {
             sim = sim.with_provenance();
         }
         let compiled = sim.compiled();
@@ -289,30 +312,28 @@ pub(crate) mod harness {
             txns: txn_count,
             txn_send,
             timeout_send,
-            out,
         };
         // Fault model: the coordinator and every participant may crash; links are reliable
-        // (`fail_stop`, so the filter admits no omission on them). Goal: agreement over the
-        // correct participants.
+        // (`fail_stop`, so the filter admits no omission on them).
         let configure = move |crashes: usize| {
-            let ldfi = Ldfi::new()
+            Ldfi::new()
+                .level(if provenance {
+                    Level::Record
+                } else {
+                    Level::Slice
+                })
                 .level_from_env()
                 .crashable("coordinator", &coordinator_id)
                 .crashable_cluster("participant", &participants_id, 0..participants_count)
-                .crash_budget(crashes);
-            if txn_count == 1 {
-                ldfi.goal_all_members(&out, "participant", 0..participants_count)
-            } else {
-                ldfi.goal_witnessed()
-            }
+                .crash_budget(crashes)
+                .spec(&spec)
         };
         (compiled, harness, configure)
     }
 
-    /// One run of the protocol: one transaction, then every participant's uncertainty timer
-    /// fires once the dust settles. Returns whether agreement held: a commit anywhere (even on
-    /// a node that later died) means every correct participant committed.
-    pub(crate) async fn body(h: &Harness, run: &Run<'_>) -> bool {
+    /// One run of the protocol: the transactions, then every participant's uncertainty
+    /// timer fires once the dust settles. The verdict is the specification's.
+    pub(crate) async fn body(h: &Harness, _run: &Run<'_>) {
         for t in 1..=h.txns {
             h.txn_send.send(Txn(t));
         }
@@ -320,29 +341,6 @@ pub(crate) mod harness {
         h.timeout_send
             .send_many((0..h.participants).map(|p| (p, ())));
         hydro_lang::sim::quiesce().await;
-
-        // The goal is checked on the first transaction; the others are load.
-        let mut any_committed = false;
-        let mut correct_committed = vec![];
-        for p in 0..h.participants {
-            let got: Vec<Txn> = h.out.collect_sorted(p).await;
-            let committed = got.contains(&Txn(1));
-            any_committed |= committed;
-            if committed {
-                // The pre-condition: a commit anywhere (even on a node that later died).
-                run.require_member(&h.out, p, &Txn(1));
-            }
-            if !run.crashed_member("participant", p) {
-                correct_committed.push(committed);
-                if committed && h.txns > 1 {
-                    run.witness_member(&h.out, p, &Txn(1));
-                }
-            }
-        }
-        if !any_committed {
-            run.mark_vacuous();
-        }
-        !any_committed || correct_committed.iter().all(|c| *c)
     }
 }
 
@@ -354,7 +352,7 @@ mod tests {
 
     fn search(ctp: bool, crashes: usize) -> Outcome {
         let (compiled, h, configure) = compile(2, ctp, 8);
-        configure(crashes).run(&compiled, async |run| body(&h, run).await)
+        configure(crashes).search(&compiled, async |run| body(&h, run).await)
     }
 
     /// The blocking case: the coordinator dies after sending `commit` to one participant.
@@ -483,24 +481,27 @@ mod tests {
             let exhaustive = full.then(|| {
                 configure(crashes)
                     .quiet()
-                    .run(&compiled, async |run| body(&h, run).await)
+                    .search(&compiled, async |run| body(&h, run).await)
             });
             let sampled = configure(crashes)
                 .exploration(Exploration::Fuzz { instances: SAMPLED })
                 .quiet()
-                .run(&compiled, async |run| body(&h, run).await);
+                .search(&compiled, async |run| body(&h, run).await);
             let blind = full.then(|| {
                 configure(crashes)
                     .strategy(Strategy::Blind)
                     .quiet()
-                    .run(&compiled, async |run| body(&h, run).await)
+                    .search(&compiled, async |run| body(&h, run).await)
             });
             let crash_points = sampled.runs()[0].crash_points();
             let fuzz: FuzzOutcome = configure(crashes).quiet().fuzz_faults(
                 &compiled,
                 &[],
                 &crash_points,
-                async |run| body(&h, run).await,
+                async |run| {
+                    body(&h, run).await;
+                    true
+                },
             );
 
             eprintln!(
@@ -548,7 +549,7 @@ mod tests {
     fn ldfi_ctp_three_participants_two_crashes() {
         let started = std::time::Instant::now();
         let (compiled, h, configure) = compile(3, true, 8);
-        let outcome = configure(2).run(&compiled, async |run| body(&h, run).await);
+        let outcome = configure(2).search(&compiled, async |run| body(&h, run).await);
         eprintln!(
             "{outcome}  ({} hypotheses, {} schedules, {:?})",
             outcome.runs().len(),

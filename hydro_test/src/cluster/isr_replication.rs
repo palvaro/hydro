@@ -757,19 +757,21 @@ pub fn isr_replication_closure<'a>(
 #[cfg(test)]
 pub(crate) mod harness {
     use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
+    use hydro_lang::location::MemberId;
     use hydro_lang::prelude::*;
     use hydro_lang::sim::compiled::CompiledSim;
-    use hydro_lang::sim::ldfi::{Ldfi, Run};
-    use hydro_lang::sim::{SimClusterReceiver, SimClusterSender, SimReceiver, SimSender};
+    use hydro_lang::sim::ldfi::{Ldfi, Level, Run};
+    use hydro_lang::sim::spec::Spec;
+    use hydro_lang::sim::{SimClusterSender, SimSender};
 
-    use super::{Client, Encoding, Hooks, Replica, View, Write, Zk, isr_replication};
+    use super::{Client, Encoding, Hooks, Replica, Write, Zk, isr_replication};
 
     /// The protocol's size and horizon.
     #[derive(Clone, Copy, Debug)]
     pub(crate) struct Shape {
         pub(crate) members: u32,
         pub(crate) rounds: u32,
-        /// Writes per run; the goal is checked on the first, the rest are load.
+        /// Writes per run; the specification is about the first, the rest are load.
         pub(crate) writes: u32,
     }
 
@@ -784,10 +786,6 @@ pub(crate) mod harness {
         write_send: SimSender<Write, TotalOrder, ExactlyOnce>,
         replica_timer: SimClusterSender<(), TotalOrder, ExactlyOnce>,
         zk_timer: SimSender<(), TotalOrder, ExactlyOnce>,
-        client_acks: SimReceiver<Write, hydro_lang::live_collections::stream::NoOrder, ExactlyOnce>,
-        views: SimReceiver<View, TotalOrder, ExactlyOnce>,
-        appended:
-            SimClusterReceiver<Write, hydro_lang::live_collections::stream::NoOrder, ExactlyOnce>,
     }
 
     pub(crate) fn compile(
@@ -796,10 +794,23 @@ pub(crate) mod harness {
         shape: Shape,
         fuzz_iterations: usize,
     ) -> (CompiledSim, Harness, impl Fn(usize) -> Ldfi) {
-        compile_with(unclean, encoding, shape, false, fuzz_iterations)
+        compile_with(unclean, encoding, shape, true, fuzz_iterations)
     }
 
-    /// [`compile`] with optional record-level provenance.
+    /// [`compile`] with or without record-level provenance.
+    ///
+    /// The specification is durability of the first acknowledged write, as views over the
+    /// client's acknowledgements, ZK's views and the replicas' logs (see
+    /// `hydro_lang::sim::spec`):
+    ///
+    /// - `PRE`: the client was acknowledged for `Write(1)`, and ZK's **final** view names a
+    ///   leader (no leader is unavailability, not a safety violation).
+    /// - `POST`: the final leader's log holds `Write(1)`.
+    ///
+    /// "Final" is `observe_sequenced(views).max()`: the last view ZK published. A view about
+    /// a last value is not monotone in the facts (a later view changes it), which is what the
+    /// first version's `witness_final` expressed by hand; the certificate is relative to that
+    /// (see `hydrofrac-negation.md`).
     pub(crate) fn compile_with(
         unclean: bool,
         encoding: Encoding,
@@ -829,9 +840,24 @@ pub(crate) mod harness {
             zk_timers,
             hooks,
         );
-        let client_acks = outputs.client_acks.sim_output();
-        let views = outputs.views.sim_output();
-        let appended = outputs.appended.sim_cluster_output();
+
+        // The specification.
+        let mut spec = Spec::new(&mut flow);
+        let acked = spec.observe(outputs.client_acks);
+        let views = spec.observe_sequenced(outputs.views);
+        let appended = spec.observe_cluster(outputs.appended);
+        let acked_first = acked.filter(q!(|w| w.0 == 1)).first();
+        let final_leader = views.max().filter_map(q!(|(_, view)| view
+            .leader
+            .map(MemberId::<Replica>::from_raw_id)));
+        spec.pre(acked_first.zip(final_leader.clone()));
+        let leader_has_first = appended
+            .filter(q!(|(_, w)| w.0 == 1))
+            .map(q!(|(replica, _)| replica))
+            .cross_singleton(final_leader)
+            .filter(q!(|(replica, leader)| replica == leader))
+            .first();
+        spec.post(leader_has_first);
 
         let replicas_id = replicas.clone();
         let mut sim = flow
@@ -840,7 +866,7 @@ pub(crate) mod harness {
             .skip_consistency_assertions()
             .with_cluster_size(&replicas, members as usize)
             .unit_test_fuzz_iterations(fuzz_iterations);
-        if provenance || std::env::var("LDFI_PROVENANCE").is_ok() {
+        if provenance && std::env::var("LDFI_NO_PROVENANCE").is_err() {
             sim = sim.with_provenance();
         }
         let compiled = sim.compiled();
@@ -850,27 +876,29 @@ pub(crate) mod harness {
             write_send,
             replica_timer,
             zk_timer,
-            client_acks,
-            views,
-            appended,
         };
         // Fault model: replicas may crash; the replication channel is lossy (declared by the
         // protocol's transport); everything else is reliable and the client and ZK do not
         // crash.
         let configure = move |crashes: usize| {
             Ldfi::new()
+                .level(if provenance {
+                    Level::Record
+                } else {
+                    Level::Slice
+                })
                 .level_from_env()
                 .crashable_cluster("replica", &replicas_id, 0..members)
                 .crash_budget(crashes)
-                .goal_witnessed()
+                .spec(&spec)
         };
         (compiled, harness, configure)
     }
 
-    /// One run: the client writes once; then `ROUNDS` rounds of replica timers followed by a
-    /// ZK timer. Omissions are allowed only in the first round (the replication of the
-    /// write); crashes anywhere. Goal: every acknowledged write is in the final leader's log.
-    pub(crate) async fn body(h: &Harness, run: &Run<'_>) -> bool {
+    /// One run: the client writes; then `rounds` rounds of replica timers followed by a ZK
+    /// timer. Omissions are allowed only in the first round (the replication of the write);
+    /// crashes anywhere. The verdict is the specification's.
+    pub(crate) async fn body(h: &Harness, run: &Run<'_>) {
         let Shape {
             members,
             rounds,
@@ -887,39 +915,6 @@ pub(crate) mod harness {
             h.zk_timer.send(());
             hydro_lang::sim::quiesce().await;
         }
-
-        let acked: Vec<Write> = h.client_acks.collect_sorted().await;
-        let views: Vec<View> = h.views.collect().await;
-        let final_view = views.last().cloned().unwrap_or_else(|| View {
-            leader: Some(0),
-            isr: (0..members).collect(),
-        });
-        let mut logs = vec![];
-        for m in 0..members {
-            let log: Vec<Write> = h.appended.collect_sorted(m).await;
-            logs.push(log);
-        }
-
-        // The goal is checked on the first write; the others are load. Nothing acknowledged
-        // (the pre-condition fails) or no leader could be chosen (unavailable, not unsafe):
-        // the goal holds vacuously and has no derivation to record.
-        let Some(leader) = final_view.leader else {
-            run.mark_vacuous();
-            return true;
-        };
-        if !acked.contains(&Write(1)) {
-            run.mark_vacuous();
-            return true;
-        }
-        // The pre-condition: the acknowledgement the goal is conditioned on.
-        run.require(&h.client_acks, &Write(1));
-        // The post-condition rests on who the final leader is (a final-state fact: the last
-        // view ZK published, which also rests on nothing superseding it) and on its log.
-        if !views.is_empty() {
-            run.witness_final(&h.views, &final_view);
-        }
-        run.witness_member(&h.appended, leader, &Write(1));
-        logs[leader as usize].contains(&Write(1))
     }
 }
 
@@ -940,7 +935,7 @@ mod tests {
         let (compiled, h, configure) = compile(unclean, encoding, DEFAULT_SHAPE, 8);
         configure(crashes)
             .exploration(Exploration::Fuzz { instances: SAMPLED })
-            .run(&compiled, async |run| body(&h, run).await)
+            .search(&compiled, async |run| body(&h, run).await)
     }
 
     /// Unclean election loses an acknowledged write: a replication message is lost, the
@@ -1018,7 +1013,7 @@ mod tests {
             let outcome = configure(1)
                 .level(level)
                 .exploration(Exploration::Fuzz { instances: 1 })
-                .run(&compiled, async |run| body(&h, run).await);
+                .search(&compiled, async |run| body(&h, run).await);
             eprintln!("attempt {attempt}: {outcome}");
             if matches!(outcome, Outcome::Certificate { .. }) {
                 panic!("false certificate on attempt {attempt}");
@@ -1069,12 +1064,12 @@ mod tests {
             let ldfi = configure(crashes)
                 .exploration(Exploration::Fuzz { instances: SAMPLED })
                 .quiet()
-                .run(&compiled, async |run| body(&h, run).await);
+                .search(&compiled, async |run| body(&h, run).await);
             let blind = configure(crashes)
                 .strategy(Strategy::Blind)
                 .exploration(Exploration::Fuzz { instances: SAMPLED })
                 .quiet()
-                .run(&compiled, async |run| body(&h, run).await);
+                .search(&compiled, async |run| body(&h, run).await);
             // The fuzzer draws from the same vocabulary: crashes, and omission of every message
             // observed on a lossy channel in the failure-free run. It gets as many instances as
             // the blind search spent.
@@ -1086,7 +1081,10 @@ mod tests {
                 &compiled_fuzz,
                 &omittable,
                 &crash_points,
-                async |run| body(&h_fuzz, run).await,
+                async |run| {
+                    body(&h_fuzz, run).await;
+                    true
+                },
             );
             eprintln!(
                 "{:<12} {:<8} {:>3} | {} | {} | {:>8} {:>4}",

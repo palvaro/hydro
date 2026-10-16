@@ -353,7 +353,10 @@ mod grid {
                         &format!("n={n} cr={crashes}"),
                         &sim,
                         &|| configure(crashes),
-                        async |run: &Run<'_>| two_pc::body(&h, run).await,
+                        async |run: &Run<'_>| {
+                            two_pc::body(&h, run).await;
+                            true
+                        },
                         SEEDS_2PC,
                         &[
                             FuzzDraw::Bernoulli,
@@ -393,7 +396,10 @@ mod grid {
                         ),
                         &sim,
                         &|| configure(1),
-                        async |run: &Run<'_>| isr::body(&h, run).await,
+                        async |run: &Run<'_>| {
+                            isr::body(&h, run).await;
+                            true
+                        },
                         SEEDS_ISR,
                         &[FuzzDraw::Bernoulli, FuzzDraw::UpTo(2)],
                     );
@@ -619,7 +625,10 @@ mod grid {
                         &format!("n=3 cr={crashes} load={txns}"),
                         &sim,
                         &|| configure(crashes),
-                        async |run: &Run<'_>| two_pc::body(&h, run).await,
+                        async |run: &Run<'_>| {
+                            two_pc::body(&h, run).await;
+                            true
+                        },
                         SEEDS_2PC,
                     );
                 }
@@ -648,7 +657,10 @@ mod grid {
                             &format!("{encoding:?} m=3 r=4 load={writes}").to_lowercase(),
                             &sim,
                             &|| configure(1),
-                            async |run: &Run<'_>| isr::body(&h, run).await,
+                            async |run: &Run<'_>| {
+                                isr::body(&h, run).await;
+                                true
+                            },
                             SEEDS_ISR,
                         );
                     }
