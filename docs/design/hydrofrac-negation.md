@@ -243,6 +243,31 @@ no warning at all. It is a static IR walk of a small graph; the polarity rules a
 operator the `Spec` examples use. Cost: a day; risk: operators with no obvious polarity (`fold`
 with an arbitrary closure, `reduce`) must be treated as unknown and warned about.
 
+*Built* (`hydro_lang/src/sim/polarity.rs`), as a grade rather than a gate: the search prints each
+view's grade before its first run and every certificate under a `Spec` says whether it is within
+the fault model (`POST` monotone) or relative to the recorded derivations persisting. The walk
+runs on the IR before the provenance rewrite and reads the user's closures from their staged
+tokens. It classifies: the leaves (a `Network` receive at the observer is tagged; `sim_input`,
+constants and `source_iter` are stratum 0); the sign-preserving operators of section 4;
+`Difference` / `AntiJoin` (negative side flipped); a `Filter` / `FilterMap` on a singleton or
+optional whose predicate is a comparison of the parameter with an integer literal (`== 0`,
+`<= k`, `< k` flip; `!= 0`, `>= k`, `> k` keep; `== k`, `!= k` for `k > 0` both ways);
+`Fold` whose accumulator is `*n += 1` (a count, grows with its input); `Reduce` downstream of
+`enumerate` (a final value: non-monotone). It cannot classify, and grades unknown with the
+reason: a predicate on a `zip` of two aggregates (`delivering == correct`), a `fold` with any
+other accumulator, a `reduce` not over a sequence (which element wins is not syntactic), a
+`scan` (so `first()` and `last()`, which are generators), a `flat_map` on an aggregate's value.
+Both-ways signs that arise only through an unclassified operator are reported as unknown, not as
+non-monotone; `NonMonotone` is reserved for a tagged leaf reached negatively or both ways along a
+path the walk understood, or for a final value. On the harnesses: the agreement `POST` written
+with `filter_not_in` grades monotone, exactly as the rule above predicts, and takes the
+counterfactual derivation alone; the positive agreements grade unknown; ISR's final view grades
+non-monotone. The "exactly one" and "some correct member has not delivered" views of section 4
+grade non-monotone (`== 1` both ways; `> 0` after a difference whose positive side is the tagged
+one). The control in the broadcast harness is integrity, "no member delivered `m` twice", which
+is true, non-monotone, and certified after one run with an empty derivation: the grade is the
+only thing that distinguishes that certificate from an earned one.
+
 **(c) Why-not provenance by rewriting.** Reconstructing, for a fact that holds through absence, the
 derivations of the absent facts that would have had to exist, Molly-style. This needs a bounded
 enumeration of what *could* have been derived, which in Molly came from the logical-time horizon.
@@ -262,8 +287,8 @@ scheduler change (two draw sites plus the hooks' `autonomous_decision`s), the re
 `Driver` backed by the trace, and the continuation policy after an override is new design. It does
 not change section 4.
 
-Recommendation: (a) now, (b) immediately after, with the empty-derivation warning kept as a
-backstop; (d) as the next substrate step, with (a) as its first instance. Document the rule of
+Recommendation: (a) and (b) are built, with the empty-derivation warning kept as a backstop; (d)
+is the next substrate step, with (a) as its first instance. Document the rule of
 section 4 in `spec.rs` in place of "write `POST` positively": the requirement is monotonicity in the
 intervenable facts, not the absence of negation, and the agreement `POST` may be written the natural
 way.
@@ -272,8 +297,8 @@ way.
 
 `hydrofrac.md` §6.5 notes that deduplicating operators (`unique`, `first`) keep the first
 provenance seen for a record, so a view's alternative supports surface one hypothesis at a time
-(reliable broadcast under one crash: 15 hypotheses, each member's crash point refuted by its own
-run). Counterfactual lineage at the observer does not change this: greedy deletion returns *one*
+(reliable broadcast under one crash: 10 hypotheses, each member's relevant crash point refuted by
+its own run). Counterfactual lineage at the observer does not change this: greedy deletion returns *one*
 1-minimal sufficient set, the one its deletion order (latest first) leaves standing; the derivation
 through an echo rather than the broadcaster's send is not enumerated. Several derivations per fact
 would need repeated deletion under different orders or a ddmin-style enumeration of minimal

@@ -210,10 +210,34 @@ impl<'a> SimFlow<'a> {
             );
         }
 
+        // The polarity of specification views, read off the user's closures before the
+        // provenance rewrite wraps them: every external output published at an observer.
+        let mut published: BTreeMap<LocationId, Vec<_>> = BTreeMap::new();
+        for root in &self.ir {
+            if let HydroRoot::SendExternal {
+                to_port_id, input, ..
+            } = root
+            {
+                let location = input.metadata().location_id.root();
+                if self.eager_locations.contains(location) {
+                    published
+                        .entry(location.clone())
+                        .or_default()
+                        .push(*to_port_id);
+                }
+            }
+        }
+        let view_polarity: BTreeMap<_, _> = published
+            .iter()
+            .flat_map(|(observer, ports)| super::polarity::compute(&self.ir, observer, ports))
+            .collect();
+
         if self.provenance {
             super::provenance::rewrite(&mut self.ir);
         }
-        let slices = Rc::new(super::slice::compute(&mut self.ir));
+        let mut slices = super::slice::compute(&mut self.ir);
+        slices.view_polarity = view_polarity;
+        let slices = Rc::new(slices);
 
         let mut seen_tees = HashMap::new();
         let mut built_tees = HashMap::new();
