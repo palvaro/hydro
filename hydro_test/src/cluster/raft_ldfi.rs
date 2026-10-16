@@ -4,11 +4,12 @@
 //! `by_mut` handles. Under the provenance rewrite the step's outputs are *opaque*
 //! (`Prov::OPAQUE`), and their lineage is derived by counterfactual replay of the member.
 //!
-//! The goal is **agreement** (state machine safety): no two members commit different entries
-//! at the same index, conditioned on a leader having committed its request
-//! (`Run::require_member`). Three members, members crashable, intra-cluster traffic on a lossy
-//! channel (omissions until the end of finite failures, which the body declares once that
-//! entry has been replicated and committed).
+//! The specification is **agreement** (state machine safety), as views over the members'
+//! committed entries (`hydro_lang::sim::spec`): `PRE`, member 0 committed its request `a`;
+//! `POST`, no two committed entries at the same index disagree, over the correct members and
+//! member 0's own commits while it lived. Three members, members crashable, intra-cluster
+//! traffic on a lossy channel (omissions until the end of finite failures, which the body
+//! declares once that entry has been replicated and committed).
 //!
 //! The scenario lets the simulator's interleavings and the search's faults compose. Member 1
 //! wins term 1 and receives request `b`; member 0's election timer fires in the same phase,
@@ -27,12 +28,14 @@
 #[cfg(test)]
 mod tests {
     use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
+    use hydro_lang::location::MemberId;
     use hydro_lang::prelude::*;
+    use hydro_lang::sim::SimClusterSender;
     use hydro_lang::sim::compiled::CompiledSim;
     use hydro_lang::sim::ldfi::{Exploration, Fault, Ldfi, Level, Outcome, Run, Strategy};
-    use hydro_lang::sim::{SimClusterReceiver, SimClusterSender};
+    use hydro_lang::sim::spec::Spec;
 
-    use crate::cluster::raft::{LeaderView, LogEntry, RaftConfig, RaftHooks, Replica, raft_server};
+    use crate::cluster::raft::{RaftConfig, RaftHooks, Replica, raft_server};
 
     const MEMBERS: u32 = 3;
     /// Schedules sampled per hypothesis.
@@ -42,8 +45,6 @@ mod tests {
         election: SimClusterSender<(), TotalOrder, ExactlyOnce>,
         heartbeat: SimClusterSender<(), TotalOrder, ExactlyOnce>,
         requests: SimClusterSender<String, TotalOrder, ExactlyOnce>,
-        committed: SimClusterReceiver<LogEntry<String>, TotalOrder, ExactlyOnce>,
-        views: SimClusterReceiver<LeaderView<Replica>, TotalOrder, ExactlyOnce>,
     }
 
     /// Compiles a three-member RAFT cluster with every batch hooked, with or without the
@@ -53,6 +54,20 @@ mod tests {
     }
 
     /// [`compile`] with the number of instances a `fuzz` / `fuzz_faults` run gets.
+    ///
+    /// The specification, over the committed entries as `(index, message)` facts per member:
+    ///
+    /// - `PRE`: member 0 committed `a`. Member 0 is the leader of term 2 in the scenario; its
+    ///   commit is observed while it lives, so a crash after the commit keeps `PRE` (and the
+    ///   crash right after each send in `PRE`'s lineage is a preserve point).
+    /// - `POST`: agreement at every index among the entries that count, the correct members'
+    ///   and member 0's own: the distinct `(index, message)` pairs are as many as the distinct
+    ///   indices. Stated as a count comparison so every committed entry contributes to the
+    ///   view's lineage (the first version named each as a witness). Agreement is a property
+    ///   about the *absence* of a conflict, so it is not monotone in the facts: a hypothesis
+    ///   breaks it by making a member commit something *else*, which in this protocol also
+    ///   removes that member's recorded commit of `a` (the lost `AppendEntries(a)`), which is
+    ///   why the search still proposes it; see `hydrofrac-negation.md` §4.
     fn compile_with(
         bug: bool,
         fuzz_iterations: usize,
@@ -80,8 +95,42 @@ mod tests {
                 hook = hooks
             ),
         );
-        let committed = outputs.committed.end_atomic().sim_cluster_output();
-        let views = outputs.leader_views.sim_cluster_output();
+        // The specification.
+        let mut spec = Spec::new(&mut flow);
+        let committed = spec.observe_cluster(
+            outputs
+                .committed
+                .end_atomic()
+                .weaken_consistency()
+                .map(q!(|entry| (entry.index, entry.message))),
+        );
+        let correct = spec.correct_members(&cluster, 0..MEMBERS);
+        let leader_committed_a = committed
+            .clone()
+            .filter(q!(|(member, (_, message))| {
+                *member == MemberId::<Replica>::from_raw_id(0) && message == "a"
+            }))
+            .first();
+        spec.pre(leader_committed_a);
+        // The entries that count: the correct members' (while the run lasts) and member 0's
+        // own while it lived.
+        let by_correct = committed
+            .clone()
+            .join(correct.map(q!(|member| (member, ()))))
+            .map(q!(|(_, (entry, ()))| entry));
+        let by_leader = committed
+            .filter(q!(
+                |(member, _)| *member == MemberId::<Replica>::from_raw_id(0)
+            ))
+            .map(q!(|(_, entry)| entry));
+        let counted = by_leader.chain(by_correct);
+        let pairs = counted.clone().unique().count();
+        let indices = counted.map(q!(|(index, _)| index)).unique().count();
+        spec.post(
+            pairs
+                .zip(indices)
+                .filter(q!(|(pairs, indices)| pairs == indices)),
+        );
 
         let cluster_id = cluster.clone();
         let mut sim = flow
@@ -98,8 +147,6 @@ mod tests {
             election,
             heartbeat,
             requests,
-            committed,
-            views,
         };
         let configure = move |crashes: usize| {
             // The step closure is opaque to the recorded lineage levels; record provenance
@@ -110,7 +157,7 @@ mod tests {
                 .level_from_env()
                 .crashable_cluster("raft", &cluster_id, 0..MEMBERS)
                 .crash_budget(crashes)
-                .goal_witnessed()
+                .spec(&spec)
         };
         (compiled, harness, configure)
     }
@@ -119,10 +166,8 @@ mod tests {
     /// election interrupt land in the same phase, so the schedule decides whether 0 wins
     /// term 2. Then request `a` at 0, two heartbeat rounds, the end of finite failures;
     /// member 1's interrupt twice (the first fire is suppressed if it saw a heartbeat),
-    /// request `y` at 1, two of its heartbeat rounds. Goal: if member 0 committed `a`, no two
-    /// committed entries (across correct members, and member 0's own while it lived) disagree
-    /// at an index.
-    async fn body(h: &Harness, run: &Run<'_>) -> bool {
+    /// request `y` at 1, two of its heartbeat rounds. The verdict is the specification's.
+    async fn body(h: &Harness, run: &Run<'_>) {
         h.election.send(1, ());
         hydro_lang::sim::quiesce().await;
         h.requests.send(1, "b".to_owned());
@@ -145,42 +190,6 @@ mod tests {
             h.heartbeat.send(1, ());
             hydro_lang::sim::quiesce().await;
         }
-
-        let mut committed: Vec<Vec<LogEntry<String>>> = vec![];
-        for m in 0..MEMBERS {
-            committed.push(h.committed.collect::<Vec<_>>(m).await);
-        }
-        for m in 0..MEMBERS {
-            let _views: Vec<LeaderView<Replica>> = h.views.collect(m).await;
-        }
-
-        // Pre-condition: member 0 was elected and committed `a` (observable while it lived).
-        let Some(a) = committed[0].iter().find(|e| e.message == "a").cloned() else {
-            run.mark_vacuous();
-            return true;
-        };
-        run.require_member(&h.committed, 0, &a);
-
-        // Post-condition: agreement at every index. Every committed entry is a witness.
-        let mut by_index: std::collections::BTreeMap<usize, String> =
-            std::collections::BTreeMap::new();
-        let mut held = true;
-        for m in 0..MEMBERS {
-            if m != 0 && run.crashed_member("raft", m) {
-                continue;
-            }
-            for entry in &committed[m as usize] {
-                run.witness_member(&h.committed, m, entry);
-                match by_index.get(&entry.index) {
-                    Some(message) if *message != entry.message => held = false,
-                    Some(_) => {}
-                    None => {
-                        by_index.insert(entry.index, entry.message.clone());
-                    }
-                }
-            }
-        }
-        held
     }
 
     fn search(bug: bool, crashes: usize, strategy: Strategy) -> Outcome {
@@ -190,7 +199,7 @@ mod tests {
             .exploration(Exploration::Fuzz {
                 instances: SCHEDULES,
             })
-            .run(&compiled, async |run| body(&h, run).await)
+            .search(&compiled, async |run| body(&h, run).await)
     }
 
     /// RAFT keeps agreement across a leader change under omissions and one crash: a
@@ -267,7 +276,10 @@ mod tests {
                             crash_points: &crash_points,
                             draw,
                         },
-                        async |run| body(&h, run).await,
+                        async |run| {
+                            body(&h, run).await;
+                            true
+                        },
                     );
                     vacuous_total += vacuous;
                     match violation {
