@@ -1,29 +1,34 @@
 # Hydrofrac: lineage-driven fault injection on the Hydro simulator
 
-Status: working prototype (feature `ldfi` of `hydro_lang`, tests in `hydro_test`), on its second
-fault substrate: the sender-side filter of section 5, which replaced the receiver-side hook
-policies of the first version (section 11 records the redesign). This document is written for
-the Hydro core team. It explains what hydrofrac is,
-how it relates to LDFI as published, exactly how it uses the simulator's hooks to inject faults
-and to collect lineage, and what a user has to write to run it on a protocol. The research log
-with every experiment and every soundness bug along the way is `ldfi-on-sim-hooks.md`; this
-document is the summary.
+Status: working prototype (feature `ldfi` of `hydro_lang`, tests in `hydro_test`), after three
+rounds. The first built the search on the simulator's scripted hooks; the second moved the fault
+point to a filter on every network send (section 5, with section 11 recording why); the third
+replaced hand-named goals by specifications written as Hydro views (section 6.5) and worked out
+what counterfactual lineage does and does not buy for them (`hydrofrac-negation.md`). This
+document is written for the Hydro core team. It explains what hydrofrac is, how it relates to
+LDFI as published, exactly how it uses the simulator to inject faults and to collect lineage,
+what a user writes to run it on a protocol, what it has found, and what remains. The research
+log with every experiment and every soundness bug along the way is `ldfi-on-sim-hooks.md`; this
+document is the summary. Section 12 is the roadmap.
 
 ## 1. What it is, in one paragraph
 
-Hydrofrac is a test harness that takes a Hydro program, a correctness property, and a fault model
-(which channels may lose messages, which nodes may crash, how many crashes), and searches for a
-combination of faults that makes the property fail. The property is stated twice: as a Rust
-verdict over the program's outputs, which decides pass or fail, and as a declaration of which
-output facts witness it and which it is conditioned on (`witness`, `require`), which is what
-lineage traces; hydrofrac does not check that the two agree (§8.2). It does this with the Hydro
-simulator: every candidate fault set is one simulator run, and the simulator's own
-schedule explorer runs underneath, so a counterexample is a fault set plus an interleaving. The
-search is lineage-driven: after each run in which the property held, hydrofrac computes which
-message deliveries that outcome depended on, and the next fault set is chosen so that it breaks
-every explanation seen so far. The search ends either with a counterexample or with a proof that
-no fault set within the model can break the property (a certificate), and in both cases every
-hypothesis it tried comes with the derivation that motivated it.
+Hydrofrac is a test harness that takes a Hydro program, a correctness specification, and a fault
+model (which nodes may crash and how many; which channels may lose messages follows from the
+transports the program declares), and searches for a combination of faults that makes the
+specification fail. The specification is two views written in Hydro over the program's outputs,
+`PRE` and `POST`, evaluated on an observer the simulator adds: a run in which `PRE` holds and
+`POST` does not is a counterexample, exactly as in LDFI as published, and because the views are
+dataflow they have lineage. It does this with the Hydro simulator: every candidate fault set is
+one simulator run, and the simulator's own schedule explorer runs underneath, so a counterexample
+is a fault set plus an interleaving. The search is lineage-driven: after each run in which `POST`
+held, hydrofrac computes which message deliveries that outcome depended on, and the next fault
+set is chosen so that it breaks every explanation seen so far. The search ends either with a
+counterexample or with a certificate that no fault set within the model can break the
+specification, and in both cases every hypothesis it tried comes with the derivation that
+motivated it. The certificate is a proof only under exhaustive schedule exploration and only for
+specifications that are monotone in the facts they observe; section 6.5 and
+`hydrofrac-negation.md` say what that means and how often it holds.
 
 ## 2. LDFI as published, briefly
 
@@ -50,11 +55,16 @@ did not explore message reordering.
 It is LDFI in the ways that matter for the method.
 
 - The fault vocabulary is Molly's: omission of a message on a lossy channel, permanent crash of
-  a node, `EFF`, a crash budget, and a horizon set by the test body.
+  a node, a crash budget, and a horizon set by the test body (Molly's `EFF` survives as an
+  optional bound; section 10).
+- The specification is Molly's: `PRE` and `POST` as views in the program's own language over
+  derived facts, so the search negates the lineage of a *view*, not of one concrete message
+  (section 6.5).
 - The loop is Molly's: run, derive, negate, solve, run again, until counterexample or
   certificate. Hypotheses are minimal hitting sets over the derivations, chosen weakest-first.
-- Over-approximate lineage is accepted as sound, under-approximate lineage is a bug, and three
-  false certificates during development were traced to under-approximation and fixed.
+- Over-approximate lineage is accepted as sound, under-approximate lineage is a bug, and every
+  false certificate during development (four so far) was traced to under-approximation and
+  fixed.
 - Certificates are the distinctive product: random and coverage-guided fuzzers cannot produce
   one.
 
@@ -676,6 +686,48 @@ load 8: 11 hypotheses vs 73 for the slice levels); the slice is not a substitute
 closure-encoded ISR, replay turns 14/27 (bug/certificate) into 6/14, better than the dataflow
 encoding under record provenance (10/18).
 
+### 9.1 The same bug under Maelstrom
+
+To place the Raft result against an established tool, the same injected bug was run under
+Maelstrom (Jepsen's workbench), through a Raft-backed `lin-kv` workload written for the purpose
+(`hydro_test/src/maelstrom/lin_kv_raft.rs`; there was none in the repository). Twelve runs, 29
+minutes of test time, three and five nodes, partitions every 1–10 s, uniform and exponential
+latency, rates 3–100: ~1,900 leader elections, no linearizability anomaly, and an in-node oracle
+that prints whenever a committed index is overwritten never fired. The correct configuration
+passes every run, so the adapter is not the problem. Hydrofrac finds the bug in 17 hypotheses, 68
+instances of ~30 ms: about two seconds of simulation.
+
+The bug never *occurred* under Maelstrom, which is a statement about search and fault model, not
+about the checker. The trigger is a conjunction: a node holding an unreplicated entry at an index
+where a different entry has been committed, campaigning while its index is still at least the
+majority's, before a heartbeat reaches it. Four things keep Maelstrom away from it.
+
+1. The search is undirected: faults are drawn from a fixed distribution and nothing about run
+   `n` informs run `n + 1`. Hydrofrac's lineage of the committed entry names
+   `AppendEntries(a)→1` as something the good outcome rested on, so its omission is a weakest-first
+   hypothesis within the first runs; the explanation of the good outcome contains the recipe for
+   the bad one.
+2. The fault vocabulary has the wrong shape. The trigger is *selective* loss (drop `a` to member
+   1, deliver what follows, so 1's index keeps pace while its content diverges). A partition drops
+   every message on a link for an interval; the only "lose this, deliver the next" it expresses is
+   its own boundary. Hydrofrac's omission is a standing filter on one message identity.
+3. Load heals the bug. Under a partition the majority keeps committing client operations while
+   the isolated node's clients time out, so the isolated node's log falls *behind*, and the
+   index-only check then correctly denies it the vote. Continuous traffic, which makes the
+   workload realistic, masks the defect; hydrofrac's body issues two requests and the stale log is
+   as long as the others' by construction of the hypothesis.
+4. Timers are not the test's to fire. The deposed node must campaign before the new leader's
+   heartbeat reaches it; after a heal the heartbeat almost always wins that race. The simulator
+   body fires the election timer in the phase where it matters and the explorer enumerates the
+   remaining order.
+
+This is a result about one bug class (interleaving plus selective loss) and about Maelstrom's
+built-in nemeses; a nemesis that drops individual messages would help with the second point and
+none of the others. Maelstrom earned its keep regardless: its first run exposed a real bug in
+Hydro's Maelstrom backend (every cluster-to-cluster channel shared one untagged message type, so
+a program with two such channels deserialized each other's bytes), a code path no simulator test
+exercises. Different tools find different failure classes.
+
 ## 10. Limitations and what is not built
 
 - **The filter is a simulator artefact.** It lives in the simulator's compilation of `Network`
@@ -691,13 +743,19 @@ encoding under record provenance (10/18).
   omission candidates are the sends the run observed, so `end_of_finite_failures` is only an
   optional bound a body may impose (reliable delivery uses it to make "try twice" fail in bounded
   rounds). It should not shape the design further.
-- **Hand-named goals are unchecked.** Under the first version's goal API the goal shape and the
-  body's verdict can disagree, and a forgotten requirement or an "ever" fact that should have
-  been "final" is a wrong certificate with no warning. A [`Spec`](#65-specifications-pre-and-post-as-views)
-  removes this: the verdict and the lineage are the same views. Its own gap is a view that is
-  only falsifiable by adding a fault without removing an observed fact (section 6.5): the
-  observer's counterfactual cannot intervene on the fault model's facts, the derivation is
-  empty, and the search warns but cannot repair it.
+- **Certificates assume monotonicity, and the interesting properties are not monotone.** The
+  hitting-set inference ("a fault set that leaves this derivation intact cannot break `POST`")
+  is valid only for views monotone in the facts they observe. Agreement is the *absence* of a
+  conflict; durability of a write rests on the *final* leader view; both are non-monotone, and
+  `hydrofrac-negation.md` shows a false certificate from exactly this on ISR before the observer
+  derivation was made the union of counterfactual and recorded lineage. The search now finds
+  these bugs because the breaking hypothesis also displaces a recorded fact in `POST`'s
+  derivation; a conflict that appeared without displacing one would not be proposed. The
+  certificate for such a property is relative to that, and nothing in the tool yet says so: a
+  polarity check of the observer's dataflow that grades the certificate is the next piece of
+  work (section 12). The first version's hand-named goal API (`goal`, `witness`, `require`) is
+  still present and unused; it had the same gap and more (a forgotten requirement or an "ever"
+  fact that should have been "final" was a wrong certificate with no warning).
 - **One derivation per record.** Deduplicating operators keep the first provenance seen, so a
   view's alternatives surface one hypothesis at a time (section 6.5).
 - **Replay assumes monotone steps.** A 1-minimal sufficient set found by greedy deletion is one
@@ -841,3 +899,36 @@ partitions at the filter; the receive-side source that would let replay feed rec
 into a node without hooks, which is what would let `BatchHook` drop out of lineage entirely.
 The simulator-side obligations of 11.3 (determinism, schedule exploration, replay, barriers)
 are unchanged.
+
+## 12. Where it stands, and what next
+
+Built, across the three rounds: the search loop with an ILP hitting-set solver; the sender-side
+filter as the fault point, with every channel a fault point by construction and the transport
+type as the fault model; message-named crash points; four lineage levels, with record provenance
+exact to the send and counterfactual replay at node granularity; specifications as Hydro views on
+an observer, derived by intervention and by record provenance together; five protocols on the
+same harness shape (reliable delivery, broadcast, 2PC with cooperative termination, ISR
+replication, Raft), each reproducing its published or injected bug and certifying the correct
+variant; and a comparison against Maelstrom on the Raft bug (section 9.1).
+
+Next, in the order that soundness requires.
+
+1. **Polarity check of the specification.** A walk over the observer's dataflow assigning
+   polarities from the `POST` sink to the observed leaves (`hydrofrac-negation.md` §4 has the
+   per-operator rules). Its output is a *grade* on the certificate, not a gate on the search:
+   "monotone view, certificate within the fault model and the explored schedules" versus
+   "non-monotone view (operators: ...), certificate relative to the recorded derivations
+   persisting". Where the view is monotone it also licenses the counterfactual derivation alone,
+   recovering the minimal derivations (broadcast 10 / 32 hypotheses instead of 15 / 89).
+2. **Decision-trace replay.** Record every nondeterministic decision of a run (the scheduler's
+   draws, the hooks' releases, the filter's fates) and replay a prefix exactly with one decision
+   overridden. This is the general counterfactual oracle of which node-level replay is the
+   coarse instance: why and why-not for any fact at any step, without hooks, and a decision
+   sequence rather than entropy bytes as the counterexample's schedule. It is worth building only
+   if (1) shows the certificates it would strengthen are the ones users want; it does not by
+   itself repair the inference for non-monotone views.
+3. **More protocols.** Section 9 covers the paper's examples plus Raft. Candidates in the
+   repository: the Paxos family (`paxos.rs`, `compartmentalized_paxos.rs`, `paxos_with_client.rs`)
+   with agreement and validity as views, and the replicated key-value store (`kv_replica`) with
+   a linearizability-shaped specification; each is a protocol written without hydrofrac in mind,
+   which is the retrofit the effort table (section 8.4) has not yet measured.
