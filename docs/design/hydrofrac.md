@@ -636,6 +636,7 @@ toolchain and `libclang`. The `ldfi` feature of `hydro_lang` gates everything.
 | 2PC + CTP | none required; channels named | ~200 lines + a comparison harness | goal conditioned on a commit |
 | ISR replication | `Hooks` struct with 9 hooks, kept for Level 3; channels named | ~180 lines + the measurement grid | `witness_final` on the view |
 | Raft | `RaftHooks` struct, 4 batch sites, ~50 lines, kept for Level 3 | ~180 lines, body ~60 | 4 schedules/hypothesis |
+| `collect_quorum` (library) | none: an ~80-line program around the unchanged library call | ~130 lines | the first library-level target |
 
 The hook structs predate the filter; they stay because counterfactual replay needs them (section
 6.4), and because the protocols' other tests script them. Nothing else in the protocols exists
@@ -657,6 +658,19 @@ section 6.5; 10 and 32 with the counterfactual alone), both under the one
 agreement specification of section 6.5; 2PC breaks under one coordinator crash, 2PC with
 cooperative termination certifies under one crash and breaks under two (coordinator after one
 commit, then the participant that got it); ISR's unclean election reproduces the Kafka bug.
+
+It also works at the library level. `hydro_std::quorum::collect_quorum` counts *replies*, not
+*responders*, and leaves deduplication to the caller; `hydro_test/src/distributed/quorum_ldfi.rs`
+puts it between a coordinator and three retransmitting responders over lossy channels (~80
+lines of program, ~130 of harness, no changes to the library) under two specifications. The
+quorum claim ("a declared quorum rests on replies from at least two distinct responders")
+certifies for the deduplicating caller in 28 hypotheses and breaks for the caller that feeds the
+library every reply in 5: silence two responders (`{omit req[→0], omit req[→1]}`) and the
+third's retransmitted reply is counted twice. Availability of a one-shot request breaks in 2
+hypotheses under the same two omissions, the paper's "try once" shape. Every operator
+`collect_quorum` uses is in the provenance rewrite; the harness runs on sampled schedules
+(eight per hypothesis) because three responders answering twice each give ~5,600
+interleavings under exhaustive exploration.
 
 The headline is Raft. `raft.rs` has thirteen behavioural tests including unit tests of the
 §5.4.1 election restriction and two fuzz tests of concurrent elections; none exercises message
@@ -927,8 +941,27 @@ Next, in the order that soundness requires.
    sequence rather than entropy bytes as the counterexample's schedule. It is worth building only
    if (1) shows the certificates it would strengthen are the ones users want; it does not by
    itself repair the inference for non-monotone views.
-3. **More protocols.** Section 9 covers the paper's examples plus Raft. Candidates in the
-   repository: the Paxos family (`paxos.rs`, `compartmentalized_paxos.rs`, `paxos_with_client.rs`)
-   with agreement and validity as views, and the replicated key-value store (`kv_replica`) with
-   a linearizability-shaped specification; each is a protocol written without hydrofrac in mind,
-   which is the retrofit the effort table (section 8.4) has not yet measured.
+3. **More protocols.** Section 9 covers the paper's examples, Raft, and the quorum building
+   block. Candidates in the repository: the Paxos family (`paxos.rs`,
+   `compartmentalized_paxos.rs`, `paxos_with_client.rs`) with agreement and validity as views,
+   and the replicated key-value store (`kv_replica`) with a linearizability-shaped
+   specification; each is a protocol written without hydrofrac in mind, which is the retrofit
+   the effort table (section 8.4) has not yet measured.
+
+   **Membership change** is the richest vein historically (Raft's joint consensus, the
+   ZooKeeper reconfiguration anomalies) and there is nothing on this branch to run it on yet.
+   `hydro_std::membership::track_membership` is a 19-line fold over `MembershipEvent`s;
+   `source_cluster_membership_stream` is a deployment-time input (ECS discovery) that the
+   simulator renders as a static "everyone joined" stream (`sim/graph.rs`); no protocol in
+   `hydro_test` changes its configuration while running (`dyn_raft` lives on `main`, not here).
+   When one exists, the shape is: the specification is agreement *across an epoch boundary*
+   ("no index is committed with two values by members of the old or the new configuration, and
+   every entry committed under the old configuration is in the logs of the new one"), with the
+   configuration-change entries observed as sequenced facts so "old" and "new" are views; the
+   fault model is a crash *during* reconfiguration (the leader after sending the joint
+   configuration to some members but not others, which the message-named crash points express
+   directly) plus omission of the configuration entries themselves; and the simulator needs
+   membership events as a driven input (a `sim_input` of `MembershipEvent`, so the body can
+   stage a join or a leave) and a decision about whether a crashed member is also `Left`
+   (today a crash is silent; `correct_members` would have to reflect the epoch). None of that
+   is hard; the protocol is the work.
