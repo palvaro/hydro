@@ -117,7 +117,7 @@ impl<'a> Deploy<'a> for MaelstromDeploy {
         _c1: &Self::Cluster,
         _c1_port: &<Self::Cluster as Node>::Port,
         _c2: &Self::Cluster,
-        _c2_port: &<Self::Cluster as Node>::Port,
+        c2_port: &<Self::Cluster as Node>::Port,
         _name: Option<&str>,
         networking_info: &crate::networking::NetworkingInfo,
         _external_types: Option<(&syn::Type, &syn::Type)>,
@@ -137,7 +137,7 @@ impl<'a> Deploy<'a> for MaelstromDeploy {
             },
             NetworkingInfo::Udp { .. } => {} // UDP is always lossy, which is always allowed
         }
-        deploy_maelstrom_m2m(RuntimeData::new("__hydro_lang_maelstrom_meta"))
+        deploy_maelstrom_m2m(RuntimeData::new("__hydro_lang_maelstrom_meta"), c2_port)
     }
 
     fn m2m_connect(
