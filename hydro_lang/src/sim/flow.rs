@@ -13,7 +13,7 @@ use super::builder::SimBuilder;
 use super::compiled::{CompiledSim, CompiledSimInstance};
 use super::graph::{SimDeploy, SimExternal, SimNode, compile_sim, create_sim_graph_trybuild};
 use crate::compile::builder::StmtId;
-use crate::compile::ir::HydroRoot;
+use crate::compile::ir::{HydroNode, HydroRoot};
 use crate::location::LocationKey;
 use crate::location::dynamic::LocationId;
 use crate::prelude::Cluster;
@@ -213,6 +213,7 @@ impl<'a> SimFlow<'a> {
         if self.provenance {
             super::provenance::rewrite(&mut self.ir);
         }
+        collapse_ticks_around_atomic(&mut self.ir);
         let slices = Rc::new(super::slice::compute(&mut self.ir));
 
         let mut seen_tees = HashMap::new();
@@ -360,4 +361,36 @@ impl<'a> SimFlow<'a> {
 
         (cluster_sizes, cluster_member_ids)
     }
+}
+
+/// A tick created on an atomic location (`Tick { tick: None, parent_location: Atomic(t) }`, as
+/// `Optional::or` does on a top-level atomic optional) is the atomic region's own tick `t`:
+/// production emission places it in `t`'s loop. The simulator keys its per-tick DFIR graphs
+/// and hooks by the location, so the alias is rewritten to `t` before emission.
+fn collapse_ticks_around_atomic(ir: &mut [HydroRoot]) {
+    fn collapse(location: &mut LocationId) {
+        match location {
+            LocationId::Tick {
+                tick: None,
+                parent_location,
+            } => {
+                collapse(parent_location);
+                if let LocationId::Atomic(inner) = parent_location.as_ref() {
+                    *location = inner.as_ref().clone();
+                }
+            }
+            LocationId::Tick {
+                tick: Some(_),
+                parent_location,
+            } => collapse(parent_location),
+            LocationId::Atomic(inner) => collapse(inner),
+            LocationId::Process(_) | LocationId::Cluster(_) => {}
+        }
+    }
+    crate::compile::ir::transform_bottom_up(
+        ir,
+        &mut |_| {},
+        &mut |node: &mut HydroNode| collapse(&mut node.metadata_mut().location_id),
+        false,
+    );
 }

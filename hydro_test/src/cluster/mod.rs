@@ -12,6 +12,8 @@ pub mod map_reduce;
 pub mod paxos;
 #[cfg(feature = "tokio")]
 pub mod paxos_bench;
+#[cfg(test)]
+mod paxos_ldfi;
 #[cfg(feature = "tokio")]
 pub mod paxos_log_bench;
 #[cfg(feature = "tokio")]

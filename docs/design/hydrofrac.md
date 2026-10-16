@@ -636,10 +636,18 @@ toolchain and `libclang`. The `ldfi` feature of `hydro_lang` gates everything.
 | 2PC + CTP | none required; channels named | ~200 lines + a comparison harness | goal conditioned on a commit |
 | ISR replication | `Hooks` struct with 9 hooks, kept for Level 3; channels named | ~180 lines + the measurement grid | `witness_final` on the view |
 | Raft | `RaftHooks` struct, 4 batch sites, ~50 lines, kept for Level 3 | ~180 lines, body ~60 | 4 schedules/hypothesis |
+| Paxos (`paxos.rs`, 1,200 lines, never simulated before) | `LeaderTiming::Driven` (the wall-clock heartbeat and expiry check as input streams, ~110 lines beside the existing `WallClock` branch); `PaxosTestVariant` (the injected bug, lossy acceptor channels); channels named; one root-level `max().into_singleton()` moved into the tick. Two defects fixed (section 9.2). | `paxos_ldfi.rs`, ~600 lines for three harnesses; the core harness ~150, body 15 | no hooks; 4 schedules/hypothesis |
+| Paxos + client + KV replicas | none beyond the above (`CorePaxosWith`, a `PaxosLike` carrying timing and variant) | ~150 lines in the same module | prefix agreement over `enumerate`d applied writes |
+| Compartmentalized Paxos | `_with` variants threading timing and variant (~60 lines); the read quorum made a column (section 9.2) | ~130 lines in the same module | 8 nodes, 5 channels |
 
 The hook structs predate the filter; they stay because counterfactual replay needs them (section
 6.4), and because the protocols' other tests script them. Nothing else in the protocols exists
-for hydrofrac.
+for hydrofrac, except timing: a protocol whose liveness is on the wall clock (`sample_every`,
+`timeout`, `source_interval_delayed`) has to take its timers as inputs to be simulated at all,
+which is the one retrofit Paxos needed and Raft was written with. Getting Paxos to *run* in the
+simulator also cost four simulator gaps (a top-level `reduce`, snapshots of top-level optionals,
+`Optional::or`'s tick on an atomic location, and `reduce_watermark` / keyed batches under the
+provenance rewrite), none specific to fault injection.
 
 The recurring cost is not the lines. It is writing the property down as views, which is the
 same judgement as writing it in Datalog: what the facts are, what `PRE` conditions on, and
@@ -727,6 +735,44 @@ none of the others. Maelstrom earned its keep regardless: its first run exposed 
 Hydro's Maelstrom backend (every cluster-to-cluster channel shared one untagged message type, so
 a program with two such channels deserialized each other's bytes), a code path no simulator test
 exercises. Different tools find different failure classes.
+
+### 9.2 Paxos, and two defects the simulator found on the way
+
+Paxos (`hydro_test/src/cluster/paxos.rs`, the production consensus core behind the benchmarks)
+had never run in the simulator: its leader liveness is on the wall clock. With the timers as
+inputs, two proposers, three acceptors, lossy acceptor channels and the agreement specification
+of section 6.5 over the chosen `(slot, value)` pairs, the injected bug (a commit quorum of `f`
+acknowledgements instead of `f + 1`, which every unit test passes) is found in 12–43 hypotheses
+across eight runs, 8–50 s, with the counterexample `{omit p2a(x)→acceptor 1, omit
+p2a(x)→acceptor 2}` under the schedule in which the new leader's P1b quorum misses acceptor 0: the
+predicted minimal set. Correct Paxos certifies under one crash in 196 hypotheses (184 s, 1,632
+replays). Through the replicated key-value store (one client, two replicas, prefix agreement over
+each replica's applied writes with their position) the same bug is three omissions away and is
+found in 42 hypotheses; the store certifies in 280 (the hitting sets grow with the extra channel
+and with the second leader's crash points, past the default budget of 256). Compartmentalized
+Paxos (two proposers, two proxy leaders, a 2 × 2 acceptor grid, eight nodes) certifies in 124
+hypotheses, 71 s, and its injected bug (a write quorum one acceptor short of a row) in 3.
+
+Two findings were not injected.
+
+- **A message loop in Paxos's leader change.** The values a new leader recommits are derived from
+  its P1b quorum, a fixed snapshot, and were re-sent on every later tick of the leader; each round
+  of P2bs triggered the next tick, so once a recommit was needed the proposer and the acceptors
+  exchanged the same P2as and P2bs forever. No deployment test exercises a leader change with a
+  partially replicated slot. The simulator surfaced it as the first faulty hypothesis never
+  quiescing; the fix gates the recommit on the tick the proposer becomes leader.
+- **Compartmentalized Paxos's read quorum was not a column.** The leader election counted any
+  `rows` P1bs of the `rows × cols` grid, so a proposer could be elected on a row's worth of P1bs
+  (the default deployment is a 2 × 2 grid), which does not intersect the other row, the write
+  quorum of half the slots. Hydrofrac reported a violation of agreement on the *correct* variant
+  in 8 hypotheses, with a failing schedule in which proposer 1's quorum was the acceptors of row 1
+  while `x` had been chosen on row 0; no fault was needed, only that P1b order. The fix has P1bs
+  name their acceptor and the proposer count them per column, which is the paper's quorum
+  intersection argument made explicit; plain Paxos is the one-column case.
+
+Both are defects of the kind the simulator alone finds, given a scenario that drives a leader
+change; what hydrofrac added is the scenario's faults and, for the second, the report that named
+the schedule.
 
 ## 10. Limitations and what is not built
 

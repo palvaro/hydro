@@ -601,9 +601,9 @@ pub fn rewrite(ir: &mut [HydroRoot]) {
 
                 // A batch passes the tags of what it releases through (a network arrival
                 // carries the id of its send; a local or external item carries none).
+                // A keyed batch buffers `(k, Tagged<v>)` pairs per key, and is as transparent.
                 HydroNode::Batch { metadata, .. } => {
                     tag_kind(&mut metadata.collection_kind);
-                    assert_eq!(out_rep, Rep::Flat, "provenance rewrite: keyed batch");
                 }
 
                 // Network: the send side sees `(value, Vec<id>)` and records the record's
@@ -726,6 +726,38 @@ pub fn rewrite(ir: &mut [HydroRoot]) {
                     *f = wrap_acc(f, Rep::Flat);
                     tag_kind(&mut metadata.collection_kind);
                 }
+                // As `ReduceKeyed`; the watermark only garbage-collects keys below it, so its
+                // tag is dropped (the retained records' provenance does not depend on it).
+                HydroNode::ReduceKeyedWatermark {
+                    f,
+                    input,
+                    watermark,
+                    metadata,
+                } => {
+                    assert_eq!(
+                        input_rep(input),
+                        Rep::Keyed,
+                        "provenance rewrite: flat input to reduce_keyed_watermark"
+                    );
+                    assert_eq!(
+                        input_rep(watermark),
+                        Rep::Flat,
+                        "provenance rewrite: keyed watermark"
+                    );
+                    *f = wrap_acc(f, Rep::Flat);
+                    let mut watermark_meta = watermark.metadata().clone();
+                    let plain = DebugType::from(plain_type(
+                        &element_type(&watermark.metadata().collection_kind).0,
+                    ));
+                    set_element_type(&mut watermark_meta.collection_kind, plain);
+                    let old = std::mem::replace(watermark.as_mut(), HydroNode::Placeholder);
+                    **watermark = map_node(
+                        parse_quote!(|__x: #root::sim::runtime::Tagged<_>| __x.0),
+                        old,
+                        watermark_meta,
+                    );
+                    tag_kind(&mut metadata.collection_kind);
+                }
                 HydroNode::Scan {
                     init,
                     acc,
@@ -832,7 +864,6 @@ pub fn rewrite(ir: &mut [HydroRoot]) {
                 | HydroNode::ResolveFuturesOrdered { .. }
                 | HydroNode::FlatMapStreamBlocking { .. }
                 | HydroNode::ScanAsyncBlocking { .. }
-                | HydroNode::ReduceKeyedWatermark { .. }
                 | HydroNode::VersionedNetwork { .. }
                 | HydroNode::VersionedNetworkFork { .. } => {
                     panic!(
