@@ -127,6 +127,8 @@ pub mod sim;
 
 pub mod sim_hooks;
 
+pub mod spec_views;
+
 pub mod forward_handle;
 
 pub mod compile;

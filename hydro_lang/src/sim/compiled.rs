@@ -1293,28 +1293,50 @@ impl CompiledSim {
         not(feature = "ldfi"),
         expect(dead_code, reason = "used by `sim::ldfi`")
     )]
-    pub(crate) fn replay(&self, thunk: impl AsyncFnOnce() + RefUnwindSafe) {
-        self.with_instantiator(
-            |instantiator| {
-                let mut instance = instantiator();
-                instance.replay = true;
-                bolero::bolero_engine::any::scope::with(
-                    Box::new(bolero::bolero_engine::driver::object::Object(
-                        bolero::bolero_engine::driver::bytes::Driver::new(
-                            vec![0u8; 1 << 20],
-                            &Default::default(),
-                        ),
-                    )),
-                    || {
-                        tokio::runtime::Builder::new_current_thread()
-                            .build()
-                            .unwrap()
-                            .block_on(instance.run(thunk));
-                    },
-                );
-            },
-            false,
-        )
+    ///
+    /// Returns `Err` with the message when the program's own code panicked during the replay
+    /// (caught by the tick guard, see `sim::runtime::erase_guarded`, and re-raised on the
+    /// host side): a diverged counterfactual state may drive the program into conditions no
+    /// real execution reaches, and such a replay is inconclusive, not fatal.
+    pub(crate) fn replay(&self, thunk: impl AsyncFnOnce() + RefUnwindSafe) -> Result<(), String> {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.with_instantiator(
+                |instantiator| {
+                    let mut instance = instantiator();
+                    instance.replay = true;
+                    bolero::bolero_engine::any::scope::with(
+                        Box::new(bolero::bolero_engine::driver::object::Object(
+                            bolero::bolero_engine::driver::bytes::Driver::new(
+                                vec![0u8; 1 << 20],
+                                &Default::default(),
+                            ),
+                        )),
+                        || {
+                            tokio::runtime::Builder::new_current_thread()
+                                .build()
+                                .unwrap()
+                                .block_on(instance.run(thunk));
+                        },
+                    );
+                },
+                false,
+            )
+        }));
+        match outcome {
+            Ok(()) => Ok(()),
+            Err(payload) => {
+                let message = payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                    .unwrap_or_else(|| "(non-string panic payload)".to_owned());
+                if message.starts_with("the simulated program panicked") {
+                    Err(message)
+                } else {
+                    std::panic::resume_unwind(payload)
+                }
+            }
+        }
     }
 }
 
@@ -2685,6 +2707,17 @@ impl<W: std::io::Write> LaunchedSim<W> {
     /// responsible for parking until new external input arrives (see
     /// [`QuiescenceState::resumed`]).
     ///
+    /// Reports, as a panic on the host side, a panic the program's own code raised inside the
+    /// generated crate and that the tick guard caught there (`sim::runtime::erase_guarded`):
+    /// unwinding across the dynamic-library boundary would abort the process. A test fails
+    /// with the program's message; a counterfactual replay (`CompiledSim::replay`) catches it
+    /// and reports the replay as inconclusive.
+    fn report_program_panic(&self) {
+        if let Some(message) = self.lineage.panicked.borrow_mut().take() {
+            panic!("the simulated program panicked: {message}");
+        }
+    }
+
     /// This future is always awaited to completion by the driver, so a step is atomic: user
     /// code never runs (and never observes intermediate state) while a step is in flight.
     async fn step(&mut self) {
@@ -2785,6 +2818,7 @@ impl<W: std::io::Write> LaunchedSim<W> {
             let events_before = self.lineage.events.borrow().len();
             self.begin_exec(&loc, c_id, false);
             let progressed = self.async_dfirs[index].2.run_tick().await;
+            self.report_program_panic();
             if !progressed {
                 // Drop the `Exec` record of a run that did nothing.
                 self.lineage.events.borrow_mut().truncate(events_before);
@@ -3065,6 +3099,7 @@ impl<W: std::io::Write> LaunchedSim<W> {
                         tokio::select! {
                             biased;
                             r = &mut run_tick_future_pinned => {
+                                self.report_program_panic();
                                 abort_assert!(r || replay, "runnable tick's DFIR run_tick() returned false");
                                 break;
                             }
@@ -3115,6 +3150,7 @@ impl<W: std::io::Write> LaunchedSim<W> {
                     }
                 } else {
                     let made_progress = run_tick_future.await;
+                    self.report_program_panic();
                     abort_assert!(
                         made_progress || self.replay,
                         "runnable tick's DFIR run_tick() returned false"

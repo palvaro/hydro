@@ -810,7 +810,7 @@ pub(crate) mod harness {
     /// "Final" is `observe_sequenced(views).max()`: the last view ZK published. A view about
     /// a last value is not monotone in the facts (a later view changes it), which is what the
     /// first version's `witness_final` expressed by hand; the certificate is relative to that
-    /// (see `hydrofrac-negation.md`).
+    /// (see `history-hydrofrac-negation.md`).
     pub(crate) fn compile_with(
         unclean: bool,
         encoding: Encoding,
@@ -1034,6 +1034,7 @@ mod tests {
                 Outcome::Certificate { .. } => "certificate",
                 Outcome::Exhausted { .. } => "exhausted",
                 Outcome::Budget { .. } => "budget",
+                Outcome::Vacuous { .. } => "vacuous",
             }
         }
         fn cell(o: &Outcome) -> String {

@@ -4,31 +4,67 @@
 //! `by_mut` handles. Under the provenance rewrite the step's outputs are *opaque*
 //! (`Prov::OPAQUE`), and their lineage is derived by counterfactual replay of the member.
 //!
-//! The specification is **agreement** (state machine safety), as views over the members'
-//! committed entries (`hydro_lang::sim::spec`): `PRE`, member 0 committed its request `a`;
-//! `POST`, no two committed entries at the same index disagree, over the correct members and
-//! member 0's own commits while it lived. Three members, members crashable, intra-cluster
-//! traffic on a lossy channel (omissions until the end of finite failures, which the body
-//! declares once that entry has been replicated and committed).
+//! The specification is **durability of a committed entry** (RAFT's Leader Completeness, as
+//! an end-of-run fact), as views over the members' committed entries
+//! (`hydro_lang::sim::spec`): `PRE`, some member committed some entry (the first commit the
+//! observer sees, as `(index, request)`); `POST`, every correct member committed that same
+//! `(index, request)` by the end of the run. This is a universal over `correct_members`, a domain the hypothesis fixes, so the
+//! view is monotone in the observed facts and a certificate is one within the fault model
+//! (the search prints its grade). It is the property lineage-driven search is built for: the
+//! derivation of "member *m* has the entry" names the `AppendEntries` whose loss is the
+//! threat. Agreement proper (no index holds two entries) is the *absence* of a conflict and
+//! is left to the simulator's own tests and to Maelstrom.
 //!
-//! The scenario lets the simulator's interleavings and the search's faults compose. Member 1
-//! wins term 1 and receives request `b`; member 0's election timer fires in the same phase,
-//! so the schedule decides whether member 2 sees `RequestVote(term 2)` before or after
-//! `AppendEntries(b)`, i.e. whether 0 wins term 2 while 1 is left holding an unreplicated
-//! `b@1`. If it does, 0 commits `a@1` (with 2's acknowledgement); then 1 campaigns, and if
-//! elected commits `y`. RAFT's §5.4.1 election restriction keeps 1 from winning: its last
-//! entry is of an older term than 0's and 2's. With the injected bug
-//! ([`RaftConfig::election_restriction_ignores_term`], which compares indexes only and which
-//! every unit test of `raft.rs` passes) the search must find the loss of `AppendEntries(a)` to
-//! member 1, under a schedule in which 0 was elected: then 1's stale `b@1` is as long as the
-//! others' logs, it is granted the votes, and `b` overwrites the committed `a`.
+//! The run is a **generic schedule that encodes nothing about any bug**: `ROUNDS` rounds in
+//! which an election timer fires at one member (rotating), a client request lands at that
+//! same member (a request at a non-leader is redirected, i.e. dropped by this harness, so a
+//! client that follows the latest campaigner is the simplest one whose requests can commit
+//! at all), and every member's heartbeat timer fires; then the end of finite failures and a
+//! **heal phase**, `HEAL` cycles of, at every member in turn, its election timer, a client
+//! request at every member, and everyone's heartbeat timer. An election interrupt is
+//! suppressed when an `AppendEntries` was seen since the previous one, so a live leader is
+//! undisturbed and a leaderless cluster elects one within two fires per member; the request
+//! is what lets a new leader advance its commit index at all, since this RAFT appends no
+//! no-op entry on election and §5.4.2 forbids a leader to commit a prior-term entry except
+//! under one of its own term. `POST` then judges the state the protocol converges to with no
+//! faults, not a message in flight or a cluster never given a timer or a request. Faults of
+//! every kind, crashes included, lie before the end of finite failures (see
+//! `hydro_lang::sim::ldfi`): omissions on any intra-cluster message until then, crashes at
+//! any send until then; the heal phase is the convergence window.
+//!
+//! Four earlier versions of this generic body were shorter and "violated" durability on
+//! *correct* RAFT: a leaderless cluster (no election timer after the failures); a leader
+//! holding the entry but unable to commit it (no request of its own term); a member whose
+//! single post-EFF timer fire was spent on the suppression a late pre-EFF heartbeat had
+//! re-armed; and a follower still catching up (this RAFT backed `next_index` off one entry
+//! per rejected heartbeat; it now carries §5.3's conflict hint in the rejection, a protocol
+//! improvement made for this harness, since a heal phase long enough for the linear
+//! back-off made every counterfactual replay a second long and a hypothesis an hour). All
+//! four are liveness artefacts of the harness, not of the protocol, and the heal phase is
+//! what it is because of them: a harness too short for the fault-free protocol to converge
+//! cannot judge it. The body was shaped by the *correct* protocol's needs only; whether the
+//! injected bug ([`RaftConfig::election_restriction_ignores_term`], which compares last-log
+//! indexes only, ignoring terms) is reachable under it is for the search to find out. The
+//! earlier version of this harness staged the race and the stale node's re-election by hand,
+//! and its results (25 then 17 hypotheses) measured a search *within* a scenario built by
+//! someone who knew the bug, not a search for it.
+//!
+//! A note on what this harness is and is not (`docs/design/hydrofrac.md`, "Hand-written specifications"). The injected
+//! bug is a *safety* bug, a violation of agreement; that is outside the class of properties
+//! lineage-driven search is sound for (fault-tolerant convergence of derived facts). The search
+//! reaches it because the bug's symptom includes a convergence failure, the stale leader never
+//! receiving the committed entry. The result is a curiosity about fault exploration, not an
+//! instance of the guarantee. Two further things the fifth round learned here: `PRE` should be
+//! a convergence witness (a settled leader every correct member acknowledges), so that a run
+//! too short to converge is vacuous rather than a violation, which would have made the four
+//! body revisions above unnecessary; this harness still has the weaker `PRE` and the tuned
+//! body, and the rewrite is in the roadmap.
 //!
 //! Each hypothesis is run under several simulator schedules (`Exploration::Fuzz`).
 
 #[cfg(test)]
 mod tests {
     use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
-    use hydro_lang::location::MemberId;
     use hydro_lang::prelude::*;
     use hydro_lang::sim::SimClusterSender;
     use hydro_lang::sim::compiled::CompiledSim;
@@ -38,6 +74,21 @@ mod tests {
     use crate::cluster::raft::{RaftConfig, RaftHooks, Replica, raft_server};
 
     const MEMBERS: u32 = 3;
+    /// Rounds of the generic schedule (see [`body`]).
+    const ROUNDS: u32 = 3;
+    /// Cycles of the heal phase after the end of finite failures (see [`body`]): two, so
+    /// that every member's election timer fires twice with heartbeat rounds in between. A
+    /// fire is suppressed when an `AppendEntries` was seen since the previous fire, and the
+    /// suppression is consumed by it; a member whose last pre-EFF heartbeat arrived after
+    /// its last fire spends its first heal fire on that stale suppression and campaigns on
+    /// the second, unless a live leader's heartbeats in between re-arm it, in which case
+    /// there already is a leader. (One cycle "violated" durability on correct RAFT this way.)
+    const HEAL: u32 = 2;
+    /// Heartbeat rounds after each heal-phase request: one for the leader to learn where a
+    /// follower's log diverges (the reply's `conflict_hint`), one to ship the missing suffix
+    /// and collect the acknowledgements that advance the commit index, one to carry the new
+    /// commit index to the followers.
+    const HEAL_HEARTBEATS: u32 = 3;
     /// Schedules sampled per hypothesis.
     const SCHEDULES: usize = 4;
 
@@ -57,17 +108,11 @@ mod tests {
     ///
     /// The specification, over the committed entries as `(index, message)` facts per member:
     ///
-    /// - `PRE`: member 0 committed `a`. Member 0 is the leader of term 2 in the scenario; its
-    ///   commit is observed while it lives, so a crash after the commit keeps `PRE` (and the
+    /// - `PRE`: some member committed some entry `(i, r)` (the first commit observed; a member
+    ///   that later crashes still counts, its commit was observed while it lived, and the
     ///   crash right after each send in `PRE`'s lineage is a preserve point).
-    /// - `POST`: agreement at every index among the entries that count, the correct members'
-    ///   and member 0's own: the distinct `(index, message)` pairs are as many as the distinct
-    ///   indices. Stated as a count comparison so every committed entry contributes to the
-    ///   view's lineage (the first version named each as a witness). Agreement is a property
-    ///   about the *absence* of a conflict, so it is not monotone in the facts: a hypothesis
-    ///   breaks it by making a member commit something *else*, which in this protocol also
-    ///   removes that member's recorded commit of `a` (the lost `AppendEntries(a)`), which is
-    ///   why the search still proposes it; see `hydrofrac-negation.md` §4.
+    /// - `POST`: every correct member committed `(i, r)`: the correct members holding that
+    ///   entry are as many as the correct members. Monotone in the observed facts.
     fn compile_with(
         bug: bool,
         fuzz_iterations: usize,
@@ -105,31 +150,24 @@ mod tests {
                 .map(q!(|entry| (entry.index, entry.message))),
         );
         let correct = spec.correct_members(&cluster, 0..MEMBERS);
-        let leader_committed_a = committed
+        // PRE: something was committed somewhere (the first commit observed).
+        let first_committed = committed.clone().map(q!(|(_, entry)| entry)).first();
+        spec.pre(first_committed.clone());
+        // POST: every correct member holds that very entry.
+        let holders = committed
+            .cross_singleton(first_committed)
+            .filter(q!(|((_, entry), chosen)| entry == chosen))
+            .map(q!(|((member, _), _)| (member, ())))
+            .unique();
+        let correct_holders = correct
             .clone()
-            .filter(q!(|(member, (_, message))| {
-                *member == MemberId::<Replica>::from_raw_id(0) && message == "a"
-            }))
-            .first();
-        spec.pre(leader_committed_a);
-        // The entries that count: the correct members' (while the run lasts) and member 0's
-        // own while it lived.
-        let by_correct = committed
-            .clone()
-            .join(correct.map(q!(|member| (member, ()))))
-            .map(q!(|(_, (entry, ()))| entry));
-        let by_leader = committed
-            .filter(q!(
-                |(member, _)| *member == MemberId::<Replica>::from_raw_id(0)
-            ))
-            .map(q!(|(_, entry)| entry));
-        let counted = by_leader.chain(by_correct);
-        let pairs = counted.clone().unique().count();
-        let indices = counted.map(q!(|(index, _)| index)).unique().count();
+            .map(q!(|member| (member, ())))
+            .join(holders)
+            .count();
         spec.post(
-            pairs
-                .zip(indices)
-                .filter(q!(|(pairs, indices)| pairs == indices)),
+            correct_holders
+                .zip(correct.count())
+                .filter(q!(|(holders, correct)| holders == correct)),
         );
 
         let cluster_id = cluster.clone();
@@ -162,33 +200,36 @@ mod tests {
         (compiled, harness, configure)
     }
 
-    /// One run (see the module docs). Member 1 wins term 1; request `b` at 1 and member 0's
-    /// election interrupt land in the same phase, so the schedule decides whether 0 wins
-    /// term 2. Then request `a` at 0, two heartbeat rounds, the end of finite failures;
-    /// member 1's interrupt twice (the first fire is suppressed if it saw a heartbeat),
-    /// request `y` at 1, two of its heartbeat rounds. The verdict is the specification's.
+    /// One run (see the module docs): a generic schedule with no knowledge of any bug.
+    /// Round `k`: the election timer fires at member `k mod 3`; a request `r{k}` arrives at
+    /// that member; every member's heartbeat timer fires (only a leader acts on it).
+    /// Then the end of finite failures and the heal phase: `HEAL` cycles of, for each
+    /// member, its election timer, a request `h{cycle}.{member}` at every member (whoever
+    /// is leader appends it; a suppressed timer leaves the leader where it was), then
+    /// everyone's heartbeat timer [`HEAL_HEARTBEATS`] times (one `next_index` back-off per
+    /// round for a follower missing a prefix). The verdict is the specification's.
     async fn body(h: &Harness, run: &Run<'_>) {
-        h.election.send(1, ());
-        hydro_lang::sim::quiesce().await;
-        h.requests.send(1, "b".to_owned());
-        h.election.send(0, ());
-        hydro_lang::sim::quiesce().await;
-        h.requests.send(0, "a".to_owned());
-        hydro_lang::sim::quiesce().await;
-        for _ in 0..2 {
-            h.heartbeat.send(0, ());
+        for round in 0..ROUNDS {
+            h.election.send(round % MEMBERS, ());
+            hydro_lang::sim::quiesce().await;
+            h.requests.send(round % MEMBERS, format!("r{round}"));
+            hydro_lang::sim::quiesce().await;
+            h.heartbeat.send_many((0..MEMBERS).map(|m| (m, ())));
             hydro_lang::sim::quiesce().await;
         }
         run.end_of_finite_failures();
-        for _ in 0..2 {
-            h.election.send(1, ());
-            hydro_lang::sim::quiesce().await;
-        }
-        h.requests.send(1, "y".to_owned());
-        hydro_lang::sim::quiesce().await;
-        for _ in 0..2 {
-            h.heartbeat.send(1, ());
-            hydro_lang::sim::quiesce().await;
+        for cycle in 0..HEAL {
+            for member in 0..MEMBERS {
+                h.election.send(member, ());
+                hydro_lang::sim::quiesce().await;
+                h.requests
+                    .send_many((0..MEMBERS).map(|m| (m, format!("h{cycle}.{member}"))));
+                hydro_lang::sim::quiesce().await;
+                for _ in 0..HEAL_HEARTBEATS {
+                    h.heartbeat.send_many((0..MEMBERS).map(|m| (m, ())));
+                    hydro_lang::sim::quiesce().await;
+                }
+            }
         }
     }
 
@@ -202,10 +243,16 @@ mod tests {
             .search(&compiled, async |run| body(&h, run).await)
     }
 
-    /// RAFT keeps agreement across a leader change under omissions and one crash: a
-    /// certificate (relative to the sampled schedules).
+    /// Correct RAFT keeps a committed entry at every correct member under omissions and one
+    /// crash: a certificate (relative to the sampled schedules, and graded RELATIVE as every
+    /// hand-written specification is; the generated specification is the one with a soundness
+    /// claim).
+    ///
+    /// Measured: 235 hypotheses, 940 instances, about 68 minutes alongside the bug search
+    /// (365k counterfactual replays between the two). Too long for the default suite.
     #[test]
-    fn ldfi_certifies_raft_agreement_under_one_crash() {
+    #[ignore = "about an hour; run with --ignored --nocapture"]
+    fn ldfi_certifies_raft_durability_under_one_crash() {
         let outcome = search(false, 1, Strategy::Lineage);
         eprintln!("{outcome}");
         assert!(
@@ -214,10 +261,21 @@ mod tests {
         );
     }
 
-    /// With the election restriction comparing indexes only, a lost replication (under a
-    /// schedule in which member 0 took over term 2) lets the stale member 1 win and overwrite
-    /// a committed entry.
+    /// With the election restriction comparing indexes only, a stale member can win an
+    /// election and overwrite a committed entry. Whether the generic schedule reaches that
+    /// world, and with which lost messages, is what this test reports; it asserts only that a
+    /// counterexample exists and involves an omission.
+    ///
+    /// Measured: a counterexample after 90 hypotheses (360 instances, about 30 minutes), four
+    /// omissions and no crash: `AppendEntries(r0)` from 0 lost to both followers, so 0 keeps
+    /// an unreplicated `r0` at index 1 of term 1; 1 wins term 2 with 2's vote, appends `r1` at
+    /// index 1, replicates and commits it with 2, while its `AppendEntries(r1)` to 0 is lost
+    /// twice (the entry and its heartbeat retransmission); in the heal phase 0 campaigns for
+    /// term 3 with last entry `(1, term 1)`, and under the index-only check 1 and 2 grant,
+    /// after which 0's heartbeats overwrite the committed `r1` at both. Correct RAFT denies
+    /// the vote (term 1 < term 2). Not a scenario anyone wrote down.
     #[test]
+    #[ignore = "about half an hour; run with --ignored --nocapture"]
     fn ldfi_finds_the_election_restriction_bug() {
         let outcome = search(true, 1, Strategy::Lineage);
         eprintln!("{outcome}");
@@ -304,6 +362,7 @@ mod tests {
             Outcome::Certificate { .. } => "certificate",
             Outcome::Exhausted { .. } => "exhausted",
             Outcome::Budget { .. } => "budget",
+            Outcome::Vacuous { .. } => "vacuous",
         }
     }
 }

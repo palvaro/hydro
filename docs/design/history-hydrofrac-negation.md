@@ -1,3 +1,9 @@
+> **History.** This is the fourth round's analysis of negation and polarity in hand-written
+> specifications. The polarity check it led to (`polarity.rs`) was removed in the fifth round:
+> hydrofrac's specification is now generated from the `EventualConsistency` label and sound by
+> its form (`hydrofrac.md` §1.1, §6.5), so there is no view left to grade. The analysis stands
+> as the reason the hand-written path is labelled "no soundness claim".
+
 # Negation in hydrofrac specifications
 
 Status: analysis, written alongside the `Spec` layer (`hydro_lang/src/sim/spec.rs`, `hydrofrac.md`

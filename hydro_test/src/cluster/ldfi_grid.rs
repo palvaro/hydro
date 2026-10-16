@@ -88,6 +88,7 @@ mod grid {
             Outcome::Certificate { .. } => "certificate",
             Outcome::Exhausted { .. } => "exhausted",
             Outcome::Budget { .. } => "budget",
+            Outcome::Vacuous { .. } => "vacuous",
         }
     }
 

@@ -70,8 +70,6 @@ pub mod ldfi;
 pub mod spec;
 
 #[cfg(stageleft_runtime)]
-pub mod polarity;
-
 #[cfg(stageleft_runtime)]
 pub mod provenance;
 

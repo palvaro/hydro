@@ -96,8 +96,7 @@ pub fn broadcast<'a>(
 mod tests {
     use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
     use hydro_lang::prelude::*;
-    use hydro_lang::sim::ldfi::{Fault, Ldfi, Level, Outcome};
-    use hydro_lang::sim::polarity::Polarity;
+    use hydro_lang::sim::ldfi::{Fault, Grade, Ldfi, Level, Outcome};
     use hydro_lang::sim::spec::Spec;
 
     use super::{Broadcaster, EchoHook, InitialHook, Member, Payload, broadcast};
@@ -116,7 +115,7 @@ mod tests {
         /// provenance is empty; the search derives specification views counterfactually at
         /// the observer, which sees the same dependencies as for [`Post::Positive`].
         Negated,
-        /// A different property, as a control for the polarity check: integrity, "no member
+        /// A different property, as a control for the certificate grading: integrity, "no member
         /// delivered `m` twice". It is non-monotone in the deliveries (a further delivery
         /// can falsify it), so a certificate for it is only relative to the recorded
         /// derivations and the search must say so.
@@ -291,9 +290,9 @@ mod tests {
     }
 
     /// Reliable broadcast under one crash with the negated `POST`: a certificate, as with the
-    /// positive formulation. The polarity check reads this `POST` as monotone (the only
-    /// negation is of the correct members, which are not observed facts), so the certificate
-    /// is graded within the fault model.
+    /// positive formulation. Both are hand-written views, so the certificate is graded
+    /// relative; the generated specification of `ec_ldfi.rs` is the one graded within the
+    /// fault model.
     #[test]
     fn ldfi_certifies_reliable_broadcast_with_a_negated_post() {
         let outcome = search(true, 1, Post::Negated);
@@ -302,35 +301,26 @@ mod tests {
             matches!(outcome, Outcome::Certificate { .. }),
             "expected a certificate, got {outcome}"
         );
-        assert!(
-            outcome.polarity().is_some_and(Polarity::is_monotone),
-            "expected POST graded monotone, got {:?}",
-            outcome.polarity()
-        );
+        assert_eq!(outcome.grade(), Some(Grade::HandWritten));
     }
 
-    /// The control for the polarity check. Integrity ("no member delivered `m` twice") holds
-    /// of the broadcast under any crash: members deduplicate before delivering. But the
-    /// search cannot earn that certificate. The view holds by the absence of a duplicate, so
-    /// no delivery's removal changes it (the counterfactual derivation is empty) and its
-    /// record provenance is empty too; the search certifies after the failure-free run with
-    /// nothing checked. That is the hitting-set inference applied outside its hypothesis: a
-    /// further fact (a duplicate) can falsify the view, which the polarity check reads off
-    /// the `== 0` over the count of duplicates and grades `NonMonotone`. The certificate is
-    /// right, but only relative to the recorded derivations, and the outcome says so.
+    /// The control for the grading. Integrity ("no member delivered `m` twice") holds of the
+    /// broadcast under any crash: members deduplicate before delivering. But the search
+    /// cannot earn that certificate. The view holds by the absence of a duplicate, so no
+    /// delivery's removal changes it (the counterfactual derivation is empty) and its record
+    /// provenance is empty too; the search certifies after the failure-free run with nothing
+    /// checked. That is the hitting-set inference applied outside its hypothesis: a further
+    /// fact (a duplicate) can falsify the view, which no derivation names. A hand-written view
+    /// gets the RELATIVE grade for exactly this reason, and the outcome says so.
     #[test]
-    fn ldfi_grades_a_non_monotone_post_as_relative() {
+    fn ldfi_grades_a_hand_written_post_as_relative() {
         let outcome = search(true, 1, Post::NoDuplicates);
         eprintln!("{outcome}");
         assert!(
             matches!(outcome, Outcome::Certificate { .. }),
             "expected a certificate, got {outcome}"
         );
-        assert!(
-            matches!(outcome.polarity(), Some(Polarity::NonMonotone { .. })),
-            "expected POST graded non-monotone, got {:?}",
-            outcome.polarity()
-        );
+        assert_eq!(outcome.grade(), Some(Grade::HandWritten));
         assert!(
             outcome.to_string().contains("RELATIVE"),
             "expected the certificate to be graded relative: {outcome}"

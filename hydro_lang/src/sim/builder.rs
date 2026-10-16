@@ -8,7 +8,7 @@ use syn::parse_quote;
 use crate::compile::builder::{HandoffId, StmtId};
 use crate::compile::ir::{
     CollectionKind, DebugExpr, DfirBuilder, HydroIrOpMetadata, KeyedSingletonBoundKind,
-    OptionalBoundKind, StreamOrder, StreamRetry,
+    StreamOrder, StreamRetry,
 };
 use crate::location::dynamic::LocationId;
 use crate::staging_util::get_this_crate;
@@ -872,15 +872,14 @@ impl DfirBuilder for SimBuilder {
                         None,
                     );
                 }
-                CollectionKind::Optional {
-                    bound: OptionalBoundKind::InitNone,
-                    element_type,
-                    ..
-                } => {
-                    // Only `InitNone` optionals (null prefix, then monotone presence) are
-                    // supported: their monotone presence is what `OptionalInitNoneHook` models. A general
-                    // `Unbounded` optional can return to null, which this hook does not represent,
-                    // so it stays rejected below.
+                CollectionKind::Optional { element_type, .. } => {
+                    // `InitNone` optionals (null prefix, then monotone presence) are exactly what
+                    // `OptionalInitNoneHook` models. A top-level `Unbounded` optional is a stream
+                    // of versions in the simulator (`singleton_intermediates`), which has no
+                    // representation of a return to null, so it is snapshotted the same way: the
+                    // snapshot is null until the first version and then some version. This is
+                    // what `Optional::or` / `unwrap_or` / `into_singleton` on a top-level
+                    // aggregate (`max`, `reduce`, `first`) need, whose presence is monotone.
                     debug_assert!(in_location.is_top_level());
 
                     let hoff_id = self.next_hoff_id.get_and_increment();
@@ -958,7 +957,9 @@ impl DfirBuilder for SimBuilder {
                             None,
                         );
                     } else {
-                        todo!("atomic yield to a different tick is not yet supported");
+                        todo!(
+                            "atomic yield to a different tick is not yet supported ({in_location:?} -> {out_location:?})"
+                        );
                     }
                 } else {
                     let hoff_id = self.next_hoff_id.get_and_increment();
@@ -1001,7 +1002,9 @@ impl DfirBuilder for SimBuilder {
                             None,
                         );
                     } else {
-                        todo!("atomic yield to a different tick is not yet supported");
+                        todo!(
+                            "atomic yield to a different tick is not yet supported ({in_location:?} -> {out_location:?})"
+                        );
                     }
                 } else {
                     // NOTE: `Optional::latest()` is non-monotone (it reflects the latest tick's
@@ -1084,7 +1087,25 @@ impl DfirBuilder for SimBuilder {
         out_kind: &CollectionKind,
         op_meta: &HydroIrOpMetadata,
     ) {
-        if trusted {
+        // A retry cast alone (`AtLeastOnce` → `ExactlyOnce`, same order and boundedness, as
+        // `fold` with an idempotence proof performs on its input) is the identity in the
+        // simulator: the simulated network never duplicates a delivery, so there is no
+        // decision to explore. (Injecting duplicates to exercise idempotence proofs would be
+        // a hook of its own; none exists.)
+        let retry_cast_only = matches!(
+            (in_kind, out_kind),
+            (
+                CollectionKind::Stream { bound: b1, order: o1, retry: StreamRetry::AtLeastOnce, .. },
+                CollectionKind::Stream { bound: b2, order: o2, retry: StreamRetry::ExactlyOnce, .. },
+            ) if b1 == b2 && o1 == o2
+        ) || matches!(
+            (in_kind, out_kind),
+            (
+                CollectionKind::KeyedStream { bound: b1, value_order: o1, value_retry: StreamRetry::AtLeastOnce, .. },
+                CollectionKind::KeyedStream { bound: b2, value_order: o2, value_retry: StreamRetry::ExactlyOnce, .. },
+            ) if b1 == b2 && o1 == o2
+        );
+        if trusted || retry_cast_only {
             let builder = self.get_dfir_mut(location);
             builder.add_dfir(
                 parse_quote! {

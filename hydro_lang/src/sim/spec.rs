@@ -88,6 +88,7 @@
 //! such a run.
 
 use std::collections::HashSet;
+use std::hash::Hash;
 use std::panic::RefUnwindSafe;
 use std::rc::Rc;
 
@@ -131,6 +132,31 @@ impl CorrectFeed {
     }
 }
 
+/// How the search feeds the fact domain of a generated specification
+/// ([`Spec::eventual_consistency`]) to the observer: the facts of the failure-free run, which
+/// the search learns from a probe run and sends before every run after it.
+#[derive(Clone)]
+pub(crate) struct FactFeed {
+    /// The port on which a run publishes the facts correct members held (one output per
+    /// fact, bincode of the fact).
+    pub port: ExternalPortId,
+    /// Sends one fact (bincode) into the observer.
+    pub send: Rc<dyn Fn(&[u8]) + RefUnwindSafe>,
+    /// The domain, filled by the search from the probe run. (`AssertUnwindSafe`: the search
+    /// writes it between runs, never inside the simulator's unwind scope.)
+    pub domain:
+        Rc<std::panic::AssertUnwindSafe<std::cell::RefCell<std::collections::BTreeSet<Vec<u8>>>>>,
+}
+
+impl FactFeed {
+    /// Feeds the whole domain.
+    pub(crate) fn feed(&self) {
+        for fact in self.domain.borrow().iter() {
+            (self.send)(fact);
+        }
+    }
+}
+
 /// A correctness specification: `PRE` and `POST` views over the program's outputs (see the
 /// module docs).
 pub struct Spec<'a> {
@@ -139,6 +165,7 @@ pub struct Spec<'a> {
     pre: Option<ExternalPortId>,
     post: Option<ExternalPortId>,
     correct: Vec<CorrectFeed>,
+    facts: Option<FactFeed>,
 }
 
 impl<'a> Spec<'a> {
@@ -152,6 +179,7 @@ impl<'a> Spec<'a> {
             pre: None,
             post: None,
             correct: vec![],
+            facts: None,
         }
     }
 
@@ -268,6 +296,67 @@ impl<'a> Spec<'a> {
         self.accumulate(stream)
     }
 
+    /// The specification an `EventualConsistency` label stands for, generated rather than
+    /// written. It is Molly's "the good outcome persists", for the one good outcome the label
+    /// is about: let `FACTS` be the facts of the collection that correct members held at the
+    /// end of the failure-free run (the search learns them from a probe run and feeds them to
+    /// the observer before every run, as it feeds `correct_members`); then `POST` is: every
+    /// correct member holds every fact of `FACTS` that some correct member holds (as a count:
+    /// the `(member, fact)` pairs at correct members over `FACTS` are as many as the `FACTS`
+    /// facts present times the correct members). There is no `PRE`; if the probe run holds no
+    /// facts the search is vacuous.
+    ///
+    /// The label promises that replicas compute the same contents *given the same inputs*;
+    /// what it assumes is that faults do not withhold inputs from some replicas, and that
+    /// assumption is this specification. A collection reachable from a lossy channel or a
+    /// crashable node that has no certificate for it carries an undischarged premise.
+    ///
+    /// Why the domain is fixed: the hitting-set inference behind a certificate is sound for a
+    /// view whose derivation in a run implies the view (a fault set that leaves every
+    /// delivery of the derivation intact cannot break it). With `FACTS` fixed and
+    /// `correct` fixed by the hypothesis, the derivation of `POST` is the set of deliveries
+    /// behind every `(member, fact)` pair, and keeping them all keeps `POST`: monotone by
+    /// construction, with no syntactic analysis of the view. Quantifying instead over
+    /// whatever facts a run produces is not monotone (a fault that makes one replica derive a
+    /// fresh fact falsifies it without touching any derivation), and a fresh fact is not the
+    /// label's premise about the given inputs anyway.
+    ///
+    /// The view is evaluated at the end of the run the body drives; the body is what gives the
+    /// protocol time to converge, and a protocol with retransmission or leader change needs the
+    /// body to let that happen. A `FACTS` fact that no correct member holds under a hypothesis
+    /// (its producer crashed before producing it) is not required of anyone, as in Molly.
+    pub fn eventual_consistency<C, T, R: Retries>(
+        &mut self,
+        observed: Stream<(MemberId<C>, T), Tick<Process<'a, Observer>>, Bounded, TotalOrder, R>,
+        correct: Stream<MemberId<C>, Tick<Process<'a, Observer>>, Bounded, TotalOrder>,
+    ) where
+        C: 'a,
+        T: Clone + Eq + Hash + Ord + Serialize + DeserializeOwned + 'static,
+    {
+        assert!(
+            self.facts.is_none(),
+            "a Spec has one generated specification"
+        );
+        let (sender, domain) = self.observer.sim_input::<T, TotalOrder, ExactlyOnce>();
+        let domain = self.accumulate(domain);
+        let (post, held_facts) = crate::spec_views::eventual_consistency(observed, correct, domain);
+        // The facts of this run, for the search's probe.
+        let port = held_facts.all_ticks().sim_output().0;
+        self.facts = Some(FactFeed {
+            port,
+            send: {
+                let sender = std::panic::AssertUnwindSafe(sender);
+                Rc::new(move |bytes: &[u8]| {
+                    let fact: T = bincode::deserialize(bytes)
+                        .expect("a published fact deserializes as the collection's element");
+                    sender.send(fact)
+                })
+            },
+            domain: Rc::new(std::panic::AssertUnwindSafe(Default::default())),
+        });
+        self.post(post);
+    }
+
     /// Declares the pre-condition: the run is vacuous unless `view` is non-empty at its end.
     /// Without one, every run counts.
     pub fn pre<T>(&mut self, view: impl Into<Optional<T, Tick<Process<'a, Observer>>, Bounded>>)
@@ -314,6 +403,7 @@ impl<'a> Spec<'a> {
                 .post
                 .expect("a Spec needs a POST (`Spec::post`) before it is given to the search"),
             correct: self.correct.clone(),
+            facts: self.facts.clone(),
         }
     }
 }
@@ -325,4 +415,6 @@ pub(crate) struct SpecParts {
     pub pre: Option<ExternalPortId>,
     pub post: ExternalPortId,
     pub correct: Vec<CorrectFeed>,
+    /// The generated specification's fact domain, if the spec is one.
+    pub facts: Option<FactFeed>,
 }

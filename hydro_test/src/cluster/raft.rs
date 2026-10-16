@@ -153,6 +153,11 @@ pub struct AppendEntriesReply {
     /// meaningful when `success`, and lets the leader advance its commit index once a
     /// majority of `match_index`es reach an entry of the current term.
     pub match_index: usize,
+    /// On a log-matching rejection, where the leader should retry from (RAFT §5.3's
+    /// conflict optimization): one past the follower's last entry when its log is too short,
+    /// or the first index of the conflicting term when the entry at `prev_log_index` has
+    /// another term. `0` when the rejection carries no hint (a stale leader's term).
+    pub conflict_hint: usize,
 }
 
 /// The single wire format for all intra-cluster RAFT traffic: vote RPCs and
@@ -603,6 +608,7 @@ pub fn raft_step<T: Clone, ClusterTag>(
                             term: state.term,
                             success: false,
                             match_index: 0,
+                            conflict_hint: 0,
                         }),
                     ));
                     continue;
@@ -628,12 +634,23 @@ pub fn raft_step<T: Clone, ClusterTag>(
                         && state.log[request.prev_log_index - 1].term_received
                             == request.prev_log_term);
                 if !log_matches {
+                    let conflict_hint = if state.log.len() < request.prev_log_index {
+                        state.log.len() + 1
+                    } else {
+                        let conflicting_term = state.log[request.prev_log_index - 1].term_received;
+                        state
+                            .log
+                            .iter()
+                            .position(|entry| entry.term_received == conflicting_term)
+                            .map_or(1, |position| position + 1)
+                    };
                     outbound.push((
                         sender,
                         RaftRpc::AppendEntriesReply(AppendEntriesReply {
                             term: state.term,
                             success: false,
                             match_index: 0,
+                            conflict_hint,
                         }),
                     ));
                     continue;
@@ -686,6 +703,7 @@ pub fn raft_step<T: Clone, ClusterTag>(
                         term: state.term,
                         success: true,
                         match_index: new_match,
+                        conflict_hint: 0,
                     }),
                 ));
             }
@@ -709,9 +727,14 @@ pub fn raft_step<T: Clone, ClusterTag>(
                         *next = reply.match_index + 1;
                     }
                 } else {
-                    // Rejections back off next_index to retry earlier prefixes.
+                    // Rejections back off next_index to retry earlier prefixes: by one, or
+                    // straight to the follower's conflict hint when it gives one (§5.3).
                     if let Some(next) = state.next_index.get_mut(&sender) {
-                        *next = (*next - 1).max(1);
+                        let mut backed_off = (*next - 1).max(1);
+                        if reply.conflict_hint > 0 {
+                            backed_off = backed_off.min(reply.conflict_hint);
+                        }
+                        *next = backed_off;
                     }
                 }
             }
@@ -1962,6 +1985,7 @@ mod tests {
                         term: 3,
                         success: false,
                         match_index: 0,
+                        conflict_hint: 0,
                     }),
                 )],
             },

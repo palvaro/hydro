@@ -445,6 +445,7 @@ mod tests {
                 Outcome::Certificate { .. } => "certificate",
                 Outcome::Exhausted { .. } => "exhausted",
                 Outcome::Budget { .. } => "budget",
+                Outcome::Vacuous { .. } => "vacuous",
             }
         }
         fn cell(o: Option<&Outcome>) -> String {

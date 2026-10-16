@@ -593,14 +593,14 @@ fn compile_sim_graph_trybuild(
     };
 
     // Wrap to erase the concrete closure type so all locations can go in a Vec.
+    let root = get_this_crate();
     let mut dfir_into_code_erased = |g: &DfirGraph| -> syn::Expr {
         let inner = dfir_into_code(g);
         syn::parse_quote! {
-            __root_dfir_rs::scheduled::context::Dfir::into_erased(#inner)
+            #root::sim::runtime::erase_guarded(#inner, __hydro_lineage.clone())
         }
     };
 
-    let root = get_this_crate();
     let process_dfir_exprs = process_graphs
         .into_iter()
         .map(|(lid, g)| {

@@ -252,6 +252,47 @@ pub struct LineageHandles {
     pub faults: Rc<RefCell<FaultState>>,
     /// The next delivery id.
     pub next_delivery: Rc<Cell<DeliveryId>>,
+    /// The message of a panic raised by the program's own code (an operator closure) and
+    /// caught on the generated code's side of the dynamic-library boundary by
+    /// [`erase_guarded`]; the host reports it. Unwinding across that boundary aborts the
+    /// process, which a test must not do and a counterfactual replay (whose diverged state
+    /// may drive the program into conditions no real execution reaches) must survive.
+    pub panicked: Rc<RefCell<Option<String>>>,
+}
+
+/// Type-erases a location's dataflow for the host, with its tick closure guarded against
+/// panics: a panic in the program's code is caught here, inside the generated crate, and
+/// recorded in `handles.panicked` for the host to report (see
+/// [`LineageHandles::panicked`]). Called by generated code.
+#[doc(hidden)]
+pub fn erase_guarded<Tick>(
+    dfir: dfir_rs::scheduled::context::Dfir<Tick>,
+    handles: LineageHandles,
+) -> dfir_rs::scheduled::context::DfirErased
+where
+    Tick: 'static + for<'a> AsyncFnMut(&'a mut dfir_rs::scheduled::context::Context) -> bool,
+{
+    use futures::FutureExt;
+    dfir.map_tick_closure(move |mut tick| {
+        async move |ctx: &mut dfir_rs::scheduled::context::Context| -> bool {
+            match std::panic::AssertUnwindSafe(tick(ctx)).catch_unwind().await {
+                Ok(progressed) => progressed,
+                Err(payload) => {
+                    let message = payload
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                        .unwrap_or_else(|| "(non-string panic payload)".to_owned());
+                    let mut panicked = handles.panicked.borrow_mut();
+                    if panicked.is_none() {
+                        *panicked = Some(message);
+                    }
+                    false
+                }
+            }
+        }
+    })
+    .into_erased()
 }
 
 impl LineageHandles {

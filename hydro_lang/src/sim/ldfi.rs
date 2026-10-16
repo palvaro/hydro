@@ -29,7 +29,10 @@
 //!   and including `m` and every later send is dropped at the filter (and its external
 //!   outputs are suppressed once it is dead). This is Molly's definition of a crash, named
 //!   by a message rather than a send count so the fault means the same thing in every run,
-//!   and it can split the fan-out of one broadcast.
+//!   and it can split the fan-out of one broadcast. Crash points, like omissions, lie
+//!   before the end of finite failures: `m` is a send performed before it (or the crash is
+//!   `before any send`). The finite-failures assumption covers every fault, and the run
+//!   after `EFF` is the window in which the protocol is expected to converge.
 //!
 //! # Lineage
 //!
@@ -93,7 +96,6 @@ use crate::sim::compiled::{
     CompiledSim, TracedHook, lineage_events, lineage_handles, lineage_port,
     lineage_provenance_enabled, lineage_slices, replay_all_hooks, trace_all_hooks,
 };
-use crate::sim::polarity::Polarity;
 use crate::sim::runtime::{
     CrashPoint, DeliveryId, ExecId, LineageEvent, NodeKey, SendFate, SendKey,
 };
@@ -372,6 +374,12 @@ pub struct Schedule {
     pub crashed_sends: Vec<(String, u64)>,
     /// Every crashable node's send sequence (the meaning of crash points in this run).
     pub sends: Rc<SendSequences>,
+    /// Per crashable node, how many of its sends happened before the end of finite failures:
+    /// crash points are `crash(node before any send)` and `crash(node after m)` for those `m`
+    /// only. The finite-failures assumption covers crashes as well as omissions: after `EFF`
+    /// no fault of any kind, and the run's remainder is the window in which the protocol is
+    /// expected to converge. (A crash in that window would need its own window after it.)
+    pub pre_eff_sends: BTreeMap<String, usize>,
     /// The lineage of the outputs the body required (the goal's pre-condition), whose sends
     /// the search wants to preserve.
     pub requirements: Derivation,
@@ -426,6 +434,40 @@ pub struct Hypothesis {
     pub schedules: Vec<Schedule>,
 }
 
+/// What a certificate is worth: whether the hitting-set inference behind it ("a fault set that
+/// leaves a derivation intact cannot break the view") is known to be valid for the view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Grade {
+    /// The specification is the generated one ([`Spec::eventual_consistency`]): a universal
+    /// over a fact domain and a member domain the hypothesis fixes, whose derivation implies
+    /// it by construction. The certificate holds within the fault model and the explored
+    /// schedules.
+    Generated,
+    /// A hand-written `PRE`/`POST`. No soundness claim is made for the inference: the view may
+    /// be falsified by an *extra* fact (agreement, uniqueness, a final value), which no
+    /// derivation names. The certificate is relative to the recorded derivations persisting
+    /// under the fault sets it excluded.
+    HandWritten,
+    /// A goal that is not a specification (the first version's `goal` / `witness` API).
+    Goal,
+}
+
+impl Display for Grade {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Grade::Generated => write!(
+                f,
+                "within the fault model and the explored schedules (generated specification)"
+            ),
+            Grade::HandWritten => write!(
+                f,
+                "RELATIVE to the recorded derivations persisting under the excluded fault sets (hand-written specification: no soundness claim for the inference)"
+            ),
+            Grade::Goal => write!(f, "relative to the recorded derivations (goal API)"),
+        }
+    }
+}
+
 /// The result of an LDFI search.
 #[derive(Clone, Debug)]
 pub enum Outcome {
@@ -448,15 +490,19 @@ pub enum Outcome {
         /// How each hypothesis's schedules were explored; a certificate is a proof only under
         /// [`Exploration::Exhaustive`].
         exploration: Exploration,
-        /// Under a [`Spec`], the polarity of `POST` in the facts it observes (see
-        /// [`crate::sim::polarity`]). The hitting-set inference behind a certificate is
-        /// valid only for a monotone view; otherwise the certificate is relative to the
-        /// recorded derivations persisting under the fault sets it excluded.
-        polarity: Option<Polarity>,
+        /// What the certificate is worth (see [`Grade`]).
+        grade: Grade,
     },
     /// The hypothesis budget ran out before the search finished.
     Budget {
         /// Every hypothesis run, in order.
+        runs: Vec<Hypothesis>,
+    },
+    /// The failure-free run was vacuous in every explored schedule: the goal's pre-condition
+    /// (a [`Spec`]'s `PRE`, or [`Run::mark_vacuous`]) never held, so there is nothing to
+    /// protect and nothing was searched. A verdict about the harness, not the protocol.
+    Vacuous {
+        /// The one hypothesis run (the failure-free run).
         runs: Vec<Hypothesis>,
     },
     /// Every admissible fault set over the observed fault universe was tried without a
@@ -480,7 +526,8 @@ impl Hypothesis {
                     node: node.clone(),
                     after: None,
                 });
-                for send in sends {
+                let pre_eff = schedule.pre_eff_sends.get(node).copied().unwrap_or(0);
+                for send in sends.iter().take(pre_eff) {
                     points.insert(Fault::Crash {
                         node: node.clone(),
                         after: Some(send.clone()),
@@ -512,6 +559,7 @@ impl Outcome {
             Outcome::Counterexample { runs, .. }
             | Outcome::Certificate { runs, .. }
             | Outcome::Budget { runs }
+            | Outcome::Vacuous { runs }
             | Outcome::Exhausted { runs } => runs,
         }
     }
@@ -534,11 +582,10 @@ impl Outcome {
         }
     }
 
-    /// A certificate's grade: the polarity of `POST` under a [`Spec`], which decides whether
-    /// the certificate is within the fault model (`POST` monotone) or relative (not).
-    pub fn polarity(&self) -> Option<&Polarity> {
+    /// A certificate's grade (see [`Grade`]).
+    pub fn grade(&self) -> Option<Grade> {
         match self {
-            Outcome::Certificate { polarity, .. } => polarity.as_ref(),
+            Outcome::Certificate { grade, .. } => Some(*grade),
             _ => None,
         }
     }
@@ -589,7 +636,7 @@ impl Display for Outcome {
                 derivations,
                 runs,
                 exploration,
-                polarity,
+                grade,
             } => {
                 match exploration {
                     Exploration::Exhaustive => writeln!(
@@ -603,17 +650,7 @@ impl Display for Outcome {
                         runs.len()
                     )?,
                 }
-                match polarity {
-                    Some(Polarity::Monotone) => writeln!(
-                        f,
-                        "  certificate within the fault model and the explored schedules: POST is monotone in the observed facts"
-                    )?,
-                    Some(polarity) => writeln!(
-                        f,
-                        "  certificate RELATIVE to the recorded derivations persisting under the excluded fault sets: POST is {polarity}"
-                    )?,
-                    None => {}
-                }
+                writeln!(f, "  certificate {grade}")?;
                 for derivation in derivations {
                     writeln!(f, "  derivation: {}", render_set(derivation))?;
                 }
@@ -623,6 +660,11 @@ impl Display for Outcome {
                 f,
                 "LDFI: hypothesis budget exhausted after {} run(s) without a verdict",
                 runs.len()
+            ),
+            Outcome::Vacuous { runs } => writeln!(
+                f,
+                "LDFI: VACUOUS: the pre-condition never held in the failure-free run ({} schedule(s)); nothing to protect, nothing searched",
+                runs.iter().map(|h| h.schedules.len()).sum::<usize>()
             ),
             Outcome::Exhausted { runs } => writeln!(
                 f,
@@ -890,6 +932,10 @@ impl Run<'_> {
             for feed in &spec.correct {
                 feed.feed(&crashed);
             }
+            // The generated specification's fact domain (the facts of the failure-free run).
+            if let Some(facts) = &spec.facts {
+                facts.feed();
+            }
         }
     }
 
@@ -899,7 +945,24 @@ impl Run<'_> {
         // A specification decides the verdict from its views' final values.
         let mut spec_pre: Option<(usize, Vec<u8>)> = None;
         let mut spec_post: Option<(usize, Vec<u8>)> = None;
+        let mut spec_facts: BTreeSet<Vec<u8>> = BTreeSet::new();
         if let Some(Goal::Spec(spec)) = &self.search.goal {
+            // The facts correct members held, for the generated specification's domain.
+            if let Some(facts) = &spec.facts {
+                let port = lineage_port(facts.port);
+                spec_facts = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        LineageEvent::Output {
+                            port: p,
+                            bytes,
+                            dropped: false,
+                            ..
+                        } if *p == port => Some(bytes.clone()),
+                        _ => None,
+                    })
+                    .collect();
+            }
             let last_output = |port: usize| -> Option<Vec<u8>> {
                 events.iter().rev().find_map(|event| match event {
                     LineageEvent::Output {
@@ -935,6 +998,7 @@ impl Run<'_> {
             vacuous: self.vacuous.get(),
             spec_pre,
             spec_post,
+            spec_facts,
             faults: self.faults.clone(),
             goal_port: self.goal_port,
             level: self.level,
@@ -971,6 +1035,9 @@ struct RunRecord {
     /// Under a [`Spec`]: the port and final value of `PRE` / `POST`, when each held.
     spec_pre: Option<(usize, Vec<u8>)>,
     spec_post: Option<(usize, Vec<u8>)>,
+    /// Under a generated [`Spec`]: the facts correct members held (bincode), the search's fact
+    /// domain when this is the failure-free probe.
+    spec_facts: BTreeSet<Vec<u8>>,
     faults: FaultSet,
     goal_port: Option<usize>,
     level: Level,
@@ -980,6 +1047,49 @@ struct RunRecord {
     final_witnesses: Vec<(usize, Option<u32>, Vec<u8>)>,
     requirements: Vec<(usize, Option<u32>, Vec<u8>)>,
     context: InstanceContext,
+}
+
+/// The report of unchecked labels (design document, section 4.5): every place the program
+/// labels a collection `EventualConsistency`, whether a network channel feeds it, and whether
+/// some channel into `observer` carries it (so this test checks it). A network-fed collection
+/// this test does not check is a labelled claim the test says nothing about. Returns the report
+/// lines; empty when the program labels nothing.
+fn undischarged_ec_report(slices: &Slices, observer: &LocationId) -> Vec<String> {
+    let observed: BTreeSet<usize> = slices
+        .channels
+        .values()
+        .filter(|channel| channel.to == *observer)
+        .flat_map(|channel| {
+            slices
+                .channel_ec_sources
+                .get(&channel.id)
+                .into_iter()
+                .flatten()
+                .copied()
+        })
+        .collect();
+    let mut lines = vec![];
+    for (index, ec) in slices.ec_collections.iter().enumerate() {
+        let status = match (ec.fed_by_network, observed.contains(&index)) {
+            (_, true) => "checked by this test",
+            (true, false) => "UNCHECKED (fed by a network channel)",
+            (false, false) => "nothing to check (local inputs only)",
+        };
+        lines.push(format!(
+            "EventualConsistency at {} ({:?}): {status}",
+            ec.label, ec.location
+        ));
+    }
+    lines
+}
+
+/// The facts a generated specification published across `records`: the fact domain of the
+/// search (see `Spec::eventual_consistency`).
+fn learn_fact_domain(records: &[RunRecord]) -> BTreeSet<Vec<u8>> {
+    records
+        .iter()
+        .flat_map(|record| record.spec_facts.iter().cloned())
+        .collect()
 }
 
 impl RunRecord {
@@ -1014,6 +1124,7 @@ impl RunRecord {
             .filter(|s| s.fate == SendFate::Omitted)
             .map(|s| lineage.message(s))
             .collect();
+        let mut vacuous = self.vacuous;
         let derivations = match (&search.goal, self.goal_port) {
             (Some(Goal::Any { .. }), Some(port)) => lineage.any_output(port),
             (
@@ -1041,8 +1152,18 @@ impl RunRecord {
             // PRE held and POST held: POST's final value is the fact to derive.
             (Some(Goal::Spec(spec)), _) => match (&self.spec_pre, &self.spec_post) {
                 (_, Some((port, bytes))) if !self.vacuous => {
-                    let monotone = lineage.view_is_monotone(spec.post);
-                    vec![lineage.spec_view(*port, bytes, monotone)]
+                    let derivation = lineage.spec_view(*port, bytes, spec.facts.is_some());
+                    if spec.facts.is_some() && derivation.is_empty() {
+                        // The generated specification held because no correct member holds
+                        // any fact of the domain (every producer was crashed before it
+                        // produced), so nothing was required of anyone. Molly's vacuous
+                        // case: the run yields no clause. (An empty clause would end the
+                        // search with a certificate.)
+                        vacuous = true;
+                        vec![]
+                    } else {
+                        vec![derivation]
+                    }
                 }
                 _ => vec![],
             },
@@ -1055,9 +1176,9 @@ impl RunRecord {
             lineage.witnessed(&self.requirements)
         };
         if let (Some((port, bytes)), Some(Goal::Spec(spec))) = (&self.spec_pre, &search.goal) {
-            let monotone = spec.pre.is_some_and(|pre| lineage.view_is_monotone(pre));
-            requirements.extend(lineage.spec_view(*port, bytes, monotone));
+            requirements.extend(lineage.spec_view(*port, bytes, spec.facts.is_some()));
         }
+        let (sends, pre_eff_sends) = lineage.send_sequences();
         Schedule {
             goal_held: self.goal_held,
             derivations,
@@ -1065,10 +1186,11 @@ impl RunRecord {
             delivered,
             dropped,
             crashed_sends,
-            sends: Rc::new(lineage.send_sequences()),
+            sends: Rc::new(sends),
+            pre_eff_sends,
             requirements,
             unmatched_releases: lineage.unmatched_releases,
-            vacuous: self.vacuous,
+            vacuous,
             replays: lineage.replays.get(),
             replay_fallbacks: lineage.replay_fallbacks.get(),
         }
@@ -1162,6 +1284,8 @@ struct Lineage<'a> {
     replays: Cell<usize>,
     /// Derivation steps that fell back to the recorded lineage.
     replay_fallbacks: Cell<usize>,
+    /// Per crashable node, its number of pre-EFF sends (see [`Self::crash_ordinal`]).
+    pre_eff_counts: std::cell::OnceCell<BTreeMap<String, usize>>,
 }
 
 impl<'a> Lineage<'a> {
@@ -1202,6 +1326,7 @@ impl<'a> Lineage<'a> {
             send_memo: RefCell::new(HashMap::new()),
             replays: Cell::new(0),
             replay_fallbacks: Cell::new(0),
+            pre_eff_counts: std::cell::OnceCell::new(),
         };
         let mut send_counts: HashMap<NodeKey, u64> = HashMap::new();
         // `(exec, hook, member, payload)` in event order, matched to sends below.
@@ -1493,20 +1618,36 @@ impl<'a> Lineage<'a> {
                         render_payload(record)
                     ),
                 },
-                sender: record.sender.clone(),
+                sender: self.crash_ordinal(record),
                 lossy: false,
             };
         }
         Dependency {
             message: self.message(record),
-            sender: record.sender.clone(),
+            sender: self.crash_ordinal(record),
             lossy: record.pre_eff && self.channel(record).is_some_and(|c| c.lossy),
         }
     }
 
+    /// The sender and ordinal a dependency on `record` is killed through: the sender's
+    /// `ordinal`-th send, clamped to its count of pre-EFF sends. Crash points lie before the
+    /// end of finite failures (see [`Schedule::pre_eff_sends`]), so every send after it is
+    /// killed by exactly the crashes that kill the sender's last pre-EFF send, and the
+    /// weakest crash that kills it (`candidate_faults`) is the one right after that send.
+    fn crash_ordinal(&self, record: &SentRecord) -> Option<(String, u64)> {
+        let (node, ordinal) = record.sender.clone()?;
+        let pre_eff = *self
+            .pre_eff_counts
+            .get_or_init(|| self.send_sequences().1)
+            .get(&node)
+            .unwrap_or(&0) as u64;
+        Some((node, ordinal.min(pre_eff)))
+    }
+
     /// Every crashable node's performed sends, in order.
-    fn send_sequences(&self) -> SendSequences {
+    fn send_sequences(&self) -> (SendSequences, BTreeMap<String, usize>) {
         let mut sequences: SendSequences = BTreeMap::new();
+        let mut pre_eff: BTreeMap<String, usize> = BTreeMap::new();
         for record in &self.sent {
             if record.fate == SendFate::Crashed || record.observation {
                 continue;
@@ -1516,9 +1657,12 @@ impl<'a> Lineage<'a> {
                     .entry(node.clone())
                     .or_default()
                     .push(self.send_id(record));
+                if record.pre_eff {
+                    *pre_eff.entry(node.clone()).or_default() += 1;
+                }
             }
         }
-        sequences
+        (sequences, pre_eff)
     }
 
     /// The derivation of one output, at the configured lineage level.
@@ -1690,8 +1834,11 @@ impl<'a> Lineage<'a> {
         let run = |removed: &BTreeSet<(ExecId, usize)>| -> bool {
             self.replays.set(self.replays.get() + 1);
             let scripts = self.replay_scripts(node, &tick_execs, removed);
-            let events = replayer.replay(&scripts);
-            let hit = produced(&events);
+            // A replay the program did not survive is inconclusive: the delivery whose
+            // removal provoked it is kept (treated as needed), which can only weaken the
+            // derivation, never drop a real dependency.
+            let events = replayer.replay(&scripts).unwrap_or_default();
+            let hit = !events.is_empty() && produced(&events);
             if debug {
                 let sent = events
                     .iter()
@@ -1957,29 +2104,22 @@ impl<'a> Lineage<'a> {
         derivation
     }
 
-    /// The derivation of a specification view's final value (see [`crate::sim::spec`]):
-    /// `bytes` is the last value published on `port`. The step at the observer is derived
-    /// twice and the two are unioned:
+    /// The derivation of a specification view's final value, as the clause (for `POST`) or the
+    /// requirement (for `PRE`).
     ///
-    /// - **Counterfactually**: the observer is replayed with observed facts removed one at a
-    ///   time, and a fact is kept iff the view's final value changes without it. This asks
-    ///   "which of what the observer saw does the view rest on?" by intervention, so it is
-    ///   the same question whether the view is written positively or through negation (a
-    ///   view that holds by the *absence* of facts has no record provenance, but removing a
-    ///   fact it rests on still falsifies it).
-    /// - **From record provenance**, at the configured level: every fact that contributed to
-    ///   the value. For a view that is not monotone in the facts (`max` of a sequence: the
-    ///   final leader view) the counterfactual's 1-minimal sufficient set is *too small* —
-    ///   replaying with only the earliest view that happens to name the same leader
-    ///   reproduces the value, while in the real system later views decide it — so the
-    ///   contributions are needed for the derivation to name what the final value rests on.
+    /// For the **generated** specification (`generated`), the derivation is the view's record
+    /// provenance at the configured level: every delivery behind every `(member, fact)` pair
+    /// the value was computed from. The view is a universal over domains the hypothesis
+    /// fixes, so keeping every one of those deliveries keeps the view, which is all the
+    /// hitting-set inference needs (see [`Grade::Generated`]).
     ///
-    /// The union is sound where either is; it costs minimality. When the polarity check
-    /// ([`crate::sim::polarity`]) has graded the view `monotone`, the counterfactual alone is
-    /// licensed: a 1-minimal sufficient set of a monotone view is a derivation, and the
-    /// recorded contributions are only an over-approximation of it. Each kept observation
-    /// then continues into the observed node's own lineage at the configured level.
-    fn spec_view(&self, port: usize, bytes: &[u8], monotone: bool) -> Derivation {
+    /// For a **hand-written** view, two derivations are taken together: a counterfactual one
+    /// at the observer (replay the observer alone with observed facts removed one at a time,
+    /// keeping a fact iff the value changes without it, which answers a view written through
+    /// negation) and the recorded one (which names what a final value rests on where a
+    /// 1-minimal sufficient set is too small). The union is sound where either is; it costs
+    /// minimality, and the certificate says it is relative ([`Grade::HandWritten`]).
+    fn spec_view(&self, port: usize, bytes: &[u8], generated: bool) -> Derivation {
         let Some(output) = self
             .outputs
             .iter()
@@ -1992,6 +2132,9 @@ impl<'a> Lineage<'a> {
             return Derivation::new();
         }
         let recorded = self.derive(output);
+        if generated {
+            return recorded;
+        }
         let fallback = || recorded.clone();
         let Some(node) = self.exec_node(output.exec) else {
             return fallback();
@@ -2013,18 +2156,8 @@ impl<'a> Lineage<'a> {
                 .unwrap_or(false)
         };
         let mut derivation = self.counterfactual(&node, output.exec, &produced, fallback);
-        if !monotone {
-            derivation.extend(recorded);
-        }
+        derivation.extend(recorded);
         derivation
-    }
-
-    /// Whether the polarity check graded the view published on `port` monotone.
-    fn view_is_monotone(&self, port: ExternalPortId) -> bool {
-        self.slices
-            .view_polarity
-            .get(&port)
-            .is_some_and(Polarity::is_monotone)
     }
 
     /// The derivation of an output as a final-state fact: under replay, the deliveries
@@ -2431,18 +2564,31 @@ struct Replayer<'a> {
 impl Replayer<'_> {
     /// Replays with `scripts[hook]` (serialized items per tick execution) installed on each
     /// hook; a hook with no script gets an empty one, which keeps its tick from ever running.
+    /// `None` when the program's own code panicked under the counterfactual inputs (a
+    /// diverged state may reach conditions no real execution does): the replay is
+    /// inconclusive and the caller falls back to the recorded lineage.
     fn replay(
         &self,
         scripts: &HashMap<(usize, Option<u32>), Vec<Vec<Vec<u8>>>>,
-    ) -> Vec<LineageEvent> {
+    ) -> Option<Vec<LineageEvent>> {
         let mut events: Vec<LineageEvent> = vec![];
         let out = &mut events;
-        self.sim.replay(async || {
+        match self.sim.replay(async || {
             replay_all_hooks(scripts);
             crate::sim::compiled::quiesce().await;
             *out = lineage_events();
-        });
-        events
+        }) {
+            Ok(()) => Some(events),
+            Err(message) => {
+                if self.log {
+                    eprintln!(
+                        "{}: replay inconclusive, the program panicked under the counterfactual inputs: {message}",
+                        self.tag
+                    );
+                }
+                None
+            }
+        }
     }
 }
 
@@ -2751,6 +2897,29 @@ impl Ldfi {
                     Exploration::Fuzz { instances } => sim.fuzz_bounded(instances, instance),
                 }
             }
+            // A generated specification quantifies over the facts of the failure-free run,
+            // which the observer has to be told: the first failure-free run is a probe that
+            // learns them, and the search then starts over with the domain fed (section 1.1
+            // of the design document: Molly's "the good outcome persists").
+            if let Some(Goal::Spec(spec)) = &search.goal
+                && let Some(facts) = &spec.facts
+                && faults.is_empty()
+                && facts.domain.borrow().is_empty()
+            {
+                let learned = learn_fact_domain(&records);
+                if learned.is_empty() {
+                    // Nothing was held anywhere: the body protects nothing.
+                    return Outcome::Vacuous { runs };
+                }
+                if self.log {
+                    eprintln!(
+                        "{tag}: fact domain learned from the failure-free run: {} fact(s)",
+                        learned.len()
+                    );
+                }
+                *facts.domain.borrow_mut() = learned;
+                continue;
+            }
             tried.insert(faults.clone());
             if !records.is_empty() && records.iter().all(|r| r.vacuous) {
                 vacuous_sets.push(faults.clone());
@@ -2825,7 +2994,8 @@ impl Ldfi {
                         node: node.clone(),
                         after: None,
                     });
-                    for (at, send) in sends.iter().enumerate() {
+                    let pre_eff = schedule.pre_eff_sends.get(node).copied().unwrap_or(0);
+                    for (at, send) in sends.iter().enumerate().take(pre_eff) {
                         let fault = Fault::Crash {
                             node: node.clone(),
                             after: Some(send.clone()),
@@ -2847,16 +3017,16 @@ impl Ldfi {
                     describe_slices(slices)
                 );
                 if let Some(Goal::Spec(spec)) = &search.goal {
-                    let grade = |port: ExternalPortId| -> String {
-                        slices
-                            .view_polarity
-                            .get(&port)
-                            .map(|p| p.to_string())
-                            .unwrap_or_else(|| "not analysed".to_owned())
-                    };
-                    eprintln!("{tag}: POST is {}", grade(spec.post));
-                    if let Some(pre) = spec.pre {
-                        eprintln!("{tag}: PRE is {}", grade(pre));
+                    eprintln!(
+                        "{tag}: specification is {}",
+                        if spec.facts.is_some() {
+                            "generated (EventualConsistency)"
+                        } else {
+                            "hand-written (no soundness claim for the inference)"
+                        }
+                    );
+                    for line in undischarged_ec_report(slices, &spec.observer) {
+                        eprintln!("{tag}: {line}");
                     }
                 }
             }
@@ -2898,6 +3068,15 @@ impl Ldfi {
                     schedule,
                     runs,
                 };
+            }
+            // A failure-free run in which the pre-condition never held protects nothing: say
+            // so rather than certify.
+            if runs.len() == 1
+                && faults.is_empty()
+                && runs[0].schedules.iter().all(|s| s.vacuous)
+                && !runs[0].schedules.is_empty()
+            {
+                return Outcome::Vacuous { runs };
             }
 
             for schedule in runs.last().into_iter().flat_map(|h| &h.schedules) {
@@ -3006,17 +3185,10 @@ impl Ldfi {
                             derivations: clauses.into_iter().map(|c| c.deps).collect(),
                             runs,
                             exploration: self.exploration,
-                            polarity: match (&search.goal, &slices) {
-                                (Some(Goal::Spec(spec)), Some(slices)) => Some(
-                                    slices
-                                        .view_polarity
-                                        .get(&spec.post)
-                                        .cloned()
-                                        .unwrap_or_else(|| Polarity::Unknown {
-                                            reasons: vec!["the view was not analysed".to_owned()],
-                                        }),
-                                ),
-                                _ => None,
+                            grade: match &search.goal {
+                                Some(Goal::Spec(spec)) if spec.facts.is_some() => Grade::Generated,
+                                Some(Goal::Spec(_)) => Grade::HandWritten,
+                                _ => Grade::Goal,
                             },
                         },
                         Strategy::Blind => Outcome::Exhausted { runs },
@@ -3132,6 +3304,38 @@ impl Ldfi {
             }
         }
         let nodes: Vec<&String> = by_node.keys().copied().collect();
+        // A generated specification needs its fact domain (see `Ldfi::run`): a failure-free
+        // probe learns it when the lineage search has not already.
+        if let Some(Goal::Spec(spec)) = &search.goal
+            && let Some(facts) = &spec.facts
+            && facts.domain.borrow().is_empty()
+        {
+            let mut records: Vec<RunRecord> = vec![];
+            {
+                let records_ref = &mut records;
+                let body_ref = &body;
+                let empty = FaultSet::new();
+                let empty_ref = &empty;
+                sim.fuzz_bounded(1, async || {
+                    let run = Run {
+                        faults: empty_ref,
+                        search,
+                        goal_port: goal_port.map(lineage_port),
+                        eff_cut: RefCell::new(None),
+                        witnesses: RefCell::new(vec![]),
+                        final_witnesses: RefCell::new(vec![]),
+                        requirements: RefCell::new(vec![]),
+                        vacuous: Cell::new(false),
+                        level: self.level,
+                        hooks: RefCell::new(vec![]),
+                    };
+                    run.install();
+                    let goal_held = body_ref(&run).await;
+                    records_ref.push(run.finish(goal_held));
+                });
+            }
+            *facts.domain.borrow_mut() = learn_fact_domain(&records);
+        }
         let mut runs = 0usize;
         let mut vacuous = 0usize;
         let mut violation: Option<FaultSet> = None;
