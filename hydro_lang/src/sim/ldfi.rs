@@ -2773,6 +2773,19 @@ impl Ldfi {
         self
     }
 
+    /// An automatic specification ([`Spec::all_labels`]) observes nothing until the search
+    /// names the collection; only [`Self::search_all_labels`] does.
+    fn assert_label_chosen(&self) {
+        if let Some(Goal::Spec(spec)) = &self.search.goal
+            && let Some(all_labels) = &spec.all_labels
+        {
+            assert!(
+                all_labels.current.get().is_some(),
+                "a `Spec::all_labels` specification is driven by `Ldfi::search_all_labels`"
+            );
+        }
+    }
+
     /// Runs the search against a [`Spec`] (see [`Self::spec`]). `body` drives one run: it
     /// sends inputs, fires timers and awaits `quiesce()`; the verdict comes from the
     /// specification's views at the end of the run, not from the body.
@@ -2795,8 +2808,8 @@ impl Ldfi {
     /// automatic specification ([`Spec::all_labels`]) and the shared `body`, and returns a
     /// verdict for each: the [`Outcome`] of its search, or why it was not checked. Every
     /// setting of this `Ldfi` (crashable nodes, budget, exploration, level) applies to every
-    /// collection. Prints one summary line per collection as it finishes, and the full outcome
-    /// of a counterexample.
+    /// collection. Unless [`Self::quiet`], prints one summary line per collection as it
+    /// finishes, and the full outcome of a counterexample.
     pub fn search_all_labels(
         &self,
         sim: &CompiledSim,
@@ -2870,6 +2883,7 @@ impl Ldfi {
         body: impl AsyncFn(&Run<'_>) -> bool + RefUnwindSafe,
     ) -> Outcome {
         let search = &self.search;
+        self.assert_label_chosen();
         let goal_port = match &search.goal {
             Some(Goal::Any { port } | Goal::AllMembers { port, .. }) => Some(*port),
             Some(Goal::Witnessed | Goal::Spec(_)) | None => None,
@@ -3459,6 +3473,7 @@ impl Ldfi {
         use bolero::generator::bolero_generator::any::Any;
 
         let search = &self.search;
+        self.assert_label_chosen();
         let goal_port = match &search.goal {
             Some(Goal::Any { port } | Goal::AllMembers { port, .. }) => Some(*port),
             Some(Goal::Witnessed | Goal::Spec(_)) | None => None,

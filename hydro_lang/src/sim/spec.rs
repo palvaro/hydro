@@ -231,10 +231,10 @@ impl<'a> Spec<'a> {
     /// then runs one search per collection and reports a verdict for each, including the ones
     /// not checked and why.
     ///
-    /// Observing a collection serializes its elements, so every labelled collection's element
-    /// type must be `serde::Serialize` (it nearly always is: labelled cluster collections are
-    /// built from network sends). If one is not, the generated crate fails to compile; use
-    /// [`Self::all_labels_except`] to leave it out.
+    /// Observing a collection shares and serializes its elements, so every checked
+    /// collection's element type must be `Clone + serde::Serialize` (it nearly always is:
+    /// labelled cluster collections are built from network sends). If one is not, the generated
+    /// crate fails to compile; use [`Self::all_labels_except`] to leave it out.
     pub fn all_labels(flow: &mut FlowBuilder<'a>) -> Self {
         Self::all_labels_except(flow, &[])
     }

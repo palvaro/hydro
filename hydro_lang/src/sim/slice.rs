@@ -118,14 +118,13 @@ pub struct Slices {
     pub sink_in_tick: HashMap<usize, bool>,
     /// Every network channel, by sink id.
     pub channels: BTreeMap<usize, ChannelInfo>,
-    /// Every collection the program labels `EventualConsistency` (see [`EcCollection`]).
-    pub ec_collections: Vec<EcCollection>,
 }
 
 /// A collection the program labels `EventualConsistency`: a premise that the label's
 /// convergence is not withheld by faults, which a specification over it discharges
 /// (`Spec::eventual_consistency`, or every one at once with `Spec::all_labels`) and which is
-/// otherwise open.
+/// otherwise open. Enumerated by [`ec_collections`] on the IR before the observation pass
+/// (`sim::observe`); the compiled program keeps the list (`CompiledSim::labels`).
 #[derive(Clone, Debug)]
 pub struct EcCollection {
     /// The user's source location of the labelling operator, or its tag.
@@ -141,7 +140,8 @@ pub struct EcCollection {
     /// The kind of the collection (its element types are those of the IR the enumeration ran
     /// on: plain before the provenance rewrite, tagged after).
     pub collection_kind: CollectionKind,
-    /// Whether the node lives inside a tick rather than at the cluster's top level.
+    /// Whether the node lives inside a tick (or an atomic region) rather than at the cluster's
+    /// top level.
     pub in_tick: bool,
     /// The label is minted here: none of the node's inputs is labelled (a `broadcast_closed`
     /// over a transport that grants it, an `assert_has_consistency_of`). What the type system
@@ -167,8 +167,8 @@ impl EcCollection {
     }
 }
 
-/// `(label, operator, cluster)`: how labelled nodes are told apart and re-identified across IR
-/// passes (node addresses do not survive a traversal, which moves what a `Tee` shares).
+/// `(label, operator, cluster)`: how labelled nodes are told apart, and how the observation
+/// pass re-identifies the nodes this enumeration found.
 pub(crate) type EcKey = (String, String, LocationId);
 
 /// Every collection `ir` labels `EventualConsistency`: every labelled node where the label is
@@ -177,8 +177,9 @@ pub(crate) type EcKey = (String, String, LocationId);
 /// labelled region (a consumer other than a send is unlabelled, or it is an output of the
 /// program). The operators
 /// in between inherit the label and are not listed. Nodes at the same source line, of the same
-/// operator, on the same cluster (one per cluster member, or one per instantiation) are reported
-/// once, in first-seen order. A `Tee` stands for what it shares: it is neither a minting point
+/// operator, on the same cluster (one per cluster member, or one per instantiation of a library
+/// function on the same cluster) are reported once, in first-seen order; a search over such a
+/// collection checks the union of their contents per member. A `Tee` stands for what it shares: it is neither a minting point
 /// nor, by itself, an exit, and the shared node is reported under its own source line.
 pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
     // Raw pointers: cycle sinks are followed from `CycleSource`s to find network ancestors;
@@ -215,7 +216,10 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
                         location: key.2,
                         fed_by_network: false,
                         collection_kind: node.metadata().collection_kind.clone(),
-                        in_tick: !node.metadata().location_id.is_top_level(),
+                        in_tick: !matches!(
+                            node.metadata().location_id,
+                            LocationId::Cluster(_)
+                        ),
                         minted: false,
                         exit: false,
                     });
@@ -291,21 +295,23 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
 /// is the minting operator's row.
 fn with_casts_resolved<R>(node: &HydroNode, f: impl FnOnce(&HydroNode) -> R) -> R {
     match node {
-        HydroNode::Tee { inner, .. }
-        | HydroNode::Reference { inner, .. }
-        | HydroNode::PartitionSide { inner, .. } => with_casts_resolved(&inner.0.borrow(), f),
+        HydroNode::Tee { inner, .. } | HydroNode::Reference { inner, .. } => {
+            with_casts_resolved(&inner.0.borrow(), f)
+        }
         HydroNode::Cast { inner, .. } if is_ec(inner) => with_casts_resolved(inner, f),
         _ => f(node),
     }
 }
 
-/// Calls `f` on the node a `Tee` (or reference / partition side) shares, through any chain of
-/// them, or on `node` itself.
+/// Calls `f` on the node a `Tee` (or reference) shares, through any chain of them, or on
+/// `node` itself.
 fn with_shared_resolved<R>(node: &HydroNode, f: impl FnOnce(&HydroNode) -> R) -> R {
     match node {
-        HydroNode::Tee { inner, .. }
-        | HydroNode::Reference { inner, .. }
-        | HydroNode::PartitionSide { inner, .. } => with_shared_resolved(&inner.0.borrow(), f),
+        HydroNode::Tee { inner, .. } | HydroNode::Reference { inner, .. } => {
+            with_shared_resolved(&inner.0.borrow(), f)
+        }
+        // A partition side is one output of the shared `PartitionShared`, which cannot be
+        // tapped as a whole; the side is the operator.
         _ => f(node),
     }
 }
@@ -697,9 +703,6 @@ pub fn compute(ir: &mut [HydroRoot]) -> Slices {
             }
         },
     );
-    // The labelled collections (section 4.5 of the design document), on the IR as emitted.
-    let ec_collections = ec_collections(ir);
-
     let State {
         network_ids,
         raw_sinks,
@@ -745,10 +748,7 @@ pub fn compute(ir: &mut [HydroRoot]) -> Slices {
             .collect(),
     );
 
-    let mut slices = Slices {
-        ec_collections,
-        ..Slices::default()
-    };
+    let mut slices = Slices::default();
     for (id, in_tick, raw) in raw_sinks {
         let mut slice = resolve_channels(&raw);
         // Fixpoint over the cycles and state cells the sink reaches. A cycle is tracked
