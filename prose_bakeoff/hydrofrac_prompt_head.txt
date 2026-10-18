@@ -1,0 +1,104 @@
+I do not like the way hydrofrac.md is written. Please rewrite it for a Hydro-familiar audience. The goal is to explain why hydrofrac is needed and why as well as how it works. The reader will have some familiarity with LDFI, but should be reminded about the idea of working "backwards" from outcomes. Make sure to clearly explain how hydrofrac separates existing Hydro code into certified or incorrect w.r.t. complete EC.
+
+The current draft's writing is extremely precious and hence often confusing, ambiguous, sometimes incomprehensible. Here is an example of MY OWN technical writing; try to write more like this:
+
+=============================================================================
+WRITING SAMPLE (my own technical writing, about a different tool)
+=============================================================================
+
+Cress
+
+(_A hydrophilic plant, or *C*ounterfactual *R*edundancy *E*stimation under *S*imulated *S*talls_)
+
+Cress is a tool for reasoning about a system's potential for amplifying work. It can be used to feel out the safety margin of a distributed system and help make it robust against metastable failures.
+
+Cress is built atop the Hydro simulator, which systematically explores potential nondeterminism in program runs. The typical use case for the simulator is to support property-based testing: it explores schedules in an attempt to find violations of correctness properties. Cress subverts that simulator in an attempt to find and measure work amplification. At a very high level, cress asks whether a program can be induced to do work not only when data arrives (i.e., productive work) but also when data does NOT arrive. If a program does work in response to time passing, we can ask HOW MUCH of this unproductive work it can be made to do. The nondeterminism that we are interested in is hence _delay_ -- manifested both in the form of streams that stop making progress (a simulator use::batch hook) and singletons that stop changing (a use::snapshot) hook.
+
+Using cress
+
+To use cress, a user will annotate the source code of their hydro program with a closure that provides constants for the program's inputs that will be used in the tests. For example, a user trying to explore the amplification hazard of a client and service under a particular configuration will provide an `#[amplification_check(...)]` annotation that provides parameters such as queue bound, client timeout, retry and throttling policy tunables, etc. They then run cress at the command line.
+
+```
+#[amplification_check(
+    name = no_governance,
+    workload(requests = 2),
+    workload_rounds = 125,
+    config = RetryConfig { timeout_ticks: 6, server_capacity: 5, max_attempts: 3,
+             policy: Policy::None },
+)]
+#[amplification_check(
+    name = circuit_breaker,
+    workload(requests = 2),
+    workload_rounds = 125,
+    config = RetryConfig { timeout_ticks: 6, server_capacity: 5, max_attempts: 3,
+             policy: Policy::CircuitBreaker { timeout_threshold: 8, open_ticks: 12 } },
+)]
+
+pub fn service<'a>(
+    client: &Process<'a, Client>,
+    server: &Process<'a, Server>,
+    requests: Stream<u64, Process<'a, Client>, Unbounded, TotalOrder, ExactlyOnce>,
+    client_clock: Stream<(), Process<'a, Client>, Unbounded, TotalOrder, ExactlyOnce>,
+    server_clock: Stream<(), Process<'a, Server>, Unbounded, TotalOrder, ExactlyOnce>,
+    config: RetryConfig,
+) -> Responses<'a> {
+[.....]
+$ ./cress hydro_test service_no_governance
+
+amplification check summary (hydro_test, functions matching "retry_service_no_governance")
+
+function       configuration  workload                                                           verdict    growth  multiplier  location                                                             first reaction  extra work               horizon  seconds
+retry_service  no_governance  requests=2, client_clock=1, server_clock=1, data in rounds 0..125  hazardous  stops   2.98x       src/cluster/witnesses/blind_budget/service.rs:533, batch of Request  8               992 in admitted records  999      9.0
+
+$ ./cress hydro_test service_circuit_breaker
+
+amplification check summary (hydro_test, functions matching "retry_service_circuit_breaker")
+
+function       configuration    workload                                                           verdict    growth  multiplier  location                                                             first reaction  extra work              horizon  seconds
+retry_service  circuit_breaker  requests=2, client_clock=1, server_clock=1, data in rounds 0..125  hazardous  stops   1.12x       src/cluster/witnesses/blind_budget/service.rs:533, batch of Request  8               16 in admitted records  999      6.0
+```
+
+How cress works
+
+Cress first instantiates the user's program under the given input, wires it up to the simulator, and runs a single "prompt" execution in which no delays are simulated. In that run, it counts how many records are admitted into each dataflow "tick" at each use::batch point, and also how many network messages were sent on a per-sender basis. It then begins exploring schedules in which it places a "hold" on a single source of nondeterminism (e.g., the stream of client requests arriving at the server) for increasing amounts of time. In these exploratory runs, it releases the input data following the same schedule as the prompt run, and pays special attention to the holds that last longer than the input. In all of these cases, ANY increase in either counter versus the prompt run can be attributed counterfactually to the hold. The counters are a proxy for "work" and a positive delta against the prompt run is a measure of "amplification." Cress then exhaustively searches the family of schedules with a specific shape: a single hold point, with the hold starting at the beginning of the program execution and lasting for 1, 2, 4, [...] ticks, up to the whole run of the program (there are many deficiencies here! but this is a prototype, and this makes the search tractable). It searches for the schedule that maximizes the delta.
+
+In the case of the client/server program, the hold that matters is on the stream of requests arriving at the server. If it is held for 8 rounds (just past the client's 6-tick timeout), the client starts re-sending. If it is held for 128 rounds or more, long enough that every request the test will ever offer is stuck behind the hold, the client has re-sent every one of them twice, which with three attempts is all it is allowed to do. The prompt run had the client send 250 messages, while under those long holds it sends 746, a delta of 496. Holding for 256 or 512 rounds gives the same 496. Holding forever also gives 496.
+
+Judgements
+
+When the search is complete, cress returns a judgement. For some programs and configurations (e.g., the client/server program with retries disabled) it will report 'benign': it was unable to stimulate amplification of any kind. For the others it will report 'hazardous', and then say two more things about the hazard.
+
+*Locus* identifies a program location sensitive to the delay. Cress identifies the hold that produced a reaction at the shortest delay, by the file and line of the `use::batch` (or `use::snapshot`) in the source. For the client/server program that is the server's inbox, reacting at a hold of 8 rounds.
+
+*Shape* describes how the work changes with the passage of time. For runs with hold durations that outlast the input, the only thing that differs is how long the program waited. Cress looks at the deltas across those runs and answers one question: does the extra work stop, or does it keep growing? If it stops, cress reports the ceiling, which for the three-attempt client is 496 extra messages, the same at 128, 256 and 512 rounds. It also reports the multiplication factor as 2.8x; this is very close to the fixed number of retries.
+
+If the work keeps growing, cress reports the rate, in extra messages per additional round of delay; the same client with no attempt cap reads about 35. Cress also notices if the rate is itself growing (it will say "degree 2"), and if the program does LESS work under a long delay (it will say "shedding", which is what a circuit breaker does because it refuses input while open). Cress does not know why the ceiling is 496; matching it to two re-sends for each of the 248 held requests is the reader's job, and the source line of the hold is printed to help.
+
+Validation
+
+To kick the tires on cress, I had a collection of agents (running GPT5.6 Sol) implement a corpus of labeled examples of systems with and without work amplification. Without any knowledge of cress, each "author" was asked to implement a system in Hydro, and to label it with ground truth regarding its stability.
+
+Benign
+
+Benign systems are written so as to never produce work amplification, and are accompanied by an assurance argument (since I do not know how to prove that a program is robust to collapse!) that the system cannot amplify work. One example is non-distributed transitive closure computation that produces substantial intermediate results but always performs productive work. Another is a system that heartbeats at a fixed interval; although it produces "useless" work that increases with time, it is invariant across schedules.
+
+Hazardous
+
+Hazardous systems are supposed to amplify work in certain regimes. Examples include the running client/server example under a wide range of configurations, read-through caches with TTL-based expiry, leader election, replicated log catchup. Even for such systems, certain configurations (e.g., a correctly-parameterized token bucket or circuit breaker that rate-limits a client when success signals from the server degrade) minimize amplification.
+
+The systems labeled "hazardous" have stronger ground truth than those labeled benign. The hazardous label was only permitted when the author was able to write a stress test that caused the system to collapse using the standard pattern: after a short burst of load beyond system capacity, the system remained in a degraded state with a low success rate.
+
+Full results
+
+Every row is one program in one configuration, run for 1000 rounds.
+
+• *verdict* — `hazardous` if any hold at any decision point made any count rise, `benign` if none did. This is the sound part: a single extra message is hazardous, because cress cannot know what a message is worth.
+• *shape* — what the extra work did across the holds long enough to cover the whole input (128, 256 and 512 rounds), where the only thing that differs between runs is how long the program waited. `stops`: the extra work reached a ceiling and a longer delay adds nothing. `grows`: every further round of delay costs about the same additional amount. `grows, slowing`: it still rises but each round costs less than the last. `grows, degree 2`: each round costs more than the last, with the rate doubling when the hold doubles. `shedding`: the program did less than the reference run under long delays (it refused input). `not read`: the data could not be confined, so the question could not be asked.
+• *ceiling or rate* — the one number that goes with the shape. When the shape stops, the ceiling: the most extra work a delay of any length can cause. When it grows, the rate: extra messages per additional round of delay.
+• *multiplier* — the worst count found divided by the reference count, for the sender where that ratio was largest. `2.98×` means that sender sent almost three times what the input required under the worst delay. When the shape stops, this is a property of the program. When it grows, it is a property of how long cress ran, and the rate is the number to compare instead. "followers send from 0" means the sender sent nothing at all in the reference run, so there is no ratio.
+• *stall* — the extra work under the hold that never releases, in which the held records never arrive: what the program does while waiting for something that never comes. For growing shapes the per-round figure is given, since it is an independent estimate of the rate. A negative stall means the program sent fewer messages than the reference run.
+
+=============================================================================
+THE DOCUMENT TO REWRITE: docs/design/hydrofrac.md (current draft)
+=============================================================================
+

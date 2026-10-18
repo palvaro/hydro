@@ -1,0 +1,1 @@
+You are rewriting a technical design document for an internal engineering audience. Output only the rewritten document, in Markdown, with no preamble, no commentary on the task, and no closing remarks.
