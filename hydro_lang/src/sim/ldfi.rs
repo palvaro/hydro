@@ -103,6 +103,9 @@ use crate::sim::runtime::{
 use crate::sim::slice::{ChannelInfo, EcCollection, SinkSlice, SliceInput, Slices};
 use crate::sim::spec::{Spec, SpecParts};
 use crate::sim::viz::Trace;
+use crate::sim::viz::provenance::{
+    ProvEdgeKind, ProvFate, ProvGraph, ProvKey, ProvLevel, ProvMessage, ProvNodeKind, ProvRecorder,
+};
 use crate::sim::viz::trace::{Crash, Fate, TraceEvent, TraceEventKind, TraceMessage, TraceNode};
 use crate::sim::{SimClusterReceiver, SimReceiver};
 
@@ -365,6 +368,19 @@ impl Display for Dependency {
     }
 }
 
+impl From<&Dependency> for ProvMessage {
+    fn from(dependency: &Dependency) -> Self {
+        ProvMessage {
+            channel: dependency.message.channel.clone(),
+            from_member: dependency.message.from_member,
+            to_member: dependency.message.to_member,
+            display: dependency.message.display.clone(),
+            sender: dependency.sender.clone(),
+            lossy: dependency.lossy,
+        }
+    }
+}
+
 /// A derivation of the goal: the deliveries it depended on. Killing any one of them kills
 /// the derivation.
 pub type Derivation = BTreeSet<Dependency>;
@@ -376,6 +392,11 @@ pub struct Schedule {
     pub goal_held: bool,
     /// The goal's derivations in this schedule (see the module docs on goals).
     pub derivations: Vec<Derivation>,
+    /// The why-provenance graph behind each derivation, parallel to `derivations`: the DAG
+    /// the backward closure walked, from the goal down to the deliveries
+    /// (see [`crate::sim::viz::provenance`]). Empty unless the search was configured with
+    /// [`Ldfi::with_provenance_graphs`].
+    pub provenance: Vec<ProvGraph>,
     /// Every delivery through a registered channel that some fault could have prevented: the
     /// fault universe a lineage-blind search sees.
     pub observed: Derivation,
@@ -486,6 +507,10 @@ impl Display for Grade {
 
 /// The result of an LDFI search.
 #[derive(Clone, Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a search result, produced once; the counterexample's schedule is what the caller reads"
+)]
 pub enum Outcome {
     /// A fault set under which the goal fails in some schedule.
     Counterexample {
@@ -1091,6 +1116,7 @@ impl RunRecord {
         search: &Search,
         replayer: Option<&Replayer<'_>>,
         retain_trace: bool,
+        prov_graphs: bool,
     ) -> Schedule {
         let lineage = Lineage::new(
             &self.events,
@@ -1099,6 +1125,7 @@ impl RunRecord {
             self.level,
             &self.context,
             replayer,
+            prov_graphs,
         );
         // A failing schedule is rare and is what a counterexample shows: always keep its
         // trace. Successful schedules keep theirs only on request (the witness picture).
@@ -1145,15 +1172,19 @@ impl RunRecord {
                 if self.witnesses.is_empty() && self.final_witnesses.is_empty() {
                     vec![]
                 } else {
+                    lineage.prov_begin("witnessed outputs");
                     let mut derivation = lineage.witnessed(&self.witnesses);
                     derivation.extend(lineage.witnessed_final(&self.final_witnesses));
+                    lineage.prov_keep(lineage.prov_end());
                     vec![derivation]
                 }
             }
             // PRE held and POST held: POST's final value is the fact to derive.
             (Some(Goal::Spec(spec)), _) => match (&self.spec_pre, &self.spec_post) {
                 (_, Some((port, bytes))) if !self.vacuous => {
+                    lineage.prov_begin("POST");
                     let derivation = lineage.spec_view(*port, bytes, spec.facts.is_some());
+                    let graph = lineage.prov_end();
                     if spec.facts.is_some() && derivation.is_empty() {
                         // The generated specification held because no correct member holds
                         // any fact of the domain (every producer was crashed before it
@@ -1163,14 +1194,25 @@ impl RunRecord {
                         vacuous = true;
                         vec![]
                     } else {
+                        lineage.prov_keep(graph);
                         vec![derivation]
                     }
                 }
                 _ => vec![],
             },
             // No goal registered: everything delivered before EFF is the one derivation.
-            _ => vec![lineage.all_pre_eff_deliveries()],
+            _ => {
+                lineage.prov_begin("every delivery before EFF");
+                let derivation = lineage.all_pre_eff_deliveries();
+                lineage.prov_keep(lineage.prov_end());
+                vec![derivation]
+            }
         };
+        let provenance = lineage.kept.take();
+        debug_assert!(
+            !prov_graphs || provenance.len() == derivations.len(),
+            "one provenance graph per derivation"
+        );
         let mut requirements = if self.requirements.is_empty() {
             Derivation::new()
         } else {
@@ -1183,6 +1225,7 @@ impl RunRecord {
         Schedule {
             goal_held: self.goal_held,
             derivations,
+            provenance,
             observed: lineage.all_deliveries(),
             delivered,
             dropped,
@@ -1542,6 +1585,14 @@ struct Lineage<'a> {
     replay_fallbacks: Cell<usize>,
     /// Per crashable node, its number of pre-EFF sends (see [`Self::crash_ordinal`]).
     pre_eff_counts: std::cell::OnceCell<BTreeMap<String, usize>>,
+    /// The provenance-graph recorder, when the search asked for graphs
+    /// ([`Ldfi::with_provenance_graphs`]); see [`crate::sim::viz::provenance`].
+    prov: Option<RefCell<ProvRecorder>>,
+    /// The recorded sub-graph of each memoized send derivation, by index into `sent`, spliced
+    /// into every graph that reaches the send again.
+    send_prov_memo: RefCell<HashMap<usize, ProvGraph>>,
+    /// The finished graphs, one per derivation, in the order the derivations were produced.
+    kept: RefCell<Vec<ProvGraph>>,
 }
 
 impl<'a> Lineage<'a> {
@@ -1552,6 +1603,7 @@ impl<'a> Lineage<'a> {
         level: Level,
         context: &InstanceContext,
         replayer: Option<&'a Replayer<'a>>,
+        prov_graphs: bool,
     ) -> Self {
         let labels_by_node: HashMap<&NodeKey, &String> = search
             .nodes
@@ -1583,6 +1635,9 @@ impl<'a> Lineage<'a> {
             replays: Cell::new(0),
             replay_fallbacks: Cell::new(0),
             pre_eff_counts: std::cell::OnceCell::new(),
+            prov: prov_graphs.then(|| RefCell::new(ProvRecorder::new())),
+            send_prov_memo: RefCell::new(HashMap::new()),
+            kept: RefCell::new(vec![]),
         };
         let mut send_counts: HashMap<NodeKey, u64> = HashMap::new();
         // `(exec, hook, member, payload)` in event order, matched to sends below.
@@ -1921,19 +1976,190 @@ impl<'a> Lineage<'a> {
         (sequences, pre_eff)
     }
 
+    // ---- Provenance-graph recording (see `crate::sim::viz::provenance`) ----
+    //
+    // Every derivation function below takes or computes an *anchor*: the graph node of the
+    // thing being derived (an output or a message), under which the step's edges hang. The
+    // anchors are `None` when no graph is being recorded, and every helper is a no-op then.
+
+    /// Whether a provenance graph is being recorded.
+    fn recording(&self) -> bool {
+        self.prov.is_some()
+    }
+
+    fn with_prov<R>(&self, f: impl FnOnce(&mut ProvRecorder) -> R) -> Option<R> {
+        self.prov.as_ref().map(|prov| f(&mut prov.borrow_mut()))
+    }
+
+    /// Starts recording a fresh graph for a goal.
+    fn prov_begin(&self, goal: &str) {
+        self.with_prov(|prov| prov.begin(Some(goal)));
+    }
+
+    /// Takes the graph begun by [`Self::prov_begin`].
+    fn prov_end(&self) -> Option<ProvGraph> {
+        self.with_prov(ProvRecorder::end)
+    }
+
+    /// Files a finished graph beside its derivation.
+    fn prov_keep(&self, graph: Option<ProvGraph>) {
+        if let Some(graph) = graph {
+            self.kept.borrow_mut().push(graph);
+        }
+    }
+
+    /// The label of a node: its registered label when crashable, `observer` for the
+    /// specification's observer, else its location.
+    fn node_label(&self, node: &NodeKey) -> String {
+        if let Some((label, _)) = self.search.nodes.iter().find(|(_, key)| **key == *node) {
+            return label.clone();
+        }
+        if self.search.observer() == Some(&node.0) {
+            return "observer".to_owned();
+        }
+        match node.1 {
+            Some(member) => format!("{:?}@{member}", node.0),
+            None => format!("{:?}", node.0),
+        }
+    }
+
+    fn prov_edge(
+        &self,
+        from: Option<usize>,
+        to: Option<usize>,
+        kind: ProvEdgeKind,
+        level: Option<ProvLevel>,
+    ) {
+        if let (Some(from), Some(to)) = (from, to) {
+            self.with_prov(|prov| prov.edge(from, to, kind, level));
+        }
+    }
+
+    /// The graph node of an execution.
+    fn prov_exec_node(&self, exec: ExecId) -> Option<usize> {
+        if !self.recording() {
+            return None;
+        }
+        let (location, member, tick) = self.execs.get(&exec)?;
+        let node = self.node_label(&(location.root().clone(), *member));
+        let location = format!("{location:?}");
+        let tick = *tick;
+        self.with_prov(|prov| {
+            prov.node(ProvKey::Exec(exec), || ProvNodeKind::Exec {
+                node,
+                exec,
+                tick,
+                location,
+            })
+        })
+    }
+
+    /// The graph node of a send (by index into `sent`).
+    fn prov_message_node(&self, i: usize) -> Option<usize> {
+        if !self.recording() {
+            return None;
+        }
+        let record = &self.sent[i];
+        let dependency = self.send_dependency(i);
+        let kind = ProvNodeKind::Message {
+            message: ProvMessage::from(&dependency),
+            from: self.node_label(&record.from),
+            to: self.node_label(&record.to),
+            fate: match record.fate {
+                SendFate::Delivered => ProvFate::Delivered,
+                SendFate::Omitted => ProvFate::Omitted,
+                SendFate::Crashed => ProvFate::Crashed,
+            },
+            observation: record.observation,
+            fault_point: dependency.lossy || dependency.sender.is_some(),
+        };
+        self.with_prov(|prov| prov.node(ProvKey::Message(i), || kind))
+    }
+
+    /// The graph node of an output, checked by the current goal (if one is begun).
+    fn prov_output_node(&self, output: &OutputRecord) -> Option<usize> {
+        if !self.recording() {
+            return None;
+        }
+        let node = self
+            .exec_node(output.exec)
+            .map(|node| self.node_label(&node))
+            .unwrap_or_else(|| "?".to_owned());
+        let key = ProvKey::Output {
+            exec: output.exec,
+            port: output.port,
+            member: output.member,
+            bytes: output.bytes.clone(),
+        };
+        let kind = ProvNodeKind::Output {
+            node,
+            exec: output.exec,
+            port: output.port,
+            display: render_bytes(&output.bytes),
+        };
+        self.with_prov(|prov| {
+            let i = prov.node(key, || kind);
+            if let Some(goal) = prov.goal() {
+                prov.edge(goal, i, ProvEdgeKind::Checked, None);
+            }
+            i
+        })
+    }
+
+    /// Records that the step at `anchor` fell back to a coarser lineage, returning the node
+    /// the fallback's edges hang from.
+    fn prov_opaque_node(&self, anchor: Option<usize>, reason: &str) -> Option<usize> {
+        let anchor = anchor?;
+        self.with_prov(|prov| {
+            let under = prov
+                .key(anchor)
+                .unwrap_or_else(|| ProvKey::Base("?".to_owned()));
+            let label = reason.to_owned();
+            let i = prov.node(ProvKey::Opaque(Box::new(under), reason.to_owned()), || {
+                ProvNodeKind::Opaque { reason: label }
+            });
+            prov.edge(anchor, i, ProvEdgeKind::Fallback, None);
+            i
+        })
+    }
+
+    /// Records that `anchor` was computed from nothing that came off a channel.
+    fn prov_base_node(&self, anchor: Option<usize>, label: &str, level: ProvLevel) {
+        let Some(anchor) = anchor else {
+            return;
+        };
+        self.with_prov(|prov| {
+            let kind = label.to_owned();
+            let i = prov.node(ProvKey::Base(label.to_owned()), || ProvNodeKind::Base {
+                label: kind,
+            });
+            prov.edge(anchor, i, ProvEdgeKind::Derived, Some(level));
+        });
+    }
+
+    /// The level tag of the execution-graph closure through `sink`.
+    fn closure_level(&self, sink: Option<usize>) -> ProvLevel {
+        if sink.and_then(|s| self.slices.precise(s)).is_some() {
+            ProvLevel::Slice
+        } else {
+            ProvLevel::Execution
+        }
+    }
+
     /// The derivation of one output, at the configured lineage level.
     fn derive(&self, output: &OutputRecord) -> Derivation {
+        let anchor = self.prov_output_node(output);
         match self.level {
-            Level::Execution => self.closure(output.exec, None),
-            Level::Slice => self.closure(output.exec, Some(output.sink)),
+            Level::Execution => self.closure(output.exec, None, anchor),
+            Level::Slice => self.closure(output.exec, Some(output.sink), anchor),
             Level::Record => {
                 if is_opaque(&output.prov) {
-                    self.counterfactual_output(output)
+                    self.counterfactual_output(output, anchor)
                 } else {
-                    self.record_closure(&output.prov, output.exec, Some(output.sink))
+                    self.record_closure(&output.prov, output.exec, Some(output.sink), anchor)
                 }
             }
-            Level::Counterfactual => self.counterfactual_output(output),
+            Level::Counterfactual => self.counterfactual_output(output, anchor),
         }
     }
 
@@ -1942,14 +2168,25 @@ impl<'a> Lineage<'a> {
     /// under [`Level::Counterfactual`], slice-level otherwise.
     fn send_derivation(&self, i: usize) -> Derivation {
         if let Some(derivation) = self.send_memo.borrow().get(&i) {
+            if self.recording()
+                && let Some(sub) = self.send_prov_memo.borrow().get(&i)
+            {
+                self.with_prov(|prov| prov.splice(sub));
+            }
             return derivation.clone();
         }
+        // Recorded into a sub-graph of its own, kept with the memoized derivation.
+        self.with_prov(ProvRecorder::push);
+        let anchor = self.prov_message_node(i);
         let record = &self.sent[i];
         let derivation = match self.level {
-            Level::Counterfactual => self.counterfactual_send(i),
-            Level::Record if is_opaque(&record.prov) => self.counterfactual_send(i),
-            _ => self.record_closure(&record.prov, record.exec, Some(record.channel)),
+            Level::Counterfactual => self.counterfactual_send(i, anchor),
+            Level::Record if is_opaque(&record.prov) => self.counterfactual_send(i, anchor),
+            _ => self.record_closure(&record.prov, record.exec, Some(record.channel), anchor),
         };
+        if let Some(sub) = self.with_prov(ProvRecorder::pop) {
+            self.send_prov_memo.borrow_mut().insert(i, sub);
+        }
         self.send_memo.borrow_mut().insert(i, derivation.clone());
         derivation
     }
@@ -1957,12 +2194,12 @@ impl<'a> Lineage<'a> {
     /// The recorded (non-counterfactual) derivation of a send, as the fallback when replay
     /// cannot reproduce it: record-level where the record carries real provenance,
     /// slice-level otherwise (including opaque records).
-    fn recorded_send_closure(&self, i: usize) -> Derivation {
+    fn recorded_send_closure(&self, i: usize, anchor: Option<usize>) -> Derivation {
         let record = &self.sent[i];
         if is_opaque(&record.prov) {
-            self.closure(record.exec, Some(record.channel))
+            self.closure(record.exec, Some(record.channel), anchor)
         } else {
-            self.record_closure(&record.prov, record.exec, Some(record.channel))
+            self.record_closure(&record.prov, record.exec, Some(record.channel), anchor)
         }
     }
 
@@ -1976,16 +2213,16 @@ impl<'a> Lineage<'a> {
     /// [`Level::Counterfactual`] for an output: the 1-minimal set of deliveries at the
     /// producing node without which it no longer produces the output, each followed to the
     /// send that produced it.
-    fn counterfactual_output(&self, output: &OutputRecord) -> Derivation {
-        let fallback = || {
+    fn counterfactual_output(&self, output: &OutputRecord, anchor: Option<usize>) -> Derivation {
+        let fallback = |anchor: Option<usize>| {
             if is_opaque(&output.prov) {
-                self.closure(output.exec, Some(output.sink))
+                self.closure(output.exec, Some(output.sink), anchor)
             } else {
-                self.record_closure(&output.prov, output.exec, Some(output.sink))
+                self.record_closure(&output.prov, output.exec, Some(output.sink), anchor)
             }
         };
         let Some(node) = self.exec_node(output.exec) else {
-            return fallback();
+            return fallback(anchor);
         };
         let (port, member, bytes) = (output.port, output.member, output.bytes.clone());
         let produced = move |events: &[LineageEvent]| {
@@ -1997,14 +2234,14 @@ impl<'a> Lineage<'a> {
                 )
             })
         };
-        self.counterfactual(&node, output.exec, &produced, fallback)
+        self.counterfactual(&node, output.exec, &produced, fallback, anchor)
     }
 
     /// The counterfactual derivation of a send (see [`Self::send_derivation`]).
-    fn counterfactual_send(&self, i: usize) -> Derivation {
+    fn counterfactual_send(&self, i: usize, anchor: Option<usize>) -> Derivation {
         let record = &self.sent[i];
         match self.exec_node(record.exec) {
-            None => self.recorded_send_closure(i),
+            None => self.recorded_send_closure(i, anchor),
             Some(node) => {
                 let (channel, to, bytes) =
                     (record.channel, record.to.clone(), record.bytes.clone());
@@ -2018,9 +2255,13 @@ impl<'a> Lineage<'a> {
                         )
                     })
                 };
-                self.counterfactual(&node, record.exec, &produced, || {
-                    self.recorded_send_closure(i)
-                })
+                self.counterfactual(
+                    &node,
+                    record.exec,
+                    &produced,
+                    |anchor| self.recorded_send_closure(i, anchor),
+                    anchor,
+                )
             }
         }
     }
@@ -2051,16 +2292,19 @@ impl<'a> Lineage<'a> {
     /// One counterfactual derivation step at `node`: greedy deletion over the deliveries
     /// into the node's ticks before `exec`, latest first; `produced` recognizes the target in
     /// a replay's events. Falls back to `fallback` when the node does not reproduce the
-    /// target with every delivery kept, or when there is no replay oracle.
+    /// target with every delivery kept, or when there is no replay oracle. `anchor` is the
+    /// provenance-graph node of the target (see [`Self::prov_output_node`]); a fallback hangs
+    /// from an opaque node under it.
     fn counterfactual(
         &self,
         node: &NodeKey,
         exec: ExecId,
         produced: &dyn Fn(&[LineageEvent]) -> bool,
-        fallback: impl FnOnce() -> Derivation,
+        fallback: impl FnOnce(Option<usize>) -> Derivation,
+        anchor: Option<usize>,
     ) -> Derivation {
         let Some(replayer) = self.replayer else {
-            return fallback();
+            return fallback(self.prov_opaque_node(anchor, "no replay oracle"));
         };
         let tick_execs = self.tick_execs_at(node);
         // Every delivery into the node's ticks, as `(exec, index)`, in event order.
@@ -2079,9 +2323,14 @@ impl<'a> Lineage<'a> {
         if all.is_empty() {
             // A node with no scripted inputs (fed only through hook-free paths): nothing to
             // replay against.
-            return fallback();
+            return fallback(self.prov_opaque_node(anchor, "no scripted inputs to replay"));
         }
         if candidates.is_empty() {
+            self.prov_base_node(
+                anchor,
+                "local input only (no delivery to remove)",
+                ProvLevel::Counterfactual,
+            );
             return Derivation::new();
         }
         let mut removed: BTreeSet<(ExecId, usize)> = BTreeSet::new();
@@ -2136,7 +2385,7 @@ impl<'a> Lineage<'a> {
                     replayer.tag, node
                 );
             }
-            return fallback();
+            return fallback(self.prov_opaque_node(anchor, "replay did not reproduce the target"));
         }
         // Latest first: the derivation keeps the earliest sufficient deliveries.
         candidates.reverse();
@@ -2157,6 +2406,13 @@ impl<'a> Lineage<'a> {
                 if dependency.lossy || dependency.sender.is_some() {
                     derivation.insert(dependency);
                 }
+                let kept = self.prov_message_node(send);
+                self.prov_edge(
+                    anchor,
+                    kept,
+                    ProvEdgeKind::Counterfactual,
+                    Some(ProvLevel::Counterfactual),
+                );
                 derivation.extend(self.send_derivation(send));
             }
         }
@@ -2211,20 +2467,43 @@ impl<'a> Lineage<'a> {
     /// network arrival carries the id of its send, and an empty set means the record was
     /// computed from nothing that came off a channel (a constant, a timer, an external
     /// input).
-    fn record_closure(&self, prov: &[u64], exec: ExecId, sink: Option<usize>) -> Derivation {
+    fn record_closure(
+        &self,
+        prov: &[u64],
+        exec: ExecId,
+        sink: Option<usize>,
+        anchor: Option<usize>,
+    ) -> Derivation {
         if !self.provenance {
-            return self.closure(exec, sink);
+            return self.closure(exec, sink, anchor);
         }
         let mut derivation = Derivation::new();
         let mut visited: BTreeSet<u64> = BTreeSet::new();
-        let mut stack: Vec<u64> = prov.to_vec();
-        while let Some(id) = stack.pop() {
+        if prov.is_empty() {
+            self.prov_base_node(anchor, LOCAL_INPUT, ProvLevel::Record);
+        }
+        // `(delivery id, the graph node that depends on it)`.
+        let mut stack: Vec<(u64, Option<usize>)> = prov.iter().map(|id| (*id, anchor)).collect();
+        while let Some((id, parent)) = stack.pop() {
+            let Some(&i) = self.by_id.get(&id) else {
+                visited.insert(id);
+                self.prov_base_node(
+                    parent,
+                    &format!("delivery #{id} (not a recorded send)"),
+                    ProvLevel::Record,
+                );
+                continue;
+            };
+            let message = self.prov_message_node(i);
+            self.prov_edge(
+                parent,
+                message,
+                ProvEdgeKind::Derived,
+                Some(ProvLevel::Record),
+            );
             if !visited.insert(id) {
                 continue;
             }
-            let Some(&i) = self.by_id.get(&id) else {
-                continue;
-            };
             let dependency = self.send_dependency(i);
             if dependency.lossy || dependency.sender.is_some() {
                 derivation.insert(dependency);
@@ -2233,7 +2512,10 @@ impl<'a> Lineage<'a> {
             if is_opaque(&record.prov) {
                 derivation.extend(self.send_derivation(i));
             } else {
-                stack.extend(record.prov.iter().copied());
+                if record.prov.is_empty() {
+                    self.prov_base_node(message, LOCAL_INPUT, ProvLevel::Record);
+                }
+                stack.extend(record.prov.iter().map(|id| (*id, message)));
             }
         }
         derivation
@@ -2244,9 +2526,12 @@ impl<'a> Lineage<'a> {
         let mut derivations: Vec<Derivation> = vec![];
         for output in &self.outputs {
             if output.port == port {
+                self.prov_begin(&format!("some output on port {port}"));
                 let derivation = self.derive(output);
+                let graph = self.prov_end();
                 if !derivations.contains(&derivation) {
                     derivations.push(derivation);
+                    self.prov_keep(graph);
                 }
             }
         }
@@ -2257,14 +2542,16 @@ impl<'a> Lineage<'a> {
     /// combination of one derivation per member, unioned. Empty if some member produced
     /// nothing.
     fn all_members(&self, port: usize, members: &[u32]) -> Vec<Derivation> {
-        let mut combined: Vec<Derivation> = vec![Derivation::new()];
+        let mut combined: Vec<(Derivation, Option<ProvGraph>)> = vec![(Derivation::new(), None)];
         for member in members {
-            let mut per_member: Vec<Derivation> = vec![];
+            let mut per_member: Vec<(Derivation, Option<ProvGraph>)> = vec![];
             for output in &self.outputs {
                 if output.port == port && output.member == Some(*member) {
+                    self.prov_begin(&format!("every correct member outputs on port {port}"));
                     let derivation = self.derive(output);
-                    if !per_member.contains(&derivation) {
-                        per_member.push(derivation);
+                    let graph = self.prov_end();
+                    if !per_member.iter().any(|(d, _)| *d == derivation) {
+                        per_member.push((derivation, graph));
                     }
                 }
             }
@@ -2273,14 +2560,29 @@ impl<'a> Lineage<'a> {
             }
             combined = combined
                 .iter()
-                .flat_map(|prefix| {
-                    per_member
-                        .iter()
-                        .map(move |d| prefix.union(d).cloned().collect())
+                .flat_map(|(prefix, prefix_graph)| {
+                    per_member.iter().map(move |(d, graph)| {
+                        let merged = match (prefix_graph, graph) {
+                            (Some(a), Some(b)) => {
+                                let mut merged = a.clone();
+                                merged.merge(b);
+                                Some(merged)
+                            }
+                            (Some(a), None) | (None, Some(a)) => Some(a.clone()),
+                            (None, None) => None,
+                        };
+                        (prefix.union(d).cloned().collect(), merged)
+                    })
                 })
                 .collect();
         }
         combined
+            .into_iter()
+            .map(|(derivation, graph)| {
+                self.prov_keep(graph);
+                derivation
+            })
+            .collect()
     }
 
     /// The union of the lineages of the named witnesses, each resolved to the latest output
@@ -2325,7 +2627,7 @@ impl<'a> Lineage<'a> {
                     && s.sender.as_ref().is_some_and(|(l, _)| *l == label)
             })
             .count() as u64;
-        Some(Dependency {
+        let dependency = Dependency {
             message: Message {
                 channel: "alive".to_owned(),
                 channel_id: usize::MAX,
@@ -2334,9 +2636,23 @@ impl<'a> Lineage<'a> {
                 payload: bincode::serialize(&(label.clone(), sends)).unwrap(),
                 display: format!("{label} through send #{sends}"),
             },
-            sender: Some((label, sends)),
+            sender: Some((label.clone(), sends)),
             lossy: false,
-        })
+        };
+        if let Some(anchor) = self.prov_output_node(output) {
+            let message = ProvMessage::from(&dependency);
+            self.with_prov(|prov| {
+                let i = prov.node(ProvKey::Alive(label.clone(), sends), || {
+                    ProvNodeKind::Alive {
+                        node: label,
+                        through: sends,
+                        message,
+                    }
+                });
+                prov.edge(anchor, i, ProvEdgeKind::Alive, None);
+            });
+        }
+        Some(dependency)
     }
 
     /// The union of the lineages of the named final-state witnesses: each must be the last
@@ -2391,10 +2707,11 @@ impl<'a> Lineage<'a> {
         if generated {
             return recorded;
         }
-        let fallback = || recorded.clone();
+        let fallback = |_anchor: Option<usize>| recorded.clone();
         let Some(node) = self.exec_node(output.exec) else {
-            return fallback();
+            return fallback(None);
         };
+        let anchor = self.prov_output_node(output);
         let (member, bytes) = (output.member, output.bytes.clone());
         let produced = move |events: &[LineageEvent]| {
             events
@@ -2411,7 +2728,7 @@ impl<'a> Lineage<'a> {
                 })
                 .unwrap_or(false)
         };
-        let mut derivation = self.counterfactual(&node, output.exec, &produced, fallback);
+        let mut derivation = self.counterfactual(&node, output.exec, &produced, fallback, anchor);
         derivation.extend(recorded);
         derivation
     }
@@ -2428,15 +2745,16 @@ impl<'a> Lineage<'a> {
         if !by_replay {
             return self.derive(output);
         }
-        let fallback = || {
+        let anchor = self.prov_output_node(output);
+        let fallback = |anchor: Option<usize>| {
             if is_opaque(&output.prov) {
-                self.closure(output.exec, Some(output.sink))
+                self.closure(output.exec, Some(output.sink), anchor)
             } else {
-                self.record_closure(&output.prov, output.exec, Some(output.sink))
+                self.record_closure(&output.prov, output.exec, Some(output.sink), anchor)
             }
         };
         let Some(node) = self.exec_node(output.exec) else {
-            return fallback();
+            return fallback(anchor);
         };
         let (port, member, bytes) = (output.port, output.member, output.bytes.clone());
         let produced = move |events: &[LineageEvent]| {
@@ -2454,17 +2772,21 @@ impl<'a> Lineage<'a> {
                 })
                 .unwrap_or(false)
         };
-        self.counterfactual(&node, output.exec, &produced, fallback)
+        self.counterfactual(&node, output.exec, &produced, fallback, anchor)
     }
 
     /// Every pre-EFF delivered send, as one derivation.
     fn all_pre_eff_deliveries(&self) -> Derivation {
+        let goal = self.with_prov(ProvRecorder::goal).flatten();
         (0..self.sent.len())
             .filter(|i| {
                 let record = &self.sent[*i];
                 record.fate == SendFate::Delivered && record.pre_eff && !record.observation
             })
-            .map(|i| self.send_dependency(i))
+            .map(|i| {
+                self.prov_edge(goal, self.prov_message_node(i), ProvEdgeKind::Checked, None);
+                self.send_dependency(i)
+            })
             .collect()
     }
 
@@ -2482,10 +2804,16 @@ impl<'a> Lineage<'a> {
     /// everything it produced). Each visited `(execution, sink)` contributes the channel
     /// deliveries that sink's static slice names (see [`crate::sim::slice`]), or every
     /// delivery into the execution and its predecessors when the slice is unknown.
-    fn closure(&self, root: ExecId, sink: Option<usize>) -> Derivation {
+    fn closure(&self, root: ExecId, sink: Option<usize>, anchor: Option<usize>) -> Derivation {
         let mut derivation = Derivation::new();
         let mut visited = BTreeSet::new();
         let mut stack = vec![(root, sink)];
+        self.prov_edge(
+            anchor,
+            self.prov_exec_node(root),
+            ProvEdgeKind::Produced,
+            Some(self.closure_level(sink)),
+        );
         while let Some((exec, sink)) = stack.pop() {
             if !visited.insert((exec, sink)) {
                 continue;
@@ -2496,6 +2824,12 @@ impl<'a> Lineage<'a> {
             let slice = sink.and_then(|s| self.slices.precise(s));
             let node = (location.clone(), *member);
             let root_node = (location.root().clone(), *member);
+            let level = Some(if slice.is_some() {
+                ProvLevel::Slice
+            } else {
+                ProvLevel::Execution
+            });
+            let exec_node = self.prov_exec_node(exec);
 
             // A send is a dependency (a fault could prevent its delivery), and leads to the
             // execution that performed it.
@@ -2507,6 +2841,14 @@ impl<'a> Lineage<'a> {
                     derivation.insert(dependency);
                 }
                 let record = &self.sent[i];
+                let message = self.prov_message_node(i);
+                self.prov_edge(exec_node, message, ProvEdgeKind::Consumed, level);
+                self.prov_edge(
+                    message,
+                    self.prov_exec_node(record.exec),
+                    ProvEdgeKind::Produced,
+                    level,
+                );
                 stack.push((record.exec, Some(record.channel)));
             };
 
@@ -2525,7 +2867,7 @@ impl<'a> Lineage<'a> {
                             .into_iter()
                             .flatten()
                         {
-                            self.push_ticks_before(tick, *member, exec, None, None, stack);
+                            self.push_ticks_before(tick, *member, exec, None, None, level, stack);
                         }
                     }
                 };
@@ -2583,7 +2925,9 @@ impl<'a> Lineage<'a> {
                                 take_arrivals_before(Some(*channel), &mut derivation, &mut stack);
                             }
                             SliceInput::Yield(tick) => {
-                                self.push_ticks_before(tick, *member, exec, None, None, &mut stack);
+                                self.push_ticks_before(
+                                    tick, *member, exec, None, None, level, &mut stack,
+                                );
                             }
                             SliceInput::Hook(_) => {}
                         }
@@ -2609,6 +2953,7 @@ impl<'a> Lineage<'a> {
                                 exec,
                                 None,
                                 None,
+                                level,
                                 &mut stack,
                             );
                         }
@@ -2650,7 +2995,9 @@ impl<'a> Lineage<'a> {
                     // inside them.
                     for input in slice.direct.iter().chain(&slice.carried) {
                         if let SliceInput::Yield(tick) = input {
-                            self.push_ticks_before(tick, *member, exec, previous, sink, &mut stack);
+                            self.push_ticks_before(
+                                tick, *member, exec, previous, sink, level, &mut stack,
+                            );
                         }
                     }
                 } else {
@@ -2671,6 +3018,7 @@ impl<'a> Lineage<'a> {
                                 exec,
                                 previous,
                                 None,
+                                level,
                                 &mut stack,
                             );
                         }
@@ -2685,7 +3033,9 @@ impl<'a> Lineage<'a> {
     /// given), to be explored through `sink`'s slice (`None`: their whole input is assumed
     /// relevant). A yield can take more than one async run to reach a sink (an `atomic`
     /// boundary adds a hop), so an empty window widens to the latest execution before
-    /// `exec`: an over-approximation, like the rule itself.
+    /// `exec`: an over-approximation, like the rule itself. `level` tags the recorded
+    /// provenance edges (from `exec` to each pushed execution).
+    #[expect(clippy::too_many_arguments, reason = "an internal walk step")]
     fn push_ticks_before(
         &self,
         tick: &LocationId,
@@ -2693,10 +3043,12 @@ impl<'a> Lineage<'a> {
         exec: ExecId,
         since: Option<ExecId>,
         sink: Option<usize>,
+        level: Option<ProvLevel>,
         stack: &mut Vec<(ExecId, Option<usize>)>,
     ) {
         let mut pushed = false;
         let mut latest: Option<ExecId> = None;
+        let from = self.prov_exec_node(exec);
         for t in self
             .ticks_at
             .get(&(tick.clone(), member))
@@ -2707,15 +3059,21 @@ impl<'a> Lineage<'a> {
                 latest = Some(*t);
                 if since.is_none_or(|s| *t > s) {
                     stack.push((*t, sink));
+                    self.prov_edge(from, self.prov_exec_node(*t), ProvEdgeKind::Carried, level);
                     pushed = true;
                 }
             }
         }
         if !pushed && let Some(t) = latest {
             stack.push((t, sink));
+            self.prov_edge(from, self.prov_exec_node(t), ProvEdgeKind::Carried, level);
         }
     }
 }
+
+/// The label of the base node a record computed from nothing that came off a channel hangs
+/// from.
+const LOCAL_INPUT: &str = "local input\n(constant, timer, or external input)";
 
 /// Whether a record's provenance is opaque (it came out of a closure the rewrite cannot see
 /// into; see `Prov::OPAQUE`).
@@ -2726,18 +3084,10 @@ fn is_opaque(prov: &[u64]) -> bool {
 /// The payload rendering of a send for reports: its `Debug` form when the type has one, else
 /// a hex prefix of the wire bytes.
 fn render_payload(record: &SentRecord) -> String {
-    record.display.clone().unwrap_or_else(|| {
-        let bytes: String = record
-            .bytes
-            .iter()
-            .take(8)
-            .fold(String::new(), |mut acc, b| {
-                use std::fmt::Write as _;
-                let _ = write!(acc, "{b:02x}");
-                acc
-            });
-        format!("{bytes}{}", if record.bytes.len() > 8 { "…" } else { "" })
-    })
+    record
+        .display
+        .clone()
+        .unwrap_or_else(|| render_bytes(&record.bytes))
 }
 
 /// Whether a payload released at a receiving hook is the serialized message `sent`. A
@@ -2898,6 +3248,8 @@ pub struct Ldfi {
     log: bool,
     /// Whether every schedule keeps its [`Trace`] (failing schedules always do).
     traces: bool,
+    /// Record a why-provenance graph beside each derivation (`Schedule::provenance`).
+    prov_graphs: bool,
 }
 
 impl Default for Ldfi {
@@ -2922,6 +3274,7 @@ impl Ldfi {
             max_hypotheses: 256,
             log: true,
             traces: false,
+            prov_graphs: false,
         }
     }
 
@@ -2932,6 +3285,16 @@ impl Ldfi {
     #[must_use]
     pub fn with_traces(mut self) -> Self {
         self.traces = true;
+        self
+    }
+
+    /// Records the why-provenance graph behind every derivation ([`Schedule::provenance`],
+    /// see [`crate::sim::viz::provenance`]): the DAG the backward closure walked from the
+    /// goal down to the deliveries, for Molly-style lineage diagrams. Off by default; the
+    /// derivations are the same either way.
+    #[must_use]
+    pub fn with_provenance_graphs(mut self) -> Self {
+        self.prov_graphs = true;
         self
     }
 
@@ -3285,7 +3648,9 @@ impl Ldfi {
             };
             let schedules: Vec<Schedule> = records
                 .iter()
-                .map(|record| record.schedule(search, Some(&replayer), self.traces))
+                .map(|record| {
+                    record.schedule(search, Some(&replayer), self.traces, self.prov_graphs)
+                })
                 .collect();
 
             let failing = schedules.iter().find(|s| !s.goal_held).cloned();

@@ -1,0 +1,87 @@
+digraph lamport {
+    rankdir=TB;
+    nodesep=0.9;
+    ranksep=0.18;
+    splines=line;
+    node [fontname="Helvetica", fontsize=10];
+    edge [fontname="Helvetica", fontsize=9];
+    labelloc=t;
+    label="goal violated by {crash(coordinator after commit[→0]:Txn(1))}";
+    // time spine
+    t_head [shape=point, style=invis];
+    t1 [shape=point, style=invis];
+    t2 [shape=point, style=invis];
+    t5 [shape=point, style=invis];
+    t7 [shape=point, style=invis];
+    t13 [shape=point, style=invis];
+    t15 [shape=point, style=invis];
+    t17 [shape=point, style=invis];
+    t19 [shape=point, style=invis];
+    t21 [shape=point, style=invis];
+    t23 [shape=point, style=invis];
+    t25 [shape=point, style=invis];
+    t26 [shape=point, style=invis];
+    t28 [shape=point, style=invis];
+    t29 [shape=point, style=invis];
+    t31 [shape=point, style=invis];
+    t33 [shape=point, style=invis];
+    t_end [shape=point, style=invis];
+    t_head -> t1 -> t2 -> t5 -> t7 -> t13 -> t15 -> t17 -> t19 -> t21 -> t23 -> t25 -> t26 -> t28 -> t29 -> t31 -> t33 -> t_end [style=invis, weight=1000];
+    // lanes
+    { rank=same; t_head; h0; h1; h2; }
+    h0 [shape=box, style="rounded,filled", fillcolor="#eeeeee", label="coordinator"];
+    h1 [shape=box, style="rounded,filled", fillcolor="#eeeeee", label="participant@0"];
+    h2 [shape=box, style="rounded,filled", fillcolor="#eeeeee", label="participant@1"];
+    h0 -> h1 -> h2 [style=invis];
+    e1 [shape=point, width=0.09, color="black"];
+    { rank=same; t1; e1; }
+    e2 [shape=point, width=0.09, color="black"];
+    { rank=same; t2; e2; }
+    e17 [shape=point, width=0.09, color="black"];
+    { rank=same; t17; e17; }
+    e23 [shape=point, width=0.09, color="black"];
+    { rank=same; t23; e23; }
+    e25 [shape=point, width=0.09, color="black"];
+    { rank=same; t25; e25; }
+    e26 [shape=point, width=0.09, color="black"];
+    { rank=same; t26; e26; }
+    e28 [shape=point, width=0.09, color="black"];
+    { rank=same; t28; e28; }
+    crash0 [shape=plaintext, label="💀", fontsize=14];
+    e29 [shape=point, width=0.09, color="black"];
+    { rank=same; t29; e29; }
+    end0 [shape=point, width=0.05, color="gray60"];
+    { rank=same; t_end; end0; }
+    h0 -> e1 -> e2 -> e17 -> e23 -> e25 -> e26 -> e28 -> crash0 -> e29 -> end0 [arrowhead=none, color="gray60", weight=100];
+    e5 [shape=point, width=0.09, color="black"];
+    { rank=same; t5; e5; }
+    e13 [shape=point, width=0.09, color="black"];
+    { rank=same; t13; e13; }
+    e15 [shape=point, width=0.09, color="black"];
+    { rank=same; t15; e15; }
+    e31 [shape=point, width=0.09, color="black"];
+    { rank=same; t31; e31; }
+    e33 [shape=point, width=0.09, color="black"];
+    { rank=same; t33; e33; }
+    end1 [shape=point, width=0.05, color="gray60"];
+    { rank=same; t_end; end1; }
+    h1 -> e5 -> e13 -> e15 -> e31 -> e33 -> end1 [arrowhead=none, color="gray60", weight=100];
+    e7 [shape=point, width=0.09, color="black"];
+    { rank=same; t7; e7; }
+    e19 [shape=point, width=0.09, color="black"];
+    { rank=same; t19; e19; }
+    e21 [shape=point, width=0.09, color="black"];
+    { rank=same; t21; e21; }
+    end2 [shape=point, width=0.05, color="gray60"];
+    { rank=same; t_end; end2; }
+    h2 -> e7 -> e19 -> e21 -> end2 [arrowhead=none, color="gray60", weight=100];
+    // messages
+    e1 -> e13 [label="prepare: Txn(1)", constraint=false];
+    e2 -> e19 [label="prepare: Txn(1)", constraint=false];
+    e15 -> e25 [label="vote: Txn(1)", constraint=false];
+    e21 -> e26 [label="vote: Txn(1)", constraint=false];
+    e28 -> e33 [label="commit: Txn(1)", constraint=false];
+    lost5 [shape=plaintext, label="✗", fontcolor=gray50, fontsize=12];
+    { rank=same; t29; lost5; }
+    e29 -> lost5 [label="commit: Txn(1) (sender crashed)", style=dashed, color=gray50, fontcolor=gray50, constraint=false];
+}

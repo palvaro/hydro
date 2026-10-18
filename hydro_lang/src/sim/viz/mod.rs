@@ -10,11 +10,20 @@
 //!    graph down to a 1-minimal counterfactual set; the finer the level, the tighter the
 //!    highlight.
 //!
-//! Both are drawn from a [`Trace`], which the search retains on every failing
+//! 3. **The why-provenance graph of the goal** ([`provenance`]): the DAG the backward
+//!    closure walked from the goal, through executions and messages, down to the deliveries
+//!    whose loss would break it, with every edge tagged by the lineage level that produced it
+//!    and the places where a finer level fell back to a coarser one shown explicitly. This is
+//!    the zoom level Molly drew as a derivation tree; hydrofrac's four levels give it more
+//!    rungs. Recorded under
+//!    [`Ldfi::with_provenance_graphs`](crate::sim::ldfi::Ldfi::with_provenance_graphs).
+//!
+//! The first two are drawn from a [`Trace`], which the search retains on every failing
 //! [`Schedule`] and, under [`Ldfi::with_traces`](crate::sim::ldfi::Ldfi::with_traces), on
-//! every schedule. [`Counterexample`] bundles the two pictures for an [`Outcome`].
+//! every schedule. [`Counterexample`] bundles the pictures for an [`Outcome`].
 
 pub mod lamport;
+pub mod provenance;
 pub mod trace;
 
 use std::fmt::Write as _;

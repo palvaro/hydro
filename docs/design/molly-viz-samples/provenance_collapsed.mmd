@@ -1,0 +1,39 @@
+flowchart TD
+    subgraph c0["observer"]
+        n1(["observer output@7<br/>0102000000000000…<br/>(exec #94)"]):::output
+    end
+    n0{{"goal: POST"}}:::goal
+    n2>"observed[0→]:Txn(1) from participant@0 through send #1←participant@0#1<br/>(observation)"]:::observation
+    n3>"commit[→0]:Txn(1)←coordinator#2"]:::message
+    n4>"vote[0→]:Txn(1)←participant@0#0"]:::message
+    n5>"prepare[→0]:Txn(1)←coordinator#0"]:::message
+    n6[/"local input<br/>(constant, timer, or external input)"/]:::base
+    n7>"vote[1→]:Txn(1)←participant@1#0"]:::message
+    n8>"prepare[→1]:Txn(1)←coordinator#1"]:::message
+    n9>"observed[1→]:Txn(1) from participant@1 through send #1←participant@1#1<br/>(observation)"]:::observation
+    n10>"commit[→1]:Txn(1)←coordinator#3"]:::message
+    n0 ==> n1
+    n1 --> n2
+    n1 ==> n2
+    n1 --> n9
+    n1 ==> n9
+    n2 --> n3
+    n3 --> n4
+    n3 --> n7
+    n4 --> n5
+    n5 --> n6
+    n7 --> n8
+    n8 --> n6
+    n9 --> n10
+    n10 --> n4
+    n10 --> n7
+    classDef goal fill:#fff2b2,stroke:#333,stroke-width:2px
+    classDef output fill:#e8f0fe,stroke:#333
+    classDef exec fill:#f4f4f4,stroke:#999
+    classDef message fill:#dff5dd,stroke:#333
+    classDef observation fill:#f0e6ff,stroke:#666,stroke-dasharray:3 3
+    classDef reliable fill:#eeeeee,stroke:#999,color:#666,stroke-dasharray:3 3
+    classDef lost fill:#ffd6d6,stroke:#c00
+    classDef alive fill:#fbe4c8,stroke:#b35900,stroke-dasharray:3 3
+    classDef base fill:#ffffff,stroke:#999
+    classDef opaque fill:#ffffff,stroke:#c00,color:#c00,stroke-dasharray:4 4

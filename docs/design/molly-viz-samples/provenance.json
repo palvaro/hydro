@@ -1,0 +1,299 @@
+{
+  "nodes": [
+    {
+      "kind": {
+        "Goal": {
+          "label": "POST"
+        }
+      }
+    },
+    {
+      "kind": {
+        "Output": {
+          "node": "observer",
+          "exec": 94,
+          "port": 7,
+          "display": "0102000000000000…"
+        }
+      }
+    },
+    {
+      "kind": {
+        "Message": {
+          "message": {
+            "channel": "observed",
+            "from_member": 0,
+            "to_member": null,
+            "display": "Txn(1) from participant@0 through send #1",
+            "sender": [
+              "participant@0",
+              1
+            ],
+            "lossy": false
+          },
+          "from": "participant@0",
+          "to": "observer",
+          "fate": "Delivered",
+          "observation": true,
+          "fault_point": true
+        }
+      }
+    },
+    {
+      "kind": {
+        "Message": {
+          "message": {
+            "channel": "commit",
+            "from_member": null,
+            "to_member": 0,
+            "display": "Txn(1)",
+            "sender": [
+              "coordinator",
+              2
+            ],
+            "lossy": false
+          },
+          "from": "coordinator",
+          "to": "participant@0",
+          "fate": "Delivered",
+          "observation": false,
+          "fault_point": true
+        }
+      }
+    },
+    {
+      "kind": {
+        "Message": {
+          "message": {
+            "channel": "vote",
+            "from_member": 0,
+            "to_member": null,
+            "display": "Txn(1)",
+            "sender": [
+              "participant@0",
+              0
+            ],
+            "lossy": false
+          },
+          "from": "participant@0",
+          "to": "coordinator",
+          "fate": "Delivered",
+          "observation": false,
+          "fault_point": true
+        }
+      }
+    },
+    {
+      "kind": {
+        "Message": {
+          "message": {
+            "channel": "prepare",
+            "from_member": null,
+            "to_member": 0,
+            "display": "Txn(1)",
+            "sender": [
+              "coordinator",
+              0
+            ],
+            "lossy": false
+          },
+          "from": "coordinator",
+          "to": "participant@0",
+          "fate": "Delivered",
+          "observation": false,
+          "fault_point": true
+        }
+      }
+    },
+    {
+      "kind": {
+        "Base": {
+          "label": "local input\n(constant, timer, or external input)"
+        }
+      }
+    },
+    {
+      "kind": {
+        "Message": {
+          "message": {
+            "channel": "vote",
+            "from_member": 1,
+            "to_member": null,
+            "display": "Txn(1)",
+            "sender": [
+              "participant@1",
+              0
+            ],
+            "lossy": false
+          },
+          "from": "participant@1",
+          "to": "coordinator",
+          "fate": "Delivered",
+          "observation": false,
+          "fault_point": true
+        }
+      }
+    },
+    {
+      "kind": {
+        "Message": {
+          "message": {
+            "channel": "prepare",
+            "from_member": null,
+            "to_member": 1,
+            "display": "Txn(1)",
+            "sender": [
+              "coordinator",
+              1
+            ],
+            "lossy": false
+          },
+          "from": "coordinator",
+          "to": "participant@1",
+          "fate": "Delivered",
+          "observation": false,
+          "fault_point": true
+        }
+      }
+    },
+    {
+      "kind": {
+        "Message": {
+          "message": {
+            "channel": "observed",
+            "from_member": 1,
+            "to_member": null,
+            "display": "Txn(1) from participant@1 through send #1",
+            "sender": [
+              "participant@1",
+              1
+            ],
+            "lossy": false
+          },
+          "from": "participant@1",
+          "to": "observer",
+          "fate": "Delivered",
+          "observation": true,
+          "fault_point": true
+        }
+      }
+    },
+    {
+      "kind": {
+        "Message": {
+          "message": {
+            "channel": "commit",
+            "from_member": null,
+            "to_member": 1,
+            "display": "Txn(1)",
+            "sender": [
+              "coordinator",
+              3
+            ],
+            "lossy": false
+          },
+          "from": "coordinator",
+          "to": "participant@1",
+          "fate": "Delivered",
+          "observation": false,
+          "fault_point": true
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": 0,
+      "to": 1,
+      "kind": "Checked",
+      "level": null
+    },
+    {
+      "from": 1,
+      "to": 2,
+      "kind": "Derived",
+      "level": "Record"
+    },
+    {
+      "from": 1,
+      "to": 2,
+      "kind": "Counterfactual",
+      "level": "Counterfactual"
+    },
+    {
+      "from": 1,
+      "to": 9,
+      "kind": "Derived",
+      "level": "Record"
+    },
+    {
+      "from": 1,
+      "to": 9,
+      "kind": "Counterfactual",
+      "level": "Counterfactual"
+    },
+    {
+      "from": 2,
+      "to": 3,
+      "kind": "Derived",
+      "level": "Record"
+    },
+    {
+      "from": 3,
+      "to": 4,
+      "kind": "Derived",
+      "level": "Record"
+    },
+    {
+      "from": 3,
+      "to": 7,
+      "kind": "Derived",
+      "level": "Record"
+    },
+    {
+      "from": 4,
+      "to": 5,
+      "kind": "Derived",
+      "level": "Record"
+    },
+    {
+      "from": 5,
+      "to": 6,
+      "kind": "Derived",
+      "level": "Record"
+    },
+    {
+      "from": 7,
+      "to": 8,
+      "kind": "Derived",
+      "level": "Record"
+    },
+    {
+      "from": 8,
+      "to": 6,
+      "kind": "Derived",
+      "level": "Record"
+    },
+    {
+      "from": 9,
+      "to": 10,
+      "kind": "Derived",
+      "level": "Record"
+    },
+    {
+      "from": 10,
+      "to": 4,
+      "kind": "Derived",
+      "level": "Record"
+    },
+    {
+      "from": 10,
+      "to": 7,
+      "kind": "Derived",
+      "level": "Record"
+    }
+  ],
+  "roots": [
+    0
+  ]
+}
