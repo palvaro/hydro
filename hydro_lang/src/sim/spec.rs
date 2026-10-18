@@ -87,6 +87,7 @@
 //! certifies, and the certificate is only as good as the vocabulary's inability to produce
 //! such a run.
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::hash::Hash;
 use std::panic::RefUnwindSafe;
@@ -110,13 +111,21 @@ use crate::sim_hooks::{BatchHook, OnProcess, SimHook};
 /// The tag of the observer process a [`Spec`] adds to the program.
 pub enum Observer {}
 
+/// The tag on the observation slot of an automatic specification ([`Spec::all_labels`]): the
+/// placeholder source at the observer the simulator's compile step replaces with the union of
+/// the labelled collections' observations (see `sim::observe`). Source-site substrings of
+/// labels to exclude follow the tag, separated by [`SLOT_TAG_SEPARATOR`].
+pub(crate) const SLOT_TAG: &str = "hydrofrac:observe-slot";
+/// The separator between the slot tag and each excluded label.
+pub(crate) const SLOT_TAG_SEPARATOR: char = '\u{1f}';
+
 /// How the search feeds a cluster's correct members to the observer for one run.
 #[derive(Clone)]
 pub(crate) struct CorrectFeed {
-    /// The cluster.
-    pub cluster: LocationId,
-    /// Its members.
-    pub members: Vec<u32>,
+    /// The cluster and its members. Fixed at construction by [`Spec::correct_members`]; set
+    /// by the search, once per labelled collection, for an automatic specification. `None`
+    /// feeds nothing.
+    pub target: Rc<std::panic::AssertUnwindSafe<RefCell<Option<(LocationId, Vec<u32>)>>>>,
     /// Sends one member id into the observer.
     pub send: Rc<dyn Fn(u32) + RefUnwindSafe>,
 }
@@ -124,10 +133,40 @@ pub(crate) struct CorrectFeed {
 impl CorrectFeed {
     /// Feeds every member of the cluster that is not in `crashed`.
     pub(crate) fn feed(&self, crashed: &HashSet<NodeKey>) {
-        for member in &self.members {
-            if !crashed.contains(&(self.cluster.clone(), Some(*member))) {
-                (self.send)(*member);
+        if let Some((cluster, members)) = &*self.target.borrow() {
+            for member in members {
+                if !crashed.contains(&(cluster.clone(), Some(*member))) {
+                    (self.send)(*member);
+                }
             }
+        }
+    }
+
+    /// Points the feed at `cluster` and its `members` (an automatic specification's feed,
+    /// between two per-collection searches).
+    pub(crate) fn set_target(&self, cluster: LocationId, members: Vec<u32>) {
+        *self.target.borrow_mut() = Some((cluster, members));
+    }
+}
+
+/// The parts of an automatic specification ([`Spec::all_labels`]) the search drives: which
+/// labelled collection the current search is about, and the correct members of its cluster.
+#[derive(Clone)]
+pub(crate) struct AllLabelsParts {
+    /// The index (into the compiled program's labelled collections) of the collection under
+    /// search; `None` before the first search.
+    pub current: Rc<std::panic::AssertUnwindSafe<std::cell::Cell<Option<usize>>>>,
+    /// Sends the current index into the observer.
+    pub send_current: Rc<dyn Fn(usize) + RefUnwindSafe>,
+    /// The correct-member feed whose cluster the search chooses per collection.
+    pub correct: CorrectFeed,
+}
+
+impl AllLabelsParts {
+    /// Feeds the current index, if a collection has been chosen.
+    pub(crate) fn feed(&self) {
+        if let Some(index) = self.current.get() {
+            (self.send_current)(index);
         }
     }
 }
@@ -144,8 +183,7 @@ pub(crate) struct FactFeed {
     pub send: Rc<dyn Fn(&[u8]) + RefUnwindSafe>,
     /// The domain, filled by the search from the probe run. (`AssertUnwindSafe`: the search
     /// writes it between runs, never inside the simulator's unwind scope.)
-    pub domain:
-        Rc<std::panic::AssertUnwindSafe<std::cell::RefCell<std::collections::BTreeSet<Vec<u8>>>>>,
+    pub domain: Rc<std::panic::AssertUnwindSafe<RefCell<std::collections::BTreeSet<Vec<u8>>>>>,
 }
 
 impl FactFeed {
@@ -166,6 +204,7 @@ pub struct Spec<'a> {
     post: Option<ExternalPortId>,
     correct: Vec<CorrectFeed>,
     facts: Option<FactFeed>,
+    all_labels: Option<AllLabelsParts>,
 }
 
 impl<'a> Spec<'a> {
@@ -180,7 +219,95 @@ impl<'a> Spec<'a> {
             post: None,
             correct: vec![],
             facts: None,
+            all_labels: None,
         }
+    }
+
+    /// The generated specification for **every** collection the program labels
+    /// `EventualConsistency`, with nothing named by the test. The simulator's compile step
+    /// finds the labelled collections in the program's IR and observes each one that the
+    /// set-based specification applies to (an unbounded stream at a cluster's top level that a
+    /// network channel feeds); [`Ldfi::search_all_labels`](super::ldfi::Ldfi::search_all_labels)
+    /// then runs one search per collection and reports a verdict for each, including the ones
+    /// not checked and why.
+    ///
+    /// Observing a collection serializes its elements, so every labelled collection's element
+    /// type must be `serde::Serialize` (it nearly always is: labelled cluster collections are
+    /// built from network sends). If one is not, the generated crate fails to compile; use
+    /// [`Self::all_labels_except`] to leave it out.
+    pub fn all_labels(flow: &mut FlowBuilder<'a>) -> Self {
+        Self::all_labels_except(flow, &[])
+    }
+
+    /// [`Self::all_labels`], leaving out every labelled collection whose source site (the
+    /// `file:line` of the labelling operator, as the results print it) contains one of
+    /// `excluded`. The left-out collections are still reported, as not checked.
+    pub fn all_labels_except(flow: &mut FlowBuilder<'a>, excluded: &[&str]) -> Self {
+        use crate::compile::ir::{HydroNode, HydroSource};
+        use crate::live_collections::stream::NoOrder;
+        use crate::spec_views::{Observed, ObservedItem};
+
+        let mut spec = Spec::new(flow);
+
+        // The observation slot: an empty source the compile step replaces with the union of
+        // the taps. It compiles to an empty source if the program labels nothing.
+        let slot_type = stageleft::quote_type::<ObservedItem>();
+        let empty: syn::Expr = syn::parse_quote!(::std::vec::Vec::<#slot_type>::new());
+        let mut metadata = spec.observer.new_node_metadata(Stream::<
+            ObservedItem,
+            Process<'a, Observer>,
+            Unbounded,
+            NoOrder,
+            ExactlyOnce,
+        >::collection_kind());
+        let mut tag = SLOT_TAG.to_owned();
+        for excluded in excluded {
+            assert!(
+                !excluded.is_empty() && !excluded.contains(SLOT_TAG_SEPARATOR),
+                "an excluded label must be a non-empty source-site substring"
+            );
+            tag.push(SLOT_TAG_SEPARATOR);
+            tag.push_str(excluded);
+        }
+        metadata.tag = Some(tag);
+        let slot: Stream<ObservedItem, Process<'a, Observer>, Unbounded, NoOrder, ExactlyOnce> =
+            Stream::new(
+                spec.observer.clone(),
+                HydroNode::Source {
+                    source: HydroSource::Iter(empty.into()),
+                    metadata,
+                },
+            );
+
+        // Which collection this search is about, and the correct members of its cluster;
+        // both fed by the search before each run.
+        let (current_sender, current) = spec.observer.sim_input::<usize, TotalOrder, ExactlyOnce>();
+        let current = spec.accumulate(current).first();
+        let (correct_sender, correct) = spec
+            .observer
+            .sim_input::<MemberId<Observed>, TotalOrder, ExactlyOnce>();
+        let correct_feed = CorrectFeed {
+            target: Rc::new(std::panic::AssertUnwindSafe(RefCell::new(None))),
+            send: {
+                let sender = std::panic::AssertUnwindSafe(correct_sender);
+                Rc::new(move |member| sender.send(MemberId::from_raw_id(member)))
+            },
+        };
+        spec.correct.push(correct_feed.clone());
+        let correct = spec.accumulate(correct);
+
+        let observed = spec.accumulate(slot);
+        let observed = crate::spec_views::select_label(observed, current);
+        spec.eventual_consistency(observed, correct);
+        spec.all_labels = Some(AllLabelsParts {
+            current: Rc::new(std::panic::AssertUnwindSafe(std::cell::Cell::new(None))),
+            send_current: {
+                let sender = std::panic::AssertUnwindSafe(current_sender);
+                Rc::new(move |index| sender.send(index))
+            },
+            correct: correct_feed,
+        });
+        spec
     }
 
     /// The observer process, for views that need a top-level collection.
@@ -285,8 +412,10 @@ impl<'a> Spec<'a> {
             .observer
             .sim_input::<MemberId<C>, TotalOrder, ExactlyOnce>();
         self.correct.push(CorrectFeed {
-            cluster: Location::id(cluster),
-            members: members.into_iter().collect(),
+            target: Rc::new(std::panic::AssertUnwindSafe(RefCell::new(Some((
+                Location::id(cluster),
+                members.into_iter().collect(),
+            ))))),
             send: {
                 // The sender holds only a port id and `PhantomData<MemberId<C>>`.
                 let sender = std::panic::AssertUnwindSafe(sender);
@@ -404,6 +533,7 @@ impl<'a> Spec<'a> {
                 .expect("a Spec needs a POST (`Spec::post`) before it is given to the search"),
             correct: self.correct.clone(),
             facts: self.facts.clone(),
+            all_labels: self.all_labels.clone(),
         }
     }
 }
@@ -417,4 +547,6 @@ pub(crate) struct SpecParts {
     pub correct: Vec<CorrectFeed>,
     /// The generated specification's fact domain, if the spec is one.
     pub facts: Option<FactFeed>,
+    /// The per-collection feeds, if the spec is an automatic one ([`Spec::all_labels`]).
+    pub all_labels: Option<AllLabelsParts>,
 }

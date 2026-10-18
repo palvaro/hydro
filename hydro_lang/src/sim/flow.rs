@@ -190,6 +190,15 @@ impl<'a> SimFlow<'a> {
 
         let mut seen_tees_instantiate: HashMap<_, _> = HashMap::new();
         let mut seen_cluster_members = HashSet::new();
+
+        // An automatic specification (`Spec::all_labels`) observes every labelled collection:
+        // the taps are ordinary network sends, inserted before the networks are compiled and
+        // before the provenance rewrite (see `sim::observe`).
+        #[cfg(feature = "ldfi")]
+        let labels = super::observe::tap_labels(&mut self.ir).map(Rc::new);
+        #[cfg(not(feature = "ldfi"))]
+        let labels = None;
+
         self.ir.iter_mut().for_each(|leaf| {
             leaf.compile_network::<SimDeploy>(
                 &mut SparseSecondaryMap::new(),
@@ -268,6 +277,7 @@ impl<'a> SimFlow<'a> {
         }
 
         let (cluster_max_sizes, cluster_member_ids) = self.cluster_sizing();
+        let cluster_members = cluster_member_ids.clone();
         drop(flow_build_span);
 
         let (bin, trybuild) = create_sim_graph_trybuild(
@@ -296,6 +306,8 @@ impl<'a> SimFlow<'a> {
             slices,
             provenance: self.provenance,
             eager_locations: Rc::new(self.eager_locations),
+            cluster_members: Rc::new(cluster_members),
+            labels,
         }
     }
 

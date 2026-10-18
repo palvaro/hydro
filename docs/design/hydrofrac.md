@@ -191,26 +191,49 @@ any other output's, and the same lineage machinery produces the clauses.
 
 ### 4.5 Which collections are checked
 
-Today a test checks one labelled collection, the one it passes to `spec.observe_cluster`. A
-program may label several (multi-Paxos labels thirteen), and a test says nothing about the
-ones it does not name. Every search therefore begins by listing every place in the program
-where a collection acquires the label, marked `checked by this test`, `UNCHECKED (fed by a
-network channel)`, or `nothing to check (local inputs only)`, so the scope of a certificate is
-visible in the log.
+Every one the program labels, without the test naming any. A `Spec::all_labels` leaves an
+*observation slot* at the observer; when the flow is compiled for the simulator, a pass over
+the IR (`sim::observe`) lists the labelled collections and taps each one the specification
+applies to: the labelling node becomes a `Tee` (as a `.clone()` would make it), and a second
+branch is mapped to `(collection index, bincode of the element)` and sent to the observer over
+a `fail_stop` channel, exactly the IR a `.send(..)` to the observer would build. The slot
+becomes the union of the taps. The pass runs before network compilation and before the
+provenance rewrite, so the taps are compiled and traced like any other operator; a `Tee`
+branch is invisible to the rest of the program, whose own outputs are unchanged.
 
-**In the works.** Since the specification is a function of the collection alone and the
-labelled collections are known from the program's IR, nothing about this needs the test author.
-The next version observes every labelled, network-fed cluster collection automatically (by an
-IR rewrite at flow finalization, as the provenance rewrite already inserts operators) and runs
-one search per collection against the shared test body, reporting a verdict for each: certified,
-violated, or not in class with the reason (a lattice `Singleton`, a collection inside a tick).
-The report above is then unnecessary and goes away; `spec.observe_cluster` remains for checking
-one collection by hand.
+A **labelled collection** is a labelled node where the label is *minted* (none of its inputs
+is labelled: a `broadcast_closed` over a transport that grants it, an
+`assert_has_consistency_of`) or where the collection *exits* the labelled region (a consumer
+drops the label, as `weaken_consistency` and `batch` into an unlabelled tick do, or it is an
+output of the program; a send to another location is not an exit, since the collection
+continues there under the transport's own rule). The operators in between inherit the label
+and are not listed; a `Tee` and a label-preserving `Cast` stand for what they share. A minting
+point is where the type system's assumption about faults lives; an exit is what the program
+delivers under the label. Reliable broadcast shows why both are reported: its initial
+single-hop broadcast is minted `EventualConsistency` and is violated by the sender's crash, and
+its delivered set, derived from that label by the type system, certifies anyway, because of the
+echo the type system cannot see. Nodes at the same source line, of the same operator, on the
+same cluster (one per cluster member, or one per instantiation) are one collection.
+
+The set-based specification applies to an unbounded stream (or keyed stream, as pairs) at a
+cluster's top level that a network channel feeds. The rest is reported, not checked: a
+collection with local inputs only (no fault in the model can withhold an input), a lattice
+value (`Singleton`, `Optional`, `KeyedSingleton`: the specification needs an equality variant,
+not built), a collection inside a tick (its per-tick contents are not the collection's), and
+whatever the test excludes (`Spec::all_labels_except`, for an element type that is not
+`Serialize`).
+
+`Ldfi::search_all_labels` runs one search per checked collection against the shared body: it
+tells the observer which collection the search is about and which members of *that*
+collection's cluster the hypothesis leaves correct, clears the fact domain, and runs the loop
+of section 4.3 unchanged. The result is a verdict per collection (`LabelResults`): the search's
+outcome, or the reason it was not checked. `spec.observe_cluster` remains for checking one
+collection by hand.
 
 ## 5. Using it
 
-Nothing is required of the program. The test fixes an execution, names the collection, and
-drives the run:
+Nothing is required of the program. The test fixes an execution and drives the run; the
+labelled collections are found in the program:
 
 ```rust
 let mut flow = FlowBuilder::new();
@@ -219,11 +242,9 @@ let members = flow.cluster::<Member>();
 let (send, items) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
 
 let delivered = reliable_broadcast_closed(items, &members);   // labelled EventualConsistency
+delivered.weaken_consistency().sim_cluster_output();
 
-let mut spec = Spec::new(&mut flow);
-let correct = spec.correct_members(&members, 0..3);
-let observed = spec.observe_cluster(delivered.weaken_consistency());
-spec.eventual_consistency(observed, correct);
+let spec = Spec::all_labels(&mut flow);                       // names nothing
 
 let compiled = flow.sim()
     .skip_consistency_assertions()      // the simulator does not yet check them
@@ -231,22 +252,38 @@ let compiled = flow.sim()
     .with_provenance()
     .compiled();
 
-Ldfi::new()
+let results = Ldfi::new()
     .level(Level::Record)
     .crashable("source", &source)
     .crashable_cluster("member", &members, 0..3)
     .crash_budget(1)
     .spec(&spec)
-    .search(&compiled, async |_run| {
+    .search_all_labels(&compiled, async |_run| {
         send.send(1);
         send.send(2);
         hydro_lang::sim::quiesce().await;
-    })
+    });
+println!("{results}");
 ```
+
+prints, for this program,
+
+```
+EventualConsistency at reliable_broadcast.rs:130 (Cluster(loc2v1), AssertIsConsistent, minted): VIOLATED by {crash(source after reliable_broadcast.rs:130[→1]:2)}, 5 hypotheses
+EventualConsistency at reliable_broadcast.rs:156 (Cluster(loc2v1), AssertIsConsistent, minted): VIOLATED by {crash(member@0 after reliable_broadcast.rs:156[0→1]:2)}, 3 hypotheses
+EventualConsistency at reliable_broadcast.rs:149 (Cluster(loc2v1), Unique, delivered): CERTIFICATE, 10 hypotheses, exhaustive
+```
+
+and `results.verdicts` holds the same as values (`LabelVerdict::Searched(outcome)` or
+`LabelVerdict::NotChecked(reason)`), for assertions per site (`results.at("file.rs:149")`) or
+overall (`results.all_certified_or_not_checked()`). To check one collection by hand, build the
+specification with `Spec::new`, `spec.observe_cluster(collection)`,
+`spec.correct_members(&cluster, 0..n)` and `spec.eventual_consistency(observed, correct)`, and
+run `Ldfi::search`.
 
 The body is the execution: which inputs, which timers, how long. For a protocol whose
 convergence needs time (retransmission timers, gossip rounds, leader change), the body fires
-those timers after `run.end_of_finite_failures()` so the protocol has its window. The result
+those timers after `run.end_of_finite_failures()` so the protocol has its window. Each result
 prints as a counterexample with its faults and failing schedule, or as a certificate with its
 grade, hypothesis count and exploration.
 
@@ -335,9 +372,15 @@ the identity, since the simulated network never duplicates).
   keyed stream (`leader_merge` runs on `Level::Slice`). Counterfactual replay can panic inside
   a program that assumes a delivery it is being denied; the panic is contained on the
   generated side of the dynamic-library boundary and treated as inconclusive for that node.
-- **The report of unchecked labels is a report.** It does not fail a test. Making it one needs a notion of
-  "every search over this program", which a per-program registry of specifications could
-  provide.
+- **Not every labelled collection is in the class.** The automatic specification checks
+  unbounded streams at a cluster's top level that a network channel feeds. A lattice value
+  (`Singleton`, `Optional`, `KeyedSingleton`), a collection inside a tick, and a collection with
+  local inputs only are reported with the reason and not searched. Observing a collection
+  serializes its elements, so its element type must be `serde::Serialize` (labelled cluster
+  collections nearly always are, being built from network sends); one that is not fails the
+  generated crate's compilation and is excluded with `Spec::all_labels_except`.
+- **The verdicts do not fail a test by themselves.** `LabelResults` is what a test asserts on;
+  nothing fails for a label the test does not look at.
 - **Byzantine, partition, and duplication faults** are outside the vocabulary. Partitions are
   expressible as omission sets on lossy channels and are found that way (the Raft
   counterexample is four omissions on two links); duplication has no fault point.
@@ -346,12 +389,11 @@ the identity, since the simulated network never duplicates).
 
 In order of what the argument of section 1 needs:
 
-1. Automatic coverage of every labelled collection (section 4.5), in progress.
-2. The lattice-aware specification for `Singleton` outputs, and `abd` under it.
-3. A convergence witness in the generated specification for protocols that report one, so
+1. The lattice-aware specification for `Singleton` outputs, and `abd` under it.
+2. A convergence witness in the generated specification for protocols that report one, so
    that horizon is a parameter rather than a verdict.
-4. Decision-trace replay: record every nondeterministic decision of a run and replay a prefix
+3. Decision-trace replay: record every nondeterministic decision of a run and replay a prefix
    with one decision overridden. This is the general counterfactual oracle of which node-level
    replay is the coarse instance.
-5. Raft's `committed` under the generated specification (the harness is written; the run is
+4. Raft's `committed` under the generated specification (the harness is written; the run is
    an hour).

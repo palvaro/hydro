@@ -137,7 +137,7 @@ fn set_element_type(kind: &mut CollectionKind, ty: DebugType) {
     }
 }
 
-fn element_type(kind: &CollectionKind) -> DebugType {
+pub(crate) fn element_type(kind: &CollectionKind) -> DebugType {
     match kind {
         CollectionKind::Stream { element_type, .. }
         | CollectionKind::Singleton { element_type, .. }

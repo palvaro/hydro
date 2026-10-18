@@ -96,10 +96,11 @@ use crate::sim::compiled::{
     CompiledSim, TracedHook, lineage_events, lineage_handles, lineage_port,
     lineage_provenance_enabled, lineage_slices, replay_all_hooks, trace_all_hooks,
 };
+pub use crate::sim::observe::{LabelPlan, NotCheckedReason};
 use crate::sim::runtime::{
     CrashPoint, DeliveryId, ExecId, LineageEvent, NodeKey, SendFate, SendKey,
 };
-use crate::sim::slice::{ChannelInfo, SinkSlice, SliceInput, Slices};
+use crate::sim::slice::{ChannelInfo, EcCollection, SinkSlice, SliceInput, Slices};
 use crate::sim::spec::{Spec, SpecParts};
 use crate::sim::{SimClusterReceiver, SimReceiver};
 
@@ -936,6 +937,10 @@ impl Run<'_> {
             if let Some(facts) = &spec.facts {
                 facts.feed();
             }
+            // An automatic specification: which labelled collection this search is about.
+            if let Some(all_labels) = &spec.all_labels {
+                all_labels.feed();
+            }
         }
     }
 
@@ -1047,40 +1052,6 @@ struct RunRecord {
     final_witnesses: Vec<(usize, Option<u32>, Vec<u8>)>,
     requirements: Vec<(usize, Option<u32>, Vec<u8>)>,
     context: InstanceContext,
-}
-
-/// The report of unchecked labels (design document, section 4.5): every place the program
-/// labels a collection `EventualConsistency`, whether a network channel feeds it, and whether
-/// some channel into `observer` carries it (so this test checks it). A network-fed collection
-/// this test does not check is a labelled claim the test says nothing about. Returns the report
-/// lines; empty when the program labels nothing.
-fn undischarged_ec_report(slices: &Slices, observer: &LocationId) -> Vec<String> {
-    let observed: BTreeSet<usize> = slices
-        .channels
-        .values()
-        .filter(|channel| channel.to == *observer)
-        .flat_map(|channel| {
-            slices
-                .channel_ec_sources
-                .get(&channel.id)
-                .into_iter()
-                .flatten()
-                .copied()
-        })
-        .collect();
-    let mut lines = vec![];
-    for (index, ec) in slices.ec_collections.iter().enumerate() {
-        let status = match (ec.fed_by_network, observed.contains(&index)) {
-            (_, true) => "checked by this test",
-            (true, false) => "UNCHECKED (fed by a network channel)",
-            (false, false) => "nothing to check (local inputs only)",
-        };
-        lines.push(format!(
-            "EventualConsistency at {} ({:?}): {status}",
-            ec.label, ec.location
-        ));
-    }
-    lines
 }
 
 /// The facts a generated specification published across `records`: the fact domain of the
@@ -2820,12 +2791,81 @@ impl Ldfi {
         })
     }
 
+    /// Runs one search per collection the program labels `EventualConsistency`, against an
+    /// automatic specification ([`Spec::all_labels`]) and the shared `body`, and returns a
+    /// verdict for each: the [`Outcome`] of its search, or why it was not checked. Every
+    /// setting of this `Ldfi` (crashable nodes, budget, exploration, level) applies to every
+    /// collection. Prints one summary line per collection as it finishes, and the full outcome
+    /// of a counterexample.
+    pub fn search_all_labels(
+        &self,
+        sim: &CompiledSim,
+        body: impl AsyncFn(&Run<'_>) + RefUnwindSafe,
+    ) -> LabelResults {
+        let Some(Goal::Spec(spec)) = &self.search.goal else {
+            panic!("`Ldfi::search_all_labels` needs a specification (`Ldfi::spec`)");
+        };
+        let (Some(all_labels), Some(facts)) = (&spec.all_labels, &spec.facts) else {
+            panic!("`Ldfi::search_all_labels` needs a specification built with `Spec::all_labels`");
+        };
+        let labels = sim.labels().unwrap_or_else(|| {
+            panic!(
+                "`Ldfi::search_all_labels`: the compiled program carries no observation slot; was the `Spec::all_labels` created on the flow that was compiled?"
+            )
+        });
+        let mut results = LabelResults { verdicts: vec![] };
+        for (index, plan) in labels.iter().enumerate() {
+            let verdict = if let Some(reason) = &plan.not_checked {
+                LabelVerdict::NotChecked(reason.clone())
+            } else {
+                let members = sim
+                        .cluster_members(&plan.collection.location)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "no cluster size for {:?}; call `with_cluster_size` before `compiled()`",
+                                plan.collection.location
+                            )
+                        })
+                        .to_vec();
+                all_labels.current.set(Some(index));
+                all_labels
+                    .correct
+                    .set_target(plan.collection.location.clone(), members);
+                facts.domain.borrow_mut().clear();
+                if self.log {
+                    eprintln!(
+                        "hydrofrac: searching EventualConsistency at {} ({})",
+                        plan.collection.label,
+                        plan.collection.location_label()
+                    );
+                }
+                let outcome = self.run(sim, async |run| {
+                    body(run).await;
+                    true
+                });
+                if self.log && outcome.is_counterexample() {
+                    eprintln!("{outcome}");
+                }
+                LabelVerdict::Searched(outcome)
+            };
+            let result = LabelResult {
+                collection: plan.collection.clone(),
+                verdict,
+            };
+            if self.log {
+                eprintln!("{result}");
+            }
+            results.verdicts.push(result);
+        }
+        results
+    }
+
     /// Runs the search. `body` is the test body for one run: it drives inputs and time and
     /// returns whether the goal held (ignored under a [`Spec`], whose views decide). It is
     /// run under the configured [`Exploration`] for every hypothesis, starting with no
     /// faults.
     pub fn run(
-        self,
+        &self,
         sim: &CompiledSim,
         body: impl AsyncFn(&Run<'_>) -> bool + RefUnwindSafe,
     ) -> Outcome {
@@ -3025,9 +3065,6 @@ impl Ldfi {
                             "hand-written (no soundness claim for the inference)"
                         }
                     );
-                    for line in undischarged_ec_report(slices, &spec.observer) {
-                        eprintln!("{tag}: {line}");
-                    }
                 }
             }
             if self.log {
@@ -3196,6 +3233,142 @@ impl Ldfi {
                 }
             }
         }
+    }
+}
+
+/// The verdict of [`Ldfi::search_all_labels`] on one labelled collection.
+#[derive(Clone, Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "an outcome carries every hypothesis; a few verdicts per program"
+)]
+pub enum LabelVerdict {
+    /// The collection was searched: a certificate, a counterexample, an exhausted budget, or
+    /// a vacuous failure-free run.
+    Searched(Outcome),
+    /// The automatic specification does not apply to the collection.
+    NotChecked(NotCheckedReason),
+}
+
+/// One row of [`LabelResults`]: a labelled collection and its verdict.
+#[derive(Clone, Debug)]
+pub struct LabelResult {
+    /// The collection: its source site, operator, cluster and role.
+    pub collection: EcCollection,
+    /// The verdict.
+    pub verdict: LabelVerdict,
+}
+
+impl LabelResult {
+    /// The source site of the labelling operator (or its tag).
+    pub fn label(&self) -> &str {
+        &self.collection.label
+    }
+}
+
+impl Display for LabelResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let c = &self.collection;
+        let role = match (c.minted, c.exit) {
+            (true, true) => "minted and delivered",
+            (true, false) => "minted",
+            (false, true) => "delivered",
+            (false, false) => "",
+        };
+        write!(
+            f,
+            "EventualConsistency at {} ({:?}, {}, {role}): ",
+            c.label, c.location, c.op
+        )?;
+        match &self.verdict {
+            LabelVerdict::NotChecked(reason) => write!(f, "not checked: {reason}"),
+            LabelVerdict::Searched(outcome) => match outcome {
+                Outcome::Certificate {
+                    runs, exploration, ..
+                } => {
+                    write!(f, "CERTIFICATE, {} hypotheses", runs.len())?;
+                    match exploration {
+                        Exploration::Exhaustive => write!(f, ", exhaustive"),
+                        Exploration::Fuzz { instances } => {
+                            write!(f, ", {instances} sampled schedules")
+                        }
+                    }
+                }
+                Outcome::Counterexample { faults, runs, .. } => write!(
+                    f,
+                    "VIOLATED by {}, {} hypotheses",
+                    render_set(faults),
+                    runs.len()
+                ),
+                Outcome::Budget { runs } => {
+                    write!(f, "BUDGET exhausted after {} hypotheses", runs.len())
+                }
+                Outcome::Vacuous { .. } => {
+                    write!(f, "VACUOUS (nothing held in the failure-free run)")
+                }
+                Outcome::Exhausted { runs } => {
+                    write!(
+                        f,
+                        "exhausted the fault universe, {} runs, no violation",
+                        runs.len()
+                    )
+                }
+            },
+        }
+    }
+}
+
+/// The result of [`Ldfi::search_all_labels`]: one verdict per collection the program labels
+/// `EventualConsistency`, in the program's enumeration order. Displays as a table, one line
+/// per collection.
+#[derive(Clone, Debug, Default)]
+pub struct LabelResults {
+    /// The verdicts.
+    pub verdicts: Vec<LabelResult>,
+}
+
+impl LabelResults {
+    /// Whether every collection either certified or was not checked (no counterexample, no
+    /// exhausted budget, no vacuous search).
+    pub fn all_certified_or_not_checked(&self) -> bool {
+        self.verdicts.iter().all(|r| {
+            matches!(
+                r.verdict,
+                LabelVerdict::NotChecked(_) | LabelVerdict::Searched(Outcome::Certificate { .. })
+            )
+        })
+    }
+
+    /// The verdicts whose label contains `site` (a source-site substring).
+    pub fn at(&self, site: &str) -> impl Iterator<Item = &LabelResult> {
+        self.verdicts
+            .iter()
+            .filter(move |r| r.collection.label.contains(site))
+    }
+
+    /// The verdicts that were searched, with their outcomes.
+    pub fn searched(&self) -> impl Iterator<Item = (&LabelResult, &Outcome)> {
+        self.verdicts.iter().filter_map(|r| match &r.verdict {
+            LabelVerdict::Searched(outcome) => Some((r, outcome)),
+            LabelVerdict::NotChecked(_) => None,
+        })
+    }
+
+    /// The counterexamples found, by label.
+    pub fn counterexamples(&self) -> impl Iterator<Item = (&LabelResult, &FaultSet)> {
+        self.verdicts.iter().filter_map(|r| match &r.verdict {
+            LabelVerdict::Searched(Outcome::Counterexample { faults, .. }) => Some((r, faults)),
+            _ => None,
+        })
+    }
+}
+
+impl Display for LabelResults {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for result in &self.verdicts {
+            writeln!(f, "{result}")?;
+        }
+        Ok(())
     }
 }
 

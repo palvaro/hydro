@@ -33,7 +33,9 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::compile::builder::CycleId;
-use crate::compile::ir::{ClosureExpr, HydroNode, HydroRoot, SharedNode, traverse_dfir};
+use crate::compile::ir::{
+    ClosureExpr, CollectionKind, HydroNode, HydroRoot, SharedNode, traverse_dfir,
+};
 use crate::location::dynamic::LocationId;
 use crate::networking::{NetworkingInfo, TcpFault};
 
@@ -118,23 +120,250 @@ pub struct Slices {
     pub channels: BTreeMap<usize, ChannelInfo>,
     /// Every collection the program labels `EventualConsistency` (see [`EcCollection`]).
     pub ec_collections: Vec<EcCollection>,
-    /// Channel (sink id) → the labelled collections (indices into `ec_collections`) upstream
-    /// of what it sends: the collections a specification observing through that channel sees.
-    pub channel_ec_sources: BTreeMap<usize, BTreeSet<usize>>,
 }
 
 /// A collection the program labels `EventualConsistency`: a premise that the label's
 /// convergence is not withheld by faults, which a specification over it discharges
-/// (`Spec::eventual_consistency`) and which is otherwise open.
+/// (`Spec::eventual_consistency`, or every one at once with `Spec::all_labels`) and which is
+/// otherwise open.
 #[derive(Clone, Debug)]
 pub struct EcCollection {
     /// The user's source location of the labelling operator, or its tag.
     pub label: String,
+    /// The operator (`Network`, `Unique`, ...), to tell apart two labelled nodes at one source
+    /// line.
+    pub op: String,
     /// The cluster the collection lives on.
     pub location: LocationId,
     /// Whether a network channel feeds it (transitively): a fault can withhold its inputs.
     /// A labelled collection computed from local sources alone has nothing to check.
     pub fed_by_network: bool,
+    /// The kind of the collection (its element types are those of the IR the enumeration ran
+    /// on: plain before the provenance rewrite, tagged after).
+    pub collection_kind: CollectionKind,
+    /// Whether the node lives inside a tick rather than at the cluster's top level.
+    pub in_tick: bool,
+    /// The label is minted here: none of the node's inputs is labelled (a `broadcast_closed`
+    /// over a transport that grants it, an `assert_has_consistency_of`). What the type system
+    /// assumes about faults, it assumes here.
+    pub minted: bool,
+    /// The collection leaves the labelled region here: a consumer drops the label (a
+    /// `weaken_consistency`, a `batch` into an unlabelled tick) or it is an output of the
+    /// program. What the program delivers under the label, it delivers here. (A send to
+    /// another location is not an exit: the collection continues there, labelled or not by the
+    /// transport's own rule.)
+    pub exit: bool,
+}
+
+impl EcCollection {
+    /// The location, as `Cluster(...)`, for reports.
+    pub fn location_label(&self) -> String {
+        format!("{:?}", self.location)
+    }
+
+    /// The identity of the collection among the program's labelled nodes.
+    pub(crate) fn key(&self) -> EcKey {
+        (self.label.clone(), self.op.clone(), self.location.clone())
+    }
+}
+
+/// `(label, operator, cluster)`: how labelled nodes are told apart and re-identified across IR
+/// passes (node addresses do not survive a traversal, which moves what a `Tee` shares).
+pub(crate) type EcKey = (String, String, LocationId);
+
+/// Every collection `ir` labels `EventualConsistency`: every labelled node where the label is
+/// **minted** (none of its inputs is labelled: the `broadcast_closed` or the
+/// `assert_has_consistency_of`) and every labelled node where the collection **exits** the
+/// labelled region (a consumer other than a send is unlabelled, or it is an output of the
+/// program). The operators
+/// in between inherit the label and are not listed. Nodes at the same source line, of the same
+/// operator, on the same cluster (one per cluster member, or one per instantiation) are reported
+/// once, in first-seen order. A `Tee` stands for what it shares: it is neither a minting point
+/// nor, by itself, an exit, and the shared node is reported under its own source line.
+pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
+    // Raw pointers: cycle sinks are followed from `CycleSource`s to find network ancestors;
+    // nothing in `ir` moves during this walk.
+    let cycle_sinks: HashMap<CycleId, *const HydroNode> = ir
+        .iter()
+        .filter_map(|root| match root {
+            HydroRoot::CycleSink {
+                cycle_id, input, ..
+            } => Some((*cycle_id, std::ptr::from_ref(&**input))),
+            _ => None,
+        })
+        .collect();
+    struct Found {
+        by_key: HashMap<EcKey, usize>,
+        collections: Vec<EcCollection>,
+        seen: HashSet<*const HydroNode>,
+    }
+    impl Found {
+        fn record(
+            &mut self,
+            node: &HydroNode,
+            minted: bool,
+            exit: bool,
+            cycle_sinks: &HashMap<CycleId, *const HydroNode>,
+        ) {
+            with_shared_resolved(node, |node| {
+                let key = ec_key(node);
+                let fed = has_network_ancestor(node, cycle_sinks);
+                let index = *self.by_key.entry(key.clone()).or_insert_with(|| {
+                    self.collections.push(EcCollection {
+                        label: key.0,
+                        op: key.1,
+                        location: key.2,
+                        fed_by_network: false,
+                        collection_kind: node.metadata().collection_kind.clone(),
+                        in_tick: !node.metadata().location_id.is_top_level(),
+                        minted: false,
+                        exit: false,
+                    });
+                    self.collections.len() - 1
+                });
+                let found = &mut self.collections[index];
+                found.fed_by_network |= fed;
+                found.minted |= minted;
+                found.exit |= exit;
+            });
+        }
+    }
+    fn visit(
+        node: &HydroNode,
+        found: &mut Found,
+        cycle_sinks: &HashMap<CycleId, *const HydroNode>,
+    ) {
+        if !found.seen.insert(std::ptr::from_ref(node)) {
+            return;
+        }
+        let mut edge = |input: &HydroNode| {
+            visit(input, found, cycle_sinks);
+            // A labelled input of an unlabelled consumer: the collection exits here. A send
+            // is not an exit: the collection continues at another location, labelled or not
+            // by the transport's own rule.
+            if is_ec(input) && !is_ec(node) && !matches!(node, HydroNode::Network { .. }) {
+                with_casts_resolved(input, |input| found.record(input, false, true, cycle_sinks));
+            }
+        };
+        match node {
+            HydroNode::Tee { inner, .. }
+            | HydroNode::Reference { inner, .. }
+            | HydroNode::PartitionSide { inner, .. } => edge(&inner.0.borrow()),
+            _ => {
+                for input in node.input() {
+                    edge(input);
+                }
+            }
+        }
+        if is_ec_minting(node) {
+            found.record(node, true, false, cycle_sinks);
+        }
+    }
+    let mut found = Found {
+        by_key: HashMap::new(),
+        collections: vec![],
+        seen: HashSet::new(),
+    };
+    for root in ir {
+        let input = root.input();
+        visit(input, &mut found, &cycle_sinks);
+        // An output of the program (not a cycle, which continues inside it).
+        if is_ec(input)
+            && matches!(
+                root,
+                HydroRoot::SendExternal { .. }
+                    | HydroRoot::ForEach { .. }
+                    | HydroRoot::DestSink { .. }
+                    | HydroRoot::EmbeddedOutput { .. }
+            )
+        {
+            with_casts_resolved(input, |input| {
+                found.record(input, false, true, &cycle_sinks)
+            });
+        }
+    }
+    found.collections
+}
+
+/// Calls `f` on the first node under `node` that is not a labelled pass-through (a `Cast`
+/// whose input is labelled, or what a `Tee` shares): the operator an exit stands for, so that
+/// an exit right after the minting operator (`broadcast_closed(..).values()` into a `batch`)
+/// is the minting operator's row.
+fn with_casts_resolved<R>(node: &HydroNode, f: impl FnOnce(&HydroNode) -> R) -> R {
+    match node {
+        HydroNode::Tee { inner, .. }
+        | HydroNode::Reference { inner, .. }
+        | HydroNode::PartitionSide { inner, .. } => with_casts_resolved(&inner.0.borrow(), f),
+        HydroNode::Cast { inner, .. } if is_ec(inner) => with_casts_resolved(inner, f),
+        _ => f(node),
+    }
+}
+
+/// Calls `f` on the node a `Tee` (or reference / partition side) shares, through any chain of
+/// them, or on `node` itself.
+fn with_shared_resolved<R>(node: &HydroNode, f: impl FnOnce(&HydroNode) -> R) -> R {
+    match node {
+        HydroNode::Tee { inner, .. }
+        | HydroNode::Reference { inner, .. }
+        | HydroNode::PartitionSide { inner, .. } => with_shared_resolved(&inner.0.borrow(), f),
+        _ => f(node),
+    }
+}
+
+/// Whether `node` carries the `EventualConsistency` label on a cluster.
+pub(crate) fn is_ec(node: &HydroNode) -> bool {
+    matches!(
+        node.metadata().consistency,
+        Some(crate::location::dynamic::ClusterConsistency::EventualConsistency)
+    ) && matches!(node.metadata().location_id.root(), LocationId::Cluster(_))
+}
+
+/// Whether `node` is where an `EventualConsistency` label is minted: labelled, and none of
+/// what feeds it (including what a `Tee` shares) is. A `CycleSource` is fed by its cycle's
+/// sink and is never a minting point.
+pub(crate) fn is_ec_minting(node: &HydroNode) -> bool {
+    if !is_ec(node) {
+        return false;
+    }
+    match node {
+        HydroNode::CycleSource { .. } => false,
+        HydroNode::Tee { inner, .. }
+        | HydroNode::Reference { inner, .. }
+        | HydroNode::PartitionSide { inner, .. } => !is_ec(&inner.0.borrow()),
+        _ => !node.input().into_iter().any(is_ec),
+    }
+}
+
+/// The label of a labelled collection: the node's tag, else the user's source line of the
+/// labelling operator (`file:line`, the file by its name), else the operator's name.
+pub(crate) fn ec_label(node: &HydroNode) -> String {
+    node.metadata()
+        .tag
+        .clone()
+        .or_else(|| {
+            user_span(&node.metadata().op.backtrace).map(|span| {
+                span.rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(span.as_str())
+                    .to_owned()
+            })
+        })
+        .unwrap_or_else(|| ec_op(node))
+}
+
+/// The operator name of `node` (`Network`, `Unique`, ...).
+fn ec_op(node: &HydroNode) -> String {
+    let name = node.print_root();
+    name.split('(').next().unwrap_or(&name).to_owned()
+}
+
+/// The identity of a labelled node (see [`EcKey`]).
+pub(crate) fn ec_key(node: &HydroNode) -> EcKey {
+    (
+        ec_label(node),
+        ec_op(node),
+        node.metadata().location_id.root().clone(),
+    )
 }
 
 impl Slices {
@@ -407,11 +636,11 @@ pub fn compute(ir: &mut [HydroRoot]) -> Slices {
                 let name = node.print_root();
                 let name = name.split('(').next().unwrap_or(&name).to_owned();
                 let kind = match &node.metadata().collection_kind {
-                    crate::compile::ir::CollectionKind::Stream { .. } => "stream",
-                    crate::compile::ir::CollectionKind::Singleton { .. } => "singleton",
-                    crate::compile::ir::CollectionKind::Optional { .. } => "optional",
-                    crate::compile::ir::CollectionKind::KeyedStream { .. } => "keyed_stream",
-                    crate::compile::ir::CollectionKind::KeyedSingleton { .. } => "keyed_singleton",
+                    CollectionKind::Stream { .. } => "stream",
+                    CollectionKind::Singleton { .. } => "singleton",
+                    CollectionKind::Optional { .. } => "optional",
+                    CollectionKind::KeyedStream { .. } => "keyed_stream",
+                    CollectionKind::KeyedSingleton { .. } => "keyed_singleton",
                 };
                 *counts
                     .borrow_mut()
@@ -468,90 +697,8 @@ pub fn compute(ir: &mut [HydroRoot]) -> Slices {
             }
         },
     );
-    // The labelled collections, and which channels carry them (section 1.2 of the design
-    // document: the lint for an undischarged `EventualConsistency` premise). A "collection" is
-    // the node where the label is minted (a labelled node none of whose inputs is labelled:
-    // the `broadcast_closed` or the `assert_has_consistency_of`), not every operator that
-    // inherits it downstream; collections minted at the same source line (one per cluster
-    // member, or one per instantiation) are reported once.
-    // Raw pointers: `traverse_dfir` takes the IR mutably (to number statements) while visiting
-    // it in place; the nodes are boxed and are not moved or freed during the visit, and the
-    // pointers are dereferenced only inside the visit.
-    let cycle_sinks: HashMap<CycleId, *const HydroNode> = ir
-        .iter()
-        .filter_map(|root| match root {
-            HydroRoot::CycleSink {
-                cycle_id, input, ..
-            } => Some((*cycle_id, std::ptr::from_ref(&**input))),
-            _ => None,
-        })
-        .collect();
-    let is_ec = |node: &HydroNode| {
-        matches!(
-            node.metadata().consistency,
-            Some(crate::location::dynamic::ClusterConsistency::EventualConsistency)
-        ) && matches!(node.metadata().location_id.root(), LocationId::Cluster(_))
-    };
-    let mut ec_index: HashMap<*const HydroNode, usize> = HashMap::new();
-    let mut ec_by_label: HashMap<(String, LocationId), usize> = HashMap::new();
-    let mut ec_collections: Vec<EcCollection> = vec![];
-    traverse_dfir(
-        ir,
-        |_, _| {},
-        |node, _| {
-            if is_ec(node)
-                && !node.input().into_iter().any(is_ec)
-                && !ec_index.contains_key(&std::ptr::from_ref(node))
-            {
-                let label = node
-                    .metadata()
-                    .tag
-                    .clone()
-                    .or_else(|| user_span(&node.metadata().op.backtrace))
-                    .unwrap_or_else(|| {
-                        let name = node.print_root();
-                        name.split('(').next().unwrap_or(&name).to_owned()
-                    });
-                let location = node.metadata().location_id.root().clone();
-                let fed = has_network_ancestor(node, &cycle_sinks);
-                let index = *ec_by_label
-                    .entry((label.clone(), location.clone()))
-                    .or_insert_with(|| {
-                        ec_collections.push(EcCollection {
-                            label,
-                            location,
-                            fed_by_network: false,
-                        });
-                        ec_collections.len() - 1
-                    });
-                ec_collections[index].fed_by_network |= fed;
-                ec_index.insert(std::ptr::from_ref(node), index);
-            }
-        },
-    );
-    let mut channel_ec_sources: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-    {
-        let state = state.borrow();
-        traverse_dfir(
-            ir,
-            |_, _| {},
-            |node, _| {
-                if let HydroNode::Network { .. } = node
-                    && let Some(id) = state.network_ids.get(&std::ptr::from_ref(node))
-                {
-                    let mut found: BTreeSet<usize> = BTreeSet::new();
-                    ec_ancestors(
-                        node.input()[0],
-                        &ec_index,
-                        &cycle_sinks,
-                        &mut found,
-                        &mut HashSet::new(),
-                    );
-                    channel_ec_sources.insert(*id, found);
-                }
-            },
-        );
-    }
+    // The labelled collections (section 4.5 of the design document), on the IR as emitted.
+    let ec_collections = ec_collections(ir);
 
     let State {
         network_ids,
@@ -600,7 +747,6 @@ pub fn compute(ir: &mut [HydroRoot]) -> Slices {
 
     let mut slices = Slices {
         ec_collections,
-        channel_ec_sources,
         ..Slices::default()
     };
     for (id, in_tick, raw) in raw_sinks {
@@ -778,7 +924,7 @@ fn print_tree(node: &HydroNode, depth: usize) -> String {
 }
 
 /// Whether a network receive is (transitively) upstream of `node`, following cycles through
-/// their sinks.
+/// their sinks and `Tee`s through what they share.
 fn has_network_ancestor(
     node: &HydroNode,
     cycle_sinks: &HashMap<CycleId, *const HydroNode>,
@@ -791,45 +937,22 @@ fn has_network_ancestor(
         if !seen.insert(std::ptr::from_ref(node)) {
             return false;
         }
-        if let HydroNode::Network { .. } = node {
-            return true;
+        match node {
+            HydroNode::Network { .. } => true,
+            HydroNode::Tee { inner, .. }
+            | HydroNode::Reference { inner, .. }
+            | HydroNode::PartitionSide { inner, .. } => go(&inner.0.borrow(), cycle_sinks, seen),
+            HydroNode::CycleSource { cycle_id, .. } => {
+                cycle_sinks.get(cycle_id).is_some_and(|sink| {
+                    // SAFETY: see the comment at the construction of `cycle_sinks`.
+                    go(unsafe { &**sink }, cycle_sinks, seen)
+                })
+            }
+            _ => node
+                .input()
+                .into_iter()
+                .any(|input| go(input, cycle_sinks, seen)),
         }
-        if let HydroNode::CycleSource { cycle_id, .. } = node
-            && let Some(sink) = cycle_sinks.get(cycle_id)
-            // SAFETY: see the comment at the construction of `cycle_sinks`.
-            && go(unsafe { &**sink }, cycle_sinks, seen)
-        {
-            return true;
-        }
-        node.input()
-            .into_iter()
-            .any(|input| go(input, cycle_sinks, seen))
     }
     go(node, cycle_sinks, &mut HashSet::new())
-}
-
-/// The labelled collections (indices in `ec_index`) upstream of `node`, following cycles
-/// through their sinks.
-fn ec_ancestors(
-    node: &HydroNode,
-    ec_index: &HashMap<*const HydroNode, usize>,
-    cycle_sinks: &HashMap<CycleId, *const HydroNode>,
-    found: &mut BTreeSet<usize>,
-    seen: &mut HashSet<*const HydroNode>,
-) {
-    if !seen.insert(std::ptr::from_ref(node)) {
-        return;
-    }
-    if let Some(index) = ec_index.get(&std::ptr::from_ref(node)) {
-        found.insert(*index);
-    }
-    if let HydroNode::CycleSource { cycle_id, .. } = node
-        && let Some(sink) = cycle_sinks.get(cycle_id)
-    {
-        // SAFETY: see the comment at the construction of `cycle_sinks`.
-        ec_ancestors(unsafe { &**sink }, ec_index, cycle_sinks, found, seen);
-    }
-    for input in node.input() {
-        ec_ancestors(input, ec_index, cycle_sinks, found, seen);
-    }
 }
