@@ -47,7 +47,7 @@ digraph lamport {
     { rank=same; t26; e26; }
     e28 [shape=point, width=0.09, color="black"];
     { rank=same; t28; e28; }
-    crash0 [shape=plaintext, label="💀", fontsize=14];
+    crash0 [shape=plaintext, label="☠ crashed", fontsize=12];
     e29 [shape=point, width=0.09, color="black"];
     { rank=same; t29; e29; }
     end0 [shape=point, width=0.05, color="gray60"];
