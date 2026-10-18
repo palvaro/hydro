@@ -46,7 +46,7 @@ fn track_membership<'a, C, L: Location<'a>>(
     )
 }
 
-fn serialize_bincode_with_type(is_demux: bool, t_type: &syn::Type) -> syn::Expr {
+pub(crate) fn serialize_bincode_with_type(is_demux: bool, t_type: &syn::Type) -> syn::Expr {
     let root = get_this_crate();
 
     if is_demux {
@@ -72,7 +72,10 @@ pub(crate) fn serialize_bincode<T: Serialize>(is_demux: bool) -> syn::Expr {
     serialize_bincode_with_type(is_demux, &quote_type::<T>())
 }
 
-fn deserialize_bincode_with_type(tagged: Option<&syn::Type>, t_type: &syn::Type) -> syn::Expr {
+pub(crate) fn deserialize_bincode_with_type(
+    tagged: Option<&syn::Type>,
+    t_type: &syn::Type,
+) -> syn::Expr {
     let root = get_this_crate();
     if let Some(c_type) = tagged {
         parse_quote! {

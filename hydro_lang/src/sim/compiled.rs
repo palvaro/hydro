@@ -898,6 +898,18 @@ pub struct CompiledSim {
     /// Locations whose ticks run as soon as they are runnable, outside the schedule choice
     /// (see `SimFlow::eager_locations`).
     pub(super) eager_locations: Rc<HashSet<LocationId>>,
+    /// Each cluster's member ids (from `SimFlow::with_cluster_size`).
+    pub(super) cluster_members: Rc<std::collections::BTreeMap<LocationId, Vec<u32>>>,
+    /// The labelled collections and whether each is observed, when the flow carries an
+    /// automatic specification (`Spec::all_labels`; see `sim::observe`).
+    #[cfg(feature = "ldfi")]
+    pub(super) labels: Option<Rc<Vec<super::observe::LabelPlan>>>,
+    #[cfg(not(feature = "ldfi"))]
+    #[expect(
+        dead_code,
+        reason = "set by `SimFlow::compiled` for the `ldfi` feature"
+    )]
+    pub(super) labels: Option<()>,
 }
 
 #[sealed::sealed]
@@ -948,6 +960,19 @@ type SimLoaded<'a> = libloading::Symbol<
 >;
 
 impl CompiledSim {
+    /// The labelled collections of the program and whether the automatic specification
+    /// observes each (see [`crate::sim::spec::Spec::all_labels`]); `None` when the flow was
+    /// compiled without one.
+    #[cfg(feature = "ldfi")]
+    pub fn labels(&self) -> Option<&[super::observe::LabelPlan]> {
+        self.labels.as_deref().map(Vec::as_slice)
+    }
+
+    /// Each cluster's member ids, from `SimFlow::with_cluster_size`.
+    pub fn cluster_members(&self, cluster: &LocationId) -> Option<&[u32]> {
+        self.cluster_members.get(cluster).map(Vec::as_slice)
+    }
+
     /// Executes the given closure with a single instance of the compiled simulation.
     pub fn with_instance<T>(&self, thunk: impl FnOnce(CompiledSimInstance<'_>) -> T) -> T {
         self.with_instantiator(|instantiator| thunk(instantiator()), true)

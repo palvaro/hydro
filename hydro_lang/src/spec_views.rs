@@ -22,6 +22,32 @@ pub type EcPost<'a, L> = Optional<((usize, usize), usize), L, Bounded>;
 /// The facts correct members hold in this run (the domain of the next runs).
 pub type EcFacts<'a, L, T> = Stream<T, L, Bounded, TotalOrder>;
 
+/// The cluster tag of the members an automatic specification (`Spec::all_labels`) observes.
+/// Every labelled collection's members arrive at the observer under this one tag, since the
+/// observation is inserted into the IR where no cluster type is available.
+pub enum Observed {}
+
+/// What the automatic specification's observation slot carries: one element of some labelled
+/// collection, as `(member, (collection index, bincode of the element))`.
+pub type ObservedItem = (MemberId<Observed>, (usize, Vec<u8>));
+
+/// The `(member, fact)` facts of the collection `current` names, out of the facts of every
+/// labelled collection the observation slot carries (`Spec::all_labels`). The facts stay as
+/// bytes: the view is one Hydro dataflow over collections of different element types.
+pub fn select_label<'a, L, R>(
+    observed: Stream<ObservedItem, L, Bounded, TotalOrder, R>,
+    current: Optional<usize, L, Bounded>,
+) -> Stream<(MemberId<Observed>, Vec<u8>), L, Bounded, TotalOrder, R>
+where
+    L: Location<'a>,
+    R: Retries,
+{
+    observed
+        .cross_singleton(current)
+        .filter(q!(|((_, (index, _)), current)| index == current))
+        .map(q!(|((member, (_, bytes)), _)| (member, bytes)))
+}
+
 /// The views an `EventualConsistency` label stands for, over `observed`, the `(member, fact)`
 /// facts of one cluster collection seen so far; `correct`, the members the hypothesis under
 /// test does not crash; and `domain`, the facts of the failure-free run (see
