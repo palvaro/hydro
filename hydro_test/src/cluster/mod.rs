@@ -12,6 +12,8 @@ pub mod isr_replication;
 pub mod kv_replica;
 #[cfg(test)]
 mod ldfi_grid;
+#[cfg(test)]
+mod ldfi_viz;
 pub mod many_to_many;
 pub mod map_reduce;
 #[cfg(feature = "tokio")]
