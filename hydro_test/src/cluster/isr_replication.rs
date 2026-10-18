@@ -916,14 +916,113 @@ pub(crate) mod harness {
             hydro_lang::sim::quiesce().await;
         }
     }
+
+    /// [`body`] with the end of finite failures after the first round rather than after the
+    /// write: ZK's first view and the leader's first replication lie before it, so a crash
+    /// between two sends of either fan-out is admissible. For the automatic specification's
+    /// sender-crash question (`ldfi_all_labels_break_under_a_sender_crash`).
+    pub(crate) async fn body_eff_after_first_round(h: &Harness, run: &Run<'_>) {
+        let Shape {
+            members,
+            rounds,
+            writes,
+        } = h.shape;
+        for w in 1..=writes {
+            h.write_send.send(Write(w));
+        }
+        hydro_lang::sim::quiesce().await;
+        for round in 0..rounds {
+            h.replica_timer.send_many((0..members).map(|m| (m, ())));
+            hydro_lang::sim::quiesce().await;
+            h.zk_timer.send(());
+            hydro_lang::sim::quiesce().await;
+            if round == 0 {
+                run.end_of_finite_failures();
+            }
+        }
+    }
+
+    /// [`compile`] with the automatic specification (`Spec::all_labels`) in place of the
+    /// hand-written one: every collection the protocol labels `EventualConsistency` (the
+    /// `write` and `view` broadcasts) is observed, nothing is named. The protocol's outputs
+    /// go to plain simulator outputs. `senders_crashable` adds the client and ZK, which the
+    /// harness's own fault model holds correct, to the crashable set.
+    pub(crate) fn compile_all_labels(
+        unclean: bool,
+        encoding: Encoding,
+        shape: Shape,
+        senders_crashable: bool,
+        fuzz_iterations: usize,
+    ) -> (CompiledSim, Harness, impl Fn(usize) -> Ldfi) {
+        let Shape { members, .. } = shape;
+        let mut flow = FlowBuilder::new();
+        let client = flow.process::<Client>();
+        let zk = flow.process::<Zk>();
+        let replicas = flow.cluster::<Replica>();
+        let hooks: Hooks = flow.sim_hook();
+
+        let (write_send, writes) = client.sim_input::<Write, TotalOrder, ExactlyOnce>();
+        let (replica_timer, replica_timers) = replicas.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let (zk_timer, zk_timers) = zk.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let outputs = isr_replication(
+            &client,
+            &zk,
+            &replicas,
+            members,
+            unclean,
+            encoding,
+            writes,
+            replica_timers,
+            zk_timers,
+            hooks,
+        );
+        let _acks = outputs.client_acks.sim_output();
+        let _views = outputs.views.sim_output();
+        let _appended = outputs.appended.sim_cluster_output();
+
+        let spec = Spec::all_labels(&mut flow);
+
+        let client_id = client.clone();
+        let zk_id = zk.clone();
+        let replicas_id = replicas.clone();
+        let compiled = flow
+            .sim()
+            .test_safety_only()
+            .skip_consistency_assertions()
+            .with_cluster_size(&replicas, members as usize)
+            .unit_test_fuzz_iterations(fuzz_iterations)
+            .with_provenance()
+            .compiled();
+
+        let harness = Harness {
+            shape,
+            write_send,
+            replica_timer,
+            zk_timer,
+        };
+        let configure = move |crashes: usize| {
+            let mut ldfi = Ldfi::new()
+                .level(Level::Record)
+                .crashable_cluster("replica", &replicas_id, 0..members)
+                .crash_budget(crashes)
+                .spec(&spec);
+            if senders_crashable {
+                ldfi = ldfi.crashable("client", &client_id).crashable("zk", &zk_id);
+            }
+            ldfi
+        };
+        (compiled, harness, configure)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use hydro_lang::sim::ldfi::{Exploration, Fault, Outcome, Strategy};
+    use hydro_lang::sim::ldfi::{Exploration, Fault, LabelVerdict, Outcome, Strategy};
 
     use super::Encoding;
-    use super::harness::{DEFAULT_SHAPE, body, compile};
+    use super::harness::{
+        DEFAULT_SHAPE, body, body_eff_after_first_round, compile, compile_all_labels,
+    };
 
     /// Schedules sampled per hypothesis. Four rounds of three replicas plus ZK give
     /// tens of thousands of interleavings per hypothesis under `exhaustive`; the protocol's
@@ -988,6 +1087,66 @@ mod tests {
     #[test]
     fn ldfi_certifies_clean_election_under_one_crash_dataflow() {
         certifies_clean_election_under_one_crash(Encoding::Dataflow);
+    }
+
+    /// Every `EventualConsistency` label of the protocol, automatically (`Spec::all_labels`),
+    /// under the harness's own fault model (replicas crashable, client and ZK correct): the
+    /// `write` and `view` broadcasts are the labelled collections; with their senders held
+    /// correct nothing within one crash breaks them. Reports every verdict.
+    #[test]
+    fn ldfi_all_labels_with_the_harness_fault_model() {
+        let (compiled, h, configure) =
+            compile_all_labels(false, Encoding::Dataflow, DEFAULT_SHAPE, false, 8);
+        let results = configure(1)
+            .exploration(Exploration::Fuzz { instances: SAMPLED })
+            .search_all_labels(&compiled, async |run| body(&h, run).await);
+        eprintln!("{results}");
+        assert!(
+            !results.verdicts.is_empty(),
+            "the protocol labels collections"
+        );
+        assert!(
+            !results
+                .verdicts
+                .iter()
+                .any(|r| matches!(r.verdict, LabelVerdict::Searched(Outcome::Budget { .. }))),
+            "{results}"
+        );
+        assert!(
+            results.counterexamples().next().is_none(),
+            "with the senders held correct, no label should be violated: {results}"
+        );
+    }
+
+    /// The same labels with the senders crashable: a single-hop `broadcast_closed` is
+    /// violated by its sender's crash between two fan-out sends (the client for `write`, ZK
+    /// for `view`). The end of finite failures is moved past the first round so that ZK's
+    /// first view lies before it (under [`body`] no ZK send does, and the view broadcast
+    /// certifies within those bounds).
+    #[test]
+    fn ldfi_all_labels_break_under_a_sender_crash() {
+        let (compiled, h, configure) =
+            compile_all_labels(false, Encoding::Dataflow, DEFAULT_SHAPE, true, 8);
+        let results = configure(1)
+            .exploration(Exploration::Fuzz { instances: SAMPLED })
+            .search_all_labels(&compiled, async |run| {
+                body_eff_after_first_round(&h, run).await
+            });
+        eprintln!("{results}");
+        let crashed_sender = |site: &str, sender: &str| {
+            results.at(site).any(|r| {
+                matches!(&r.verdict, LabelVerdict::Searched(Outcome::Counterexample { faults, .. })
+                    if faults.iter().any(|f| matches!(f, Fault::Crash { node, .. } if node == sender)))
+            })
+        };
+        assert!(
+            crashed_sender("isr_replication.rs:343", "client"),
+            "the write broadcast should break under the client's crash: {results}"
+        );
+        assert!(
+            crashed_sender("isr_replication.rs:564", "zk"),
+            "the view broadcast should break under ZK's crash: {results}"
+        );
     }
 
     /// Hunts a false certificate on the closure encoding at load 2 under the opaque-step

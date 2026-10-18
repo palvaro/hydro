@@ -504,10 +504,10 @@ mod tests {
             "{results}"
         );
         assert!(
-            !results.verdicts.iter().any(|r| matches!(
-                r.verdict,
-                LabelVerdict::Searched(Outcome::Budget { .. })
-            )),
+            !results
+                .verdicts
+                .iter()
+                .any(|r| matches!(r.verdict, LabelVerdict::Searched(Outcome::Budget { .. }))),
             "{results}"
         );
     }

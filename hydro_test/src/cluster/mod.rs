@@ -3,6 +3,8 @@ pub mod compartmentalized_paxos;
 #[cfg(feature = "tokio")]
 pub mod compute_pi;
 #[cfg(test)]
+mod ec_all_labels_classes;
+#[cfg(test)]
 mod ec_demos_ldfi;
 #[cfg(test)]
 mod ec_ldfi;

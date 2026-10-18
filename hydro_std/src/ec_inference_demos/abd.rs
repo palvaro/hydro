@@ -594,3 +594,78 @@ mod tests {
             });
     }
 }
+
+/// Hydrofrac's automatic specification (`Spec::all_labels`) on the register: the one place in
+/// the demos where a labelled collection is a lattice `Singleton`, which the set-based
+/// specification does not apply to. The test lives here rather than in `hydro_test` because
+/// the simulator's hook metadata names the demo's private message types.
+#[cfg(test)]
+mod hydrofrac_tests {
+    use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
+    use hydro_lang::prelude::*;
+    use hydro_lang::sim::compiled::CompiledSim;
+    use hydro_lang::sim::ldfi::{
+        Exploration, LabelVerdict, Ldfi, Level, NotCheckedReason, Outcome,
+    };
+    use hydro_lang::sim::spec::Spec;
+
+    use super::abd_register;
+
+    pub struct Replica;
+    pub struct Client;
+
+    /// The replica register (`abd.rs`, the `fold`) is labelled `EventualConsistency` and is a
+    /// `Singleton`: reported as not checked, with the reason. The stream collections of the
+    /// protocol (the clients' query broadcast and the phase-2 cycle) get verdicts; nothing is
+    /// skipped silently.
+    #[test]
+    fn all_labels_reports_the_register_as_not_a_stream() {
+        const REPLICAS: usize = 3;
+        let mut flow = FlowBuilder::new();
+        let replicas = flow.cluster::<Replica>();
+        let clients = flow.cluster::<Client>();
+        let (w_send, writes) = clients.sim_input::<(u64, u32), TotalOrder, ExactlyOnce>();
+        let (_r_send, reads) = clients.sim_input::<u64, TotalOrder, ExactlyOnce>();
+        let outs = abd_register(&replicas, REPLICAS / 2 + 1, writes, reads);
+        let _done = outs.write_done.sim_cluster_output();
+        let _read = outs.read_result.sim_cluster_output();
+
+        let spec = Spec::all_labels(&mut flow);
+
+        let compiled: CompiledSim = flow
+            .sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&replicas, REPLICAS)
+            .with_cluster_size(&clients, 1)
+            .unit_test_fuzz_iterations(8)
+            .with_provenance()
+            .compiled();
+
+        let results = Ldfi::new()
+            .level(Level::Record)
+            .exploration(Exploration::Fuzz { instances: 8 })
+            .crashable_cluster("replica", &replicas, 0..REPLICAS as u32)
+            .crashable_cluster("client", &clients, 0..1)
+            .crash_budget(1)
+            .spec(&spec)
+            .search_all_labels(&compiled, async |_run| {
+                w_send.send(0, (1, 10u32));
+                hydro_lang::sim::quiesce().await;
+            });
+        eprintln!("{results}");
+        assert!(
+            results.verdicts.iter().any(|r| matches!(
+                &r.verdict,
+                LabelVerdict::NotChecked(NotCheckedReason::NotAStream(kind)) if kind == "Singleton"
+            )),
+            "the register is a Singleton and must be reported as not a stream: {results}"
+        );
+        assert!(
+            !results
+                .verdicts
+                .iter()
+                .any(|r| matches!(r.verdict, LabelVerdict::Searched(Outcome::Budget { .. }))),
+            "{results}"
+        );
+    }
+}
