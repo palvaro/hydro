@@ -169,7 +169,7 @@ The operators between a mint and an exit inherit the label and are not listed. A
 The generated specification applies to an unbounded stream (or keyed stream, taken as pairs) at a cluster's top level that a network channel feeds. Everything else is reported with a reason and not searched:
 
 - **Local inputs only.** No fault in the model can withhold an input, so there is nothing to search.
-- **Not a stream.** A `Singleton`, `Optional`, or `KeyedSingleton` is a lattice value, and the equality variant of the specification is not built.
+- **Not a stream.** A `Singleton`, `Optional`, or `KeyedSingleton` is reported, not checked, today; the planned treatment checks its input stream rather than its value (next steps, item 1).
 - **Inside a tick** or an atomic region. The per-tick contents are not the collection's.
 - **Excluded by the test** through `Spec::all_labels_except`. Observing a collection shares and serializes its elements, so its element type must be `Clone + Serialize`. Labelled cluster collections nearly always are, being built from network sends; one that is not fails the generated crate's compilation and is excluded by hand.
 
@@ -315,7 +315,7 @@ The distinction is straightforward in this corpus. Single-hop dissemination fail
 
 This exposes a gap in transport-level justifications for EC. Treating a failed connection as a failed recipient does not account for a sender that dies halfway through a fan-out. Treating a dropped message as indefinitely delayed does not make surviving recipients converge within a recovery window. A transport label alone cannot establish complete EC for the program using it.
 
-Some other labels do not introduce an independent network fault question. Algebraically justified folds preserve consistency given their inputs. `quorum` and `epoch_splice` are EC-preserving combinators whose dissemination assumptions come from their upstream inputs. `synod` has no `EventualConsistency` label. ABD's replica register does have an EC claim, but its lattice `Singleton` output needs a different observer.
+Some other labels do not introduce an independent network fault question. Algebraically justified folds preserve consistency given their inputs. `quorum` and `epoch_splice` are EC-preserving combinators whose dissemination assumptions come from their upstream inputs. `synod` has no `EventualConsistency` label. ABD's replica register does have an EC claim, but it is a `Singleton`, reported and not checked today; it is to be checked at its input stream (next steps, item 1).
 
 ### Every label of multi-Paxos
 
@@ -387,7 +387,7 @@ The larger tests are ignored by default for runtime. The Raft bug and correct-ve
 
 **Convergence is checked at a finite horizon.** Hydrofrac cannot distinguish “never converges” from “has not converged yet” using the final contents alone. Test bodies must provide a realistic recovery window.
 
-**The generated observer handles set-valued collections.** A lattice `Singleton`, such as ABD's max-by-timestamp register, needs an observer that compares final values rather than accumulated facts. That observer is not implemented.
+**Scalar collections are reported, not checked.** A `Singleton`, `Optional`, or `KeyedSingleton`, such as ABD's max-by-timestamp register, is reported with the reason and not searched today. The planned treatment checks the stream the scalar is computed from, not its value (next steps, item 1).
 
 **Membership is static in these tests.** The simulator starts with all members joined. Tests of `_live` protocols exercise faults, not join timing.
 
@@ -399,7 +399,7 @@ The larger tests are ignored by default for runtime. The Raft bug and correct-ve
 
 ## Next steps
 
-1. **Add a lattice-aware observer.** Use it to check ABD's `Singleton` register.
+1. **Check scalar collections at their inputs.** A `Singleton`, `Optional`, or `KeyedSingleton` is checked at its input, not its value. A labelled scalar is a function of the stream it is computed from, and the type system has already vouched for the function; the only premise left to hydrofrac is that every correct member receives the same inputs. So the tap goes on the labelling operator's input stream, and the verdict is reported under the scalar's site. When that input is itself labelled it is already a row of the table, and the scalar's row says so. ABD's register (`abd.rs:165`, asserted over an unlabelled stream) is the first case. Checking the value itself ("final values equal") is not built and is not planned: it re-proves the type system's conclusion, which the certificate does not claim.
 2. **Support explicit convergence witnesses.** Protocols that report convergence should be able to use that signal in the specification rather than rely only on a fixed horizon.
 3. **Add decision-trace replay.** Record nondeterministic decisions and replay a prefix with one decision changed. This would provide finer counterfactual analysis than node-local replay.
 4. **Run Raft's `committed` output under the generated specification.** The harness exists; the search takes about an hour.
