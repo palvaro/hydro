@@ -32,7 +32,7 @@ mod tests {
     use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
     use hydro_lang::prelude::*;
     use hydro_lang::sim::compiled::CompiledSim;
-    use hydro_lang::sim::ldfi::{Exploration, Fault, Ldfi, Level, Outcome};
+    use hydro_lang::sim::ldfi::{Exploration, Fault, LabelVerdict, Ldfi, Level, Outcome};
     use hydro_lang::sim::spec::Spec;
     use hydro_std::ec_inference_demos::broadcast_live::broadcast_live_from_process;
     use hydro_std::ec_inference_demos::crdt_gossip::{g_set_gossip, g_set_gossip_live};
@@ -380,6 +380,135 @@ mod tests {
         assert!(
             !matches!(outcome, Outcome::Budget { .. } | Outcome::Vacuous { .. }),
             "{outcome}"
+        );
+    }
+
+    /// Every label of `reliable_broadcast_closed`, automatically (`Spec::all_labels`): the
+    /// delivered set certifies in the same 10 hypotheses as the manual search above; the
+    /// initial single-hop broadcast the label is inferred from is violated by the source's
+    /// crash between two of its fan-out sends.
+    #[test]
+    fn ec_demo_reliable_broadcast_all_labels() {
+        let mut flow = FlowBuilder::new();
+        let source = flow.process::<Source>();
+        let members = flow.cluster::<Member>();
+        let (send, items) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+        let delivered = reliable_broadcast_closed(items, &members);
+        let _out = delivered.weaken_consistency().sim_cluster_output();
+
+        let spec = Spec::all_labels(&mut flow);
+
+        let compiled: CompiledSim = flow
+            .sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&members, MEMBERS as usize)
+            .with_provenance()
+            .compiled();
+
+        let results = Ldfi::new()
+            .level(Level::Record)
+            .crashable("source", &source)
+            .crashable_cluster("member", &members, 0..MEMBERS)
+            .crash_budget(1)
+            .spec(&spec)
+            .search_all_labels(&compiled, async |_run| {
+                send.send(1);
+                send.send(2);
+                hydro_lang::sim::quiesce().await;
+            });
+        eprintln!("{results}");
+        // The delivered set (`new_messages`, the `unique`): the manual search's certificate.
+        let delivered: Vec<_> = results.at("reliable_broadcast.rs:149").collect();
+        assert_eq!(delivered.len(), 1, "{results}");
+        let LabelVerdict::Searched(Outcome::Certificate { runs, .. }) = &delivered[0].verdict
+        else {
+            panic!("{results}");
+        };
+        assert_eq!(runs.len(), 10, "{results}");
+        // The initial single-hop broadcast the label is inferred from: the source's crash.
+        let initial: Vec<_> = results.at("reliable_broadcast.rs:130").collect();
+        assert_eq!(initial.len(), 1, "{results}");
+        let LabelVerdict::Searched(Outcome::Counterexample { faults, .. }) = &initial[0].verdict
+        else {
+            panic!("{results}");
+        };
+        assert!(
+            faults
+                .iter()
+                .any(|f| matches!(f, Fault::Crash { node, .. } if node == "source")),
+            "{results}"
+        );
+        // Nothing is skipped silently: every label has a verdict.
+        assert!(
+            results
+                .verdicts
+                .iter()
+                .all(|r| matches!(r.verdict, LabelVerdict::Searched(_))),
+            "{results}"
+        );
+    }
+
+    /// Every label of `multi_paxos`, automatically. `learned` (the learners' delivered set)
+    /// certifies as in the manual search above; the rest get verdicts, recorded in section 6
+    /// of `docs/design/hydrofrac.md`.
+    #[test]
+    fn ec_demo_multi_paxos_all_labels() {
+        let mut flow = FlowBuilder::new();
+        let proposers = flow.cluster::<Proposer>();
+        let acceptors = flow.cluster::<Acceptor>();
+        let learners = flow.cluster::<Learner>();
+        let (lead, leads) = proposers.sim_input::<u64, TotalOrder, ExactlyOnce>();
+        let (command, commands) = proposers.sim_input::<u32, TotalOrder, ExactlyOnce>();
+
+        let outputs = multi_paxos(&acceptors, &learners, 2, leads, commands);
+        let _learned = outputs.learned.weaken_consistency().sim_cluster_output();
+
+        let spec = Spec::all_labels(&mut flow);
+
+        let compiled: CompiledSim = flow
+            .sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&proposers, 1)
+            .with_cluster_size(&acceptors, 3)
+            .with_cluster_size(&learners, MEMBERS as usize)
+            .unit_test_fuzz_iterations(8)
+            .with_provenance()
+            .compiled();
+
+        let results = Ldfi::new()
+            .level(Level::Record)
+            .exploration(Exploration::Fuzz { instances: 8 })
+            .crashable_cluster("proposer", &proposers, 0..1)
+            .crashable_cluster("acceptor", &acceptors, 0..3)
+            .crashable_cluster("learner", &learners, 0..MEMBERS)
+            .crash_budget(1)
+            .spec(&spec)
+            .search_all_labels(&compiled, async |_run| {
+                lead.send(0, 1);
+                hydro_lang::sim::quiesce().await;
+                command.send(0, 7);
+                command.send(0, 8);
+                hydro_lang::sim::quiesce().await;
+            });
+        eprintln!("{results}");
+        let learned: Vec<_> = results
+            .at("multi_paxos.rs:588")
+            .filter(|r| r.collection.exit)
+            .collect();
+        assert_eq!(learned.len(), 1, "{results}");
+        assert!(
+            matches!(
+                learned[0].verdict,
+                LabelVerdict::Searched(Outcome::Certificate { .. })
+            ),
+            "{results}"
+        );
+        assert!(
+            !results
+                .verdicts
+                .iter()
+                .any(|r| matches!(r.verdict, LabelVerdict::Searched(Outcome::Budget { .. }))),
+            "{results}"
         );
     }
 }

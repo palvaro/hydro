@@ -2123,6 +2123,17 @@ impl HydroRoot {
         }
     }
 
+    pub fn input_mut(&mut self) -> &mut HydroNode {
+        match self {
+            HydroRoot::ForEach { input, .. }
+            | HydroRoot::SendExternal { input, .. }
+            | HydroRoot::DestSink { input, .. }
+            | HydroRoot::CycleSink { input, .. }
+            | HydroRoot::EmbeddedOutput { input, .. }
+            | HydroRoot::Null { input, .. } => input,
+        }
+    }
+
     pub fn input_metadata(&self) -> &HydroIrMetadata {
         self.input().metadata()
     }
