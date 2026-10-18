@@ -310,7 +310,7 @@ include the probe run.
 | `reliable_broadcast_closed`, `reliable_broadcast_live` | **Certificate**, 10 each, exhaustive. |
 | `uniform_reliable_broadcast_closed`, thresholds 1 and 2 | **Certificate**, 28 each, 8 sampled schedules per hypothesis. |
 | `g_set_gossip`, `g_set_gossip_live` | **Certificate**, 13 each, 8 sampled schedules. |
-| `multi_paxos`, the learners' `learned` output (1 proposer, 3 acceptors, 3 learners) | **Certificate**, 24 hypotheses, 8 sampled schedules. The learners re-broadcast what they learn; the certificate is that echo cycle's. The proposer is held correct. |
+| `multi_paxos`, the learners' `learned` output (1 proposer, 3 acceptors, 3 learners) | **Certificate**, 24 hypotheses (25 on another run; fuzz sampling moves the count by one between runs), 8 sampled schedules. The learners re-broadcast what they learn; the certificate is that echo cycle's. The proposer is held correct. |
 
 Every single-hop dissemination fails under one crash or one omission; every protocol with an
 echo or gossip cycle holds. The transports themselves (`networking/mod.rs`) justify granting
@@ -327,6 +327,44 @@ same inputs), and `collect_quorum` (a function of the response set). Of the rema
 their premise is whichever broadcast fed them), `synod` labels nothing `EventualConsistency`,
 and `abd`'s replica register is in the class but is a lattice `Singleton` the set-based
 specification cannot observe correctly (section 8).
+
+### Every label of multi-Paxos
+
+`Spec::all_labels` over `multi_paxos` (1 proposer, 3 acceptors, 3 learners; proposer, acceptors
+and learners all crashable, one crash; `Fuzz { instances: 8 }`; the body tells proposer 0 to
+lead round 1, quiesces, sends commands 7 and 8, quiesces) reports ten collections. Hypothesis
+counts include the probe run and move by one between runs with the fuzz sampling. Line numbers
+are into `hydro_std/src/ec_inference_demos/multi_paxos.rs` unless named otherwise.
+
+| Site | Collection | Result |
+|---|---|---|
+| `:281`, acceptors, minted and delivered | `broadcast_closed` of prepares, proposer → acceptors; its `.entries()` goes straight into the acceptor's tick batch (`:303`), so the mint is also the exit. | **Violated**, 5 hypotheses: `crash(proposer@0 after :281[0→1]:Ts { round: 1, writer: 0 })`. The proposer dies between the prepare to acceptor 0 and the prepare to acceptor 1; acceptor 0 holds a prepare no other acceptor receives. |
+| `:549`, acceptors, minted | `broadcast_closed` of phase-2 accepts, proposer → acceptors. | **Violated**, 8 hypotheses: `crash(proposer@0 after :549[0→1]:(Ts { round: 1, writer: 0 }, 0, 1, Some(8)))`. The proposer dies after sending the accept for slot 1 (command 8) to acceptor 0 only. |
+| `:286`, acceptors, delivered | The `forward_ref` that closes the accept cycle; the same stream as `:549`'s entries, exiting the labelled region at `use::batch(accepts_fwd, ..)` (`:308`). | **Violated**, 8 hypotheses, by the same crash as `:549`. Nothing between the broadcast and the batch retransmits. |
+| `:569`, proposers, minted | `broadcast_closed` of chosen slots, proposer → proposers. | **Certificate**, 17–18 hypotheses, 8 sampled schedules. The proposer cluster has one member in this run, so agreement is among one member and holds trivially. |
+| `:570`, proposers, delivered | The `.values()` of `:569`, exiting at `weaken_consistency()` (`:571`). | **Certificate**, 19 hypotheses, 8 sampled schedules; trivial for the same reason. |
+| `:582`, learners, minted | `broadcast_closed` of chosen decrees, proposer → learners: the initial hop of the learner echo. | **Violated**, 9 hypotheses: `crash(proposer@0 after :582[0→1]:(1, 0, 0, Some(7)))`. The proposer dies after shipping slot 0 (command 7) to learner 0 only. This is the premise the echo repairs. |
+| `:591`, learners, minted | `broadcast_closed` of the echo, learners → learners, keyed by echoer. | **Violated**, 10 hypotheses: `crash(learner@0 after :591[0→1]:(1, 0, 0, Some(7)))`. Learner 0 dies partway through echoing slot 0; its echo, under its own key, is present at some correct learners and absent at others. |
+| `:588`, learners, delivered | `learned = initial.merge_unordered(echo_fwd).unique()`, exiting at the test's `weaken_consistency()`. | **Certificate**, 25–26 hypotheses, 8 sampled schedules. Every learner that receives a decree echoes it to every learner; one crash leaves at least one echoer per decree that a correct learner received. |
+| `:608`, learners, delivered | The `SpliceFact` `flat_map_unordered` of `learned`, exiting into the fold at `epoch_splice.rs:190`. | **Certificate**, 25–26 hypotheses, 8 sampled schedules. A function of `learned`, element by element. |
+| `epoch_splice.rs:190`, learners, minted | The `fold` with a `commutative = manual_proof!` into `Singleton<SpliceState>`. | **Not checked**: a `Singleton`, not a set-valued collection (section 8). |
+
+The `.values()` directly after `:281` (a `Cast`, delivered) is the same collection as its mint
+and is not listed separately. The automatic search of `learned` took 25–26 hypotheses against
+the manual search's 24–25 in the main table: the observer's dataflow is larger under
+`all_labels` (it carries every label's facts and selects by index), so the probe run's lineage
+has more to cover.
+
+The pattern is the one section 5 shows for reliable broadcast. A minted single-hop
+`broadcast_closed` is violated by the sender's crash mid-fan-out (`reliable_broadcast.rs:130`,
+and here `:281`, `:549`, `:582`), because the transport's grant assumes the sender finishes.
+The delivered set after an echo cycle certifies (`reliable_broadcast.rs:149`, and here `:588`,
+`:608`). The receiving side of the echo itself, a cluster → cluster broadcast keyed by echoer
+(`reliable_broadcast.rs:156`, and here `:591`), is violated by an echoer's crash: the echo
+repairs the merged set, not the keyed collection of who echoed. A verdict per label separates
+the transport's assumption from what the program delivers under it.
+
+<!-- ISR / 2PC per-label results: pending -->
 
 ## 7. Hand-written specifications
 
