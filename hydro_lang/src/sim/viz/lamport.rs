@@ -295,7 +295,8 @@ const LOST: &str = "#dc2626";
 /// from its send to its receive. An omitted message is a red dashed edge to a `✗`; a send
 /// lost to the sender's crash a gray dashed edge; a message in flight at the horizon a dotted
 /// edge to the bottom of the destination's lane. Highlighted messages are bold and colored.
-/// `💀` marks a crash point, and the end of finite failures is a labelled rank.
+/// `☠ crashed` marks a crash point (Graphviz cannot render 4-byte UTF-8 such as `💀`), and
+/// the end of finite failures is a labelled rank.
 pub fn dot(trace: &Trace, opts: &LamportOptions) -> String {
     let mut out = String::new();
     out.push_str("digraph lamport {\n");
@@ -383,7 +384,7 @@ pub fn dot(trace: &Trace, opts: &LamportOptions) -> String {
         if info.crash == Some(Crash::BeforeAnySend) {
             let _ = writeln!(
                 out,
-                "    crash{node} [shape=plaintext, label=\"💀\", fontsize=14];"
+                "    crash{node} [shape=plaintext, label=\"☠ crashed\", fontsize=12];"
             );
             chain.push(format!("crash{node}"));
         }
@@ -417,7 +418,7 @@ pub fn dot(trace: &Trace, opts: &LamportOptions) -> String {
             if info.crash == Some(Crash::AfterEvent(index)) {
                 let _ = writeln!(
                     out,
-                    "    crash{node} [shape=plaintext, label=\"💀\", fontsize=14];"
+                    "    crash{node} [shape=plaintext, label=\"☠ crashed\", fontsize=12];"
                 );
                 chain.push(format!("crash{node}"));
             }
@@ -595,7 +596,7 @@ mod tests {
         );
         assert!(out.contains("t_eff [label=\"EFF\""), "{out}");
         assert!(
-            out.contains("crash0 [shape=plaintext, label=\"💀\""),
+            out.contains("crash0 [shape=plaintext, label=\"☠ crashed\""),
             "{out}"
         );
         assert!(out.contains("e6 [shape=note"), "{out}");

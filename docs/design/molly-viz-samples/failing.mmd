@@ -1,0 +1,14 @@
+---
+title: goal violated by {crash(coordinator after commit[→0]:Txn(1))}
+---
+sequenceDiagram
+    participant p0 as coordinator
+    participant p1 as participant@0
+    participant p2 as participant@1
+    p0->>p1: prepare: Txn(1)
+    p0->>p2: prepare: Txn(1)
+    p1->>p0: vote: Txn(1)
+    p2->>p0: vote: Txn(1)
+    p0->>p1: commit: Txn(1)
+    Note over p0: 💀 crashed
+    p0--xp2: commit: Txn(1) (lost: sender crashed)

@@ -153,3 +153,66 @@ fn provenance_graph_of_two_pc_renders() {
     );
     hydro_build_utils::assert_snapshot!("two_pc_slice_dot", dot);
 }
+
+/// Writes the whole Molly-style report of the blocking 2PC counterexample (both Lamport
+/// diagrams and the witness's provenance graph, in Mermaid and DOT) into the directory named
+/// by `MOLLY_VIZ_OUT`, for rendering with `dot -Tpng` / `mmdc`. A no-op unless that variable is
+/// set, so it never writes into the tree during `cargo test`.
+#[test]
+fn render_molly_report_to_disk() {
+    let Ok(out) = std::env::var("MOLLY_VIZ_OUT") else {
+        return;
+    };
+    let out = std::path::PathBuf::from(out);
+    std::fs::create_dir_all(&out).unwrap();
+    let write = |name: &str, text: &str| std::fs::write(out.join(name), text).unwrap();
+
+    let (compiled, h, configure) = compile(2, false, 8);
+    let outcome = configure(1)
+        .level(Level::Record)
+        .with_traces()
+        .with_provenance_graphs()
+        .search(&compiled, async |run| body(&h, run).await);
+    assert!(outcome.is_counterexample(), "{outcome}");
+    let viz = outcome.viz().unwrap();
+
+    // Zoom level 0: the failing run.
+    write("failing.mmd", &viz.lamport_mermaid().unwrap());
+    write("failing.dot", &viz.lamport_dot().unwrap());
+    // Zoom level 1: a run in which the goal held, its support highlighted.
+    write("witness.mmd", &viz.support_lamport_mermaid().unwrap());
+    write("witness.dot", &viz.support_lamport_dot().unwrap());
+    // Zoom level 2: the why-provenance graph behind that support.
+    let witness = viz.witness().unwrap();
+    let index = witness
+        .schedule
+        .derivations
+        .iter()
+        .position(|d| std::ptr::eq(d, witness.derivation))
+        .unwrap();
+    let graph = &witness.schedule.provenance[index];
+    write(
+        "provenance.dot",
+        &provenance::dot(
+            graph,
+            &ProvOptions {
+                title: Some("2PC: why the goal held (record-level lineage)".to_owned()),
+                ..ProvOptions::default()
+            },
+        ),
+    );
+    write(
+        "provenance_collapsed.mmd",
+        &provenance::mermaid(
+            graph,
+            &ProvOptions {
+                collapse_execs: true,
+                show_levels: false,
+                ..ProvOptions::default()
+            },
+        ),
+    );
+    write("provenance.json", &graph.to_json());
+    write("report.md", &viz.markdown());
+    eprintln!("wrote the Molly report to {}", out.display());
+}
