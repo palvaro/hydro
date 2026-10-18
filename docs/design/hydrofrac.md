@@ -364,7 +364,34 @@ The delivered set after an echo cycle certifies (`reliable_broadcast.rs:149`, an
 repairs the merged set, not the keyed collection of who echoed. A verdict per label separates
 the transport's assumption from what the program delivers under it.
 
-<!-- ISR / 2PC per-label results: pending -->
+### Every label of ISR replication, two-phase commit and `abd`
+
+The hand-written harnesses of section 7 run under `Spec::all_labels` as well
+(`isr_replication.rs`, `two_pc_ldfi.rs`: `*_all_labels` tests; `abd.rs` in `hydro_std`). The
+senders those harnesses hold correct (the client and ZooKeeper; the coordinator) are also run
+crashable, since a `broadcast_closed` from a process has no label premise other than the
+sender's survival.
+
+| Program, fault model | Site | Result |
+|---|---|---|
+| ISR (3 replicas, 4 rounds, `Fuzz { instances: 8 }`), replicas crashable | `:343` write broadcast, client → replicas (minted and delivered); `:360` replication `forward_ref` at the replicas (delivered); `:564` view broadcast, ZK → replicas (minted) | **Certificate** each, 4 hypotheses. No crashable node sends on these channels. |
+| ISR, client and ZK crashable too, harness body (`EFF` right after the write) | `:343` | **Violated**, 2 hypotheses: `crash(client after write[→1]:Write(1))`. |
+| | `:564`, `:360` | **Certificate**, 5 hypotheses each. Every ZK send lies after the body's end of finite failures, so no ZK crash point is admissible: a certificate within the bounds the body sets. |
+| ISR, client and ZK crashable, `EFF` after the first round | `:343` | **Violated**, 2 hypotheses, by the client's crash as above. |
+| | `:564`, `:360` | **Violated**, 8 hypotheses each: `crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] })`. ZK dies between two sends of one view; the replication cycle carries the difference. |
+| 2PC with the cooperative termination protocol (2 participants, 1 transaction, exhaustive), coordinator and participants crashable | `:86` prepare broadcast (minted and delivered) | **Violated**, 2 hypotheses: `crash(coordinator after prepare[→0]:Txn(1))`. |
+| | `:92` commit broadcast (minted and delivered) | **Violated**, 2 hypotheses: `crash(coordinator after commit[→0]:Txn(1))`. |
+| | `:98` peer `forward_ref`, `:161` peer broadcast | **Vacuous.** The failure-free run carries no peer traffic: the termination timers fire after every decision is known, so no participant queries a peer. |
+| 2PC, coordinator held correct | `:86`, `:92` | **Certificate**, 3 and 5 hypotheses. `:98`, `:161` vacuous as above. |
+| `abd` (3 replicas, 1 client, one write, `Fuzz { instances: 8 }`), replicas and client crashable | `:141` query broadcast, `:150` phase-2 `forward_ref`, `:161` the writes filtered from it, `:314` write broadcast | **Violated**, 2 hypotheses each, by the client's crash between two sends of its query or its write. Every stream the replicas label is a single hop from the client. |
+| | `:165` the register `fold` | **Not checked**: a `Singleton`. |
+
+The vacuous rows are a statement about the body, as section 2 says: a termination protocol
+whose premise is never exercised in the failure-free run has nothing for the specification to
+protect, and the automatic search says so rather than certifying. A collection minted inside a
+tick (`hydro_test`'s `ec_all_labels_classes.rs`: a `batch` of a broadcast into the members'
+tick, labelled there by `assert_has_consistency_of`) is reported `not checked: inside a tick`,
+while the broadcast before the tick and the `all_ticks` after it are searched.
 
 ## 7. Hand-written specifications
 

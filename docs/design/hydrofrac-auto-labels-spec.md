@@ -1,6 +1,6 @@
 # Work spec: hydrofrac checks every `EventualConsistency` label automatically
 
-Status: not started. Branch to build on: `sandbox-ce19e56b-0571-4476-8bca-61900a6a4ef4`
+Status: done (see `hydrofrac.md` §4.5–§6 and `Spec::all_labels`). Branch built on: `sandbox-ce19e56b-0571-4476-8bca-61900a6a4ef4`
 in `/local/home/palvarox/hydro`, at or after commit `8d6e7e053e`. Read
 `docs/design/hydrofrac.md` first (short); it describes what exists. Section 4.5 of it is the
 one-paragraph version of this spec.

@@ -111,23 +111,44 @@ fn classify(collection: &EcCollection, excluded: &[String]) -> Option<NotChecked
 
 /// The observation slot's metadata and the excluded labels, if `ir` has a slot.
 fn find_slot(ir: &[HydroRoot]) -> Option<(crate::compile::ir::HydroIrMetadata, Vec<String>)> {
-    fn visit(node: &HydroNode) -> Option<crate::compile::ir::HydroIrMetadata> {
+    fn visit(
+        node: &HydroNode,
+        seen: &mut HashSet<*const HydroNode>,
+        found: &mut Vec<crate::compile::ir::HydroIrMetadata>,
+    ) {
+        if !seen.insert(std::ptr::from_ref(node)) {
+            return;
+        }
         if let HydroNode::Source { metadata, .. } = node
             && metadata
                 .tag
                 .as_deref()
                 .is_some_and(|t| t.starts_with(SLOT_TAG))
         {
-            return Some(metadata.clone());
+            found.push(metadata.clone());
         }
         match node {
             HydroNode::Tee { inner, .. }
             | HydroNode::Reference { inner, .. }
-            | HydroNode::PartitionSide { inner, .. } => visit(&inner.0.borrow()),
-            _ => node.input().into_iter().find_map(visit),
+            | HydroNode::PartitionSide { inner, .. } => visit(&inner.0.borrow(), seen, found),
+            _ => {
+                for input in node.input() {
+                    visit(input, seen, found);
+                }
+            }
         }
     }
-    let metadata = ir.iter().find_map(|root| visit(root.input()))?;
+    let mut found = vec![];
+    let mut seen = HashSet::new();
+    for root in ir {
+        visit(root.input(), &mut seen, &mut found);
+    }
+    assert!(
+        found.len() <= 1,
+        "a flow has one automatic specification (`Spec::all_labels`); found {}",
+        found.len()
+    );
+    let metadata = found.pop()?;
     let tag = metadata.tag.clone().unwrap_or_default();
     let excluded = tag
         .split(SLOT_TAG_SEPARATOR)
@@ -193,12 +214,20 @@ pub(crate) fn tap_labels(ir: &mut [HydroRoot]) -> Option<Vec<LabelPlan>> {
     let pair_type: syn::Type = parse_quote!((usize, ::std::vec::Vec<u8>));
     let observed_type: syn::Type = stageleft::quote_type::<crate::spec_views::Observed>();
 
-    // Pass 1: tap. Labelled nodes are re-identified by the enumeration's key rather than by
-    // address: the traversal moves nodes a `Tee` shares. (A `Tee` never matches: the
-    // enumeration records what it shares, under that node's own key.)
+    // Pass 1: tap. Labelled nodes are re-identified by the enumeration's key. (A `Tee` never
+    // matches: the enumeration records what it shares, under that node's own key; a shared
+    // partition or reference cell is not tapped as a whole.)
     let mut taps: Vec<HydroNode> = vec![];
     walk_in_place(ir, &mut |node: &mut HydroNode| {
-        if !is_ec(node) {
+        if !is_ec(node)
+            || matches!(
+                node,
+                HydroNode::PartitionShared { .. }
+                    | HydroNode::Reference { .. }
+                    | HydroNode::VersionedNetwork { .. }
+                    | HydroNode::VersionedNetworkFork { .. }
+            )
+        {
             return;
         }
         let Some(&index) = index_of.get(&ec_key(node)) else {
@@ -237,6 +266,8 @@ pub(crate) fn tap_labels(ir: &mut [HydroRoot]) -> Option<Vec<LabelPlan>> {
         let mut map_metadata = node_metadata.clone();
         map_metadata.consistency = None;
         map_metadata.tag = None;
+        map_metadata.op.sim_hook_id = None;
+        map_metadata.op.id = None;
         map_metadata.collection_kind = CollectionKind::Stream {
             bound: BoundKind::Unbounded,
             order: StreamOrder::NoOrder,
@@ -253,6 +284,8 @@ pub(crate) fn tap_labels(ir: &mut [HydroRoot]) -> Option<Vec<LabelPlan>> {
         let mut network_metadata = slot_metadata.clone();
         network_metadata.tag = None;
         network_metadata.op = node_metadata.op;
+        network_metadata.op.sim_hook_id = None;
+        network_metadata.op.id = None;
         taps.push(HydroNode::Network {
             name: Some("observe".to_owned()),
             networking_info: NetworkingInfo::Tcp {
@@ -296,7 +329,7 @@ pub(crate) fn tap_labels(ir: &mut [HydroRoot]) -> Option<Vec<LabelPlan>> {
                 *node = union;
             }
         });
-        assert!(union.is_none(), "the observation slot was not found twice");
+        assert!(union.is_none(), "the observation slot was not found");
     }
 
     Some(plans)

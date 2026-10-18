@@ -216,10 +216,7 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
                         location: key.2,
                         fed_by_network: false,
                         collection_kind: node.metadata().collection_kind.clone(),
-                        in_tick: !matches!(
-                            node.metadata().location_id,
-                            LocationId::Cluster(_)
-                        ),
+                        in_tick: !matches!(node.metadata().location_id, LocationId::Cluster(_)),
                         minted: false,
                         exit: false,
                     });

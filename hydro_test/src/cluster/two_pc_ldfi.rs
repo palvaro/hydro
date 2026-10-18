@@ -342,13 +342,82 @@ pub(crate) mod harness {
             .send_many((0..h.participants).map(|p| (p, ())));
         hydro_lang::sim::quiesce().await;
     }
+
+    /// [`compile`] with the automatic specification (`Spec::all_labels`) in place of the
+    /// hand-written one: every collection the protocol labels `EventualConsistency` (the
+    /// `prepare`, `commit` and `peer` broadcasts) is observed, nothing is named. The
+    /// committed transactions go to a plain simulator output. `coordinator_crashable` is the
+    /// harness's own fault model; without it the coordinator is held correct.
+    pub(crate) fn compile_all_labels(
+        participants_count: u32,
+        ctp: bool,
+        coordinator_crashable: bool,
+        fuzz_iterations: usize,
+    ) -> (CompiledSim, Harness, impl Fn(usize) -> Ldfi) {
+        let mut flow = FlowBuilder::new();
+        let coordinator = flow.process::<Coordinator>();
+        let participants = flow.cluster::<Participant>();
+        let prepare_hook: PrepareHook = flow.sim_hook();
+        let commit_hook: CommitHook = flow.sim_hook();
+        let peer_hook: PeerHook = flow.sim_hook();
+        let vote_hook: VoteHook = flow.sim_hook();
+        let timeout_hook: TimeoutHook = flow.sim_hook();
+
+        let (txn_send, txns) = coordinator.sim_input::<Txn, TotalOrder, ExactlyOnce>();
+        let (timeout_send, timeouts) = participants.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let committed = two_pc(
+            &coordinator,
+            &participants,
+            participants_count as usize,
+            txns,
+            timeouts,
+            ctp,
+            nondet!(/** traced by the search */ hook = prepare_hook),
+            nondet!(/** traced by the search */ hook = commit_hook),
+            nondet!(/** traced by the search */ hook = peer_hook),
+            nondet!(/** traced by the search */ hook = vote_hook),
+            nondet!(/** external input, consumed as it arrives */ hook = timeout_hook),
+        );
+        let _committed = committed.sim_cluster_output();
+
+        let spec = Spec::all_labels(&mut flow);
+
+        let coordinator_id = coordinator.clone();
+        let participants_id = participants.clone();
+        let compiled = flow
+            .sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&participants, participants_count as usize)
+            .unit_test_fuzz_iterations(fuzz_iterations)
+            .with_provenance()
+            .compiled();
+
+        let harness = Harness {
+            participants: participants_count,
+            txns: 1,
+            txn_send,
+            timeout_send,
+        };
+        let configure = move |crashes: usize| {
+            let mut ldfi = Ldfi::new()
+                .level(Level::Record)
+                .crashable_cluster("participant", &participants_id, 0..participants_count)
+                .crash_budget(crashes)
+                .spec(&spec);
+            if coordinator_crashable {
+                ldfi = ldfi.crashable("coordinator", &coordinator_id);
+            }
+            ldfi
+        };
+        (compiled, harness, configure)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use hydro_lang::sim::ldfi::{Exploration, Fault, FuzzOutcome, Outcome, Strategy};
+    use hydro_lang::sim::ldfi::{Exploration, Fault, FuzzOutcome, LabelVerdict, Outcome, Strategy};
 
-    use super::harness::{body, compile};
+    use super::harness::{body, compile, compile_all_labels};
 
     fn search(ctp: bool, crashes: usize) -> Outcome {
         let (compiled, h, configure) = compile(2, ctp, 8);
@@ -389,6 +458,69 @@ mod tests {
             matches!(outcome, Outcome::Certificate { .. }),
             "expected a certificate, got {outcome}"
         );
+    }
+
+    /// Every `EventualConsistency` label of 2PC with cooperative termination, automatically
+    /// (`Spec::all_labels`), under the harness's own fault model (coordinator and participants
+    /// crashable): the `prepare` and `commit` broadcasts are single hops from the coordinator
+    /// and break under its crash between two fan-out sends. Reports every verdict.
+    #[test]
+    fn ldfi_all_labels_with_the_harness_fault_model() {
+        let (compiled, h, configure) = compile_all_labels(2, true, true, 8);
+        let results = configure(1).search_all_labels(&compiled, async |run| body(&h, run).await);
+        eprintln!("{results}");
+        assert!(
+            !results
+                .verdicts
+                .iter()
+                .any(|r| matches!(r.verdict, LabelVerdict::Searched(Outcome::Budget { .. }))),
+            "{results}"
+        );
+        let coordinator_crashed = |site: &str| {
+            results.at(site).any(|r| {
+                matches!(&r.verdict, LabelVerdict::Searched(Outcome::Counterexample { faults, .. })
+                    if faults.iter().any(|f| matches!(f, Fault::Crash { node, .. } if node == "coordinator")))
+            })
+        };
+        assert!(
+            coordinator_crashed("two_pc_ldfi.rs:86"),
+            "the prepare broadcast should break under the coordinator's crash: {results}"
+        );
+        assert!(
+            coordinator_crashed("two_pc_ldfi.rs:92"),
+            "the commit broadcast should break under the coordinator's crash: {results}"
+        );
+    }
+
+    /// The same labels with the coordinator held correct (participants crashable only).
+    /// Reports what happens to each; nothing may run out of budget.
+    #[test]
+    fn ldfi_all_labels_with_the_coordinator_correct() {
+        let (compiled, h, configure) = compile_all_labels(2, true, false, 8);
+        let results = configure(1).search_all_labels(&compiled, async |run| body(&h, run).await);
+        eprintln!("{results}");
+        assert!(
+            !results.verdicts.is_empty(),
+            "the protocol labels collections"
+        );
+        assert!(
+            !results
+                .verdicts
+                .iter()
+                .any(|r| matches!(r.verdict, LabelVerdict::Searched(Outcome::Budget { .. }))),
+            "{results}"
+        );
+        // The coordinator's broadcasts cannot be broken by a participant's crash: a crashed
+        // participant is not required to hold anything, and the survivors receive everything.
+        for site in ["two_pc_ldfi.rs:86", "two_pc_ldfi.rs:92"] {
+            assert!(
+                results.at(site).all(|r| matches!(
+                    r.verdict,
+                    LabelVerdict::Searched(Outcome::Certificate { .. } | Outcome::Vacuous { .. })
+                )),
+                "{site}: {results}"
+            );
+        }
     }
 
     /// ...but not two: the coordinator dies after one `commit`, and the participant that
