@@ -211,10 +211,20 @@ pub(super) fn cluster_membership_stream<'a>(
 
 /// Create sink and source for m2m (cluster member to cluster member) communication.
 /// Messages are routed through Maelstrom's network via stdin/stdout.
-pub(super) fn deploy_maelstrom_m2m(meta: RuntimeData<&MaelstromMeta>) -> (syn::Expr, syn::Expr) {
+///
+/// Every message carries the destination `port` of its channel, so that a program with
+/// several intra-cluster channels can demultiplex them: each channel's source only accepts
+/// the `hydro_data` messages addressed to its own port.
+pub(super) fn deploy_maelstrom_m2m(
+    meta: RuntimeData<&MaelstromMeta>,
+    port: &str,
+) -> (syn::Expr, syn::Expr) {
+    let sink_port = port.to_owned();
+    let source_port = port.to_owned();
     // Sink: serialize and write to stdout with Maelstrom message envelope
     let sink_expr = q!({
         let node_id = meta.node_id.clone();
+        let port: &str = sink_port;
         sinktools::map(
             move |(dest_id, payload): (TaglessMemberId, bytes::Bytes)| {
                 let msg = serde_json::json!({
@@ -222,6 +232,7 @@ pub(super) fn deploy_maelstrom_m2m(meta: RuntimeData<&MaelstromMeta>) -> (syn::E
                     "dest": dest_id.get_maelstrom_node_id(),
                     "body": {
                         "type": "hydro_data",
+                        "port": port,
                         "data": payload.to_vec()
                     }
                 });
@@ -243,6 +254,7 @@ pub(super) fn deploy_maelstrom_m2m(meta: RuntimeData<&MaelstromMeta>) -> (syn::E
     // Source: subscribe to the shared stdin broadcast stream
     let source_expr = q!({
         let node_ids: std::collections::HashSet<String> = meta.node_ids.iter().cloned().collect();
+        let port: &str = source_port;
         let lines = meta.subscribe_stdin();
         futures::StreamExt::filter_map(lines, move |line_result| {
             let node_ids = node_ids.clone();
@@ -250,11 +262,16 @@ pub(super) fn deploy_maelstrom_m2m(meta: RuntimeData<&MaelstromMeta>) -> (syn::E
                 let line = line_result.ok()?;
                 let mut msg =
                     serde_json::from_str::<MaelstromMessage<serde_json::Value>>(&line).ok()?;
-                // Only process messages from other nodes (not clients)
+                // Only process messages from other nodes (not clients) that are addressed
+                // to this channel's port.
                 if msg
                     .body
                     .get("type")
                     .is_some_and(|t| t.as_str() == Some("hydro_data"))
+                    && msg
+                        .body
+                        .get("port")
+                        .is_some_and(|p| p.as_str() == Some(port))
                 {
                     let deser: Vec<u8> =
                         serde_json::from_value(msg.body.get_mut("data").unwrap().take()).unwrap();

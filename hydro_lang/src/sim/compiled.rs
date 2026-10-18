@@ -77,7 +77,7 @@ macro_rules! abort_assert {
 
 use core::{fmt, panic};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::panic::RefUnwindSafe;
 use std::path::Path;
@@ -94,9 +94,11 @@ use libloading::Library;
 use tokio::sync::{Mutex, Notify};
 
 use super::runtime::{
-    Hooks, InlineHooks, ObservationHooks, ScriptTarget, ScriptedHookControl, ScriptedHookRegistry,
-    ScriptedInlineHooks, ScriptedObservationHooks, ScriptedTickHooks, SimLocation,
+    Hooks, InlineHooks, LineageEvent, LineageHandles, ObservationHooks, PolicyTrace, ScriptTarget,
+    ScriptedHookControl, ScriptedHookRegistry, ScriptedInlineHooks, ScriptedObservationHooks,
+    ScriptedTickHooks, SimLocation,
 };
+use super::slice::Slices;
 use super::{SimClusterReceiver, SimClusterSender, SimReceiver, SimSender};
 use crate::compile::builder::ExternalPortId;
 use crate::compile::trybuild::generate::BuiltArtifact;
@@ -408,6 +410,114 @@ impl ScriptCtx {
     }
 }
 
+/// A snapshot of the current simulation instance's lineage events (see
+/// [`LineageEvent`]). Panics if called outside a simulation.
+#[cfg_attr(
+    not(feature = "ldfi"),
+    expect(dead_code, reason = "used by `sim::ldfi`")
+)]
+pub(crate) fn lineage_events() -> Vec<LineageEvent> {
+    CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().lineage.events.borrow().clone())
+}
+
+/// Whether the current simulation instance was compiled with record-level provenance.
+#[cfg_attr(
+    not(feature = "ldfi"),
+    expect(dead_code, reason = "used by `sim::ldfi`")
+)]
+pub(crate) fn lineage_provenance_enabled() -> bool {
+    CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().provenance)
+}
+
+/// The static dependency slices of the current simulation instance's program. Panics if
+/// called outside a simulation.
+#[cfg_attr(
+    not(feature = "ldfi"),
+    expect(dead_code, reason = "used by `sim::ldfi`")
+)]
+pub(crate) fn lineage_slices() -> Rc<Slices> {
+    CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().slices.clone())
+}
+
+/// The current simulation instance's shared lineage/crash handles. Panics if called outside
+/// a simulation.
+#[cfg_attr(
+    not(feature = "ldfi"),
+    expect(dead_code, reason = "used by `sim::ldfi`")
+)]
+pub(crate) fn lineage_handles() -> LineageHandles {
+    CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().lineage.clone())
+}
+
+/// The raw simulator port number that lineage [`LineageEvent::Output`] events use for an
+/// external output port. Panics if called outside a simulation.
+#[cfg_attr(
+    not(feature = "ldfi"),
+    expect(dead_code, reason = "used by `sim::ldfi`")
+)]
+pub(crate) fn lineage_port(port: ExternalPortId) -> usize {
+    CURRENT_SIM_CONNECTIONS.with(|connections| {
+        connections
+            .borrow()
+            .external_registered
+            .get(&port)
+            .expect("external port is not registered in this simulation")
+            .into_inner()
+    })
+}
+
+/// A scripted tick-input hook the fault-injection layer drives without knowing its element
+/// type: its handle id and member, the node it belongs to, and the tick it feeds.
+#[cfg(feature = "ldfi")]
+#[derive(Clone, Debug)]
+pub(crate) struct TracedHook {
+    pub hook_id: usize,
+    pub member: Option<u32>,
+    pub node: (LocationId, Option<u32>),
+    pub tick: (LocationId, Option<u32>),
+}
+
+/// Places every scripted tick-input hook of the current instance that has a traced
+/// pass-through policy under it (see `ScriptableHook::passthrough_policy`), so it delivers
+/// everything as it arrives without entropy and its releases are logged, and returns those
+/// hooks. Panics if called outside a simulation.
+#[cfg(feature = "ldfi")]
+pub(crate) fn trace_all_hooks() -> Vec<TracedHook> {
+    let ctx = script_ctx();
+    let mut traced = vec![];
+    for ((hook_id, member), hook) in ctx.hooks.iter() {
+        let mut hook = hook.borrow_mut();
+        let ScriptTarget::Tick { location } = hook.target() else {
+            continue;
+        };
+        if hook.install_passthrough() {
+            traced.push(TracedHook {
+                hook_id: *hook_id,
+                member: *member,
+                node: (location.location.root().clone(), location.cluster_id),
+                tick: (location.location, location.cluster_id),
+            });
+        }
+    }
+    traced
+}
+
+/// Places every traced hook of the current instance under a replay policy: `scripts[hook]`
+/// (serialized items per execution of its tick) where given, an empty script otherwise (the
+/// tick never runs on that hook's account). Panics if called outside a simulation.
+#[cfg(feature = "ldfi")]
+pub(crate) fn replay_all_hooks(scripts: &HashMap<(usize, Option<u32>), Vec<Vec<Vec<u8>>>>) {
+    let ctx = script_ctx();
+    for (key, hook) in ctx.hooks.iter() {
+        let mut hook = hook.borrow_mut();
+        if !matches!(hook.target(), ScriptTarget::Tick { .. }) {
+            continue;
+        }
+        let script = scripts.get(key).cloned().unwrap_or_default();
+        hook.install_replay(script);
+    }
+}
+
 /// Resolves the per-instance scripting context. Panics if called outside a simulation.
 pub(crate) fn script_ctx() -> ScriptCtx {
     CURRENT_SIM_CONNECTIONS.with(|connections| {
@@ -603,22 +713,6 @@ pub async fn quiesce() {
     quiescence.tainted.set(false);
 }
 
-/// Removes every message already delivered to `receiver` and returns how many there were. This
-/// never runs the scheduler: it neither settles the simulation nor forces pending work, so it
-/// cannot taint or poison the instance, and messages that pending work would still produce are
-/// not waited for. Callers that need a final count reach quiescence first (see [`quiesce`]).
-fn drain_delivered_bytes(receiver: &Mutex<UnsyncReceiver<Bytes>>) -> usize {
-    let mut receiver = receiver
-        .try_lock()
-        .expect("simulation output is being received elsewhere");
-    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-    let mut count = 0;
-    while let Poll::Ready(Some(_)) = receiver.poll_next_unpin(&mut cx) {
-        count += 1;
-    }
-    count
-}
-
 /// Receives the next message from `receiver` while trying not to overrun the simulation:
 /// first the simulation *settles* (deterministic work runs, but the scheduler pauses before
 /// nondeterministic work). If a message arrives, it is returned; if the simulation settles to
@@ -697,6 +791,12 @@ struct SimConnections {
     scripted_hooks: Rc<ScriptedHookRegistry>,
     /// Coordinates the decision-group protocol between hook handles and the scheduler.
     script_coordinator: Rc<RefCell<ScriptCoordinator>>,
+    /// The execution-granular lineage log, shared with the generated code and the scheduler.
+    lineage: LineageHandles,
+    /// Static dependency slices of the program's sinks.
+    slices: Rc<Slices>,
+    /// Compiled with record-level provenance.
+    provenance: bool,
     log: bool,
     /// Whether this instance is being executed by the exhaustive engine (see
     /// [`CompiledSim::exhaustive`]), which affects how `assert_yields_only` explores
@@ -791,6 +891,25 @@ pub struct CompiledSim {
     pub(super) lib: Library,
     pub(super) externals_port_registry: SimExternalPortRegistry,
     pub(super) unit_test_fuzz_iterations: usize,
+    /// Static dependency slices of the program's sinks (see [`super::slice`]).
+    pub(super) slices: Rc<Slices>,
+    /// Compiled with record-level provenance (see [`super::provenance`]).
+    pub(super) provenance: bool,
+    /// Locations whose ticks run as soon as they are runnable, outside the schedule choice
+    /// (see `SimFlow::eager_locations`).
+    pub(super) eager_locations: Rc<HashSet<LocationId>>,
+    /// Each cluster's member ids (from `SimFlow::with_cluster_size`).
+    pub(super) cluster_members: Rc<std::collections::BTreeMap<LocationId, Vec<u32>>>,
+    /// The labelled collections and whether each is observed, when the flow carries an
+    /// automatic specification (`Spec::all_labels`; see `sim::observe`).
+    #[cfg(feature = "ldfi")]
+    pub(super) labels: Option<Rc<Vec<super::observe::LabelPlan>>>,
+    #[cfg(not(feature = "ldfi"))]
+    #[expect(
+        dead_code,
+        reason = "set by `SimFlow::compiled` for the `ldfi` feature"
+    )]
+    pub(super) labels: Option<()>,
 }
 
 #[sealed::sealed]
@@ -836,10 +955,24 @@ type SimLoaded<'a> = libloading::Symbol<
         ScriptedObservationHooks,
         ScriptedInlineHooks,
         ScriptedHookRegistry,
+        LineageHandles,
     ),
 >;
 
 impl CompiledSim {
+    /// The labelled collections of the program and whether the automatic specification
+    /// observes each (see [`crate::sim::spec::Spec::all_labels`]); `None` when the flow was
+    /// compiled without one.
+    #[cfg(feature = "ldfi")]
+    pub fn labels(&self) -> Option<&[super::observe::LabelPlan]> {
+        self.labels.as_deref().map(Vec::as_slice)
+    }
+
+    /// Each cluster's member ids, from `SimFlow::with_cluster_size`.
+    pub fn cluster_members(&self, cluster: &LocationId) -> Option<&[u32]> {
+        self.cluster_members.get(cluster).map(Vec::as_slice)
+    }
+
     /// Executes the given closure with a single instance of the compiled simulation.
     pub fn with_instance<T>(&self, thunk: impl FnOnce(CompiledSimInstance<'_>) -> T) -> T {
         self.with_instantiator(|instantiator| thunk(instantiator()), true)
@@ -863,10 +996,14 @@ impl CompiledSim {
             &(|| CompiledSimInstance {
                 func: func.clone(),
                 externals_port_registry: self.externals_port_registry.clone(),
+                slices: self.slices.clone(),
+                provenance: self.provenance,
+                eager_locations: self.eager_locations.clone(),
                 dylib_result: None,
                 log,
                 exhaustive: false,
                 deterministic: false,
+                replay: false,
             }),
         )
     }
@@ -1009,6 +1146,38 @@ impl CompiledSim {
         }
     }
 
+    /// Explores exactly `iterations` randomly scheduled executions of the simulation, with no
+    /// fuzzer, no reproducer lookup, and no failure output: a bounded random sample of the
+    /// schedule space, for callers (such as `hydro_lang::sim::ldfi`) that run many such samples
+    /// under their own control and need each one to terminate. Prefer [`Self::fuzz`] for tests.
+    pub fn fuzz_bounded(&self, iterations: usize, mut thunk: impl AsyncFnMut() + RefUnwindSafe) {
+        self.with_instantiator(
+            |instantiator| {
+                bolero::test(bolero::TargetLocation {
+                    package_name: "",
+                    manifest_dir: "",
+                    module_path: "",
+                    file: ".",
+                    line: 0,
+                    item_path: "<unknown>::__bolero_item_path__",
+                    test_name: None,
+                })
+                .with_iterations(iterations)
+                .run_with_replay(move |is_replay| {
+                    let mut instance = instantiator();
+                    if is_replay {
+                        instance.log = true;
+                    }
+                    tokio::runtime::Builder::new_current_thread()
+                        .build()
+                        .unwrap()
+                        .block_on(async { instance.run(&mut thunk).await })
+                })
+            },
+            false,
+        );
+    }
+
     /// Executes the given closure with a single instance of the compiled simulation, using the
     /// provided bytes as the source of fuzzing decisions. This can be used to manually reproduce a
     /// failure found during fuzzing.
@@ -1051,44 +1220,6 @@ impl CompiledSim {
             }
             std::panic::resume_unwind(payload);
         }
-    }
-
-    /// Executes the given closure with a single instance of the compiled simulation, drawing
-    /// every scheduling decision from the provided bolero [`Driver`] instead of a fuzzer.
-    /// [`super::prompt_schedule::PromptScheduleDriver`] is a deterministic driver that always
-    /// moves the most data forward; a custom driver can implement any fixed scheduling policy.
-    ///
-    /// This is a stand-in for [`CompiledSim::deterministic`] for callers that script some hooks
-    /// and need a fixed default for the rest: `deterministic()` refuses hooks with more than one
-    /// legal decision and more than one runnable tick, and not every hook kind can be scripted
-    /// yet (see the [`prompt_schedule`](super::prompt_schedule) docs). Once they can, or once
-    /// `deterministic()` takes a default policy, this method should be deleted.
-    ///
-    /// The closure receives the instance without the scheduler running; use
-    /// [`CompiledSimInstance::run_with_scheduler_and_logger`] (or a receiver's methods, which
-    /// drive the scheduler while they wait) inside it. Tick logging follows `HYDRO_SIM_LOG`.
-    ///
-    /// [`Driver`]: bolero::bolero_engine::driver::Driver
-    pub fn run_with_driver<D: bolero::bolero_engine::driver::Driver + 'static>(
-        &self,
-        driver: D,
-        thunk: impl AsyncFnOnce(CompiledSimInstance<'_>) + RefUnwindSafe,
-    ) {
-        self.with_instantiator(
-            |instantiator| {
-                let instance = instantiator();
-                bolero::bolero_engine::any::scope::with(
-                    Box::new(bolero::bolero_engine::driver::object::Object(driver)),
-                    || {
-                        tokio::runtime::Builder::new_current_thread()
-                            .build()
-                            .unwrap()
-                            .block_on(async { instance.run_without_launching(thunk).await })
-                    },
-                );
-            },
-            false,
-        );
     }
 
     /// Exhaustively searches all possible executions of the simulation. The provided
@@ -1178,6 +1309,60 @@ impl CompiledSim {
                 .block_on(instance.run(thunk));
         })
     }
+
+    /// A quiet instance driven by a fixed, all-zero entropy source: every scheduling choice
+    /// and every unhooked in-tick decision resolves to its first alternative, so two such
+    /// instances of the same program under the same scripts behave identically. For the
+    /// counterfactual replays of `sim::ldfi`, whose hooks are all under replay policies.
+    #[cfg_attr(
+        not(feature = "ldfi"),
+        expect(dead_code, reason = "used by `sim::ldfi`")
+    )]
+    ///
+    /// Returns `Err` with the message when the program's own code panicked during the replay
+    /// (caught by the tick guard, see `sim::runtime::erase_guarded`, and re-raised on the
+    /// host side): a diverged counterfactual state may drive the program into conditions no
+    /// real execution reaches, and such a replay is inconclusive, not fatal.
+    pub(crate) fn replay(&self, thunk: impl AsyncFnOnce() + RefUnwindSafe) -> Result<(), String> {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.with_instantiator(
+                |instantiator| {
+                    let mut instance = instantiator();
+                    instance.replay = true;
+                    bolero::bolero_engine::any::scope::with(
+                        Box::new(bolero::bolero_engine::driver::object::Object(
+                            bolero::bolero_engine::driver::bytes::Driver::new(
+                                vec![0u8; 1 << 20],
+                                &Default::default(),
+                            ),
+                        )),
+                        || {
+                            tokio::runtime::Builder::new_current_thread()
+                                .build()
+                                .unwrap()
+                                .block_on(instance.run(thunk));
+                        },
+                    );
+                },
+                false,
+            )
+        }));
+        match outcome {
+            Ok(()) => Ok(()),
+            Err(payload) => {
+                let message = payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                    .unwrap_or_else(|| "(non-string panic payload)".to_owned());
+                if message.starts_with("the simulated program panicked") {
+                    Err(message)
+                } else {
+                    std::panic::resume_unwind(payload)
+                }
+            }
+        }
+    }
 }
 
 // This must be a tuple because it is referenced from generated code in `graph.rs`.
@@ -1191,6 +1376,7 @@ type DylibResult = (
     ScriptedObservationHooks,
     ScriptedInlineHooks,
     ScriptedHookRegistry,
+    LineageHandles,
 );
 
 /// A single instance of a compiled Hydro simulation, which provides methods to interactively
@@ -1198,10 +1384,16 @@ type DylibResult = (
 pub struct CompiledSimInstance<'a> {
     func: SimLoaded<'a>,
     externals_port_registry: SimExternalPortRegistry,
+    slices: Rc<Slices>,
+    provenance: bool,
+    eager_locations: Rc<HashSet<LocationId>>,
     dylib_result: Option<DylibResult>,
     log: bool,
     exhaustive: bool,
     deterministic: bool,
+    /// A counterfactual replay (see [`CompiledSim::replay`]): tick executions are scripted by
+    /// replay policies and may legitimately have nothing to do.
+    replay: bool,
 }
 
 impl<'a> CompiledSimInstance<'a> {
@@ -1288,6 +1480,16 @@ impl<'a> CompiledSimInstance<'a> {
         }
 
         let scripted_hooks = Rc::new(std::mem::take(&mut dylib_result.8));
+        let lineage = dylib_result.9.clone();
+        // The filter enforces the program's declared fault model: only channels whose
+        // transport admits loss accept omissions.
+        lineage.faults.borrow_mut().lossy = self
+            .slices
+            .channels
+            .values()
+            .filter(|channel| channel.lossy)
+            .map(|channel| channel.id)
+            .collect();
         self.dylib_result = Some(dylib_result);
 
         CURRENT_SIM_CONNECTIONS
@@ -1301,6 +1503,9 @@ impl<'a> CompiledSimInstance<'a> {
                     quiescence: quiescence.clone(),
                     scripted_hooks,
                     script_coordinator: Rc::new(RefCell::new(ScriptCoordinator::default())),
+                    lineage,
+                    slices: self.slices.clone(),
+                    provenance: self.provenance,
                     log: self.log,
                     exhaustive: self.exhaustive,
                 }),
@@ -1316,10 +1521,9 @@ impl<'a> CompiledSimInstance<'a> {
     /// The future always gets to run first; whenever it is blocked (e.g. waiting to receive
     /// simulation outputs), the scheduler runs a single step to completion. Steps are atomic
     /// with respect to the future: it is re-polled between every pair of scheduler steps, but
-    /// never while a step is in flight. The `LaunchedSim` state struct lives across steps,
-    /// in this function's frame. Tick logging is off; see
-    /// [`CompiledSimInstance::run_with_scheduler_and_logger`] for a trace.
-    pub async fn run_with_scheduler(self, thunk: impl Future<Output = ()>) {
+    /// never while a step is in flight. The [`LaunchedSim`] state struct lives across steps,
+    /// in this function's frame.
+    async fn run_with_scheduler(self, thunk: impl Future<Output = ()>) {
         self.run_with_scheduler_and_maybe_logger::<std::io::Empty>(None, thunk)
             .await;
     }
@@ -1404,6 +1608,7 @@ impl<'a> CompiledSimInstance<'a> {
             mut scripted_observation_hooks,
             mut scripted_inline_hooks,
             _registry,
+            lineage,
         ) = self.dylib_result.take().unwrap();
 
         // The generated code keys hooks and tick DFIRs by the same locations, so we can
@@ -1442,13 +1647,20 @@ impl<'a> CompiledSimInstance<'a> {
             })
             .collect();
 
-        let (quiescence, script_coordinator) = CURRENT_SIM_CONNECTIONS.with(|connections| {
-            let connections = connections.borrow();
-            (
-                connections.quiescence.clone(),
-                connections.script_coordinator.clone(),
-            )
-        });
+        let (quiescence, script_coordinator, hook_ids) =
+            CURRENT_SIM_CONNECTIONS.with(|connections| {
+                let connections = connections.borrow();
+                let hook_ids = connections
+                    .scripted_hooks
+                    .iter()
+                    .map(|(key, hook)| (Rc::as_ptr(hook).cast::<()>(), *key))
+                    .collect();
+                (
+                    connections.quiescence.clone(),
+                    connections.script_coordinator.clone(),
+                    hook_ids,
+                )
+            });
 
         let not_ready_observations = async_dfirs
             .iter()
@@ -1512,6 +1724,11 @@ impl<'a> CompiledSimInstance<'a> {
             },
             quiescence,
             deterministic: self.deterministic,
+            replay: self.replay,
+            lineage,
+            next_exec: 0,
+            hook_ids,
+            eager_locations: self.eager_locations.clone(),
         }
     }
 }
@@ -1670,12 +1887,6 @@ impl<T, O: Ordering, R: Retries> SimReceiver<T, O, R> {
         try_next_bytes(&receiver, &quiescence)
             .await
             .map(|bytes| (self.2)(&bytes))
-    }
-
-    /// See [`drain_delivered_bytes`].
-    pub(crate) fn drain_delivered(&self) -> usize {
-        let (receiver, _) = self.connections();
-        drain_delivered_bytes(&receiver)
     }
 
     /// Asserts that the stream has ended and no more messages can possibly arrive.
@@ -2121,12 +2332,6 @@ impl<T, O: Ordering, R: Retries> SimClusterReceiver<T, O, R> {
             .map(|bytes| (self.2)(&bytes))
     }
 
-    /// See [`drain_delivered_bytes`].
-    pub(crate) fn drain_delivered(&self, member_id: u32) -> usize {
-        let (receiver, _) = self.member_connections(member_id);
-        drain_delivered_bytes(&receiver)
-    }
-
     /// Asserts that the stream from a specific cluster member has ended and no more messages
     /// can possibly arrive.
     ///
@@ -2478,9 +2683,47 @@ struct LaunchedSim<W: std::io::Write> {
     /// drawn, every unsafe operator with meaningful input must be scripted, and at most
     /// one tick is ever runnable (see `SimFlow::deterministic`).
     deterministic: bool,
+    /// Whether this is a counterfactual replay, whose scripted tick executions may have
+    /// nothing to do.
+    replay: bool,
+    /// The lineage log shared with generated code; the scheduler assigns execution ids
+    /// and records executions and hook releases into it.
+    lineage: LineageHandles,
+    /// The next execution id to assign.
+    next_exec: u64,
+    /// Scripted hook object identity → `(hook_id, member)`, from the registry; lets the
+    /// scheduler attribute a release to the handle the test knows it by.
+    hook_ids: HashMap<*const (), (usize, Option<u32>)>,
+    /// Locations whose runnable ticks are run first, without a schedule choice: they only
+    /// consume (a specification's observer), so their interleaving is unobservable to the
+    /// program and exploring it would only multiply schedules.
+    eager_locations: Rc<HashSet<LocationId>>,
+}
+
+/// The items a scripted hook has delivered under a standing policy (empty when it has
+/// none), from its serialized [`PolicyTrace`].
+fn policy_delivered(hook: &dyn ScriptedTickInputHook) -> Vec<Vec<u8>> {
+    let trace: PolicyTrace = bincode::deserialize(&hook.policy_trace_blob())
+        .expect("internal error: policy trace blob was malformed");
+    trace.delivered
 }
 
 impl<W: std::io::Write> LaunchedSim<W> {
+    /// Starts a new execution: assigns the next id, publishes it to generated code, and
+    /// records it. Returns the id.
+    fn begin_exec(&mut self, location: &LocationId, member: Option<u32>, tick: bool) -> u64 {
+        let id = self.next_exec;
+        self.next_exec += 1;
+        self.lineage.current_exec.set(id);
+        self.lineage.events.borrow_mut().push(LineageEvent::Exec {
+            id,
+            location: location.clone(),
+            member,
+            tick,
+        });
+        id
+    }
+
     /// Runs a single step of the simulation scheduler.
     ///
     /// A step first advances all async DFIRs; if none of them made progress, it instead runs
@@ -2489,6 +2732,17 @@ impl<W: std::io::Write> LaunchedSim<W> {
     /// responsible for parking until new external input arrives (see
     /// [`QuiescenceState::resumed`]).
     ///
+    /// Reports, as a panic on the host side, a panic the program's own code raised inside the
+    /// generated crate and that the tick guard caught there (`sim::runtime::erase_guarded`):
+    /// unwinding across the dynamic-library boundary would abort the process. A test fails
+    /// with the program's message; a counterfactual replay (`CompiledSim::replay`) catches it
+    /// and reports the replay as inconclusive.
+    fn report_program_panic(&self) {
+        if let Some(message) = self.lineage.panicked.borrow_mut().take() {
+            panic!("the simulated program panicked: {message}");
+        }
+    }
+
     /// This future is always awaited to completion by the driver, so a step is atomic: user
     /// code never runs (and never observes intermediate state) while a step is in flight.
     async fn step(&mut self) {
@@ -2579,8 +2833,23 @@ impl<W: std::io::Write> LaunchedSim<W> {
         }
 
         let mut any_made_progress = false;
-        for (loc, c_id, dfir) in &mut self.async_dfirs {
-            if dfir.run_tick().await {
+        for index in 0..self.async_dfirs.len() {
+            let (loc, c_id) = {
+                let (loc, c_id, _) = &self.async_dfirs[index];
+                (loc.clone(), *c_id)
+            };
+            // Every async run is an execution; one that makes no progress produces no
+            // events, so recording it is harmless and keeps ids dense.
+            let events_before = self.lineage.events.borrow().len();
+            self.begin_exec(&loc, c_id, false);
+            let progressed = self.async_dfirs[index].2.run_tick().await;
+            self.report_program_panic();
+            if !progressed {
+                // Drop the `Exec` record of a run that did nothing.
+                self.lineage.events.borrow_mut().truncate(events_before);
+            }
+            let (loc, c_id, _) = &self.async_dfirs[index];
+            if progressed {
                 any_made_progress = true;
 
                 // This async DFIR may have produced new data, so the ticks and observations
@@ -2727,7 +2996,13 @@ impl<W: std::io::Write> LaunchedSim<W> {
                 observation_start + self.possibly_ready_observations.len();
             let candidate_count =
                 scripted_observation_index + usize::from(scripted_observation_runnable);
-            let next_tick_or_obs = if self.deterministic {
+            let eager_tick = self
+                .possibly_ready_ticks
+                .iter()
+                .position(|tick| self.eager_locations.contains(tick.parent_location.root()));
+            let next_tick_or_obs = if let Some(index) = eager_tick {
+                index
+            } else if self.deterministic {
                 for tick in self.possibly_ready_ticks.iter().chain(
                     self.current_scripted_tick
                         .iter()
@@ -2799,6 +3074,13 @@ impl<W: std::io::Write> LaunchedSim<W> {
                     write.write_str(" ")
                 };
 
+                let exec = self.begin_exec(&tick.location, tick.cluster_id, true);
+                let delivered_before: Vec<usize> = tick
+                    .scripted_hooks
+                    .iter()
+                    .map(|hook| policy_delivered(&*hook.borrow()).len())
+                    .collect();
+
                 let mut tick_decision_writer = (!matches!(self.log, LogKind::Null)).then(|| {
                     indenter::indented(&mut self.log).with_format(indenter::Format::Custom {
                         inserter: &mut asterisk_indenter,
@@ -2811,16 +3093,39 @@ impl<W: std::io::Write> LaunchedSim<W> {
                     &tick.scripted_hooks,
                 );
 
+                // Lineage: whatever each policy hook delivered just now fed this execution.
+                for (hook_rc, before) in tick.scripted_hooks.iter().zip(delivered_before) {
+                    let hook = hook_rc.borrow();
+                    let delivered = policy_delivered(&*hook);
+                    if delivered.len() > before {
+                        let ScriptTarget::Tick { location } = hook.target() else {
+                            unreachable!("tick-registered scripted hook had an observation target")
+                        };
+                        let (hook_id, _) = self.hook_ids[&Rc::as_ptr(hook_rc).cast::<()>()];
+                        self.lineage
+                            .events
+                            .borrow_mut()
+                            .push(LineageEvent::Released {
+                                exec,
+                                hook_id,
+                                member: location.cluster_id,
+                                items: delivered[before..].to_vec(),
+                            });
+                    }
+                }
+
                 let run_tick_future = tick.dfir.run_tick();
                 if !tick.inline_hooks.is_empty() || !tick.scripted_inline_hooks.is_empty() {
                     let mut run_tick_future_pinned = pin!(run_tick_future);
                     let deterministic = self.deterministic;
+                    let replay = self.replay;
 
                     loop {
                         tokio::select! {
                             biased;
                             r = &mut run_tick_future_pinned => {
-                                abort_assert!(r, "runnable tick's DFIR run_tick() returned false");
+                                self.report_program_panic();
+                                abort_assert!(r || replay, "runnable tick's DFIR run_tick() returned false");
                                 break;
                             }
                             () = async {} => {
@@ -2870,8 +3175,9 @@ impl<W: std::io::Write> LaunchedSim<W> {
                     }
                 } else {
                     let made_progress = run_tick_future.await;
+                    self.report_program_panic();
                     abort_assert!(
-                        made_progress,
+                        made_progress || self.replay,
                         "runnable tick's DFIR run_tick() returned false"
                     );
                 }

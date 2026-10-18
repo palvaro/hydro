@@ -127,6 +127,8 @@ pub mod sim;
 
 pub mod sim_hooks;
 
+pub mod spec_views;
+
 pub mod forward_handle;
 
 pub mod compile;
@@ -279,6 +281,11 @@ impl<T: Countable> Counter<T> {
         let id = self.0;
         self.0 += 1;
         T::from_count(id)
+    }
+
+    /// The value the next [`Self::get_and_increment`] will return (as a raw count).
+    pub fn next_count(&self) -> usize {
+        self.0
     }
 
     /// Returns an iterator from zero up to (but excluding) the current counter value.
