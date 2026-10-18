@@ -1,0 +1,5 @@
+{
+  "A": "us.anthropic.claude-opus-5-5",
+  "B": "us.anthropic.claude-fable-5-1",
+  "C": "us.openai.gpt-6-astra"
+}
