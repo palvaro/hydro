@@ -74,6 +74,10 @@ pub mod spec;
 pub mod observe;
 
 #[cfg(stageleft_runtime)]
+#[cfg(feature = "ldfi")]
+pub mod viz;
+
+#[cfg(stageleft_runtime)]
 pub mod provenance;
 
 #[cfg(stageleft_runtime)]

@@ -1,0 +1,13 @@
+---
+source: hydro_test/src/distributed/reliable_delivery.rs
+expression: mermaid
+---
+---
+title: goal violated by {omit(msg:Msg { attempt: 1 }), omit(msg:Msg { attempt: 2 })}
+---
+sequenceDiagram
+    participant p0 as Process(loc1v1)
+    participant p1 as Process(loc2v1)
+    p0-xp1: msg: Msg { attempt: 1 } (omitted)
+    p0-xp1: msg: Msg { attempt: 2 } (omitted)
+    Note over p0,p1: EFF: end of finite failures

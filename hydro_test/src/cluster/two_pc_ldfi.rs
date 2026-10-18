@@ -447,6 +447,79 @@ mod tests {
         assert_eq!(runs.len(), 2);
     }
 
+    /// The counterexample's pictures (see `hydro_lang::sim::viz`) for a crash: the failing
+    /// run shows the coordinator dying after its first `commit`, the second `commit` lost to
+    /// the crash; the witness (the failure-free run) highlights the whole protocol, which is
+    /// that run's derivation of agreement.
+    #[test]
+    fn ldfi_draws_the_blocking_counterexample() {
+        let (compiled, h, configure) = compile(2, false, 8);
+        let outcome = configure(1)
+            .with_traces()
+            .search(&compiled, async |run| body(&h, run).await);
+        let viz = outcome.viz().expect("a counterexample");
+        eprintln!("{}", viz.markdown());
+
+        let failing = viz.failing_trace().unwrap();
+        let coordinator = failing
+            .node("coordinator")
+            .expect("the coordinator is a node");
+        assert!(
+            matches!(
+                failing.nodes[coordinator].crash,
+                Some(hydro_lang::sim::viz::trace::Crash::AfterEvent(_))
+            ),
+            "{:?}",
+            failing.nodes[coordinator]
+        );
+        assert!(
+            failing.node("participant@0").is_some(),
+            "{:?}",
+            failing.nodes
+        );
+        assert!(
+            failing.node("participant@1").is_some(),
+            "{:?}",
+            failing.nodes
+        );
+        // The observer is a node, hidden from the diagrams by default.
+        assert!(
+            failing.nodes.iter().any(|n| n.is_observer),
+            "{:?}",
+            failing.nodes
+        );
+        let mermaid = viz.lamport_mermaid().unwrap();
+        assert!(!mermaid.contains("observer"), "{mermaid}");
+        assert!(mermaid.contains("💀 crashed"), "{mermaid}");
+        assert!(mermaid.contains("(lost: sender crashed)"), "{mermaid}");
+        assert!(mermaid.contains("->>"), "{mermaid}");
+        let shown = hydro_lang::sim::viz::lamport::mermaid(
+            failing,
+            &viz.lamport_options().show_observer(true),
+        );
+        assert!(shown.contains(" as observer"), "{shown}");
+        let dot = viz.lamport_dot().unwrap();
+        assert!(dot.contains("💀"), "{dot}");
+        assert!(dot.contains("(sender crashed)"), "{dot}");
+
+        let witness = viz.witness().expect("traces were retained");
+        assert!(
+            witness.hypothesis.faults.is_empty(),
+            "{:?}",
+            witness.hypothesis.faults
+        );
+        let support = witness
+            .schedule
+            .trace
+            .as_ref()
+            .unwrap()
+            .support(witness.derivation);
+        assert!(!support.is_empty());
+        let mermaid = viz.support_lamport_mermaid().unwrap();
+        assert!(mermaid.contains("★ commit"), "{mermaid}");
+        assert!(mermaid.contains("★ prepare"), "{mermaid}");
+    }
+
     /// Cooperative termination survives the coordinator's crash: the participant that got the
     /// `commit` answers its peers' queries, which appears as a new derivation through the peer
     /// channel. No single crash kills both derivations.

@@ -102,6 +102,8 @@ use crate::sim::runtime::{
 };
 use crate::sim::slice::{ChannelInfo, EcCollection, SinkSlice, SliceInput, Slices};
 use crate::sim::spec::{Spec, SpecParts};
+use crate::sim::viz::Trace;
+use crate::sim::viz::trace::{Crash, Fate, TraceEvent, TraceEventKind, TraceMessage, TraceNode};
 use crate::sim::{SimClusterReceiver, SimReceiver};
 
 /// A message as the omission vocabulary names it: the channel it travelled on, its sender
@@ -132,6 +134,16 @@ impl Message {
             self.to_member,
             &self.payload,
         )
+    }
+
+    /// The channel's sink id.
+    pub(crate) fn channel_id(&self) -> usize {
+        self.channel_id
+    }
+
+    /// The wire bytes.
+    pub(crate) fn payload(&self) -> &[u8] {
+        &self.payload
     }
 
     /// `label[from→to]`: the channel with its endpoints, omitting the brackets for a
@@ -394,6 +406,9 @@ pub struct Schedule {
     /// Derivation steps where the node did not reproduce its output under replay and the
     /// closure fell back to the recorded lineage.
     pub replay_fallbacks: usize,
+    /// The run's event trace, for visualization (see [`crate::sim::viz`]). Retained for every
+    /// failing schedule, and for every schedule under [`Ldfi::with_traces`].
+    pub trace: Option<Rc<Trace>>,
 }
 
 /// A derivation together with the send sequences of the run it was observed in.
@@ -1071,7 +1086,12 @@ impl RunRecord {
             .any(|fault| matches!(fault, Fault::Crash { node: n, .. } if *n == label))
     }
 
-    fn schedule(&self, search: &Search, replayer: Option<&Replayer<'_>>) -> Schedule {
+    fn schedule(
+        &self,
+        search: &Search,
+        replayer: Option<&Replayer<'_>>,
+        retain_trace: bool,
+    ) -> Schedule {
         let lineage = Lineage::new(
             &self.events,
             search,
@@ -1080,6 +1100,16 @@ impl RunRecord {
             &self.context,
             replayer,
         );
+        // A failing schedule is rare and is what a counterexample shows: always keep its
+        // trace. Successful schedules keep theirs only on request (the witness picture).
+        let trace = (retain_trace || !self.goal_held).then(|| {
+            Rc::new(build_trace(
+                &lineage,
+                &self.events,
+                self.eff_cut,
+                &self.faults,
+            ))
+        });
         let protocol = lineage.sent.iter().filter(|s| !s.observation);
         let crashed_sends = protocol
             .clone()
@@ -1164,8 +1194,263 @@ impl RunRecord {
             vacuous,
             replays: lineage.replays.get(),
             replay_fallbacks: lineage.replay_fallbacks.get(),
+            trace,
         }
     }
+}
+
+/// The nodes of a [`Trace`] as they are discovered, keyed by `(root location, member)`.
+struct TraceNodes<'a> {
+    nodes: Vec<TraceNode>,
+    index: HashMap<NodeKey, usize>,
+    labels: HashMap<&'a NodeKey, &'a String>,
+    observer: Option<&'a LocationId>,
+}
+
+impl TraceNodes<'_> {
+    fn node_of(&mut self, location: &LocationId, member: Option<u32>) -> usize {
+        let key: NodeKey = (location.root().clone(), member);
+        if let Some(i) = self.index.get(&key) {
+            return *i;
+        }
+        let is_observer = self.observer == Some(&key.0);
+        let crashable = self.labels.contains_key(&key);
+        let label = match self.labels.get(&key) {
+            Some(label) => (*label).clone(),
+            None if is_observer => "observer".to_owned(),
+            None => match member {
+                Some(m) => format!("{:?}@{m}", key.0),
+                None => format!("{:?}", key.0),
+            },
+        };
+        self.nodes.push(TraceNode {
+            label,
+            location: format!("{:?}", key.0),
+            member,
+            is_observer,
+            crashable,
+            crash: None,
+        });
+        self.index.insert(key, self.nodes.len() - 1);
+        self.nodes.len() - 1
+    }
+}
+
+/// The run's [`Trace`] (see [`crate::sim::viz`]): the event log reduced to nodes, ordered
+/// events and messages, with receives (top-level, or a scripted hook's releases into a
+/// tick) paired to their sends the way the lineage pairs them.
+fn build_trace(
+    lineage: &Lineage<'_>,
+    events: &[LineageEvent],
+    eff_cut: usize,
+    faults: &FaultSet,
+) -> Trace {
+    let search = lineage.search;
+    let mut nodes = TraceNodes {
+        nodes: vec![],
+        index: HashMap::new(),
+        labels: search
+            .nodes
+            .iter()
+            .map(|(label, key)| (key, label))
+            .collect(),
+        observer: search.observer(),
+    };
+
+    // Messages, in send order, indexed like `lineage.sent`; their events are filled in below.
+    let mut messages: Vec<TraceMessage> = lineage
+        .sent
+        .iter()
+        .map(|record| TraceMessage {
+            channel: lineage.channel_label(record.channel),
+            channel_id: record.channel,
+            display: render_payload(record),
+            from: nodes.node_of(&record.from.0, record.from.1),
+            to: nodes.node_of(&record.to.0, record.to.1),
+            send_event: 0,
+            recv_event: None,
+            fate: match record.fate {
+                SendFate::Delivered => Fate::Delivered,
+                SendFate::Omitted => Fate::Omitted,
+                SendFate::Crashed => Fate::Crashed,
+            },
+            observation: record.observation,
+            lossy: lineage.channel(record).is_some_and(|c| c.lossy),
+            delivery_id: 0,
+            ordinal: record.sender.as_ref().map(|(_, ordinal)| *ordinal),
+            payload_hash: crate::sim::viz::trace::payload_hash(&record.bytes),
+        })
+        .collect();
+
+    // Events, in log order. Releases are paired to sends through the lineage's matching;
+    // the matched records of an execution are consumed in order.
+    let mut trace_events: Vec<TraceEvent> = vec![];
+    let mut trace_eff: Option<usize> = None;
+    let mut release_cursor: HashMap<ExecId, usize> = HashMap::new();
+    let mut sent_cursor = 0usize;
+    for (index, event) in events.iter().enumerate() {
+        if index == eff_cut {
+            trace_eff = Some(trace_events.len());
+        }
+        let exec_of = |exec: &ExecId| lineage.execs.get(exec);
+        match event {
+            LineageEvent::Exec {
+                id,
+                location,
+                member,
+                tick,
+            } => {
+                trace_events.push(TraceEvent {
+                    node: nodes.node_of(location, *member),
+                    exec: *id,
+                    tick: *tick,
+                    kind: TraceEventKind::Exec,
+                });
+            }
+            LineageEvent::Sent {
+                exec,
+                id,
+                from,
+                from_member,
+                ..
+            } => {
+                let message = sent_cursor;
+                sent_cursor += 1;
+                messages[message].send_event = trace_events.len();
+                messages[message].delivery_id = *id;
+                trace_events.push(TraceEvent {
+                    node: nodes.node_of(from, *from_member),
+                    exec: *exec,
+                    tick: exec_of(exec).is_some_and(|(_, _, tick)| *tick),
+                    kind: TraceEventKind::Send(message),
+                });
+            }
+            LineageEvent::Recv {
+                exec,
+                to,
+                to_member,
+                send,
+                ..
+            } => {
+                if let Some(message) = lineage.by_id.get(send).copied() {
+                    messages[message].recv_event = Some(trace_events.len());
+                    trace_events.push(TraceEvent {
+                        node: nodes.node_of(to, *to_member),
+                        exec: *exec,
+                        tick: exec_of(exec).is_some_and(|(_, _, tick)| *tick),
+                        kind: TraceEventKind::Recv(message),
+                    });
+                }
+            }
+            LineageEvent::Released {
+                exec,
+                hook_id,
+                member,
+                items,
+            } => {
+                let Some((location, _, tick)) = exec_of(exec) else {
+                    continue;
+                };
+                let node = nodes.node_of(location, *member);
+                let cursor = release_cursor.entry(*exec).or_insert(0);
+                let releases = lineage.released.get(exec);
+                for _ in items {
+                    let release = releases.and_then(|r| r.get(*cursor));
+                    *cursor += 1;
+                    if let Some(message) = release
+                        .filter(|r| r.hook_id == *hook_id)
+                        .and_then(|r| r.send)
+                    {
+                        messages[message].recv_event = Some(trace_events.len());
+                        trace_events.push(TraceEvent {
+                            node,
+                            exec: *exec,
+                            tick: *tick,
+                            kind: TraceEventKind::Recv(message),
+                        });
+                    }
+                }
+            }
+            LineageEvent::Output {
+                exec,
+                member,
+                bytes,
+                dropped,
+                ..
+            } => {
+                let Some((location, _, tick)) = exec_of(exec) else {
+                    continue;
+                };
+                trace_events.push(TraceEvent {
+                    node: nodes.node_of(location, *member),
+                    exec: *exec,
+                    tick: *tick,
+                    kind: TraceEventKind::Output {
+                        display: render_bytes(bytes),
+                        dropped: *dropped,
+                    },
+                });
+            }
+        }
+    }
+    if eff_cut >= events.len() {
+        // `finish` sets the cut to the log's length when the body never declared it.
+        trace_eff = None;
+    }
+    // Where each installed crash took effect.
+    for fault in faults {
+        let Fault::Crash { node, after } = fault else {
+            continue;
+        };
+        let Some(key) = search.nodes.get(node) else {
+            continue;
+        };
+        let index = nodes.node_of(&key.0, key.1);
+        nodes.nodes[index].crash = match after {
+            None => Some(Crash::BeforeAnySend),
+            Some(send) => lineage
+                .sent
+                .iter()
+                .position(|record| {
+                    record.from == *key
+                        && record.channel == send.channel
+                        && record.to.1 == send.to_member
+                        && record.bytes == send.bytes
+                })
+                .map(|message| Crash::AfterEvent(messages[message].send_event)),
+        };
+    }
+    // The observer last.
+    let TraceNodes { nodes, .. } = nodes;
+    let mut order: Vec<usize> = (0..nodes.len()).collect();
+    order.sort_by_key(|i| nodes[*i].is_observer);
+    let mut renumber = vec![0usize; nodes.len()];
+    for (new, old) in order.iter().enumerate() {
+        renumber[*old] = new;
+    }
+    for event in &mut trace_events {
+        event.node = renumber[event.node];
+    }
+    for message in &mut messages {
+        message.from = renumber[message.from];
+        message.to = renumber[message.to];
+    }
+    Trace {
+        nodes: order.into_iter().map(|i| nodes[i].clone()).collect(),
+        events: trace_events,
+        messages,
+        eff_cut: trace_eff,
+    }
+}
+
+/// A hex prefix of some wire bytes, for outputs whose `Debug` rendering is not recorded.
+fn render_bytes(bytes: &[u8]) -> String {
+    let hex: String = bytes.iter().take(8).fold(String::new(), |mut acc, b| {
+        use std::fmt::Write as _;
+        let _ = write!(acc, "{b:02x}");
+        acc
+    });
+    format!("{hex}{}", if bytes.len() > 8 { "…" } else { "" })
 }
 
 /// A recorded send, resolved against the registered nodes.
@@ -2611,6 +2896,8 @@ pub struct Ldfi {
     crash_budget: usize,
     max_hypotheses: usize,
     log: bool,
+    /// Whether every schedule keeps its [`Trace`] (failing schedules always do).
+    traces: bool,
 }
 
 impl Default for Ldfi {
@@ -2634,7 +2921,18 @@ impl Ldfi {
             crash_budget: 0,
             max_hypotheses: 256,
             log: true,
+            traces: false,
         }
+    }
+
+    /// Keeps the event [`Trace`] of every explored schedule (see [`Schedule::trace`]), not
+    /// only of failing ones, so a counterexample can be shown next to a run in which the goal
+    /// held with its support highlighted (see [`crate::sim::viz`]). Costs memory in
+    /// proportion to the schedules explored.
+    #[must_use]
+    pub fn with_traces(mut self) -> Self {
+        self.traces = true;
+        self
     }
 
     /// Selects how hypotheses are chosen (default [`Strategy::Lineage`]).
@@ -2987,7 +3285,7 @@ impl Ldfi {
             };
             let schedules: Vec<Schedule> = records
                 .iter()
-                .map(|record| record.schedule(search, Some(&replayer)))
+                .map(|record| record.schedule(search, Some(&replayer), self.traces))
                 .collect();
 
             let failing = schedules.iter().find(|s| !s.goal_held).cloned();

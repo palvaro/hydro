@@ -117,6 +117,17 @@ mod tests {
     /// the search traces for exact per-execution lineage); without, the lineage comes from
     /// the receives alone.
     fn search(max_attempts: Option<u32>, eot: u32, eff: u32, hooks: bool) -> Outcome {
+        search_with(max_attempts, eot, eff, hooks, false)
+    }
+
+    /// [`search`], keeping every schedule's trace when `traces` (for the visualizations).
+    fn search_with(
+        max_attempts: Option<u32>,
+        eot: u32,
+        eff: u32,
+        hooks: bool,
+        traces: bool,
+    ) -> Outcome {
         let mut flow = FlowBuilder::new();
         let sender = flow.process::<Sender>();
         let receiver = flow.process::<Receiver>();
@@ -151,20 +162,21 @@ mod tests {
             sim = sim.with_provenance();
         }
         let compiled = sim.compiled();
-        Ldfi::new()
-            .level_from_env()
-            .goal(&out)
-            .run(&compiled, async |run| {
-                for round in 1..=eot {
-                    if round == eff + 1 {
-                        run.end_of_finite_failures();
-                    }
-                    timer_send.send(round);
-                    hydro_lang::sim::quiesce().await;
+        let mut ldfi = Ldfi::new().level_from_env().goal(&out);
+        if traces {
+            ldfi = ldfi.with_traces();
+        }
+        ldfi.run(&compiled, async |run| {
+            for round in 1..=eot {
+                if round == eff + 1 {
+                    run.end_of_finite_failures();
                 }
-                let received: Vec<Msg> = out.collect_sorted().await;
-                !received.is_empty()
-            })
+                timer_send.send(round);
+                hydro_lang::sim::quiesce().await;
+            }
+            let received: Vec<Msg> = out.collect_sorted().await;
+            !received.is_empty()
+        })
     }
 
     /// A sender that gives up after two attempts violates the property: dropping both
@@ -234,5 +246,89 @@ mod tests {
         );
         // {}, {msg_1}, {msg_1, msg_2}: the last run's support is empty (msg_3 is after EFF).
         assert_eq!(outcome.runs().len(), 3);
+    }
+
+    /// The counterexample's two pictures (see `hydro_lang::sim::viz`): the Lamport diagram
+    /// of the failing run, with both omissions marked, and the last run in which the goal
+    /// held with the goal's support (`msg_2`, the retry that got through) highlighted.
+    #[test]
+    fn ldfi_draws_the_counterexample() {
+        let outcome = search_with(Some(2), 4, 2, true, true);
+        let viz = outcome.viz().expect("a counterexample");
+
+        // Level 0: the failing run.
+        let failing = viz
+            .failing_trace()
+            .expect("a failing schedule keeps its trace");
+        assert_eq!(failing.nodes.len(), 2, "{:?}", failing.nodes);
+        assert!(
+            failing
+                .nodes
+                .iter()
+                .all(|n| n.label.starts_with("Process(") && !n.crashable),
+            "{:?}",
+            failing.nodes
+        );
+        assert_eq!(
+            failing
+                .messages
+                .iter()
+                .filter(|m| m.fate == hydro_lang::sim::viz::trace::Fate::Omitted)
+                .count(),
+            2
+        );
+        assert!(failing.eff_cut.is_some(), "the body declared EFF");
+        let mermaid = viz.lamport_mermaid().unwrap();
+        assert_eq!(
+            mermaid
+                .lines()
+                .filter(|l| l.contains("-xp1: msg: Msg { attempt: 1 } (omitted)"))
+                .count(),
+            1,
+            "{mermaid}"
+        );
+        assert!(
+            mermaid.contains("-xp1: msg: Msg { attempt: 2 } (omitted)"),
+            "{mermaid}"
+        );
+        assert!(mermaid.contains("EFF: end of finite failures"), "{mermaid}");
+        // Rounds 3 and 4 are delivered after EFF but the sender had given up.
+        assert!(!mermaid.contains("attempt: 3"), "{mermaid}");
+        hydro_build_utils::assert_snapshot!(mermaid);
+        let dot = viz.lamport_dot().unwrap();
+        assert!(dot.starts_with("digraph lamport {"), "{dot}");
+        assert!(dot.contains("(omitted)"), "{dot}");
+        assert!(dot.contains("t_eff [label=\"EFF\""), "{dot}");
+
+        // Level 1: the witness is the `{msg_1}` run, whose support is `msg_2`.
+        let witness = viz.witness().expect("traces were retained");
+        assert_eq!(witness.hypothesis.faults.len(), 1);
+        assert_eq!(witness.derivation.len(), 1);
+        let support = witness
+            .schedule
+            .trace
+            .as_ref()
+            .unwrap()
+            .support(witness.derivation);
+        assert_eq!(support.len(), 1, "{support:?}");
+        let mermaid = viz.support_lamport_mermaid().unwrap();
+        assert!(
+            mermaid.contains("->>p1: ★ msg: Msg { attempt: 2 }"),
+            "{mermaid}"
+        );
+        assert!(mermaid.contains("rect rgb"), "{mermaid}");
+        hydro_build_utils::assert_snapshot!(mermaid);
+        let dot = viz.support_lamport_dot().unwrap();
+        assert!(dot.contains("★ msg: Msg { attempt: 2 }"), "{dot}");
+
+        // The report, and the trace survives a JSON round trip.
+        let markdown = viz.markdown();
+        assert!(markdown.contains("## The failing run"), "{markdown}");
+        assert_eq!(markdown.matches("```mermaid").count(), 2, "{markdown}");
+        let json = failing.to_json();
+        assert_eq!(
+            &hydro_lang::sim::viz::Trace::from_json(&json).unwrap(),
+            failing
+        );
     }
 }
