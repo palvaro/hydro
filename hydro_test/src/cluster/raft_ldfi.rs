@@ -187,7 +187,7 @@ mod tests {
             requests,
         };
         let configure = move |crashes: usize| {
-            // The step closure is opaque to the recorded lineage levels; record provenance
+            // The step closure is opaque to the execution-level lineage; record provenance
             // with replay at the opaque step is this harness's default (`LDFI_LEVEL`
             // overrides).
             Ldfi::new()

@@ -214,7 +214,7 @@ mod tests {
 
         // The provenance rewrite does not yet handle `entries_partially_ordered` on a keyed
         // stream (it destructures the element as `Tagged<_>` where the layout is
-        // `(key, Tagged<_>)`), so this search runs on the recorded lineage levels.
+        // `(key, Tagged<_>)`), so this search runs on the execution-level lineage.
         let compiled: CompiledSim = flow
             .sim()
             .skip_consistency_assertions()
@@ -223,7 +223,7 @@ mod tests {
             .compiled();
 
         Ldfi::new()
-            .level(Level::Slice)
+            .level(Level::Execution)
             .crashable("leader", &leader)
             .crashable_cluster("replica", &replicas, 0..MEMBERS)
             .crash_budget(crashes)

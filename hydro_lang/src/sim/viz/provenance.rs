@@ -8,10 +8,11 @@
 //! closure runs (`Ldfi::with_provenance_graphs`) and retained on `Schedule::provenance`,
 //! one graph per derivation.
 //!
-//! Every edge carries the lineage level that produced it (see `ldfi::Level`), so a graph
-//! shows where a record-level or counterfactual derivation fell back to the slice-level or
-//! execution-level closure: the fallback appears as an [`ProvNodeKind::Opaque`] node under
-//! the step that could not be resolved more finely.
+//! Every edge carries the lineage oracle that produced it ([`ProvLevel`]: the execution
+//! closure, record provenance, or the counterfactual replay that `ldfi::Level::Record` runs at
+//! an opaque record), so a graph shows where a record-level derivation went through replay or
+//! fell back to the execution-level closure: the fallback appears as an
+//! [`ProvNodeKind::Opaque`] node under the step that could not be resolved more finely.
 //!
 //! Edges point from the thing that depends to the thing it depends on, so the goal is at the
 //! top and the fault points are at the bottom. [`dot`] and [`mermaid`] render a graph;
@@ -72,27 +73,27 @@ pub enum ProvFate {
     Crashed,
 }
 
-/// The lineage level that produced an edge (see `ldfi::Level`).
+/// The lineage oracle that produced an edge (see `ldfi::Level`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ProvLevel {
-    /// Level 0: an execution depends on everything that reached it.
+    /// The execution closure (`Level::Execution`, and the fallback of the others): an
+    /// execution depends on everything that reached it and its predecessors.
     Execution,
-    /// Level 1: narrowed by the static slice of the producing sink.
-    Slice,
-    /// Level 2: record-level provenance carried by each element.
+    /// Record-level provenance carried by each element (`Level::Record`).
     Record,
-    /// Level 3: counterfactual, by replay with deliveries removed.
-    Counterfactual,
+    /// Counterfactual replay with deliveries removed: the oracle `Level::Record` uses at a
+    /// record the provenance rewrite could not see into, and the derivation of a hand-written
+    /// specification view at the observer.
+    Replay,
 }
 
 impl ProvLevel {
-    /// A one-letter tag for edge labels.
+    /// A short tag for edge labels.
     pub fn tag(self) -> &'static str {
         match self {
-            ProvLevel::Execution => "L0",
-            ProvLevel::Slice => "L1",
-            ProvLevel::Record => "L2",
-            ProvLevel::Counterfactual => "L3",
+            ProvLevel::Execution => "exec",
+            ProvLevel::Record => "record",
+            ProvLevel::Replay => "replay",
         }
     }
 }
@@ -160,7 +161,7 @@ pub enum ProvNodeKind {
         /// A description.
         label: String,
     },
-    /// A step the configured level could not resolve, which fell back to a coarser one.
+    /// A step the configured oracle could not resolve, which fell back to a coarser one.
     Opaque {
         /// Why.
         reason: String,
@@ -274,7 +275,7 @@ pub struct ProvEdge {
     pub to: usize,
     /// How.
     pub kind: ProvEdgeKind,
-    /// The lineage level that produced the edge, when one did.
+    /// The lineage oracle that produced the edge, when one did.
     pub level: Option<ProvLevel>,
 }
 
@@ -588,7 +589,7 @@ impl ProvRecorder {
 pub struct ProvOptions {
     /// Elide execution nodes (see [`ProvGraph::collapsed`]).
     pub collapse_execs: bool,
-    /// Label edges with the lineage level that produced them.
+    /// Label edges with the lineage oracle that produced them.
     pub show_levels: bool,
     /// Show messages that are not fault points (reliable channels, non-crashable senders).
     pub show_non_fault_points: bool,
@@ -958,11 +959,36 @@ mod tests {
             }
         });
         g.edge(goal, output, ProvEdgeKind::Checked, None);
-        g.edge(output, exec, ProvEdgeKind::Produced, Some(ProvLevel::Slice));
-        g.edge(exec, earlier, ProvEdgeKind::Carried, Some(ProvLevel::Slice));
-        g.edge(earlier, msg, ProvEdgeKind::Consumed, Some(ProvLevel::Slice));
-        g.edge(msg, sender, ProvEdgeKind::Produced, Some(ProvLevel::Slice));
-        g.edge(sender, base, ProvEdgeKind::Consumed, Some(ProvLevel::Slice));
+        g.edge(
+            output,
+            exec,
+            ProvEdgeKind::Produced,
+            Some(ProvLevel::Execution),
+        );
+        g.edge(
+            exec,
+            earlier,
+            ProvEdgeKind::Carried,
+            Some(ProvLevel::Execution),
+        );
+        g.edge(
+            earlier,
+            msg,
+            ProvEdgeKind::Consumed,
+            Some(ProvLevel::Execution),
+        );
+        g.edge(
+            msg,
+            sender,
+            ProvEdgeKind::Produced,
+            Some(ProvLevel::Execution),
+        );
+        g.edge(
+            sender,
+            base,
+            ProvEdgeKind::Consumed,
+            Some(ProvLevel::Execution),
+        );
         g
     }
 
@@ -1046,12 +1072,12 @@ mod tests {
         assert!(dot.contains("label=\"coordinator\""));
         assert!(dot.contains("commit[→0]:Txn(1)"));
         assert!(dot.contains("n0 -> n1 [penwidth=2]"));
-        assert!(dot.contains("label=\"L1\""));
+        assert!(dot.contains("label=\"exec\""));
         let mermaid = mermaid(&g, &ProvOptions::default());
         assert!(mermaid.starts_with("flowchart TD"));
         assert!(mermaid.contains("n0{{\"goal: POST\"}}:::goal"));
         assert!(mermaid.contains("n0 ==> n1"));
-        assert!(mermaid.contains("n1 -->|L1| n2"));
+        assert!(mermaid.contains("n1 -->|exec| n2"));
         assert!(mermaid.contains("subgraph c0[\"coordinator\"]"));
     }
 

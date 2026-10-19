@@ -38,8 +38,7 @@ mod grid {
         hypotheses: usize,
         instances: usize,
         /// Random rows: instances whose pre-condition failed. Lineage-level rows:
-        /// counterfactual replays run (the extra cost of `L3/replay`, and of `L2/record` on
-        /// a closure-encoded program).
+        /// counterfactual replays run (the cost of `record` on a closure-encoded program).
         vacuous: usize,
     }
 
@@ -425,15 +424,7 @@ mod grid {
         repeats: u64,
     ) {
         let run_body = &body;
-        for (name, level) in [
-            ("L0/exec", Level::Execution),
-            ("L1/slice", Level::Slice),
-            ("L2/record", Level::Record),
-            ("L3/replay", Level::Counterfactual),
-        ] {
-            if name == "L3/replay" && std::env::var("LDFI_GRID_REPLAY").is_err() {
-                continue;
-            }
+        for (name, level) in [("exec", Level::Execution), ("record", Level::Record)] {
             let repeats = if std::env::var("LDFI_GRID_VERBOSE").is_ok() {
                 1
             } else {
@@ -540,8 +531,8 @@ mod grid {
         }
         writeln!(
             out,
-            "\n{:<12} {:<22} | {:<26} | {:<26} | {:<26} | {:<26} | {:<14} | random k2",
-            "protocol", "config", "L0/exec", "L1/slice", "L2/record", "L3/replay", "blind/1"
+            "\n{:<12} {:<22} | {:<26} | {:<26} | {:<14} | random k2",
+            "protocol", "config", "exec", "record", "blind/1"
         )
         .unwrap();
         for (protocol, config) in cells {
@@ -590,13 +581,11 @@ mod grid {
             };
             writeln!(
                 out,
-                "{:<12} {:<22} | {} | {} | {} | {} | {} | {}",
+                "{:<12} {:<22} | {} | {} | {} | {}",
                 protocol,
                 config,
-                dist("L0/exec"),
-                dist("L1/slice"),
-                dist("L2/record"),
-                dist("L3/replay"),
+                dist("exec"),
+                dist("record"),
                 dist("blind/1"),
                 dist("random/k2"),
             )
@@ -647,7 +636,7 @@ mod grid {
                 };
                 for unclean in [true, false] {
                     // Both encodings of the same protocol. On the closure encoding the
-                    // step is one opaque node, so `L2/record` is record provenance up to the
+                    // step is one opaque node, so `record` is record provenance up to the
                     // step and counterfactual replay through it (`Prov::OPAQUE`).
                     for encoding in [Encoding::Dataflow, Encoding::Closure] {
                         let (sim, h, configure) =

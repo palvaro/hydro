@@ -328,7 +328,7 @@ pub(crate) mod harness {
                 .level(if provenance {
                     Level::Record
                 } else {
-                    Level::Slice
+                    Level::Execution
                 })
                 .level_from_env()
                 .crashable("coordinator", &coordinator_id)

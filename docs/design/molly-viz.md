@@ -2,10 +2,13 @@
 
 Molly (Alvaro, Rosen, Hellerstein, SIGMOD 2015) showed every counterexample at two zoom
 levels: the **Lamport diagram** of the failing run, and the **why-provenance** of the goal
-in a run where it held. Hydrofrac tracks lineage at four levels (`Level::Execution`,
-`Slice`, `Record`, `Counterfactual`), each a tighter support of the goal than the last, so
-the ladder here has more rungs. This document describes what is implemented in
-`hydro_lang::sim::viz` and how it fits the search.
+in a run where it held. Hydrofrac has two lineage oracles (`Level::Execution`, the
+execution-granular closure, and `Level::Record`, record-level provenance from
+`SimFlow::with_provenance`, the default) and, inside `Record`, a third source of edges:
+counterfactual **replay** of a node at the records the provenance rewrite could not see into
+(`Prov::OPAQUE`). A provenance graph therefore shows which of the three produced each step.
+This document describes what is implemented in `hydro_lang::sim::viz` and how it fits the
+search.
 
 See `molly-viz-research.md` for the inventory of what the runtime records and what the
 search used to keep (nothing structural: every level collapsed to a flat `Derivation`).
@@ -88,7 +91,7 @@ The observer and the traffic into it are hidden by default (`show_observer`).
 (`Schedule::provenance`, parallel to `Schedule::derivations`). The graph is the DAG the
 closure actually walked; the flat `Derivation` is exactly its fault points
 (`ProvGraph::dependencies()` equals the derivation, which the `hydro_test` test
-`ldfi_viz::provenance_graphs_agree_with_derivations_at_every_level` checks at Levels 1–3).
+`ldfi_viz::provenance_graphs_agree_with_derivations_at_every_level` checks at both levels).
 Recording never changes a derivation: the recorder only observes the walk.
 
 Edges point from the thing that depends to the thing it depends on, so the goal is at the
@@ -102,23 +105,24 @@ top and the fault points at the bottom.
 | `Message { message, from, to, fate, observation, fault_point }` | a send and its delivery; `fault_point` says whether a fault could have prevented it (i.e. whether it is in the flat derivation) | the index into the run's sends |
 | `Alive { node, through, message }` | a witnessed output's producer having survived to emit it | `(node, sends)` |
 | `Base { label }` | something computed from nothing off a channel (constant, timer, external input) | the label |
-| `Opaque { reason }` | a step the configured level could not resolve, under which the fallback hangs | `(anchor key, reason)` |
+| `Opaque { reason }` | a step the configured oracle could not resolve, under which the fallback hangs | `(anchor key, reason)` |
 
 | Edge kind | From → to | Produced by |
 |---|---|---|
 | `Checked` | goal → output (or goal → message, for the no-goal "every pre-EFF delivery" derivation) | the goal reader |
-| `Produced` | output or message → the execution that produced it | Levels 0/1 (`closure`) |
-| `Consumed` | execution → message it consumed (hook release, top-level receive, arrival an unscripted batch may have released) | Levels 0/1 |
-| `Carried` | execution → earlier execution whose state it carried (same tick) or whose yields it consumed | Levels 0/1 |
-| `Derived` | output or message → message in its record provenance; also → `Base` when the provenance is empty | Level 2 (`record_closure`) |
-| `Counterfactual` | output or message → delivery kept by replay | Level 3 (`counterfactual`) |
-| `Fallback` | any → `Opaque` | every fallback: opaque record → L3/L1, replay did not reproduce the target, no scripted inputs, no replay oracle |
+| `Produced` | output or message → the execution that produced it | `Execution` (`closure`) |
+| `Consumed` | execution → message it consumed (hook release, top-level receive, arrival an unscripted batch may have released) | `Execution` |
+| `Carried` | execution → earlier execution whose state it carried (same tick) or whose yields it consumed | `Execution` |
+| `Derived` | output or message → message in its record provenance; also → `Base` when the provenance is empty | `Record` (`record_closure`) |
+| `Counterfactual` | output or message → delivery kept by replay | `Replay` (`counterfactual`, at an opaque record under `Record`, and at the observer for a hand-written specification) |
+| `Fallback` | any → `Opaque` | every fallback: opaque record → replay → execution closure, replay did not reproduce the target, no scripted inputs, no replay oracle |
 | `Alive` | output → `Alive` | `witnessed` / `witnessed_final` |
 
-Every edge carries the `ProvLevel` that produced it, so a Level 2 graph whose closure
-visited an opaque record shows the `Opaque` node, then Level 3 edges (or Level 1 `Produced`
-/ `Consumed` edges) beneath it. This is the "more levels of zoom": one derivation, drawn with
-the level each step was actually resolved at.
+Every edge carries the `ProvLevel` that produced it (`Execution`, `Record`, `Replay`), so a
+`Record` graph whose closure visited an opaque record shows the `Opaque` node, then `Replay`
+edges (or, where the replay did not reproduce the target, `Execution` `Produced` / `Consumed`
+edges) beneath it. This is the "more levels of zoom": one derivation, drawn with the oracle
+each step was actually resolved by.
 
 ### How it is recorded
 
@@ -151,15 +155,16 @@ graph.
 - `ProvGraph::to_json()` for other front ends (`serde` on every type; the dedup index is not
   serialized).
 
-Snapshots of both renderings for 2PC (Level 2, and Level 1 with its execution nodes) live in
-`hydro_test/src/cluster/snapshots/two_pc_{record,slice}_*.snap`.
+Snapshots of both renderings for 2PC (`Record`, and `Execution` with its execution nodes)
+live in `hydro_test/src/cluster/snapshots/two_pc_{record,execution}_*.snap`.
 
 ### Limits
 
 - Nodes are executions, records (as sends), and deliveries; the operators a record traversed
   are not tracked (`Prov` is a set of delivery ids), so the graph shows *which* messages and
-  executions a fact rests on, not the `join`/`fold` that combined them. The static slice
-  (`sim::slice`) could annotate edges with the sink/channel site later.
+  executions a fact rests on, not the `join`/`fold` that combined them. The IR traversal in
+  `sim::slice` (which names the channels) could annotate edges with the sink/channel site
+  later.
 - Under `Level::Record` the record provenance keeps the first derivation of a duplicate
   element; alternative derivations are not drawn (they are not in the flat derivation either).
 - The `Message` key is the send's index in the run, so graphs of different runs cannot be

@@ -1,13 +1,16 @@
 # Lineage-level ablation
 
 A re-measurement of what each lineage level of hydrofrac (`hydro_lang::sim::ldfi::Level`) buys,
-on the current code. The levels are `Execution` (L0: every input of the execution and of earlier
-executions of the same tick), `Slice` (L1: L0 narrowed by the static slice of the producing
-sink; the `Ldfi::new` default), `Record` (L2: record-level provenance from
-`SimFlow::with_provenance`, falling back to L1 where a record carries none) and
-`Counterfactual` (L3: node-local replay with deliveries removed one at a time, falling back to
-L2). Each level runs the *same* search (same fault model, crash budget, exploration and
-hypothesis budget) on the *same* provenance-compiled program; only the backward closure differs.
+on the current code. **The levels measured in the body of this document are the four of the
+code as it was at the time**: `Execution` (L0: every input of the execution and of earlier
+executions at the node), `Slice` (L1: L0 narrowed by the static slice of the producing sink;
+the `Ldfi::new` default then), `Record` (L2: record-level provenance from
+`SimFlow::with_provenance`, falling back to L1 where a record carries none, replaying the node at
+an opaque record) and `Counterfactual` (L3: node-local replay with deliveries removed one at a
+time, falling back to L2). Each level runs the *same* search (same fault model, crash budget,
+exploration and hypothesis budget) on the *same* provenance-compiled program; only the backward
+closure differs. The outcome of the measurement, the collapse to two levels (`Execution`,
+`Record`) under Molly's fault model, is in the [final section](#final-two-levels-under-the-molly-fault-model).
 
 - Date: 2026-10-19.
 - Commit: `ldfi-hydrofrac` at `7d58ad20e0`, measured on the `molly viz` sandbox base
@@ -537,11 +540,11 @@ then **certifies at every level** (31 hypotheses at L0, the same count as the cl
 because the leader's acknowledgement is post-`EFF` in the omission world and the crash the bug
 needs never fires. The ISR unit tests, the harness doc ("crashes anywhere") and the negation
 history all treat `{omit(repl[0→1]), crash(replica@0 after client-ack)}` as the expected
-counterexample, so the search was made to agree with the simulator rather than the simulator
-with the search. The two readings of "finite failures" for crashes should be reconciled
-explicitly at some point: either the simulator confines crash points to the window and the ISR
-harness moves `EFF` past the first round (`body_eff_after_first_round`), or the docs adopt
-"named before `EFF`, fires wherever" as the model (the state after this fix).
+counterexample, so at this point the search was made to agree with the simulator rather than
+the simulator with the search. The two readings of "finite failures" for crashes were then
+reconciled the other way, as the [final section](#final-two-levels-under-the-molly-fault-model)
+records: the simulator confines crash points to the window (Molly's model) and the ISR harness
+moves `EFF` past the first round, where the leader's acknowledgement lies in every world.
 
 ### Root cause 2 (L3): sequenced observations were never traced to their sends
 
@@ -594,3 +597,163 @@ missed hitting set.
   Paxos agreement, Paxos KV prefix agreement; 15–60 min each). Their harnesses have post-`EFF`
   sends, so their hypothesis counts may move; their verdicts should not (the fix only adds
   hits to clauses the simulator already refutes, and traces deliveries that were held fixed).
+
+## Final: two levels under the Molly fault model
+
+Same day, same machine, same harnesses, after two changes that the measurement above led to.
+
+**The fault model is Molly's.** Every failure happens at a time `≤ EFF`. The simulator's filter
+(`FaultState::filter`, `sim/runtime/lineage.rs`) now fires an `AfterSend` crash point only while
+finite failures last: a crash point is *named* by a pre-`EFF` send of the run that minted it, and
+in another run it fires only if that send happens before `EFF` there; if the named send happens
+after `EFF`, or never, the node does not crash in that run (a node already dead stays dead). The
+search's kill relation follows (`Dependency::killed_by` takes the run's pre-`EFF` send counts and
+counts a crash as firing only within that prefix); the exact-ordinal fix of the previous section
+is kept, since a pre-`EFF` crash does kill the sender's post-`EFF` sends; a requirement sent after
+`EFF` no longer gets a preserve point (no crash that fires in that run keeps it). The ISR harness's
+`body` declares `EFF` after the first round of replica timers and ZK's first view, so the leader's
+acknowledgement and first heartbeat lie inside the window in every world; the unclean-election
+counterexample `{omit(repl[0→1]), crash(replica@0 after client-ack)}` is then an admissible
+failure (the acknowledgement is replica 0's send #4 in the omission world, before `EFF`), and no
+level needs a crash that fires after `EFF` to find it. Unit tests:
+`sim::runtime::lineage::tests::crash_point_named_by_a_post_eff_send_does_not_fire`,
+`ldfi::tests::crash_points_fire_only_before_eff_and_kill_every_later_send`.
+
+**Two levels.** `Level` is `Execution` (the execution-granular closure, no static slice) and
+`Record` (record provenance, counterfactual replay at `Prov::OPAQUE` records, execution closure
+as the fallback). `Record` is `Ldfi::new()`'s default; a program compiled without
+`with_provenance()` is searched at `Execution` (the search logs the substitution). `Slice` and
+`Counterfactual` are gone, with the sink-slice filtering in the closure and the standalone replay
+path; `sim/slice.rs` still computes the program's channels and hook inputs, which the closure and
+`search_all_labels` need. `ProvLevel` tags are `Execution`, `Record`, `Replay`.
+
+### Four levels, after the fault-model change (before the collapse)
+
+Re-measured to separate the two changes. Verdicts and hypothesis counts are **identical to the
+post-fix tables above in every cell** of ISR (closure unclean cr=1: bug 14 / 14 / 9 / 9; clean
+cr=1: cert 31 / 31 / 12 / 12; dataflow unclean: bug 14 / 14 / 12 / 3; clean: cert 31 / 31 / 18 /
+12; cr=0: 4 / 4 / 1 / 1), of 2PC (all 36 configurations; every certificate count unchanged, the
+counterexample cells moving by schedule draw as before) and of reliable broadcast / delivery. The
+ISR hypothesis *sequence* differs (the universe now contains `crash(replica after hb)` for the
+first-round heartbeats, and `{crash(replica@0 after hb)}` is hypothesis #5 at L0 where
+`{crash(replica@0 after client-ack)}` used to be), the totals coincide. No verdict changed.
+
+### Two levels
+
+Cell = `verdict / hypotheses / schedules / mean derivation size / wall secs (replays)`.
+
+ISR replication (`level_ablation_isr`, provenance-compiled, budget 256):
+
+| encoding | config | Execution | Record |
+|---|---|---|---|
+| closure | unclean cr=1 fuzz 8 | bug / 14 / 112 / 16.3 / 5.7s (r1680) | bug / 9 / 72 / 4.2 / 23.3s (r7589) |
+| closure | unclean cr=1 fuzz 1 | bug / 14 / 14 / 16.3 / 0.8s (r210) | bug / 9 / 9 / 4.1 / 3.0s (r940) |
+| closure | unclean cr=0 fuzz 8 | cert / 4 / 32 / 17.8 / 1.7s (r512) | cert / 1 / 8 / 4.0 / 3.5s (r1104) |
+| closure | clean cr=1 fuzz 8 | cert / 31 / 248 / 15.0 / 11.3s (r3232) | cert / 12 / 96 / 4.5 / 24.4s (r7728) |
+| closure | clean cr=1 fuzz 1 | cert / 31 / 31 / 15.0 / 1.7s (r404) | cert / 12 / 12 / 4.1 / 3.0s (r934) |
+| closure | clean cr=0 fuzz 8 | cert / 4 / 32 / 17.8 / 1.7s (r512) | cert / 1 / 8 / 4.0 / 3.5s (r1104) |
+| dataflow | unclean cr=1 fuzz 8 | bug / 14 / 112 / 16.3 / 6.3s (r1680) | bug / 12 / 96 / 10.6 / 5.4s (r1440) |
+| dataflow | unclean cr=1 fuzz 1 | bug / 14 / 14 / 16.3 / 0.9s (r210) | bug / 12 / 12 / 10.6 / 0.8s (r180) |
+| dataflow | unclean cr=0 fuzz 8 | cert / 4 / 32 / 17.8 / 1.8s (r512) | cert / 1 / 8 / 13.0 / 0.5s (r144) |
+| dataflow | clean cr=1 fuzz 8 | cert / 31 / 248 / 15.0 / 12.4s (r3232) | cert / 18 / 144 / 10.8 / 7.1s (r1776) |
+| dataflow | clean cr=1 fuzz 1 | cert / 31 / 31 / 15.0 / 1.9s (r404) | cert / 18 / 18 / 10.8 / 1.0s (r222) |
+| dataflow | clean cr=0 fuzz 8 | cert / 4 / 32 / 17.8 / 1.9s (r512) | cert / 1 / 8 / 13.0 / 0.5s (r144) |
+
+Replay fallbacks 0 in every cell. Every cell equals the corresponding L0 (for `Execution`) and L2
+(for `Record`) cell of the four-level table.
+
+2PC (`level_ablation_two_pc_n{2,3,4}`, fuzz 1, budget 400; `cr=0` rows are the failure-free
+certificate at every level and are omitted):
+
+| variant | config | Execution | Record |
+|---|---|---|---|
+| 2PC | n=2 load=1 cr=1 | CEX / 2 / 2 / 8.00 / 0.0s | CEX / 2 / 2 / 8.00 / 0.0s |
+| 2PC | n=2 load=4 cr=1 | CEX / 6 / 6 / 28.00 / 0.1s | CEX / 2 / 2 / 8.00 / 0.0s |
+| 2PC | n=2 load=8 cr=1 | CEX / 6 / 6 / 60.00 / 0.3s | CEX / 2 / 2 / 8.00 / 0.1s |
+| 2PC | n=3 load=1 cr=1 | CEX / 2 / 2 / 12.00 / 0.0s | CEX / 4 / 4 / 10.67 / 0.1s |
+| 2PC | n=3 load=4 cr=1 | CEX / 8 / 8 / 42.00 / 0.3s | CEX / 2 / 2 / 12.00 / 0.1s |
+| 2PC | n=3 load=8 cr=1 | CEX / 8 / 8 / 90.00 / 0.7s | CEX / 6 / 6 / 10.40 / 0.3s |
+| 2PC | n=4 load=1 cr=1 | CEX / 2 / 2 / 16.00 / 0.0s | CEX / 2 / 2 / 16.00 / 0.0s |
+| 2PC | n=4 load=4 cr=1 | CEX / 10 / 10 / 56.00 / 0.7s | CEX / 8 / 8 / 14.29 / 0.3s |
+| 2PC | n=4 load=8 cr=1 | CEX / 10 / 10 / 120.00 / 1.9s | CEX / 2 / 2 / 16.00 / 0.2s |
+| 2PC+CTP | n=2 load=1 cr=1 | CERT(hand) / 9 / 9 / 7.50 / 0.1s | CERT(hand) / 9 / 9 / 7.25 / 0.1s |
+| 2PC+CTP | n=2 load=4 cr=1 | CERT(hand) / 27 / 27 / 24.21 / 0.6s | CERT(hand) / 13 / 13 / 6.83 / 0.1s |
+| 2PC+CTP | n=2 load=8 cr=1 | CERT(hand) / 51 / 51 / 44.36 / 2.3s | CERT(hand) / 13 / 13 / 6.83 / 0.2s |
+| 2PC+CTP | n=3 load=1 cr=1 | CERT(hand) / 13 / 13 / 12.83 / 0.2s | CERT(hand) / 13 / 13 / 11.33 / 0.2s |
+| 2PC+CTP | n=3 load=4 cr=1 | CERT(hand) / 40 / 40 / 39.81 / 2.1s | CERT(hand) / 18 / 18 / 10.89 / 0.4s |
+| 2PC+CTP | n=3 load=8 cr=1 | CERT(hand) / 76 / 76 / 71.85 / 9.2s | CERT(hand) / 18 / 18 / 10.89 / 0.6s |
+| 2PC+CTP | n=4 load=1 cr=1 | CERT(hand) / 17 / 17 / 17.00 / 0.3s | CERT(hand) / 17 / 17 / 15.38 / 0.3s |
+| 2PC+CTP | n=4 load=4 cr=1 | CERT(hand) / 53 / 53 / 56.86 / 5.9s | CERT(hand) / 23 / 23 / 14.92 / 0.8s |
+| 2PC+CTP | n=4 load=8 cr=1 | CERT(hand) / 101 / 101 / 100.66 / 27.8s | CERT(hand) / 23 / 23 / 14.92 / 1.3s |
+
+Every verdict and every certificate count as in the four-level grid; the counterexample cells
+move by the schedule drawn (2, 4, 6 or 8 at `Record`, as in the repeats above).
+
+Reliable broadcast and reliable delivery (`level_ablation_broadcast_and_delivery`, exhaustive):
+
+| config | Execution | Record |
+|---|---|---|
+| plain broadcast, n=3, 1 crash, POST positive | violated / 2 / 8 / 6.00 / 0.1s (r54) | violated / 2 / 8 / 6.00 / 0.1s (r54) |
+| reliable broadcast, n=3, 1 crash, POST positive | certificate / 15 / 3289 / 6.81 / 27.6s (r21168) | certificate / 10 / 2641 / 4.55 / 22.7s (r17280) |
+| reliable broadcast, n=3, 2 crashes, POST positive | certificate / 73 / 10845 / 4.77 / 73.8s (r54872) | certificate / 32 / 7271 / 3.38 / 51.5s (r38664) |
+| plain broadcast, n=3, 1 crash, POST negated | violated / 2 / 8 / 6.00 / 0.1s (r54) | violated / 2 / 8 / 6.00 / 0.1s (r54) |
+| reliable broadcast, n=3, 1 crash, POST negated | certificate / 15 / 3289 / 6.81 / 27.5s (r21168) | certificate / 10 / 2641 / 4.55 / 22.2s (r17280) |
+| plain broadcast, n=4, 1 crash, POST positive | violated / 2 / 30 / 8.00 / 0.5s (r264) | violated / 2 / 30 / 8.00 / 0.4s (r264) |
+| reliable delivery, give up after 2, eot=4 eff=2 (hooks or not) | violated / 3 / 3 / 1.00 | violated / 3 / 3 / 1.00 |
+| reliable delivery, retry until ack, eot=4 eff=2 (hooks or not) | certificate / 3 / 3 / 0.67 | certificate / 3 / 3 / 0.67 |
+| reliable delivery, give up after 3, eot=6 eff=3, hooks | violated / 4 / 4 / 1.00 | violated / 4 / 4 / 1.00 |
+| reliable delivery, retry until ack, eot=6 eff=3, hooks | certificate / 4 / 4 / 0.75 | certificate / 4 / 4 / 0.75 |
+
+Identical to the L0 and L2 columns above.
+
+Raft and core Paxos (`level_ablation_raft`, the shrunken configurations of the Raft and Paxos
+sections above; one sampled schedule per hypothesis, so counts move by ±50% between passes):
+
+| protocol | config | Execution | Record |
+|---|---|---|---|
+| Raft durability | n=3 cr=1 rounds=2 heal=2 sched=1 max=64, bug | certificate / 59 / 59 / 66.5 / 17s (r1984) | budget / 64 / 64 / 10.4 / 243s (r16384) |
+| Raft durability | n=3 cr=1 rounds=2 heal=2 sched=1 max=64, correct | certificate / 59 / 59 / 66.5 / 17s (r1984) | budget / 64 / 64 / 10.4 / 267s (r17589) |
+| Paxos agreement | p=2 a=3 cr=1 sched=1 max=256, bug | violated / 84 / 84 / 20.0 / 13s (r355) | violated / 27 / 27 / 16.0 / 2s (r115) |
+| Paxos agreement | p=2 a=3 cr=1 sched=1 max=256, correct | budget / 256 / 256 / 24.1 / 136s (r776) | certificate / 230 / 230 / 19.2 / 116s (r552) |
+
+Verdicts as in the four-level tables (Raft: `Execution` certifies both variants in 59, `Record`
+runs out of budget at 64; Paxos: the bug is found at both levels, the correct variant certifies
+only at `Record` within 256). Raft's `Execution` derivations are larger than the L0 cells above
+(66.5 against 46.4 leaves): the old L0 walked the *sub*-derivations of sends through the sink
+slice (`closure(exec, Some(channel))`), and the slice narrowed Raft's channel plumbing even though
+the step itself was opaque; the pure execution closure does not. The hypothesis count is the
+same 59, as the certificate's shape is decided by the opaque step's over-approximation either
+way. The Paxos counterexample at `Execution` is a `p1b` omission this pass (84 hypotheses; 44
+with a `p2a` omission in the pass above) — schedule variance, not a change in the search.
+
+### Regression suites
+
+`cargo test -p hydro_test ldfi -- --test-threads=1`: 52 passed, 12 ignored (the long
+certifications), 594 s. `cargo test -p hydro_lang --features ldfi --lib sim`: 212 passed.
+`ldfi_viz::provenance_graphs_agree_with_derivations_at_every_level` checks both levels; the
+`Execution` snapshot (`two_pc_execution_dot`, formerly `two_pc_slice_dot`) changed in its edge
+set, since the walk no longer filters through the slice, with the same fault points.
+
+### Recommendation record
+
+**Retained:** `Level::Execution` and `Level::Record`; `Record` is the default and the level every
+harness in the tree uses when it compiles with provenance. `Record` keeps counterfactual replay as
+its oracle for `Prov::OPAQUE` records (the closure-encoded ISR step, Raft's `raft_step`), which is
+what it already did; it is the only place replay runs on the protocol's nodes, besides the
+derivation of a hand-written specification view at the observer. **Removed:** `Slice`, because on
+every protocol measured (2PC, ISR in both encodings, reliable broadcast, reliable delivery, Raft,
+Paxos) it produced the same hypotheses and derivations as `Execution` — the static slice never
+separated a record from the inputs of its execution where that would have changed a verdict or a
+count; and `Counterfactual`, because wherever `Record` applied it produced the same derivations
+and, on 2PC and broadcast, the same hypothesis counts, at two to ten times the replays and wall
+time, and its one real advantage (the dataflow ISR bug in 3 hypotheses instead of 12) does not
+pay for a Raft search that runs five seconds a hypothesis. **Why `Record` and not `Execution` by
+default:** `Record` beats `Execution` on hypotheses wherever there is background load or
+redundancy (2PC+CTP 101 → 23 at `n=4 load=8`, reliable broadcast 73 → 32, ISR 31 → 12/18), is
+faster in wall time on every dataflow-style program, and is the level the Molly-style provenance
+graphs are drawn from; it loses only on Raft, where the opaque step forces a replay per record and
+the execution closure's single clause certifies in 19 s — a program that is closure-encoded end to
+end should pick `Execution` explicitly, and a program compiled without `with_provenance()` gets
+it automatically. **Fault model:** every failure at a time `≤ EFF`, enforced by the simulator and
+mirrored by the kill relation; a harness that means to admit a crash must place `EFF` after the
+send that names it, as the ISR harness now does.

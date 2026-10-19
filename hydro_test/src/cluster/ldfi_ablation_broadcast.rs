@@ -1,5 +1,5 @@
 //! Lineage-level ablation for reliable broadcast and reliable delivery: the same LDFI search
-//! at every [`Level`] (execution, static slice, record provenance, counterfactual replay) on
+//! at every [`Level`] (execution closure, record provenance with replay at opaque records) on
 //! the same provenance-compiled program, per protocol configuration.
 //!
 //! Run explicitly; it writes a Markdown fragment to the path in `LDFI_ABLATION_OUT` and does
@@ -30,12 +30,7 @@ mod ablation {
     };
     use crate::distributed::reliable_delivery::{Ack, Msg, Receiver, Sender, reliable_delivery};
 
-    const LEVELS: [(&str, Level); 4] = [
-        ("L0/exec", Level::Execution),
-        ("L1/slice", Level::Slice),
-        ("L2/record", Level::Record),
-        ("L3/replay", Level::Counterfactual),
-    ];
+    const LEVELS: [(&str, Level); 2] = [("exec", Level::Execution), ("record", Level::Record)];
 
     /// One measurement: one configuration at one level.
     struct Cell {

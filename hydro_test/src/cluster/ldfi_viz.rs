@@ -67,7 +67,7 @@ fn graphs_agree_with_derivations(outcome: &Outcome) -> usize {
 
 #[test]
 fn provenance_graphs_agree_with_derivations_at_every_level() {
-    for level in [Level::Slice, Level::Record, Level::Counterfactual] {
+    for level in [Level::Execution, Level::Record] {
         let (with, without) = search_both_ways(level);
         assert!(
             with.is_counterexample(),
@@ -138,20 +138,20 @@ fn provenance_graph_of_two_pc_renders() {
     let json: serde_json::Value = serde_json::from_str(&graph.to_json()).unwrap();
     assert_eq!(json["nodes"].as_array().unwrap().len(), graph.node_count());
 
-    // Slice-level lineage walks the execution graph: the same goal, drawn through the tick
-    // executions and async runs that carried it, grouped by node.
-    let (with, _) = search_both_ways(Level::Slice);
+    // Execution-level lineage walks the execution graph: the same goal, drawn through the
+    // tick executions and async runs that carried it, grouped by node.
+    let (with, _) = search_both_ways(Level::Execution);
     let graph = &with.runs()[0].schedules[0].provenance[0];
-    eprintln!("slice-level graph: {:?}", kinds(graph));
+    eprintln!("execution-level graph: {:?}", kinds(graph));
     assert!(kinds(graph)["exec"] >= 3, "{:?}", kinds(graph));
     let dot = provenance::dot(
         graph,
         &ProvOptions {
-            title: Some("2PC, failure-free run, slice-level lineage".to_owned()),
+            title: Some("2PC, failure-free run, execution-level lineage".to_owned()),
             ..ProvOptions::default()
         },
     );
-    hydro_build_utils::assert_snapshot!("two_pc_slice_dot", dot);
+    hydro_build_utils::assert_snapshot!("two_pc_execution_dot", dot);
 }
 
 /// Writes the whole Molly-style report of the blocking 2PC counterexample (both Lamport

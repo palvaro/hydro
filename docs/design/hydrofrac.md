@@ -204,7 +204,11 @@ crash(node after message)
 
 The node performs sends through the named message. Later sends are dropped, and its external outputs are suppressed. Naming the crash point by a message rather than a send count makes the hypothesis usable across schedules. It also allows hydrofrac to crash a sender between two sends in a single broadcast fan-out.
 
-Only nodes registered by the test are crashable. Crashes count against the crash budget. Faults take effect before `EFF`; the remaining execution gives the protocol a chance to recover.
+Only nodes registered by the test are crashable. Crashes count against the crash budget.
+
+**Every failure happens at a time `≤ EFF`.** This is Molly's fault model, and the simulator's filter enforces it for both kinds of fault. The test declares the end of finite failures (`Run::end_of_finite_failures`); from then on omissions stop applying and no crash point fires. A crash point is named by a message that was sent before `EFF` in the run that proposed it. In another run the same message may be sent only after `EFF`, or never; the crash then does not happen in that run (a node already dead stays dead: crashes are permanent). The execution after `EFF` is failure-free recovery, the window in which the protocol is expected to converge, and a crash point only ever proposed from pre-`EFF` sends. The search's account of what a crash kills (`Dependency::killed_by`) follows the simulator exactly: a crash after `m` kills every later send of the node, before or after `EFF`, provided `m` was sent before `EFF` in that run.
+
+A harness therefore has to place `EFF` late enough for the failures it means to admit. The ISR harness declares it after the first round of replica timers, so the leader's acknowledgement and heartbeats lie inside the window; with `EFF` right after the client's write, the leader's crash after the acknowledgement is not an admissible failure, and the unclean-election bug is outside the bounds.
 
 The program's transport declarations therefore determine what can go wrong, while the test determines how much can go wrong and when faults must stop.
 
@@ -223,18 +227,16 @@ This is the central LDFI idea. A forward search asks, “What happens if I drop 
 
 Suppose the probe succeeds because a source sends directly to every member. Hydrofrac tries a crash that interrupts that fan-out. If the remaining members repair the missing delivery through an echo, the next successful run records the echo path. A breaking hypothesis must now defeat both known ways of succeeding.
 
-Hydrofrac supports four lineage levels:
+Hydrofrac has two lineage oracles, selected by `Level`:
 
 | Level | Dependencies recorded |
 |---|---|
-| `Exec` | Every input to the execution and to earlier executions of the same tick. |
-| `Slice` | The same execution-level information, narrowed by a static slice for each sink. This is the default. |
-| `Record` | Record-level provenance, added by an IR rewrite through `SimFlow::with_provenance`. |
-| `Counterfactual` | Node-local replay with deliveries removed one at a time, to test whether the output depends on them. |
+| `Execution` | Every input to the execution that produced the output, and to earlier executions of the same tick (persisted state). Sound but coarse; available for any program. |
+| `Record` | Record-level provenance, added by an IR rewrite through `SimFlow::with_provenance`: each element carries the delivery ids it was computed from. The default. |
 
-More precise lineage can reduce the number of hypotheses, but it is not always available. The record rewrite cannot handle every operator or see through every closure. Counterfactual replay may fail to reproduce a node's original output even when all deliveries are retained; it may also encounter code that panics when a delivery is removed.
+Under `Record`, an element that came out of a closure the rewrite cannot see into carries an opaque mark; at such a record hydrofrac derives the step by **counterfactual replay** of the node alone (its recorded deliveries removed one at a time, keeping those without which the node no longer produces the record). Replay is an oracle for opaque records only, not a level of its own: measured as a standalone level it produced the same derivations as `Record` wherever `Record` applied, at two to ten times the cost (`ldfi-level-ablation.md`). A static-slice narrowing of the execution closure was also measured and removed: it never separated a record from the inputs of its execution on any protocol in the corpus.
 
-When a more precise level cannot produce a usable result, hydrofrac falls back: `Counterfactual` to `Record`, and `Record` to `Slice`.
+When an oracle cannot produce a usable result, hydrofrac falls back: a replay that does not reproduce the node's output (or panics) to the record provenance where there is any, and from there to the execution closure. `Ldfi::new()` defaults to `Record`; a program compiled without `with_provenance()` is searched at `Execution` (the search says so when logging).
 
 The direction of this fallback is important. Including an unnecessary dependency gives the search extra faults to try. Omitting a necessary dependency can hide a counterexample. Conservative over-approximation costs search time; under-approximation threatens certification.
 
@@ -391,7 +393,7 @@ The larger tests are ignored by default for runtime. The Raft bug and correct-ve
 
 **Membership is static in these tests.** The simulator starts with all members joined. Tests of `_live` protocols exercise faults, not join timing.
 
-**Precise lineage has gaps.** The provenance rewrite does not handle `entries_partially_ordered` on keyed streams, so `leader_merge` uses `Level::Slice`. Counterfactual replay failures are treated as inconclusive for the affected node and trigger fallback.
+**Precise lineage has gaps.** The provenance rewrite does not handle `entries_partially_ordered` on keyed streams, so `leader_merge` is compiled without provenance and searched at `Level::Execution`. A counterfactual replay that does not reproduce the node's output is treated as inconclusive for that step and falls back to the recorded lineage.
 
 **Not every labelled collection is in the class.** The automatic specification checks unbounded streams at a cluster's top level that a network channel feeds. Lattice values, collections inside a tick, and collections with local inputs only are reported with the reason and not searched. Observing a collection requires its element type to be `Clone + Serialize`; one that is not must be excluded with `Spec::all_labels_except`. The verdicts do not fail a test by themselves: `LabelResults` is what a test asserts on, and nothing fails for a label the test does not look at.
 

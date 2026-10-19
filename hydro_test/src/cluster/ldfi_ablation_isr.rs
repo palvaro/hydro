@@ -25,12 +25,7 @@ use crate::cluster::isr_replication::harness as isr;
 /// Schedules sampled per hypothesis by the ISR unit tests (`isr_replication::tests::SAMPLED`).
 const SAMPLED: usize = 8;
 
-const LEVELS: [(&str, Level); 4] = [
-    ("L0 exec", Level::Execution),
-    ("L1 slice", Level::Slice),
-    ("L2 record", Level::Record),
-    ("L3 replay", Level::Counterfactual),
-];
+const LEVELS: [(&str, Level); 2] = [("exec", Level::Execution), ("record", Level::Record)];
 
 /// One (encoding, config) × level measurement.
 struct Cell {

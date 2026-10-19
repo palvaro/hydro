@@ -26,7 +26,7 @@ pub struct Prov(Vec<u64>);
 impl Prov {
     /// The delivery id standing for "unknown": the record came out of a closure whose reads
     /// the rewrite cannot see (a `Reference` capture), so its lineage must be derived by
-    /// counterfactual replay of the node (see `sim::ldfi`, [`Level::Counterfactual`]).
+    /// counterfactual replay of the node (see `sim::ldfi`, `Level::Record`).
     pub const OPAQUE: u64 = u64::MAX;
 
     /// No provenance (a constant, an external input, a network arrival at the top level).

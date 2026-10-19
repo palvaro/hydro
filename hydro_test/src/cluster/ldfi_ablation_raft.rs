@@ -1,8 +1,7 @@
 //! Lineage-level ablation of hydrofrac on RAFT ([`super::raft_ldfi`]) and, for reference, on
-//! core Paxos ([`super::paxos_ldfi`]): the same search at each of the four lineage levels
-//! (`Level::Execution`, `Level::Slice`, `Level::Record`, `Level::Counterfactual`), on the same
-//! provenance-compiled program, recording verdict, hypotheses, schedules, mean derivation
-//! size, replays and wall time.
+//! core Paxos ([`super::paxos_ldfi`]): the same search at each lineage level
+//! (`Level::Execution`, `Level::Record`), on the same provenance-compiled program, recording
+//! verdict, hypotheses, schedules, mean derivation size, replays and wall time.
 //!
 //! A measurement, not a test of the protocols: it does nothing unless `LDFI_ABLATION_OUT`
 //! names the markdown file to write, and the configuration is a *shrunken* copy of the
@@ -18,7 +17,7 @@
 //! Knobs (all optional): `LDFI_ABLATION_ROUNDS` (RAFT rounds before the end of finite
 //! failures; default 2, the original has 3), `LDFI_ABLATION_SCHEDULES` (schedules sampled per
 //! hypothesis; default 1, the originals use 4), `LDFI_ABLATION_MAX_HYP` (hypothesis cap;
-//! default 64 for RAFT and 256 for Paxos), `LDFI_ABLATION_LEVELS` (comma-separated subset of `exec,slice,record,replay`),
+//! default 64 for RAFT and 256 for Paxos), `LDFI_ABLATION_LEVELS` (comma-separated subset of `exec,record`),
 //! `LDFI_ABLATION_CELLS` (comma-separated subset of `raft-bug,raft-ok,paxos-bug,paxos-ok`),
 //! `LDFI_ABLATION_VERBOSE` (keep the per-hypothesis log).
 
@@ -63,12 +62,7 @@ mod tests {
         list.is_none_or(|l| l.iter().any(|x| x == name))
     }
 
-    const LEVELS: [(&str, Level); 4] = [
-        ("exec", Level::Execution),
-        ("slice", Level::Slice),
-        ("record", Level::Record),
-        ("replay", Level::Counterfactual),
-    ];
+    const LEVELS: [(&str, Level); 2] = [("exec", Level::Execution), ("record", Level::Record)];
 
     // ------------------------------------------------------------------------------------
     // One measurement.
@@ -240,7 +234,7 @@ mod tests {
             "| protocol | goal | config | {} |",
             LEVELS
                 .iter()
-                .map(|(n, _)| format!("L{} {n}", level_index(n)))
+                .map(|(n, _)| (*n).to_owned())
                 .collect::<Vec<_>>()
                 .join(" | ")
         )
@@ -293,7 +287,7 @@ mod tests {
             "| protocol | goal | config | {} |",
             LEVELS
                 .iter()
-                .map(|(n, _)| format!("L{} {n}", level_index(n)))
+                .map(|(n, _)| (*n).to_owned())
                 .collect::<Vec<_>>()
                 .join(" | ")
         )
@@ -321,10 +315,6 @@ mod tests {
             writeln!(out).unwrap();
         }
         out
-    }
-
-    fn level_index(name: &str) -> usize {
-        LEVELS.iter().position(|(n, _)| *n == name).unwrap()
     }
 
     fn write_out(path: &str, cells: &[Cell], header: &str) {
@@ -551,8 +541,8 @@ mod tests {
     // The grid.
     // ------------------------------------------------------------------------------------
 
-    /// RAFT durability (bug and correct) at the four lineage levels; then core Paxos
-    /// agreement (bug and correct) at the four levels. Writes `LDFI_ABLATION_OUT`.
+    /// RAFT durability (bug and correct) at both lineage levels; then core Paxos
+    /// agreement (bug and correct) at both levels. Writes `LDFI_ABLATION_OUT`.
     #[test]
     fn level_ablation_raft() {
         let Ok(out) = std::env::var("LDFI_ABLATION_OUT") else {

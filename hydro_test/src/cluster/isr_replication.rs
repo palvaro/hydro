@@ -885,7 +885,7 @@ pub(crate) mod harness {
                 .level(if provenance {
                     Level::Record
                 } else {
-                    Level::Slice
+                    Level::Execution
                 })
                 .level_from_env()
                 .crashable_cluster("replica", &replicas_id, 0..members)
@@ -896,32 +896,18 @@ pub(crate) mod harness {
     }
 
     /// One run: the client writes; then `rounds` rounds of replica timers followed by a ZK
-    /// timer. Omissions are allowed only in the first round (the replication of the write);
-    /// crashes anywhere. The verdict is the specification's.
+    /// timer. The end of finite failures is declared after the first round: omissions and
+    /// crashes are admitted during the replication of the write and the first round of
+    /// replica timers (ISR shrink, acknowledgement, heartbeats) and ZK's first view, and the
+    /// remaining rounds are failure-free recovery (every failure happens at a time `≤ EFF`;
+    /// see `hydro_lang::sim::ldfi`). The verdict is the specification's.
+    ///
+    /// The unclean-election bug is `{omit(repl[0→1]), crash(replica@0 after client-ack)}`:
+    /// the leader acknowledges in the first round, after shrinking the ISR, so its crash right
+    /// after the acknowledgement lies inside the window. (With `EFF` right after the write,
+    /// as the first version of this harness had it, that crash point was admissible only
+    /// under a simulator that let crashes fire after `EFF`.)
     pub(crate) async fn body(h: &Harness, run: &Run<'_>) {
-        let Shape {
-            members,
-            rounds,
-            writes,
-        } = h.shape;
-        for w in 1..=writes {
-            h.write_send.send(Write(w));
-        }
-        hydro_lang::sim::quiesce().await;
-        run.end_of_finite_failures();
-        for _ in 0..rounds {
-            h.replica_timer.send_many((0..members).map(|m| (m, ())));
-            hydro_lang::sim::quiesce().await;
-            h.zk_timer.send(());
-            hydro_lang::sim::quiesce().await;
-        }
-    }
-
-    /// [`body`] with the end of finite failures after the first round rather than after the
-    /// write: ZK's first view and the leader's first replication lie before it, so a crash
-    /// between two sends of either fan-out is admissible. For the automatic specification's
-    /// sender-crash question (`ldfi_all_labels_break_under_a_sender_crash`).
-    pub(crate) async fn body_eff_after_first_round(h: &Harness, run: &Run<'_>) {
         let Shape {
             members,
             rounds,
@@ -1020,9 +1006,7 @@ mod tests {
     use hydro_lang::sim::ldfi::{Exploration, Fault, LabelVerdict, Level, Outcome, Strategy};
 
     use super::Encoding;
-    use super::harness::{
-        DEFAULT_SHAPE, body, body_eff_after_first_round, compile, compile_all_labels,
-    };
+    use super::harness::{DEFAULT_SHAPE, body, compile, compile_all_labels};
 
     /// Schedules sampled per hypothesis. Four rounds of three replicas plus ZK give
     /// tens of thousands of interleavings per hypothesis under `exhaustive`; the protocol's
@@ -1070,20 +1054,15 @@ mod tests {
 
     /// The verdict does not depend on the lineage level. Regression test for two false
     /// certificates on the unclean variant (see `docs/design/ldfi-level-ablation.md`,
-    /// "Soundness bug"): at `Execution`/`Slice`, dependency ordinals clamped at `EFF` made the
-    /// clause of the omission world unhittable by the leader's crash after its (now post-`EFF`)
-    /// acknowledgement; at `Counterfactual`, the sequenced view observations were never traced
-    /// to ZK's sends, so the final view had no lineage at the observer. Every level has to find
-    /// the lost replication plus the leader's crash.
+    /// "Soundness bug"): at `Execution`, dependency ordinals clamped at `EFF` made the clause
+    /// of the omission world unhittable by the leader's crash after its acknowledgement; under
+    /// counterfactual replay, the sequenced view observations were never traced to ZK's
+    /// sends, so the final view had no lineage at the observer. Every level has to find the
+    /// lost replication plus the leader's crash.
     #[test]
     fn ldfi_finds_the_unclean_election_bug_at_every_level() {
         let (compiled, h, configure) = compile(true, Encoding::Dataflow, DEFAULT_SHAPE, 8);
-        for level in [
-            Level::Execution,
-            Level::Slice,
-            Level::Record,
-            Level::Counterfactual,
-        ] {
+        for level in [Level::Execution, Level::Record] {
             let outcome = configure(1)
                 .level(level)
                 .exploration(Exploration::Fuzz { instances: SAMPLED })
@@ -1157,18 +1136,14 @@ mod tests {
 
     /// The same labels with the senders crashable: a single-hop `broadcast_closed` is
     /// violated by its sender's crash between two fan-out sends (the client for `write`, ZK
-    /// for `view`). The end of finite failures is moved past the first round so that ZK's
-    /// first view lies before it (under [`body`] no ZK send does, and the view broadcast
-    /// certifies within those bounds).
+    /// for `view`). ZK's first view lies before the end of finite failures under [`body`].
     #[test]
     fn ldfi_all_labels_break_under_a_sender_crash() {
         let (compiled, h, configure) =
             compile_all_labels(false, Encoding::Dataflow, DEFAULT_SHAPE, true, 8);
         let results = configure(1)
             .exploration(Exploration::Fuzz { instances: SAMPLED })
-            .search_all_labels(&compiled, async |run| {
-                body_eff_after_first_round(&h, run).await
-            });
+            .search_all_labels(&compiled, async |run| body(&h, run).await);
         eprintln!("{results}");
         let crashed_sender = |site: &str, sender: &str| {
             results.at(site).any(|r| {
@@ -1192,22 +1167,16 @@ mod tests {
     #[test]
     #[ignore = "diagnostic; loops until a certificate appears"]
     fn ldfi_hunt_false_certificate() {
-        use hydro_lang::sim::ldfi::Level;
-
         use super::harness::{Shape, compile_with};
         let shape = Shape {
             members: 3,
             rounds: 4,
             writes: 2,
         };
-        let level = match std::env::var("LDFI_LEVEL").as_deref() {
-            Ok("replay") => Level::Counterfactual,
-            _ => Level::Record,
-        };
         let (compiled, h, configure) = compile_with(true, Encoding::Closure, shape, true, 1);
         for attempt in 0..40 {
             let outcome = configure(1)
-                .level(level)
+                .level(Level::Record)
                 .exploration(Exploration::Fuzz { instances: 1 })
                 .search(&compiled, async |run| body(&h, run).await);
             eprintln!("attempt {attempt}: {outcome}");

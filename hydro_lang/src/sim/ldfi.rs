@@ -29,13 +29,16 @@
 //!   and including `m` and every later send is dropped at the filter (and its external
 //!   outputs are suppressed once it is dead). This is Molly's definition of a crash, named
 //!   by a message rather than a send count so the fault means the same thing in every run,
-//!   and it can split the fan-out of one broadcast. Crash points are *proposed* from before
-//!   the end of finite failures: `m` is a send performed before it in the run that minted
-//!   the point (or the crash is `before any send`). Being named by a message, the point fires
-//!   wherever that message is sent, which in another hypothesis's run may be after `EFF`; the
-//!   search's notion of what a crash kills follows the simulator's, exactly
-//!   ([`Dependency::killed_by`]). The run after `EFF` is the window in which the protocol is
-//!   expected to converge.
+//!   and it can split the fan-out of one broadcast.
+//!
+//! **Every failure happens at a time `≤ EFF`** (Molly's fault model): omissions apply only
+//! while finite failures last, and a crash happens only if its message is sent before the
+//! end of finite failures in the run at hand. Crash points are *named* by a pre-`EFF` send of
+//! the run that minted them (or are `before any send`); in the run of another hypothesis the
+//! same message may be sent after `EFF`, or never, and the crash then does not happen there
+//! (`FaultState::filter` in `sim::runtime::lineage`). The run after `EFF` is failure-free
+//! recovery, the window in which the protocol is expected to converge. The search's notion
+//! of what a crash kills follows the simulator's exactly ([`Dependency::killed_by`]).
 //!
 //! # Lineage
 //!
@@ -46,11 +49,12 @@
 //! backward closure from the execution that produced it: a tick execution depends on the
 //! channel messages its hooked batches released into it, on the arrivals at its node that
 //! an unhooked batch may have released into it, and, as a sound over-approximation of
-//! persisted state, on the earlier executions of the same tick; an async run depends on
-//! what it received and on the tick executions at its location since its previous run. A
-//! static slice of the program ([`Level::Slice`]) narrows these rules per sink; record-level
-//! provenance ([`Level::Record`]) and counterfactual replay ([`Level::Counterfactual`])
-//! replace them.
+//! persisted state, on the earlier executions at its node; an async run depends on what it
+//! received and on the tick executions at its location since its previous run. This is
+//! [`Level::Execution`]. Record-level provenance ([`Level::Record`], the default)
+//! replaces these rules with the delivery ids each element was computed from, and derives
+//! the records the provenance rewrite could not see into by counterfactual replay of the
+//! node.
 //!
 //! Scripted batch hooks are optional precision, not a soundness requirement: a hooked
 //! batch's releases say exactly which tick execution consumed a message, and are what
@@ -103,7 +107,7 @@ pub use crate::sim::observe::{LabelPlan, NotCheckedReason};
 use crate::sim::runtime::{
     CrashPoint, DeliveryId, ExecId, LineageEvent, NodeKey, SendFate, SendKey,
 };
-use crate::sim::slice::{ChannelInfo, EcCollection, SinkSlice, SliceInput, Slices};
+use crate::sim::slice::{ChannelInfo, EcCollection, Slices};
 use crate::sim::spec::{Spec, SpecParts};
 use crate::sim::viz::Trace;
 use crate::sim::viz::provenance::{
@@ -298,8 +302,8 @@ pub struct Dependency {
     pub message: Message,
     /// The sending node's label and the message's position among that node's sends in the
     /// run it was observed in, when the sender is crashable. The position is exact (not
-    /// clamped to the end of finite failures): it is what decides whether a crash point kills
-    /// the delivery, and the simulator's crash fires wherever its message is sent (see
+    /// clamped to the end of finite failures): together with the run's send sequence and its
+    /// pre-`EFF` send counts it decides whether a crash point kills the delivery (see
     /// [`Self::killed_by`]).
     pub sender: Option<(String, u64)>,
     /// Whether the channel admits omission.
@@ -315,17 +319,20 @@ pub type SendSequences = BTreeMap<String, Vec<SendId>>;
 pub type PreEffSends = BTreeMap<String, usize>;
 
 impl Dependency {
-    /// Whether `fault` prevents this delivery, in a run whose crashable nodes sent `sends`.
+    /// Whether `fault` prevents this delivery, in a run whose crashable nodes sent `sends`,
+    /// `pre_eff` of them before the end of finite failures.
     ///
-    /// A crash point is named by a message, and the simulator kills the node right after it
-    /// sends that message in *whatever* run, before or after the end of finite failures (a
-    /// message sent before `EFF` in the run that minted the crash point may be sent after it
-    /// in the run of another hypothesis). So the relation is exact position arithmetic in
-    /// this run: the crash kills the delivery iff `m` was sent before it. Clamping either
-    /// side to `EFF` would make the clause claim a crash kills nothing of what it does kill,
-    /// and a hypothesis that breaks the goal would never be a hitting set (a false
-    /// certificate).
-    pub fn killed_by(&self, fault: &Fault, sends: &SendSequences) -> bool {
+    /// A crash point is named by a message `m`, and the simulator kills the node right after
+    /// it sends `m` **if that happens before `EFF`** in this run (every failure happens at a
+    /// time `≤ EFF`; see the module docs). So the relation is exact position arithmetic in
+    /// this run: the crash kills the delivery iff `m` is among the sender's pre-`EFF` sends
+    /// and was sent before the delivery. A message sent before `EFF` in the run that minted
+    /// the crash point may be sent after it in the run of another hypothesis; the crash then
+    /// does not happen there and kills nothing. Clamping the delivery's own position to `EFF`
+    /// would make the clause claim a crash kills nothing of what it does kill (a post-`EFF`
+    /// delivery is killed by every earlier pre-`EFF` crash), and a hypothesis that breaks the
+    /// goal would never be a hitting set (a false certificate).
+    pub fn killed_by(&self, fault: &Fault, sends: &SendSequences, pre_eff: &PreEffSends) -> bool {
         match fault {
             Fault::Omit(message) => self.lossy && *message == self.message,
             Fault::Crash { node, after } => {
@@ -337,10 +344,13 @@ impl Dependency {
                 }
                 match after {
                     None => true,
-                    Some(m) => sends
-                        .get(node)
-                        .and_then(|seq| seq.iter().position(|s| s == m))
-                        .is_some_and(|at| (at as u64) < *ordinal),
+                    Some(m) => {
+                        let fires_before = pre_eff.get(node).copied().unwrap_or(0);
+                        sends
+                            .get(node)
+                            .and_then(|seq| seq.iter().take(fires_before).position(|s| s == m))
+                            .is_some_and(|at| (at as u64) < *ordinal)
+                    }
                 }
             }
         }
@@ -349,13 +359,11 @@ impl Dependency {
     /// The weakest faults that kill this delivery: its omission (if lossy) and the crash of
     /// its sender right after the send preceding this one (if crashable).
     ///
-    /// Crash points are minted before the end of finite failures only (`pre_eff`: the
-    /// finite-failures assumption covers crashes as well as omissions, and the run after
-    /// `EFF` is the window in which the protocol is expected to converge). A delivery sent
-    /// after `EFF` is therefore killed, among the crash points this search proposes, by the
-    /// ones that kill the sender's last pre-`EFF` send, and the weakest of those is the crash
-    /// right after that send. The clamp is on the *proposal* only; [`Self::killed_by`] uses
-    /// the exact position.
+    /// Crash points are named by pre-`EFF` sends only (`pre_eff`): every failure happens at
+    /// a time `≤ EFF`, and the run after `EFF` is the window in which the protocol is expected
+    /// to converge. A delivery sent after `EFF` is therefore killed by every crash point of
+    /// its sender that fires in this run, and the weakest of those is the crash right after
+    /// the sender's last pre-`EFF` send. [`Self::killed_by`] uses the exact position.
     fn candidate_faults(&self, sends: &SendSequences, pre_eff: &PreEffSends) -> Vec<Fault> {
         let mut faults = vec![];
         if self.lossy {
@@ -438,13 +446,12 @@ pub struct Schedule {
     /// Every crashable node's send sequence (the meaning of crash points in this run).
     pub sends: Rc<SendSequences>,
     /// Per crashable node, how many of its sends happened before the end of finite failures:
-    /// the crash points the search *proposes* are `crash(node before any send)` and
-    /// `crash(node after m)` for those `m` only. The finite-failures assumption covers crashes
-    /// as well as omissions: after `EFF` no new fault, and the run's remainder is the window
-    /// in which the protocol is expected to converge. A crash point is named by its message,
-    /// though, and fires in every run right after that message is sent, which in the run of
-    /// another hypothesis may be after `EFF`; whether it kills a delivery there is exact
-    /// position arithmetic ([`Dependency::killed_by`]), never clamped.
+    /// the crash points that can fire in this run are `crash(node before any send)` and
+    /// `crash(node after m)` for those `m` only, and they are the only ones the search
+    /// *proposes*. Every failure happens at a time `≤ EFF` (Molly's fault model, enforced by
+    /// the simulator's filter): a crash point named by a message that this run sends only
+    /// after `EFF`, or never, does not fire here. Whether a crash point kills a delivery is
+    /// exact position arithmetic within the pre-`EFF` prefix ([`Dependency::killed_by`]).
     pub pre_eff_sends: PreEffSends,
     /// The lineage of the outputs the body required (the goal's pre-condition), whose sends
     /// the search wants to preserve.
@@ -454,7 +461,8 @@ pub struct Schedule {
     /// Whether the body declared the run vacuous ([`Run::mark_vacuous`]: the goal's
     /// pre-condition failed, so the run says nothing about the protocol).
     pub vacuous: bool,
-    /// Counterfactual replays run to derive this schedule's lineage ([`Level::Counterfactual`]).
+    /// Counterfactual replays run to derive this schedule's lineage (at opaque records under
+    /// [`Level::Record`], and at the observer for a hand-written specification view).
     pub replays: usize,
     /// Derivation steps where the node did not reproduce its output under replay and the
     /// closure fell back to the recorded lineage.
@@ -471,8 +479,8 @@ pub struct Clause {
     pub deps: Derivation,
     /// The run's send sequences.
     pub sends: Rc<SendSequences>,
-    /// The run's pre-`EFF` send counts (see [`Schedule::pre_eff_sends`]): where the crash
-    /// points this clause proposes may lie.
+    /// The run's pre-`EFF` send counts (see [`Schedule::pre_eff_sends`]): the crash points
+    /// that fire in this run, and so the ones this clause proposes and is hit by.
     pub pre_eff_sends: PreEffSends,
     /// The crashes of the hypothesis the derivation was observed under. A derivation found in
     /// a world where a node was absent is sufficient only there: a goal such as agreement is
@@ -486,7 +494,7 @@ impl Clause {
     pub fn hit_by(&self, fault: &Fault) -> bool {
         self.deps
             .iter()
-            .any(|dep| dep.killed_by(fault, &self.sends))
+            .any(|dep| dep.killed_by(fault, &self.sends, &self.pre_eff_sends))
     }
 
     /// Every fault that kills some delivery of this clause.
@@ -1576,7 +1584,6 @@ struct OutputRecord {
 
 /// A top-level receive, resolved against the sends by delivery id.
 struct RecvRecord {
-    channel: usize,
     /// Index into `sent` of the send.
     producer: Option<usize>,
 }
@@ -1610,7 +1617,7 @@ struct Lineage<'a> {
     hooks: HashMap<(usize, Option<u32>), TracedHook>,
     /// Releases that matched no send although their hook batches a channel (diagnostic).
     unmatched_releases: usize,
-    /// The replay oracle ([`Level::Counterfactual`]).
+    /// The replay oracle (see [`Level::Record`]).
     replayer: Option<&'a Replayer<'a>>,
     /// Counterfactual derivations of sends, by index into `sent`.
     send_memo: RefCell<HashMap<usize, Derivation>>,
@@ -1776,7 +1783,7 @@ impl<'a> Lineage<'a> {
         }
 
         // A receive names its send by delivery id.
-        for (exec, channel, node, id) in raw_recvs {
+        for (exec, _channel, node, id) in raw_recvs {
             let producer = lineage.by_id.get(&id).copied();
             if let Some(i) = producer {
                 lineage
@@ -1789,7 +1796,7 @@ impl<'a> Lineage<'a> {
                 .recvs
                 .entry(exec)
                 .or_default()
-                .push(RecvRecord { channel, producer });
+                .push(RecvRecord { producer });
         }
 
         // Match each hook release to the send that produced it. A hook's releases are the
@@ -1974,15 +1981,14 @@ impl<'a> Lineage<'a> {
 
     /// The sender and ordinal a dependency on `record` is killed through: the sender's
     /// `ordinal`-th send, exactly. The ordinal is **not** clamped to the sender's count of
-    /// pre-`EFF` sends: a crash point is named by a message and the simulator fires it right
-    /// after that message in every run, before or after `EFF` (`FaultState::filter`), so a
-    /// clause has to know the real order of the sender's sends to say which of them a given
-    /// crash point kills. (An earlier version clamped here, on the assumption that crash points
-    /// lie before `EFF`; a crash point minted in a run where its message was pre-`EFF` fires
-    /// post-`EFF` in the run of another hypothesis, and the clamp then declared it harmless
-    /// to every post-`EFF` delivery of that run — the hypothesis that broke the goal was never
-    /// a hitting set, and the search certified a buggy protocol.) The clamp belongs to the
-    /// proposal of crash points only ([`Dependency::candidate_faults`]).
+    /// pre-`EFF` sends: a crash point is named by a message and fires right after that message
+    /// when it is sent before `EFF` (`FaultState::filter`), killing every later send, before
+    /// or after `EFF`; so a clause has to know the real order of the sender's sends to say
+    /// which of them a given crash point kills. (An earlier version clamped here, which
+    /// declared every pre-`EFF` crash harmless to the sender's post-`EFF` sends; the hypothesis
+    /// that broke the goal was never a hitting set, and the search certified a buggy
+    /// protocol.) Which crash points fire in a run is decided from the run's pre-`EFF` send
+    /// counts, in [`Dependency::killed_by`] and [`Dependency::candidate_faults`].
     fn crash_ordinal(&self, record: &SentRecord) -> Option<(String, u64)> {
         record.sender.clone()
     }
@@ -2169,35 +2175,24 @@ impl<'a> Lineage<'a> {
         });
     }
 
-    /// The level tag of the execution-graph closure through `sink`.
-    fn closure_level(&self, sink: Option<usize>) -> ProvLevel {
-        if sink.and_then(|s| self.slices.precise(s)).is_some() {
-            ProvLevel::Slice
-        } else {
-            ProvLevel::Execution
-        }
-    }
-
     /// The derivation of one output, at the configured lineage level.
     fn derive(&self, output: &OutputRecord) -> Derivation {
         let anchor = self.prov_output_node(output);
         match self.level {
-            Level::Execution => self.closure(output.exec, None, anchor),
-            Level::Slice => self.closure(output.exec, Some(output.sink), anchor),
+            Level::Execution => self.closure(output.exec, anchor),
             Level::Record => {
                 if is_opaque(&output.prov) {
                     self.counterfactual_output(output, anchor)
                 } else {
-                    self.record_closure(&output.prov, output.exec, Some(output.sink), anchor)
+                    self.record_closure(&output.prov, output.exec, anchor)
                 }
             }
-            Level::Counterfactual => self.counterfactual_output(output, anchor),
         }
     }
 
     /// The derivation of a send, at the configured level (memoized by index into `sent`):
-    /// record-level where the record carries provenance, by replay where it is opaque or
-    /// under [`Level::Counterfactual`], slice-level otherwise.
+    /// record-level where the record carries provenance, by replay where it is opaque under
+    /// [`Level::Record`], execution-level otherwise.
     fn send_derivation(&self, i: usize) -> Derivation {
         if let Some(derivation) = self.send_memo.borrow().get(&i) {
             if self.recording()
@@ -2212,9 +2207,10 @@ impl<'a> Lineage<'a> {
         let anchor = self.prov_message_node(i);
         let record = &self.sent[i];
         let derivation = match self.level {
-            Level::Counterfactual => self.counterfactual_send(i, anchor),
             Level::Record if is_opaque(&record.prov) => self.counterfactual_send(i, anchor),
-            _ => self.record_closure(&record.prov, record.exec, Some(record.channel), anchor),
+            Level::Record | Level::Execution => {
+                self.record_closure(&record.prov, record.exec, anchor)
+            }
         };
         if let Some(sub) = self.with_prov(ProvRecorder::pop) {
             self.send_prov_memo.borrow_mut().insert(i, sub);
@@ -2225,13 +2221,13 @@ impl<'a> Lineage<'a> {
 
     /// The recorded (non-counterfactual) derivation of a send, as the fallback when replay
     /// cannot reproduce it: record-level where the record carries real provenance,
-    /// slice-level otherwise (including opaque records).
+    /// execution-level otherwise (including opaque records).
     fn recorded_send_closure(&self, i: usize, anchor: Option<usize>) -> Derivation {
         let record = &self.sent[i];
         if is_opaque(&record.prov) {
-            self.closure(record.exec, Some(record.channel), anchor)
+            self.closure(record.exec, anchor)
         } else {
-            self.record_closure(&record.prov, record.exec, Some(record.channel), anchor)
+            self.record_closure(&record.prov, record.exec, anchor)
         }
     }
 
@@ -2242,15 +2238,15 @@ impl<'a> Lineage<'a> {
             .map(|(location, member, _)| (location.root().clone(), *member))
     }
 
-    /// [`Level::Counterfactual`] for an output: the 1-minimal set of deliveries at the
-    /// producing node without which it no longer produces the output, each followed to the
-    /// send that produced it.
+    /// Counterfactual replay for an output (an opaque record under [`Level::Record`]): the
+    /// 1-minimal set of deliveries at the producing node without which it no longer produces
+    /// the output, each followed to the send that produced it.
     fn counterfactual_output(&self, output: &OutputRecord, anchor: Option<usize>) -> Derivation {
         let fallback = |anchor: Option<usize>| {
             if is_opaque(&output.prov) {
-                self.closure(output.exec, Some(output.sink), anchor)
+                self.closure(output.exec, anchor)
             } else {
-                self.record_closure(&output.prov, output.exec, Some(output.sink), anchor)
+                self.record_closure(&output.prov, output.exec, anchor)
             }
         };
         let Some(node) = self.exec_node(output.exec) else {
@@ -2361,7 +2357,7 @@ impl<'a> Lineage<'a> {
             self.prov_base_node(
                 anchor,
                 "local input only (no delivery to remove)",
-                ProvLevel::Counterfactual,
+                ProvLevel::Replay,
             );
             return Derivation::new();
         }
@@ -2443,7 +2439,7 @@ impl<'a> Lineage<'a> {
                     anchor,
                     kept,
                     ProvEdgeKind::Counterfactual,
-                    Some(ProvLevel::Counterfactual),
+                    Some(ProvLevel::Replay),
                 );
                 derivation.extend(self.send_derivation(send));
             }
@@ -2495,19 +2491,12 @@ impl<'a> Lineage<'a> {
 
     /// The record-level backward closure: delivery ids → the sends that produced them →
     /// their delivery ids. Without record-level provenance in the program this is the
-    /// slice-level closure of the execution. With it, a record's provenance is exact: every
-    /// network arrival carries the id of its send, and an empty set means the record was
-    /// computed from nothing that came off a channel (a constant, a timer, an external
-    /// input).
-    fn record_closure(
-        &self,
-        prov: &[u64],
-        exec: ExecId,
-        sink: Option<usize>,
-        anchor: Option<usize>,
-    ) -> Derivation {
+    /// execution-level closure. With it, a record's provenance is exact: every network
+    /// arrival carries the id of its send, and an empty set means the record was computed
+    /// from nothing that came off a channel (a constant, a timer, an external input).
+    fn record_closure(&self, prov: &[u64], exec: ExecId, anchor: Option<usize>) -> Derivation {
         if !self.provenance {
-            return self.closure(exec, sink, anchor);
+            return self.closure(exec, anchor);
         }
         let mut derivation = Derivation::new();
         let mut visited: BTreeSet<u64> = BTreeSet::new();
@@ -2770,21 +2759,14 @@ impl<'a> Lineage<'a> {
     /// [`Self::derive`].
     fn derive_final(&self, output: &OutputRecord) -> Derivation {
         let by_replay = match self.level {
-            Level::Counterfactual => true,
             Level::Record => is_opaque(&output.prov),
-            Level::Execution | Level::Slice => false,
+            Level::Execution => false,
         };
         if !by_replay {
             return self.derive(output);
         }
         let anchor = self.prov_output_node(output);
-        let fallback = |anchor: Option<usize>| {
-            if is_opaque(&output.prov) {
-                self.closure(output.exec, Some(output.sink), anchor)
-            } else {
-                self.record_closure(&output.prov, output.exec, Some(output.sink), anchor)
-            }
-        };
+        let fallback = |anchor: Option<usize>| self.closure(output.exec, anchor);
         let Some(node) = self.exec_node(output.exec) else {
             return fallback(anchor);
         };
@@ -2832,42 +2814,36 @@ impl<'a> Lineage<'a> {
             .collect()
     }
 
-    /// The backward closure of what execution `root` produced through sink `sink` (`None`:
-    /// everything it produced). Each visited `(execution, sink)` contributes the channel
-    /// deliveries that sink's static slice names (see [`crate::sim::slice`]), or every
-    /// delivery into the execution and its predecessors when the slice is unknown.
-    fn closure(&self, root: ExecId, sink: Option<usize>, anchor: Option<usize>) -> Derivation {
+    /// The execution-level backward closure of what execution `root` produced. Each visited
+    /// execution contributes every channel delivery that reached it (a hook release, a
+    /// top-level receive, an arrival at its node that an unscripted batch may have released)
+    /// and, as a sound over-approximation of persisted state, the earlier executions at its
+    /// node.
+    fn closure(&self, root: ExecId, anchor: Option<usize>) -> Derivation {
         let mut derivation = Derivation::new();
         let mut visited = BTreeSet::new();
-        let mut stack = vec![(root, sink)];
+        let mut stack = vec![root];
+        let level = Some(ProvLevel::Execution);
         self.prov_edge(
             anchor,
             self.prov_exec_node(root),
             ProvEdgeKind::Produced,
-            Some(self.closure_level(sink)),
+            level,
         );
-        while let Some((exec, sink)) = stack.pop() {
-            if !visited.insert((exec, sink)) {
+        while let Some(exec) = stack.pop() {
+            if !visited.insert(exec) {
                 continue;
             }
             let Some((location, member, is_tick)) = self.execs.get(&exec) else {
                 continue;
             };
-            let slice = sink.and_then(|s| self.slices.precise(s));
             let node = (location.clone(), *member);
             let root_node = (location.root().clone(), *member);
-            let level = Some(if slice.is_some() {
-                ProvLevel::Slice
-            } else {
-                ProvLevel::Execution
-            });
             let exec_node = self.prov_exec_node(exec);
 
             // A send is a dependency (a fault could prevent its delivery), and leads to the
             // execution that performed it.
-            let take_send = |i: usize,
-                             derivation: &mut Derivation,
-                             stack: &mut Vec<(ExecId, Option<usize>)>| {
+            let take_send = |i: usize, derivation: &mut Derivation, stack: &mut Vec<ExecId>| {
                 let dependency = self.send_dependency(i);
                 if dependency.lossy || dependency.sender.is_some() {
                     derivation.insert(dependency);
@@ -2881,114 +2857,43 @@ impl<'a> Lineage<'a> {
                     ProvEdgeKind::Produced,
                     level,
                 );
-                stack.push((record.exec, Some(record.channel)));
+                stack.push(record.exec);
             };
-
-            // A hook release that came off a channel is a dependency on its send; one that
-            // did not is the output of a local tick, batched.
-            let take_release =
-                |release: &ReleaseRecord,
-                 derivation: &mut Derivation,
-                 stack: &mut Vec<(ExecId, Option<usize>)>| match release.send {
-                    Some(i) => take_send(i, derivation, stack),
-                    None => {
-                        for tick in self
-                            .slices
-                            .hook_yields
-                            .get(&release.hook_id)
-                            .into_iter()
-                            .flatten()
-                        {
-                            self.push_ticks_before(tick, *member, exec, None, None, level, stack);
-                        }
-                    }
-                };
-
-            let take_recv = |recv: &RecvRecord,
-                             derivation: &mut Derivation,
-                             stack: &mut Vec<(ExecId, Option<usize>)>| {
-                if let Some(i) = recv.producer {
-                    take_send(i, derivation, stack);
-                }
-            };
-
-            // Every arrival on `channel` at this node before `exec`: what an unscripted
-            // batch may have released into it.
-            let take_arrivals_before =
-                |channel: Option<usize>,
-                 derivation: &mut Derivation,
-                 stack: &mut Vec<(ExecId, Option<usize>)>| {
-                    for (recv_exec, i) in self.recvs_at.get(&root_node).into_iter().flatten() {
-                        if *recv_exec < exec && channel.is_none_or(|c| self.sent[*i].channel == c) {
-                            take_send(*i, derivation, stack);
-                        }
-                    }
-                };
 
             if *is_tick {
-                if let Some(slice) = slice {
-                    let direct = |hook: usize| {
-                        slice.direct.contains(&SliceInput::Hook(hook))
-                            || slice.carried.contains(&SliceInput::Hook(hook))
-                    };
-                    let carried = |hook: usize| slice.carried.contains(&SliceInput::Hook(hook));
-                    for release in self.released.get(&exec).into_iter().flatten() {
-                        if direct(release.hook_id) {
-                            take_release(release, &mut derivation, &mut stack);
-                        }
-                    }
-                    // State carried from earlier executions of this tick.
-                    if !slice.carried.is_empty() {
-                        for earlier in self.ticks_at.get(&node).into_iter().flatten() {
-                            if *earlier >= exec {
-                                break;
-                            }
-                            for release in self.released.get(earlier).into_iter().flatten() {
-                                if carried(release.hook_id) {
-                                    take_release(release, &mut derivation, &mut stack);
-                                }
+                // A hook release that came off a channel is a dependency on its send; one
+                // that did not is the output of a local tick, batched.
+                for release in self.released.get(&exec).into_iter().flatten() {
+                    match release.send {
+                        Some(i) => take_send(i, &mut derivation, &mut stack),
+                        None => {
+                            for tick in self
+                                .slices
+                                .hook_yields
+                                .get(&release.hook_id)
+                                .into_iter()
+                                .flatten()
+                            {
+                                self.push_ticks_before(tick, *member, exec, None, &mut stack);
                             }
                         }
                     }
-                    // Channels and local ticks consumed through unscripted batches.
-                    for input in slice.direct.iter().chain(&slice.carried) {
-                        match input {
-                            SliceInput::Channel(channel) => {
-                                take_arrivals_before(Some(*channel), &mut derivation, &mut stack);
-                            }
-                            SliceInput::Yield(tick) => {
-                                self.push_ticks_before(
-                                    tick, *member, exec, None, None, level, &mut stack,
-                                );
-                            }
-                            SliceInput::Hook(_) => {}
-                        }
+                }
+                // Every arrival at the node so far (an unscripted batch may have released
+                // it), and persisted state: earlier executions of the same tick and of every
+                // other tick at the node (their yields may have been batched).
+                for (recv_exec, i) in self.recvs_at.get(&root_node).into_iter().flatten() {
+                    if *recv_exec < exec {
+                        take_send(*i, &mut derivation, &mut stack);
                     }
-                } else {
-                    for release in self.released.get(&exec).into_iter().flatten() {
-                        take_release(release, &mut derivation, &mut stack);
-                    }
-                    // Every arrival at the node so far (an unscripted batch may have
-                    // released it), and persisted state: earlier executions of the same
-                    // tick and of every other tick at the node (their yields may have been
-                    // batched).
-                    take_arrivals_before(None, &mut derivation, &mut stack);
-                    #[expect(
-                        clippy::disallowed_methods,
-                        reason = "pushes onto a stack whose order does not affect the closure"
-                    )]
-                    for (tick_location, tick_member) in self.ticks_at.keys() {
-                        if tick_location.root() == location.root() && tick_member == member {
-                            self.push_ticks_before(
-                                tick_location,
-                                *member,
-                                exec,
-                                None,
-                                None,
-                                level,
-                                &mut stack,
-                            );
-                        }
+                }
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "pushes onto a stack whose order does not affect the closure"
+                )]
+                for (tick_location, tick_member) in self.ticks_at.keys() {
+                    if tick_location.root() == location.root() && tick_member == member {
+                        self.push_ticks_before(tick_location, *member, exec, None, &mut stack);
                     }
                 }
             } else {
@@ -3001,59 +2906,20 @@ impl<'a> Lineage<'a> {
                     .copied()
                     .filter(|a| *a < exec)
                     .max();
-                if let Some(slice) = slice {
-                    let wants = |channel: usize, inputs: &BTreeSet<SliceInput>| {
-                        inputs.contains(&SliceInput::Channel(channel))
-                    };
-                    for recv in self.recvs.get(&exec).into_iter().flatten() {
-                        if wants(recv.channel, &slice.direct) || wants(recv.channel, &slice.carried)
-                        {
-                            take_recv(recv, &mut derivation, &mut stack);
-                        }
+                for recv in self.recvs.get(&exec).into_iter().flatten() {
+                    if let Some(i) = recv.producer {
+                        take_send(i, &mut derivation, &mut stack);
                     }
-                    if !slice.carried.is_empty() {
-                        for earlier in self.asyncs_at.get(&node).into_iter().flatten() {
-                            if *earlier >= exec {
-                                break;
-                            }
-                            for recv in self.recvs.get(earlier).into_iter().flatten() {
-                                if wants(recv.channel, &slice.carried) {
-                                    take_recv(recv, &mut derivation, &mut stack);
-                                }
-                            }
-                        }
-                    }
-                    // The ticks whose yields this run consumed; the same slice applies
-                    // inside them.
-                    for input in slice.direct.iter().chain(&slice.carried) {
-                        if let SliceInput::Yield(tick) = input {
-                            self.push_ticks_before(
-                                tick, *member, exec, previous, sink, level, &mut stack,
-                            );
-                        }
-                    }
-                } else {
-                    for recv in self.recvs.get(&exec).into_iter().flatten() {
-                        take_recv(recv, &mut derivation, &mut stack);
-                    }
-                    // An async run consumes what the location's ticks yielded since its
-                    // previous run.
-                    #[expect(
-                        clippy::disallowed_methods,
-                        reason = "pushes onto a stack whose order does not affect the closure"
-                    )]
-                    for (tick_location, tick_member) in self.ticks_at.keys() {
-                        if tick_location.root() == location && tick_member == member {
-                            self.push_ticks_before(
-                                tick_location,
-                                *member,
-                                exec,
-                                previous,
-                                None,
-                                level,
-                                &mut stack,
-                            );
-                        }
+                }
+                // An async run consumes what the location's ticks yielded since its previous
+                // run.
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "pushes onto a stack whose order does not affect the closure"
+                )]
+                for (tick_location, tick_member) in self.ticks_at.keys() {
+                    if tick_location.root() == location && tick_member == member {
+                        self.push_ticks_before(tick_location, *member, exec, previous, &mut stack);
                     }
                 }
             }
@@ -3062,22 +2928,19 @@ impl<'a> Lineage<'a> {
     }
 
     /// Pushes the executions of tick `tick` at `member` before `exec` (and after `since`, if
-    /// given), to be explored through `sink`'s slice (`None`: their whole input is assumed
-    /// relevant). A yield can take more than one async run to reach a sink (an `atomic`
-    /// boundary adds a hop), so an empty window widens to the latest execution before
-    /// `exec`: an over-approximation, like the rule itself. `level` tags the recorded
-    /// provenance edges (from `exec` to each pushed execution).
-    #[expect(clippy::too_many_arguments, reason = "an internal walk step")]
+    /// given). A yield can take more than one async run to reach a sink (an `atomic` boundary
+    /// adds a hop), so an empty window widens to the latest execution before `exec`: an
+    /// over-approximation, like the rule itself. Records a `Carried` edge from `exec` to each
+    /// pushed execution.
     fn push_ticks_before(
         &self,
         tick: &LocationId,
         member: Option<u32>,
         exec: ExecId,
         since: Option<ExecId>,
-        sink: Option<usize>,
-        level: Option<ProvLevel>,
-        stack: &mut Vec<(ExecId, Option<usize>)>,
+        stack: &mut Vec<ExecId>,
     ) {
+        let level = Some(ProvLevel::Execution);
         let mut pushed = false;
         let mut latest: Option<ExecId> = None;
         let from = self.prov_exec_node(exec);
@@ -3090,14 +2953,14 @@ impl<'a> Lineage<'a> {
             if *t < exec {
                 latest = Some(*t);
                 if since.is_none_or(|s| *t > s) {
-                    stack.push((*t, sink));
+                    stack.push(*t);
                     self.prov_edge(from, self.prov_exec_node(*t), ProvEdgeKind::Carried, level);
                     pushed = true;
                 }
             }
         }
         if !pushed && let Some(t) = latest {
-            stack.push((t, sink));
+            stack.push(t);
             self.prov_edge(from, self.prov_exec_node(t), ProvEdgeKind::Carried, level);
         }
     }
@@ -3144,62 +3007,30 @@ fn payload_matches(received: &[u8], sent: &[u8], from_member: Option<u32>) -> bo
         }
 }
 
-/// A human-readable summary of the program's channels and of every sink's slice.
-fn describe_slices(slices: &Slices) -> String {
-    let channel_label = |channel: usize| -> String {
-        slices
-            .channel(channel)
-            .map(|c| c.label.clone())
-            .unwrap_or_else(|| format!("ch{channel}"))
-    };
-    let render = |inputs: &BTreeSet<SliceInput>| -> String {
-        inputs
-            .iter()
-            .map(|input| match input {
-                SliceInput::Hook(h) => format!("hook#{h}"),
-                SliceInput::Channel(c) => channel_label(*c),
-                SliceInput::Yield(t) => format!("yield({t:?})"),
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let mut lines: Vec<String> = vec![];
-    for channel in slices.channels.values() {
-        lines.push(format!(
-            "  channel#{} {:?}: {:?} → {:?}, {}",
-            channel.id,
-            channel.label,
-            channel.from,
-            channel.to,
-            if channel.lossy { "lossy" } else { "reliable" }
-        ));
-    }
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "collected into an ordered map; iteration order is irrelevant"
-    )]
-    let sinks: BTreeMap<&usize, &SinkSlice> = slices.sinks.iter().collect();
-    for (id, slice) in sinks {
-        let kind = if slices.sink_in_tick.get(id).copied().unwrap_or(false) {
-            "tick"
-        } else {
-            "async"
-        };
-        lines.push(format!(
-            "  sink#{id} ({kind}){}: direct {{{}}} carried {{{}}}",
-            if slice.opaque { " OPAQUE" } else { "" },
-            render(&slice.direct),
-            render(&slice.carried),
-        ));
-    }
-    lines.join("\n")
+/// A human-readable summary of the program's channels.
+fn describe_channels(slices: &Slices) -> String {
+    slices
+        .channels
+        .values()
+        .map(|channel| {
+            format!(
+                "  channel#{} {:?}: {:?} → {:?}, {}",
+                channel.id,
+                channel.label,
+                channel.from,
+                channel.to,
+                if channel.lossy { "lossy" } else { "reliable" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn member_label(cluster: &str, member: u32) -> String {
     format!("{cluster}@{member}")
 }
 
-/// The counterfactual replay oracle ([`Level::Counterfactual`]): runs one node alone, every
+/// The counterfactual replay oracle (see [`Level::Record`]): runs one node alone, every
 /// scripted batch hook under a replay policy, in a quiet deterministic instance, and returns
 /// what the instance recorded.
 struct Replayer<'a> {
@@ -3257,24 +3088,33 @@ impl Search {
     }
 }
 
-/// Which lineage the backward closure follows.
+/// Which lineage oracle the backward closure follows.
+///
+/// Both levels run the same search on the same program; only the derivation of a goal
+/// differs. `Record` is the default and the recommended level wherever the program compiles
+/// with `SimFlow::with_provenance`; `Execution` is the fallback for a program that does not
+/// (the search selects it by itself then). An earlier version had two more levels, a
+/// static-slice narrowing of the execution closure and counterfactual replay as a level of its
+/// own; measured on 2PC, ISR, reliable broadcast, Raft and Paxos
+/// (`docs/design/ldfi-level-ablation.md`), the slice never separated a record from the inputs
+/// of its execution, and standalone replay produced the derivations of `Record` wherever
+/// `Record` applied, at two to ten times the cost. Replay survives as `Record`'s oracle for
+/// opaque records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {
-    /// Level 0: every output of an execution depends on every input of it and of every
-    /// earlier execution of the same tick.
+    /// Every output of an execution depends on every input of it and of every earlier
+    /// execution at its node (persisted state): the execution-granular lineage log read
+    /// directly. Sound for any program, including one compiled without provenance.
     Execution,
-    /// Level 1 (default): as above, narrowed by the static slice of the producing sink.
-    Slice,
-    /// Level 2: record-level provenance (requires `SimFlow::with_provenance`); falls back
-    /// to Level 1 where a record carries none.
+    /// Record-level provenance (requires `SimFlow::with_provenance`): each element carries
+    /// the delivery ids it was computed from. Where an element came out of a closure the
+    /// rewrite cannot see into (`Prov::OPAQUE`), the step is derived by **counterfactual
+    /// replay** of the node alone: its recorded deliveries are removed one at a time, and a
+    /// delivery is in the derivation iff the node stops producing the record without it (a
+    /// 1-minimal sufficient set, latest deliveries removed first). Where replay does not
+    /// reproduce the record with every delivery kept, or there is no replay oracle, the step
+    /// falls back to the execution closure.
     Record,
-    /// Level 3: counterfactual lineage by replay. Each node is re-executed alone, with its
-    /// recorded deliveries held fixed, once per candidate delivery removed; a delivery is in
-    /// the derivation iff the node stops producing the output without it (a 1-minimal
-    /// sufficient set, latest deliveries removed first). Sees through closures and state the
-    /// static slice and the provenance rewrite cannot. Falls back to Level 2 (or 1) where a
-    /// node does not reproduce its output under replay with everything kept.
-    Counterfactual,
 }
 
 /// An LDFI search configuration: the crashable nodes, the goal, and the budgets. The
@@ -3310,7 +3150,7 @@ impl Ldfi {
             },
             strategy: Strategy::Lineage,
             exploration: Exploration::Exhaustive,
-            level: Level::Slice,
+            level: Level::Record,
             crash_budget: 0,
             max_hypotheses: 256,
             log: true,
@@ -3346,23 +3186,32 @@ impl Ldfi {
         self
     }
 
-    /// Selects which lineage the backward closure follows (default [`Level::Slice`]).
+    /// Selects which lineage the backward closure follows (default [`Level::Record`]). A
+    /// program compiled without `SimFlow::with_provenance` is searched at
+    /// [`Level::Execution`] whatever is selected here.
     #[must_use]
     pub fn level(mut self, level: Level) -> Self {
         self.level = level;
         self
     }
 
-    /// Reads the lineage level from `LDFI_LEVEL` (`exec`, `slice`, `record`, `replay`) if
-    /// set; for experiments that compare levels without recompiling the test.
+    /// Reads the lineage level from `LDFI_LEVEL` (`exec` or `record`) if set; for experiments
+    /// that compare levels without recompiling the test.
     #[must_use]
     pub fn level_from_env(self) -> Self {
         match std::env::var("LDFI_LEVEL").as_deref() {
-            Ok("exec") => self.level(Level::Execution),
-            Ok("slice") => self.level(Level::Slice),
+            Ok("exec" | "execution") => self.level(Level::Execution),
             Ok("record") => self.level(Level::Record),
-            Ok("replay" | "counterfactual") => self.level(Level::Counterfactual),
             _ => self,
+        }
+    }
+
+    /// The level the search runs at on `sim`: the configured one, or [`Level::Execution`] when
+    /// the program was compiled without record-level provenance.
+    fn effective_level(&self, sim: &CompiledSim) -> Level {
+        match self.level {
+            Level::Record if !sim.provenance => Level::Execution,
+            level => level,
         }
     }
 
@@ -3608,13 +3457,17 @@ impl Ldfi {
         let mut vacuous_sets: Vec<FaultSet> = vec![];
         let mut tried: BTreeSet<FaultSet> = BTreeSet::new();
         let mut faults = FaultSet::new();
-        let tag = match (self.strategy, self.level) {
+        let level = self.effective_level(sim);
+        let tag = match (self.strategy, level) {
             (Strategy::Blind, _) => "blind",
-            (Strategy::Lineage, Level::Execution) => "ldfi/L0",
-            (Strategy::Lineage, Level::Slice) => "ldfi",
-            (Strategy::Lineage, Level::Record) => "ldfi/L2",
-            (Strategy::Lineage, Level::Counterfactual) => "ldfi/L3",
+            (Strategy::Lineage, Level::Execution) => "ldfi/exec",
+            (Strategy::Lineage, Level::Record) => "ldfi",
         };
+        if self.log && level != self.level {
+            eprintln!(
+                "{tag}: the program was compiled without record-level provenance (`SimFlow::with_provenance`); searching at {level:?}"
+            );
+        }
         let mut slices: Option<Rc<Slices>> = None;
 
         loop {
@@ -3638,7 +3491,7 @@ impl Ldfi {
                         final_witnesses: RefCell::new(vec![]),
                         requirements: RefCell::new(vec![]),
                         vacuous: Cell::new(false),
-                        level: self.level,
+                        level,
                         hooks: RefCell::new(vec![]),
                     };
                     run.install();
@@ -3733,14 +3586,13 @@ impl Ldfi {
                     });
                 }
                 for dep in &schedule.requirements {
-                    // A requirement's send after `EFF` is preserved by the crash right after
-                    // the sender's first post-`EFF` send, the earliest point the proposal
-                    // vocabulary reaches (crash points are minted pre-`EFF`; see
-                    // `Dependency::candidate_faults`).
+                    // The weakest crash that preserves a requirement's send is the crash right
+                    // after it. A requirement sent after `EFF` has no preserve point: every
+                    // crash that fires in this run (a pre-`EFF` one) kills it.
                     if let Some((node, ordinal)) = &dep.sender
                         && let Some(send) = schedule.sends.get(node).and_then(|seq| {
                             let cap = schedule.pre_eff_sends.get(node).copied().unwrap_or(0);
-                            seq.get((*ordinal as usize).min(cap))
+                            seq[..cap.min(seq.len())].get(*ordinal as usize)
                         })
                     {
                         preserve_points.insert(Fault::Crash {
@@ -3772,10 +3624,7 @@ impl Ldfi {
                 && runs.is_empty()
                 && let Some(slices) = &slices
             {
-                eprintln!(
-                    "{tag}: channels and static slices:\n{}",
-                    describe_slices(slices)
-                );
+                eprintln!("{tag}: channels:\n{}", describe_channels(slices));
                 if let Some(Goal::Spec(spec)) = &search.goal {
                     eprintln!(
                         "{tag}: specification is {}",
@@ -4181,6 +4030,7 @@ impl Ldfi {
 
         let search = &self.search;
         self.assert_label_chosen();
+        let level = self.effective_level(sim);
         let goal_port = match &search.goal {
             Some(Goal::Any { port } | Goal::AllMembers { port, .. }) => Some(*port),
             Some(Goal::Witnessed | Goal::Spec(_)) | None => None,
@@ -4221,7 +4071,7 @@ impl Ldfi {
                         final_witnesses: RefCell::new(vec![]),
                         requirements: RefCell::new(vec![]),
                         vacuous: Cell::new(false),
-                        level: self.level,
+                        level,
                         hooks: RefCell::new(vec![]),
                     };
                     run.install();
@@ -4307,7 +4157,7 @@ impl Ldfi {
                     final_witnesses: RefCell::new(vec![]),
                     requirements: RefCell::new(vec![]),
                     vacuous: Cell::new(false),
-                    level: self.level,
+                    level,
                     hooks: RefCell::new(vec![]),
                 };
                 run.install();
@@ -4665,33 +4515,33 @@ mod tests {
         let killed: Vec<bool> = clauses[0]
             .deps
             .iter()
-            .map(|d| d.killed_by(&later, &sends))
+            .map(|d| d.killed_by(&later, &sends, &clauses[0].pre_eff_sends))
             .collect();
         assert_eq!(killed, [false, true]);
         let earlier = Fault::Crash {
             node: "s".to_owned(),
             after: None,
         };
-        assert!(
-            clauses[0]
-                .deps
-                .iter()
-                .all(|d| d.killed_by(&earlier, &sends))
-        );
+        assert!(clauses[0].deps.iter().all(|d| d.killed_by(
+            &earlier,
+            &sends,
+            &clauses[0].pre_eff_sends
+        )));
         // In a run where `m0` was never sent, a crash after it never fires.
         let other_run = Rc::new(SendSequences::from([("s".to_owned(), vec![m1])]));
-        assert!(!reliable("to@1", 42, "s", 0).killed_by(&later, &other_run));
+        let other_pre_eff: PreEffSends = [("s".to_owned(), 1)].into_iter().collect();
+        assert!(!reliable("to@1", 42, "s", 0).killed_by(&later, &other_run, &other_pre_eff));
     }
 
-    /// A crash point fires wherever its message is sent, including after the end of finite
-    /// failures in the run of another hypothesis, and kills every later send there; the
-    /// clause must say so. Only the *proposal* of crash points is confined to pre-`EFF` sends.
-    /// (The ISR unclean-election bug needs `crash(leader after client-ack)` in a run where the
-    /// acknowledgement, pre-`EFF` in the run that minted the crash point, moved after `EFF`;
-    /// with the kill relation clamped at `EFF` the counterexample was never a hitting set and
-    /// the search certified the bug.)
+    /// Every failure happens at a time `≤ EFF`: a crash point named by a message that this run
+    /// sends only after the end of finite failures does not fire here and kills nothing, while
+    /// a pre-`EFF` crash point kills every later send, including the post-`EFF` ones; the
+    /// clause must say both. Only pre-`EFF` crash points are proposed. (The ISR
+    /// unclean-election bug needs `crash(leader after client-ack)` to kill the leader's later
+    /// heartbeats; with the kill relation clamped at `EFF` the counterexample was never a
+    /// hitting set and the search certified the bug.)
     #[test]
-    fn post_eff_crash_point_kills_later_sends_but_is_not_proposed() {
+    fn crash_points_fire_only_before_eff_and_kill_every_later_send() {
         // The sender's run: `a`, `b` before EFF; `c`, `d` after it.
         let (a, b, c, d) = (send(0, 1), send(0, 2), send(0, 3), send(0, 4));
         let sends = Rc::new(SendSequences::from([(
@@ -4699,28 +4549,37 @@ mod tests {
             vec![a.clone(), b.clone(), c.clone(), d.clone()],
         )]));
         let pre_eff: PreEffSends = [("s".to_owned(), 2)].into_iter().collect();
+        let dep_b = reliable("to", 2, "s", 1);
         let dep_d = reliable("to", 4, "s", 3);
         let after = |m: &SendId| Fault::Crash {
             node: "s".to_owned(),
             after: Some(m.clone()),
         };
-        // Exact position arithmetic: the crash after `c` (a post-EFF point, minted in some
-        // other run where `c` was pre-EFF) kills `d`; the crash after `d` does not.
-        assert!(dep_d.killed_by(&after(&c), &sends));
-        assert!(dep_d.killed_by(&after(&b), &sends));
-        assert!(!dep_d.killed_by(&after(&d), &sends));
-        // Proposal: the weakest crash point *before EFF* that kills `d` is the one right after
-        // the last pre-EFF send, `b`; neither `c` nor `d` is minted as a crash point.
+        // A pre-EFF crash point kills every later send, post-EFF ones included.
+        assert!(dep_d.killed_by(&after(&a), &sends, &pre_eff));
+        assert!(dep_d.killed_by(&after(&b), &sends, &pre_eff));
+        assert!(dep_b.killed_by(&after(&a), &sends, &pre_eff));
+        assert!(!dep_b.killed_by(&after(&b), &sends, &pre_eff));
+        // A crash point named by a post-EFF send of this run (minted in some other run where
+        // `c` was pre-EFF) does not fire here.
+        assert!(!dep_d.killed_by(&after(&c), &sends, &pre_eff));
+        assert!(!dep_d.killed_by(&after(&d), &sends, &pre_eff));
+        // Had `c` been pre-EFF, the crash after it would kill `d`.
+        let later_eff: PreEffSends = [("s".to_owned(), 3)].into_iter().collect();
+        assert!(dep_d.killed_by(&after(&c), &sends, &later_eff));
+        // Proposal: the weakest crash point that kills `d` is the one right after the last
+        // pre-EFF send, `b`; neither `c` nor `d` is minted as a crash point.
         let proposed = dep_d.candidate_faults(&sends, &pre_eff);
         assert_eq!(proposed, vec![after(&b)]);
         let clause = Clause {
-            deps: [dep_d.clone()].into_iter().collect(),
-            sends: sends.clone(),
+            deps: [dep_d].into_iter().collect(),
+            sends,
             pre_eff_sends: pre_eff,
             premises: BTreeSet::new(),
         };
-        assert!(clause.hit_by(&after(&c)));
+        assert!(clause.hit_by(&after(&a)));
         assert!(clause.hit_by(&after(&b)));
+        assert!(!clause.hit_by(&after(&c)));
         assert!(!clause.hit_by(&after(&d)));
     }
 }

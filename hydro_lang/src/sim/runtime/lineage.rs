@@ -27,7 +27,12 @@
 //!   It works on reliable (`fail_stop`) channels, whose receivers then see a prefix, and it
 //!   can split the sends of one execution, which "crashed mid fan-out" needs.
 //! - **End of finite failures.** [`FaultState::end_finite_failures`] is a switch: from then
-//!   on omissions are ignored. Crashes are permanent.
+//!   on no new failure happens. Omissions are ignored, and a crash point whose message has
+//!   not been sent by then never fires (a node that is already dead stays dead: a crash is
+//!   permanent). This is Molly's fault model: every failure, omission or crash, happens at a
+//!   time `≤ EFF`, and the run after `EFF` is failure-free recovery. A crash point is *named*
+//!   by a message sent before `EFF` in the run that proposed it; in another run the same
+//!   message may be sent after `EFF` (or never), and the crash then does not happen there.
 //!
 //! A send that reaches the wire carries a fresh **delivery id**, which the receive half
 //! records ([`LineageEvent::Recv`]) and, under record-level provenance, attaches to the
@@ -150,8 +155,9 @@ pub enum LineageEvent {
 pub enum CrashPoint {
     /// Before its first send.
     BeforeAnySend,
-    /// Right after it sends this message (by channel, destination member, and wire bytes);
-    /// if the message is never sent, the node never dies.
+    /// Right after it sends this message (by channel, destination member, and wire bytes),
+    /// provided the message is sent before the end of finite failures; if it is never sent,
+    /// or first sent after `EFF`, the node never dies (see the module docs).
     AfterSend {
         channel: usize,
         to_member: Option<u32>,
@@ -203,7 +209,8 @@ impl FaultState {
         self.crash_points.insert(node, point);
     }
 
-    /// Declares the end of finite failures: omissions stop applying.
+    /// Declares the end of finite failures: omissions stop applying, and no crash point fires
+    /// from now on (a node already dead stays dead).
     pub fn end_finite_failures(&mut self) {
         self.finite_failures_ended = true;
     }
@@ -214,18 +221,20 @@ impl FaultState {
     }
 
     /// The filter: decides the fate of a send by `node` and updates the state (kills the node
-    /// afterwards if this send was its crash point). A crash point fires whether or not the
-    /// send itself was omitted: the node performed the send; the network lost it.
+    /// afterwards if this send was its crash point and finite failures have not ended). A
+    /// crash point fires whether or not the send itself was omitted: the node performed the
+    /// send; the network lost it.
     fn filter(&mut self, key: &SendKey) -> SendFate {
         *self.sends.entry(key.from.clone()).or_insert(0) += 1;
         if self.dead.contains(&key.from) {
             return SendFate::Crashed;
         }
-        if let Some(CrashPoint::AfterSend {
-            channel,
-            to_member,
-            bytes,
-        }) = self.crash_points.get(&key.from)
+        if !self.finite_failures_ended
+            && let Some(CrashPoint::AfterSend {
+                channel,
+                to_member,
+                bytes,
+            }) = self.crash_points.get(&key.from)
             && *channel == key.channel
             && *to_member == key.to_member
             && *bytes == key.bytes
@@ -438,5 +447,71 @@ impl LineageOutputSender {
         } else {
             self.inner.try_send(value)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node() -> NodeKey {
+        (
+            LocationId::Process(crate::location::LocationKey::FIRST),
+            None,
+        )
+    }
+
+    fn key(bytes: u8) -> SendKey {
+        SendKey {
+            channel: 7,
+            from: node(),
+            to_member: None,
+            bytes: vec![bytes],
+        }
+    }
+
+    fn after(bytes: u8) -> CrashPoint {
+        CrashPoint::AfterSend {
+            channel: 7,
+            to_member: None,
+            bytes: vec![bytes],
+        }
+    }
+
+    /// A crash point fires right after its message, and every later send is dropped.
+    #[test]
+    fn crash_point_fires_before_eff_and_is_permanent() {
+        let mut faults = FaultState::default();
+        faults.install(node(), after(1));
+        assert_eq!(faults.filter(&key(0)), SendFate::Delivered);
+        assert_eq!(faults.filter(&key(1)), SendFate::Delivered);
+        assert!(faults.is_dead(&node()));
+        assert_eq!(faults.filter(&key(2)), SendFate::Crashed);
+        // Permanent across the end of finite failures.
+        faults.end_finite_failures();
+        assert_eq!(faults.filter(&key(3)), SendFate::Crashed);
+    }
+
+    /// Molly's fault model: every failure happens at a time `≤ EFF`. A crash point whose
+    /// message is first sent after the end of finite failures does not fire in that run.
+    #[test]
+    fn crash_point_named_by_a_post_eff_send_does_not_fire() {
+        let mut faults = FaultState::default();
+        faults.install(node(), after(1));
+        assert_eq!(faults.filter(&key(0)), SendFate::Delivered);
+        faults.end_finite_failures();
+        assert_eq!(faults.filter(&key(1)), SendFate::Delivered);
+        assert!(!faults.is_dead(&node()));
+        assert_eq!(faults.filter(&key(2)), SendFate::Delivered);
+        assert_eq!(faults.filter(&key(1)), SendFate::Delivered);
+    }
+
+    /// `BeforeAnySend` kills the node at installation, which is before `EFF` by construction.
+    #[test]
+    fn crash_before_any_send_kills_immediately() {
+        let mut faults = FaultState::default();
+        faults.install(node(), CrashPoint::BeforeAnySend);
+        assert!(faults.is_dead(&node()));
+        assert_eq!(faults.filter(&key(0)), SendFate::Crashed);
     }
 }
