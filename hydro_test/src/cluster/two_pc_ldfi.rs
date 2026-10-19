@@ -429,6 +429,29 @@ mod tests {
         configure(crashes).search(&compiled, async |run| body(&h, run).await)
     }
 
+    #[test]
+    fn print_ctp_hypothesis_sequence() {
+        use hydro_lang::sim::ldfi::Exploration;
+        let (compiled, mut h, configure) = super::harness::compile_with(2, true, 1, true, 8);
+        h = super::harness::with_txns(h, 4);
+        let outcome = configure(1)
+            .exploration(Exploration::Exhaustive)
+            .quiet()
+            .search(&compiled, async |run| super::harness::body(&h, run).await);
+        eprintln!(
+            "OUTCOME {}",
+            match &outcome {
+                hydro_lang::sim::ldfi::Outcome::Certificate { .. } => "CERT",
+                hydro_lang::sim::ldfi::Outcome::Counterexample { .. } => "CEX",
+                _ => "OTHER",
+            }
+        );
+        for (i, hyp) in outcome.runs().iter().enumerate() {
+            let faults: Vec<String> = hyp.faults.iter().map(|f| f.to_string()).collect();
+            eprintln!("HYP {i} {} schedules {:?}", hyp.schedules.len(), faults);
+        }
+    }
+
     /// The blocking case: the coordinator dies after sending `commit` to one participant.
     /// The failure-free derivation is the whole protocol run (prepares, votes, commits), so
     /// the candidates are the coordinator's crash at each of its four sends (two prepares,
