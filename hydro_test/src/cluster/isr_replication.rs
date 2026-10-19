@@ -1017,7 +1017,7 @@ pub(crate) mod harness {
 
 #[cfg(test)]
 mod tests {
-    use hydro_lang::sim::ldfi::{Exploration, Fault, LabelVerdict, Outcome, Strategy};
+    use hydro_lang::sim::ldfi::{Exploration, Fault, LabelVerdict, Level, Outcome, Strategy};
 
     use super::Encoding;
     use super::harness::{
@@ -1066,6 +1066,43 @@ mod tests {
     #[test]
     fn ldfi_finds_the_unclean_election_bug_dataflow() {
         finds_the_unclean_election_bug(Encoding::Dataflow);
+    }
+
+    /// The verdict does not depend on the lineage level. Regression test for two false
+    /// certificates on the unclean variant (see `docs/design/ldfi-level-ablation.md`,
+    /// "Soundness bug"): at `Execution`/`Slice`, dependency ordinals clamped at `EFF` made the
+    /// clause of the omission world unhittable by the leader's crash after its (now post-`EFF`)
+    /// acknowledgement; at `Counterfactual`, the sequenced view observations were never traced
+    /// to ZK's sends, so the final view had no lineage at the observer. Every level has to find
+    /// the lost replication plus the leader's crash.
+    #[test]
+    fn ldfi_finds_the_unclean_election_bug_at_every_level() {
+        let (compiled, h, configure) = compile(true, Encoding::Dataflow, DEFAULT_SHAPE, 8);
+        for level in [
+            Level::Execution,
+            Level::Slice,
+            Level::Record,
+            Level::Counterfactual,
+        ] {
+            let outcome = configure(1)
+                .level(level)
+                .exploration(Exploration::Fuzz { instances: SAMPLED })
+                .search(&compiled, async |run| body(&h, run).await);
+            eprintln!("{level:?}: {outcome}");
+            let Outcome::Counterexample { faults, .. } = &outcome else {
+                panic!("{level:?}: expected a counterexample, got {outcome}");
+            };
+            assert!(
+                faults.iter().any(|f| matches!(f, Fault::Omit(_))),
+                "{level:?}: the counterexample needs a lost replication: {faults:?}"
+            );
+            assert!(
+                faults
+                    .iter()
+                    .any(|f| matches!(f, Fault::Crash { node, .. } if node == "replica@0")),
+                "{level:?}: the counterexample needs the leader's crash: {faults:?}"
+            );
+        }
     }
 
     /// Clean election (ISR members only) keeps every acknowledged write: no fault set within

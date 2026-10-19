@@ -507,7 +507,8 @@ mod tests {
         );
         assert!(shown.contains(" as observer"), "{shown}");
         let dot = viz.lamport_dot().unwrap();
-        assert!(dot.contains("💀"), "{dot}");
+        // Graphviz cannot render 4-byte UTF-8, so the DOT renderer marks crashes with `☠`.
+        assert!(dot.contains("☠ crashed"), "{dot}");
         assert!(dot.contains("(sender crashed)"), "{dot}");
 
         let witness = viz.witness().expect("traces were retained");

@@ -29,10 +29,13 @@
 //!   and including `m` and every later send is dropped at the filter (and its external
 //!   outputs are suppressed once it is dead). This is Molly's definition of a crash, named
 //!   by a message rather than a send count so the fault means the same thing in every run,
-//!   and it can split the fan-out of one broadcast. Crash points, like omissions, lie
-//!   before the end of finite failures: `m` is a send performed before it (or the crash is
-//!   `before any send`). The finite-failures assumption covers every fault, and the run
-//!   after `EFF` is the window in which the protocol is expected to converge.
+//!   and it can split the fan-out of one broadcast. Crash points are *proposed* from before
+//!   the end of finite failures: `m` is a send performed before it in the run that minted
+//!   the point (or the crash is `before any send`). Being named by a message, the point fires
+//!   wherever that message is sent, which in another hypothesis's run may be after `EFF`; the
+//!   search's notion of what a crash kills follows the simulator's, exactly
+//!   ([`Dependency::killed_by`]). The run after `EFF` is the window in which the protocol is
+//!   expected to converge.
 //!
 //! # Lineage
 //!
@@ -294,7 +297,10 @@ pub struct Dependency {
     /// The message, by channel and payload.
     pub message: Message,
     /// The sending node's label and the message's position among that node's sends in the
-    /// run it was observed in, when the sender is crashable.
+    /// run it was observed in, when the sender is crashable. The position is exact (not
+    /// clamped to the end of finite failures): it is what decides whether a crash point kills
+    /// the delivery, and the simulator's crash fires wherever its message is sent (see
+    /// [`Self::killed_by`]).
     pub sender: Option<(String, u64)>,
     /// Whether the channel admits omission.
     pub lossy: bool,
@@ -304,8 +310,21 @@ pub struct Dependency {
 /// there: `crash(node after m)` kills the sends after `m`'s position.
 pub type SendSequences = BTreeMap<String, Vec<SendId>>;
 
+/// Per crashable node, how many of its sends in one run happened before the end of finite
+/// failures (see [`Schedule::pre_eff_sends`]).
+pub type PreEffSends = BTreeMap<String, usize>;
+
 impl Dependency {
     /// Whether `fault` prevents this delivery, in a run whose crashable nodes sent `sends`.
+    ///
+    /// A crash point is named by a message, and the simulator kills the node right after it
+    /// sends that message in *whatever* run, before or after the end of finite failures (a
+    /// message sent before `EFF` in the run that minted the crash point may be sent after it
+    /// in the run of another hypothesis). So the relation is exact position arithmetic in
+    /// this run: the crash kills the delivery iff `m` was sent before it. Clamping either
+    /// side to `EFF` would make the clause claim a crash kills nothing of what it does kill,
+    /// and a hypothesis that breaks the goal would never be a hitting set (a false
+    /// certificate).
     pub fn killed_by(&self, fault: &Fault, sends: &SendSequences) -> bool {
         match fault {
             Fault::Omit(message) => self.lossy && *message == self.message,
@@ -329,17 +348,27 @@ impl Dependency {
 
     /// The weakest faults that kill this delivery: its omission (if lossy) and the crash of
     /// its sender right after the send preceding this one (if crashable).
-    fn candidate_faults(&self, sends: &SendSequences) -> Vec<Fault> {
+    ///
+    /// Crash points are minted before the end of finite failures only (`pre_eff`: the
+    /// finite-failures assumption covers crashes as well as omissions, and the run after
+    /// `EFF` is the window in which the protocol is expected to converge). A delivery sent
+    /// after `EFF` is therefore killed, among the crash points this search proposes, by the
+    /// ones that kill the sender's last pre-`EFF` send, and the weakest of those is the crash
+    /// right after that send. The clamp is on the *proposal* only; [`Self::killed_by`] uses
+    /// the exact position.
+    fn candidate_faults(&self, sends: &SendSequences, pre_eff: &PreEffSends) -> Vec<Fault> {
         let mut faults = vec![];
         if self.lossy {
             faults.push(Fault::Omit(self.message.clone()));
         }
         if let Some((sender, ordinal)) = &self.sender {
-            let after = (*ordinal > 0)
+            let cap = pre_eff.get(sender).copied().unwrap_or(0) as u64;
+            let ordinal = (*ordinal).min(cap);
+            let after = (ordinal > 0)
                 .then(|| {
                     sends
                         .get(sender)
-                        .and_then(|seq| seq.get(*ordinal as usize - 1))
+                        .and_then(|seq| seq.get(ordinal as usize - 1))
                         .cloned()
                 })
                 .flatten();
@@ -409,11 +438,14 @@ pub struct Schedule {
     /// Every crashable node's send sequence (the meaning of crash points in this run).
     pub sends: Rc<SendSequences>,
     /// Per crashable node, how many of its sends happened before the end of finite failures:
-    /// crash points are `crash(node before any send)` and `crash(node after m)` for those `m`
-    /// only. The finite-failures assumption covers crashes as well as omissions: after `EFF`
-    /// no fault of any kind, and the run's remainder is the window in which the protocol is
-    /// expected to converge. (A crash in that window would need its own window after it.)
-    pub pre_eff_sends: BTreeMap<String, usize>,
+    /// the crash points the search *proposes* are `crash(node before any send)` and
+    /// `crash(node after m)` for those `m` only. The finite-failures assumption covers crashes
+    /// as well as omissions: after `EFF` no new fault, and the run's remainder is the window
+    /// in which the protocol is expected to converge. A crash point is named by its message,
+    /// though, and fires in every run right after that message is sent, which in the run of
+    /// another hypothesis may be after `EFF`; whether it kills a delivery there is exact
+    /// position arithmetic ([`Dependency::killed_by`]), never clamped.
+    pub pre_eff_sends: PreEffSends,
     /// The lineage of the outputs the body required (the goal's pre-condition), whose sends
     /// the search wants to preserve.
     pub requirements: Derivation,
@@ -439,6 +471,9 @@ pub struct Clause {
     pub deps: Derivation,
     /// The run's send sequences.
     pub sends: Rc<SendSequences>,
+    /// The run's pre-`EFF` send counts (see [`Schedule::pre_eff_sends`]): where the crash
+    /// points this clause proposes may lie.
+    pub pre_eff_sends: PreEffSends,
     /// The crashes of the hypothesis the derivation was observed under. A derivation found in
     /// a world where a node was absent is sufficient only there: a goal such as agreement is
     /// not monotone in a node's presence (the absent node, alive, may act against it), so a
@@ -458,7 +493,7 @@ impl Clause {
     pub fn candidate_faults(&self) -> impl Iterator<Item = Fault> + '_ {
         self.deps
             .iter()
-            .flat_map(|dep| dep.candidate_faults(&self.sends))
+            .flat_map(|dep| dep.candidate_faults(&self.sends, &self.pre_eff_sends))
     }
 }
 
@@ -1583,8 +1618,6 @@ struct Lineage<'a> {
     replays: Cell<usize>,
     /// Derivation steps that fell back to the recorded lineage.
     replay_fallbacks: Cell<usize>,
-    /// Per crashable node, its number of pre-EFF sends (see [`Self::crash_ordinal`]).
-    pre_eff_counts: std::cell::OnceCell<BTreeMap<String, usize>>,
     /// The provenance-graph recorder, when the search asked for graphs
     /// ([`Ldfi::with_provenance_graphs`]); see [`crate::sim::viz::provenance`].
     prov: Option<RefCell<ProvRecorder>>,
@@ -1634,7 +1667,6 @@ impl<'a> Lineage<'a> {
             send_memo: RefCell::new(HashMap::new()),
             replays: Cell::new(0),
             replay_fallbacks: Cell::new(0),
-            pre_eff_counts: std::cell::OnceCell::new(),
             prov: prov_graphs.then(|| RefCell::new(ProvRecorder::new())),
             send_prov_memo: RefCell::new(HashMap::new()),
             kept: RefCell::new(vec![]),
@@ -1941,24 +1973,24 @@ impl<'a> Lineage<'a> {
     }
 
     /// The sender and ordinal a dependency on `record` is killed through: the sender's
-    /// `ordinal`-th send, clamped to its count of pre-EFF sends. Crash points lie before the
-    /// end of finite failures (see [`Schedule::pre_eff_sends`]), so every send after it is
-    /// killed by exactly the crashes that kill the sender's last pre-EFF send, and the
-    /// weakest crash that kills it (`candidate_faults`) is the one right after that send.
+    /// `ordinal`-th send, exactly. The ordinal is **not** clamped to the sender's count of
+    /// pre-`EFF` sends: a crash point is named by a message and the simulator fires it right
+    /// after that message in every run, before or after `EFF` (`FaultState::filter`), so a
+    /// clause has to know the real order of the sender's sends to say which of them a given
+    /// crash point kills. (An earlier version clamped here, on the assumption that crash points
+    /// lie before `EFF`; a crash point minted in a run where its message was pre-`EFF` fires
+    /// post-`EFF` in the run of another hypothesis, and the clamp then declared it harmless
+    /// to every post-`EFF` delivery of that run — the hypothesis that broke the goal was never
+    /// a hitting set, and the search certified a buggy protocol.) The clamp belongs to the
+    /// proposal of crash points only ([`Dependency::candidate_faults`]).
     fn crash_ordinal(&self, record: &SentRecord) -> Option<(String, u64)> {
-        let (node, ordinal) = record.sender.clone()?;
-        let pre_eff = *self
-            .pre_eff_counts
-            .get_or_init(|| self.send_sequences().1)
-            .get(&node)
-            .unwrap_or(&0) as u64;
-        Some((node, ordinal.min(pre_eff)))
+        record.sender.clone()
     }
 
     /// Every crashable node's performed sends, in order.
-    fn send_sequences(&self) -> (SendSequences, BTreeMap<String, usize>) {
+    fn send_sequences(&self) -> (SendSequences, PreEffSends) {
         let mut sequences: SendSequences = BTreeMap::new();
-        let mut pre_eff: BTreeMap<String, usize> = BTreeMap::new();
+        let mut pre_eff: PreEffSends = BTreeMap::new();
         for record in &self.sent {
             if record.fate == SendFate::Crashed || record.observation {
                 continue;
@@ -3092,7 +3124,12 @@ fn render_payload(record: &SentRecord) -> String {
 
 /// Whether a payload released at a receiving hook is the serialized message `sent`. A
 /// cluster-sourced channel delivers `(MemberId, T)`, so the received bytes carry the
-/// serialized sender member id as a prefix.
+/// serialized sender member id as a prefix. A sequenced observation
+/// ([`Spec::observe_sequenced`]) batches `(n, T)` with `n` the arrival position
+/// (`enumerate` before the observer's hook), so the received bytes carry a serialized
+/// `usize` as a prefix; left unmatched, the observation would be a lineage gap at the
+/// observer, and counterfactual replay would hold the views fixed and never follow them to
+/// the sends they rest on.
 fn payload_matches(received: &[u8], sent: &[u8], from_member: Option<u32>) -> bool {
     received == sent
         || from_member.is_some_and(|m| {
@@ -3101,6 +3138,10 @@ fn payload_matches(received: &[u8], sent: &[u8], from_member: Option<u32>) -> bo
                 && received[..prefix.len()] == prefix[..]
                 && received[prefix.len()..] == *sent
         })
+        || {
+            let n = bincode::serialized_size(&0usize).unwrap() as usize;
+            received.len() == sent.len() + n && received[n..] == *sent
+        }
 }
 
 /// A human-readable summary of the program's channels and of every sink's slice.
@@ -3676,12 +3717,9 @@ impl Ldfi {
                 .cloned()
                 .collect();
             for schedule in &schedules {
-                observed.extend(
-                    schedule
-                        .observed
-                        .iter()
-                        .flat_map(|dep| dep.candidate_faults(&schedule.sends)),
-                );
+                observed.extend(schedule.observed.iter().flat_map(|dep| {
+                    dep.candidate_faults(&schedule.sends, &schedule.pre_eff_sends)
+                }));
                 if !schedule.requirements.is_empty()
                     && !required
                         .iter()
@@ -3690,15 +3728,20 @@ impl Ldfi {
                     required.push(Clause {
                         deps: schedule.requirements.clone(),
                         sends: schedule.sends.clone(),
+                        pre_eff_sends: schedule.pre_eff_sends.clone(),
                         premises: premises.clone(),
                     });
                 }
                 for dep in &schedule.requirements {
+                    // A requirement's send after `EFF` is preserved by the crash right after
+                    // the sender's first post-`EFF` send, the earliest point the proposal
+                    // vocabulary reaches (crash points are minted pre-`EFF`; see
+                    // `Dependency::candidate_faults`).
                     if let Some((node, ordinal)) = &dep.sender
-                        && let Some(send) = schedule
-                            .sends
-                            .get(node)
-                            .and_then(|seq| seq.get(*ordinal as usize))
+                        && let Some(send) = schedule.sends.get(node).and_then(|seq| {
+                            let cap = schedule.pre_eff_sends.get(node).copied().unwrap_or(0);
+                            seq.get((*ordinal as usize).min(cap))
+                        })
                     {
                         preserve_points.insert(Fault::Crash {
                             node: node.clone(),
@@ -3805,6 +3848,7 @@ impl Ldfi {
                         clauses.push(Clause {
                             deps: derivation.clone(),
                             sends: schedule.sends.clone(),
+                            pre_eff_sends: schedule.pre_eff_sends.clone(),
                             premises: premises.clone(),
                         });
                     }
@@ -4509,10 +4553,16 @@ mod tests {
         }
     }
 
+    /// A clause whose run ended finite failures after its last send (every send is a crash
+    /// point).
     fn clause(deps: impl IntoIterator<Item = Dependency>, sends: &Rc<SendSequences>) -> Clause {
         Clause {
             deps: deps.into_iter().collect(),
             sends: sends.clone(),
+            pre_eff_sends: sends
+                .iter()
+                .map(|(node, seq)| (node.clone(), seq.len()))
+                .collect(),
             premises: BTreeSet::new(),
         }
     }
@@ -4631,5 +4681,46 @@ mod tests {
         // In a run where `m0` was never sent, a crash after it never fires.
         let other_run = Rc::new(SendSequences::from([("s".to_owned(), vec![m1])]));
         assert!(!reliable("to@1", 42, "s", 0).killed_by(&later, &other_run));
+    }
+
+    /// A crash point fires wherever its message is sent, including after the end of finite
+    /// failures in the run of another hypothesis, and kills every later send there; the
+    /// clause must say so. Only the *proposal* of crash points is confined to pre-`EFF` sends.
+    /// (The ISR unclean-election bug needs `crash(leader after client-ack)` in a run where the
+    /// acknowledgement, pre-`EFF` in the run that minted the crash point, moved after `EFF`;
+    /// with the kill relation clamped at `EFF` the counterexample was never a hitting set and
+    /// the search certified the bug.)
+    #[test]
+    fn post_eff_crash_point_kills_later_sends_but_is_not_proposed() {
+        // The sender's run: `a`, `b` before EFF; `c`, `d` after it.
+        let (a, b, c, d) = (send(0, 1), send(0, 2), send(0, 3), send(0, 4));
+        let sends = Rc::new(SendSequences::from([(
+            "s".to_owned(),
+            vec![a.clone(), b.clone(), c.clone(), d.clone()],
+        )]));
+        let pre_eff: PreEffSends = [("s".to_owned(), 2)].into_iter().collect();
+        let dep_d = reliable("to", 4, "s", 3);
+        let after = |m: &SendId| Fault::Crash {
+            node: "s".to_owned(),
+            after: Some(m.clone()),
+        };
+        // Exact position arithmetic: the crash after `c` (a post-EFF point, minted in some
+        // other run where `c` was pre-EFF) kills `d`; the crash after `d` does not.
+        assert!(dep_d.killed_by(&after(&c), &sends));
+        assert!(dep_d.killed_by(&after(&b), &sends));
+        assert!(!dep_d.killed_by(&after(&d), &sends));
+        // Proposal: the weakest crash point *before EFF* that kills `d` is the one right after
+        // the last pre-EFF send, `b`; neither `c` nor `d` is minted as a crash point.
+        let proposed = dep_d.candidate_faults(&sends, &pre_eff);
+        assert_eq!(proposed, vec![after(&b)]);
+        let clause = Clause {
+            deps: [dep_d.clone()].into_iter().collect(),
+            sends: sends.clone(),
+            pre_eff_sends: pre_eff,
+            premises: BTreeSet::new(),
+        };
+        assert!(clause.hit_by(&after(&c)));
+        assert!(clause.hit_by(&after(&b)));
+        assert!(!clause.hit_by(&after(&d)));
     }
 }

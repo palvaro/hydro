@@ -11,11 +11,11 @@ mod ec_ldfi;
 pub mod isr_replication;
 pub mod kv_replica;
 #[cfg(test)]
+mod ldfi_ablation_broadcast;
+#[cfg(test)]
 mod ldfi_ablation_isr;
 #[cfg(test)]
 mod ldfi_ablation_two_pc;
-#[cfg(test)]
-mod ldfi_ablation_broadcast;
 #[cfg(test)]
 mod ldfi_grid;
 #[cfg(test)]
