@@ -1107,3 +1107,219 @@ exist. A variant worth one more experiment is **DNF clauses over the single-deri
 universe** — keep every alternative as a cover constraint but propose crash points only from
 the first-witness derivations, dropping (soundly) any clause the universe cannot hit — which
 would keep the two pruned broadcaster hypotheses without admitting the three new member ones.
+
+## Diagnostic: why disjunction ran more hypotheses on broadcast
+
+Reliable broadcast with echo, `n=3`, `POST` positive, `Exhaustive` exploration,
+`Level::Precise`, the harness of `reliable_broadcast::tests::search_with`: the single-witness
+search certifies in 10 hypotheses and the disjunctive search in 11 (2 crashes: 32 against 39).
+This section reconstructs both hypothesis sequences from the searches' own data (`Outcome::runs()`:
+per hypothesis, every schedule's `derivations`, `sends`, `pre_eff_sends`, `requirements`,
+`goal_held`, `vacuous`), rebuilds the clause set and the fault universe the solver saw after each
+hypothesis exactly as `Ldfi::run` builds them (clauses deduplicated by `(deps, premises)`, universe
+= `Clause::candidate_faults` over every clause plus the preserve points), and checks each
+hypothesis against them with `Clause::hit_by`. Nothing below is inferred from the protocol; every
+statement is a check against those records. A `Strategy::Blind` search of the same harness (every
+admissible fault set over every crash point of every observed delivery) was run as the oracle for
+"would this fault set have broken the goal".
+
+Notation. `b→k` is `initial[→k]:Payload(42)` (the broadcaster's `k`-th fan-out send, ordinal `k`);
+`i→j` is `echo[i→j]:Payload(42)` (member `i`'s echo to member `j`, ordinal `j` among member `i`'s
+sends); `obsk` is the specification observer's view of member `k`'s delivery, which the lineage
+counts as member `k`'s send #3 (after its three echoes). `crash(b after b→1)` is
+`crash(broadcaster after initial[→1])`; `crash(m2 after 2→0)` is `crash(member@2 after echo[2→0])`.
+A clause `D ⊢ P` has premises `P` (the crashes of the hypothesis it was observed under). In every
+schedule of every run the send order was the same: broadcaster `[b→0, b→1, b→2]`, member `k`
+`[k→0, k→1, k→2]` (a crashed node's sequence is a prefix), and every send was before `EFF`
+(the harness never calls `end_of_finite_failures`, so `pre_eff_sends == sends.len()` for every
+node in all 92 hypotheses of the four searches): no crash point in either universe is named by a
+post-`EFF` send, and every one of them fires.
+
+### 1 crash: the two sequences
+
+Single witness (10 hypotheses, 2641 schedules, 10 distinct clauses at the end):
+
+| # | hypothesis | schedules | goal | new clauses (distinct) |
+|---|---|---|---|---|
+| 0 | `{}` | 360 | held | `{b→0, b→1, b→2, obs0, obs1, obs2}` |
+| 1 | `{crash(b after b→1)}` | 240 | held | `{b→0, b→1, 0→2, obs0, obs1, obs2}`, `{b→0, b→1, 1→2, obs0, obs1, obs2}` ⊢ #1 |
+| 2 | `{crash(b after b→0)}` | 120 | held | `{b→0, 0→1, 0→2, obs0, obs1, obs2}` ⊢ #2 |
+| 3 | `{crash(m0 after 0→2)}` | 360 | held | `{b→1, b→2, obs1, obs2}` ⊢ #3 |
+| 4 | `{crash(m0 after 0→1)}` | 294 | held | `{b→1, b→2, obs1, obs2}` ⊢ #4 |
+| 5 | `{crash(m0 after 0→0)}` | 252 | held | `{b→1, b→2, obs1, obs2}` ⊢ #5 |
+| 6 | `{crash(m1 after 1→2)}` | 360 | held | `{b→0, b→2, obs0, obs2}` ⊢ #6 |
+| 7 | `{crash(m1 after 1→1)}` | 294 | held | `{b→0, b→2, obs0, obs2}` ⊢ #7 |
+| 8 | `{crash(m2 after 2→2)}` | 360 | held | `{b→0, b→1, obs0, obs1}` ⊢ #8 |
+| 9 | `{crash(b before any send)}` | 1 | vacuous | none |
+
+The failure-free run's 360 schedules yield **one** distinct derivation: in every schedule the
+first copy of the payload at every member is the broadcaster's `initial` (an echo arriving in the
+same tick is second in `from_broadcaster.chain(from_members)` and is dropped by `unique`; one
+arriving in a later tick is dropped by `filter_not_in(seen)`). The only echoes that ever appear
+in a single-witness clause are `0→1`, `0→2`, `1→2` (runs #1, #2: members above the broadcaster's
+crash cut deliver from the echoes of the members below it). The universe after run #0 is
+`{crash(b before any send), crash(b after b→0), crash(b after b→1), crash(b after b→2)*,
+crash(m0 after 0→2), crash(m1 after 1→2), crash(m2 after 2→2)}` (`*` = a preserve point, after
+the last requirement send; it hits no clause and is never proposed); run #1 adds
+`crash(m0 after 0→1)`, `crash(m1 after 1→1)`; run #2 adds `crash(m0 after 0→0)`; nothing is
+added after that (10 crash points).
+
+Disjunctive (11 hypotheses, 2651 schedules, 73 distinct clauses at the end):
+
+| # | hypothesis | schedules | goal | new clauses (distinct) |
+|---|---|---|---|---|
+| 0 | `{}` | 360 | held | 16, listed below |
+| 1 | `{crash(m0 after 0→2)}` | 360 | held | 10 ⊢ #1 |
+| 2 | `{crash(m0 after 0→1)}` | 294 | held | 6 ⊢ #2 |
+| 3 | `{crash(m0 after 0→0)}` | 252 | held | 3 ⊢ #3: `{b→1, b→2, obs1, obs2}`, `{b→1, 1→2, obs1, obs2}`, `{b→2, 2→1, obs1, obs2}` |
+| 4 | `{crash(m1 after 1→2)}` | 360 | held | 10 ⊢ #4 |
+| 5 | `{crash(m1 after 1→1)}` | 294 | held | 6 ⊢ #5 |
+| 6 | `{crash(m1 before any send)}` | 120 | held | 3 ⊢ #6: `{b→0, b→2, obs0, obs2}`, `{b→0, 0→2, obs0, obs2}`, `{b→2, 2→0, obs0, obs2}` |
+| 7 | `{crash(m2 after 2→2)}` | 360 | held | 10 ⊢ #7 |
+| 8 | `{crash(m2 after 2→0)}` | 130 | held | 6 ⊢ #8 |
+| 9 | `{crash(m2 before any send)}` | 120 | held | 3 ⊢ #9: `{b→0, b→1, obs0, obs1}`, `{b→0, 0→1, obs0, obs1}`, `{b→1, 1→0, obs0, obs1}` |
+| 10 | `{crash(b before any send)}` | 1 | vacuous | none |
+
+The 16 derivations of the failure-free run (each member's delivery witnessed by `b→k` or by an
+echo that arrived in the same tick as another copy):
+
+```
+{b→0, b→1, b→2, …}  {b→0, b→1, 0→2, …}  {b→0, b→1, 1→2, …}  {b→0, b→2, 0→1, …}
+{b→0, 0→1, 0→2, …}  {b→0, 0→1, 1→2, …}  {b→0, b→2, 2→1, …}  {b→0, 0→2, 2→1, …}
+{b→1, b→2, 1→0, …}  {b→1, 1→0, 1→2, …}  {b→1, 0→2, 1→0, …}  {b→1, b→2, 2→0, …}
+{b→1, 1→2, 2→0, …}  {b→2, 2→0, 2→1, …}  {b→2, 0→1, 2→0, …}  {b→2, 1→0, 2→1, …}
+```
+
+(`…` = `obs0, obs1, obs2` in every one.) The universe after run #0 is already its final 13
+crash points: the single search's 10, plus `crash(m1 before any send)`, `crash(m2 before any
+send)`, `crash(m2 after 2→0)`. No later run adds a crash point to either universe.
+
+### 1 crash: classification
+
+Every hypothesis of both searches was checked to be a hitting set of the clauses held before it
+(premise rule included), within the crash budget, at most one crash per node, and minimal (no
+proper subset was an untried hitting set): 21 of 21 pass. No vacuous hypothesis occurs before the
+last one in either search.
+
+**(a) Run by both: 8.** `{}`, `crash(m0 after 0→2)`, `crash(m0 after 0→1)`,
+`crash(m0 after 0→0)`, `crash(m1 after 1→2)`, `crash(m1 after 1→1)`, `crash(m2 after 2→2)`,
+`crash(b before any send)`.
+
+**(b) Single witness only: 2**, both pruned by a clause of the disjunctive failure-free run (#0),
+i.e. before the disjunctive search proposed anything:
+
+| hypothesis | disjunctive clause it leaves intact |
+|---|---|
+| `{crash(b after b→1)}` | `{b→0, b→1, 0→2, obs0, obs1, obs2}` — the crash kills `b→2` only (ordinal 2 > position 1); `b→0`, `b→1`, member 0's echo and the observations survive |
+| `{crash(b after b→0)}` | `{b→0, 0→1, 0→2, obs0, obs1, obs2}` — the crash kills `b→1`, `b→2`; nothing in this clause |
+
+Both fault sets are in the disjunctive universe; they were never proposed because the cover
+constraint for the quoted clause is unsatisfiable by them.
+
+**(c) Disjunctive only: 3.** Each is a single crash point, and each was **never in the
+single-witness universe** at any point of its run (checked after every one of its 10 hypotheses):
+
+| hypothesis | minted by dependency | in the disjunctive universe from | in any single-witness clause? | goal under it (disjunctive run) |
+|---|---|---|---|---|
+| `{crash(m1 before any send)}` | `1→0` (member 1's send #0) | run #0 | never | held, 120/120 schedules |
+| `{crash(m2 after 2→0)}` | `2→1` (member 2's send #1) | run #0 | never | held, 130/130 |
+| `{crash(m2 before any send)}` | `2→0` (member 2's send #0) | run #0 | never | held, 120/120 |
+
+So the question "was it dominated, mis-ordered, or over budget in the single-witness ILP" does
+not arise: the solver cannot select a variable it does not have. The three dependencies that
+mint them — `1→0`, `2→0`, `2→1` — are echoes from a higher-numbered member to a lower-numbered
+one. In the single-witness search no clause ever contained such a dependency (its echo
+dependencies are exactly `0→1`, `0→2`, `1→2`), because in every schedule it explored the
+lower-numbered member received the broadcaster's `initial` as its first copy: the broadcaster
+fans out in order `0, 1, 2`, a crash cuts a prefix, and the members below the cut always hold
+`initial` while the members above it hold echoes from below. In the disjunctive search the same
+echoes appear as *alternatives* (second copies in the same tick, recorded by the `Alts` cell at
+`unique`) in 10 of the 16 failure-free derivations, and `Dependency::candidate_faults` names the
+crash right before each one.
+
+### 1 crash: counts
+
+- Saved by disjunction (b): **2** runs — `crash(b after b→1)` (240 schedules),
+  `crash(b after b→0)` (120).
+- Added by disjunction (c): **3** runs — `crash(m1 before any send)` (120),
+  `crash(m2 after 2→0)` (130), `crash(m2 before any send)` (120).
+- Net: +1 hypothesis, +10 schedules (2641 → 2651). The crash points behind (c), and the only
+  difference between the two universes, are `crash(m1 before any send)`,
+  `crash(m2 after 2→0)`, `crash(m2 before any send)`.
+
+### 1 crash: bug checks
+
+- **Every (c) hypothesis is a legitimate minimal hitting set** of the disjunctive clauses held
+  when it was proposed, within budget (checked above). E.g. `{crash(m1 before any send)}` at
+  disjunctive run #6: of the 51 clauses then held, the 16 from runs #4 and #5 carry a premise
+  `crash(m1 after 1→2)` or `crash(m1 after 1→1)` that the hypothesis does not contain and are
+  covered by it; every other clause contains `obs1` or an echo of member 1, which the crash kills.
+- **No (c) hypothesis broke the goal**: all three held in every schedule of the disjunctive run
+  (table above). The single-witness certificate is not contradicted by any hypothesis the
+  disjunctive search ran.
+- **Blind oracle.** `Strategy::Blind` on the same harness (12 crash points: every node before any
+  send, and after each send that some delivery depends on; the universe excludes the crash
+  points that kill only an observation) ran 13 hypotheses and exhausted: the goal held under
+  every one, including the three (c) points and three further points proposed by **neither**
+  lineage search: `crash(m0 before any send)` (120 schedules), `crash(m1 after 1→0)` (130),
+  `crash(m2 after 2→1)` (148). Each of those three is the crash point right before a member's
+  self-addressed echo `k→k`, which is a dependency in no derivation of any run (the member
+  already delivered in the tick that produced it), so neither lineage universe ever names it. Each
+  such point hits every clause of both searches (through `obsk`, and through the member's other
+  echoes); the certificates do not cover them by inference, they are outside both universes.
+  Under the blind run they hold.
+- **Vacuity pruning.** The only fault sets in either universe that hit every clause and were not
+  run are supersets of `{crash(b before any send)}`, which was vacuous (1 schedule, `PRE` fails);
+  `Ldfi::run` excludes supersets of a vacuous set. At 1 crash there are none (budget); at 2
+  crashes there are 6 in the single-witness search and 9 in the disjunctive one (that point paired
+  with each member crash point of the respective universe).
+- **Fireability.** No post-`EFF` crash points (above). `crash(b after b→2)` is in both universes as
+  a preserve point; it kills no dependency and is in no hitting set.
+
+### 2 crashes (32 against 39)
+
+Same harness, crash budget 2. Both sequences begin with the 1-crash sequence (single: #0–#8 as
+above, then 19 pairs, then `crash(b before any send)` at #28, then 3 more pairs; disjunctive:
+#0–#9 as above, then 27 pairs, `crash(b before any send)` at #37, one more pair). Every one of
+the 71 hypotheses is a minimal hitting set of its prior clauses within budget; final clause
+counts 33 (single) and 140 (disjunctive); the universes are the same 10 and 13 crash points as at
+1 crash, fixed after single run #2 and disjunctive run #0 respectively.
+
+| class | count | fault sets |
+|---|---|---|
+| (a) both | 20 | `{}`, the 6 member singletons, 11 member pairs, `{crash(b before any send)}`, `{crash(b after b→0), crash(m0 after 0→0)}` (vacuous in both: 1 schedule) |
+| (b) single only | 12 | `{crash(b after b→1)}`, `{crash(b after b→0)}`, and 10 pairs each containing one of those two broadcaster points with a member point from the single universe |
+| (c) disjunctive only | 19 | the 3 singletons of the 1-crash case, and 16 pairs each containing at least one of `crash(m1 before any send)`, `crash(m2 after 2→0)`, `crash(m2 before any send)` |
+
+Every (b) set leaves a disjunctive clause intact; for the pairs the pruning clause comes from a
+disjunctive crash run, e.g. `{crash(b after b→1), crash(m0 after 0→2)}` leaves
+`{b→0, b→1, 0→2, obs1, obs2} ⊢ crash(m0 after 0→2)` (disjunctive run #1) intact — the broadcaster
+crash kills only `b→2`, and member 0's crash after `0→2` kills nothing sent at or before `0→2`.
+Every (c) set contains a crash point never in the single-witness universe (the same three as at
+1 crash; the other member of a pair is a point both universes hold). The goal held in every
+schedule of every (c) run. Saved 12, added 19, net +7 hypotheses, +9 schedules (7271 → 7280).
+
+Blind oracle at 2 crashes: 58 hypotheses over the 12 blind crash points (67 admissible sets,
+minus the 9 supersets of the vacuous `{crash(b before any send)}`), exhausted, the goal held in
+every schedule. 30 of the 58 were run by neither lineage search: 24 contain one of
+`crash(m0 before any send)`, `crash(m1 after 1→0)`, `crash(m2 after 2→1)` (outside both universes),
+and 6 pair `crash(b after b→0)` or `crash(b after b→1)` with one of the three (c) points (outside
+the single-witness universe; left a clause intact in the disjunctive search). All held.
+
+### What the data says
+
+The disjunctive formula prunes exactly what it is supposed to prune: every hypothesis the
+single-witness search ran and the disjunctive search did not is a fault set that leaves one of the
+failure-free run's sixteen derivations (or a crash run's) intact, and the clause is quoted above.
+The extra hypotheses are not a solver artifact: each is a minimal hitting set over a universe that
+has three more crash points — `crash(m1 before any send)`, `crash(m2 after 2→0)`,
+`crash(m2 before any send)` — minted by the alternative witnesses `1→0`, `2→0`, `2→1`, which the
+single-witness closure never placed in any derivation because the first copy at a lower-numbered
+member was always the broadcaster's. Both certificates are relative to their universe; the blind
+search over every fireable crash point (12) and every admissible pair confirms the goal under all of
+them at both budgets, including the fault sets neither lineage search can propose.
+
+Reproduction: `LDFI_BROADCAST_DIAG=1 [LDFI_BROADCAST_CRASHES=2] cargo test -p hydro_test
+ldfi_certifies_reliable_broadcast_with_disjunctive_provenance -- --test-threads=1 --nocapture`
+prints both hypothesis sequences with the search log (universe and derivations after each run);
+`LDFI_SOLVER_DEBUG=1` adds every clause with the send sequence it was observed under.
