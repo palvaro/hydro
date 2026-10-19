@@ -94,6 +94,7 @@ impl LamportOptions {
     }
 
     fn label(&self, text: &str) -> String {
+        let text = strip_paths(text);
         let mut chars = text.chars();
         let truncated: String = chars.by_ref().take(self.max_label).collect();
         if chars.next().is_some() {
@@ -102,6 +103,60 @@ impl LamportOptions {
             truncated
         }
     }
+}
+
+/// Drops module paths from type names in a `Debug` rendering: `a::b::Name` → `Name`
+/// (`MemberId::<crate::m::Role>(1)` → `MemberId::<Role>(1)`). A path segment is an identifier
+/// followed by `::` and another identifier.
+fn strip_paths(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // At the start of an identifier: is it `ident::` followed by an identifier?
+        if is_ident(bytes[i]) && (i == 0 || !is_ident(bytes[i - 1])) {
+            let mut j = i;
+            while j < bytes.len() && is_ident(bytes[j]) {
+                j += 1;
+            }
+            if bytes.get(j) == Some(&b':')
+                && bytes.get(j + 1) == Some(&b':')
+                && bytes.get(j + 2).is_some_and(|b| is_ident(*b))
+            {
+                i = j + 2;
+                continue;
+            }
+            out.push_str(&text[i..j]);
+            i = j;
+            continue;
+        }
+        let c = text[i..].chars().next().expect("in bounds");
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
+/// Breaks a long title into lines of about `width` characters at `, ` boundaries, for a
+/// diagram no wider than its lanes need.
+fn wrap_title(title: &str, width: usize) -> Vec<String> {
+    let mut lines = vec![];
+    let mut current = String::new();
+    for (i, piece) in title.split(", ").enumerate() {
+        if i > 0 {
+            current.push_str(", ");
+        }
+        if current.chars().count() + piece.chars().count() > width && !current.trim().is_empty() {
+            lines.push(current.trim_end().to_owned());
+            current = String::new();
+        }
+        current.push_str(piece);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
 }
 
 /// What a diagram row shows, in the order rows are emitted.
@@ -320,24 +375,148 @@ struct LaneItem {
 /// Vertical distance between consecutive ranks, in points.
 const RANK_GAP: f64 = 16.0;
 
-/// Renders the trace as a Graphviz DOT spacetime diagram in Molly's style: a lane per node,
-/// time flowing down with one rank per event in global order, a straight edge per message
-/// from its send to its receive, labelled beside it. Every point is pinned (`pos="x,y!"`,
-/// `layout=neato`), so lanes are exactly vertical and lane spacing is exactly what the
-/// longest label needs: Graphviz only places the labels.
+/// Approximate advance of one character of 9pt Helvetica, in points (generous, so that a
+/// wider substitute font still fits).
+const CHAR_WIDTH: f64 = 5.3;
+
+/// Height of a one-line 9pt label box, in points.
+const LABEL_HEIGHT: f64 = 11.0;
+
+/// An axis-aligned box (center and size, in points) that text occupies; label placement
+/// keeps labels off each other and off the lanes' wider marks.
+#[derive(Clone, Copy, Debug)]
+struct Box {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+impl Box {
+    fn text(x: f64, y: f64, chars: usize, pt: f64) -> Box {
+        Box {
+            x,
+            y,
+            w: CHAR_WIDTH * (pt / 9.0) * chars as f64 + 6.0,
+            h: LABEL_HEIGHT * (pt / 9.0),
+        }
+    }
+
+    fn overlaps(&self, other: &Box) -> bool {
+        (self.x - other.x).abs() * 2.0 < self.w + other.w
+            && (self.y - other.y).abs() * 2.0 < self.h + other.h
+    }
+
+    /// Whether the segment from `a` to `b` passes through the box (Liang–Barsky clipping).
+    fn crossed_by(&self, a: (f64, f64), b: (f64, f64)) -> bool {
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let (mut t0, mut t1) = (0.0f64, 1.0f64);
+        for (p, q) in [
+            (-dx, a.0 - (self.x - self.w / 2.0)),
+            (dx, (self.x + self.w / 2.0) - a.0),
+            (-dy, a.1 - (self.y - self.h / 2.0)),
+            (dy, (self.y + self.h / 2.0) - a.1),
+        ] {
+            if p == 0.0 {
+                if q < 0.0 {
+                    return false;
+                }
+            } else {
+                let t = q / p;
+                if p < 0.0 {
+                    t0 = t0.max(t);
+                } else {
+                    t1 = t1.min(t);
+                }
+            }
+        }
+        t0 < t1
+    }
+}
+
+/// Picks where a message's label goes: on its (straight) edge, in one of the lane gaps the
+/// edge crosses, at the first of a few spots along the gap that collides with none of `taken`,
+/// is crossed by none of the `lines` (the other messages), and keeps clear of both lanes
+/// bounding the gap. Tries the gap nearest the sender first, then the others; when no spot on
+/// the edge is free, tries the same spots just above or below it (the label still touches its
+/// edge). Falls back to the middle of the first gap.
+fn place_label(
+    from: (f64, f64),
+    to: (f64, f64),
+    lane_gap: f64,
+    width: f64,
+    taken: &[Box],
+    lines: &[((f64, f64), (f64, f64))],
+) -> (f64, f64) {
+    let (xa, ya) = from;
+    let (xb, yb) = to;
+    let lanes_crossed = ((xb - xa).abs() / lane_gap).round().max(1.0) as usize;
+    let dir = if xb >= xa { 1.0 } else { -1.0 };
+    let at_x = |x: f64| ya + (x - xa) / (xb - xa) * (yb - ya);
+    let clearance = width / 2.0 + 4.0;
+    let mut fallback = None;
+    for dy in [0.0, -(LABEL_HEIGHT + 1.0), LABEL_HEIGHT + 1.0] {
+        for gap in 0..lanes_crossed {
+            let left = xa + dir * gap as f64 * lane_gap;
+            for t in [0.5, 0.4, 0.6, 0.3, 0.7, 0.2, 0.8] {
+                if t * lane_gap < clearance || (1.0 - t) * lane_gap < clearance {
+                    continue;
+                }
+                let x = left + dir * t * lane_gap;
+                let y = at_x(x) + dy;
+                let candidate = Box {
+                    x,
+                    y,
+                    w: width,
+                    h: LABEL_HEIGHT,
+                };
+                if fallback.is_none() {
+                    fallback = Some((x, y));
+                }
+                if !taken.iter().any(|b| b.overlaps(&candidate))
+                    && !lines.iter().any(|(a, b)| candidate.crossed_by(*a, *b))
+                {
+                    return (x, y);
+                }
+            }
+        }
+    }
+    fallback.unwrap_or_else(|| {
+        let x = xa + dir * 0.5 * lane_gap;
+        (x, at_x(x))
+    })
+}
+
+/// Renders the trace as a Graphviz DOT spacetime diagram in Molly's style: a lane per node
+/// (grouped by role, members in order), time flowing down with one rank per event in global
+/// order, a straight edge per message from its send to its receive. Everything is pinned
+/// (`pos="x,y!"`, `layout=neato`; render with `neato -n2`), so lanes are exactly vertical and
+/// lane spacing is exactly what the longest label needs. Labels are placed here too, not by
+/// Graphviz: each sits on its edge in a lane gap the edge crosses, at a spot that no other
+/// label, edge, crash mark or output note occupies (`place_label`).
 ///
 /// Only the instants that matter are drawn as points: a message's send and receive, an
-/// output, a crash. An omitted message is a red dashed edge from its send to a `✗` on the
-/// lane of the node that should have received it; a send lost because the sender had already
-/// crashed the same in gray. A message still in flight at the horizon is a dotted edge to the
-/// bottom of the destination's lane. `☠ crashed` ends a lane (Graphviz cannot render 4-byte
-/// UTF-8 such as `💀`); what the dead node still did is drawn on a faint dotted continuation.
-/// The end of finite failures is a dashed rule across all lanes labelled `EFF`. Highlighted
-/// messages ([`LamportOptions::highlight`]) are bold, colored, and prefixed `★`.
+/// output (with its note beside the lane), a crash. An omitted message is a red dashed edge
+/// from its send to a `✗` on the lane of the node that should have received it; a send lost
+/// because the sender had already crashed the same in gray. A message still in flight at the
+/// horizon is a dotted edge to the bottom of the destination's lane. `☠ crashed` ends a lane
+/// (Graphviz cannot render 4-byte UTF-8 such as `💀`); what the dead node still did is drawn on
+/// a faint dotted continuation. The end of finite failures is a dashed rule across all lanes
+/// labelled `EFF`. Highlighted messages ([`LamportOptions::highlight`]) are bold, colored, and
+/// prefixed `★`. Module paths are stripped from `Debug` text in labels and the title.
 pub fn dot(trace: &Trace, opts: &LamportOptions) -> String {
-    let shown: Vec<usize> = (0..trace.nodes.len())
+    // Lanes: the nodes grouped by location (in order of first appearance), members in order.
+    let mut shown: Vec<usize> = (0..trace.nodes.len())
         .filter(|n| opts.node_shown(trace, *n))
         .collect();
+    let location_order = |node: usize| {
+        trace
+            .nodes
+            .iter()
+            .position(|n| n.location == trace.nodes[node].location)
+            .expect("the node's own location is in the list")
+    };
+    shown.sort_by_key(|n| (location_order(*n), trace.nodes[*n].member));
     let lane_of = |node: usize| shown.iter().position(|n| *n == node);
     let message_shown = |m: usize| opts.message_shown(trace, &trace.messages[m]);
     // The receive that a message's edge ends at: a message released by a scripted hook is
@@ -430,12 +609,8 @@ pub fn dot(trace: &Trace, opts: &LamportOptions) -> String {
                 };
                 format!("shape=point, width=0.08, color=\"{color}\"")
             }
-            TraceEventKind::Output { display, dropped } => format!(
-                "shape=note, fontsize=9, style=filled, fillcolor=\"{}\", color=\"{}\", margin=\"0.05,0.02\", height=0.2, label=\"⇒ {}\"",
-                if *dropped { "#fde8e8" } else { "#fff7d6" },
-                if *dropped { CRASHED } else { "gray40" },
-                escape_dot(&opts.label(display))
-            ),
+            // The instant on the lane; the note itself is placed beside the lane below.
+            TraceEventKind::Output { .. } => "shape=point, width=0.06, color=\"gray40\"".to_owned(),
             TraceEventKind::Exec => unreachable!("exec events are never drawn"),
         };
         items.push(LaneItem {
@@ -449,13 +624,17 @@ pub fn dot(trace: &Trace, opts: &LamportOptions) -> String {
         let Some(rank) = lost_rank[index] else {
             continue;
         };
-        let color = if m.fate == Fate::Omitted { LOST } else { CRASHED };
+        let color = if m.fate == Fate::Omitted {
+            LOST
+        } else {
+            CRASHED
+        };
         items.push(LaneItem {
             rank,
             node: m.to,
             name: format!("lost{index}"),
             attrs: format!(
-                "shape=plaintext, label=\"✗\", fontcolor=\"{color}\", fontsize=13, width=0.14, height=0.14, fixedsize=true, margin=0"
+                "shape=plaintext, label=\"✗\", fontcolor=\"{color}\", fontsize=13, width=0.2, height=0.2, fixedsize=true, margin=0"
             ),
         });
     }
@@ -490,23 +669,29 @@ pub fn dot(trace: &Trace, opts: &LamportOptions) -> String {
         .map(|(i, m)| label_of(i, m).chars().count())
         .max()
         .unwrap_or(0);
-    // 9pt Helvetica averages ~4.6pt a character.
-    let lane_gap = (4.6 * longest as f64 + 36.0).clamp(90.0, 320.0);
+    // Room for the longest label plus clearance from both lanes.
+    let lane_gap = (CHAR_WIDTH * longest as f64 + 66.0).clamp(96.0, 400.0);
     let x = |lane: usize| lane as f64 * lane_gap;
-    let y = |rank: usize| -(rank as f64) * RANK_GAP;
+    // `0.0 - …` rather than a negation: rank 0 must print as `0.0`, not `-0.0`.
+    let y = |rank: usize| 0.0 - rank as f64 * RANK_GAP;
     let pos = |lane: usize, rank: usize| format!("pos=\"{:.1},{:.1}!\"", x(lane), y(rank));
 
     let mut out = String::new();
     out.push_str("digraph lamport {\n");
-    out.push_str("    layout=neato;\n    splines=false;\n    overlap=true;\n    forcelabels=true;\n    outputorder=edgesfirst;\n");
+    out.push_str("    layout=neato;\n    splines=false;\n    overlap=true;\n    outputorder=edgesfirst;\n    pad=\"0.3,0.2\";\n");
     out.push_str("    node [fontname=\"Helvetica\", fontsize=10];\n");
     out.push_str("    edge [fontname=\"Helvetica\", fontsize=9];\n");
-    let legend = "— delivered    ⋯ in flight    ╌ ✗ omitted (red) / lost to a crash (gray)    ★ support";
+    let legend =
+        "— delivered    ⋯ in flight    ╌ ✗ omitted (red) / lost to a crash (gray)    ★ support";
     let _ = match &opts.title {
         Some(title) => writeln!(
             out,
             "    labelloc=t;\n    fontname=\"Helvetica\";\n    label=<<FONT POINT-SIZE=\"12\">{}</FONT><BR/><FONT POINT-SIZE=\"8\" COLOR=\"gray40\">{}</FONT>>;",
-            escape_html(title),
+            wrap_title(&strip_paths(title), 100)
+                .iter()
+                .map(|line| escape_html(line))
+                .collect::<Vec<_>>()
+                .join("<BR/>"),
             escape_html(legend)
         ),
         None => writeln!(
@@ -554,6 +739,8 @@ pub fn dot(trace: &Trace, opts: &LamportOptions) -> String {
             pos(lane, 0)
         );
     }
+    // Text wide enough to reach into a lane gap: labels keep clear of it.
+    let mut taken: Vec<Box> = vec![];
     for item in &items {
         let lane = lane_of(item.node).expect("items are on shown lanes");
         let _ = writeln!(
@@ -563,6 +750,9 @@ pub fn dot(trace: &Trace, opts: &LamportOptions) -> String {
             item.attrs,
             pos(lane, item.rank)
         );
+        if item.name.starts_with("crash") {
+            taken.push(Box::text(x(lane), y(item.rank), 9, 11.0));
+        }
     }
     for node in &shown {
         let mut prev = format!("h{node}");
@@ -585,48 +775,168 @@ pub fn dot(trace: &Trace, opts: &LamportOptions) -> String {
         }
     }
 
-    // Messages.
-    out.push_str("    // messages\n");
-    for (index, m) in trace.messages.iter().enumerate() {
-        if !opts.message_shown(trace, m) || event_rank[m.send_event].is_none() {
+    // Outputs: a note just right of the lane, level with its instant.
+    let mut notes = String::new();
+    for (index, event) in trace.events.iter().enumerate() {
+        let (Some(rank), TraceEventKind::Output { display, dropped }) =
+            (event_rank[index], &event.kind)
+        else {
             continue;
-        }
+        };
+        let lane = lane_of(event.node).expect("drawn events are on shown lanes");
+        let text = format!("⇒ {}", opts.label(display));
+        let chars = text.chars().count();
+        let bx = Box::text(
+            x(lane) + 7.0 + (CHAR_WIDTH * chars as f64 + 10.0) / 2.0,
+            y(rank),
+            chars,
+            9.0,
+        );
+        let _ = writeln!(
+            notes,
+            "    o{index} [shape=note, fontsize=9, style=filled, fillcolor=\"{}\", color=\"{}\", margin=\"0.05,0.02\", height=0.2, label=\"{}\", pos=\"{:.1},{:.1}!\"];",
+            if *dropped { "#fde8e8" } else { "#fff7d6" },
+            if *dropped { CRASHED } else { "gray40" },
+            escape_dot(&text),
+            bx.x,
+            bx.y
+        );
+        taken.push(bx);
+    }
+    if !notes.is_empty() {
+        out.push_str("    // outputs\n");
+        out.push_str(&notes);
+    }
+
+    // Messages: a straight edge, and its label placed on the edge in a lane gap it crosses.
+    // A message a node sends itself bends out of its lane through `via`, so it is visible.
+    struct Drawn {
+        index: usize,
+        to: String,
+        kind: &'static str,
+        line: String,
+        head: &'static str,
+        a: (f64, f64),
+        b: (f64, f64),
+    }
+    let drawn: Vec<Drawn> = trace
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| opts.message_shown(trace, m) && event_rank[m.send_event].is_some())
+        .map(|(index, m)| {
+            let (to, to_rank, kind, line, head) = match (m.fate, m.recv_event) {
+                (Fate::Delivered, Some(recv)) => (
+                    format!("e{recv}"),
+                    event_rank[recv].expect("the receive of a drawn message is drawn"),
+                    "",
+                    String::new(),
+                    "arrowsize=0.7",
+                ),
+                (Fate::Delivered, None) => (
+                    format!("end{}", m.to),
+                    horizon,
+                    " (in flight)",
+                    "style=dotted, ".to_owned(),
+                    "arrowhead=open, arrowsize=0.7",
+                ),
+                (Fate::Omitted, _) => (
+                    format!("lost{index}"),
+                    lost_rank[index].expect("a lost message has its mark"),
+                    " (omitted)",
+                    format!("style=dashed, color=\"{LOST}\", "),
+                    "arrowhead=none",
+                ),
+                (Fate::Crashed, _) => (
+                    format!("lost{index}"),
+                    lost_rank[index].expect("a lost message has its mark"),
+                    " (sender crashed)",
+                    format!("style=dashed, color=\"{CRASHED}\", "),
+                    "arrowhead=none",
+                ),
+            };
+            let from_lane = lane_of(m.from).expect("shown message");
+            let to_lane = lane_of(m.to).expect("shown message");
+            Drawn {
+                index,
+                to,
+                kind,
+                line,
+                head,
+                a: (x(from_lane), y(event_rank[m.send_event].expect("drawn"))),
+                b: (x(to_lane), y(to_rank)),
+            }
+        })
+        .collect();
+    out.push_str("    // messages\n");
+    let mut labels = String::new();
+    for (i, d) in drawn.iter().enumerate() {
+        let m = &trace.messages[d.index];
+        let (index, kind, line, head, a, b) = (d.index, d.kind, &d.line, d.head, d.a, d.b);
+        let (from, to) = (format!("e{}", m.send_event), &d.to);
         let highlighted = opts.highlight.contains(&index);
-        let label = escape_dot(&label_of(index, m));
+        let text = label_of(index, m);
+        let label = escape_dot(&text);
+        let fontcolor = if highlighted {
+            HIGHLIGHT
+        } else {
+            match m.fate {
+                Fate::Omitted => LOST,
+                Fate::Crashed => CRASHED,
+                Fate::Delivered => "black",
+            }
+        };
         let emphasis = if highlighted {
-            format!(", penwidth=2, color=\"{HIGHLIGHT}\", fontcolor=\"{HIGHLIGHT}\"")
+            format!(", penwidth=2, color=\"{HIGHLIGHT}\"")
         } else {
             String::new()
         };
-        let from = format!("e{}", m.send_event);
-        match (m.fate, m.recv_event) {
-            (Fate::Delivered, Some(recv)) => {
-                let _ = writeln!(
-                    out,
-                    "    {from} -> e{recv} [xlabel=\"{label}\", tooltip=\"{label}\", arrowsize=0.7{emphasis}];"
-                );
-            }
-            (Fate::Delivered, None) => {
-                let _ = writeln!(
-                    out,
-                    "    {from} -> end{} [xlabel=\"{label}\", tooltip=\"{label} (in flight)\", style=dotted, arrowhead=open, arrowsize=0.7{emphasis}];",
-                    m.to
-                );
-            }
-            (Fate::Omitted, _) => {
-                let _ = writeln!(
-                    out,
-                    "    {from} -> lost{index} [xlabel=\"{label}\", tooltip=\"{label} (omitted)\", style=dashed, color=\"{LOST}\", fontcolor=\"{LOST}\", arrowhead=none];"
-                );
-            }
-            (Fate::Crashed, _) => {
-                let _ = writeln!(
-                    out,
-                    "    {from} -> lost{index} [xlabel=\"{label}\", tooltip=\"{label} (sender crashed)\", style=dashed, color=\"{CRASHED}\", fontcolor=\"{CRASHED}\", arrowhead=none];"
-                );
-            }
-        }
+        let width = CHAR_WIDTH * text.chars().count() as f64 + 6.0;
+        let (lx, ly) = if a.0 == b.0 {
+            // Bend 14pt out of the lane (to the left on the last lane) and label beside it.
+            let last = lane_of(m.from) == Some(shown.len() - 1) && shown.len() > 1;
+            let dir = if last { -1.0 } else { 1.0 };
+            let vx = a.0 + dir * 14.0;
+            let vy = (a.1 + b.1) / 2.0;
+            let _ = writeln!(
+                out,
+                "    via{index} [shape=point, style=invis, width=0.01, pos=\"{vx:.1},{vy:.1}!\"];"
+            );
+            let _ = writeln!(
+                out,
+                "    {from} -> via{index} [tooltip=\"{label}{kind}\", {line}arrowhead=none{emphasis}];"
+            );
+            let _ = writeln!(
+                out,
+                "    via{index} -> {to} [tooltip=\"{label}{kind}\", {line}{head}{emphasis}];"
+            );
+            (vx + dir * (width / 2.0 + 2.0), vy)
+        } else {
+            let _ = writeln!(
+                out,
+                "    {from} -> {to} [tooltip=\"{label}{kind}\", {line}{head}{emphasis}];"
+            );
+            let others: Vec<_> = drawn
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, o)| (o.a, o.b))
+                .collect();
+            place_label(a, b, lane_gap, width, &taken, &others)
+        };
+        taken.push(Box {
+            x: lx,
+            y: ly,
+            w: width,
+            h: LABEL_HEIGHT,
+        });
+        let _ = writeln!(
+            labels,
+            "    l{index} [shape=plaintext, style=filled, fillcolor=white, fontsize=9, fontcolor=\"{fontcolor}\", margin=\"0.03,0\", height=0.14, label=\"{label}\", pos=\"{lx:.1},{ly:.1}!\"];"
+        );
     }
+    out.push_str("    // message labels\n");
+    out.push_str(&labels);
     out.push_str("}\n");
     out
 }
@@ -702,56 +1012,107 @@ mod tests {
         assert!(out.contains("layout=neato"), "{out}");
         assert!(out.contains("splines=false"), "{out}");
         // Lanes are pinned: the sender's header and its points share an x.
-        assert!(out.contains("h0 [") && out.contains("pos=\"0.0,0.0!\""), "{out}");
-        assert!(out.contains("e1 [shape=point, width=0.08, color=\"#d35400\", pos=\"0.0,-16.0!\"]"), "{out}");
-        assert!(out.contains("h0 [shape=box"), "{out}");
-        // Message edges are labelled beside the edge, not on it.
         assert!(
-            out.contains("e1 -> e5 [xlabel=\"★ msg: Msg { attempt: 1 }\""),
+            out.contains("h0 [") && out.contains("pos=\"0.0,0.0!\""),
             "{out}"
         );
-        assert!(!out.contains(" label=\"★"), "{out}");
+        assert!(
+            out.contains("e1 [shape=point, width=0.08, color=\"#d35400\", pos=\"0.0,-16.0!\"]"),
+            "{out}"
+        );
+        assert!(out.contains("h0 [shape=box"), "{out}");
+        // Message edges carry no label of their own: the label is a pinned node of its own,
+        // placed in the lane gap the edge crosses.
+        assert!(
+            out.contains("e1 -> e5 [tooltip=\"★ msg: Msg { attempt: 1 }\", arrowsize=0.7, penwidth=2, color=\"#d35400\"]"),
+            "{out}"
+        );
+        assert!(
+            out.contains("l0 [shape=plaintext, style=filled, fillcolor=white, fontsize=9, fontcolor=\"#d35400\""),
+            "{out}"
+        );
+        assert!(
+            out.contains("label=\"★ msg: Msg { attempt: 1 }\", pos=\""),
+            "{out}"
+        );
+        assert!(!out.contains("xlabel"), "{out}");
         // An omitted message ends at a `✗` on the receiver's lane, one rank below its send.
         assert!(
-            out.contains("e2 -> lost1 [xlabel=\"msg: Msg { attempt: 2 }\", tooltip=\"msg: Msg { attempt: 2 } (omitted)\""),
+            out.contains(
+                "e2 -> lost1 [tooltip=\"msg: Msg { attempt: 2 } (omitted)\", style=dashed"
+            ),
             "{out}"
         );
         assert!(out.contains("lost1 [shape=plaintext, label=\"✗\""), "{out}");
         assert!(out.contains("h1 -> lost1 [arrowhead=none"), "{out}");
         assert!(
-            out.contains("e3 -> end1 [xlabel=\"msg: Msg { attempt: 3 }\", tooltip=\"msg: Msg { attempt: 3 } (in flight)\""),
+            out.contains("e3 -> end1 [tooltip=\"msg: Msg { attempt: 3 } (in flight)\", style=dotted, arrowhead=open"),
             "{out}"
         );
         // The sender died after event 3: its lane ends in `☠` and continues faintly, and the
         // send it attempted afterwards is a gray stub to the receiver's lane.
         assert!(
-            out.contains("crash0 [shape=plaintext, label=\"☠ crashed\""),
-            "{out}"
-        );
-        assert!(out.contains("e3 -> crash0 [arrowhead=none, color=\"gray55\""), "{out}");
-        assert!(
-            out.contains("crash0 -> eff0 [arrowhead=none, style=dotted, color=\"gray80\""),
+            out.contains(
+                "crash0 [shape=plaintext, style=filled, fillcolor=white, label=\"☠ crashed\""
+            ),
             "{out}"
         );
         assert!(
-            out.contains("e9 -> lost4 [xlabel=\"msg: Msg { attempt: 4 }\", tooltip=\"msg: Msg { attempt: 4 } (sender crashed)\""),
+            out.contains("e3 -> crash0 [arrowhead=none, color=\"gray55\""),
+            "{out}"
+        );
+        assert!(
+            out.contains("crash0 -> e9 [arrowhead=none, style=dotted, color=\"gray80\""),
+            "{out}"
+        );
+        assert!(
+            out.contains("e9 -> lost4 [tooltip=\"msg: Msg { attempt: 4 } (sender crashed)\", style=dashed, color=\"gray50\""),
             "{out}"
         );
         // EFF is a dashed rule across the lanes, labelled at the right.
         assert!(out.contains("t_eff [label=\"EFF\""), "{out}");
         assert!(out.contains("eff_l -> eff_r [style=dashed"), "{out}");
-        assert!(out.contains("e6 [shape=note"), "{out}");
+        // An output is an instant on the lane and a note beside it.
+        assert!(out.contains("e6 [shape=point, width=0.06"), "{out}");
+        assert!(out.contains("o6 [shape=note"), "{out}");
+        assert!(
+            out.contains("label=\"⇒ Msg { attempt: 1 }\", pos=\""),
+            "{out}"
+        );
         // Only message endpoints, outputs and crashes are drawn: no exec points.
         assert!(!out.contains("e0 ["), "{out}");
         assert!(!out.contains("e4 ["), "{out}");
         assert!(!out.contains("e8 ["), "{out}");
-        assert!(out.contains("label=<<FONT POINT-SIZE=\"12\">t</FONT>"), "{out}");
+        assert!(
+            out.contains("label=<<FONT POINT-SIZE=\"12\">t</FONT>"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn strips_paths_and_wraps_titles() {
+        assert_eq!(
+            strip_paths(
+                "Ballot { proposer_id: MemberId::<hydro_test::cluster::paxos::Proposer>(1) }"
+            ),
+            "Ballot { proposer_id: MemberId::<Proposer>(1) }"
+        );
+        assert_eq!(strip_paths("a::b::C::d(1)"), "d(1)");
+        assert_eq!(strip_paths("x: 1, y: Some(\"x\")"), "x: 1, y: Some(\"x\")");
+        assert_eq!(
+            wrap_title("goal violated by {omit(a), omit(b), crash(c)}", 24),
+            ["goal violated by {omit(a),", "omit(b), crash(c)}"]
+        );
+        assert_eq!(wrap_title("short", 24), ["short"]);
     }
 
     #[test]
     fn escapes() {
         assert_eq!(escape_mermaid("a;b#c\nd"), "a#59;b#35;c<br/>d");
         assert_eq!(escape_dot("a\"b\\c\nd"), "a\\\"b\\\\c\\nd");
-        assert_eq!(escape_html("a<b>&\"c\"\nd"), "a&lt;b&gt;&amp;&quot;c&quot;<BR/>d");
+        assert_eq!(
+            escape_html("a<b>&\"c\"\nd"),
+            "a&lt;b&gt;&amp;&quot;c&quot;<BR/>d"
+        );
     }
 }

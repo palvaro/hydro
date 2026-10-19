@@ -21,7 +21,7 @@ mod ldfi_ablation_two_pc;
 #[cfg(test)]
 mod ldfi_grid;
 #[cfg(test)]
-mod ldfi_viz;
+pub(crate) mod ldfi_viz;
 pub mod many_to_many;
 pub mod map_reduce;
 #[cfg(feature = "tokio")]

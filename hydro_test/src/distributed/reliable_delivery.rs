@@ -128,6 +128,18 @@ mod tests {
         hooks: bool,
         traces: bool,
     ) -> Outcome {
+        search_configured(max_attempts, eot, eff, hooks, traces, |ldfi| ldfi)
+    }
+
+    /// [`search_with`], with `configure` applied to the search before it runs.
+    fn search_configured(
+        max_attempts: Option<u32>,
+        eot: u32,
+        eff: u32,
+        hooks: bool,
+        traces: bool,
+        configure: impl FnOnce(Ldfi) -> Ldfi,
+    ) -> Outcome {
         let mut flow = FlowBuilder::new();
         let sender = flow.process::<Sender>();
         let receiver = flow.process::<Receiver>();
@@ -158,7 +170,7 @@ mod tests {
         let out = received.sim_output();
 
         let mut sim = flow.sim().test_safety_only();
-        if std::env::var("LDFI_PROVENANCE").is_ok() {
+        if std::env::var("LDFI_PROVENANCE").is_ok() || std::env::var("MOLLY_VIZ_OUT").is_ok() {
             sim = sim.with_provenance();
         }
         let compiled = sim.compiled();
@@ -166,7 +178,7 @@ mod tests {
         if traces {
             ldfi = ldfi.with_traces();
         }
-        ldfi.run(&compiled, async |run| {
+        configure(ldfi).run(&compiled, async |run| {
             for round in 1..=eot {
                 if round == eff + 1 {
                     run.end_of_finite_failures();
@@ -177,6 +189,25 @@ mod tests {
             let received: Vec<Msg> = out.collect_sorted().await;
             !received.is_empty()
         })
+    }
+
+    /// The gallery entry (see `cluster::ldfi_viz`): a sender that gives up after two
+    /// attempts, both lost.
+    #[test]
+    fn gallery_reliable_delivery_gives_up() {
+        use hydro_lang::sim::ldfi::Level;
+
+        use crate::cluster::ldfi_viz::{gallery_dir, write_gallery};
+
+        let Some(dir) = gallery_dir("reliable_delivery_gives_up") else {
+            return;
+        };
+        for level in [Level::Execution, Level::Record] {
+            let outcome = search_configured(Some(2), 4, 2, true, true, |ldfi| {
+                ldfi.level(level).with_provenance_graphs()
+            });
+            write_gallery(&dir, "reliable delivery", level, &outcome);
+        }
     }
 
     /// A sender that gives up after two attempts violates the property: dropping both

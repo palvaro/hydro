@@ -711,6 +711,11 @@ pub fn dot(g: &ProvGraph, opts: &ProvOptions) -> String {
     let _ = writeln!(out, "digraph provenance {{");
     let _ = writeln!(out, "    rankdir=TB;");
     let _ = writeln!(out, "    compound=true;");
+    // A dense graph (execution-level lineage, where every execution depends on most earlier
+    // ones) is a hairball of parallel edges: merge the edges that share a path.
+    if g.edges.len() > 60 {
+        let _ = writeln!(out, "    concentrate=true;");
+    }
     let _ = writeln!(
         out,
         "    node [fontname=\"Helvetica\", fontsize=10];\n    edge [fontname=\"Helvetica\", fontsize=8];"

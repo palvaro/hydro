@@ -51,7 +51,7 @@
 // Two attributes: the staging tool recognises a bare `#[cfg(test)]` only.
 #[cfg(test)]
 #[cfg(feature = "tokio")]
-mod tests {
+pub(crate) mod tests {
     use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
     use hydro_lang::location::MemberId;
     use hydro_lang::prelude::*;
@@ -76,7 +76,7 @@ mod tests {
     /// Schedules sampled per hypothesis.
     const SCHEDULES: usize = 4;
 
-    struct Harness {
+    pub(crate) struct Harness {
         heartbeat: SimClusterSender<(), TotalOrder, ExactlyOnce>,
         check: SimClusterSender<(), TotalOrder, ExactlyOnce>,
         payloads: SimClusterSender<String, TotalOrder, ExactlyOnce>,
@@ -84,7 +84,7 @@ mod tests {
 
     /// Compiles Paxos with two proposers and three acceptors, with or without the injected
     /// bug. Fault model: proposers and acceptors crash; the acceptor channels are lossy.
-    fn compile(bug: bool) -> (CompiledSim, Harness, impl Fn(usize) -> Ldfi) {
+    pub(crate) fn compile(bug: bool) -> (CompiledSim, Harness, impl Fn(usize) -> Ldfi) {
         compile_with(bug, SCHEDULES)
     }
 
@@ -193,7 +193,7 @@ mod tests {
     /// it is sent `x`; proposer 1's check fires (its first ballot, whose P1a/P1b exchange is
     /// still under finite failures); the end of finite failures; proposer 1's check fires
     /// again (a retry with a higher ballot if the first was lost), it is sent `y`.
-    async fn body(h: &Harness, run: &Run<'_>) {
+    pub(crate) async fn body(h: &Harness, run: &Run<'_>) {
         h.check.send(0, ());
         hydro_lang::sim::quiesce().await;
         h.payloads.send(0, "x".to_owned());
