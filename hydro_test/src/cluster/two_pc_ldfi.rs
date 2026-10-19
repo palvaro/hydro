@@ -226,6 +226,14 @@ pub(crate) mod harness {
         timeout_send: SimClusterSender<(), TotalOrder, ExactlyOnce>,
     }
 
+    /// Changes the transactions per run (the workload is a runtime knob: the compiled program
+    /// is the same at every load). For the lineage ablation (`ldfi_ablation_two_pc.rs`),
+    /// which compiles once per protocol size.
+    pub(crate) fn with_txns(mut h: Harness, txns: u32) -> Harness {
+        h.txns = txns;
+        h
+    }
+
     /// Builds and compiles 2PC with or without cooperative termination.
     pub(crate) fn compile(
         participants_count: u32,
