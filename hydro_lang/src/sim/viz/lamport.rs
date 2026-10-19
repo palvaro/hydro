@@ -286,175 +286,315 @@ fn escape_dot(text: &str) -> String {
     out
 }
 
-const HIGHLIGHT: &str = "#d97706";
-const LANE: &str = "gray60";
-const LOST: &str = "#dc2626";
+const HIGHLIGHT: &str = "#d35400";
+const LANE: &str = "gray55";
+const DEAD_LANE: &str = "gray80";
+const LOST: &str = "#c0392b";
+const CRASHED: &str = "gray50";
+const EFF: &str = "gray45";
 
-/// Renders the trace as a Graphviz DOT spacetime diagram: a lane per node, one rank per
-/// event in global order (an invisible time spine fixes the ranks), a message as an edge
-/// from its send to its receive. An omitted message is a red dashed edge to a `✗`; a send
-/// lost to the sender's crash a gray dashed edge; a message in flight at the horizon a dotted
-/// edge to the bottom of the destination's lane. Highlighted messages are bold and colored.
-/// `☠ crashed` marks a crash point (Graphviz cannot render 4-byte UTF-8 such as `💀`), and
-/// the end of finite failures is a labelled rank.
-pub fn dot(trace: &Trace, opts: &LamportOptions) -> String {
-    let mut out = String::new();
-    out.push_str("digraph lamport {\n");
-    out.push_str("    rankdir=TB;\n    nodesep=0.9;\n    ranksep=0.18;\n    splines=line;\n");
-    out.push_str("    node [fontname=\"Helvetica\", fontsize=10];\n");
-    out.push_str("    edge [fontname=\"Helvetica\", fontsize=9];\n");
-    if let Some(title) = &opts.title {
-        let _ = writeln!(out, "    labelloc=t;\n    label=\"{}\";", escape_dot(title));
+/// Escapes text for a Graphviz HTML-like label.
+fn escape_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\n' => out.push_str("<BR/>"),
+            c => out.push(c),
+        }
     }
+    out
+}
+
+/// One thing drawn on a lane at a rank: the DOT node's name and its attributes.
+struct LaneItem {
+    rank: usize,
+    node: usize,
+    name: String,
+    attrs: String,
+}
+
+/// Vertical distance between consecutive ranks, in points.
+const RANK_GAP: f64 = 16.0;
+
+/// Renders the trace as a Graphviz DOT spacetime diagram in Molly's style: a lane per node,
+/// time flowing down with one rank per event in global order, a straight edge per message
+/// from its send to its receive, labelled beside it. Every point is pinned (`pos="x,y!"`,
+/// `layout=neato`), so lanes are exactly vertical and lane spacing is exactly what the
+/// longest label needs: Graphviz only places the labels.
+///
+/// Only the instants that matter are drawn as points: a message's send and receive, an
+/// output, a crash. An omitted message is a red dashed edge from its send to a `✗` on the
+/// lane of the node that should have received it; a send lost because the sender had already
+/// crashed the same in gray. A message still in flight at the horizon is a dotted edge to the
+/// bottom of the destination's lane. `☠ crashed` ends a lane (Graphviz cannot render 4-byte
+/// UTF-8 such as `💀`); what the dead node still did is drawn on a faint dotted continuation.
+/// The end of finite failures is a dashed rule across all lanes labelled `EFF`. Highlighted
+/// messages ([`LamportOptions::highlight`]) are bold, colored, and prefixed `★`.
+pub fn dot(trace: &Trace, opts: &LamportOptions) -> String {
     let shown: Vec<usize> = (0..trace.nodes.len())
         .filter(|n| opts.node_shown(trace, *n))
         .collect();
+    let lane_of = |node: usize| shown.iter().position(|n| *n == node);
+    let message_shown = |m: usize| opts.message_shown(trace, &trace.messages[m]);
+    // The receive that a message's edge ends at: a message released by a scripted hook is
+    // recorded twice (the top-level receive, then the release), and the trace pairs it with
+    // the last.
+    let is_recv_endpoint = |event: usize, m: usize| trace.messages[m].recv_event == Some(event);
+    let crash_event = |node: usize| match trace.nodes[node].crash {
+        Some(Crash::AfterEvent(event)) => Some(event),
+        _ => None,
+    };
+    let dead_at = |node: usize, event: usize| match trace.nodes[node].crash {
+        Some(Crash::BeforeAnySend) => true,
+        Some(Crash::AfterEvent(crash)) => event > crash,
+        None => false,
+    };
 
-    // The ranks: one per shown event (plus the headers, EFF, and the horizon), in order.
-    // `event_rank[i]` is the spine node of event `i` when it is shown.
-    let mut spine: Vec<String> = vec!["t_head".to_owned()];
-    let mut event_spine: Vec<Option<usize>> = vec![None; trace.events.len()];
-    let mut eff_spine: Option<usize> = None;
+    // Ranks, in time order: 0 is the header row. `event_rank[i]` is the rank of event `i`
+    // when it is drawn; an omitted or crashed send gets an extra rank right below it for the
+    // `✗` on the receiver's lane, a crash one for the `☠`.
+    let mut ranks = 1usize;
+    let mut event_rank: Vec<Option<usize>> = vec![None; trace.events.len()];
+    let mut lost_rank: Vec<Option<usize>> = vec![None; trace.messages.len()];
+    let mut crash_rank: Vec<Option<usize>> = vec![None; trace.nodes.len()];
+    let mut eff_rank: Option<usize> = None;
+    let mut next_rank = || {
+        ranks += 1;
+        ranks - 1
+    };
+    for node in &shown {
+        if trace.nodes[*node].crash == Some(Crash::BeforeAnySend) {
+            crash_rank[*node] = Some(next_rank());
+        }
+    }
     for (index, event) in trace.events.iter().enumerate() {
         if trace.eff_cut == Some(index) {
-            eff_spine = Some(spine.len());
-            spine.push("t_eff".to_owned());
+            eff_rank = Some(next_rank());
         }
-        let shown_event = opts.node_shown(trace, event.node)
-            && match &event.kind {
-                TraceEventKind::Exec => false,
-                TraceEventKind::Send(m) | TraceEventKind::Recv(m) => {
-                    opts.message_shown(trace, &trace.messages[*m])
-                }
-                TraceEventKind::Output { .. } => opts.show_outputs,
-            };
-        if shown_event {
-            event_spine[index] = Some(spine.len());
-            spine.push(format!("t{index}"));
+        if !opts.node_shown(trace, event.node) {
+            continue;
+        }
+        let drawn = match &event.kind {
+            TraceEventKind::Exec => false,
+            TraceEventKind::Send(m) => message_shown(*m),
+            TraceEventKind::Recv(m) => message_shown(*m) && is_recv_endpoint(index, *m),
+            TraceEventKind::Output { .. } => opts.show_outputs,
+        };
+        if drawn {
+            event_rank[index] = Some(next_rank());
+        }
+        if let TraceEventKind::Send(m) = &event.kind
+            && drawn
+            && trace.messages[*m].fate != Fate::Delivered
+        {
+            lost_rank[*m] = Some(next_rank());
+        }
+        if crash_event(event.node) == Some(index) {
+            crash_rank[event.node] = Some(next_rank());
         }
     }
     if trace.eff_cut == Some(trace.events.len()) {
-        eff_spine = Some(spine.len());
-        spine.push("t_eff".to_owned());
+        eff_rank = Some(next_rank());
     }
-    spine.push("t_end".to_owned());
+    let horizon = next_rank();
 
-    // The spine.
-    out.push_str("    // time spine\n");
-    for t in &spine {
-        let label = if t == "t_eff" {
-            "label=\"EFF\", shape=plaintext, fontcolor=gray40, fontsize=9"
-        } else {
-            "shape=point, style=invis"
+    // What each lane shows.
+    let mut items: Vec<LaneItem> = vec![];
+    for node in &shown {
+        if let Some(rank) = crash_rank[*node] {
+            items.push(LaneItem {
+                rank,
+                node: *node,
+                name: format!("crash{node}"),
+                attrs: "shape=plaintext, style=filled, fillcolor=white, label=\"☠ crashed\", fontsize=11, margin=\"0.04,0\", height=0.16".to_owned(),
+            });
+        }
+    }
+    for (index, event) in trace.events.iter().enumerate() {
+        let Some(rank) = event_rank[index] else {
+            continue;
         };
-        let _ = writeln!(out, "    {t} [{label}];");
+        let dead = dead_at(event.node, index);
+        let attrs = match &event.kind {
+            TraceEventKind::Send(m) | TraceEventKind::Recv(m) => {
+                let color = if opts.highlight.contains(m) {
+                    HIGHLIGHT
+                } else if dead {
+                    CRASHED
+                } else {
+                    "black"
+                };
+                format!("shape=point, width=0.08, color=\"{color}\"")
+            }
+            TraceEventKind::Output { display, dropped } => format!(
+                "shape=note, fontsize=9, style=filled, fillcolor=\"{}\", color=\"{}\", margin=\"0.05,0.02\", height=0.2, label=\"⇒ {}\"",
+                if *dropped { "#fde8e8" } else { "#fff7d6" },
+                if *dropped { CRASHED } else { "gray40" },
+                escape_dot(&opts.label(display))
+            ),
+            TraceEventKind::Exec => unreachable!("exec events are never drawn"),
+        };
+        items.push(LaneItem {
+            rank,
+            node: event.node,
+            name: format!("e{index}"),
+            attrs,
+        });
     }
-    let _ = writeln!(
-        out,
-        "    {} [style=invis, weight=1000];",
-        spine.join(" -> ")
-    );
+    for (index, m) in trace.messages.iter().enumerate() {
+        let Some(rank) = lost_rank[index] else {
+            continue;
+        };
+        let color = if m.fate == Fate::Omitted { LOST } else { CRASHED };
+        items.push(LaneItem {
+            rank,
+            node: m.to,
+            name: format!("lost{index}"),
+            attrs: format!(
+                "shape=plaintext, label=\"✗\", fontcolor=\"{color}\", fontsize=13, width=0.14, height=0.14, fixedsize=true, margin=0"
+            ),
+        });
+    }
+    for node in &shown {
+        items.push(LaneItem {
+            rank: horizon,
+            node: *node,
+            name: format!("end{node}"),
+            attrs: format!("shape=point, width=0.04, color=\"{LANE}\""),
+        });
+    }
+    items.sort_by_key(|item| item.rank);
 
-    // Headers, left to right in node order.
-    out.push_str("    // lanes\n");
-    out.push_str("    { rank=same; t_head;");
-    for node in &shown {
-        out.push_str(&format!(" h{node};"));
+    // Message labels decide how far apart the lanes are.
+    let label_of = |index: usize, m: &TraceMessage| {
+        format!(
+            "{}{}: {}",
+            if opts.highlight.contains(&index) {
+                "★ "
+            } else {
+                ""
+            },
+            m.channel,
+            opts.label(&m.display)
+        )
+    };
+    let longest = trace
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| opts.message_shown(trace, m))
+        .map(|(i, m)| label_of(i, m).chars().count())
+        .max()
+        .unwrap_or(0);
+    // 9pt Helvetica averages ~4.6pt a character.
+    let lane_gap = (4.6 * longest as f64 + 36.0).clamp(90.0, 320.0);
+    let x = |lane: usize| lane as f64 * lane_gap;
+    let y = |rank: usize| -(rank as f64) * RANK_GAP;
+    let pos = |lane: usize, rank: usize| format!("pos=\"{:.1},{:.1}!\"", x(lane), y(rank));
+
+    let mut out = String::new();
+    out.push_str("digraph lamport {\n");
+    out.push_str("    layout=neato;\n    splines=false;\n    overlap=true;\n    forcelabels=true;\n    outputorder=edgesfirst;\n");
+    out.push_str("    node [fontname=\"Helvetica\", fontsize=10];\n");
+    out.push_str("    edge [fontname=\"Helvetica\", fontsize=9];\n");
+    let legend = "— delivered    ⋯ in flight    ╌ ✗ omitted (red) / lost to a crash (gray)    ★ support";
+    let _ = match &opts.title {
+        Some(title) => writeln!(
+            out,
+            "    labelloc=t;\n    fontname=\"Helvetica\";\n    label=<<FONT POINT-SIZE=\"12\">{}</FONT><BR/><FONT POINT-SIZE=\"8\" COLOR=\"gray40\">{}</FONT>>;",
+            escape_html(title),
+            escape_html(legend)
+        ),
+        None => writeln!(
+            out,
+            "    labelloc=t;\n    fontname=\"Helvetica\";\n    label=<<FONT POINT-SIZE=\"8\" COLOR=\"gray40\">{}</FONT>>;",
+            escape_html(legend)
+        ),
+    };
+
+    // The end of finite failures: a dashed rule across the lanes, labelled at the right.
+    if let Some(rank) = eff_rank {
+        let right = x(shown.len().saturating_sub(1)) + 0.4 * lane_gap.min(90.0);
+        let _ = writeln!(
+            out,
+            "    // the end of finite failures\n    eff_l [shape=point, style=invis, width=0.01, pos=\"{:.1},{:.1}!\"];",
+            -0.3 * lane_gap.min(90.0),
+            y(rank)
+        );
+        let _ = writeln!(
+            out,
+            "    eff_r [shape=point, style=invis, width=0.01, pos=\"{right:.1},{:.1}!\"];",
+            y(rank)
+        );
+        let _ = writeln!(
+            out,
+            "    t_eff [label=\"EFF\", shape=plaintext, fontcolor=\"{EFF}\", fontsize=9, margin=\"0.04,0\", height=0.12, pos=\"{:.1},{:.1}!\"];",
+            right + 12.0,
+            y(rank)
+        );
+        let _ = writeln!(
+            out,
+            "    eff_l -> eff_r [style=dashed, color=\"{EFF}\", arrowhead=none];"
+        );
     }
-    out.push_str(" }\n");
-    for node in &shown {
+
+    // Lanes: a header, then each item top to bottom, chained; the chain is faint and dotted
+    // once the node has died.
+    out.push_str("    // lanes\n");
+    for (lane, node) in shown.iter().enumerate() {
         let info = &trace.nodes[*node];
         let _ = writeln!(
             out,
-            "    h{node} [shape=box, style=\"rounded,filled\", fillcolor=\"#eeeeee\", label=\"{}\"];",
-            escape_dot(&info.label)
+            "    h{node} [shape=box, style=\"rounded,filled\", fillcolor=\"#eeeeee\", color=\"#bbbbbb\", height=0.3, label=\"{}\", {}];",
+            escape_dot(&info.label),
+            pos(lane, 0)
         );
     }
-    if shown.len() > 1 {
-        let heads: Vec<String> = shown.iter().map(|n| format!("h{n}")).collect();
-        let _ = writeln!(out, "    {} [style=invis];", heads.join(" -> "));
+    for item in &items {
+        let lane = lane_of(item.node).expect("items are on shown lanes");
+        let _ = writeln!(
+            out,
+            "    {} [{}, {}];",
+            item.name,
+            item.attrs,
+            pos(lane, item.rank)
+        );
     }
-
-    // Each lane: its shown events chained top to bottom, a crash marker where it dies, an
-    // end point at the horizon.
-    let mut lane_end: Vec<String> = vec![String::new(); trace.nodes.len()];
     for node in &shown {
-        let info = &trace.nodes[*node];
-        let mut chain: Vec<String> = vec![format!("h{node}")];
-        if info.crash == Some(Crash::BeforeAnySend) {
+        let mut prev = format!("h{node}");
+        let mut dead = trace.nodes[*node].crash == Some(Crash::BeforeAnySend);
+        for item in items.iter().filter(|item| item.node == *node) {
+            let style = if dead {
+                format!("style=dotted, color=\"{DEAD_LANE}\"")
+            } else {
+                format!("color=\"{LANE}\"")
+            };
             let _ = writeln!(
                 out,
-                "    crash{node} [shape=plaintext, label=\"☠ crashed\", fontsize=12];"
+                "    {prev} -> {} [arrowhead=none, {style}];",
+                item.name
             );
-            chain.push(format!("crash{node}"));
-        }
-        for (index, event) in trace.events.iter().enumerate() {
-            if event.node != *node {
-                continue;
+            if item.name == format!("crash{node}") {
+                dead = true;
             }
-            let Some(t) = event_spine[index] else {
-                continue;
-            };
-            let name = format!("e{index}");
-            let attrs = match &event.kind {
-                TraceEventKind::Send(m) | TraceEventKind::Recv(m) => {
-                    let color = if opts.highlight.contains(m) {
-                        HIGHLIGHT
-                    } else {
-                        "black"
-                    };
-                    format!("shape=point, width=0.09, color=\"{color}\"")
-                }
-                TraceEventKind::Output { display, dropped } => format!(
-                    "shape=note, fontsize=9, style=filled, fillcolor=\"{}\", label=\"⇒ {}\"",
-                    if *dropped { "#fde8e8" } else { "#fff7d6" },
-                    escape_dot(&opts.label(display))
-                ),
-                TraceEventKind::Exec => unreachable!("exec events are never shown"),
-            };
-            let _ = writeln!(out, "    {name} [{attrs}];");
-            let _ = writeln!(out, "    {{ rank=same; {}; {name}; }}", spine[t]);
-            chain.push(name);
-            if info.crash == Some(Crash::AfterEvent(index)) {
-                let _ = writeln!(
-                    out,
-                    "    crash{node} [shape=plaintext, label=\"☠ crashed\", fontsize=12];"
-                );
-                chain.push(format!("crash{node}"));
-            }
+            prev = item.name.clone();
         }
-        let _ = writeln!(
-            out,
-            "    end{node} [shape=point, width=0.05, color=\"{LANE}\"];"
-        );
-        let _ = writeln!(out, "    {{ rank=same; t_end; end{node}; }}");
-        chain.push(format!("end{node}"));
-        lane_end[*node] = format!("end{node}");
-        let _ = writeln!(
-            out,
-            "    {} [arrowhead=none, color=\"{LANE}\", weight=100];",
-            chain.join(" -> ")
-        );
-    }
-    if let Some(t) = eff_spine {
-        let _ = writeln!(out, "    // the end of finite failures: {}", spine[t]);
     }
 
     // Messages.
     out.push_str("    // messages\n");
     for (index, m) in trace.messages.iter().enumerate() {
-        if !opts.message_shown(trace, m) {
+        if !opts.message_shown(trace, m) || event_rank[m.send_event].is_none() {
             continue;
         }
         let highlighted = opts.highlight.contains(&index);
-        let label = escape_dot(&format!(
-            "{}{}: {}",
-            if highlighted { "★ " } else { "" },
-            m.channel,
-            opts.label(&m.display)
-        ));
+        let label = escape_dot(&label_of(index, m));
         let emphasis = if highlighted {
-            format!(", penwidth=2.2, color=\"{HIGHLIGHT}\", fontcolor=\"{HIGHLIGHT}\"")
+            format!(", penwidth=2, color=\"{HIGHLIGHT}\", fontcolor=\"{HIGHLIGHT}\"")
         } else {
             String::new()
         };
@@ -463,44 +603,26 @@ pub fn dot(trace: &Trace, opts: &LamportOptions) -> String {
             (Fate::Delivered, Some(recv)) => {
                 let _ = writeln!(
                     out,
-                    "    {from} -> e{recv} [label=\"{label}\", constraint=false{emphasis}];"
+                    "    {from} -> e{recv} [xlabel=\"{label}\", tooltip=\"{label}\", arrowsize=0.7{emphasis}];"
                 );
             }
             (Fate::Delivered, None) => {
                 let _ = writeln!(
                     out,
-                    "    {from} -> {} [label=\"{label} (in flight)\", style=dotted, arrowhead=open, constraint=false{emphasis}];",
-                    lane_end[m.to]
+                    "    {from} -> end{} [xlabel=\"{label}\", tooltip=\"{label} (in flight)\", style=dotted, arrowhead=open, arrowsize=0.7{emphasis}];",
+                    m.to
                 );
             }
             (Fate::Omitted, _) => {
                 let _ = writeln!(
                     out,
-                    "    lost{index} [shape=plaintext, label=\"✗\", fontcolor=\"{LOST}\", fontsize=14];"
-                );
-                let _ = writeln!(
-                    out,
-                    "    {{ rank=same; {}; lost{index}; }}",
-                    spine[event_spine[m.send_event].expect("a shown message's send is shown")]
-                );
-                let _ = writeln!(
-                    out,
-                    "    {from} -> lost{index} [label=\"{label} (omitted)\", style=dashed, color=\"{LOST}\", fontcolor=\"{LOST}\", constraint=false];"
+                    "    {from} -> lost{index} [xlabel=\"{label}\", tooltip=\"{label} (omitted)\", style=dashed, color=\"{LOST}\", fontcolor=\"{LOST}\", arrowhead=none];"
                 );
             }
             (Fate::Crashed, _) => {
                 let _ = writeln!(
                     out,
-                    "    lost{index} [shape=plaintext, label=\"✗\", fontcolor=gray50, fontsize=12];"
-                );
-                let _ = writeln!(
-                    out,
-                    "    {{ rank=same; {}; lost{index}; }}",
-                    spine[event_spine[m.send_event].expect("a shown message's send is shown")]
-                );
-                let _ = writeln!(
-                    out,
-                    "    {from} -> lost{index} [label=\"{label} (sender crashed)\", style=dashed, color=gray50, fontcolor=gray50, constraint=false];"
+                    "    {from} -> lost{index} [xlabel=\"{label}\", tooltip=\"{label} (sender crashed)\", style=dashed, color=\"{CRASHED}\", fontcolor=\"{CRASHED}\", arrowhead=none];"
                 );
             }
         }
@@ -572,39 +694,64 @@ mod tests {
     #[test]
     fn dot_is_well_formed() {
         let trace = two_node_trace();
-        let opts = LamportOptions::default().highlight([0]);
+        let opts = LamportOptions::default().highlight([0]).title("t");
         let out = dot(&trace, &opts);
         assert!(out.starts_with("digraph lamport {\n"), "{out}");
         assert!(out.trim_end().ends_with('}'), "{out}");
         assert_eq!(out.matches('{').count(), out.matches('}').count(), "{out}");
+        assert!(out.contains("layout=neato"), "{out}");
+        assert!(out.contains("splines=false"), "{out}");
+        // Lanes are pinned: the sender's header and its points share an x.
+        assert!(out.contains("h0 [") && out.contains("pos=\"0.0,0.0!\""), "{out}");
+        assert!(out.contains("e1 [shape=point, width=0.08, color=\"#d35400\", pos=\"0.0,-16.0!\"]"), "{out}");
         assert!(out.contains("h0 [shape=box"), "{out}");
+        // Message edges are labelled beside the edge, not on it.
         assert!(
-            out.contains("e1 -> e5 [label=\"★ msg: Msg { attempt: 1 }\""),
+            out.contains("e1 -> e5 [xlabel=\"★ msg: Msg { attempt: 1 }\""),
             "{out}"
         );
+        assert!(!out.contains(" label=\"★"), "{out}");
+        // An omitted message ends at a `✗` on the receiver's lane, one rank below its send.
         assert!(
-            out.contains("e2 -> lost1 [label=\"msg: Msg { attempt: 2 } (omitted)\""),
+            out.contains("e2 -> lost1 [xlabel=\"msg: Msg { attempt: 2 }\", tooltip=\"msg: Msg { attempt: 2 } (omitted)\""),
             "{out}"
         );
+        assert!(out.contains("lost1 [shape=plaintext, label=\"✗\""), "{out}");
+        assert!(out.contains("h1 -> lost1 [arrowhead=none"), "{out}");
         assert!(
-            out.contains("e3 -> end1 [label=\"msg: Msg { attempt: 3 } (in flight)\""),
+            out.contains("e3 -> end1 [xlabel=\"msg: Msg { attempt: 3 }\", tooltip=\"msg: Msg { attempt: 3 } (in flight)\""),
             "{out}"
         );
-        assert!(
-            out.contains("e9 -> lost4 [label=\"msg: Msg { attempt: 4 } (sender crashed)\""),
-            "{out}"
-        );
-        assert!(out.contains("t_eff [label=\"EFF\""), "{out}");
+        // The sender died after event 3: its lane ends in `☠` and continues faintly, and the
+        // send it attempted afterwards is a gray stub to the receiver's lane.
         assert!(
             out.contains("crash0 [shape=plaintext, label=\"☠ crashed\""),
             "{out}"
         );
+        assert!(out.contains("e3 -> crash0 [arrowhead=none, color=\"gray55\""), "{out}");
+        assert!(
+            out.contains("crash0 -> eff0 [arrowhead=none, style=dotted, color=\"gray80\""),
+            "{out}"
+        );
+        assert!(
+            out.contains("e9 -> lost4 [xlabel=\"msg: Msg { attempt: 4 }\", tooltip=\"msg: Msg { attempt: 4 } (sender crashed)\""),
+            "{out}"
+        );
+        // EFF is a dashed rule across the lanes, labelled at the right.
+        assert!(out.contains("t_eff [label=\"EFF\""), "{out}");
+        assert!(out.contains("eff_l -> eff_r [style=dashed"), "{out}");
         assert!(out.contains("e6 [shape=note"), "{out}");
+        // Only message endpoints, outputs and crashes are drawn: no exec points.
+        assert!(!out.contains("e0 ["), "{out}");
+        assert!(!out.contains("e4 ["), "{out}");
+        assert!(!out.contains("e8 ["), "{out}");
+        assert!(out.contains("label=<<FONT POINT-SIZE=\"12\">t</FONT>"), "{out}");
     }
 
     #[test]
     fn escapes() {
         assert_eq!(escape_mermaid("a;b#c\nd"), "a#59;b#35;c<br/>d");
         assert_eq!(escape_dot("a\"b\\c\nd"), "a\\\"b\\\\c\\nd");
+        assert_eq!(escape_html("a<b>&\"c\"\nd"), "a&lt;b&gt;&amp;&quot;c&quot;<BR/>d");
     }
 }
