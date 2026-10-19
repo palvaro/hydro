@@ -2849,7 +2849,9 @@ impl<'a> Lineage<'a> {
         let anchor = self.prov_message_node(i);
         let record = &self.sent[i];
         let derivations = match self.level {
-            Level::Precise if self.by_replay(&record.prov) => self.counterfactual_send_all(i, anchor),
+            Level::Precise if self.by_replay(&record.prov) => {
+                self.counterfactual_send_all(i, anchor)
+            }
             Level::Precise | Level::Execution => {
                 self.record_closures(&record.prov, record.exec, anchor)
             }
