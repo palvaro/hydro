@@ -191,7 +191,7 @@ mod tests {
             // with replay at the opaque step is this harness's default (`LDFI_LEVEL`
             // overrides).
             Ldfi::new()
-                .level(Level::Record)
+                .level(Level::Precise)
                 .level_from_env()
                 .crashable_cluster("raft", &cluster_id, 0..MEMBERS)
                 .crash_budget(crashes)

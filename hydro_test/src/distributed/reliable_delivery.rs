@@ -202,7 +202,7 @@ mod tests {
         let Some(dir) = gallery_dir("reliable_delivery_gives_up") else {
             return;
         };
-        for level in [Level::Execution, Level::Record] {
+        for level in [Level::Execution, Level::Precise] {
             let outcome = search_configured(Some(2), 4, 2, true, true, |ldfi| {
                 ldfi.level(level).with_provenance_graphs()
             });

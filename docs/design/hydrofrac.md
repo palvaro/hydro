@@ -123,7 +123,7 @@ let compiled = flow.sim()
     .compiled();
 
 let results = Ldfi::new()
-    .level(Level::Record)
+    .level(Level::Precise)
     .crashable("source", &source)
     .crashable_cluster("member", &members, 0..3)
     .crash_budget(1)
@@ -232,11 +232,11 @@ Hydrofrac has two lineage oracles, selected by `Level`:
 | Level | Dependencies recorded |
 |---|---|
 | `Execution` | Every input to the execution that produced the output, and to earlier executions of the same tick (persisted state). Sound but coarse; available for any program. |
-| `Record` | Record-level provenance, added by an IR rewrite through `SimFlow::with_provenance`: each element carries the delivery ids it was computed from. The default. |
+| `Precise` | Record provenance where the program carries it, counterfactual replay where it does not; falls back to execution lineage only when replay is inconclusive. The default. |
 
-Under `Record`, an element that came out of a closure the rewrite cannot see into carries an opaque mark; at such a record hydrofrac derives the step by **counterfactual replay** of the node alone (its recorded deliveries removed one at a time, keeping those without which the node no longer produces the record). Replay is an oracle for opaque records only, not a level of its own: measured as a standalone level it produced the same derivations as `Record` wherever `Record` applied, at two to ten times the cost (`ldfi-level-ablation.md`). A static-slice narrowing of the execution closure was also measured and removed: it never separated a record from the inputs of its execution on any protocol in the corpus.
+Record provenance is added by an IR rewrite through `SimFlow::with_provenance`: each element carries the delivery ids it was computed from. An element that came out of a closure the rewrite cannot see into carries an opaque mark instead; at such a record hydrofrac derives the step by **counterfactual replay** of the node alone (its recorded deliveries removed one at a time, keeping those without which the node no longer produces the record). A program compiled without `with_provenance()` (because the rewrite does not support one of its operators, or by choice) has no tags at all, and `Precise` treats every record of it as opaque: every send and output is derived by replay. Replay is thus an oracle inside `Precise`, not a level of its own: measured as a standalone level it produced the same derivations as record provenance wherever record provenance applied, at two to ten times the cost (`ldfi-level-ablation.md`). A static-slice narrowing of the execution closure was also measured and removed: it never separated a record from the inputs of its execution on any protocol in the corpus.
 
-When an oracle cannot produce a usable result, hydrofrac falls back: a replay that does not reproduce the node's output (or panics) to the record provenance where there is any, and from there to the execution closure. `Ldfi::new()` defaults to `Record`; a program compiled without `with_provenance()` is searched at `Execution` (the search says so when logging).
+When replay cannot produce a usable result, hydrofrac falls back: a replay that does not reproduce the node's output (or panics), a node with no scripted inputs to replay against, or a search with no replay oracle goes to the record provenance where there is any, and from there to the execution closure; the search counts these fallbacks per schedule. `Ldfi::new()` defaults to `Precise`; on a program compiled without `with_provenance()` the search logs that it is replaying every record.
 
 The direction of this fallback is important. Including an unnecessary dependency gives the search extra faults to try. Omitting a necessary dependency can hide a counterexample. Conservative over-approximation costs search time; under-approximation threatens certification.
 

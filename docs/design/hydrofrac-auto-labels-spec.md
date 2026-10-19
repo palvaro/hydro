@@ -75,7 +75,7 @@ let compiled = flow.sim()
     .compiled();
 
 let results: LabelResults = Ldfi::new()
-    .level(Level::Record)
+    .level(Level::Precise)
     .crashable("source", &source)
     .crashable_cluster("member", &members, 0..3)
     .crash_budget(1)
@@ -123,7 +123,7 @@ In `SimFlow::compiled()`, when the flow carries a `Spec` built with `all_labels`
 3. Union all taps and splice them into the **observation slot** (4.2).
 
 Insert the tap *before* the provenance rewrite so that the tap is rewritten like any other
-operator and `Level::Record` lineage flows through it. The tap must not change the program's
+operator and `Level::Precise` lineage flows through it. The tap must not change the program's
 own behaviour: a `Tee` branch to the observer is invisible to the rest of the program.
 
 Note on `fed_by_network` and in-class checks: compute them on the pre-rewrite IR.

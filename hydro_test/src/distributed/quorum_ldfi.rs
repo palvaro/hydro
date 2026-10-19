@@ -188,7 +188,7 @@ mod tests {
         let compiled = sim.compiled();
 
         Ldfi::new()
-            .level(Level::Record)
+            .level(Level::Precise)
             .level_from_env()
             .crashable_cluster("responder", &responders, 0..N)
             .crash_budget(crashes)

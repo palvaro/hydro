@@ -2,11 +2,12 @@
 
 Molly (Alvaro, Rosen, Hellerstein, SIGMOD 2015) showed every counterexample at two zoom
 levels: the **Lamport diagram** of the failing run, and the **why-provenance** of the goal
-in a run where it held. Hydrofrac has two lineage oracles (`Level::Execution`, the
-execution-granular closure, and `Level::Record`, record-level provenance from
-`SimFlow::with_provenance`, the default) and, inside `Record`, a third source of edges:
-counterfactual **replay** of a node at the records the provenance rewrite could not see into
-(`Prov::OPAQUE`). A provenance graph therefore shows which of the three produced each step.
+in a run where it held. Hydrofrac has two lineage levels (`Level::Execution`, the
+execution-granular closure, and `Level::Precise`, the default) and `Precise` draws on two
+oracles: record provenance from `SimFlow::with_provenance` where the program carries it, and
+counterfactual **replay** of a node at the records it does not (`Prov::OPAQUE` records of a
+provenance-compiled program, and every record of a program compiled without provenance). A
+provenance graph therefore shows which of the three sources produced each step.
 This document describes what is implemented in `hydro_lang::sim::viz` and how it fits the
 search.
 
@@ -114,12 +115,12 @@ top and the fault points at the bottom.
 | `Consumed` | execution → message it consumed (hook release, top-level receive, arrival an unscripted batch may have released) | `Execution` |
 | `Carried` | execution → earlier execution whose state it carried (same tick) or whose yields it consumed | `Execution` |
 | `Derived` | output or message → message in its record provenance; also → `Base` when the provenance is empty | `Record` (`record_closure`) |
-| `Counterfactual` | output or message → delivery kept by replay | `Replay` (`counterfactual`, at an opaque record under `Record`, and at the observer for a hand-written specification) |
+| `Counterfactual` | output or message → delivery kept by replay | `Replay` (`counterfactual`, at a record without usable provenance under `Precise`, and at the observer for a hand-written specification) |
 | `Fallback` | any → `Opaque` | every fallback: opaque record → replay → execution closure, replay did not reproduce the target, no scripted inputs, no replay oracle |
 | `Alive` | output → `Alive` | `witnessed` / `witnessed_final` |
 
 Every edge carries the `ProvLevel` that produced it (`Execution`, `Record`, `Replay`), so a
-`Record` graph whose closure visited an opaque record shows the `Opaque` node, then `Replay`
+`Precise` graph whose closure visited an opaque record shows the `Opaque` node, then `Replay`
 edges (or, where the replay did not reproduce the target, `Execution` `Produced` / `Consumed`
 edges) beneath it. This is the "more levels of zoom": one derivation, drawn with the oracle
 each step was actually resolved by.
@@ -155,8 +156,9 @@ graph.
 - `ProvGraph::to_json()` for other front ends (`serde` on every type; the dedup index is not
   serialized).
 
-Snapshots of both renderings for 2PC (`Record`, and `Execution` with its execution nodes)
-live in `hydro_test/src/cluster/snapshots/two_pc_{record,execution}_*.snap`.
+Snapshots of both renderings for 2PC (`Precise` on the provenance-compiled program, whose
+edges are all `record`, and `Execution` with its execution nodes) live in
+`hydro_test/src/cluster/snapshots/two_pc_{record,execution}_*.snap`.
 
 ### Limits
 
@@ -165,7 +167,7 @@ live in `hydro_test/src/cluster/snapshots/two_pc_{record,execution}_*.snap`.
   executions a fact rests on, not the `join`/`fold` that combined them. The IR traversal in
   `sim::slice` (which names the channels) could annotate edges with the sink/channel site
   later.
-- Under `Level::Record` the record provenance keeps the first derivation of a duplicate
+- Under `Level::Precise` the record provenance keeps the first derivation of a duplicate
   element; alternative derivations are not drawn (they are not in the flat derivation either).
 - The `Message` key is the send's index in the run, so graphs of different runs cannot be
   merged (they are not meant to be; the Lamport diagram of a *failing* run and the provenance

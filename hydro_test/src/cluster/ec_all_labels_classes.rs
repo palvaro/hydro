@@ -52,7 +52,7 @@ mod tests {
             .compiled();
 
         let results = Ldfi::new()
-            .level(Level::Record)
+            .level(Level::Precise)
             .crashable("source", &source)
             .crashable_cluster("member", &members, 0..MEMBERS)
             .crash_budget(1)

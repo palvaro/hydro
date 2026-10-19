@@ -16,7 +16,7 @@
 //! 3. replaces the slot with the union of the taps.
 //!
 //! A `Tee` branch is invisible to the rest of the program, so the program's own behaviour is
-//! unchanged. The taps are inserted before the provenance rewrite so that `Level::Record`
+//! unchanged. The taps are inserted before the provenance rewrite so that `Level::Precise`
 //! lineage flows through them like through any other operator; the collection kinds the pass
 //! reads are therefore the plain, pre-rewrite ones.
 

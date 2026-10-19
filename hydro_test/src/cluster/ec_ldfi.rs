@@ -99,7 +99,7 @@ mod tests {
         let compiled = sim.compiled();
 
         Ldfi::new()
-            .level(Level::Record)
+            .level(Level::Precise)
             .crashable("source", &source)
             .crashable_cluster("member", &members, 0..MEMBERS)
             .crash_budget(crashes)
@@ -137,7 +137,7 @@ mod tests {
             .compiled();
 
         Ldfi::new()
-            .level(Level::Record)
+            .level(Level::Precise)
             .crashable_cluster("source", &sources, 0..SOURCES)
             .crashable_cluster("member", &members, 0..MEMBERS)
             .crash_budget(crashes)
@@ -179,7 +179,7 @@ mod tests {
             .compiled();
 
         Ldfi::new()
-            .level(Level::Record)
+            .level(Level::Precise)
             .crashable("broadcaster", &broadcaster)
             .crashable_cluster("member", &members, 0..MEMBERS)
             .crash_budget(crashes)

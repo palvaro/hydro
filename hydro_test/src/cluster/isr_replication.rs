@@ -879,14 +879,10 @@ pub(crate) mod harness {
         };
         // Fault model: replicas may crash; the replication channel is lossy (declared by the
         // protocol's transport); everything else is reliable and the client and ZK do not
-        // crash.
+        // crash. The level is `Precise` (the default) whether or not the program carries
+        // provenance: without it, every record is derived by counterfactual replay.
         let configure = move |crashes: usize| {
             Ldfi::new()
-                .level(if provenance {
-                    Level::Record
-                } else {
-                    Level::Execution
-                })
                 .level_from_env()
                 .crashable_cluster("replica", &replicas_id, 0..members)
                 .crash_budget(crashes)
@@ -988,7 +984,7 @@ pub(crate) mod harness {
         };
         let configure = move |crashes: usize| {
             let mut ldfi = Ldfi::new()
-                .level(Level::Record)
+                .level(Level::Precise)
                 .crashable_cluster("replica", &replicas_id, 0..members)
                 .crash_budget(crashes)
                 .spec(&spec);
@@ -1006,7 +1002,7 @@ mod tests {
     use hydro_lang::sim::ldfi::{Exploration, Fault, LabelVerdict, Level, Outcome, Strategy};
 
     use super::Encoding;
-    use super::harness::{DEFAULT_SHAPE, body, compile, compile_all_labels};
+    use super::harness::{DEFAULT_SHAPE, body, compile, compile_all_labels, compile_with};
 
     /// Schedules sampled per hypothesis. Four rounds of three replicas plus ZK give
     /// tens of thousands of interleavings per hypothesis under `exhaustive`; the protocol's
@@ -1062,7 +1058,7 @@ mod tests {
     #[test]
     fn ldfi_finds_the_unclean_election_bug_at_every_level() {
         let (compiled, h, configure) = compile(true, Encoding::Dataflow, DEFAULT_SHAPE, 8);
-        for level in [Level::Execution, Level::Record] {
+        for level in [Level::Execution, Level::Precise] {
             let outcome = configure(1)
                 .level(level)
                 .exploration(Exploration::Fuzz { instances: SAMPLED })
@@ -1082,6 +1078,71 @@ mod tests {
                 "{level:?}: the counterexample needs the leader's crash: {faults:?}"
             );
         }
+    }
+
+    /// A program compiled **without** provenance is still searched at `Precise`: every record
+    /// is then opaque and derived by counterfactual replay (the search must not quietly
+    /// downgrade to `Execution`). The dataflow unclean variant has to yield the same
+    /// counterexample as with provenance, through replays and without a single fallback to the
+    /// execution closure, and its provenance graphs carry `Replay` edges and no `Record` ones.
+    #[test]
+    fn ldfi_finds_the_unclean_election_bug_without_provenance() {
+        use hydro_lang::sim::viz::provenance::ProvLevel;
+
+        let (compiled, h, configure) =
+            compile_with(true, Encoding::Dataflow, DEFAULT_SHAPE, false, 8);
+        let outcome = configure(1)
+            .level(Level::Precise)
+            .with_provenance_graphs()
+            .exploration(Exploration::Fuzz { instances: SAMPLED })
+            .search(&compiled, async |run| body(&h, run).await);
+        eprintln!("no provenance, Precise: {outcome}");
+        let Outcome::Counterexample { faults, runs, .. } = &outcome else {
+            panic!("expected a counterexample, got {outcome}");
+        };
+        assert!(
+            faults.iter().any(|f| matches!(f, Fault::Omit(_))),
+            "the counterexample needs a lost replication: {faults:?}"
+        );
+        assert!(
+            faults
+                .iter()
+                .any(|f| matches!(f, Fault::Crash { node, .. } if node == "replica@0")),
+            "the counterexample needs the leader's crash: {faults:?}"
+        );
+        let replays: usize = runs
+            .iter()
+            .flat_map(|r| r.schedules.iter())
+            .map(|s| s.replays)
+            .sum();
+        let fallbacks: usize = runs
+            .iter()
+            .flat_map(|r| r.schedules.iter())
+            .map(|s| s.replay_fallbacks)
+            .sum();
+        assert!(
+            replays > 0,
+            "every record should have been derived by replay"
+        );
+        assert_eq!(
+            fallbacks, 0,
+            "no derivation should have fallen back to the execution closure"
+        );
+        let levels: std::collections::BTreeSet<ProvLevel> = runs
+            .iter()
+            .flat_map(|r| r.schedules.iter())
+            .flat_map(|s| s.provenance.iter())
+            .flat_map(|g| g.edges.iter())
+            .filter_map(|e| e.level)
+            .collect();
+        assert!(
+            levels.contains(&ProvLevel::Replay),
+            "the graphs should carry replay edges: {levels:?}"
+        );
+        assert!(
+            !levels.contains(&ProvLevel::Record),
+            "a program without provenance has no record-provenance edges: {levels:?}"
+        );
     }
 
     /// Clean election (ISR members only) keeps every acknowledged write: no fault set within
@@ -1176,7 +1237,7 @@ mod tests {
         let (compiled, h, configure) = compile_with(true, Encoding::Closure, shape, true, 1);
         for attempt in 0..40 {
             let outcome = configure(1)
-                .level(Level::Record)
+                .level(Level::Precise)
                 .exploration(Exploration::Fuzz { instances: 1 })
                 .search(&compiled, async |run| body(&h, run).await);
             eprintln!("attempt {attempt}: {outcome}");

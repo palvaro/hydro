@@ -109,7 +109,7 @@ mod tests {
             .compiled();
 
         Ldfi::new()
-            .level(Level::Record)
+            .level(Level::Precise)
             .exploration(exploration)
             .crashable("source", &source)
             .crashable_cluster("member", &members, 0..MEMBERS)
@@ -170,7 +170,7 @@ mod tests {
         let compiled: CompiledSim = sim.compiled();
 
         Ldfi::new()
-            .level(Level::Record)
+            .level(Level::Precise)
             .level_from_env()
             .exploration(Exploration::Fuzz { instances: 8 })
             .crashable_cluster("member", &members, 0..MEMBERS)
@@ -214,7 +214,8 @@ mod tests {
 
         // The provenance rewrite does not yet handle `entries_partially_ordered` on a keyed
         // stream (it destructures the element as `Tagged<_>` where the layout is
-        // `(key, Tagged<_>)`), so this search runs on the execution-level lineage.
+        // `(key, Tagged<_>)`), so the program is compiled without provenance; at `Precise` the
+        // search then derives every record by counterfactual replay.
         let compiled: CompiledSim = flow
             .sim()
             .skip_consistency_assertions()
@@ -223,7 +224,8 @@ mod tests {
             .compiled();
 
         Ldfi::new()
-            .level(Level::Execution)
+            .level(Level::Precise)
+            .level_from_env()
             .crashable("leader", &leader)
             .crashable_cluster("replica", &replicas, 0..MEMBERS)
             .crash_budget(crashes)
@@ -271,7 +273,7 @@ mod tests {
             .compiled();
 
         Ldfi::new()
-            .level(Level::Record)
+            .level(Level::Precise)
             .exploration(Exploration::Fuzz { instances: 8 })
             .crashable_cluster("proposer", &proposers, 0..1)
             .crashable_cluster("acceptor", &acceptors, 0..3)
@@ -406,7 +408,7 @@ mod tests {
             .compiled();
 
         let results = Ldfi::new()
-            .level(Level::Record)
+            .level(Level::Precise)
             .crashable("source", &source)
             .crashable_cluster("member", &members, 0..MEMBERS)
             .crash_budget(1)
@@ -476,7 +478,7 @@ mod tests {
             .compiled();
 
         let results = Ldfi::new()
-            .level(Level::Record)
+            .level(Level::Precise)
             .exploration(Exploration::Fuzz { instances: 8 })
             .crashable_cluster("proposer", &proposers, 0..1)
             .crashable_cluster("acceptor", &acceptors, 0..3)

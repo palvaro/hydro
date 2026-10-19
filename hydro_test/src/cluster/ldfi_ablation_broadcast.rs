@@ -1,6 +1,6 @@
 //! Lineage-level ablation for reliable broadcast and reliable delivery: the same LDFI search
-//! at every [`Level`] (execution closure, record provenance with replay at opaque records) on
-//! the same provenance-compiled program, per protocol configuration.
+//! at every [`Level`] (execution closure; record provenance with replay at records without
+//! usable provenance) on the same provenance-compiled program, per protocol configuration.
 //!
 //! Run explicitly; it writes a Markdown fragment to the path in `LDFI_ABLATION_OUT` and does
 //! nothing without it:
@@ -30,7 +30,7 @@ mod ablation {
     };
     use crate::distributed::reliable_delivery::{Ack, Msg, Receiver, Sender, reliable_delivery};
 
-    const LEVELS: [(&str, Level); 2] = [("exec", Level::Execution), ("record", Level::Record)];
+    const LEVELS: [(&str, Level); 2] = [("exec", Level::Execution), ("precise", Level::Precise)];
 
     /// One measurement: one configuration at one level.
     struct Cell {
@@ -161,14 +161,13 @@ mod ablation {
     }
 
     /// Runs one search per level on an already-compiled program. Each search is isolated by
-    /// `catch_unwind`, so a level the program does not support is a cell, not a crash.
-    fn run_levels(provenance: bool, search: impl Fn(Level) -> Outcome) -> Vec<Cell> {
+    /// `catch_unwind`, so a level the program does not support is a cell, not a crash. A
+    /// program compiled without provenance is searched at every level too (`Precise` then
+    /// replays every record).
+    fn run_levels(search: impl Fn(Level) -> Outcome) -> Vec<Cell> {
         LEVELS
             .iter()
             .map(|&(name, level)| {
-                if level == Level::Record && !provenance {
-                    return unavailable("n/a: provenance compile failed");
-                }
                 let start = Instant::now();
                 match catch_unwind(AssertUnwindSafe(|| search(level))) {
                     Ok(outcome) => {
@@ -257,7 +256,7 @@ mod ablation {
         }
         let compiled = sim.compiled();
 
-        run_levels(provenance, |level| {
+        run_levels(|level| {
             quiet(Ldfi::new())
                 .level(level)
                 .crashable("broadcaster", &broadcaster)
@@ -272,7 +271,7 @@ mod ablation {
     }
 
     /// Tries the provenance-compiled program first; if the rewrite panics, recompiles without
-    /// provenance (Level 2 is then reported as unavailable).
+    /// provenance (`Precise` then replays every record).
     fn broadcast_config(echo: bool, members_n: u32, crashes: usize, post: Post) -> Vec<Cell> {
         match catch_unwind(AssertUnwindSafe(|| {
             broadcast_levels(echo, members_n, crashes, post, true)
@@ -336,7 +335,7 @@ mod ablation {
         }
         let compiled = sim.compiled();
 
-        run_levels(provenance, |level| {
+        run_levels(|level| {
             quiet(Ldfi::new())
                 .level(level)
                 .goal(&out)

@@ -10,7 +10,9 @@
 //! LDFI_ABLATION_OUT=target/isr-ablation.md cargo test -p hydro_test level_ablation_isr -- --test-threads=1 --nocapture
 //! ```
 //!
-//! `LDFI_ABLATION_ONLY=closure|dataflow` restricts to one encoding.
+//! `LDFI_ABLATION_ONLY=closure|dataflow` restricts to one encoding. `LDFI_ABLATION_PROVENANCE=0`
+//! compiles the program **without** `with_provenance()`, so `Precise` derives every record by
+//! counterfactual replay (the case of a program the provenance rewrite rejects).
 
 use std::fmt::Write as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -25,7 +27,7 @@ use crate::cluster::isr_replication::harness as isr;
 /// Schedules sampled per hypothesis by the ISR unit tests (`isr_replication::tests::SAMPLED`).
 const SAMPLED: usize = 8;
 
-const LEVELS: [(&str, Level); 2] = [("exec", Level::Execution), ("record", Level::Record)];
+const LEVELS: [(&str, Level); 2] = [("exec", Level::Execution), ("precise", Level::Precise)];
 
 /// One (encoding, config) × level measurement.
 struct Cell {
@@ -116,6 +118,7 @@ fn level_ablation_isr() {
         return;
     };
     let only = std::env::var("LDFI_ABLATION_ONLY").ok();
+    let provenance = std::env::var("LDFI_ABLATION_PROVENANCE").as_deref() != Ok("0");
 
     let mut md = String::new();
     writeln!(md, "## ISR replication").unwrap();
@@ -124,11 +127,15 @@ fn level_ablation_isr() {
         md,
         "Harness: `isr_replication::harness` (3 replicas, 4 rounds, 1 write), hand-written \
          durability specification, replicas crashable, omissions on the replication channel in \
-         the first round. Every cell searches the **same provenance-compiled program** \
-         (`with_provenance()`), so the levels differ only in which lineage the backward closure \
-         follows. `fuzz k` = `Exploration::Fuzz {{ instances: k }}` (k = 8 is what the unit \
-         tests use; k = 1 is the measurement grid's one schedule per hypothesis). Hypothesis \
-         budget 256 (the default)."
+         the first round. Every cell searches the **same {} program**, so the levels differ \
+         only in which lineage the backward closure follows. `fuzz k` = `Exploration::Fuzz {{ \
+         instances: k }}` (k = 8 is what the unit tests use; k = 1 is the measurement grid's \
+         one schedule per hypothesis). Hypothesis budget 256 (the default).",
+        if provenance {
+            "provenance-compiled (`with_provenance()`)"
+        } else {
+            "program compiled without provenance (every record replayed at `Precise`)"
+        }
     )
     .unwrap();
     writeln!(md).unwrap();
@@ -156,7 +163,7 @@ fn level_ablation_isr() {
         }
         for unclean in [true, false] {
             let (sim, h, configure) =
-                isr::compile_with(unclean, encoding, isr::DEFAULT_SHAPE, true, 8);
+                isr::compile_with(unclean, encoding, isr::DEFAULT_SHAPE, provenance, 8);
             let variant = if unclean { "unclean" } else { "clean" };
             for (crashes, instances) in [(1usize, SAMPLED), (1, 1), (0, SAMPLED)] {
                 let config = format!("{variant} cr={crashes} fuzz {instances}");

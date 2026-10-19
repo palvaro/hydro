@@ -322,14 +322,11 @@ pub(crate) mod harness {
             timeout_send,
         };
         // Fault model: the coordinator and every participant may crash; links are reliable
-        // (`fail_stop`, so the filter admits no omission on them).
+        // (`fail_stop`, so the filter admits no omission on them). The level is `Precise`
+        // (the default) with or without provenance: without it, every record is derived by
+        // counterfactual replay.
         let configure = move |crashes: usize| {
             Ldfi::new()
-                .level(if provenance {
-                    Level::Record
-                } else {
-                    Level::Execution
-                })
                 .level_from_env()
                 .crashable("coordinator", &coordinator_id)
                 .crashable_cluster("participant", &participants_id, 0..participants_count)
@@ -408,7 +405,7 @@ pub(crate) mod harness {
         };
         let configure = move |crashes: usize| {
             let mut ldfi = Ldfi::new()
-                .level(Level::Record)
+                .level(Level::Precise)
                 .crashable_cluster("participant", &participants_id, 0..participants_count)
                 .crash_budget(crashes)
                 .spec(&spec);

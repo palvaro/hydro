@@ -203,9 +203,9 @@ mod tests {
         }
 
         // Record-level provenance is the natural lineage for a specification: the
-        // derivation of a view is exactly the deliveries its value was computed from. The
-        // recorded levels work too (`LDFI_NO_PROVENANCE`), with coarser derivations and a
-        // much slower closure over the hundreds of schedules of the echo variant.
+        // derivation of a view is exactly the deliveries its value was computed from. Without
+        // it (`LDFI_NO_PROVENANCE`) `Precise` replays every record, which is much slower over
+        // the hundreds of schedules of the echo variant; `Execution` is coarser still.
         let mut sim = flow
             .sim()
             .skip_consistency_assertions()
@@ -217,7 +217,7 @@ mod tests {
 
         configure(
             Ldfi::new()
-                .level(Level::Record)
+                .level(Level::Precise)
                 .level_from_env()
                 .crashable("broadcaster", &broadcaster)
                 .crashable_cluster("member", &members, 0..MEMBERS)
@@ -238,7 +238,7 @@ mod tests {
         let Some(dir) = gallery_dir("plain_broadcast") else {
             return;
         };
-        for level in [Level::Execution, Level::Record] {
+        for level in [Level::Execution, Level::Precise] {
             let outcome = search_with(false, 1, Post::Positive, |ldfi| {
                 ldfi.level(level).with_traces().with_provenance_graphs()
             });

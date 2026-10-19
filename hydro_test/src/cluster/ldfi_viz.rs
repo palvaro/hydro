@@ -67,7 +67,7 @@ fn graphs_agree_with_derivations(outcome: &Outcome) -> usize {
 
 #[test]
 fn provenance_graphs_agree_with_derivations_at_every_level() {
-    for level in [Level::Execution, Level::Record] {
+    for level in [Level::Execution, Level::Precise] {
         let (with, without) = search_both_ways(level);
         assert!(
             with.is_counterexample(),
@@ -97,7 +97,7 @@ fn provenance_graphs_agree_with_derivations_at_every_level() {
 /// input), with every message a fault point of the coordinator's crash.
 #[test]
 fn provenance_graph_of_two_pc_renders() {
-    let (with, _) = search_both_ways(Level::Record);
+    let (with, _) = search_both_ways(Level::Precise);
     let failure_free = &with.runs()[0].schedules[0];
     assert!(failure_free.goal_held);
     let graph = &failure_free.provenance[0];
@@ -169,7 +169,7 @@ fn render_molly_report_to_disk() {
 
     let (compiled, h, configure) = compile(2, false, 8);
     let outcome = configure(1)
-        .level(Level::Record)
+        .level(Level::Precise)
         .with_traces()
         .with_provenance_graphs()
         .search(&compiled, async |run| body(&h, run).await);
@@ -242,7 +242,7 @@ pub(crate) fn write_gallery(
 ) {
     let suffix = match level {
         Level::Execution => "execution",
-        Level::Record => "record",
+        Level::Precise => "precise",
     };
     let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();
     let Some(viz) = outcome.viz() else {
@@ -297,7 +297,7 @@ fn gallery_two_pc() {
         return;
     };
     let (compiled, h, configure) = compile(2, false, 8);
-    for level in [Level::Execution, Level::Record] {
+    for level in [Level::Execution, Level::Precise] {
         let outcome = configure(1)
             .level(level)
             .with_traces()
@@ -322,7 +322,7 @@ fn gallery_isr_unclean_election() {
         return;
     };
     let (compiled, h, configure) = isr_compile(true, Encoding::Dataflow, DEFAULT_SHAPE, 8);
-    for level in [Level::Execution, Level::Record] {
+    for level in [Level::Execution, Level::Precise] {
         let outcome = configure(1)
             .level(level)
             .exploration(Exploration::Fuzz { instances: 8 })
@@ -349,7 +349,7 @@ fn gallery_paxos_commit_quorum() {
         return;
     };
     let (compiled, h, configure) = paxos_compile(true);
-    for level in [Level::Execution, Level::Record] {
+    for level in [Level::Execution, Level::Precise] {
         let outcome = configure(1)
             .level(level)
             .exploration(Exploration::Fuzz { instances: 4 })
