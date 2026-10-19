@@ -132,6 +132,17 @@ mod tests {
     /// reliable. The same specification separates the two protocols: plain broadcast violates
     /// it, reliable broadcast satisfies it.
     fn search(echo: bool, crashes: usize, post: Post) -> Outcome {
+        search_with(echo, crashes, post, |ldfi| ldfi)
+    }
+
+    /// [`search`], with `configure` applied to the search before it runs (traces, provenance
+    /// graphs, the lineage level).
+    fn search_with(
+        echo: bool,
+        crashes: usize,
+        post: Post,
+        configure: impl FnOnce(Ldfi) -> Ldfi,
+    ) -> Outcome {
         let mut flow = FlowBuilder::new();
         let broadcaster = flow.process::<Broadcaster>();
         let members = flow.cluster::<Member>();
@@ -204,17 +215,35 @@ mod tests {
         }
         let compiled = sim.compiled();
 
-        Ldfi::new()
-            .level(Level::Record)
-            .level_from_env()
-            .crashable("broadcaster", &broadcaster)
-            .crashable_cluster("member", &members, 0..MEMBERS)
-            .crash_budget(crashes)
-            .spec(&spec)
-            .search(&compiled, async |_run| {
-                source_send.send(Payload(42));
-                hydro_lang::sim::quiesce().await;
-            })
+        configure(
+            Ldfi::new()
+                .level(Level::Record)
+                .level_from_env()
+                .crashable("broadcaster", &broadcaster)
+                .crashable_cluster("member", &members, 0..MEMBERS)
+                .crash_budget(crashes)
+                .spec(&spec),
+        )
+        .search(&compiled, async |_run| {
+            source_send.send(Payload(42));
+            hydro_lang::sim::quiesce().await;
+        })
+    }
+
+    /// The gallery entry (see `ldfi_viz`): plain broadcast, three members, one crash.
+    #[test]
+    fn gallery_plain_broadcast() {
+        use crate::cluster::ldfi_viz::{gallery_dir, write_gallery};
+
+        let Some(dir) = gallery_dir("plain_broadcast") else {
+            return;
+        };
+        for level in [Level::Execution, Level::Record] {
+            let outcome = search_with(false, 1, Post::Positive, |ldfi| {
+                ldfi.level(level).with_traces().with_provenance_graphs()
+            });
+            write_gallery(&dir, "plain broadcast", level, &outcome);
+        }
     }
 
     /// Plain broadcast violates agreement under one crash: the broadcaster dies after its
