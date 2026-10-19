@@ -13,6 +13,12 @@
 //! `LDFI_ABLATION_ONLY=closure|dataflow` restricts to one encoding. `LDFI_ABLATION_PROVENANCE=0`
 //! compiles the program **without** `with_provenance()`, so `Precise` derives every record by
 //! counterfactual replay (the case of a program the provenance rewrite rejects).
+//!
+//! Measurement knobs (all optional): `LDFI_ABLATION_EXPLORATION=exhaustive|fuzz<k>` replaces
+//! the default `(cr, fuzz k)` grid with the single config `cr=1` at that exploration;
+//! `LDFI_ABLATION_REPEATS=<n>` repeats every cell (rows suffixed `#<repeat>`);
+//! `LDFI_ABLATION_LEVEL=exec|precise|disjunctive` runs one column only (the others are
+//! reported `skipped`); `LDFI_ABLATION_VARIANT=unclean|clean` runs one variant only.
 
 use std::fmt::Write as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -135,6 +141,34 @@ fn level_ablation_isr() {
     };
     let only = std::env::var("LDFI_ABLATION_ONLY").ok();
     let provenance = std::env::var("LDFI_ABLATION_PROVENANCE").as_deref() != Ok("0");
+    let only_level = std::env::var("LDFI_ABLATION_LEVEL").ok();
+    let only_variant = std::env::var("LDFI_ABLATION_VARIANT").ok();
+    let repeats: usize = std::env::var("LDFI_ABLATION_REPEATS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let exploration = std::env::var("LDFI_ABLATION_EXPLORATION").ok().map(|s| {
+        if let Some(k) = s.strip_prefix("fuzz") {
+            Exploration::Fuzz {
+                instances: k.parse().expect("LDFI_ABLATION_EXPLORATION=fuzz<k>"),
+            }
+        } else {
+            Exploration::Exhaustive
+        }
+    });
+    let configs: Vec<(usize, Exploration, String)> = match exploration {
+        Some(e) => vec![(1, e, format!("cr=1 {e:?}").to_lowercase())],
+        None => [(1usize, SAMPLED), (1, 1), (0, SAMPLED)]
+            .into_iter()
+            .map(|(crashes, instances)| {
+                (
+                    crashes,
+                    Exploration::Fuzz { instances },
+                    format!("cr={crashes} fuzz {instances}"),
+                )
+            })
+            .collect(),
+    };
 
     let mut md = String::new();
     writeln!(md, "## ISR replication").unwrap();
@@ -178,30 +212,43 @@ fn level_ablation_isr() {
             continue;
         }
         for unclean in [true, false] {
+            let variant = if unclean { "unclean" } else { "clean" };
+            if only_variant.as_deref().is_some_and(|v| v != variant) {
+                continue;
+            }
             let (sim, h, configure) =
                 isr::compile_with(unclean, encoding, isr::DEFAULT_SHAPE, provenance, 8);
-            let variant = if unclean { "unclean" } else { "clean" };
-            for (crashes, instances) in [(1usize, SAMPLED), (1, 1), (0, SAMPLED)] {
-                let config = format!("{variant} cr={crashes} fuzz {instances}");
-                let mut cells = vec![];
-                for (level_name, level, disjunctive) in LEVELS {
-                    eprintln!("ablation: {name} {config} {level_name}");
-                    let cell = measure(
-                        &sim,
-                        configure(crashes)
-                            .level(level)
-                            .disjunctive_provenance(disjunctive)
-                            .exploration(Exploration::Fuzz { instances })
-                            .quiet(),
-                        async |run| isr::body(&h, run).await,
-                    );
-                    match &cell {
-                        Ok(c) => eprintln!("  -> {}", c.render()),
-                        Err(e) => eprintln!("  -> panic: {e}"),
+            for (crashes, exploration, config_name) in &configs {
+                for repeat in 0..repeats {
+                    let config = if repeats > 1 {
+                        format!("{variant} {config_name} #{repeat}")
+                    } else {
+                        format!("{variant} {config_name}")
+                    };
+                    let mut cells = vec![];
+                    for (level_name, level, disjunctive) in LEVELS {
+                        if only_level.as_deref().is_some_and(|l| l != level_name) {
+                            cells.push(Err("skipped".to_string()));
+                            continue;
+                        }
+                        eprintln!("ablation: {name} {config} {level_name}");
+                        let cell = measure(
+                            &sim,
+                            configure(*crashes)
+                                .level(level)
+                                .disjunctive_provenance(disjunctive)
+                                .exploration(*exploration)
+                                .quiet(),
+                            async |run| isr::body(&h, run).await,
+                        );
+                        match &cell {
+                            Ok(c) => eprintln!("  -> {}", c.render()),
+                            Err(e) => eprintln!("  -> panic: {e}"),
+                        }
+                        cells.push(cell);
                     }
-                    cells.push(cell);
+                    rows.push((name.clone(), config, cells));
                 }
-                rows.push((name.clone(), config, cells));
             }
         }
     }

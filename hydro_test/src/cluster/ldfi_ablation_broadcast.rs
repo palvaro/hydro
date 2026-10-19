@@ -15,6 +15,9 @@
 //! `LDFI_ABLATION_EXPLORATION=fuzz<k>` samples `k` schedules per hypothesis instead of every
 //! schedule (the default, `exhaustive`); `LDFI_ABLATION_REPEATS` repeats each search (rows are
 //! then suffixed `#<repeat>`), which under `fuzz<k>` shows the spread of the schedule draw.
+//! `LDFI_ABLATION_CONFIG=<substring>` runs only the configurations whose name contains it;
+//! `LDFI_ABLATION_LEVEL=exec|precise|disjunctive` runs one column only (the others are
+//! reported `skipped`).
 
 #[cfg(test)]
 mod ablation {
@@ -209,6 +212,9 @@ mod ablation {
             .map(|&(name, level, disjunctive)| {
                 if disjunctive && !provenance {
                     return unavailable("n/a: needs record provenance");
+                }
+                if std::env::var("LDFI_ABLATION_LEVEL").is_ok_and(|l| l != name) {
+                    return unavailable("skipped (LDFI_ABLATION_LEVEL)");
                 }
                 let start = Instant::now();
                 match catch_unwind(AssertUnwindSafe(|| search(level, disjunctive))) {
@@ -437,8 +443,10 @@ mod ablation {
     ) -> Vec<(String, Vec<Cell>)> {
         let budget = budget_secs();
         let repeats = repeats();
+        let only_config = std::env::var("LDFI_ABLATION_CONFIG").ok();
         configs
             .into_iter()
+            .filter(|(name, _)| only_config.as_deref().is_none_or(|c| name.contains(c)))
             .flat_map(|(name, run)| {
                 (0..repeats)
                     .map(|repeat| {
@@ -499,8 +507,16 @@ mod ablation {
                 Box::new(|| broadcast_config(false, 4, 1, Post::Positive)),
             ),
         ];
-        // Not in the grid: reliable broadcast at n=4 explores 92,160 schedules per hypothesis
-        // exhaustively (about 5 minutes each), which no level brings within the budget.
+        // Not in the default grid: reliable broadcast at n=4 explores 92,160 schedules per
+        // hypothesis exhaustively (about 5 minutes each), which no level brings within the
+        // budget. Opt in with `LDFI_ABLATION_CONFIG=n=4` (and `LDFI_ABLATION_EXPLORATION=fuzz<k>`).
+        let mut broadcast_configs = broadcast_configs;
+        if std::env::var("LDFI_ABLATION_CONFIG").is_ok() {
+            broadcast_configs.push((
+                "reliable (echo), n=4, 1 crash, POST positive".into(),
+                Box::new(|| broadcast_config(true, 4, 1, Post::Positive)),
+            ));
+        }
         let broadcast_rows = if wanted("broadcast") {
             grid(&start, broadcast_configs)
         } else {
