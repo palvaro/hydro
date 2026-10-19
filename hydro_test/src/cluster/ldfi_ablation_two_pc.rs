@@ -16,6 +16,10 @@
 //!   suffixed `#<repeat>`.
 //! - `LDFI_ABLATION_N`, `LDFI_ABLATION_LOAD`, `LDFI_ABLATION_CRASHES`: comma-separated
 //!   subsets of the grid axes.
+//! - `LDFI_ABLATION_CTP`: comma-separated subset of `{0, 1}` (plain 2PC, 2PC with cooperative
+//!   termination; default both).
+//! - `LDFI_ABLATION_LEVELS`: comma-separated subset of the column names (`exec`, `precise`,
+//!   `disjunctive`; default all), for sharding an exhaustive run by column.
 //! - `LDFI_ABLATION_PROVENANCE=0`: compile **without** `with_provenance()`, so `Precise`
 //!   derives every record by counterfactual replay.
 //!
@@ -90,6 +94,17 @@ where
         .unwrap_or_else(|| default.to_vec())
 }
 
+fn levels() -> Vec<(&'static str, Level, bool)> {
+    let names: Vec<String> = env_list(
+        "LDFI_ABLATION_LEVELS",
+        &LEVELS.map(|(name, _, _)| name.to_owned()),
+    );
+    LEVELS
+        .into_iter()
+        .filter(|(name, _, _)| names.iter().any(|n| n == name))
+        .collect()
+}
+
 fn exploration() -> Exploration {
     match std::env::var("LDFI_ABLATION_EXPLORATION").as_deref() {
         Ok(s) if s.starts_with("fuzz") => Exploration::Fuzz {
@@ -148,7 +163,7 @@ fn measure(
         true
     };
     for repeat in 0..repeats() {
-        for (name, level, disjunctive) in LEVELS {
+        for (name, level, disjunctive) in levels() {
             let start = Instant::now();
             let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 configure(crashes)
@@ -401,9 +416,13 @@ fn render(cells: &[Cell]) -> String {
 fn grid(ns: &[u32]) -> Vec<Cell> {
     let loads = env_list("LDFI_ABLATION_LOAD", &[1u32, 4, 8]);
     let crashes = env_list("LDFI_ABLATION_CRASHES", &[0usize, 1]);
+    let ctps: Vec<u8> = env_list("LDFI_ABLATION_CTP", &[0u8, 1]);
     let mut cells = vec![];
     for &n in ns {
         for ctp in [false, true] {
+            if !ctps.contains(&(ctp as u8)) {
+                continue;
+            }
             // One compilation (a trybuild, about a minute) per protocol size and variant; the
             // workload and the crash budget are runtime knobs.
             let provenance = std::env::var("LDFI_ABLATION_PROVENANCE").as_deref() != Ok("0");
