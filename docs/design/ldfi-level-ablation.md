@@ -1323,3 +1323,155 @@ Reproduction: `LDFI_BROADCAST_DIAG=1 [LDFI_BROADCAST_CRASHES=2] cargo test -p hy
 ldfi_certifies_reliable_broadcast_with_disjunctive_provenance -- --test-threads=1 --nocapture`
 prints both hypothesis sequences with the search log (universe and derivations after each run);
 `LDFI_SOLVER_DEBUG=1` adds every clause with the send sequence it was observed under.
+
+## Complete grid: ISR, broadcast, delivery (disjunction)
+
+The three-column grid (`exec` = `Level::Execution`; `precise` = `Level::Precise`, one witness
+per record; `disjunctive` = `Level::Precise` with `Ldfi::disjunctive_provenance(true)`) on the
+provenance-compiled ISR, reliable-broadcast and reliable-delivery harnesses, each column run as
+its own process (`LDFI_ABLATION_LEVEL`), every search at hypothesis budget 256, witness cap 8.
+Cell = `verdict / hypotheses / schedules / mean derivation size / clauses per run / wall secs
+(rN = replays, oK = witness overflows)`. **Fuzz cells are five repeats** (`LDFI_ABLATION_REPEATS=5`);
+a single value means all five repeats agreed exactly, a range is min–max.
+
+**Two measurement caveats.** (1) Wall seconds are inflated and noisy: the box (8 cores) ran
+this grid alongside another ablation, at a load average of 20–30 throughout; the same exhaustive
+search (echo `n=3` cr=1, `precise`) took 31.9 s in one process and 118.9 s in another, and the
+ISR `precise` cells are 4–5× the 25 s of the earlier section. Within a row the columns ran
+concurrently, so the ratios between columns are roughly meaningful; the absolute values are not.
+Hypothesis, schedule, derivation and clause counts are deterministic and unaffected. (2) The
+machine went down (out of memory) before the last three runs completed: the delivery grid's
+first three rows, and the `LDFI_PROV_DEBUG` census of multi-witness records on ISR / delivery /
+plain broadcast, were not captured and are marked below. Nothing was re-run after the reboot.
+
+### Exhaustive feasibility probes
+
+- **ISR, exhaustive** (dataflow, unclean, `precise`, cr=1): hypothesis #0 alone had explored
+  ≈6,350 schedules at ≈12 schedules/s after 11 minutes, with the simulator's state-space
+  estimate still growing (6,421 at 98.9 %); killed at the 660 s timeout. No ISR column finishes
+  in 10 minutes; ISR is measured at `fuzz 8` (the unit tests' sample), five repeats.
+- **Reliable broadcast with echo, `n=4`, exhaustive** (`precise`, cr=1): 58,080 of the 92,160
+  schedules of hypothesis #0 after 16 minutes at 75–120 schedules/s; killed at the 960 s
+  timeout. No column finishes in 15 minutes; `n=4` echo is measured at `fuzz 8`, five repeats.
+
+### ISR replication (provenance-compiled, cr=1, `fuzz 8`, 5 repeats)
+
+| encoding | variant | exec | precise | disjunctive |
+|---|---|---|---|---|
+| closure | unclean (bug) | bug / 14 / 112 / 16.3 / 6.86 / 27–30s (r1680) | bug / 9 / 72 / 4.1–4.2 / 6.22 / 104–128s (r7546–7687) | bug / 9 / 72 / 4.2–4.3 / 6.22 / 104–130s (r7593–7700, o0) |
+| closure | clean (cert) | cert / 31 / 248 / 15.0 / 6.45 / 44–60s (r3232) | cert / 12 / 96 / 4.4–4.5 / 5.33 / 93–122s (r7646–7694) | cert / 12 / 96 / 4.3–4.5 / 5.33 / 97–123s (r7612–7772, o0) |
+| dataflow | unclean (bug) | bug / 14 / 112 / 16.3 / 6.86 / 32–42s (r1680) | bug / 12 / 96 / 10.6 / 6.67 / 22–26s (r1440) | bug / 12 / 96 / 10.6 / 6.67 / 21–24s (r1440, o0) |
+| dataflow | clean (cert) | cert / 31 / 248 / 15.0 / 6.45 / 56–67s (r3232) | cert / 18 / 144 / 10.8 / 5.78 / 28–142s (r1776) | cert / 18 / 144 / 10.8 / 5.78 / 30–140s (r1776, o0) |
+
+Every count (hypotheses, schedules, clauses per run) was identical in all five repeats of every
+cell; the only quantities that moved between repeats were the closure encoding's replay count
+(±1 %), the mean derivation size in its second decimal, and wall time (the 142 s / 140 s
+dataflow-clean outliers are one repeat each, the other four at 28–38 s). `disjunctive` equals
+`precise` in every count of every cell, and clauses per run is the same in both columns to
+two decimals (6.22, 5.33, 6.67, 5.78): over 8 schedules per hypothesis the disjunctive closure
+produced exactly as many derivations as the single-witness one, which is only possible if no
+record resolved to more than one witness. The direct `LDFI_PROV_DEBUG` census (which prints
+every record with more than one witness) was started but lost in the reboot; the earlier
+section's census of the same harness found none.
+
+### Reliable broadcast with echo
+
+Exhaustive, `n=3`:
+
+| config | exec | precise | disjunctive |
+|---|---|---|---|
+| echo, n=3, 1 crash, POST positive | certificate / 15 / 3289 / 6.81 / 219.20 / 39.6s (r21168) | certificate / 10 / 2641 / 4.55 / 264.00 / 31.9s (r17280) | certificate / 11 / 2651 / 4.75 / 868.55 / 31.1s (r16620, o0) |
+| echo, n=3, 2 crashes, POST positive | certificate / 73 / 10845 / 4.77 / 148.53 / 301.9s (r54872) | certificate / 32 / 7271 / 3.38 / 227.16 / 144.8s (r38664) | certificate / 39 / 7280 / 3.71 / 454.92 / 137.6s (r35132, o0) |
+| echo, n=3, 1 crash, POST negated | certificate / 15 / 3289 / 6.81 / 219.20 / 147.6s (r21168) | certificate / 10 / 2641 / 4.55 / 264.00 / 118.9s (r17280) | certificate / 11 / 2651 / 4.75 / 868.55 / 110.9s (r16620, o0) |
+
+The counts reproduce the earlier section exactly (10 → 11 and 32 → 39 hypotheses; 2641 → 2651
+and 7271 → 7280 schedules; clauses per run 264 → 869 and 227 → 455; replays 17,280 → 16,620
+and 38,664 → 35,132, fewer under disjunction because the two broadcaster-crash hypotheses it
+prunes are not simulated). The negated `POST` row is identical to the positive one in every
+count, as before; its wall times are the same searches measured under a heavier load.
+
+`n=4`, 1 crash, `POST` positive, `fuzz 8`, 5 repeats:
+
+| config | exec | precise | disjunctive |
+|---|---|---|---|
+| echo, n=4, 1 crash | certificate / 24 / 192 / 10.99–11.15 / 7.67 / 15.3–20.7s (r1536, o0) | certificate / 15 / 120 / 6.57 / 7.47 / 8.9–11.0s (r960, o0) | certificate / 21 / 168 / 7.18–7.39 / 25.24–27.81 / 14.1–16.4s (r1344, **o156–176**) |
+
+Hypothesis and schedule counts were identical in all five repeats of all three columns (the
+sampled schedules differ by the draw, which moves the mean derivation size and the disjunctive
+clause count slightly). `disjunctive` runs 21 hypotheses against `precise`'s 15 (+6, +40 %;
+at `n=3` it was +1 / +10 % at one crash and +7 / +22 % at two), still 3 fewer than `exec`'s 24.
+Clauses per run 7.47 → 25–28 (3.4–3.7×). **This is the first configuration in the corpus where
+the witness cap of 8 is reached**: 156–176 overflow steps per search (none at `n=3`, none in
+ISR or delivery). With four members each delivery has up to four witnesses (the initial or one
+of three echoes) and the goal conjoins four members, so the cross product of the goal's
+witnesses is 4⁴ = 256 > 8 before minimization; each overflowing step falls back to the union
+witness (sound, less pruning).
+
+### Reliable broadcast, plain (the bug): time to counterexample
+
+Exhaustive:
+
+| config | exec | precise | disjunctive |
+|---|---|---|---|
+| plain, n=3, 1 crash, POST positive | violated / 2 / 8 / 6.00 / 3.00 / 0.2s (r54) | violated / 2 / 8 / 6.00 / 3.00 / 0.2s (r54) | violated / 2 / 8 / 6.00 / 3.00 / 0.1s (r54, o0) |
+| plain, n=3, 1 crash, POST negated | violated / 2 / 8 / 6.00 / 3.00 / 0.4s (r54) | violated / 2 / 8 / 6.00 / 3.00 / 0.7s (r54) | violated / 2 / 8 / 6.00 / 3.00 / 0.5s (r54, o0) |
+| plain, n=4, 1 crash, POST positive | violated / 2 / 30 / 8.00 / 12.00 / 2.5s (r264) | violated / 2 / 30 / 8.00 / 12.00 / 2.5s (r264) | violated / 2 / 30 / 8.00 / 12.00 / 2.3s (r264, o0) |
+
+`fuzz 8`, 5 repeats (every repeat identical): plain `n=4`, 1 crash — all three columns
+`violated / 2 / 16 / 8.00 / 4.00 / 0.6–1.5s (r112)`.
+
+Time to counterexample is two hypotheses (the failure-free run and the first crash proposed)
+in every column, every configuration, every exploration; the columns are indistinguishable on
+the bug. Clauses per run is the same in `precise` and `disjunctive` (3.00, 12.00, 4.00): without
+echoes no member ever receives a second copy, so there is no record with more than one witness.
+
+### Reliable delivery (exhaustive)
+
+| config | exec | precise | disjunctive |
+|---|---|---|---|
+| give up after 2, eot=4 eff=2, no hooks | not captured (reboot) | not captured | not captured |
+| give up after 2, eot=4 eff=2, hooks | not captured (reboot) | not captured | not captured |
+| retry until ack, eot=4 eff=2, no hooks | not captured (reboot) | not captured | not captured |
+| retry until ack, eot=4 eff=2, hooks | certificate / 3 / 3 / 0.67 / 1.00 / 0.1s | certificate / 3 / 3 / 0.67 / 1.00 / 0.0s | certificate / 3 / 3 / 0.67 / 1.00 / 0.1s (o0) |
+| give up after 3, eot=6 eff=3, hooks | violated / 4 / 4 / 1.00 / 0.75 / 0.1s | violated / 4 / 4 / 1.00 / 0.75 / 0.0s | violated / 4 / 4 / 1.00 / 0.75 / 0.1s (o0) |
+| retry until ack, eot=6 eff=3, hooks | certificate / 4 / 4 / 0.75 / 1.00 / 0.1s | certificate / 4 / 4 / 0.75 / 1.00 / 0.0s | certificate / 4 / 4 / 0.75 / 1.00 / 0.0s (o0) |
+
+All six rows ran to completion in all three columns (the processes finished before the reboot);
+only the last three rows' cells had been read from the logs when the host went down, so the
+first three are reported as not captured rather than copied from the earlier four-level table.
+In the captured rows the three columns are identical in every count: one schedule per
+hypothesis, one one-leaf derivation per goal-held schedule (clauses per run 1.00, or 0.75 where
+the last hypothesis's derivation is empty), no replays, no overflows. Time to counterexample on
+the give-up variant is 4 hypotheses (`{}`, then one omission per pre-`EFF` round) in every column.
+
+### Observations
+
+- **Verdicts agree in every captured cell of every protocol.** No disagreement between
+  `precise` and `disjunctive`, or between either and `exec`.
+- **Where disjunction changed the hypothesis count.** Only on reliable broadcast with echo:
+  `n=3` +1 (10 → 11, cr=1) and +7 (32 → 39, cr=2) exhaustive; `n=4` +6 (15 → 21, cr=1, `fuzz 8`,
+  all five repeats). Never fewer. In every other cell of the grid — ISR (both encodings, both
+  variants), plain broadcast (`n=3`, `n=4`), reliable delivery — the two columns are identical in
+  hypotheses, schedules, derivations and clauses per run.
+- **Multi-witness records exist only in echo broadcast**, as far as this grid can tell: the
+  clauses-per-run equality between the two columns on ISR, plain broadcast and delivery leaves no
+  room for a record that resolved to more than one witness (such a record multiplies the
+  derivations of every goal that depends on it). The direct census was not completed.
+- **Witness overflows appear for the first time at `n=4` echo** (156–176 per search, cap 8);
+  zero everywhere else in the grid, as in the earlier sections.
+- **Time to counterexample is unaffected** on both bug variants measured here: 2 hypotheses on
+  plain broadcast (every column, every size, every exploration) and 4 on give-up delivery; on ISR
+  unclean it is 9 (closure) and 12 (dataflow) in both `precise` and `disjunctive`, against 14
+  for `exec`, in all five repeats.
+- **Fuzz variance was nil in the counts.** Across 5 repeats × (12 ISR cells + 3 echo `n=4`
+  cells + 3 plain `n=4` cells) no hypothesis or schedule count moved; only replay counts
+  (closure ISR, ±1 %), second-decimal derivation sizes, and wall time varied.
+
+Reproduction (the harness knobs added for this grid, `hydro_test/src/cluster/ldfi_ablation_isr.rs`
+and `ldfi_ablation_broadcast.rs`): `LDFI_ABLATION_LEVEL=exec|precise|disjunctive` runs one
+column; `LDFI_ABLATION_REPEATS=<n>` repeats every cell; ISR takes
+`LDFI_ABLATION_EXPLORATION=exhaustive|fuzz<k>` (replacing the default grid with `cr=1` at that
+exploration) and `LDFI_ABLATION_VARIANT=unclean|clean`; broadcast takes
+`LDFI_ABLATION_CONFIG=<substring>`, which also enables the otherwise-omitted
+`reliable (echo), n=4, 1 crash` row. Do not run the columns of several exhaustive grids
+concurrently on one machine: this pass ended in an out-of-memory reboot.
