@@ -872,3 +872,238 @@ cannot carry provenance, and no longer panics or downgrades.
 hydro_lang --features ldfi --lib sim`: 213 passed. No verdict changed anywhere; every provenance-compiled
 cell is untouched by construction (`by_replay` reduces to `is_opaque` when the program carries
 provenance).
+
+## Disjunctive provenance
+
+Molly's lineage from one good run is a boolean formula over messages: a conjunction within a
+derivation, a **disjunction** across the alternative derivations of one fact, and the
+hitting-set solver prunes every fault set that leaves some alternative intact without running
+it. Hydrofrac's record provenance kept one witness per record (at a dedup, the first copy's),
+so a run yielded one clause per goal fact and the alternatives were rediscovered by simulation.
+This section recovers the disjunction behind a flag and measures what it buys. Same machine,
+same harnesses as the section above, the `disjunctive` column added to each table (`Record`
+level with `Ldfi::disjunctive_provenance(true)`; `precise` is the same level with it off).
+
+### What was built
+
+**A record's provenance is a formula** (`sim/runtime/provenance.rs`). `Prov` is a shared,
+lazily-resolved handle over `Leaf(delivery) | All(children) | Alts(children)`: pass-through
+operators share the handle, combinations (`join`, `cross`, folds) build `All`, and a
+deduplicating operator builds `Alts`. It has to be lazy and shared because DFIR's `unique` is
+streaming: the first copy of a value is emitted (and possibly sent) before its duplicate
+arrives in the same tick, so the alternative can only reach the emitted record through a cell
+both share. The rewrite (`sim/provenance.rs`) inserts a map before every `unique` inside a
+tick that gives each arrival a fresh `Alts` cell, shared by the copy `unique` stores and the
+record it emits and by nothing upstream; `Tagged::eq` — the only hook `unique`'s hash set
+offers — pushes the duplicate's alternatives into that cell when the values are equal.
+Absorption is opt-in (only an `Alts` cell absorbs), so no other comparison site creates an
+alternative; `filter_not_in` is compiled as an anti-join with a plain negative side, so a
+positive record is never compared with a negative one as `Tagged`s; a top-level (`'static`)
+`unique` is not reboxed, since a duplicate arriving in a later execution is no derivation of
+what the first copy already produced. The formula is resolved to a minimal DNF of witnesses
+when the lineage log is read (`LineageHandles::snapshot`), under a cap (`Ldfi::max_witnesses`,
+default 8): a conjunction whose cross product exceeds it falls back to the single union
+witness (a superset of a real witness: sound, less pruning) and a disjunction keeps its first
+`cap` alternatives (dropping alternatives is sound); both count as `witness_overflows`. With a
+cap of 1 the resolution is exactly the old single derivation (first copy wins at a dedup,
+union at a combination), which `RecordProv::ids` always holds, so the flag-off path reads
+what it always read.
+
+**The closure follows every witness** (`sim/ldfi.rs`). `record_closures` expands each witness
+of a record through the (memoized) derivations of the sends behind its deliveries — a cross
+product under the same cap, minimized (no derivation a superset of another: the smaller
+clause implies the larger) — and the goal assemblers conjoin lists: `any_output` and
+`all_members` take every derivation of every output, `witnessed` crosses the facts' lists,
+the hand-written specification view conjoins the observer's counterfactual derivation with
+each recorded alternative (unioning it into them, the first attempt, erased every alternative
+and measured as a no-op), and a replayed (opaque) record's kept deliveries are conjoined
+through their own alternatives (`counterfactual_all`; the replay itself is shared with the
+single path through a memo, so the replay counts are the same in both columns). Every
+derivation becomes a clause, and the ILP must hit them all: Molly's pruning.
+
+Flag off, the search is unchanged: `cargo test -p hydro_lang --features ldfi --lib sim`
+(221 tests) passes, the 2PC / ISR / broadcast tables below reproduce the `precise` column of
+the section above cell for cell (up to the schedule draw under `fuzz 1`), and
+`two_pc_ldfi::tests::single_derivation_search_is_unchanged_by_the_provenance_formula` pins
+the thirteen hypotheses of the exhaustive 2PC+CTP `n=2 load=4` search, in order, to the
+sequence recorded from the tree before this change.
+
+### Where the alternatives are
+
+Whether the disjunction can do anything depends on a run *exhibiting* two derivations of one
+fact. `LDFI_PROV_DEBUG` prints the records whose formula resolved to more than one witness:
+
+- **2PC with cooperative termination:** none in the failure-free run. A participant queries
+  its peers only after a timeout while uncertain, and the body fires the timers after the
+  commits land; the peer path fires only in runs where the coordinator crashed, and there the
+  participant hears *only* the peer. Alternatives exist across worlds, not within one run,
+  and Molly's single-run lineage would see exactly what hydrofrac's does. At `n ≥ 3` some
+  crash runs do batch a `commit` and a peer's `Decided` into the same tick (clauses per run
+  0.54–1.06 against 0.46–0.52), which is where the table's extra derivations come from.
+- **ISR replication:** none, in either encoding (the one write reaches each follower once;
+  heartbeats are folded, not deduplicated).
+- **Reliable broadcast with echo:** every member's delivery has two or three witnesses in most
+  schedules (`[[0], [3]]`: the broadcaster's `initial` or member 1's echo), since every echo is
+  sent unconditionally and a tick often batches the initial with an echo.
+
+### 2PC (fuzz 1, budget 400, cr=1)
+
+Cell = `verdict / hypotheses / schedules / mean derivation size / clauses per run / seconds`.
+
+| variant | config | exec | record | disjunctive |
+|---|---|---|---|---|
+| 2PC | n=2 load=1 | CEX / 2 / 2 / 8.00 / 0.50 / 0.0s | CEX / 2 / 2 / 8.00 / 0.50 / 0.0s | CEX / 2 / 2 / 8.00 / 0.50 / 0.0s |
+| 2PC | n=2 load=4 | CEX / 6 / 6 / 28.00 / 0.83 / 0.1s | CEX / 2 / 2 / 8.00 / 0.50 / 0.0s | CEX / 2 / 2 / 8.00 / 0.50 / 0.0s |
+| 2PC | n=2 load=8 | CEX / 6 / 6 / 60.00 / 0.83 / 0.3s | CEX / 4 / 4 / 6.67 / 0.75 / 0.1s | CEX / 4 / 4 / 6.67 / 0.75 / 0.1s |
+| 2PC | n=3 load=1 | CEX / 2 / 2 / 12.00 / 0.50 / 0.0s | CEX / 2 / 2 / 12.00 / 0.50 / 0.0s | CEX / 2 / 2 / 12.00 / 0.50 / 0.0s |
+| 2PC | n=3 load=4 | CEX / 8 / 8 / 42.00 / 0.88 / 0.3s | CEX / 2 / 2 / 12.00 / 0.50 / 0.1s | CEX / 6 / 6 / 10.40 / 0.83 / 0.2s |
+| 2PC | n=3 load=8 | CEX / 8 / 8 / 90.00 / 0.88 / 0.7s | CEX / 2 / 2 / 12.00 / 0.50 / 0.1s | CEX / 6 / 6 / 10.40 / 0.83 / 0.3s |
+| 2PC | n=4 load=1 | CEX / 2 / 2 / 16.00 / 0.50 / 0.0s | CEX / 2 / 2 / 16.00 / 0.50 / 0.0s | CEX / 2 / 2 / 16.00 / 0.50 / 0.0s |
+| 2PC | n=4 load=4 | CEX / 10 / 10 / 56.00 / 0.90 / 0.6s | CEX / 2 / 2 / 16.00 / 0.50 / 0.1s | CEX / 2 / 2 / 16.00 / 0.50 / 0.1s |
+| 2PC | n=4 load=8 | CEX / 10 / 10 / 120.00 / 0.90 / 1.7s | CEX / 2 / 2 / 16.00 / 0.50 / 0.2s | CEX / 2 / 2 / 16.00 / 0.50 / 0.2s |
+| 2PC+CTP | n=2 load=1 | CERT(hand) / 9 / 9 / 7.50 / 0.44 / 0.1s | CERT(hand) / 9 / 9 / 7.25 / 0.44 / 0.1s | CERT(hand) / 9 / 9 / 7.25 / 0.44 / 0.1s |
+| 2PC+CTP | n=2 load=4 | CERT(hand) / 27 / 27 / 24.36 / 0.52 / 0.6s | CERT(hand) / 13 / 13 / 6.83 / 0.46 / 0.1s | CERT(hand) / 13 / 13 / 6.83 / 0.46 / 0.1s |
+| 2PC+CTP | n=2 load=8 | CERT(hand) / 51 / 51 / 44.45 / 0.43 / 2.3s | CERT(hand) / 13 / 13 / 6.83 / 0.46 / 0.2s | CERT(hand) / 13 / 13 / 6.83 / 0.46 / 0.2s |
+| 2PC+CTP | n=3 load=1 | CERT(hand) / 13 / 13 / 12.67 / 0.46 / 0.2s | CERT(hand) / 13 / 13 / 11.33 / 0.46 / 0.1s | CERT(hand) / 13 / 13 / 11.71 / 0.54 / 0.2s |
+| 2PC+CTP | n=3 load=4 | CERT(hand) / 40 / 40 / 39.67 / 0.53 / 2.0s | CERT(hand) / 18 / 18 / 10.89 / 0.50 / 0.4s | CERT(hand) / 18 / 18 / 11.20 / 0.56 / 0.4s |
+| 2PC+CTP | n=3 load=8 | CERT(hand) / 76 / 76 / 72.12 / 0.43 / 9.4s | CERT(hand) / 18 / 18 / 10.89 / 0.50 / 0.6s | CERT(hand) / 18 / 18 / 11.36 / 0.61 / 0.7s |
+| 2PC+CTP | n=4 load=1 | CERT(hand) / 17 / 17 / 18.12 / 0.47 / 0.4s | CERT(hand) / 17 / 17 / 15.38 / 0.47 / 0.3s | CERT(hand) / 17 / 17 / 16.83 / 1.06 / 0.4s |
+| 2PC+CTP | n=4 load=4 | CERT(hand) / 53 / 53 / 57.04 / 0.53 / 5.8s | CERT(hand) / 23 / 23 / 14.92 / 0.52 / 0.8s | CERT(hand) / 23 / 23 / 16.56 / 0.78 / 0.9s (2 overflows) |
+| 2PC+CTP | n=4 load=8 | CERT(hand) / 101 / 101 / 100.98 / 0.44 / 29.0s | CERT(hand) / 23 / 23 / 14.92 / 0.52 / 1.3s | CERT(hand) / 23 / 23 / 16.38 / 1.04 / 1.5s |
+
+Every verdict identical; every certificate count identical. The plain-2PC `n=3` counterexample
+cells (2 against 6) move by the schedule draw, as in every earlier pass (`precise` has drawn
+2, 4, 6 and 8 there). Witness overflows: 2 in the whole grid (`n=4 load=4`), none elsewhere.
+
+### ISR replication (provenance-compiled, budget 256)
+
+Cell = `verdict / hypotheses / schedules / mean derivation size / clauses per run / seconds (replays)`.
+
+| encoding | config | exec | record | disjunctive |
+|---|---|---|---|---|
+| closure | unclean cr=1 fuzz 8 | bug / 14 / 112 / 16.3 / 6.86 / 5.9s (r1680) | bug / 9 / 72 / 4.2 / 6.22 / 24.5s (r7631) | bug / 9 / 72 / 4.3 / 6.22 / 24.6s (r7682) |
+| closure | unclean cr=1 fuzz 1 | bug / 14 / 14 / 16.3 / 0.86 / 0.9s (r210) | bug / 9 / 9 / 4.4 / 0.78 / 3.2s (r974) | bug / 9 / 9 / 4.1 / 0.78 / 3.2s (r940) |
+| closure | unclean cr=0 fuzz 8 | cert / 4 / 32 / 17.8 / 8.00 / 1.7s (r512) | cert / 1 / 8 / 4.0 / 8.00 / 3.7s (r1104) | cert / 1 / 8 / 4.0 / 8.00 / 3.6s (r1104) |
+| closure | clean cr=1 fuzz 8 | cert / 31 / 248 / 15.0 / 6.45 / 11.6s (r3232) | cert / 12 / 96 / 4.3 / 5.33 / 25.4s (r7683) | cert / 12 / 96 / 4.4 / 5.33 / 25.0s (r7646) |
+| closure | clean cr=1 fuzz 1 | cert / 31 / 31 / 15.0 / 0.81 / 1.7s (r404) | cert / 12 / 12 / 4.6 / 0.67 / 3.2s (r975) | cert / 12 / 12 / 4.5 / 0.67 / 3.2s (r958) |
+| closure | clean cr=0 fuzz 8 | cert / 4 / 32 / 17.8 / 8.00 / 1.7s (r512) | cert / 1 / 8 / 4.0 / 8.00 / 3.5s (r1104) | cert / 1 / 8 / 4.0 / 8.00 / 3.6s (r1104) |
+| dataflow | unclean cr=1 fuzz 8 | bug / 14 / 112 / 16.3 / 6.86 / 6.9s (r1680) | bug / 12 / 96 / 10.6 / 6.67 / 5.8s (r1440) | bug / 12 / 96 / 10.6 / 6.67 / 5.8s (r1440) |
+| dataflow | unclean cr=1 fuzz 1 | bug / 14 / 14 / 16.3 / 0.86 / 1.0s (r210) | bug / 12 / 12 / 10.6 / 0.83 / 0.8s (r180) | bug / 12 / 12 / 10.6 / 0.83 / 0.8s (r180) |
+| dataflow | unclean cr=0 fuzz 8 | cert / 4 / 32 / 17.8 / 8.00 / 2.0s (r512) | cert / 1 / 8 / 13.0 / 8.00 / 0.6s (r144) | cert / 1 / 8 / 13.0 / 8.00 / 0.6s (r144) |
+| dataflow | clean cr=1 fuzz 8 | cert / 31 / 248 / 15.0 / 6.45 / 13.6s (r3232) | cert / 18 / 144 / 10.8 / 5.78 / 7.8s (r1776) | cert / 18 / 144 / 10.8 / 5.78 / 7.8s (r1776) |
+| dataflow | clean cr=1 fuzz 1 | cert / 31 / 31 / 15.0 / 0.81 / 2.0s (r404) | cert / 18 / 18 / 10.8 / 0.72 / 1.1s (r222) | cert / 18 / 18 / 10.8 / 0.72 / 1.1s (r222) |
+| dataflow | clean cr=0 fuzz 8 | cert / 4 / 32 / 17.8 / 8.00 / 2.1s (r512) | cert / 1 / 8 / 13.0 / 8.00 / 0.6s (r144) | cert / 1 / 8 / 13.0 / 8.00 / 0.6s (r144) |
+
+Identical to `precise` in every cell (the odd replay count differs by the draw); no record in
+ISR has more than one witness, so there is nothing to disjoin. Overflows 0.
+
+### Reliable broadcast (n=3, echo), the protocol with alternatives
+
+Exhaustive exploration, cell = `verdict / hypotheses / schedules / mean derivation size / clauses per run / seconds (replays)`:
+
+| config | exec | record | disjunctive |
+|---|---|---|---|
+| plain, 1 crash, POST positive | violated / 2 / 8 / 6.00 / 3.00 / 0.1s (r54) | violated / 2 / 8 / 6.00 / 3.00 / 0.1s (r54) | violated / 2 / 8 / 6.00 / 3.00 / 0.1s (r54) |
+| reliable (echo), 1 crash, POST positive | certificate / 15 / 3289 / 6.81 / 219.20 / 30.3s (r21168) | certificate / 10 / 2641 / 4.55 / 264.00 / 24.7s (r17280) | certificate / 11 / 2651 / 4.75 / 868.55 / 24.2s (r16620) |
+| reliable (echo), 2 crashes, POST positive | certificate / 73 / 10845 / 4.77 / 148.53 / 78.7s (r54872) | certificate / 32 / 7271 / 3.38 / 227.16 / 53.3s (r38664) | certificate / 39 / 7280 / 3.71 / 454.92 / 50.1s (r35132) |
+| plain, 1 crash, POST negated | violated / 2 / 8 / 6.00 / 3.00 / 0.1s (r54) | violated / 2 / 8 / 6.00 / 3.00 / 0.1s (r54) | violated / 2 / 8 / 6.00 / 3.00 / 0.1s (r54) |
+| reliable (echo), 1 crash, POST negated | certificate / 15 / 3289 / 6.81 / 219.20 / 29.8s (r21168) | certificate / 10 / 2641 / 4.55 / 264.00 / 24.1s (r17280) | certificate / 11 / 2651 / 4.75 / 868.55 / 23.5s (r16620) |
+| plain, n=4, 1 crash, POST positive | violated / 2 / 30 / 8.00 / 12.00 / 0.5s (r264) | violated / 2 / 30 / 8.00 / 12.00 / 0.5s (r264) | violated / 2 / 30 / 8.00 / 12.00 / 0.5s (r264) |
+
+One schedule per hypothesis (`LDFI_ABLATION_EXPLORATION=fuzz1`, three repeats), hypotheses only:
+
+| config | exec | record | disjunctive |
+|---|---|---|---|
+| reliable (echo), 1 crash, POST positive | 15, 15, 15 | 9, 9, 10 | 11, 13, 12 |
+| reliable (echo), 2 crashes, POST positive | 74, 74, 74 | 33, 32, 32 | 52, 47, 46 |
+| reliable (echo), 1 crash, POST negated | 15, 15, 15 | 9, 10, 10 | 12, 12, 11 |
+| plain (both forms), 1 crash | 2 | 2 or 4 | 2 or 4 |
+
+Clauses per run: 0.9 → 2.3–3.1 (1 crash), 0.94 → 1.8–2.0 (2 crashes). Overflows 0 (the cap of 8 is
+never reached at `n=3`). Verdicts identical.
+
+### Observations
+
+**The disjunction does what Molly promises, and it costs more runs than it saves.** The
+hypothesis sequences of the exhaustive 1-crash search
+(`reliable_broadcast::tests::ldfi_certifies_reliable_broadcast_with_disjunctive_provenance`,
+`LDFI_BROADCAST_DIAG=1`):
+
+```
+single:       {} → crash(broadcaster after initial[→1]) → crash(broadcaster after initial[→0])
+              → crash(member@0 after echo[0→2]) → … after echo[0→1] → … after echo[0→0]
+              → crash(member@1 after echo[1→2]) → … after echo[1→1]
+              → crash(member@2 after echo[2→2]) → crash(broadcaster before any send)        (10)
+disjunctive:  {} → crash(member@0 after echo[0→2]) → … after echo[0→1] → … after echo[0→0]
+              → crash(member@1 after echo[1→2]) → … after echo[1→1] → crash(member@1 before any send)
+              → crash(member@2 after echo[2→2]) → crash(member@2 after echo[2→0])
+              → crash(member@2 before any send) → crash(broadcaster before any send)         (11)
+```
+
+The failure-free run yields 2160 clauses instead of 360 (six derivations per schedule: each
+member's delivery by the initial or by an echo), and the two `crash(broadcaster after
+initial[→k])` hypotheses the single search ran are **pruned without running**: the clauses say
+an echo alternative survives them. That is the pruning Molly's formula buys, and it is real.
+But every alternative's deliveries are now dependencies, so their senders' early sends become
+crash-point candidates — `crash(member@1 before any send)`, `crash(member@2 after echo[2→0])`,
+`crash(member@2 before any send)` — which the single-derivation search never named (nothing it
+derived depended on member 1's first send) and therefore never tried. Three runs for two. Under
+two crashes the universe grows the same way and the combinations with it, 32 → 46–52.
+
+**Why hydrofrac did not need the disjunction.** Hydrofrac's fault universe is grown lazily
+from the derivations it has seen, and a crash point is only proposed once some derivation
+depends on the send it is named by. A fault that kills no dependency of any observed derivation
+is never tried, which is itself most of the pruning Molly gets from the formula: the single
+path never ran `crash(member@1 before any send)` because it never had a reason to. Molly's
+universe is every message of the run, so the disjunction is what keeps *its* search from
+running every one of them; hydrofrac gets that from the universe instead. The DNF's
+certificate is relative to a larger universe (it also covers fault sets that combine the newly
+named crash points, which the single path's certificate does not), so it is a stronger
+certificate at more runs, not a cheaper one.
+
+**Where it would pay.** A protocol in which the failure-free run exhibits alternatives *and*
+whose alternative deliveries are sends the single path already names: then the pruning is free
+and the universe does not grow. Neither corpus protocol has that shape — in 2PC+CTP and ISR
+alternatives do not fire within a run at all; in broadcast the alternatives are echoes whose
+senders had no other dependency. Schedule diversity under exhaustive exploration already
+harvests the alternatives the single path misses (264 clauses per run on broadcast with one
+witness each, since different schedules batch differently), which is why the exhaustive and
+the `fuzz 1` columns move the same way.
+
+**The cap cost nothing.** Two overflows in the whole measurement (2PC+CTP `n=4 load=4`), none on
+broadcast or ISR; the formulas stay small because the alternatives are two or three per record
+and the goals conjoin three members at most. Resolution and expansion add no measurable wall
+time (every `disjunctive` cell is within a tenth of a second of `precise`; the replays are
+shared).
+
+### Core Paxos (p=2, a=3, cr=1, one sampled schedule per hypothesis, budget 256)
+
+Cell = `verdict / hypotheses / mean derivation size / clauses per run / seconds (replays)`.
+
+| variant | exec | record | disjunctive |
+|---|---|---|---|
+| bug (commit quorum off by one) | violated / 162 / 23.6 / 0.58 / 67s (r665) | violated / 77 / 15.9 / 0.65 / 18s (r307) | violated / 134 / 16.0 / 0.60 / 81s (r539) |
+| correct | certificate / 203 / 18.4 / 0.45 / 44s (r496) | budget / 256 / 19.5 / 0.60 / 540s (r956) | certificate / 223 / 18.9 / 0.42 / 136s (r548) |
+
+Overflows 0. With one sampled schedule per hypothesis these counts move by ±50% between passes
+(the section above had `precise` certify at 230 and `exec` run out of budget at 256, the
+reverse of this pass), and clauses per run are the same 0.4–0.65 in every column: no Paxos
+record resolved to more than one witness (a `p2b` quorum is a fold, a conjunction), so the
+columns differ by the draw alone. The `budget` against `certificate` pair is a budget effect
+of that variance, not a verdict disagreement.
+
+**What the measurement does not say.** The counterexample cells are decided by the schedule
+draw at every level and say nothing here; so does Paxos at one schedule per hypothesis. Raft was
+not measured (its record cells run four minutes each and its lineage is replayed, which yields
+one derivation per record by construction).
+
+### Status
+
+`Ldfi::disjunctive_provenance(bool)`, default off; `Ldfi::max_witnesses(k)`, default 8;
+`Schedule::witness_overflows`. The formula representation stays on regardless (it is what the
+record level now reads its single derivation from, bit for bit). Off is the recommendation:
+on the corpus it never reduced the hypothesis count and raised it by 10–50% where alternatives
+exist. A variant worth one more experiment is **DNF clauses over the single-derivation
+universe** — keep every alternative as a cover constraint but propose crash points only from
+the first-witness derivations, dropping (soundly) any clause the universe cannot hit — which
+would keep the two pruned broadcaster hypotheses without admitting the three new member ones.

@@ -27,7 +27,12 @@ use crate::cluster::isr_replication::harness as isr;
 /// Schedules sampled per hypothesis by the ISR unit tests (`isr_replication::tests::SAMPLED`).
 const SAMPLED: usize = 8;
 
-const LEVELS: [(&str, Level); 2] = [("exec", Level::Execution), ("precise", Level::Precise)];
+/// The columns: `(name, level, disjunctive provenance)`.
+const LEVELS: [(&str, Level, bool); 3] = [
+    ("exec", Level::Execution, false),
+    ("precise", Level::Precise, false),
+    ("disjunctive", Level::Precise, true),
+];
 
 /// One (encoding, config) × level measurement.
 struct Cell {
@@ -37,8 +42,12 @@ struct Cell {
     /// Mean number of dependencies per derivation, over the derivations of goal-held
     /// schedules (`None` when there were none).
     mean_derivation: Option<f64>,
+    /// Derivations (clauses) per hypothesis run.
+    clauses_per_run: f64,
     replays: usize,
     fallbacks: usize,
+    /// Steps where the witness cap truncated (disjunctive provenance only).
+    overflows: usize,
     secs: f64,
 }
 
@@ -49,14 +58,14 @@ impl Cell {
             None => "-".into(),
         };
         let mut s = format!(
-            "{} / {} / {} / {} / {:.1}s",
-            self.verdict, self.hypotheses, self.schedules, deriv, self.secs
+            "{} / {} / {} / {} / {:.2} / {:.1}s",
+            self.verdict, self.hypotheses, self.schedules, deriv, self.clauses_per_run, self.secs
         );
-        if self.replays > 0 || self.fallbacks > 0 {
+        if self.replays > 0 || self.fallbacks > 0 || self.overflows > 0 {
             write!(
                 s,
-                " (replays {}, fallbacks {})",
-                self.replays, self.fallbacks
+                " (replays {}, fallbacks {}, overflows {})",
+                self.replays, self.fallbacks, self.overflows
             )
             .unwrap();
         }
@@ -89,10 +98,11 @@ fn measure(sim: &CompiledSim, ldfi: Ldfi, body: impl AsyncFn(&Run<'_>)) -> Resul
     let secs = start.elapsed().as_secs_f64();
     let schedules = outcome.runs().iter().flat_map(|h| &h.schedules);
     let (mut deriv_sum, mut deriv_n) = (0usize, 0usize);
-    let (mut replays, mut fallbacks) = (0usize, 0usize);
+    let (mut replays, mut fallbacks, mut overflows) = (0usize, 0usize, 0usize);
     for s in schedules {
         replays += s.replays;
         fallbacks += s.replay_fallbacks;
+        overflows += s.witness_overflows;
         if s.goal_held {
             for d in &s.derivations {
                 deriv_sum += d.len();
@@ -105,8 +115,14 @@ fn measure(sim: &CompiledSim, ldfi: Ldfi, body: impl AsyncFn(&Run<'_>)) -> Resul
         hypotheses: outcome.runs().len(),
         schedules: outcome.schedules(),
         mean_derivation: (deriv_n > 0).then(|| deriv_sum as f64 / deriv_n as f64),
+        clauses_per_run: if outcome.runs().is_empty() {
+            0.0
+        } else {
+            deriv_n as f64 / outcome.runs().len() as f64
+        },
         replays,
         fallbacks,
+        overflows,
         secs,
     })
 }
@@ -141,7 +157,7 @@ fn level_ablation_isr() {
     writeln!(md).unwrap();
     writeln!(
         md,
-        "Cell = `verdict / hypotheses / schedules / mean derivation size / wall secs`; \
+        "Cell = `verdict / hypotheses / schedules / mean derivation size / clauses per run / wall secs`; \
          mean derivation size is the mean number of dependencies per derivation over goal-held \
          schedules; `(replays, fallbacks)` are counterfactual replays and replay fallbacks."
     )
@@ -150,7 +166,7 @@ fn level_ablation_isr() {
     writeln!(
         md,
         "| encoding | config | {} |",
-        LEVELS.map(|(n, _)| n).join(" | ")
+        LEVELS.map(|(n, _, _)| n).join(" | ")
     )
     .unwrap();
     writeln!(md, "|---|---|{}", "---|".repeat(LEVELS.len())).unwrap();
@@ -168,12 +184,13 @@ fn level_ablation_isr() {
             for (crashes, instances) in [(1usize, SAMPLED), (1, 1), (0, SAMPLED)] {
                 let config = format!("{variant} cr={crashes} fuzz {instances}");
                 let mut cells = vec![];
-                for (level_name, level) in LEVELS {
+                for (level_name, level, disjunctive) in LEVELS {
                     eprintln!("ablation: {name} {config} {level_name}");
                     let cell = measure(
                         &sim,
                         configure(crashes)
                             .level(level)
+                            .disjunctive_provenance(disjunctive)
                             .exploration(Exploration::Fuzz { instances })
                             .quiet(),
                         async |run| isr::body(&h, run).await,
@@ -221,10 +238,11 @@ fn level_ablation_isr_diagnose() {
         Encoding::Dataflow
     };
     let (sim, h, configure) = isr::compile_with(true, encoding, isr::DEFAULT_SHAPE, true, 8);
-    for (level_name, level) in LEVELS {
+    for (level_name, level, disjunctive) in LEVELS {
         eprintln!("\n===== {encoding:?} unclean cr=1 fuzz 1 {level_name} =====");
         let outcome = configure(1)
             .level(level)
+            .disjunctive_provenance(disjunctive)
             .exploration(Exploration::Fuzz { instances: 1 })
             .search(&sim, async |run| isr::body(&h, run).await);
         eprintln!("{outcome}");

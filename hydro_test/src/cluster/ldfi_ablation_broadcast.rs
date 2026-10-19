@@ -12,6 +12,9 @@
 //! `LDFI_ABLATION_BUDGET_SECS` (default 1200) bounds the total time: configurations that
 //! would start after it are reported as skipped. `LDFI_ABLATION_ONLY=broadcast|delivery`
 //! runs one protocol. `LDFI_ABLATION_VERBOSE` keeps the per-hypothesis progress lines.
+//! `LDFI_ABLATION_EXPLORATION=fuzz<k>` samples `k` schedules per hypothesis instead of every
+//! schedule (the default, `exhaustive`); `LDFI_ABLATION_REPEATS` repeats each search (rows are
+//! then suffixed `#<repeat>`), which under `fuzz<k>` shows the spread of the schedule draw.
 
 #[cfg(test)]
 mod ablation {
@@ -21,7 +24,7 @@ mod ablation {
 
     use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
     use hydro_lang::prelude::*;
-    use hydro_lang::sim::ldfi::{Ldfi, Level, Outcome};
+    use hydro_lang::sim::ldfi::{Exploration, Ldfi, Level, Outcome};
     use hydro_lang::sim::spec::Spec;
     use hydro_lang::sim_hooks::{BatchHook, OnProcess};
 
@@ -30,7 +33,12 @@ mod ablation {
     };
     use crate::distributed::reliable_delivery::{Ack, Msg, Receiver, Sender, reliable_delivery};
 
-    const LEVELS: [(&str, Level); 2] = [("exec", Level::Execution), ("precise", Level::Precise)];
+    /// The columns: `(name, level, disjunctive provenance)`.
+    const LEVELS: [(&str, Level, bool); 3] = [
+        ("exec", Level::Execution, false),
+        ("precise", Level::Precise, false),
+        ("disjunctive", Level::Precise, true),
+    ];
 
     /// One measurement: one configuration at one level.
     struct Cell {
@@ -40,8 +48,12 @@ mod ablation {
         /// Mean number of dependencies per derivation, over the derivations of goal-held
         /// schedules; `None` when no derivation was recorded.
         mean_deriv: Option<f64>,
+        /// Derivations (clauses) per hypothesis run.
+        clauses_per_run: f64,
         replays: usize,
         fallbacks: usize,
+        /// Steps where the witness cap truncated (disjunctive provenance only).
+        overflows: usize,
         secs: f64,
     }
 
@@ -59,10 +71,12 @@ mod ablation {
 
     fn measure(outcome: &Outcome, secs: f64) -> Cell {
         let schedules = outcome.runs().iter().flat_map(|h| &h.schedules);
-        let (mut leaves, mut derivations, mut replays, mut fallbacks) = (0usize, 0usize, 0, 0);
+        let (mut leaves, mut derivations, mut replays, mut fallbacks, mut overflows) =
+            (0usize, 0usize, 0, 0, 0);
         for s in schedules {
             replays += s.replays;
             fallbacks += s.replay_fallbacks;
+            overflows += s.witness_overflows;
             if s.goal_held {
                 for d in &s.derivations {
                     leaves += d.len();
@@ -75,8 +89,14 @@ mod ablation {
             hypotheses: outcome.runs().len(),
             schedules: outcome.schedules(),
             mean_deriv: (derivations > 0).then(|| leaves as f64 / derivations as f64),
+            clauses_per_run: if outcome.runs().is_empty() {
+                0.0
+            } else {
+                derivations as f64 / outcome.runs().len() as f64
+            },
             replays,
             fallbacks,
+            overflows,
             secs,
         }
     }
@@ -87,8 +107,10 @@ mod ablation {
             hypotheses: 0,
             schedules: 0,
             mean_deriv: None,
+            clauses_per_run: 0.0,
             replays: 0,
             fallbacks: 0,
+            overflows: 0,
             secs: 0.0,
         }
     }
@@ -116,11 +138,11 @@ mod ablation {
             .map(|d| format!("{d:.2}"))
             .unwrap_or_else(|| "–".to_string());
         let mut s = format!(
-            "{} / {} / {} / {} / {:.1}s",
-            c.verdict, c.hypotheses, c.schedules, deriv, c.secs
+            "{} / {} / {} / {} / {:.2} / {:.1}s",
+            c.verdict, c.hypotheses, c.schedules, deriv, c.clauses_per_run, c.secs
         );
-        if c.replays > 0 || c.fallbacks > 0 {
-            write!(s, " (r{} f{})", c.replays, c.fallbacks).unwrap();
+        if c.replays > 0 || c.fallbacks > 0 || c.overflows > 0 {
+            write!(s, " (r{} f{} o{})", c.replays, c.fallbacks, c.overflows).unwrap();
         }
         s
     }
@@ -129,7 +151,7 @@ mod ablation {
     fn table(rows: &[(String, Vec<Cell>)]) -> String {
         let mut out = String::new();
         out.push_str("| config |");
-        for (name, _) in LEVELS {
+        for (name, _, _) in LEVELS {
             write!(out, " {name} |").unwrap();
         }
         out.push('\n');
@@ -146,13 +168,14 @@ mod ablation {
             out.push('\n');
         }
         out.push_str(
-            "\nCells: `verdict / hypotheses / schedules / mean derivation size / wall secs`; \
-             `(rN fM)` = counterfactual replays and replay fallbacks.\n",
+            "\nCells: `verdict / hypotheses / schedules / mean derivation size / clauses per run / wall secs`; \
+             `(rN fM oK)` = counterfactual replays, replay fallbacks, witness overflows.\n",
         );
         out
     }
 
     fn quiet(ldfi: Ldfi) -> Ldfi {
+        let ldfi = ldfi.exploration(exploration());
         if std::env::var("LDFI_ABLATION_VERBOSE").is_ok() {
             ldfi
         } else {
@@ -160,16 +183,35 @@ mod ablation {
         }
     }
 
+    fn exploration() -> Exploration {
+        match std::env::var("LDFI_ABLATION_EXPLORATION").as_deref() {
+            Ok(s) if s.starts_with("fuzz") => Exploration::Fuzz {
+                instances: s[4..].parse().expect("LDFI_ABLATION_EXPLORATION=fuzz<k>"),
+            },
+            _ => Exploration::Exhaustive,
+        }
+    }
+
+    fn repeats() -> usize {
+        std::env::var("LDFI_ABLATION_REPEATS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1)
+    }
+
     /// Runs one search per level on an already-compiled program. Each search is isolated by
     /// `catch_unwind`, so a level the program does not support is a cell, not a crash. A
     /// program compiled without provenance is searched at every level too (`Precise` then
-    /// replays every record).
-    fn run_levels(search: impl Fn(Level) -> Outcome) -> Vec<Cell> {
+    /// replays every record); the disjunctive column needs record provenance.
+    fn run_levels(provenance: bool, search: impl Fn(Level, bool) -> Outcome) -> Vec<Cell> {
         LEVELS
             .iter()
-            .map(|&(name, level)| {
+            .map(|&(name, level, disjunctive)| {
+                if disjunctive && !provenance {
+                    return unavailable("n/a: needs record provenance");
+                }
                 let start = Instant::now();
-                match catch_unwind(AssertUnwindSafe(|| search(level))) {
+                match catch_unwind(AssertUnwindSafe(|| search(level, disjunctive))) {
                     Ok(outcome) => {
                         let cell = measure(&outcome, start.elapsed().as_secs_f64());
                         eprintln!("  {name}: {}", format_cell(&cell));
@@ -256,9 +298,10 @@ mod ablation {
         }
         let compiled = sim.compiled();
 
-        run_levels(|level| {
+        run_levels(provenance, |level, disjunctive| {
             quiet(Ldfi::new())
                 .level(level)
+                .disjunctive_provenance(disjunctive)
                 .crashable("broadcaster", &broadcaster)
                 .crashable_cluster("member", &members, 0..members_n)
                 .crash_budget(crashes)
@@ -335,9 +378,10 @@ mod ablation {
         }
         let compiled = sim.compiled();
 
-        run_levels(|level| {
+        run_levels(provenance, |level, disjunctive| {
             quiet(Ldfi::new())
                 .level(level)
+                .disjunctive_provenance(disjunctive)
                 .goal(&out)
                 .run(&compiled, async |run| {
                     for round in 1..=eot {
@@ -392,16 +436,26 @@ mod ablation {
         configs: Vec<(String, Box<dyn Fn() -> Vec<Cell>>)>,
     ) -> Vec<(String, Vec<Cell>)> {
         let budget = budget_secs();
+        let repeats = repeats();
         configs
             .into_iter()
-            .map(|(name, run)| {
-                eprintln!("[{:.0}s] {name}", start.elapsed().as_secs_f64());
-                if start.elapsed().as_secs_f64() > budget {
-                    eprintln!("  skipped: over the time budget");
-                    return (name, skipped());
-                }
-                let cells = run();
-                (name, cells)
+            .flat_map(|(name, run)| {
+                (0..repeats)
+                    .map(|repeat| {
+                        let name = if repeats > 1 {
+                            format!("{name} #{repeat}")
+                        } else {
+                            name.clone()
+                        };
+                        eprintln!("[{:.0}s] {name}", start.elapsed().as_secs_f64());
+                        if start.elapsed().as_secs_f64() > budget {
+                            eprintln!("  skipped: over the time budget");
+                            return (name, skipped());
+                        }
+                        let cells = run();
+                        (name, cells)
+                    })
+                    .collect::<Vec<_>>()
             })
             .collect()
     }
@@ -457,9 +511,9 @@ mod ablation {
             "`hydro_test/src/cluster/reliable_broadcast.rs`: the broadcaster and every member \
              crashable (`fail_stop` links, so crashes are the only faults), specification \
              `PRE` = some member delivered `m`, `POST` = every correct member delivered `m` \
-             (written positively or through `filter_not_in`). Compiled with provenance; \
-             exhaustive schedule exploration.\n\n",
+             (written positively or through `filter_not_in`). Compiled with provenance.\n\n",
         );
+        writeln!(md, "Exploration: `{:?}`.\n", exploration()).unwrap();
         md.push_str(&table(&broadcast_rows));
         md.push('\n');
 

@@ -417,7 +417,7 @@ impl ScriptCtx {
     expect(dead_code, reason = "used by `sim::ldfi`")
 )]
 pub(crate) fn lineage_events() -> Vec<LineageEvent> {
-    CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().lineage.events.borrow().clone())
+    CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().lineage.snapshot())
 }
 
 /// Whether the current simulation instance was compiled with record-level provenance.
@@ -2846,7 +2846,7 @@ impl<W: std::io::Write> LaunchedSim<W> {
             self.report_program_panic();
             if !progressed {
                 // Drop the `Exec` record of a run that did nothing.
-                self.lineage.events.borrow_mut().truncate(events_before);
+                self.lineage.truncate(events_before);
             }
             let (loc, c_id, _) = &self.async_dfirs[index];
             if progressed {

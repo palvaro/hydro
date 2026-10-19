@@ -1,6 +1,7 @@
-//! Lineage-level ablation on 2PC: the same search at every [`Level`] on the same
-//! provenance-compiled program, over participants × workload × crash budget, with and without
-//! cooperative termination. Writes a Markdown table; the results are in
+//! Lineage-level ablation on 2PC: the same search at every [`Level`] (and, at the record
+//! level, with and without disjunctive provenance, see [`Ldfi::disjunctive_provenance`]) on
+//! the same provenance-compiled program, over participants × workload × crash budget, with and
+//! without cooperative termination. Writes a Markdown table; the results are in
 //! `docs/design/ldfi-level-ablation.md`.
 //!
 //! Gated on `LDFI_ABLATION_OUT` (the path of the table to write); without it the test returns
@@ -35,7 +36,12 @@ use hydro_lang::sim::ldfi::{Derivation, Exploration, Grade, Ldfi, Level, Outcome
 
 use crate::cluster::two_pc_ldfi::harness as two_pc;
 
-const LEVELS: [(&str, Level); 2] = [("exec", Level::Execution), ("precise", Level::Precise)];
+/// The columns: `(name, level, disjunctive provenance)`.
+const LEVELS: [(&str, Level, bool); 3] = [
+    ("exec", Level::Execution, false),
+    ("precise", Level::Precise, false),
+    ("disjunctive", Level::Precise, true),
+];
 
 /// One measurement: one configuration at one level.
 struct Cell {
@@ -58,7 +64,19 @@ struct Cell {
     distinct_derivations: usize,
     replays: usize,
     replay_fallbacks: usize,
+    /// Steps where the witness cap truncated (disjunctive provenance only).
+    overflows: usize,
     secs: f64,
+}
+
+/// Derivations (clauses) per hypothesis run. A free function rather than a method: the
+/// staging copy of this crate drops impl blocks.
+fn clauses_per_run(cell: &Cell) -> f64 {
+    if cell.hypotheses == 0 {
+        0.0
+    } else {
+        cell.derivations as f64 / cell.hypotheses as f64
+    }
 }
 
 fn env_list<T: std::str::FromStr>(name: &str, default: &[T]) -> Vec<T>
@@ -130,11 +148,12 @@ fn measure(
         true
     };
     for repeat in 0..repeats() {
-        for (name, level) in LEVELS {
+        for (name, level, disjunctive) in LEVELS {
             let start = Instant::now();
             let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 configure(crashes)
                     .level(level)
+                    .disjunctive_provenance(disjunctive)
                     .exploration(exploration())
                     .max_hypotheses(max_hypotheses())
                     .quiet()
@@ -154,8 +173,13 @@ fn measure(
                     let distinct: BTreeSet<&Derivation> = derivations.iter().copied().collect();
                     let total_deps: usize = derivations.iter().map(|d| d.len()).sum();
                     let all = outcome.runs().iter().flat_map(|h| &h.schedules);
-                    let (replays, fallbacks) =
-                        all.fold((0, 0), |(r, f), s| (r + s.replays, f + s.replay_fallbacks));
+                    let (replays, fallbacks, overflows) = all.fold((0, 0, 0), |(r, f, o), s| {
+                        (
+                            r + s.replays,
+                            f + s.replay_fallbacks,
+                            o + s.witness_overflows,
+                        )
+                    });
                     Cell {
                         ctp,
                         repeat,
@@ -176,6 +200,7 @@ fn measure(
                         distinct_derivations: distinct.len(),
                         replays,
                         replay_fallbacks: fallbacks,
+                        overflows,
                         secs,
                     }
                 }
@@ -202,20 +227,23 @@ fn measure(
                         distinct_derivations: 0,
                         replays: 0,
                         replay_fallbacks: 0,
+                        overflows: 0,
                         secs,
                     }
                 }
             };
             eprintln!(
-                "cell: ctp={ctp} n={n} load={txns} cr={crashes} #{repeat} {name}: {} hyp={} sched={} deriv={} ({} distinct, mean {:.2}) replays={} fallbacks={} {:.1}s",
+                "cell: ctp={ctp} n={n} load={txns} cr={crashes} #{repeat} {name}: {} hyp={} sched={} deriv={} ({} distinct, mean {:.2}, {:.2}/run) replays={} fallbacks={} overflows={} {:.1}s",
                 cell.verdict,
                 cell.hypotheses,
                 cell.schedules,
                 cell.derivations,
                 cell.distinct_derivations,
                 cell.mean_derivation,
+                clauses_per_run(&cell),
                 cell.replays,
                 cell.replay_fallbacks,
+                cell.overflows,
                 cell.secs
             );
             out.push(cell);
@@ -238,7 +266,7 @@ fn render(cells: &[Cell]) -> String {
     let mut out = String::new();
     writeln!(
         out,
-        "Exploration: `{:?}`; hypothesis budget {}; `fuzz_iterations` 8 (unused under exhaustive). Cell = `verdict / hypotheses / schedules / mean derivation size / seconds`.\n",
+        "Exploration: `{:?}`; hypothesis budget {}; `fuzz_iterations` 8 (unused under exhaustive). Cell = `verdict / hypotheses / schedules / mean derivation size / clauses per run / seconds`.\n",
         exploration(),
         max_hypotheses()
     )
@@ -259,7 +287,7 @@ fn render(cells: &[Cell]) -> String {
         )
         .unwrap();
         write!(out, "| config |").unwrap();
-        for (name, _) in LEVELS {
+        for (name, _, _) in LEVELS {
             write!(out, " {name} |").unwrap();
         }
         writeln!(out).unwrap();
@@ -277,15 +305,20 @@ fn render(cells: &[Cell]) -> String {
         }
         for label in &configs {
             write!(out, "| {label} |").unwrap();
-            for (name, _) in LEVELS {
+            for (name, _, _) in LEVELS {
                 match rows
                     .iter()
                     .find(|c| &config_label(c) == label && c.level == name)
                 {
                     Some(c) if c.counterexample.is_some() => write!(
                         out,
-                        " {} / {} / {} / {:.2} / {:.1}s |",
-                        c.verdict, c.hypotheses, c.schedules, c.mean_derivation, c.secs
+                        " {} / {} / {} / {:.2} / {:.2} / {:.1}s |",
+                        c.verdict,
+                        c.hypotheses,
+                        c.schedules,
+                        c.mean_derivation,
+                        clauses_per_run(c),
+                        c.secs
                     )
                     .unwrap(),
                     Some(c) => write!(out, " {} / {:.1}s |", c.verdict, c.secs).unwrap(),
@@ -298,11 +331,11 @@ fn render(cells: &[Cell]) -> String {
 
         writeln!(
             out,
-            "Detail (`derivations observed / distinct derivations / replays / replay fallbacks`):\n"
+            "Detail (`derivations observed / distinct derivations / replays / replay fallbacks / witness overflows`):\n"
         )
         .unwrap();
         write!(out, "| config |").unwrap();
-        for (name, _) in LEVELS {
+        for (name, _, _) in LEVELS {
             write!(out, " {name} |").unwrap();
         }
         writeln!(out).unwrap();
@@ -313,15 +346,19 @@ fn render(cells: &[Cell]) -> String {
         writeln!(out).unwrap();
         for label in &configs {
             write!(out, "| {label} |").unwrap();
-            for (name, _) in LEVELS {
+            for (name, _, _) in LEVELS {
                 match rows
                     .iter()
                     .find(|c| &config_label(c) == label && c.level == name)
                 {
                     Some(c) => write!(
                         out,
-                        " {} / {} / {} / {} |",
-                        c.derivations, c.distinct_derivations, c.replays, c.replay_fallbacks
+                        " {} / {} / {} / {} / {} |",
+                        c.derivations,
+                        c.distinct_derivations,
+                        c.replays,
+                        c.replay_fallbacks,
+                        c.overflows
                     )
                     .unwrap(),
                     None => write!(out, " - |").unwrap(),
@@ -346,7 +383,7 @@ fn render(cells: &[Cell]) -> String {
         if disagreements.is_empty() {
             writeln!(
                 out,
-                "Verdicts (counterexample vs. certificate) agree across every level for every configuration.\n"
+                "Verdicts (counterexample vs. certificate) agree across all columns for every configuration.\n"
             )
             .unwrap();
         } else {

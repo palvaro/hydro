@@ -17,7 +17,7 @@
 //! Knobs (all optional): `LDFI_ABLATION_ROUNDS` (RAFT rounds before the end of finite
 //! failures; default 2, the original has 3), `LDFI_ABLATION_SCHEDULES` (schedules sampled per
 //! hypothesis; default 1, the originals use 4), `LDFI_ABLATION_MAX_HYP` (hypothesis cap;
-//! default 64 for RAFT and 256 for Paxos), `LDFI_ABLATION_LEVELS` (comma-separated subset of `exec,record`),
+//! default 64 for RAFT and 256 for Paxos), `LDFI_ABLATION_LEVELS` (comma-separated subset of `exec,record,disjunctive`),
 //! `LDFI_ABLATION_CELLS` (comma-separated subset of `raft-bug,raft-ok,paxos-bug,paxos-ok`),
 //! `LDFI_ABLATION_VERBOSE` (keep the per-hypothesis log).
 
@@ -62,7 +62,12 @@ mod tests {
         list.is_none_or(|l| l.iter().any(|x| x == name))
     }
 
-    const LEVELS: [(&str, Level); 2] = [("exec", Level::Execution), ("precise", Level::Precise)];
+    /// The columns: `(name, level, disjunctive provenance)`.
+    const LEVELS: [(&str, Level, bool); 3] = [
+        ("exec", Level::Execution, false),
+        ("precise", Level::Precise, false),
+        ("disjunctive", Level::Precise, true),
+    ];
 
     // ------------------------------------------------------------------------------------
     // One measurement.
@@ -83,6 +88,8 @@ mod tests {
         dependencies: usize,
         replays: usize,
         fallbacks: usize,
+        /// Steps where the witness cap truncated (disjunctive provenance only).
+        overflows: usize,
         /// Failure-free runs redrawn because `PRE` did not hold in the sampled schedule.
         vacuous_redraws: usize,
         secs: f64,
@@ -115,7 +122,7 @@ mod tests {
         protocol: &'static str,
         goal: &str,
         config: &str,
-        level: (&'static str, Level),
+        level: (&'static str, Level, bool),
         max_hyp: usize,
         sim: &CompiledSim,
         configure: &dyn Fn() -> Ldfi,
@@ -136,6 +143,7 @@ mod tests {
             dependencies: 0,
             replays: 0,
             fallbacks: 0,
+            overflows: 0,
             vacuous_redraws: 0,
             secs: 0.0,
         };
@@ -153,6 +161,7 @@ mod tests {
             let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 let mut ldfi = configure()
                     .level(level.1)
+                    .disjunctive_provenance(level.2)
                     .exploration(Exploration::Fuzz {
                         instances: schedules,
                     })
@@ -179,6 +188,7 @@ mod tests {
                 for schedule in outcome.runs().iter().flat_map(|h| &h.schedules) {
                     cell.replays += schedule.replays;
                     cell.fallbacks += schedule.replay_fallbacks;
+                    cell.overflows += schedule.witness_overflows;
                     if schedule.goal_held {
                         for derivation in &schedule.derivations {
                             cell.derivations += 1;
@@ -197,13 +207,15 @@ mod tests {
             }
         }
         eprintln!(
-            "ablation:   {} hyp={} sched={} mean-deriv={} replays={} fallbacks={} redraws={} {:.1}s",
+            "ablation:   {} hyp={} sched={} mean-deriv={} clauses/run={} replays={} fallbacks={} overflows={} redraws={} {:.1}s",
             cell.verdict.unwrap_or("n/a"),
             cell.hypotheses,
             cell.schedules,
             mean_deriv(&cell),
+            clauses_per_run(&cell),
             cell.replays,
             cell.fallbacks,
+            cell.overflows,
             cell.vacuous_redraws,
             cell.secs
         );
@@ -218,14 +230,22 @@ mod tests {
         }
     }
 
+    fn clauses_per_run(cell: &Cell) -> String {
+        if cell.hypotheses == 0 {
+            "-".to_owned()
+        } else {
+            format!("{:.2}", cell.derivations as f64 / cell.hypotheses as f64)
+        }
+    }
+
     fn render(cells: &[Cell], header: &str) -> String {
         let mut out = String::new();
         writeln!(out, "{header}").unwrap();
         writeln!(out).unwrap();
         writeln!(
             out,
-            "Cells: `verdict / hypotheses / schedules / mean derivation size / seconds`; \
-             `n/a: ...` when the search panicked. Replays and fallbacks below."
+            "Cells: `verdict / hypotheses / schedules / mean derivation size / clauses per run / seconds`; \
+             `n/a: ...` when the search panicked. Replays, fallbacks and witness overflows below."
         )
         .unwrap();
         writeln!(out).unwrap();
@@ -234,7 +254,7 @@ mod tests {
             "| protocol | goal | config | {} |",
             LEVELS
                 .iter()
-                .map(|(n, _)| (*n).to_owned())
+                .map(|(n, _, _)| (*n).to_owned())
                 .collect::<Vec<_>>()
                 .join(" | ")
         )
@@ -249,7 +269,7 @@ mod tests {
         }
         for (protocol, goal, config) in &keys {
             write!(out, "| {protocol} | {goal} | {config} |").unwrap();
-            for (name, _) in LEVELS {
+            for (name, _, _) in LEVELS {
                 let cell = cells.iter().find(|c| {
                     c.protocol == *protocol
                         && c.goal == *goal
@@ -261,10 +281,11 @@ mod tests {
                     Some(c) => match (&c.verdict, &c.error) {
                         (Some(v), _) => write!(
                             out,
-                            " {v} / {} / {} / {} / {:.0}s |",
+                            " {v} / {} / {} / {} / {} / {:.0}s |",
                             c.hypotheses,
                             c.schedules,
                             mean_deriv(c),
+                            clauses_per_run(c),
                             c.secs
                         )
                         .unwrap(),
@@ -278,7 +299,7 @@ mod tests {
         writeln!(out).unwrap();
         writeln!(
             out,
-            "Replays / replay fallbacks / vacuous redraws of the failure-free run per cell:"
+            "Replays / replay fallbacks / witness overflows / vacuous redraws of the failure-free run per cell:"
         )
         .unwrap();
         writeln!(out).unwrap();
@@ -287,7 +308,7 @@ mod tests {
             "| protocol | goal | config | {} |",
             LEVELS
                 .iter()
-                .map(|(n, _)| (*n).to_owned())
+                .map(|(n, _, _)| (*n).to_owned())
                 .collect::<Vec<_>>()
                 .join(" | ")
         )
@@ -295,7 +316,7 @@ mod tests {
         writeln!(out, "|---|---|---|{}", "---|".repeat(LEVELS.len())).unwrap();
         for (protocol, goal, config) in &keys {
             write!(out, "| {protocol} | {goal} | {config} |").unwrap();
-            for (name, _) in LEVELS {
+            for (name, _, _) in LEVELS {
                 let cell = cells.iter().find(|c| {
                     c.protocol == *protocol
                         && c.goal == *goal
@@ -305,8 +326,8 @@ mod tests {
                 match cell {
                     Some(c) if c.verdict.is_some() => write!(
                         out,
-                        " {} / {} / {} |",
-                        c.replays, c.fallbacks, c.vacuous_redraws
+                        " {} / {} / {} / {} |",
+                        c.replays, c.fallbacks, c.overflows, c.vacuous_redraws
                     )
                     .unwrap(),
                     _ => write!(out, " - |").unwrap(),
