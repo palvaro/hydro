@@ -192,6 +192,18 @@ mod tests {
     /// order and broadcasts it to three replicas (`leader_merge_broadcast`). The EC label on
     /// the replicas' stream rests on the leader; leader and replicas are crashable.
     fn leader_merge_search(crashes: usize) -> Outcome {
+        leader_merge_search_with(crashes, Level::Precise, false, false)
+    }
+
+    /// [`leader_merge_search`] with the lineage level, disjunctive provenance and the
+    /// provenance compile as parameters (for the level ablation; see
+    /// `docs/design/ldfi-level-ablation.md`).
+    fn leader_merge_search_with(
+        crashes: usize,
+        level: Level,
+        disjunctive: bool,
+        provenance: bool,
+    ) -> Outcome {
         let mut flow = FlowBuilder::new();
         let writers = flow.cluster::<Writer>();
         let leader = flow.process::<Source>();
@@ -215,17 +227,22 @@ mod tests {
         // The provenance rewrite does not yet handle `entries_partially_ordered` on a keyed
         // stream (it destructures the element as `Tagged<_>` where the layout is
         // `(key, Tagged<_>)`), so the program is compiled without provenance; at `Precise` the
-        // search then derives every record by counterfactual replay.
-        let compiled: CompiledSim = flow
+        // search then derives every record by counterfactual replay. `provenance` opts in to
+        // the rewrite anyway (to measure whether it still rejects the program).
+        let mut sim = flow
             .sim()
             .skip_consistency_assertions()
             .with_cluster_size(&writers, 2)
-            .with_cluster_size(&replicas, MEMBERS as usize)
-            .compiled();
+            .with_cluster_size(&replicas, MEMBERS as usize);
+        if provenance {
+            sim = sim.with_provenance();
+        }
+        let compiled: CompiledSim = sim.compiled();
 
         Ldfi::new()
-            .level(Level::Precise)
+            .level(level)
             .level_from_env()
+            .disjunctive_provenance(disjunctive)
             .crashable("leader", &leader)
             .crashable_cluster("replica", &replicas, 0..MEMBERS)
             .crash_budget(crashes)
@@ -369,6 +386,81 @@ mod tests {
                 .any(|f| matches!(f, Fault::Crash { node, .. } if node == "leader")),
             "{faults:?}"
         );
+    }
+
+    /// Level ablation of `leader_merge_broadcast` (measurement, not a test: does nothing
+    /// unless `LDFI_ABLATION_OUT` is set; `docs/design/ldfi-level-ablation.md`). Runs the
+    /// `exec`, `precise` and `disjunctive` columns under exhaustive exploration at crash
+    /// budgets 1 and 2, compiled without provenance (the default) and, if
+    /// `LDFI_ABLATION_PROVENANCE` is set, with it.
+    #[test]
+    fn ec_demo_leader_merge_level_ablation() {
+        let Ok(out) = std::env::var("LDFI_ABLATION_OUT") else {
+            return;
+        };
+        let provenance = std::env::var("LDFI_ABLATION_PROVENANCE").is_ok();
+        let mut table = String::from(
+            "| crashes | provenance | column | verdict | hypotheses | schedules | mean deriv | clauses/run | replays | fallbacks | overflows | secs |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n",
+        );
+        for crashes in [1usize, 2] {
+            for (name, level, disjunctive) in [
+                ("exec", Level::Execution, false),
+                ("precise", Level::Precise, false),
+                ("disjunctive", Level::Precise, true),
+            ] {
+                let start = std::time::Instant::now();
+                let outcome = std::panic::catch_unwind(|| {
+                    leader_merge_search_with(crashes, level, disjunctive, provenance)
+                });
+                let secs = start.elapsed().as_secs_f64();
+                let row = match outcome {
+                    Err(_) => format!(
+                        "| {crashes} | {provenance} | {name} | n/a: panicked | | | | | | | | {secs:.1} |\n"
+                    ),
+                    Ok(outcome) => {
+                        eprintln!("{outcome}");
+                        let verdict = match &outcome {
+                            Outcome::Counterexample { .. } => "violated",
+                            Outcome::Certificate { .. } => "certificate",
+                            Outcome::Exhausted { .. } => "exhausted",
+                            Outcome::Budget { .. } => "budget",
+                            Outcome::Vacuous { .. } => "vacuous",
+                        };
+                        let (mut derivations, mut deps, mut replays, mut fallbacks, mut overflows) =
+                            (0usize, 0usize, 0usize, 0usize, 0usize);
+                        for schedule in outcome.runs().iter().flat_map(|h| &h.schedules) {
+                            replays += schedule.replays;
+                            fallbacks += schedule.replay_fallbacks;
+                            overflows += schedule.witness_overflows;
+                            if schedule.goal_held {
+                                for d in &schedule.derivations {
+                                    derivations += 1;
+                                    deps += d.len();
+                                }
+                            }
+                        }
+                        let hyp = outcome.runs().len();
+                        format!(
+                            "| {crashes} | {provenance} | {name} | {verdict} | {hyp} | {} | {:.2} | {:.2} | {replays} | {fallbacks} | {overflows} | {secs:.1} |\n",
+                            outcome.schedules(),
+                            if derivations == 0 {
+                                0.0
+                            } else {
+                                deps as f64 / derivations as f64
+                            },
+                            if hyp == 0 {
+                                0.0
+                            } else {
+                                derivations as f64 / hyp as f64
+                            },
+                        )
+                    }
+                };
+                eprint!("{row}");
+                table.push_str(&row);
+                std::fs::write(&out, &table).expect("LDFI_ABLATION_OUT not writable");
+            }
+        }
     }
 
     /// `multi_paxos.learned` is labelled EC with the argument that the learner-side echo makes
