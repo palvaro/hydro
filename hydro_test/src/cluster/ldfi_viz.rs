@@ -216,3 +216,147 @@ fn render_molly_report_to_disk() {
     write("report.md", &viz.markdown());
     eprintln!("wrote the Molly report to {}", out.display());
 }
+
+/// The directory a counterexample gallery entry goes to: `$MOLLY_VIZ_OUT/<name>/`, or `None`
+/// when `MOLLY_VIZ_OUT` is unset (the gallery tests are then no-ops, so `cargo test` never
+/// writes into the tree).
+pub(crate) fn gallery_dir(name: &str) -> Option<std::path::PathBuf> {
+    let out = std::env::var("MOLLY_VIZ_OUT").ok()?;
+    let dir = std::path::PathBuf::from(out).join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    Some(dir)
+}
+
+/// Writes one gallery entry's pictures for a search run at `level` under
+/// [`Ldfi::with_traces`](hydro_lang::sim::ldfi::Ldfi::with_traces) and
+/// [`Ldfi::with_provenance_graphs`](hydro_lang::sim::ldfi::Ldfi::with_provenance_graphs) into
+/// `dir`: `failing.dot` (zoom 0; the same whatever the level, written once), `witness_<level>.dot`
+/// (zoom 1: the support at that level), `provenance_<level>.dot` (zoom 2: the why-provenance
+/// graph behind that support, executions collapsed) and `report.md`. `protocol` names the
+/// entry in the provenance graph's title.
+pub(crate) fn write_gallery(
+    dir: &std::path::Path,
+    protocol: &str,
+    level: Level,
+    outcome: &Outcome,
+) {
+    let suffix = match level {
+        Level::Execution => "execution",
+        Level::Record => "record",
+    };
+    let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();
+    let Some(viz) = outcome.viz() else {
+        eprintln!("{protocol} at {level:?}: not a counterexample, nothing to draw: {outcome}");
+        return;
+    };
+    if !dir.join("failing.dot").exists() {
+        write("failing.dot", &viz.lamport_dot().unwrap());
+        write("report.md", &viz.markdown());
+    }
+    let Some(witness) = viz.witness() else {
+        eprintln!(
+            "{protocol} at {level:?}: no witness (no run in which the goal held with a derivation)"
+        );
+        return;
+    };
+    write(
+        &format!("witness_{suffix}.dot"),
+        &viz.support_lamport_dot().unwrap(),
+    );
+    let index = witness
+        .schedule
+        .derivations
+        .iter()
+        .position(|d| std::ptr::eq(d, witness.derivation))
+        .unwrap();
+    if let Some(graph) = witness.schedule.provenance.get(index) {
+        write(
+            &format!("provenance_{suffix}.dot"),
+            &provenance::dot(
+                graph,
+                &ProvOptions {
+                    collapse_execs: true,
+                    title: Some(format!(
+                        "{protocol}: why the goal held ({suffix}-level lineage)"
+                    )),
+                    ..ProvOptions::default()
+                },
+            ),
+        );
+    }
+    eprintln!(
+        "wrote the {protocol} gallery entry at {level:?} to {}",
+        dir.display()
+    );
+}
+
+/// The 2PC gallery entry: blocking 2PC, two participants, one coordinator crash.
+#[test]
+fn gallery_two_pc() {
+    let Some(dir) = gallery_dir("two_pc") else {
+        return;
+    };
+    let (compiled, h, configure) = compile(2, false, 8);
+    for level in [Level::Execution, Level::Record] {
+        let outcome = configure(1)
+            .level(level)
+            .with_traces()
+            .with_provenance_graphs()
+            .search(&compiled, async |run| body(&h, run).await);
+        write_gallery(&dir, "2PC", level, &outcome);
+    }
+}
+
+/// The ISR gallery entry: unclean leader election loses an acknowledged write (one lost
+/// replication, the leader's crash after its acknowledgement).
+#[test]
+fn gallery_isr_unclean_election() {
+    use hydro_lang::sim::ldfi::Exploration;
+
+    use super::isr_replication::Encoding;
+    use super::isr_replication::harness::{
+        DEFAULT_SHAPE, body as isr_body, compile as isr_compile,
+    };
+
+    let Some(dir) = gallery_dir("isr_unclean_election") else {
+        return;
+    };
+    let (compiled, h, configure) = isr_compile(true, Encoding::Dataflow, DEFAULT_SHAPE, 8);
+    for level in [Level::Execution, Level::Record] {
+        let outcome = configure(1)
+            .level(level)
+            .exploration(Exploration::Fuzz { instances: 8 })
+            .with_traces()
+            .with_provenance_graphs()
+            .search(&compiled, async |run| isr_body(&h, run).await);
+        write_gallery(&dir, "ISR replication", level, &outcome);
+    }
+}
+
+/// The Paxos gallery entry: a commit quorum one acknowledgement short lets a new leader
+/// choose `y` at the slot where `x` was chosen (two proposers, three acceptors, one crash
+/// allowed, four sampled schedules per hypothesis as in `paxos_ldfi`'s own test: with one,
+/// whether the sampled schedule lets `PRE` hold is luck, and the search can run past a
+/// few hundred hypotheses without a counterexample).
+#[cfg(feature = "tokio")]
+#[test]
+fn gallery_paxos_commit_quorum() {
+    use hydro_lang::sim::ldfi::Exploration;
+
+    use super::paxos_ldfi::tests::{body as paxos_body, compile as paxos_compile};
+
+    let Some(dir) = gallery_dir("paxos_commit_quorum") else {
+        return;
+    };
+    let (compiled, h, configure) = paxos_compile(true);
+    for level in [Level::Execution, Level::Record] {
+        let outcome = configure(1)
+            .level(level)
+            .exploration(Exploration::Fuzz { instances: 4 })
+            .max_hypotheses(256)
+            .with_traces()
+            .with_provenance_graphs()
+            .search(&compiled, async |run| paxos_body(&h, run).await);
+        write_gallery(&dir, "Paxos", level, &outcome);
+    }
+}
