@@ -410,8 +410,8 @@ mod grid {
         eprintln!("{}", summarize(&sink));
     }
 
-    /// Lineage ablation: Level 0 (execution), Level 1 (static slice), Level 2 (record
-    /// provenance) on the same provenance-compiled program, across a workload axis (extra
+    /// Lineage ablation: `Level::Execution` and `Level::Precise` (record provenance) on the
+    /// same provenance-compiled program, across a workload axis (extra
     /// transactions / writes as background load; the goal is checked on the first). Blind and
     /// random are run once per configuration for reference.
     fn ablate(
@@ -424,7 +424,7 @@ mod grid {
         repeats: u64,
     ) {
         let run_body = &body;
-        for (name, level) in [("exec", Level::Execution), ("record", Level::Record)] {
+        for (name, level) in [("exec", Level::Execution), ("precise", Level::Precise)] {
             let repeats = if std::env::var("LDFI_GRID_VERBOSE").is_ok() {
                 1
             } else {
@@ -532,7 +532,7 @@ mod grid {
         writeln!(
             out,
             "\n{:<12} {:<22} | {:<26} | {:<26} | {:<14} | random k2",
-            "protocol", "config", "exec", "record", "blind/1"
+            "protocol", "config", "exec", "precise", "blind/1"
         )
         .unwrap();
         for (protocol, config) in cells {
@@ -585,7 +585,7 @@ mod grid {
                 protocol,
                 config,
                 dist("exec"),
-                dist("record"),
+                dist("precise"),
                 dist("blind/1"),
                 dist("random/k2"),
             )

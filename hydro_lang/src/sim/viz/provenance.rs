@@ -9,9 +9,9 @@
 //! one graph per derivation.
 //!
 //! Every edge carries the lineage oracle that produced it ([`ProvLevel`]: the execution
-//! closure, record provenance, or the counterfactual replay that `ldfi::Level::Record` runs at
-//! an opaque record), so a graph shows where a record-level derivation went through replay or
-//! fell back to the execution-level closure: the fallback appears as an
+//! closure, record provenance, or the counterfactual replay that `ldfi::Level::Precise` runs at
+//! a record without usable provenance), so a graph shows where a precise derivation went
+//! through replay or fell back to the execution-level closure: the fallback appears as an
 //! [`ProvNodeKind::Opaque`] node under the step that could not be resolved more finely.
 //!
 //! Edges point from the thing that depends to the thing it depends on, so the goal is at the
@@ -79,11 +79,13 @@ pub enum ProvLevel {
     /// The execution closure (`Level::Execution`, and the fallback of the others): an
     /// execution depends on everything that reached it and its predecessors.
     Execution,
-    /// Record-level provenance carried by each element (`Level::Record`).
+    /// Record-level provenance carried by each element (`Level::Precise` on a program compiled
+    /// with `SimFlow::with_provenance`).
     Record,
-    /// Counterfactual replay with deliveries removed: the oracle `Level::Record` uses at a
-    /// record the provenance rewrite could not see into, and the derivation of a hand-written
-    /// specification view at the observer.
+    /// Counterfactual replay with deliveries removed: the oracle `Level::Precise` uses at a
+    /// record the provenance rewrite could not see into (and at every record of a program
+    /// compiled without provenance), and the derivation of a hand-written specification view
+    /// at the observer.
     Replay,
 }
 

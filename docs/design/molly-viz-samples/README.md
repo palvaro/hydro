@@ -7,7 +7,7 @@ Molly-style pictures (Alvaro, Rosen, Hellerstein, *Lineage-driven Fault Injectio
 | file | zoom | what it shows |
 |---|---|---|
 | `failing.{dot,png}` | 0 | The Lamport diagram of the failing run: a lane per node, time down, an arrow per message; `✗` an omitted message (red) or a send lost because the sender had crashed (gray), `☠ crashed` ending a lane (what the dead node still did is on a faint dotted continuation), the dashed `EFF` rule the end of finite failures. |
-| `witness_{execution,record}.{dot,png}` | 1 | The last run in which the goal held, with the goal's support highlighted (`★`, orange): the messages whose loss the search learned the goal depends on, at execution-level and at record-level lineage. The finer the level, the tighter the highlight. |
+| `witness_{execution,record}.{dot,png}` | 1 | The last run in which the goal held, with the goal's support highlighted (`★`, orange): the messages whose loss the search learned the goal depends on, at `Level::Execution` and at `Level::Precise` (record provenance on these provenance-compiled programs; the files carry the level's former name, `record`, and a regenerated gallery writes `*_precise.*`). The finer the level, the tighter the highlight. |
 | `provenance_{execution,record}.{dot,png}` | 2 | The why-provenance graph behind that support, from the goal down to the deliveries whose loss would break it (executions collapsed), at each level. |
 | `report.md` | 0–1 | Both Lamport diagrams as Mermaid sequence diagrams. |
 

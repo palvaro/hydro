@@ -176,7 +176,7 @@ pub(crate) mod tests {
         };
         let configure = move |crashes: usize| {
             Ldfi::new()
-                .level(Level::Record)
+                .level(Level::Precise)
                 .level_from_env()
                 .crashable_cluster("proposer", &proposers_id, 0..PROPOSERS)
                 .crashable_cluster("acceptor", &acceptors_id, 0..ACCEPTORS)
@@ -334,7 +334,7 @@ pub(crate) mod tests {
         };
         let configure = move |crashes: usize| {
             Ldfi::new()
-                .level(Level::Record)
+                .level(Level::Precise)
                 .level_from_env()
                 .crashable_cluster("proposer", &proposers_id, 0..PROPOSERS)
                 .crashable_cluster("acceptor", &acceptors_id, 0..ACCEPTORS)
@@ -516,7 +516,7 @@ pub(crate) mod tests {
         };
         let configure = move |crashes: usize| {
             Ldfi::new()
-                .level(Level::Record)
+                .level(Level::Precise)
                 .level_from_env()
                 .crashable_cluster("proposer", &proposers_id, 0..PROPOSERS)
                 .crashable_cluster("proxy_leader", &proxy_leaders_id, 0..PROXY_LEADERS)

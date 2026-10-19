@@ -620,11 +620,14 @@ level needs a crash that fires after `EFF` to find it. Unit tests:
 `ldfi::tests::crash_points_fire_only_before_eff_and_kill_every_later_send`.
 
 **Two levels.** `Level` is `Execution` (the execution-granular closure, no static slice) and
-`Record` (record provenance, counterfactual replay at `Prov::OPAQUE` records, execution closure
-as the fallback). `Record` is `Ldfi::new()`'s default; a program compiled without
-`with_provenance()` is searched at `Execution` (the search logs the substitution). `Slice` and
-`Counterfactual` are gone, with the sink-slice filtering in the closure and the standalone replay
-path; `sim/slice.rs` still computes the program's channels and hook inputs, which the closure and
+`Precise` (named `Record` when this section was measured: record provenance where the program
+carries it, counterfactual replay where it does not, execution closure as the fallback when
+replay is inconclusive). `Precise` is `Ldfi::new()`'s default. As first collapsed, a program
+compiled without `with_provenance()` was searched at `Execution` (the search logged the
+substitution); that fallback was wrong and is replaced, see
+[Precise without provenance](#precise-without-provenance). `Slice` and `Counterfactual` are
+gone, with the sink-slice filtering in the closure and the standalone replay path;
+`sim/slice.rs` still computes the program's channels and hook inputs, which the closure and
 `search_all_labels` need. `ProvLevel` tags are `Execution`, `Record`, `Replay`.
 
 ### Four levels, after the fault-model change (before the collapse)
@@ -736,9 +739,10 @@ set, since the walk no longer filters through the slice, with the same fault poi
 
 ### Recommendation record
 
-**Retained:** `Level::Execution` and `Level::Record`; `Record` is the default and the level every
-harness in the tree uses when it compiles with provenance. `Record` keeps counterfactual replay as
-its oracle for `Prov::OPAQUE` records (the closure-encoded ISR step, Raft's `raft_step`), which is
+**Retained:** `Level::Execution` and `Level::Record` (since renamed `Precise`); `Record` is the
+default and the level every harness in the tree uses when it compiles with provenance. `Record`
+keeps counterfactual replay as its oracle for `Prov::OPAQUE` records (the closure-encoded ISR
+step, Raft's `raft_step`), which is
 what it already did; it is the only place replay runs on the protocol's nodes, besides the
 derivation of a hand-written specification view at the observer. **Removed:** `Slice`, because on
 every protocol measured (2PC, ISR in both encodings, reliable broadcast, reliable delivery, Raft,
@@ -753,7 +757,118 @@ redundancy (2PC+CTP 101 → 23 at `n=4 load=8`, reliable broadcast 73 → 32, IS
 faster in wall time on every dataflow-style program, and is the level the Molly-style provenance
 graphs are drawn from; it loses only on Raft, where the opaque step forces a replay per record and
 the execution closure's single clause certifies in 19 s — a program that is closure-encoded end to
-end should pick `Execution` explicitly, and a program compiled without `with_provenance()` gets
-it automatically. **Fault model:** every failure at a time `≤ EFF`, enforced by the simulator and
+end should pick `Execution` explicitly. (A program compiled without `with_provenance()` was at
+this point downgraded to `Execution` automatically; the next section replaces that with replay
+at every record.) **Fault model:** every failure at a time `≤ EFF`, enforced by the simulator and
 mirrored by the kill relation; a harness that means to admit a crash must place `EFF` after the
 send that names it, as the ISR harness now does.
+
+## Precise without provenance
+
+The ablation above never measured the case the collapse got wrong: a program compiled
+**without** `with_provenance()`. `Ldfi::effective_level` silently searched such a program at
+`Execution`, so a program the provenance rewrite rejects (`leader_merge_broadcast` uses
+`entries_partially_ordered` on a keyed stream, which the rewrite does not handle; the harness in
+`ec_demos_ldfi.rs` pinned `Level::Execution` for it) got the coarsest lineage — 46 leaves against
+10 on Raft's opaque step, 31 hypotheses against 12 on clean ISR — although the level's own
+oracle for a record without provenance, counterfactual replay, needs no tags at all.
+
+**Change.** `Level::Record` is renamed `Level::Precise`: *record provenance where the program
+carries it, counterfactual replay where it does not; execution lineage only when replay is
+inconclusive.* A program without provenance has no `Prov` on any record, and `Precise` treats
+every record of it as opaque (`Lineage::by_replay`: `!provenance || is_opaque(prov)`), so every
+send and output is derived by replay, exactly as the removed `Level::Counterfactual` did; the
+execution closure is reached only through the replay fallbacks that already existed (no replay
+oracle, no scripted inputs at the node, the node does not reproduce the target with every
+delivery kept; the last is what `Schedule::replay_fallbacks` counts). The edges such a derivation
+records are `ProvLevel::Replay`. `effective_level` is gone; the search logs "replaying every
+record" instead of "searching at Execution". `LDFI_LEVEL=precise` is the new spelling,
+`record` is kept as an alias. The ISR, 2PC and ec-demo harnesses no longer pick `Execution`
+when they compile without provenance; `ldfi_ablation_broadcast::run_levels` no longer reports
+`Precise` as unavailable on a program whose provenance compile failed. The ablation harnesses
+take `LDFI_ABLATION_PROVENANCE=0` to compile without provenance.
+
+Same machine, same harnesses as the two-level tables above. Cell =
+`verdict / hypotheses / schedules / mean derivation size / wall secs (replays, fallbacks)`.
+
+### ISR replication, compiled without provenance
+
+`level_ablation_isr` with `LDFI_ABLATION_PROVENANCE=0`. Both encodings are the same program to
+the search here (no `Tagged` wrappers in either), so their cells coincide.
+
+| encoding | config | Execution | Precise |
+|---|---|---|---|
+| closure | unclean cr=1 fuzz 8 | bug / 14 / 112 / 16.3 / 5.4s (r1680, f0) | bug / 9 / 72 / 3.6 / 12.5s (r4392, f0) |
+| closure | unclean cr=1 fuzz 1 | bug / 14 / 14 / 16.3 / 0.8s (r210, f0) | bug / 9 / 9 / 3.6 / 1.6s (r539, f0) |
+| closure | unclean cr=0 fuzz 8 | cert / 4 / 32 / 17.8 / 1.6s (r512, f0) | cert / 1 / 8 / 4.0 / 1.8s (r632, f0) |
+| closure | clean cr=1 fuzz 8 | cert / 31 / 248 / 15.0 / 10.7s (r3232, f0) | cert / 12 / 96 / 3.6 / 13.1s (r4480, f0) |
+| closure | clean cr=1 fuzz 1 | cert / 31 / 31 / 15.0 / 1.6s (r404, f0) | cert / 12 / 12 / 3.6 / 1.8s (r560, f0) |
+| closure | clean cr=0 fuzz 8 | cert / 4 / 32 / 17.8 / 1.5s (r512, f0) | cert / 1 / 8 / 4.0 / 1.8s (r632, f0) |
+| dataflow | unclean cr=1 fuzz 8 | bug / 14 / 112 / 16.3 / 5.9s (r1680, f0) | bug / 9 / 72 / 3.6 / 14.1s (r4392, f0) |
+| dataflow | unclean cr=1 fuzz 1 | bug / 14 / 14 / 16.3 / 0.9s (r210, f0) | bug / 9 / 9 / 3.6 / 1.8s (r539, f0) |
+| dataflow | unclean cr=0 fuzz 8 | cert / 4 / 32 / 17.8 / 1.7s (r512, f0) | cert / 1 / 8 / 4.0 / 2.2s (r632, f0) |
+| dataflow | clean cr=1 fuzz 8 | cert / 31 / 248 / 15.0 / 11.7s (r3232, f0) | cert / 12 / 96 / 3.6 / 14.8s (r4480, f0) |
+| dataflow | clean cr=1 fuzz 1 | cert / 31 / 31 / 15.0 / 1.7s (r404, f0) | cert / 12 / 12 / 3.6 / 2.1s (r560, f0) |
+| dataflow | clean cr=0 fuzz 8 | cert / 4 / 32 / 17.8 / 1.8s (r512, f0) | cert / 1 / 8 / 4.0 / 2.2s (r632, f0) |
+
+`Execution` is the `Execution` column of the provenance-compiled table (14 / 31 / 4, mean 16.3 /
+15.0 / 17.8), as it must be: the execution closure reads no tags. `Precise` without provenance is
+the old L3 column (bug 9, cert 12, cr=0 cert 1; mean derivation 3.6 against the
+provenance-compiled `Record`'s 4.1–4.5), where before the change it would have been the
+`Execution` column. The `Execution` cells also show replays (1680 at fuzz 8): those are the
+observer replays of the hand-written specification view, run at every level. The dataflow
+unclean bug in 9 hypotheses rather than L3's 3 is hypothesis order under the sampled schedules
+(the failure-free derivation is L3's, `{hb[0→]#3, hb[1→]#1, hb[2→]#1, observed[0→]#2}`; the
+counterexample `{omit(repl[0→1]), crash(replica@0 after client-ack)}` is the same). Zero
+fallbacks: every ISR input (writes, timers, replication, acknowledgements, views) is batched
+through a scripted hook, so replay reproduces every node.
+
+Regression test `isr_replication::tests::ldfi_finds_the_unclean_election_bug_without_provenance`
+(dataflow, unclean, no provenance, `Precise`, fuzz 8): a counterexample with the lost replication
+and the leader's crash, `replays > 0`, `replay_fallbacks == 0`, and provenance graphs whose edges
+include `ProvLevel::Replay` and no `ProvLevel::Record`.
+
+### 2PC n=3 load=8 cr=1, compiled without provenance
+
+`level_ablation_two_pc` with `LDFI_ABLATION_PROVENANCE=0 LDFI_ABLATION_N=3 LDFI_ABLATION_LOAD=8
+LDFI_ABLATION_CRASHES=1` (fuzz 1, budget 400). Detail = `derivations / distinct / replays /
+fallbacks`.
+
+| variant | Execution | Precise | Execution detail | Precise detail |
+|---|---|---|---|---|
+| 2PC | CEX / 8 / 8 / 90.00 / 0.7s | CEX / 2 / 2 / 12.00 / 0.6s | 7 / 7 / 326 / 0 | 1 / 1 / 403 / 6 |
+| 2PC+CTP | CERT(hand) / 76 / 76 / 72.15 / 9.0s | CERT(hand) / 18 / 18 / 10.89 / 3.1s | 33 / 33 / 876 / 0 | 9 / 9 / 2079 / 27 |
+
+The CTP certificate is the provenance-compiled `Record` cell (18 hypotheses, mean 10.89) where
+the old fallback gave `Execution`'s 76 / 71.85; the counterexample is found in 2 hypotheses (the
+provenance-compiled cell drew 6 on its schedule; 2–8 across repeats above). Here the fallbacks
+are not zero: the coordinator's transactions arrive through a `sim_input` that is not under a
+hook, so a replay of the coordinator alone (fed only its hooks' recorded releases) never sends a
+`prepare`, "did not reproduce the target", and the coordinator's sends take the execution closure
+— 6 and 27 such steps. The participants' and observer's steps replay. This is the one case in
+which `Precise` without provenance is coarser than with it (the derivation of a `prepare` is its
+execution's inputs instead of the empty set), and it is the fallback doing what it is for.
+
+### A program the provenance rewrite rejects
+
+`ec_demos_ldfi::tests::ec_demo_leader_merge_breaks_under_a_leader_crash` (`leader_merge_broadcast`,
+two writers, one leader, three replicas, EC on the replicas' merged stream, one crash). Before,
+pinned to `Level::Execution`; now `Level::Precise` on the same program compiled without
+provenance (`LDFI_LEVEL=exec` for the comparison):
+
+| level | verdict | hypotheses | derivation (failure-free run) | replays / fallbacks |
+|---|---|---|---|---|
+| Execution | violated, `{crash(leader after merged[→1]:(W(0), 100))}` | 2 | 12 deps (6 `merged`, 6 observations) | — |
+| Precise | violated, same fault | 2 | 12 deps, the same set | 14 / 0 |
+
+The protocol's whole lineage is the leader's fan-out, so both levels see the same derivation and
+the search is the same; the point is that the harness no longer needs to know that its program
+cannot carry provenance, and no longer panics or downgrades.
+
+### Regression suites
+
+`cargo test -p hydro_test ldfi -- --test-threads=1`: 56 passed (one new,
+`ldfi_finds_the_unclean_election_bug_without_provenance`), 12 ignored, 733 s. `cargo test -p
+hydro_lang --features ldfi --lib sim`: 213 passed. No verdict changed anywhere; every provenance-compiled
+cell is untouched by construction (`by_replay` reduces to `is_opaque` when the program carries
+provenance).

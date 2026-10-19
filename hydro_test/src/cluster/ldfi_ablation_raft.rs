@@ -1,6 +1,6 @@
 //! Lineage-level ablation of hydrofrac on RAFT ([`super::raft_ldfi`]) and, for reference, on
 //! core Paxos ([`super::paxos_ldfi`]): the same search at each lineage level
-//! (`Level::Execution`, `Level::Record`), on the same provenance-compiled program, recording
+//! (`Level::Execution`, `Level::Precise`), on the same provenance-compiled program, recording
 //! verdict, hypotheses, schedules, mean derivation size, replays and wall time.
 //!
 //! A measurement, not a test of the protocols: it does nothing unless `LDFI_ABLATION_OUT`
@@ -62,7 +62,7 @@ mod tests {
         list.is_none_or(|l| l.iter().any(|x| x == name))
     }
 
-    const LEVELS: [(&str, Level); 2] = [("exec", Level::Execution), ("record", Level::Record)];
+    const LEVELS: [(&str, Level); 2] = [("exec", Level::Execution), ("precise", Level::Precise)];
 
     // ------------------------------------------------------------------------------------
     // One measurement.

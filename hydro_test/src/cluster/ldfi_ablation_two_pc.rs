@@ -15,6 +15,8 @@
 //!   suffixed `#<repeat>`.
 //! - `LDFI_ABLATION_N`, `LDFI_ABLATION_LOAD`, `LDFI_ABLATION_CRASHES`: comma-separated
 //!   subsets of the grid axes.
+//! - `LDFI_ABLATION_PROVENANCE=0`: compile **without** `with_provenance()`, so `Precise`
+//!   derives every record by counterfactual replay.
 //!
 //! ```text
 //! LDFI_ABLATION_OUT=target/ablation-2pc.md cargo test -p hydro_test level_ablation_two_pc -- --test-threads=1 --nocapture
@@ -33,7 +35,7 @@ use hydro_lang::sim::ldfi::{Derivation, Exploration, Grade, Ldfi, Level, Outcome
 
 use crate::cluster::two_pc_ldfi::harness as two_pc;
 
-const LEVELS: [(&str, Level); 2] = [("exec", Level::Execution), ("record", Level::Record)];
+const LEVELS: [(&str, Level); 2] = [("exec", Level::Execution), ("precise", Level::Precise)];
 
 /// One measurement: one configuration at one level.
 struct Cell {
@@ -344,7 +346,7 @@ fn render(cells: &[Cell]) -> String {
         if disagreements.is_empty() {
             writeln!(
                 out,
-                "Verdicts (counterexample vs. certificate) agree across all four levels for every configuration.\n"
+                "Verdicts (counterexample vs. certificate) agree across every level for every configuration.\n"
             )
             .unwrap();
         } else {
@@ -367,7 +369,8 @@ fn grid(ns: &[u32]) -> Vec<Cell> {
         for ctp in [false, true] {
             // One compilation (a trybuild, about a minute) per protocol size and variant; the
             // workload and the crash budget are runtime knobs.
-            let (sim, mut h, configure) = two_pc::compile_with(n, ctp, 1, true, 8);
+            let provenance = std::env::var("LDFI_ABLATION_PROVENANCE").as_deref() != Ok("0");
+            let (sim, mut h, configure) = two_pc::compile_with(n, ctp, 1, provenance, 8);
             for &txns in &loads {
                 h = two_pc::with_txns(h, txns);
                 for &cr in &crashes {

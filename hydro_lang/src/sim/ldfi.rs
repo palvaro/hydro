@@ -51,10 +51,12 @@
 //! an unhooked batch may have released into it, and, as a sound over-approximation of
 //! persisted state, on the earlier executions at its node; an async run depends on what it
 //! received and on the tick executions at its location since its previous run. This is
-//! [`Level::Execution`]. Record-level provenance ([`Level::Record`], the default)
-//! replaces these rules with the delivery ids each element was computed from, and derives
-//! the records the provenance rewrite could not see into by counterfactual replay of the
-//! node.
+//! [`Level::Execution`]. The precise level ([`Level::Precise`], the default) replaces these
+//! rules with the delivery ids each element was computed from where the program carries
+//! record provenance (`SimFlow::with_provenance`), and derives every other record (one the
+//! provenance rewrite could not see into, or any record of a program compiled without
+//! provenance) by counterfactual replay of the node, with the execution closure as the
+//! fallback where replay is inconclusive.
 //!
 //! Scripted batch hooks are optional precision, not a soundness requirement: a hooked
 //! batch's releases say exactly which tick execution consumed a message, and are what
@@ -461,8 +463,9 @@ pub struct Schedule {
     /// Whether the body declared the run vacuous ([`Run::mark_vacuous`]: the goal's
     /// pre-condition failed, so the run says nothing about the protocol).
     pub vacuous: bool,
-    /// Counterfactual replays run to derive this schedule's lineage (at opaque records under
-    /// [`Level::Record`], and at the observer for a hand-written specification view).
+    /// Counterfactual replays run to derive this schedule's lineage (at records without usable
+    /// provenance under [`Level::Precise`], and at the observer for a hand-written
+    /// specification view).
     pub replays: usize,
     /// Derivation steps where the node did not reproduce its output under replay and the
     /// closure fell back to the recorded lineage.
@@ -1617,7 +1620,7 @@ struct Lineage<'a> {
     hooks: HashMap<(usize, Option<u32>), TracedHook>,
     /// Releases that matched no send although their hook batches a channel (diagnostic).
     unmatched_releases: usize,
-    /// The replay oracle (see [`Level::Record`]).
+    /// The replay oracle (see [`Level::Precise`]).
     replayer: Option<&'a Replayer<'a>>,
     /// Counterfactual derivations of sends, by index into `sent`.
     send_memo: RefCell<HashMap<usize, Derivation>>,
@@ -2180,8 +2183,8 @@ impl<'a> Lineage<'a> {
         let anchor = self.prov_output_node(output);
         match self.level {
             Level::Execution => self.closure(output.exec, anchor),
-            Level::Record => {
-                if is_opaque(&output.prov) {
+            Level::Precise => {
+                if self.by_replay(&output.prov) {
                     self.counterfactual_output(output, anchor)
                 } else {
                     self.record_closure(&output.prov, output.exec, anchor)
@@ -2190,9 +2193,16 @@ impl<'a> Lineage<'a> {
         }
     }
 
+    /// Whether, under [`Level::Precise`], a record with provenance `prov` is derived by
+    /// counterfactual replay: it is opaque (it came out of a closure the rewrite cannot see
+    /// into), or the program carries no provenance at all, in which case every record is.
+    fn by_replay(&self, prov: &[u64]) -> bool {
+        !self.provenance || is_opaque(prov)
+    }
+
     /// The derivation of a send, at the configured level (memoized by index into `sent`):
-    /// record-level where the record carries provenance, by replay where it is opaque under
-    /// [`Level::Record`], execution-level otherwise.
+    /// record-level where the record carries provenance, by replay where it does not under
+    /// [`Level::Precise`], execution-level otherwise.
     fn send_derivation(&self, i: usize) -> Derivation {
         if let Some(derivation) = self.send_memo.borrow().get(&i) {
             if self.recording()
@@ -2207,8 +2217,8 @@ impl<'a> Lineage<'a> {
         let anchor = self.prov_message_node(i);
         let record = &self.sent[i];
         let derivation = match self.level {
-            Level::Record if is_opaque(&record.prov) => self.counterfactual_send(i, anchor),
-            Level::Record | Level::Execution => {
+            Level::Precise if self.by_replay(&record.prov) => self.counterfactual_send(i, anchor),
+            Level::Precise | Level::Execution => {
                 self.record_closure(&record.prov, record.exec, anchor)
             }
         };
@@ -2221,10 +2231,10 @@ impl<'a> Lineage<'a> {
 
     /// The recorded (non-counterfactual) derivation of a send, as the fallback when replay
     /// cannot reproduce it: record-level where the record carries real provenance,
-    /// execution-level otherwise (including opaque records).
+    /// execution-level otherwise (opaque records, or no provenance in the program).
     fn recorded_send_closure(&self, i: usize, anchor: Option<usize>) -> Derivation {
         let record = &self.sent[i];
-        if is_opaque(&record.prov) {
+        if self.by_replay(&record.prov) {
             self.closure(record.exec, anchor)
         } else {
             self.record_closure(&record.prov, record.exec, anchor)
@@ -2238,12 +2248,12 @@ impl<'a> Lineage<'a> {
             .map(|(location, member, _)| (location.root().clone(), *member))
     }
 
-    /// Counterfactual replay for an output (an opaque record under [`Level::Record`]): the
-    /// 1-minimal set of deliveries at the producing node without which it no longer produces
-    /// the output, each followed to the send that produced it.
+    /// Counterfactual replay for an output (a record without usable provenance under
+    /// [`Level::Precise`]): the 1-minimal set of deliveries at the producing node without
+    /// which it no longer produces the output, each followed to the send that produced it.
     fn counterfactual_output(&self, output: &OutputRecord, anchor: Option<usize>) -> Derivation {
         let fallback = |anchor: Option<usize>| {
-            if is_opaque(&output.prov) {
+            if self.by_replay(&output.prov) {
                 self.closure(output.exec, anchor)
             } else {
                 self.record_closure(&output.prov, output.exec, anchor)
@@ -2759,7 +2769,7 @@ impl<'a> Lineage<'a> {
     /// [`Self::derive`].
     fn derive_final(&self, output: &OutputRecord) -> Derivation {
         let by_replay = match self.level {
-            Level::Record => is_opaque(&output.prov),
+            Level::Precise => self.by_replay(&output.prov),
             Level::Execution => false,
         };
         if !by_replay {
@@ -3030,7 +3040,7 @@ fn member_label(cluster: &str, member: u32) -> String {
     format!("{cluster}@{member}")
 }
 
-/// The counterfactual replay oracle (see [`Level::Record`]): runs one node alone, every
+/// The counterfactual replay oracle (see [`Level::Precise`]): runs one node alone, every
 /// scripted batch hook under a replay policy, in a quiet deterministic instance, and returns
 /// what the instance recorded.
 struct Replayer<'a> {
@@ -3091,30 +3101,35 @@ impl Search {
 /// Which lineage oracle the backward closure follows.
 ///
 /// Both levels run the same search on the same program; only the derivation of a goal
-/// differs. `Record` is the default and the recommended level wherever the program compiles
-/// with `SimFlow::with_provenance`; `Execution` is the fallback for a program that does not
-/// (the search selects it by itself then). An earlier version had two more levels, a
-/// static-slice narrowing of the execution closure and counterfactual replay as a level of its
-/// own; measured on 2PC, ISR, reliable broadcast, Raft and Paxos
+/// differs. `Precise` is the default and the recommended level for any program; `Execution`
+/// is the coarse, replay-free closure, for a program whose records are all opaque and whose
+/// nodes are expensive to replay. An earlier version had two more levels, a static-slice
+/// narrowing of the execution closure and counterfactual replay as a level of its own;
+/// measured on 2PC, ISR, reliable broadcast, Raft and Paxos
 /// (`docs/design/ldfi-level-ablation.md`), the slice never separated a record from the inputs
-/// of its execution, and standalone replay produced the derivations of `Record` wherever
-/// `Record` applied, at two to ten times the cost. Replay survives as `Record`'s oracle for
-/// opaque records.
+/// of its execution, and standalone replay produced the derivations of record provenance
+/// wherever record provenance applied, at two to ten times the cost. Replay survives as
+/// `Precise`'s oracle wherever the program carries no provenance for a record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {
     /// Every output of an execution depends on every input of it and of every earlier
     /// execution at its node (persisted state): the execution-granular lineage log read
     /// directly. Sound for any program, including one compiled without provenance.
     Execution,
-    /// Record-level provenance (requires `SimFlow::with_provenance`): each element carries
-    /// the delivery ids it was computed from. Where an element came out of a closure the
-    /// rewrite cannot see into (`Prov::OPAQUE`), the step is derived by **counterfactual
-    /// replay** of the node alone: its recorded deliveries are removed one at a time, and a
-    /// delivery is in the derivation iff the node stops producing the record without it (a
-    /// 1-minimal sufficient set, latest deliveries removed first). Where replay does not
-    /// reproduce the record with every delivery kept, or there is no replay oracle, the step
-    /// falls back to the execution closure.
-    Record,
+    /// Record provenance where the program carries it, counterfactual replay where it does
+    /// not; falls back to execution lineage only when replay is inconclusive.
+    ///
+    /// With `SimFlow::with_provenance`, each element carries the delivery ids it was computed
+    /// from, and the derivation follows them. Where an element came out of a closure the
+    /// rewrite cannot see into (`Prov::OPAQUE`), or the program was compiled without
+    /// provenance at all (every record is then opaque), the step is derived by
+    /// **counterfactual replay** of the node alone: its recorded deliveries are removed one at
+    /// a time, and a delivery is in the derivation iff the node stops producing the record
+    /// without it (a 1-minimal sufficient set, latest deliveries removed first). Where replay
+    /// does not reproduce the record with every delivery kept (counted in
+    /// [`Schedule::replay_fallbacks`]), there is no replay oracle, or the node has no scripted
+    /// inputs to replay against, the step falls back to the execution closure.
+    Precise,
 }
 
 /// An LDFI search configuration: the crashable nodes, the goal, and the budgets. The
@@ -3150,7 +3165,7 @@ impl Ldfi {
             },
             strategy: Strategy::Lineage,
             exploration: Exploration::Exhaustive,
-            level: Level::Record,
+            level: Level::Precise,
             crash_budget: 0,
             max_hypotheses: 256,
             log: true,
@@ -3186,32 +3201,22 @@ impl Ldfi {
         self
     }
 
-    /// Selects which lineage the backward closure follows (default [`Level::Record`]). A
-    /// program compiled without `SimFlow::with_provenance` is searched at
-    /// [`Level::Execution`] whatever is selected here.
+    /// Selects which lineage the backward closure follows (default [`Level::Precise`]).
     #[must_use]
     pub fn level(mut self, level: Level) -> Self {
         self.level = level;
         self
     }
 
-    /// Reads the lineage level from `LDFI_LEVEL` (`exec` or `record`) if set; for experiments
-    /// that compare levels without recompiling the test.
+    /// Reads the lineage level from `LDFI_LEVEL` (`exec` or `precise`; `record` is accepted
+    /// as the former name of `precise`) if set; for experiments that compare levels without
+    /// recompiling the test.
     #[must_use]
     pub fn level_from_env(self) -> Self {
         match std::env::var("LDFI_LEVEL").as_deref() {
             Ok("exec" | "execution") => self.level(Level::Execution),
-            Ok("record") => self.level(Level::Record),
+            Ok("precise" | "record") => self.level(Level::Precise),
             _ => self,
-        }
-    }
-
-    /// The level the search runs at on `sim`: the configured one, or [`Level::Execution`] when
-    /// the program was compiled without record-level provenance.
-    fn effective_level(&self, sim: &CompiledSim) -> Level {
-        match self.level {
-            Level::Record if !sim.provenance => Level::Execution,
-            level => level,
         }
     }
 
@@ -3457,15 +3462,19 @@ impl Ldfi {
         let mut vacuous_sets: Vec<FaultSet> = vec![];
         let mut tried: BTreeSet<FaultSet> = BTreeSet::new();
         let mut faults = FaultSet::new();
-        let level = self.effective_level(sim);
+        let level = self.level;
         let tag = match (self.strategy, level) {
             (Strategy::Blind, _) => "blind",
             (Strategy::Lineage, Level::Execution) => "ldfi/exec",
-            (Strategy::Lineage, Level::Record) => "ldfi",
+            (Strategy::Lineage, Level::Precise) => "ldfi",
         };
-        if self.log && level != self.level {
+        if self.log
+            && self.strategy == Strategy::Lineage
+            && level == Level::Precise
+            && !sim.provenance
+        {
             eprintln!(
-                "{tag}: the program was compiled without record-level provenance (`SimFlow::with_provenance`); searching at {level:?}"
+                "{tag}: the program was compiled without record-level provenance (`SimFlow::with_provenance`); replaying every record (execution closure where replay is inconclusive)"
             );
         }
         let mut slices: Option<Rc<Slices>> = None;
@@ -4030,7 +4039,7 @@ impl Ldfi {
 
         let search = &self.search;
         self.assert_label_chosen();
-        let level = self.effective_level(sim);
+        let level = self.level;
         let goal_port = match &search.goal {
             Some(Goal::Any { port } | Goal::AllMembers { port, .. }) => Some(*port),
             Some(Goal::Witnessed | Goal::Spec(_)) | None => None,
