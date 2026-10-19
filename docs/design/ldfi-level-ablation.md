@@ -12,7 +12,9 @@ hypothesis budget) on the *same* provenance-compiled program; only the backward 
 - Date: 2026-10-19.
 - Commit: `ldfi-hydrofrac` at `7d58ad20e0`, measured on the `molly viz` sandbox base
   `38471d0dd1` (which adds `sim::viz` on top: trace and provenance-graph recording in
-  `ldfi.rs`, off by default here, and no change to the closure or the search).
+  `ldfi.rs`, off by default here, and no change to the closure or the search). The ISR table
+  and the "after the fix" notes were re-measured after the soundness fix described in the last
+  section (exact dependency ordinals; sequenced observations traced), same day, same machine.
 - Machine: 8 × Intel Xeon Platinum 8375C @ 2.90 GHz, 15 GiB, debug build (`cargo test`),
   rustc 1.96.0. Other measurement runs were sharing the machine, so wall times are indicative
   (±30 %), not benchmarks.
@@ -243,70 +245,48 @@ the notes below rather than the cells.
 
 | encoding | config | L0 exec | L1 slice | L2 record | L3 replay |
 |---|---|---|---|---|---|
-| closure | unclean cr=1 fuzz 8 | **cert** / 14 / 112 / 7.4 / 6.9s | **cert** / 14 / 112 / 7.4 / 6.5s | bug / 9 / 72 / 3.8 / 36.3s | **cert** / 6 / 48 / 1.7 / 9.7s |
-| closure | unclean cr=1 fuzz 1 | **cert** / 14 / 14 / 7.4 / 0.5s | **cert** / 14 / 14 / 7.4 / 0.5s | bug / 9 / 9 / 3.9 / 2.9s | **cert** / 6 / 6 / 1.7 / 0.7s |
-| closure | unclean cr=0 fuzz 8 | cert / 4 / 32 / 8.8 / 1.9s | cert / 4 / 32 / 8.8 / 1.2s | cert / 1 / 8 / 4.0 / 4.2s | cert / 1 / 8 / 1.0 / 2.3s |
-| closure | clean cr=1 fuzz 8 | cert / 14 / 112 / 7.4 / 3.2s | cert / 14 / 112 / 7.4 / 3.6s | cert / 12 / 96 / 4.0 / 23.7s | cert / 6 / 48 / 1.7 / 5.8s |
-| closure | clean cr=1 fuzz 1 | cert / 14 / 14 / 7.4 / 0.5s | cert / 14 / 14 / 7.4 / 0.5s | cert / 12 / 12 / 3.6 / 2.9s | cert / 6 / 6 / 1.7 / 0.7s |
-| closure | clean cr=0 fuzz 8 | cert / 4 / 32 / 8.8 / 1.1s | cert / 4 / 32 / 8.8 / 1.1s | cert / 1 / 8 / 4.0 / 3.4s | cert / 1 / 8 / 1.0 / 1.8s |
-| dataflow | unclean cr=1 fuzz 8 | **cert** / 14 / 112 / 7.4 / 3.8s | **cert** / 14 / 112 / 7.4 / 3.6s | bug / 9 / 72 / 4.1 / 2.7s | **cert** / 6 / 48 / 1.7 / 3.0s |
-| dataflow | unclean cr=1 fuzz 1 | **cert** / 14 / 14 / 7.4 / 0.6s | **cert** / 14 / 14 / 7.4 / 0.6s | bug / 9 / 9 / 4.1 / 0.4s | **cert** / 6 / 6 / 1.7 / 0.4s |
-| dataflow | unclean cr=0 fuzz 8 | cert / 4 / 32 / 8.8 / 1.3s | cert / 4 / 32 / 8.8 / 1.3s | cert / 1 / 8 / 4.0 / 0.4s | cert / 1 / 8 / 1.0 / 0.9s |
-| dataflow | clean cr=1 fuzz 8 | cert / 14 / 112 / 7.4 / 3.5s | cert / 14 / 112 / 7.4 / 3.5s | cert / 13 / 104 / 4.3 / 3.4s | cert / 6 / 48 / 1.7 / 3.0s |
-| dataflow | clean cr=1 fuzz 1 | cert / 14 / 14 / 7.4 / 0.6s | cert / 14 / 14 / 7.4 / 0.6s | cert / 13 / 13 / 4.3 / 0.5s | cert / 6 / 6 / 1.7 / 0.4s |
-| dataflow | clean cr=0 fuzz 8 | cert / 4 / 32 / 8.8 / 1.2s | cert / 4 / 32 / 8.8 / 1.2s | cert / 1 / 8 / 4.0 / 0.4s | cert / 1 / 8 / 1.0 / 0.9s |
+| closure | unclean cr=1 fuzz 8 | bug / 14 / 112 / 16.3 / 5.7s (r1680) | bug / 14 / 112 / 16.3 / 5.7s (r1680) | bug / 9 / 72 / 4.2 / 23.2s (r7589) | bug / 9 / 72 / 3.6 / 19.7s (r6484) |
+| closure | unclean cr=1 fuzz 1 | bug / 14 / 14 / 16.3 / 0.8s (r210) | bug / 14 / 14 / 16.3 / 0.8s (r210) | bug / 9 / 9 / 4.1 / 2.9s (r940) | bug / 9 / 9 / 3.6 / 2.6s (r828) |
+| closure | unclean cr=0 fuzz 8 | cert / 4 / 32 / 17.8 / 1.7s (r512) | cert / 4 / 32 / 17.8 / 1.7s (r512) | cert / 1 / 8 / 4.0 / 3.5s (r1104) | cert / 1 / 8 / 4.0 / 2.9s (r936) |
+| closure | clean cr=1 fuzz 8 | cert / 31 / 248 / 15.0 / 11.3s (r3232) | cert / 31 / 248 / 15.0 / 11.3s (r3232) | cert / 12 / 96 / 4.5 / 24.0s (r7711) | cert / 12 / 96 / 3.6 / 20.9s (r6766) |
+| closure | clean cr=1 fuzz 1 | cert / 31 / 31 / 15.0 / 1.8s (r404) | cert / 31 / 31 / 15.0 / 1.7s (r404) | cert / 12 / 12 / 4.2 / 3.0s (r951) | cert / 12 / 12 / 3.6 / 2.7s (r856) |
+| closure | clean cr=0 fuzz 8 | cert / 4 / 32 / 17.8 / 1.7s (r512) | cert / 4 / 32 / 17.8 / 1.7s (r512) | cert / 1 / 8 / 4.0 / 3.5s (r1104) | cert / 1 / 8 / 4.0 / 2.9s (r936) |
+| dataflow | unclean cr=1 fuzz 8 | bug / 14 / 112 / 16.3 / 6.3s (r1680) | bug / 14 / 112 / 16.3 / 6.3s (r1680) | bug / 12 / 96 / 10.6 / 5.4s (r1440) | bug / 3 / 24 / 4.0 / 6.4s (r1796) |
+| dataflow | unclean cr=1 fuzz 1 | bug / 14 / 14 / 16.3 / 0.9s (r210) | bug / 14 / 14 / 16.3 / 0.9s (r210) | bug / 12 / 12 / 10.6 / 0.8s (r180) | bug / 3 / 3 / 4.0 / 0.8s (r232) |
+| dataflow | unclean cr=0 fuzz 8 | cert / 4 / 32 / 17.8 / 1.8s (r512) | cert / 4 / 32 / 17.8 / 1.8s (r512) | cert / 1 / 8 / 13.0 / 0.5s (r144) | cert / 1 / 8 / 4.0 / 2.2s (r632) |
+| dataflow | clean cr=1 fuzz 8 | cert / 31 / 248 / 15.0 / 12.4s (r3232) | cert / 31 / 248 / 15.0 / 12.5s (r3232) | cert / 18 / 144 / 10.8 / 7.0s (r1776) | cert / 12 / 96 / 3.6 / 15.8s (r4480) |
+| dataflow | clean cr=1 fuzz 1 | cert / 31 / 31 / 15.0 / 1.9s (r404) | cert / 31 / 31 / 15.0 / 1.9s (r404) | cert / 18 / 18 / 10.8 / 1.0s (r222) | cert / 12 / 12 / 3.6 / 2.0s (r560) |
+| dataflow | clean cr=0 fuzz 8 | cert / 4 / 32 / 17.8 / 1.8s (r512) | cert / 4 / 32 / 17.8 / 1.8s (r512) | cert / 1 / 8 / 13.0 / 0.5s (r144) | cert / 1 / 8 / 4.0 / 2.2s (r632) |
 
-Bold = the verdict is wrong (a certificate on the buggy variant). Replay fallbacks were 0 in
-every cell. Replays per cell (fuzz 8, cr=1): closure L0/L1 640, L2 ≈7100–7200, L3 ≈1700;
-dataflow L0/L1 640, L2 512–624, L3 680. Replays occur at L0/L1 too because the hand-written
-specification's final-view derivation (`spec_view`) is always taken by counterfactual replay and
-unioned with the recorded one, independently of the level.
+Replay fallbacks were 0 in every cell; `(rN)` = counterfactual replays. Replays occur at L0/L1
+too because the hand-written specification's final-view derivation (`spec_view`) is always
+taken by counterfactual replay and unioned with the recorded one, independently of the level.
+This table is **after the fix** described in [Soundness bug: two lineage gaps](#soundness-bug-two-lineage-gaps-not-vacuous-hypotheses)
+below (same harness, same machine, 2026-10-19); the pre-fix table, with its false certificates,
+is kept there for the record.
 
 ### Observations
 
-- **VERDICT DISAGREEMENT ACROSS LEVELS — false certificates on the buggy variant.** On *unclean*
-  (the known unclean-election bug: one lost replication plus the leader's crash after it
-  acknowledges) only **L2 finds the bug**; **L0, L1 and L3 certify it**, on both encodings, under
-  both fuzz 1 and fuzz 8 (so this is not sampling noise: same hypothesis sequence every time).
-  Confirmed independently of this harness: the repository's own
-  `ldfi_finds_the_unclean_election_bug{,_dataflow}` tests fail with `LDFI_NO_PROVENANCE=1`
-  (L1: certificate in 14 hypotheses) and with `LDFI_LEVEL=replay` (L3: certificate in 6).
-  Diagnosis from the hypothesis traces (`level_ablation_isr_diagnose`, dataflow, fuzz 1):
-  - The counterexample is `{omit(repl[0→1]), crash(replica@0 after client-ack)}`. At L2 the
-    failure-free derivation is small (`hb[0→]#3`, `hb[1→]`, `hb[2→]`, `observed[0→]#2`), so the
-    only crash that kills it on replica 0 is the one after its send #2, the client ack; the
-    second hypothesis is already that crash, the third adds the omission, done in 9.
-  - At L0/L1 the failure-free derivation names 11 deliveries including `repl[0→1]#0`,
-    `repl[0→2]#1`, `client-ack#2`, `hb#3`. The hitting-set search prefers the crashes after
-    `repl[0→1]` / `repl[0→2]` (each kills more of the clause) and never tries the weaker crash
-    after the ack. Every hypothesis combining the omission with one of those earlier crashes is
-    **vacuous** (the leader dies before acknowledging, so `PRE` fails and `goal_held = !pre ||
-    post` is true); vacuous runs add no clause, the hitting sets exhaust, and the search
-    certifies in 14. The coarser lineage lets a *stronger* crash shadow the weaker crash the bug
-    needs, and vacuity is read as coverage.
-  - At L3 the failure-free derivation is a single dependency, `observed[0→]#2` (the leader's own
-    log output). Replay judges the leader's heartbeat `hb[0→]#3` unnecessary because removing it
-    makes ZK's final view leaderless, which fails `PRE` and so leaves the goal *held*. The
-    spec view is not monotone in the facts (a last-value view; cf. `history-hydrofrac-negation.md`)
-    and the 1-minimal sufficient set under a `!pre || post` goal drops exactly the delivery whose
-    loss the bug exploits. Omission is never considered (`observed` is not lossy): 6 hypotheses,
-    all crashes, certificate.
-- **L2 vs L1 hypothesis reduction.** 14 → 9 (bug, both encodings), 14 → 12 (closure clean),
-  14 → 13 (dataflow clean), 4 → 1 (cr=0). Mean derivation size roughly halves (7.4 → 3.6–4.3;
-  8.8 → 4.0 at cr=0). L0 and L1 are identical in every cell: the static slice buys nothing over
-  the execution closure on this program, in either encoding.
-- **L3 vs L2.** 9/12–13 → 6 hypotheses with derivations of 1.7 deliveries on average, but see
-  above: on *unclean* the reduction is bought with a false certificate. On *clean* the certificates
-  agree. On the closure encoding L2 is the slowest level (≈7000 replays per search, 24–36 s at
-  fuzz 8) because the opaque step is replayed per record (`Prov::OPAQUE`); L3 replays ≈1700 and is
-  3–4× faster than L2 there. On the dataflow encoding all levels are within a few seconds.
+- **Verdicts agree across all four levels in every cell**: *unclean* is a counterexample at
+  every level (always `{omit(repl[0→1]), crash(replica@0 after client-ack)}`), *clean* a
+  certificate. Before the fix L0, L1 and L3 certified the buggy variant (see below).
+- **L2 vs L1 hypothesis reduction.** 14 → 9 (bug, closure), 14 → 12 (bug, dataflow), 31 → 12
+  (clean, closure), 31 → 18 (clean, dataflow), 4 → 1 (cr=0). Mean derivation size at L0/L1 is
+  now 15–18 dependencies (the exact ordinals keep one dependency per heartbeat round instead of
+  collapsing the post-`EFF` heartbeats of a replica into one), 4–11 at L2. L0 and L1 are
+  identical in every cell: the static slice buys nothing over the execution closure on this
+  program, in either encoding.
+- **L3 vs L2.** Dataflow: 12 → 3 hypotheses on the bug (the failure-free derivation is
+  `{hb[0→]#3, hb[1→], hb[2→], observed[0→]#2}`, so `crash(replica@0 after client-ack)` is
+  hypothesis #2 and the omission is added at #3), 18 → 12 on the certificate. Closure: L3 equals
+  L2 in hypotheses (9 / 12) with slightly smaller derivations (3.6 vs 4.2–4.5); the opaque step
+  is replayed per record at L2 (`Prov::OPAQUE`), so L2 and L3 do similar work there (≈7000 vs
+  ≈6500 replays at fuzz 8). L2 on the dataflow encoding is the cheapest level (0.5–7 s).
 - **The 14/27 → 6/14 claim** (closure, L2 → L3, bug/certificate hypotheses) does **not**
-  reproduce. Measured today, closure: L2 **9**/12, L3 6/6 — but the L3 "6" on the buggy variant is
-  a certificate, not a counterexample, and the clean-variant certificate is 6 rather than 14. The
-  dataflow L2 figure of 10/18 is now 9/13. The harness has changed since those numbers were
-  taken (hand-written `witness_final` goal → `Spec` with `observe_sequenced(views).max()`; the
-  client acknowledgements and views are now fault points), which is the likely cause of both the
-  count changes and the L3 verdict flip; it was not re-measured on the old harness.
+  reproduce: closure L2 9/12, L3 9/12. The harness has changed since those numbers were taken
+  (hand-written `witness_final` goal → `Spec` with `observe_sequenced(views).max()`; the client
+  acknowledgements and views are now fault points), and the L3 "6" of the earlier measurement was
+  the false certificate.
 - cr=0 is a degenerate row: with no crashes the only faults are first-round omissions, and L2/L3
   certify from the failure-free run alone (1 hypothesis) because no omission kills the recorded
   derivation; L0/L1 need 4.
@@ -475,3 +455,142 @@ one schedule per hypothesis move by ±50% between passes; the table above is a s
 - **Verdict agreement:** every level that reached a verdict agrees (bug → `violated` at all
   four; correct → `certificate` or `budget`). No soundness disagreement.
 - **Operators blocking L2: none**; core Paxos compiles under the rewrite.
+
+## Soundness bug: two lineage gaps, not vacuous hypotheses
+
+The first measurement of the ISR grid found L0, L1 and L3 **certifying the unclean-election
+bug** that L2 finds (`ldfi_finds_the_unclean_election_bug{,_dataflow}` failed with
+`LDFI_NO_PROVENANCE=1` and with `LDFI_LEVEL=replay`). The table as measured then, for the record
+(bold = wrong verdict):
+
+| encoding | config | L0 exec | L1 slice | L2 record | L3 replay |
+|---|---|---|---|---|---|
+| closure | unclean cr=1 fuzz 8 | **cert** / 14 / 112 / 7.4 / 6.9s | **cert** / 14 / 112 / 7.4 / 6.5s | bug / 9 / 72 / 3.8 / 36.3s | **cert** / 6 / 48 / 1.7 / 9.7s |
+| closure | unclean cr=1 fuzz 1 | **cert** / 14 / 14 / 7.4 / 0.5s | **cert** / 14 / 14 / 7.4 / 0.5s | bug / 9 / 9 / 3.9 / 2.9s | **cert** / 6 / 6 / 1.7 / 0.7s |
+| closure | unclean cr=0 fuzz 8 | cert / 4 / 32 / 8.8 / 1.9s | cert / 4 / 32 / 8.8 / 1.2s | cert / 1 / 8 / 4.0 / 4.2s | cert / 1 / 8 / 1.0 / 2.3s |
+| closure | clean cr=1 fuzz 8 | cert / 14 / 112 / 7.4 / 3.2s | cert / 14 / 112 / 7.4 / 3.6s | cert / 12 / 96 / 4.0 / 23.7s | cert / 6 / 48 / 1.7 / 5.8s |
+| closure | clean cr=1 fuzz 1 | cert / 14 / 14 / 7.4 / 0.5s | cert / 14 / 14 / 7.4 / 0.5s | cert / 12 / 12 / 3.6 / 2.9s | cert / 6 / 6 / 1.7 / 0.7s |
+| closure | clean cr=0 fuzz 8 | cert / 4 / 32 / 8.8 / 1.1s | cert / 4 / 32 / 8.8 / 1.1s | cert / 1 / 8 / 4.0 / 3.4s | cert / 1 / 8 / 1.0 / 1.8s |
+| dataflow | unclean cr=1 fuzz 8 | **cert** / 14 / 112 / 7.4 / 3.8s | **cert** / 14 / 112 / 7.4 / 3.6s | bug / 9 / 72 / 4.1 / 2.7s | **cert** / 6 / 48 / 1.7 / 3.0s |
+| dataflow | unclean cr=1 fuzz 1 | **cert** / 14 / 14 / 7.4 / 0.6s | **cert** / 14 / 14 / 7.4 / 0.6s | bug / 9 / 9 / 4.1 / 0.4s | **cert** / 6 / 6 / 1.7 / 0.4s |
+| dataflow | unclean cr=0 fuzz 8 | cert / 4 / 32 / 8.8 / 1.3s | cert / 4 / 32 / 8.8 / 1.3s | cert / 1 / 8 / 4.0 / 0.4s | cert / 1 / 8 / 1.0 / 0.9s |
+| dataflow | clean cr=1 fuzz 8 | cert / 14 / 112 / 7.4 / 3.5s | cert / 14 / 112 / 7.4 / 3.5s | cert / 13 / 104 / 4.3 / 3.4s | cert / 6 / 48 / 1.7 / 3.0s |
+| dataflow | clean cr=1 fuzz 1 | cert / 14 / 14 / 7.4 / 0.6s | cert / 14 / 14 / 7.4 / 0.6s | cert / 13 / 13 / 4.3 / 0.5s | cert / 6 / 6 / 1.7 / 0.4s |
+| dataflow | clean cr=0 fuzz 8 | cert / 4 / 32 / 8.8 / 1.2s | cert / 4 / 32 / 8.8 / 1.2s | cert / 1 / 8 / 4.0 / 0.4s | cert / 1 / 8 / 1.0 / 0.9s |
+
+The diagnosis written down at the time — vacuous hypotheses (`PRE` false) contribute no clause
+and are read as coverage, so the hitting sets exhaust before the real counterexample is tried —
+does **not** survive the solver's own trace (`LDFI_SOLVER_DEBUG=1`). Vacuous hypotheses do add no
+clause and do prune their supersets (`ldfi.rs`, `vacuous_sets` in `Ldfi::run` and the "no
+superset of a vacuous hypothesis" constraint in `solve_hypothesis`), but the counterexample
+`X = {omit(repl[0→1]), crash(replica@0 after client-ack)}` is a superset of none of the vacuous
+sets the search saw (`{crash(r0 before any send)}`, `{omit(repl[0→1]), crash(r0 after repl[0→2])}`,
+`{omit(repl[0→1]), crash(r0 after repl[0→1])}`). `X` was never proposed because **`X` was not a
+hitting set of the clauses the search had**: some clause claimed `POST` rested only on deliveries
+`X` does not kill, while the simulator shows `X` kills `POST`. Two unrelated gaps produced such
+clauses, one per failing level pair.
+
+### Root cause 1 (L0, L1): dependency ordinals clamped at `EFF`
+
+A clause's dependency carries `(sender, ordinal)` and a crash point `crash(n after m)` kills it
+iff `m`'s position in the clause's run is below the ordinal (`Dependency::killed_by`).
+`Lineage::crash_ordinal` *clamped* the ordinal to the sender's number of pre-`EFF` sends, on the
+documented assumption that crash points lie before the end of finite failures, so that every
+post-`EFF` send was "killed by exactly the crashes that kill the sender's last pre-`EFF` send".
+The simulator does not share the assumption: a crash point is named by its message and
+`FaultState::filter` (`sim/runtime/lineage.rs`) kills the node right after that message is sent
+in *every* run, `EFF` or not (the ISR harness's own doc says "crashes anywhere"). In the run of
+the second hypothesis, `{omit(repl[0→1])}`, replica 0's sends were
+
+```
+#0 repl[0→1]  #1 repl[0→2]  | EFF |  #2 shrink  #3 hb  #4 client-ack  #5 hb  #6 hb  #7 hb
+```
+
+and every replica-0 dependency of that run's clause carried the clamped ordinal `#2`. For
+`crash(replica@0 after client-ack)` the relation computed `position(client-ack) = 4 < 2`, i.e.
+the crash kills nothing of the clause — while it kills `#5–#7`, the heartbeats that keep 0 the
+leader in ZK's final view, which is exactly how `POST` falls. The omission world's clause could
+never be hit by the crash the bug needs, so `X` was never a hitting set; the ILP ran out of
+hitting sets and certified (14 hypotheses). L2 found the bug only by hypothesis order: its
+smaller failure-free clause made `{crash(replica@0 after client-ack)}` hypothesis #2, *before*
+any omission-world clause existed, and `X` then hit that crash world's clause through the
+omission.
+
+**Fix.** The ordinal is exact (`crash_ordinal` returns the sender's real send position) and the
+clamp moves to where crash points are *proposed*: `Dependency::candidate_faults` takes the
+clause's `pre_eff_sends` and mints, for a post-`EFF` delivery, the crash right after the
+sender's last pre-`EFF` send (`Clause` carries `pre_eff_sends`; the preserve points of
+requirements index the same way). The universe is unchanged — only pre-`EFF`-named crash points
+are ever proposed — and `killed_by` now agrees with the simulator wherever a proposed point
+fires. Clauses grow (one dependency per heartbeat round instead of one collapsed dependency), so
+mean derivation sizes change at every level. Module docs, `Schedule::pre_eff_sends` and
+`Dependency` now state the actual semantics: crash points are *named* before `EFF` in the run
+that minted them and fire wherever the message is sent. Unit test
+`post_eff_crash_point_kills_later_sends_but_is_not_proposed`.
+
+The alternative — enforcing the stated model in the simulator (`FaultState::filter` ignores a
+crash point once `EFF` has passed, as `history-hydrofrac-development.md` §5.4 describes the
+intent: "a crash is permanent, as in Molly, but it happens inside the finite-failures window",
+introduced after a Raft heal-phase crash produced a false violation) — would also make the
+levels agree, but in the other direction: tried as a one-line experiment, the unclean variant
+then **certifies at every level** (31 hypotheses at L0, the same count as the clean variant),
+because the leader's acknowledgement is post-`EFF` in the omission world and the crash the bug
+needs never fires. The ISR unit tests, the harness doc ("crashes anywhere") and the negation
+history all treat `{omit(repl[0→1]), crash(replica@0 after client-ack)}` as the expected
+counterexample, so the search was made to agree with the simulator rather than the simulator
+with the search. The two readings of "finite failures" for crashes should be reconciled
+explicitly at some point: either the simulator confines crash points to the window and the ISR
+harness moves `EFF` past the first round (`body_eff_after_first_round`), or the docs adopt
+"named before `EFF`, fires wherever" as the model (the state after this fix).
+
+### Root cause 2 (L3): sequenced observations were never traced to their sends
+
+`Spec::observe_sequenced` applies `.enumerate()` *before* the observer's hooked batch, so the
+hook's release payload is `bincode((usize, View))` while the send's wire bytes are
+`bincode(View)`. `payload_matches` only stripped the cluster `MemberId` prefix, so every view
+release was unmatched — the "32 untraced deliveries" (4 views × 8 schedules) printed on every ISR
+log line, at every level. L0–L2 are unaffected (the execution closure follows receives by
+delivery id, record provenance follows prov ids), but `Lineage::counterfactual` takes as
+removable candidates only releases matched to a send (`matters`), so at L3 the views were fed to
+every observer replay as fixed facts and their lineage (ZK ← heartbeats) was never followed:
+failure-free derivation `{observed[0→]#2}`, requirement `{client-ack#2}`, a universe of two crash
+points, no omission ever considered, certificate in 6. (The observer's `produced` predicate was
+already "`POST`'s last value is unchanged", not `!pre || post`; the vacuity reading of this level
+was also wrong.)
+
+**Fix.** `payload_matches` also accepts a serialized `usize` prefix. The L3 failure-free
+derivation becomes `{hb[0→]#3, hb[1→]#1, hb[2→]#1, observed[0→]#2}`, the same shape as L2's, and
+the search goes hypothesis #2 `{crash(replica@0 after client-ack)}`, #3 `X`, violated.
+
+### Vacuous hypotheses
+
+Left as they were: a hypothesis whose every schedule has `PRE` false contributes no clause and
+excludes its supersets. Nothing in this investigation shows it changing a verdict; the superset
+pruning remains the documented heuristic ("vacuity is not monotone in the fault set",
+`history-hydrofrac-development.md` §10), i.e. a potential, so far unobserved, source of a
+missed hitting set.
+
+### After the fix
+
+- **ISR**: the table in [ISR replication](#isr-replication) above. Verdicts agree at every level
+  (bug / cert); regression test `ldfi_finds_the_unclean_election_bug_at_every_level` runs the
+  dataflow search at all four levels. Hypothesis counts moved: L0/L1 bug 14 (cert) → 14 (bug), clean 14 → 31
+  (larger clauses, more hitting sets to refute); L2 bug 9 → 9 (closure), 9 → 12 (dataflow),
+  clean 12 → 12 / 13 → 18; L3 bug 6 (cert) → 9 (closure) / 3 (dataflow), clean 6 → 12.
+- **2PC** (`level_ablation_two_pc`, same grid, fuzz 1, deterministic across repeats): every
+  verdict unchanged; every certificate's hypothesis count unchanged (ctp=true, all 18 cells);
+  mean derivation sizes at L0/L1 move by <1 (uncollapsed post-`EFF` dependencies). The
+  counterexample cells shift by a few hypotheses in both directions, from the different clause
+  shapes: ctp=false L2 `n=2 load=4` 4 → 2, `n=2 load=8` 2 → 4, `n=3 load=1` 4 → 2, `n=3 load=8`
+  6 → 2, `n=4 load=8` 8 → 2; L3 `n=3 load=1` 2 → 4, `n=4 load=4` 8 → 2. The 2PC tables above are
+  the pre-fix measurement.
+- **Reliable broadcast / reliable delivery** (`level_ablation_broadcast_and_delivery`,
+  exhaustive; two runs, each losing one L2 cell to trybuild's recompilation guard when a source
+  file changed under it, the union covering every cell): every cell identical to the tables
+  above in verdict, hypotheses, schedules, mean derivation size and replay counts (e.g. reliable broadcast n=3, 2 crashes: 73 / 10845 / 4.77 at
+  L0–L1, 32 / 7271 / 3.38 at L2–L3, r142059 at L3). Neither protocol has post-`EFF` sends that a
+  proposed crash point could reach, nor sequenced observations, so neither gap applied.
+- Not re-run: the `#[ignore]`d long certifications (Raft durability, Paxos / compartmentalized
+  Paxos agreement, Paxos KV prefix agreement; 15–60 min each). Their harnesses have post-`EFF`
+  sends, so their hypothesis counts may move; their verdicts should not (the fix only adds
+  hits to clauses the simulator already refutes, and traces deliveries that were held fixed).
