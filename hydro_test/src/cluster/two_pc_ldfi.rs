@@ -529,6 +529,66 @@ mod tests {
         assert!(mermaid.contains("★ prepare"), "{mermaid}");
     }
 
+    /// The hypothesis sequence of the exhaustive 2PC+CTP search at `n=2 load=4`, as recorded
+    /// before record provenance became a formula (`sim::runtime::provenance`), the sequence
+    /// the single-derivation search (`disjunctive_provenance(false)`, the default) must still
+    /// produce bit for bit. Exhaustive exploration makes the search deterministic.
+    const CTP_N2_LOAD4_SEQUENCE: [&str; 13] = [
+        "{}",
+        "{crash(coordinator after commit[→0]:Txn(1))}",
+        "{crash(participant@0 after vote[0→]:Txn(4))}",
+        "{crash(participant@0 after vote[0→]:Txn(1))}",
+        "{crash(participant@1 after vote[1→]:Txn(4))}",
+        "{crash(participant@1 after vote[1→]:Txn(1))}",
+        "{crash(coordinator after commit[→1]:Txn(3))}",
+        "{crash(coordinator after prepare[→1]:Txn(4))}",
+        "{crash(coordinator after prepare[→1]:Txn(1))}",
+        "{crash(coordinator after prepare[→0]:Txn(1))}",
+        "{crash(coordinator before any send)}",
+        "{crash(participant@0 before any send)}",
+        "{crash(participant@1 before any send)}",
+    ];
+
+    fn ctp_n2_load4_sequence(disjunctive: bool) -> (Outcome, Vec<String>) {
+        let (compiled, h, configure) = super::harness::compile_with(2, true, 1, true, 8);
+        let h = super::harness::with_txns(h, 4);
+        let outcome = configure(1)
+            .disjunctive_provenance(disjunctive)
+            .exploration(Exploration::Exhaustive)
+            .quiet()
+            .search(&compiled, async |run| body(&h, run).await);
+        let sequence = outcome
+            .runs()
+            .iter()
+            .map(|hyp| {
+                let faults: Vec<String> = hyp.faults.iter().map(|f| f.to_string()).collect();
+                format!("{{{}}}", faults.join(", "))
+            })
+            .collect();
+        (outcome, sequence)
+    }
+
+    /// With disjunctive provenance off, the search is the single-derivation search it always
+    /// was: the same thirteen hypotheses in the same order, ending in the same certificate.
+    #[test]
+    fn single_derivation_search_is_unchanged_by_the_provenance_formula() {
+        let (outcome, sequence) = ctp_n2_load4_sequence(false);
+        assert!(matches!(outcome, Outcome::Certificate { .. }), "{outcome}");
+        assert_eq!(sequence, CTP_N2_LOAD4_SEQUENCE);
+    }
+
+    /// With disjunctive provenance on, 2PC+CTP certifies too. CTP's peer path never fires in
+    /// the same run as the coordinator's (a participant queries only after a timeout while
+    /// uncertain), so no run exhibits two derivations of one commit and the sequence is the
+    /// single-derivation one (see `docs/design/ldfi-level-ablation.md`, "Disjunctive
+    /// provenance").
+    #[test]
+    fn disjunctive_search_certifies_ctp() {
+        let (outcome, sequence) = ctp_n2_load4_sequence(true);
+        assert!(matches!(outcome, Outcome::Certificate { .. }), "{outcome}");
+        assert_eq!(sequence, CTP_N2_LOAD4_SEQUENCE);
+    }
+
     /// Cooperative termination survives the coordinator's crash: the participant that got the
     /// `commit` answers its peers' queries, which appears as a new derivation through the peer
     /// channel. No single crash kills both derivations.

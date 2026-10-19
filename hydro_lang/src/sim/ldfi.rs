@@ -105,7 +105,8 @@ use crate::sim::compiled::{
 };
 pub use crate::sim::observe::{LabelPlan, NotCheckedReason};
 use crate::sim::runtime::{
-    CrashPoint, DeliveryId, ExecId, LineageEvent, NodeKey, SendFate, SendKey,
+    CrashPoint, DEFAULT_MAX_WITNESSES, DeliveryId, ExecId, LineageEvent, NodeKey, RecordProv,
+    SendFate, SendKey,
 };
 use crate::sim::slice::{ChannelInfo, EcCollection, Slices};
 use crate::sim::spec::{Spec, SpecParts};
@@ -467,6 +468,10 @@ pub struct Schedule {
     /// Derivation steps where the node did not reproduce its output under replay and the
     /// closure fell back to the recorded lineage.
     pub replay_fallbacks: usize,
+    /// Under [`Ldfi::disjunctive_provenance`]: steps where the cap on witnesses truncated a
+    /// record's alternatives (in the simulator's resolution of its formula, or in the
+    /// closure's expansion), falling back to the single union derivation there.
+    pub witness_overflows: usize,
     /// The run's event trace, for visualization (see [`crate::sim::viz`]). Retained for every
     /// failing schedule, and for every schedule under [`Ldfi::with_traces`].
     pub trace: Option<Rc<Trace>>,
@@ -824,6 +829,9 @@ pub struct Run<'a> {
     vacuous: Cell<bool>,
     /// Which lineage to derive with.
     level: Level,
+    /// See [`Ldfi::disjunctive_provenance`] and [`Ldfi::max_witnesses`].
+    disjunctive: bool,
+    max_witnesses: usize,
     /// The scripted batch hooks placed under a traced pass-through policy at install.
     hooks: RefCell<Vec<TracedHook>>,
 }
@@ -970,6 +978,7 @@ impl Run<'_> {
     fn install(&self) {
         let slices = lineage_slices();
         let handles = lineage_handles();
+        handles.witness_cap.set(self.max_witnesses);
         let mut faults = handles.faults.borrow_mut();
         for fault in self.faults {
             match fault {
@@ -1098,6 +1107,8 @@ impl Run<'_> {
             context: InstanceContext {
                 slices: lineage_slices(),
                 provenance: lineage_provenance_enabled(),
+                disjunctive: self.disjunctive,
+                max_witnesses: self.max_witnesses,
                 hooks: self.hooks.into_inner(),
             },
         }
@@ -1111,6 +1122,10 @@ struct InstanceContext {
     slices: Rc<Slices>,
     /// Whether the program was compiled with record-level provenance.
     provenance: bool,
+    /// Whether the closure follows every witness of a record (see
+    /// [`Ldfi::disjunctive_provenance`]) and the cap on derivations per record.
+    disjunctive: bool,
+    max_witnesses: usize,
     /// The scripted batch hooks under a traced pass-through policy.
     hooks: Vec<TracedHook>,
 }
@@ -1216,19 +1231,21 @@ impl RunRecord {
                     vec![]
                 } else {
                     lineage.prov_begin("witnessed outputs");
-                    let mut derivation = lineage.witnessed(&self.witnesses);
-                    derivation.extend(lineage.witnessed_final(&self.final_witnesses));
-                    lineage.prov_keep(lineage.prov_end());
-                    vec![derivation]
+                    let derivations = lineage.conjoin(
+                        lineage.witnessed_all(&self.witnesses),
+                        lineage.witnessed_final_all(&self.final_witnesses),
+                    );
+                    lineage.prov_keep_each(lineage.prov_end(), derivations.len());
+                    derivations
                 }
             }
             // PRE held and POST held: POST's final value is the fact to derive.
             (Some(Goal::Spec(spec)), _) => match (&self.spec_pre, &self.spec_post) {
                 (_, Some((port, bytes))) if !self.vacuous => {
                     lineage.prov_begin("POST");
-                    let derivation = lineage.spec_view(*port, bytes, spec.facts.is_some());
+                    let derivations = lineage.spec_view_all(*port, bytes, spec.facts.is_some());
                     let graph = lineage.prov_end();
-                    if spec.facts.is_some() && derivation.is_empty() {
+                    if spec.facts.is_some() && derivations.iter().any(BTreeSet::is_empty) {
                         // The generated specification held because no correct member holds
                         // any fact of the domain (every producer was crashed before it
                         // produced), so nothing was required of anyone. Molly's vacuous
@@ -1237,8 +1254,8 @@ impl RunRecord {
                         vacuous = true;
                         vec![]
                     } else {
-                        lineage.prov_keep(graph);
-                        vec![derivation]
+                        lineage.prov_keep_each(graph, derivations.len());
+                        derivations
                     }
                 }
                 _ => vec![],
@@ -1280,6 +1297,7 @@ impl RunRecord {
             vacuous,
             replays: lineage.replays.get(),
             replay_fallbacks: lineage.replay_fallbacks.get(),
+            witness_overflows: lineage.witness_overflows.get(),
             trace,
         }
     }
@@ -1559,8 +1577,8 @@ struct SentRecord {
     /// A send to the specification's observer: not a message of the protocol, not a fault
     /// point, transparent to lineage except for the sender having been alive to perform it.
     observation: bool,
-    /// Delivery ids the record was computed from (record-level provenance; empty without).
-    prov: Vec<u64>,
+    /// What the record was computed from (record-level provenance; empty without).
+    prov: RecordProv,
 }
 
 /// A hook release, resolved against the sends.
@@ -1578,8 +1596,8 @@ struct OutputRecord {
     port: usize,
     member: Option<u32>,
     bytes: Vec<u8>,
-    /// Delivery ids the record was computed from (record-level provenance; empty without).
-    prov: Vec<u64>,
+    /// What the record was computed from (record-level provenance; empty without).
+    prov: RecordProv,
 }
 
 /// A top-level receive, resolved against the sends by delivery id.
@@ -1625,6 +1643,18 @@ struct Lineage<'a> {
     replays: Cell<usize>,
     /// Derivation steps that fell back to the recorded lineage.
     replay_fallbacks: Cell<usize>,
+    /// Whether the closure follows every witness (see [`Ldfi::disjunctive_provenance`]).
+    disjunctive: bool,
+    /// The cap on derivations per record under `disjunctive`.
+    max_witnesses: usize,
+    /// Steps where the cap truncated (see [`Schedule::witness_overflows`]).
+    witness_overflows: Cell<usize>,
+    /// Counterfactual derivations of sends under `disjunctive`, by index into `sent`: every
+    /// derivation of the send (the memo of [`Self::send_derivation`] holds the single one).
+    send_memo_all: RefCell<HashMap<usize, Vec<Derivation>>>,
+    /// The deliveries a send's node kept under replay, by index into `sent` (see
+    /// [`Self::counterfactual_kept`]).
+    kept_memo: RefCell<HashMap<usize, Result<Vec<usize>, &'static str>>>,
     /// The provenance-graph recorder, when the search asked for graphs
     /// ([`Ldfi::with_provenance_graphs`]); see [`crate::sim::viz::provenance`].
     prov: Option<RefCell<ProvRecorder>>,
@@ -1674,6 +1704,11 @@ impl<'a> Lineage<'a> {
             send_memo: RefCell::new(HashMap::new()),
             replays: Cell::new(0),
             replay_fallbacks: Cell::new(0),
+            disjunctive: context.disjunctive && context.provenance,
+            max_witnesses: context.max_witnesses.max(1),
+            witness_overflows: Cell::new(0),
+            send_memo_all: RefCell::new(HashMap::new()),
+            kept_memo: RefCell::new(HashMap::new()),
             prov: prov_graphs.then(|| RefCell::new(ProvRecorder::new())),
             send_prov_memo: RefCell::new(HashMap::new()),
             kept: RefCell::new(vec![]),
@@ -1782,6 +1817,29 @@ impl<'a> Lineage<'a> {
             }
         }
 
+        if std::env::var("LDFI_PROV_DEBUG").is_ok() {
+            for record in &lineage.sent {
+                if record.prov.witnesses.len() > 1 || record.prov.overflow {
+                    eprintln!(
+                        "prov: send {:?}→{:?} {:?}: ids {:?} witnesses {:?} overflow {}",
+                        record.from,
+                        record.to,
+                        record.display,
+                        record.prov.ids,
+                        record.prov.witnesses,
+                        record.prov.overflow
+                    );
+                }
+            }
+            for output in &lineage.outputs {
+                if output.prov.witnesses.len() > 1 || output.prov.overflow {
+                    eprintln!(
+                        "prov: output port {} member {:?}: ids {:?} witnesses {:?}",
+                        output.port, output.member, output.prov.ids, output.prov.witnesses
+                    );
+                }
+            }
+        }
         // A receive names its send by delivery id.
         for (exec, _channel, node, id) in raw_recvs {
             let producer = lineage.by_id.get(&id).copied();
@@ -2184,7 +2242,7 @@ impl<'a> Lineage<'a> {
                 if is_opaque(&output.prov) {
                     self.counterfactual_output(output, anchor)
                 } else {
-                    self.record_closure(&output.prov, output.exec, anchor)
+                    self.record_closure(&output.prov.ids, output.exec, anchor)
                 }
             }
         }
@@ -2209,7 +2267,7 @@ impl<'a> Lineage<'a> {
         let derivation = match self.level {
             Level::Record if is_opaque(&record.prov) => self.counterfactual_send(i, anchor),
             Level::Record | Level::Execution => {
-                self.record_closure(&record.prov, record.exec, anchor)
+                self.record_closure(&record.prov.ids, record.exec, anchor)
             }
         };
         if let Some(sub) = self.with_prov(ProvRecorder::pop) {
@@ -2227,7 +2285,7 @@ impl<'a> Lineage<'a> {
         if is_opaque(&record.prov) {
             self.closure(record.exec, anchor)
         } else {
-            self.record_closure(&record.prov, record.exec, anchor)
+            self.record_closure(&record.prov.ids, record.exec, anchor)
         }
     }
 
@@ -2246,7 +2304,7 @@ impl<'a> Lineage<'a> {
             if is_opaque(&output.prov) {
                 self.closure(output.exec, anchor)
             } else {
-                self.record_closure(&output.prov, output.exec, anchor)
+                self.record_closure(&output.prov.ids, output.exec, anchor)
             }
         };
         let Some(node) = self.exec_node(output.exec) else {
@@ -2262,7 +2320,66 @@ impl<'a> Lineage<'a> {
                 )
             })
         };
-        self.counterfactual(&node, output.exec, &produced, fallback, anchor)
+        self.counterfactual(&node, output.exec, &produced, fallback, anchor, None)
+    }
+
+    /// [`Self::counterfactual_output`] with every derivation.
+    fn counterfactual_output_all(
+        &self,
+        output: &OutputRecord,
+        anchor: Option<usize>,
+    ) -> Vec<Derivation> {
+        let fallback = |anchor: Option<usize>| {
+            if is_opaque(&output.prov) {
+                vec![self.closure(output.exec, anchor)]
+            } else {
+                self.record_closures(&output.prov, output.exec, anchor)
+            }
+        };
+        let Some(node) = self.exec_node(output.exec) else {
+            return fallback(anchor);
+        };
+        let (port, member, bytes) = (output.port, output.member, output.bytes.clone());
+        let produced = move |events: &[LineageEvent]| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    LineageEvent::Output { port: p, member: m, bytes: b, .. }
+                        if *p == port && *m == member && *b == bytes
+                )
+            })
+        };
+        self.counterfactual_all(&node, output.exec, &produced, fallback, anchor, None)
+    }
+
+    /// [`Self::counterfactual_send`] with every derivation.
+    fn counterfactual_send_all(&self, i: usize, anchor: Option<usize>) -> Vec<Derivation> {
+        let record = &self.sent[i];
+        let recorded = |anchor: Option<usize>| {
+            if is_opaque(&record.prov) {
+                vec![self.closure(record.exec, anchor)]
+            } else {
+                self.record_closures(&record.prov, record.exec, anchor)
+            }
+        };
+        match self.exec_node(record.exec) {
+            None => recorded(anchor),
+            Some(node) => {
+                let (channel, to, bytes) =
+                    (record.channel, record.to.clone(), record.bytes.clone());
+                let from = node.clone();
+                let produced = move |events: &[LineageEvent]| {
+                    events.iter().any(|event| {
+                        matches!(
+                            event,
+                            LineageEvent::Sent { channel: c, from: f, from_member: fm, to: t, to_member: tm, bytes: b, .. }
+                                if *c == channel && (f.clone(), *fm) == from && (t.clone(), *tm) == to && *b == bytes
+                        )
+                    })
+                };
+                self.counterfactual_all(&node, record.exec, &produced, recorded, anchor, Some(i))
+            }
+        }
     }
 
     /// The counterfactual derivation of a send (see [`Self::send_derivation`]).
@@ -2289,6 +2406,7 @@ impl<'a> Lineage<'a> {
                     &produced,
                     |anchor| self.recorded_send_closure(i, anchor),
                     anchor,
+                    Some(i),
                 )
             }
         }
@@ -2330,9 +2448,90 @@ impl<'a> Lineage<'a> {
         produced: &dyn Fn(&[LineageEvent]) -> bool,
         fallback: impl FnOnce(Option<usize>) -> Derivation,
         anchor: Option<usize>,
+        memo: Option<usize>,
     ) -> Derivation {
+        match self.counterfactual_kept(node, exec, produced, anchor, memo) {
+            Err(reason) => fallback(self.prov_opaque_node(anchor, reason)),
+            Ok(kept) => {
+                let mut derivation = Derivation::new();
+                for send in kept {
+                    let dependency = self.send_dependency(send);
+                    if dependency.lossy || dependency.sender.is_some() {
+                        derivation.insert(dependency);
+                    }
+                    self.prov_kept_edge(anchor, send);
+                    derivation.extend(self.send_derivation(send));
+                }
+                derivation
+            }
+        }
+    }
+
+    /// [`Self::counterfactual`] with every derivation (under disjunctive provenance): the
+    /// kept deliveries' own derivations are conjoined rather than unioned, so the alternatives
+    /// behind each delivery survive.
+    fn counterfactual_all(
+        &self,
+        node: &NodeKey,
+        exec: ExecId,
+        produced: &dyn Fn(&[LineageEvent]) -> bool,
+        fallback: impl FnOnce(Option<usize>) -> Vec<Derivation>,
+        anchor: Option<usize>,
+        memo: Option<usize>,
+    ) -> Vec<Derivation> {
+        match self.counterfactual_kept(node, exec, produced, anchor, memo) {
+            Err(reason) => fallback(self.prov_opaque_node(anchor, reason)),
+            Ok(kept) => {
+                let mut acc = vec![Derivation::new()];
+                for send in kept {
+                    let dependency = self.send_dependency(send);
+                    self.prov_kept_edge(anchor, send);
+                    let mut theirs = self.send_derivations(send);
+                    if dependency.lossy || dependency.sender.is_some() {
+                        for derivation in &mut theirs {
+                            derivation.insert(dependency.clone());
+                        }
+                    }
+                    acc = self.conjoin(acc, theirs);
+                }
+                acc
+            }
+        }
+    }
+
+    /// The replay half of [`Self::counterfactual`]: the sends (indices into `sent`) of the
+    /// deliveries the node needs to reproduce the target, earliest first; `Err` with the
+    /// reason when the step must fall back. Memoized by `memo` (the index of the send being
+    /// derived) so the single and the disjunctive closure share one replay per send.
+    fn counterfactual_kept(
+        &self,
+        node: &NodeKey,
+        exec: ExecId,
+        produced: &dyn Fn(&[LineageEvent]) -> bool,
+        anchor: Option<usize>,
+        memo: Option<usize>,
+    ) -> Result<Vec<usize>, &'static str> {
+        if let Some(i) = memo
+            && let Some(known) = self.kept_memo.borrow().get(&i)
+        {
+            return known.clone();
+        }
+        let result = self.counterfactual_kept_uncached(node, exec, produced, anchor);
+        if let Some(i) = memo {
+            self.kept_memo.borrow_mut().insert(i, result.clone());
+        }
+        result
+    }
+
+    fn counterfactual_kept_uncached(
+        &self,
+        node: &NodeKey,
+        exec: ExecId,
+        produced: &dyn Fn(&[LineageEvent]) -> bool,
+        anchor: Option<usize>,
+    ) -> Result<Vec<usize>, &'static str> {
         let Some(replayer) = self.replayer else {
-            return fallback(self.prov_opaque_node(anchor, "no replay oracle"));
+            return Err("no replay oracle");
         };
         let tick_execs = self.tick_execs_at(node);
         // Every delivery into the node's ticks, as `(exec, index)`, in event order.
@@ -2351,7 +2550,7 @@ impl<'a> Lineage<'a> {
         if all.is_empty() {
             // A node with no scripted inputs (fed only through hook-free paths): nothing to
             // replay against.
-            return fallback(self.prov_opaque_node(anchor, "no scripted inputs to replay"));
+            return Err("no scripted inputs to replay");
         }
         if candidates.is_empty() {
             self.prov_base_node(
@@ -2359,7 +2558,7 @@ impl<'a> Lineage<'a> {
                 "local input only (no delivery to remove)",
                 ProvLevel::Replay,
             );
-            return Derivation::new();
+            return Ok(vec![]);
         }
         let mut removed: BTreeSet<(ExecId, usize)> = BTreeSet::new();
         let debug = std::env::var("LDFI_REPLAY_DEBUG").is_ok();
@@ -2413,7 +2612,7 @@ impl<'a> Lineage<'a> {
                     replayer.tag, node
                 );
             }
-            return fallback(self.prov_opaque_node(anchor, "replay did not reproduce the target"));
+            return Err("replay did not reproduce the target");
         }
         // Latest first: the derivation keeps the earliest sufficient deliveries.
         candidates.reverse();
@@ -2423,28 +2622,28 @@ impl<'a> Lineage<'a> {
                 removed.remove(candidate);
             }
         }
-        let mut derivation = Derivation::new();
+        let mut kept_sends = vec![];
         for (e, i) in candidates.iter().rev() {
             if removed.contains(&(*e, *i)) {
                 continue;
             }
             let release = &self.released[e][*i];
             if let Some(send) = release.send {
-                let dependency = self.send_dependency(send);
-                if dependency.lossy || dependency.sender.is_some() {
-                    derivation.insert(dependency);
-                }
-                let kept = self.prov_message_node(send);
-                self.prov_edge(
-                    anchor,
-                    kept,
-                    ProvEdgeKind::Counterfactual,
-                    Some(ProvLevel::Replay),
-                );
-                derivation.extend(self.send_derivation(send));
+                kept_sends.push(send);
             }
         }
-        derivation
+        Ok(kept_sends)
+    }
+
+    /// Records that the step at `anchor` kept delivery `send` under replay.
+    fn prov_kept_edge(&self, anchor: Option<usize>, send: usize) {
+        let kept = self.prov_message_node(send);
+        self.prov_edge(
+            anchor,
+            kept,
+            ProvEdgeKind::Counterfactual,
+            Some(ProvLevel::Replay),
+        );
     }
 
     /// The replay scripts for the hooks at `node`: each hook's recorded releases per
@@ -2533,26 +2732,183 @@ impl<'a> Lineage<'a> {
             if is_opaque(&record.prov) {
                 derivation.extend(self.send_derivation(i));
             } else {
-                if record.prov.is_empty() {
+                if record.prov.ids.is_empty() {
                     self.prov_base_node(message, LOCAL_INPUT, ProvLevel::Record);
                 }
-                stack.extend(record.prov.iter().map(|id| (*id, message)));
+                stack.extend(record.prov.ids.iter().map(|id| (*id, message)));
             }
         }
         derivation
     }
 
-    /// One derivation per output on `port`.
+    /// Every derivation of a record under disjunctive provenance
+    /// ([`Ldfi::disjunctive_provenance`]): one per witness of its provenance, each expanded
+    /// through the derivations of the sends behind its deliveries, minimized (no derivation a
+    /// superset of another) and capped. Without disjunctive provenance, the single derivation
+    /// of [`Self::record_closure`].
+    fn record_closures(
+        &self,
+        prov: &RecordProv,
+        exec: ExecId,
+        anchor: Option<usize>,
+    ) -> Vec<Derivation> {
+        if !self.disjunctive || !self.provenance {
+            return vec![self.record_closure(&prov.ids, exec, anchor)];
+        }
+        if prov.overflow {
+            self.witness_overflows.set(self.witness_overflows.get() + 1);
+        }
+        let single = [prov.ids.clone()];
+        let witnesses: &[Vec<u64>] = if prov.witnesses.is_empty() {
+            &single
+        } else {
+            &prov.witnesses
+        };
+        let mut derivations: Vec<Derivation> = vec![];
+        for witness in witnesses {
+            derivations.extend(self.witness_closure(witness, exec, anchor));
+        }
+        let mut derivations = minimize_derivations(derivations);
+        if derivations.len() > self.max_witnesses {
+            derivations.truncate(self.max_witnesses);
+            self.witness_overflows.set(self.witness_overflows.get() + 1);
+        }
+        derivations
+    }
+
+    /// The derivations of one witness (a set of deliveries that sufficed for the record): the
+    /// cross product, over its deliveries, of each delivery's own derivations plus the
+    /// delivery itself. Falls back to the single union derivation of the witness when the
+    /// product exceeds the cap.
+    fn witness_closure(
+        &self,
+        witness: &[u64],
+        exec: ExecId,
+        anchor: Option<usize>,
+    ) -> Vec<Derivation> {
+        if witness.is_empty() {
+            self.prov_base_node(anchor, LOCAL_INPUT, ProvLevel::Record);
+            return vec![Derivation::new()];
+        }
+        let mut acc: Vec<Derivation> = vec![Derivation::new()];
+        for id in witness {
+            let Some(&i) = self.by_id.get(id) else {
+                self.prov_base_node(
+                    anchor,
+                    &format!("delivery #{id} (not a recorded send)"),
+                    ProvLevel::Record,
+                );
+                continue;
+            };
+            let message = self.prov_message_node(i);
+            self.prov_edge(
+                anchor,
+                message,
+                ProvEdgeKind::Derived,
+                Some(ProvLevel::Record),
+            );
+            let dependency = self.send_dependency(i);
+            let mut theirs = self.send_derivations(i);
+            if dependency.lossy || dependency.sender.is_some() {
+                for derivation in &mut theirs {
+                    derivation.insert(dependency.clone());
+                }
+            }
+            let product = cross_derivations(&acc, &theirs);
+            if product.len() > self.max_witnesses {
+                self.witness_overflows.set(self.witness_overflows.get() + 1);
+                return vec![self.record_closure(witness, exec, anchor)];
+            }
+            acc = product;
+        }
+        acc
+    }
+
+    /// Every derivation of a send under disjunctive provenance (memoized by index into
+    /// `sent`; see [`Self::send_derivation`] for the single one).
+    fn send_derivations(&self, i: usize) -> Vec<Derivation> {
+        if let Some(derivations) = self.send_memo_all.borrow().get(&i) {
+            if self.recording()
+                && let Some(sub) = self.send_prov_memo.borrow().get(&i)
+            {
+                self.with_prov(|prov| prov.splice(sub));
+            }
+            return derivations.clone();
+        }
+        self.with_prov(ProvRecorder::push);
+        let anchor = self.prov_message_node(i);
+        let record = &self.sent[i];
+        let derivations = match self.level {
+            Level::Record if is_opaque(&record.prov) => self.counterfactual_send_all(i, anchor),
+            Level::Record | Level::Execution => {
+                self.record_closures(&record.prov, record.exec, anchor)
+            }
+        };
+        if let Some(sub) = self.with_prov(ProvRecorder::pop) {
+            self.send_prov_memo.borrow_mut().insert(i, sub);
+        }
+        self.send_memo_all
+            .borrow_mut()
+            .insert(i, derivations.clone());
+        derivations
+    }
+
+    /// Every derivation of an output: [`Self::derive`]'s one, or under disjunctive
+    /// provenance every witness of the record expanded (see [`Self::record_closures`]).
+    fn derive_all(&self, output: &OutputRecord) -> Vec<Derivation> {
+        if !self.disjunctive {
+            return vec![self.derive(output)];
+        }
+        let anchor = self.prov_output_node(output);
+        match self.level {
+            Level::Execution => vec![self.closure(output.exec, anchor)],
+            Level::Record => {
+                if is_opaque(&output.prov) {
+                    self.counterfactual_output_all(output, anchor)
+                } else {
+                    self.record_closures(&output.prov, output.exec, anchor)
+                }
+            }
+        }
+    }
+
+    /// The derivations of a conjunction of two facts with derivations `left` and `right`:
+    /// the cross product (unions), minimized; the single union of everything when the
+    /// product exceeds the cap (a superset of a sufficient set: sound, less pruning).
+    fn conjoin(&self, left: Vec<Derivation>, right: Vec<Derivation>) -> Vec<Derivation> {
+        let product = cross_derivations(&left, &right);
+        if product.len() > self.max_witnesses {
+            self.witness_overflows.set(self.witness_overflows.get() + 1);
+            let mut everything = Derivation::new();
+            for derivation in left.iter().chain(&right) {
+                everything.extend(derivation.iter().cloned());
+            }
+            return vec![everything];
+        }
+        product
+    }
+
+    /// Files `graph` once per derivation (the graphs are parallel to the derivations).
+    fn prov_keep_each(&self, graph: Option<ProvGraph>, count: usize) {
+        for _ in 0..count {
+            self.prov_keep(graph.clone());
+        }
+    }
+
+    /// One derivation per output on `port` (every derivation of every output under
+    /// disjunctive provenance).
     fn any_output(&self, port: usize) -> Vec<Derivation> {
         let mut derivations: Vec<Derivation> = vec![];
         for output in &self.outputs {
             if output.port == port {
                 self.prov_begin(&format!("some output on port {port}"));
-                let derivation = self.derive(output);
+                let theirs = self.derive_all(output);
                 let graph = self.prov_end();
-                if !derivations.contains(&derivation) {
-                    derivations.push(derivation);
-                    self.prov_keep(graph);
+                for derivation in theirs {
+                    if !derivations.contains(&derivation) {
+                        derivations.push(derivation);
+                        self.prov_keep(graph.clone());
+                    }
                 }
             }
         }
@@ -2569,10 +2925,12 @@ impl<'a> Lineage<'a> {
             for output in &self.outputs {
                 if output.port == port && output.member == Some(*member) {
                     self.prov_begin(&format!("every correct member outputs on port {port}"));
-                    let derivation = self.derive(output);
+                    let theirs = self.derive_all(output);
                     let graph = self.prov_end();
-                    if !per_member.iter().any(|(d, _)| *d == derivation) {
-                        per_member.push((derivation, graph));
+                    for derivation in theirs {
+                        if !per_member.iter().any(|(d, _)| *d == derivation) {
+                            per_member.push((derivation, graph.clone()));
+                        }
                     }
                 }
             }
@@ -2604,6 +2962,136 @@ impl<'a> Lineage<'a> {
                 derivation
             })
             .collect()
+    }
+
+    /// [`Self::witnessed`] with every derivation: the conjunction of the named facts, each
+    /// with every derivation of its output (see [`Self::conjoin`]).
+    fn witnessed_all(&self, witnesses: &[(usize, Option<u32>, Vec<u8>)]) -> Vec<Derivation> {
+        let mut acc = vec![Derivation::new()];
+        for (port, member, bytes) in witnesses {
+            let latest = self
+                .outputs
+                .iter()
+                .filter(|o| o.port == *port && o.member == *member && o.bytes == *bytes)
+                .max_by_key(|o| o.exec);
+            if let Some(output) = latest {
+                let mut theirs = self.derive_all(output);
+                let alive = self.alive_dependency(output);
+                for derivation in &mut theirs {
+                    derivation.extend(alive.clone());
+                }
+                acc = self.conjoin(acc, theirs);
+            }
+        }
+        acc
+    }
+
+    /// The lineages of the named final-state witnesses, conjoined: each must be the last
+    /// output on its port and member (otherwise the fact does not hold and it contributes
+    /// nothing), and is derived as a final-state fact (see [`Run::witness_final`]).
+    fn witnessed_final_all(&self, witnesses: &[(usize, Option<u32>, Vec<u8>)]) -> Vec<Derivation> {
+        let mut acc = vec![Derivation::new()];
+        for (port, member, bytes) in witnesses {
+            let last = self
+                .outputs
+                .iter()
+                .filter(|o| o.port == *port && o.member == *member)
+                .max_by_key(|o| o.exec);
+            if let Some(output) = last
+                && output.bytes == *bytes
+            {
+                let mut theirs = self.derive_final_all(output);
+                let alive = self.alive_dependency(output);
+                for derivation in &mut theirs {
+                    derivation.extend(alive.clone());
+                }
+                acc = self.conjoin(acc, theirs);
+            }
+        }
+        acc
+    }
+
+    /// [`Self::spec_view`] with every derivation of the recorded lineage (the counterfactual
+    /// one of a hand-written view is single, and is unioned into each).
+    fn spec_view_all(&self, port: usize, bytes: &[u8], generated: bool) -> Vec<Derivation> {
+        if !self.disjunctive {
+            return vec![self.spec_view(port, bytes, generated)];
+        }
+        let Some(output) = self
+            .outputs
+            .iter()
+            .filter(|o| o.port == port && o.member.is_none())
+            .max_by_key(|o| o.exec)
+        else {
+            return vec![Derivation::new()];
+        };
+        if output.bytes != bytes {
+            return vec![Derivation::new()];
+        }
+        let recorded = self.derive_all(output);
+        if generated {
+            return recorded;
+        }
+        let fallback = |_anchor: Option<usize>| recorded.clone();
+        let Some(node) = self.exec_node(output.exec) else {
+            return fallback(None);
+        };
+        let anchor = self.prov_output_node(output);
+        let (member, bytes) = (output.member, output.bytes.clone());
+        let produced = move |events: &[LineageEvent]| {
+            events
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    LineageEvent::Output {
+                        port: p,
+                        member: m,
+                        bytes: b,
+                        ..
+                    } if *p == port && *m == member => Some(b == &bytes),
+                    _ => None,
+                })
+                .unwrap_or(false)
+        };
+        let counterfactual =
+            self.counterfactual_all(&node, output.exec, &produced, fallback, anchor, None);
+        self.conjoin(counterfactual, recorded)
+    }
+
+    /// [`Self::derive_final`] with every derivation (a replayed record has one).
+    fn derive_final_all(&self, output: &OutputRecord) -> Vec<Derivation> {
+        let by_replay = match self.level {
+            Level::Record => is_opaque(&output.prov),
+            Level::Execution => false,
+        };
+        if !self.disjunctive {
+            return vec![self.derive_final(output)];
+        }
+        if !by_replay {
+            return self.derive_all(output);
+        }
+        let anchor = self.prov_output_node(output);
+        let fallback = |anchor: Option<usize>| vec![self.closure(output.exec, anchor)];
+        let Some(node) = self.exec_node(output.exec) else {
+            return fallback(anchor);
+        };
+        let (port, member, bytes) = (output.port, output.member, output.bytes.clone());
+        let produced = move |events: &[LineageEvent]| {
+            events
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    LineageEvent::Output {
+                        port: p,
+                        member: m,
+                        bytes: b,
+                        ..
+                    } if *p == port && *m == member => Some(b == &bytes),
+                    _ => None,
+                })
+                .unwrap_or(false)
+        };
+        self.counterfactual_all(&node, output.exec, &produced, fallback, anchor, None)
     }
 
     /// The union of the lineages of the named witnesses, each resolved to the latest output
@@ -2676,27 +3164,6 @@ impl<'a> Lineage<'a> {
         Some(dependency)
     }
 
-    /// The union of the lineages of the named final-state witnesses: each must be the last
-    /// output on its port and member (otherwise the fact does not hold and it contributes
-    /// nothing), and is derived as a final-state fact (see [`Run::witness_final`]).
-    fn witnessed_final(&self, witnesses: &[(usize, Option<u32>, Vec<u8>)]) -> Derivation {
-        let mut derivation = Derivation::new();
-        for (port, member, bytes) in witnesses {
-            let last = self
-                .outputs
-                .iter()
-                .filter(|o| o.port == *port && o.member == *member)
-                .max_by_key(|o| o.exec);
-            if let Some(output) = last
-                && output.bytes == *bytes
-            {
-                derivation.extend(self.derive_final(output));
-                derivation.extend(self.alive_dependency(output));
-            }
-        }
-        derivation
-    }
-
     /// The derivation of a specification view's final value, as the clause (for `POST`) or the
     /// requirement (for `PRE`).
     ///
@@ -2749,7 +3216,8 @@ impl<'a> Lineage<'a> {
                 })
                 .unwrap_or(false)
         };
-        let mut derivation = self.counterfactual(&node, output.exec, &produced, fallback, anchor);
+        let mut derivation =
+            self.counterfactual(&node, output.exec, &produced, fallback, anchor, None);
         derivation.extend(recorded);
         derivation
     }
@@ -2786,7 +3254,7 @@ impl<'a> Lineage<'a> {
                 })
                 .unwrap_or(false)
         };
-        self.counterfactual(&node, output.exec, &produced, fallback, anchor)
+        self.counterfactual(&node, output.exec, &produced, fallback, anchor, None)
     }
 
     /// Every pre-EFF delivered send, as one derivation.
@@ -2972,8 +3440,34 @@ const LOCAL_INPUT: &str = "local input\n(constant, timer, or external input)";
 
 /// Whether a record's provenance is opaque (it came out of a closure the rewrite cannot see
 /// into; see `Prov::OPAQUE`).
-fn is_opaque(prov: &[u64]) -> bool {
-    prov.contains(&crate::sim::runtime::Prov::OPAQUE)
+fn is_opaque(prov: &RecordProv) -> bool {
+    prov.is_opaque()
+}
+
+/// `{a ∪ b | a ∈ left, b ∈ right}`, minimized.
+fn cross_derivations(left: &[Derivation], right: &[Derivation]) -> Vec<Derivation> {
+    let mut out = Vec::with_capacity(left.len() * right.len());
+    for a in left {
+        for b in right {
+            out.push(a.union(b).cloned().collect());
+        }
+    }
+    minimize_derivations(out)
+}
+
+/// Drops duplicates and every derivation that is a strict superset of another: a fault set
+/// hitting the smaller one hits the larger, so the larger clause is implied. Keeps first-seen
+/// order.
+fn minimize_derivations(derivations: Vec<Derivation>) -> Vec<Derivation> {
+    let mut kept: Vec<Derivation> = vec![];
+    for derivation in derivations {
+        if kept.iter().any(|k| k.is_subset(&derivation)) {
+            continue;
+        }
+        kept.retain(|k| !derivation.is_subset(k));
+        kept.push(derivation);
+    }
+    kept
 }
 
 /// The payload rendering of a send for reports: its `Debug` form when the type has one, else
@@ -3131,6 +3625,10 @@ pub struct Ldfi {
     traces: bool,
     /// Record a why-provenance graph beside each derivation (`Schedule::provenance`).
     prov_graphs: bool,
+    /// Follow every witness of a record (see [`Self::disjunctive_provenance`]).
+    disjunctive: bool,
+    /// The cap on witnesses per record (see [`Self::max_witnesses`]).
+    max_witnesses: usize,
 }
 
 impl Default for Ldfi {
@@ -3156,7 +3654,44 @@ impl Ldfi {
             log: true,
             traces: false,
             prov_graphs: false,
+            disjunctive: false,
+            max_witnesses: DEFAULT_MAX_WITNESSES,
         }
+    }
+
+    /// Under [`Level::Record`], follows **every** derivation of a record rather than the first
+    /// one a deduplicating operator saw: a record's provenance is a formula (conjunction of
+    /// what it was computed from, disjunction over the equal records a dedup collapsed; see
+    /// `sim::runtime::provenance`), and each of its witnesses, expanded through the witnesses
+    /// of the sends behind it, becomes a derivation of the goal and so a clause of its own.
+    /// This is Molly's lineage: one good run yields every alternative it exhibited, and the
+    /// hitting-set solver prunes the fault sets that leave one intact without running them.
+    /// Off by default; off, the search is exactly the single-derivation one.
+    #[must_use]
+    pub fn disjunctive_provenance(mut self, on: bool) -> Self {
+        self.disjunctive = on;
+        self
+    }
+
+    /// Reads [`Self::disjunctive_provenance`] from `LDFI_DISJUNCTIVE` (`1` / `0`) if set.
+    #[must_use]
+    pub fn disjunctive_from_env(self) -> Self {
+        match std::env::var("LDFI_DISJUNCTIVE").as_deref() {
+            Ok("1" | "on" | "true") => self.disjunctive_provenance(true),
+            Ok("0" | "off" | "false") => self.disjunctive_provenance(false),
+            _ => self,
+        }
+    }
+
+    /// The cap on witnesses (alternative derivations) per record, both when the simulator
+    /// resolves a record's provenance formula and when the closure expands a record through
+    /// the sends behind it (default [`DEFAULT_MAX_WITNESSES`]). Where a cross product would
+    /// exceed it, the step falls back to the single union derivation (sound, less pruning)
+    /// and the schedule counts a [`Schedule::witness_overflows`].
+    #[must_use]
+    pub fn max_witnesses(mut self, cap: usize) -> Self {
+        self.max_witnesses = cap.max(1);
+        self
     }
 
     /// Keeps the event [`Trace`] of every explored schedule (see [`Schedule::trace`]), not
@@ -3492,6 +4027,8 @@ impl Ldfi {
                         requirements: RefCell::new(vec![]),
                         vacuous: Cell::new(false),
                         level,
+                        disjunctive: self.disjunctive,
+                        max_witnesses: self.max_witnesses,
                         hooks: RefCell::new(vec![]),
                     };
                     run.install();
@@ -4072,6 +4609,8 @@ impl Ldfi {
                         requirements: RefCell::new(vec![]),
                         vacuous: Cell::new(false),
                         level,
+                        disjunctive: self.disjunctive,
+                        max_witnesses: self.max_witnesses,
                         hooks: RefCell::new(vec![]),
                     };
                     run.install();
@@ -4158,6 +4697,8 @@ impl Ldfi {
                     requirements: RefCell::new(vec![]),
                     vacuous: Cell::new(false),
                     level,
+                    disjunctive: self.disjunctive,
+                    max_witnesses: self.max_witnesses,
                     hooks: RefCell::new(vec![]),
                 };
                 run.install();

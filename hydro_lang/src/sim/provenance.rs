@@ -13,8 +13,16 @@
 //! changes (a `Cast` between a flat and a keyed kind). Sources and external inputs produce
 //! empty provenance; a network receive tags each record with the delivery id of the send
 //! that produced it (the id travels with the message; `SimBuilder` emits the tagging);
-//! network sends and external outputs are preceded by a map to `(value, Vec<delivery id>)`,
-//! which `SimBuilder` (in provenance mode) serializes and records.
+//! network sends and external outputs are preceded by a map to `(value, Prov)`, which
+//! `SimBuilder` (in provenance mode) serializes and records.
+//!
+//! Deduplication is where alternative derivations of one value meet. A `unique` inside a tick
+//! is preceded by a map giving each record a fresh disjunction cell
+//! ([`codegen::rebox`](crate::sim::runtime::codegen::rebox)), which the dedup's equality
+//! comparison fills with the alternatives it drops (see `sim::runtime::provenance`); a
+//! `filter_not_in` on a flat stream is compiled as an anti-join whose negative side carries
+//! plain values, so the comparison between a positive record and a negative one (different
+//! facts that happen to be equal) never runs on `Tagged`s.
 //!
 //! Unsupported operators panic at compile time with their name: the rewrite is complete for
 //! the operators the LDFI examples use and explicit about what it does not cover.
@@ -478,11 +486,19 @@ fn empty_tag_expr(rep: Rep) -> syn::Expr {
     }
 }
 
-/// The expression turning a tagged element into `(plain value, Vec<delivery id>)`, for the
-/// send / output sites `SimBuilder` emits in provenance mode.
+/// The expression turning a tagged element into `(plain value, Prov)`, for the send / output
+/// sites `SimBuilder` emits in provenance mode.
 fn strip_expr(rep: Rep) -> syn::Expr {
     let (pat, val) = unwrap_tokens(rep);
-    parse_quote!(move |#pat| (#val, __prov.ids().to_vec()))
+    parse_quote!(move |#pat| (#val, __prov))
+}
+
+/// `T` → `(T, Tagged<()>)` (the positive side of a set difference keyed by the whole value).
+fn diff_pos_type(ty: &DebugType) -> DebugType {
+    let root = get_this_crate();
+    let inner: &syn::Type = &ty.0;
+    let out: syn::Type = parse_quote!((#inner, #root::sim::runtime::Tagged<()>));
+    DebugType::from(out)
 }
 
 /// Rewrites `ir` in place. Must run after network compilation and before slicing and
@@ -557,11 +573,62 @@ pub fn rewrite(ir: &mut [HydroRoot]) {
                 | HydroNode::Tee { metadata, .. }
                 | HydroNode::CycleSource { metadata, .. }
                 | HydroNode::DeferTick { metadata, .. }
-                | HydroNode::Unique { metadata, .. }
                 | HydroNode::Sort { metadata, .. }
-                | HydroNode::Counter { metadata, .. }
-                | HydroNode::Difference { metadata, .. } => {
+                | HydroNode::Counter { metadata, .. } => {
                     tag_kind(&mut metadata.collection_kind);
+                }
+                // Dedup: inside a tick, every arrival gets a fresh disjunction cell, which the
+                // operator's equality comparison fills with the alternatives it drops (see
+                // the module docs). A top-level `unique` keeps `'static` state, and a
+                // duplicate arriving in a later execution is no derivation of what the first
+                // copy already produced, so it is left alone (first copy wins).
+                HydroNode::Unique { input, metadata } => {
+                    let in_rep = input_rep(input);
+                    if !input.metadata().location_id.is_top_level() {
+                        let rebox: syn::Expr = match in_rep {
+                            Rep::Flat => parse_quote!(#root::sim::runtime::codegen::rebox),
+                            Rep::Keyed => parse_quote!(#root::sim::runtime::codegen::rebox_keyed),
+                        };
+                        let in_meta = input.metadata().clone();
+                        let old = std::mem::replace(input.as_mut(), HydroNode::Placeholder);
+                        **input = map_node(rebox, old, in_meta);
+                    }
+                    tag_kind(&mut metadata.collection_kind);
+                }
+                // Set difference: as an anti-join keyed by the whole value, with a plain
+                // negative side (DFIR's `difference` is `anti_join` under the hood), so the
+                // operator never compares a positive `Tagged` with a negative one.
+                HydroNode::Difference { pos, neg, metadata } => {
+                    assert!(
+                        out_rep == Rep::Flat
+                            && input_rep(pos) == Rep::Flat
+                            && input_rep(neg) == Rep::Flat,
+                        "provenance rewrite: keyed difference"
+                    );
+                    let pos_f: syn::Expr = parse_quote!(#root::sim::runtime::codegen::diff_pos);
+                    let neg_f: syn::Expr = parse_quote!(#root::sim::runtime::codegen::diff_neg);
+                    let out_f: syn::Expr = parse_quote!(#root::sim::runtime::codegen::diff_out);
+                    let plain = element_type(&metadata.collection_kind);
+                    let mut pos_meta = pos.metadata().clone();
+                    set_element_type(&mut pos_meta.collection_kind, diff_pos_type(&plain));
+                    let old = std::mem::replace(pos.as_mut(), HydroNode::Placeholder);
+                    **pos = map_node(pos_f, old, pos_meta);
+                    let mut neg_meta = neg.metadata().clone();
+                    set_element_type(&mut neg_meta.collection_kind, plain.clone());
+                    let old = std::mem::replace(neg.as_mut(), HydroNode::Placeholder);
+                    **neg = map_node(neg_f, old, neg_meta);
+                    let mut tagged_meta = metadata.clone();
+                    tag_kind(&mut tagged_meta.collection_kind);
+                    let mut anti_meta = metadata.clone();
+                    set_element_type(&mut anti_meta.collection_kind, diff_pos_type(&plain));
+                    let pos = std::mem::replace(pos.as_mut(), HydroNode::Placeholder);
+                    let neg = std::mem::replace(neg.as_mut(), HydroNode::Placeholder);
+                    *node = HydroNode::AntiJoin {
+                        pos: Box::new(pos),
+                        neg: Box::new(neg),
+                        metadata: anti_meta,
+                    };
+                    post = Some((out_f, tagged_meta));
                 }
                 // A reference slot (`by_ref` / `by_mut`): holds the tagged value; the closures
                 // that capture it are wrapped by `wrap_opaque`.

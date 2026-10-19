@@ -49,6 +49,7 @@ use std::rc::Rc;
 use dfir_rs::bytes::Bytes;
 use dfir_rs::util::unsync::mpsc::Sender;
 
+use super::provenance::{DEFAULT_MAX_WITNESSES, Prov, RecordProv};
 use crate::location::dynamic::LocationId;
 
 /// Identifies one execution (async run or tick execution) within a simulation instance.
@@ -121,9 +122,10 @@ pub enum LineageEvent {
         /// The payload's `Debug` rendering, when its type has one.
         display: Option<String>,
         fate: SendFate,
-        /// The delivery ids the sent record was computed from (record-level provenance;
-        /// empty when the simulation was compiled without it).
-        prov: Vec<u64>,
+        /// The deliveries the sent record was computed from (record-level provenance; empty
+        /// when the simulation was compiled without it), resolved when the log was read
+        /// (see [`LineageHandles::snapshot`]).
+        prov: RecordProv,
     },
     /// Execution `exec` at node `(to, to_member)` took delivery `send` off network channel
     /// `channel` (recorded by generated code at the receive half, before deserialization).
@@ -145,8 +147,8 @@ pub enum LineageEvent {
         member: Option<u32>,
         bytes: Vec<u8>,
         dropped: bool,
-        /// The delivery ids the output record was computed from (see `Sent::prov`).
-        prov: Vec<u64>,
+        /// The deliveries the output record was computed from (see `Sent::prov`).
+        prov: RecordProv,
     },
 }
 
@@ -261,6 +263,13 @@ pub struct LineageHandles {
     pub faults: Rc<RefCell<FaultState>>,
     /// The next delivery id.
     pub next_delivery: Rc<Cell<DeliveryId>>,
+    /// The provenance formula of each `Sent` / `Output` event (by index into `events`) that
+    /// carried one, resolved when the log is read: a formula is lazy, since a record may
+    /// still acquire alternative derivations after it was sent (see `super::provenance`).
+    pub pending_prov: Rc<RefCell<Vec<(usize, Prov)>>>,
+    /// The cap on witnesses per record when resolving (`0` for the default,
+    /// [`DEFAULT_MAX_WITNESSES`]).
+    pub witness_cap: Rc<Cell<usize>>,
     /// The message of a panic raised by the program's own code (an operator closure) and
     /// caught on the generated code's side of the dynamic-library boundary by
     /// [`erase_guarded`]; the host reports it. Unwinding across that boundary aborts the
@@ -328,7 +337,7 @@ impl LineageHandles {
             to_member,
             bytes,
             display,
-            Vec::new(),
+            Prov::empty(),
         )
     }
 
@@ -344,7 +353,7 @@ impl LineageHandles {
         to_member: Option<u32>,
         bytes: &Bytes,
         display: Option<String>,
-        prov: Vec<u64>,
+        prov: Prov,
     ) -> Option<DeliveryId> {
         let key = SendKey {
             channel,
@@ -355,6 +364,7 @@ impl LineageHandles {
         let fate = self.faults.borrow_mut().filter(&key);
         let id = self.next_delivery.get();
         self.next_delivery.set(id + 1);
+        self.note_prov(prov);
         self.events.borrow_mut().push(LineageEvent::Sent {
             exec: self.current_exec.get(),
             id,
@@ -366,9 +376,50 @@ impl LineageHandles {
             bytes: key.bytes,
             display,
             fate,
-            prov,
+            prov: RecordProv::default(),
         });
         (fate == SendFate::Delivered).then_some(id)
+    }
+
+    /// Files the provenance of the event about to be pushed, for resolution at
+    /// [`Self::snapshot`]. An empty formula needs no filing: its resolution is the default.
+    fn note_prov(&self, prov: Prov) {
+        if !prov.is_empty() {
+            let index = self.events.borrow().len();
+            self.pending_prov.borrow_mut().push((index, prov));
+        }
+    }
+
+    /// Drops every event from `len` on (and the provenance filed for them).
+    pub fn truncate(&self, len: usize) {
+        self.events.borrow_mut().truncate(len);
+        self.pending_prov
+            .borrow_mut()
+            .retain(|(index, _)| *index < len);
+    }
+
+    /// The cap on witnesses per record (see `super::provenance`).
+    pub fn max_witnesses(&self) -> usize {
+        match self.witness_cap.get() {
+            0 => DEFAULT_MAX_WITNESSES,
+            cap => cap,
+        }
+    }
+
+    /// A copy of the event log with every record's provenance resolved to its witnesses under
+    /// the current cap (see [`Self::witness_cap`]).
+    pub fn snapshot(&self) -> Vec<LineageEvent> {
+        let mut events = self.events.borrow().clone();
+        let cap = self.max_witnesses();
+        for (index, prov) in self.pending_prov.borrow().iter() {
+            if let Some(
+                LineageEvent::Sent { prov: slot, .. } | LineageEvent::Output { prov: slot, .. },
+            ) = events.get_mut(*index)
+            {
+                *slot = RecordProv::resolve(prov, cap);
+            }
+        }
+        events
     }
 
     /// Records a network receive by the current execution. Called by generated code.
@@ -418,14 +469,14 @@ impl LineageOutputSender {
         &self,
         value: Bytes,
     ) -> Result<(), dfir_rs::util::unsync::mpsc::TrySendError<Bytes>> {
-        self.try_send_with(value, Vec::new())
+        self.try_send_with(value, Prov::empty())
     }
 
     /// [`Self::try_send`] with the output record's provenance.
     pub fn try_send_with(
         &self,
         value: Bytes,
-        prov: Vec<u64>,
+        prov: Prov,
     ) -> Result<(), dfir_rs::util::unsync::mpsc::TrySendError<Bytes>> {
         let dropped = self.location.as_ref().is_some_and(|location| {
             self.lineage
@@ -433,6 +484,7 @@ impl LineageOutputSender {
                 .borrow()
                 .is_dead(&(location.clone(), self.member))
         });
+        self.lineage.note_prov(prov);
         self.lineage.events.borrow_mut().push(LineageEvent::Output {
             exec: self.lineage.current_exec.get(),
             sink: self.sink,
@@ -440,7 +492,7 @@ impl LineageOutputSender {
             member: self.member,
             bytes: value.to_vec(),
             dropped,
-            prov,
+            prov: RecordProv::default(),
         });
         if dropped {
             Ok(())

@@ -297,6 +297,48 @@ mod tests {
         );
     }
 
+    /// Disjunctive provenance (`Ldfi::disjunctive_provenance`) on the echo protocol: a member
+    /// that gets the payload from the broadcaster and from an echo in the same tick records
+    /// both as derivations of its delivery, so one good run yields every alternative it
+    /// exhibited. The verdict is the same certificate; the two hypothesis sequences are
+    /// printed for comparison (`LDFI_BROADCAST_DIAG`).
+    #[test]
+    fn ldfi_certifies_reliable_broadcast_with_disjunctive_provenance() {
+        let diag = std::env::var("LDFI_BROADCAST_DIAG").is_ok();
+        let crashes: usize = std::env::var("LDFI_BROADCAST_CRASHES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
+        let single = search_with(true, crashes, Post::Positive, |ldfi| {
+            if diag { ldfi } else { ldfi.quiet() }
+        });
+        let disjunctive = search_with(true, crashes, Post::Positive, |ldfi| {
+            let ldfi = ldfi.disjunctive_provenance(true);
+            if diag { ldfi } else { ldfi.quiet() }
+        });
+        for (name, outcome) in [("single", &single), ("disjunctive", &disjunctive)] {
+            eprintln!("{name}: {} hypotheses", outcome.runs().len());
+            for (i, hyp) in outcome.runs().iter().enumerate() {
+                let clauses: usize = hyp
+                    .schedules
+                    .iter()
+                    .filter(|s| s.goal_held)
+                    .map(|s| s.derivations.len())
+                    .sum();
+                eprintln!(
+                    "  #{i} {:?}: {} schedules, {clauses} clauses",
+                    hyp.faults,
+                    hyp.schedules.len()
+                );
+            }
+        }
+        assert!(matches!(single, Outcome::Certificate { .. }), "{single}");
+        assert!(
+            matches!(disjunctive, Outcome::Certificate { .. }),
+            "{disjunctive}"
+        );
+    }
+
     /// The same search with `POST` written through negation ([`Post::Negated`]). The record
     /// provenance of a view that holds by the absence of facts is empty, but the search
     /// derives specification views counterfactually at the observer (replaying it with
