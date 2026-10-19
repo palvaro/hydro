@@ -1475,3 +1475,62 @@ exploration) and `LDFI_ABLATION_VARIANT=unclean|clean`; broadcast takes
 `LDFI_ABLATION_CONFIG=<substring>`, which also enables the otherwise-omitted
 `reliable (echo), n=4, 1 crash` row. Do not run the columns of several exhaustive grids
 concurrently on one machine: this pass ended in an out-of-memory reboot.
+
+## Complete grid: 2PC, Paxos, leader_merge (disjunction) — partial, salvaged
+
+_The complete-grid run was cut short when the host ran out of memory (≈15 concurrent exhaustive
+searches on an 8-core, 15 GB machine) and rebooted. The cells below finished before the reboot
+and were captured from the measuring threads' reports; nothing was re-run. Wall seconds were
+measured at load 20–37 and are not meaningful._
+
+### 2PC, exhaustive, cr=1, budget 400 (`verdict / hyp / sched / mean deriv / clauses-per-run`)
+
+| variant | config | exec | precise | disjunctive |
+|---|---|---|---|---|
+| 2PC | n=2 load=1 | CEX / 2 / 24 / 8.00 / 8.00 | CEX / 2 / 24 / 8.00 / 8.00 | CEX / 2 / 24 / 8.00 / 8.00 |
+| 2PC | n=2 load=4 | CEX / 6 / 96 / 28.00 / 13.33 | CEX / 2 / 32 / 8.00 / 8.00 | CEX / 2 / 32 / 8.00 / 8.00 |
+| 2PC | n=2 load=8 | CEX / 6 / 96 / 60.00 / 13.33 | CEX / 2 / 32 / 8.00 / 8.00 | CEX / 2 / 32 / 8.00 / 8.00 |
+| 2PC | n=3 load=1 | CEX / 2 / 1152 / 12.00 / 432 | CEX / 2 / 1152 / 12.00 / 432 | CEX / 2 / 1152 / 12.00 / 432 |
+| 2PC | n=3 load=4 | CEX / 8 / 6912 / 42.00 / 756 | CEX / 2 / 1728 / 12.00 / 432 | not finished |
+| 2PC | n=3 load=8 | not run | CEX / 2 / 1728 / 12.00 / 432 | CEX / 2 / 1728 / 12.00 / 432 |
+| 2PC+CTP | n=2 load=1 | CERT / 9 / 158 / 8.33 / 10.67 | CERT / 9 / 158 / 7.83 / 10.67 | CERT / 9 / 158 / 7.83 / 10.67 |
+| 2PC+CTP | n=2 load=4 | CERT / 27 / 1142 / 27.89 / 27.85 | CERT / 13 / 414 / 7.81 / 19.69 | CERT / 13 / 414 / 7.81 / 19.69 |
+| 2PC+CTP | n=2 load=8 | CERT / 51 / 2486 / 50.90 / 19.76 | CERT / 13 / 414 / 7.81 / 19.69 | CERT / 13 / 414 / 7.81 / 19.69 |
+
+Overflows 0 everywhere; verdicts agree in every completed cell; `precise` and `disjunctive`
+are identical in every completed cell (hypotheses, schedules, derivations, clauses per run).
+No n=3 CTP, n=4, or fuzz×5 cells completed. Timing notes for a rerun: plain 2PC n=3 is
+1–8 min per column exhaustive; 2PC+CTP n=3 is ~15–75 min per column; n=4 produced no
+exhaustive cell in 25 min. Memory: 0.2–1.1 GB RSS per process; ≤ 4 concurrent is the ceiling
+on this host.
+
+### Paxos bug (p=2 a=3 cr=1, 4 schedules/hypothesis, cap 256), two repeats
+
+`verdict / hyp / sched / mean deriv / clauses-per-run / replays`
+
+| repeat | exec | precise | disjunctive |
+|---|---|---|---|
+| 1 | violated / 46 / 184 / 22.7 / 2.28 / 675 | violated / 26 / 104 / 15.9 / 2.77 / 439 | violated / 57 / 228 / 15.3 / 2.30 / 820 |
+| 2 | violated / 42 / 168 / 23.1 / 2.57 / 703 | violated / 52 / 208 / 15.0 / 2.40 / 763 | violated / 22 / 88 / 14.9 / 2.36 / 315 |
+
+Overflows 0, fallbacks 0 in every cell. Clauses per run 2.3–2.8 at 4 schedules ≈ 0.6–0.7 per
+schedule in every column ⇒ no multi-witness Paxos record (the p2b quorum is a `fold`, which
+conjoins). Hypotheses to counterexample are draw-dominated (precise 26 vs 52; disjunctive 57 vs
+22); no column is consistently fewer. Verdicts agree. The Paxos-correct cells and every Raft
+cell (original config, 3 rounds × 4 schedules, cap 160; ~30 min in, none finished) died in the
+reboot and remain unmeasured.
+
+### leader_merge (compiled without provenance, exhaustive, cr ∈ {1, 2})
+
+All six cells identical: violated / 2 hyp / 4 sched / mean deriv 12.0 / 1.00 clauses per run;
+replays 0 (exec) or 14 (precise, disjunctive); counterexample `crash(leader after merged[→1])`.
+
+### Across the corpus
+
+The only program in the corpus that ever produces a record with more than one witness is
+reliable broadcast with echo. 2PC (plain and CTP), ISR (both encodings), Paxos, leader_merge,
+plain broadcast and reliable delivery have exactly one witness per record in every measured
+cell, so on them disjunctive provenance is a no-op by construction. On echo broadcast it
+prunes the provably useless hypotheses (diagnostic above) and surfaces crash points on the
+echoing members that the single-witness search never names; the net hypothesis count rises
+(+10 %, +22 % at n=3; +40 % at n=4, where the witness cap of 8 is hit 150+ times per run).
