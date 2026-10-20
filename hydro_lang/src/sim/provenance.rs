@@ -24,6 +24,21 @@
 //! plain values, so the comparison between a positive record and a negative one (different
 //! facts that happen to be equal) never runs on `Tagged`s.
 //!
+//! Aggregates are where "any `k` of `n`" is lost: a fold's output is the conjunction of every
+//! input. Under aggregate witnesses (`Ldfi::aggregate_witnesses`, a run-time mode read from
+//! `__hydro_lineage`, the instance's `LineageHandles`), a `fold` / `fold_keyed` step also
+//! records the input's value in the accumulator's provenance cell
+//! ([`codegen::agg_push`](crate::sim::runtime::codegen::agg_push), with fresh instances of the
+//! fold's `init` and `acc` for re-folding); a `filter` (through a map placed after it) or a
+//! `filter_map` whose input carries such a cell gives its output the disjunction of the
+//! minimal input subsets its predicate accepts
+//! ([`codegen::agg_witness`](crate::sim::runtime::codegen::agg_witness)). The casts between
+//! the keyed and the flat representation re-shape the re-folded value the predicate sees
+//! (`key_in_cast`, `key_out_cast`); operators that change the value (`map`, `filter_map`'s
+//! own output, `flat_map`, `scan`, `enumerate`) strip the cell to its conjunction, so no
+//! predicate ever re-evaluates an aggregate through a value it did not see. With the mode
+//! off every one of these is the identity on the formula.
+//!
 //! Unsupported operators panic at compile time with their name: the rewrite is complete for
 //! the operators the LDFI examples use and explicit about what it does not cover.
 
@@ -216,11 +231,16 @@ fn wrap_closure(closure: &ClosureExpr, make: impl FnOnce(&syn::Expr) -> syn::Exp
     wrapped
 }
 
-/// `map`-style: `Fn(T) -> U`.
+/// `map`-style: `Fn(T) -> U`. The value changes, so an aggregate cell is stripped to the
+/// conjunction it wraps (see `sim::runtime::provenance`).
 fn wrap_map(f: &ClosureExpr, input: Rep, output: Rep) -> ClosureExpr {
     let (pat, val) = unwrap_tokens(input);
     wrap_closure(f, |f| {
-        let out = wrap_tokens(output, parse_quote!(__f(#val)), parse_quote!(__prov));
+        let out = wrap_tokens(
+            output,
+            parse_quote!(__f(#val)),
+            parse_quote!(__prov.strip_agg()),
+        );
         parse_quote!({
             let mut __f = #f;
             move |#pat| #out
@@ -265,15 +285,110 @@ fn wrap_by_ref(f: &ClosureExpr, input: &CollectionKind) -> ClosureExpr {
     })
 }
 
-/// `filter_map`-style: `Fn(T) -> Option<U>`.
+/// The map placed after a `filter` with predicate `f`: gives each record that passed the
+/// provenance of its aggregate witnesses when its input is a fold's accumulator
+/// ([`codegen::agg_witness`](crate::sim::runtime::codegen::agg_witness)); the identity
+/// otherwise and with the mode off. `kind` is the filter's (already tagged) kind, whose
+/// concrete types annotate the parameter (a push-based `map` infers nothing else).
+fn filter_witness_expr(f: &ClosureExpr, kind: &CollectionKind) -> syn::Expr {
+    let root = get_this_crate();
+    let f: &syn::Expr = &f.expr;
+    match kind {
+        CollectionKind::Stream { element_type, .. }
+        | CollectionKind::Singleton { element_type, .. }
+        | CollectionKind::Optional { element_type, .. } => {
+            let ty: &syn::Type = &element_type.0;
+            parse_quote!({
+                let mut __f = #f;
+                let __h = __hydro_lineage.clone();
+                move |#root::sim::runtime::Tagged(__val, __prov): #ty| {
+                    let __prov = #root::sim::runtime::codegen::agg_witness(
+                        &__h,
+                        &__prov,
+                        #root::sim::runtime::codegen::type_of(&__val),
+                        |__c| __f(&__c),
+                    );
+                    #root::sim::runtime::Tagged(__val, __prov)
+                }
+            })
+        }
+        CollectionKind::KeyedStream {
+            key_type,
+            value_type,
+            ..
+        }
+        | CollectionKind::KeyedSingleton {
+            key_type,
+            value_type,
+            ..
+        } => {
+            let k: &syn::Type = &key_type.0;
+            let v: &syn::Type = &value_type.0;
+            parse_quote!({
+                let mut __f = #f;
+                let __h = __hydro_lineage.clone();
+                move |(__key, #root::sim::runtime::Tagged(__val, __prov)): (#k, #v)| {
+                    let __prov = #root::sim::runtime::codegen::agg_witness(
+                        &__h,
+                        &__prov,
+                        #root::sim::runtime::codegen::type_of(&__val),
+                        |__c| __f(&(__key.clone(), __c)),
+                    );
+                    (__key, #root::sim::runtime::Tagged(__val, __prov))
+                }
+            })
+        }
+    }
+}
+
+/// `filter_map`-style: `Fn(T) -> Option<U>`. An output's provenance is its aggregate
+/// witnesses when the input is a fold's accumulator (a second instance of `f` is the
+/// predicate: "is `Some`"), else the input's.
 fn wrap_filter_map(f: &ClosureExpr, input: Rep, output: Rep) -> ClosureExpr {
-    let (pat, val) = unwrap_tokens(input);
+    let root = get_this_crate();
     wrap_closure(f, |f| {
         let out = wrap_tokens(output, parse_quote!(__u), parse_quote!(__prov));
-        parse_quote!({
-            let mut __f = #f;
-            move |#pat| __f(#val).map(|__u| #out)
-        })
+        match input {
+            Rep::Flat => parse_quote!({
+                let mut __f = #f;
+                let mut __g = #f;
+                let __h = __hydro_lineage.clone();
+                move |#root::sim::runtime::Tagged(__val, __prov)| {
+                    let __like = #root::sim::runtime::codegen::type_of(&__val);
+                    let __u = match __f(__val) {
+                        Some(__u) => __u,
+                        None => return None,
+                    };
+                    let __prov = #root::sim::runtime::codegen::agg_witness(
+                        &__h,
+                        &__prov,
+                        __like,
+                        |__c| __g(__c).is_some(),
+                    );
+                    Some(#out)
+                }
+            }),
+            Rep::Keyed => parse_quote!({
+                let mut __f = #f;
+                let mut __g = #f;
+                let __h = __hydro_lineage.clone();
+                move |(__key, #root::sim::runtime::Tagged(__val, __prov))| {
+                    let __like = #root::sim::runtime::codegen::type_of(&__val);
+                    let __key2 = __key.clone();
+                    let __u = match __f((__key, __val)) {
+                        Some(__u) => __u,
+                        None => return None,
+                    };
+                    let __prov = #root::sim::runtime::codegen::agg_witness(
+                        &__h,
+                        &__prov,
+                        __like,
+                        |__c| __g((__key2.clone(), __c)).is_some(),
+                    );
+                    Some(#out)
+                }
+            }),
+        }
     })
 }
 
@@ -284,7 +399,10 @@ fn wrap_flat_map(f: &ClosureExpr, input: Rep, output: Rep) -> ClosureExpr {
         let out = wrap_tokens(output, parse_quote!(__u), parse_quote!(__prov.clone()));
         parse_quote!({
             let mut __f = #f;
-            move |#pat| __f(#val).into_iter().map(move |__u| #out)
+            move |#pat| {
+                let __prov = __prov.strip_agg();
+                __f(#val).into_iter().map(move |__u| #out)
+            }
         })
     })
 }
@@ -317,6 +435,33 @@ fn wrap_acc(acc: &ClosureExpr, input: Rep) -> ClosureExpr {
     })
 }
 
+/// [`wrap_acc`] for a fold with an initial state: the step also records the input's value
+/// for aggregate witnesses when the mode is on
+/// ([`codegen::agg_push`](crate::sim::runtime::codegen::agg_push)), with fresh instances of
+/// the fold's `init` and `acc` for the re-folds; off, exactly [`wrap_acc`].
+fn wrap_fold_acc(acc: &ClosureExpr, init: &ClosureExpr, input: Rep) -> ClosureExpr {
+    let (pat, val) = unwrap_tokens(input);
+    let root = get_this_crate();
+    let init: &syn::Expr = &init.expr;
+    wrap_closure(acc, |acc| {
+        parse_quote!({
+            let mut __acc = #acc;
+            let __h = __hydro_lineage.clone();
+            move |__state: &mut #root::sim::runtime::Tagged<_>, #pat| {
+                #root::sim::runtime::codegen::agg_push(
+                    &__h,
+                    &mut __state.1,
+                    &__state.0,
+                    &__val,
+                    &__prov,
+                    || #root::sim::runtime::TypedAggregate::new(#init, #acc),
+                );
+                __acc(&mut __state.0, #val);
+            }
+        })
+    })
+}
+
 /// `Fn(&mut A, T) -> Option<U>` (scan): absorbs, applies, tags any output with the
 /// accumulated provenance.
 fn wrap_scan_acc(acc: &ClosureExpr, input: Rep, output: Rep) -> ClosureExpr {
@@ -327,7 +472,7 @@ fn wrap_scan_acc(acc: &ClosureExpr, input: Rep, output: Rep) -> ClosureExpr {
         parse_quote!({
             let mut __acc = #acc;
             move |__state: &mut #root::sim::runtime::Tagged<_>, #pat| {
-                __state.1.extend(&__prov);
+                __state.1.extend(&__prov.strip_agg());
                 __acc(&mut __state.0, #val).map(|__u| #out)
             }
         })
@@ -549,10 +694,10 @@ pub fn rewrite(ir: &mut [HydroRoot]) {
                     if in_rep != out_rep {
                         let adapter: syn::Expr = match (in_rep, out_rep) {
                             (Rep::Flat, Rep::Keyed) => {
-                                parse_quote!(#root::sim::runtime::codegen::key_out)
+                                parse_quote!(#root::sim::runtime::codegen::key_out_cast)
                             }
                             (Rep::Keyed, Rep::Flat) => {
-                                parse_quote!(#root::sim::runtime::codegen::key_in)
+                                parse_quote!(#root::sim::runtime::codegen::key_in_cast)
                             }
                             _ => unreachable!(),
                         };
@@ -644,7 +789,7 @@ pub fn rewrite(ir: &mut [HydroRoot]) {
                     tag_kind(&mut tagged_meta.collection_kind);
                     post = Some((
                         parse_quote!(|(__i, #root::sim::runtime::Tagged(__v, __p))| {
-                            #root::sim::runtime::Tagged((__i, __v), __p)
+                            #root::sim::runtime::Tagged((__i, __v), __p.strip_agg())
                         }),
                         tagged_meta,
                     ));
@@ -720,8 +865,20 @@ pub fn rewrite(ir: &mut [HydroRoot]) {
                     };
                     tag_kind(&mut metadata.collection_kind);
                 }
-                HydroNode::Filter { f, input, metadata }
-                | HydroNode::Inspect { f, input, metadata } => {
+                // A filter keeps the record as it is, so the aggregate witnesses of what it
+                // lets through are computed by a map placed after it (see the module docs).
+                HydroNode::Filter { f, input, metadata } => {
+                    assert!(
+                        f.singleton_refs.is_empty(),
+                        "the provenance rewrite does not support references captured by `{name}`"
+                    );
+                    let predicate = f.clone();
+                    *f = wrap_by_ref(f, &input.metadata().collection_kind);
+                    tag_kind(&mut metadata.collection_kind);
+                    let witness = filter_witness_expr(&predicate, &metadata.collection_kind);
+                    post = Some((witness, metadata.clone()));
+                }
+                HydroNode::Inspect { f, input, metadata } => {
                     assert!(
                         f.singleton_refs.is_empty(),
                         "the provenance rewrite does not support references captured by `{name}`"
@@ -756,8 +913,8 @@ pub fn rewrite(ir: &mut [HydroRoot]) {
                         Rep::Flat,
                         "provenance rewrite: keyed input to fold"
                     );
+                    *acc = wrap_fold_acc(acc, init, Rep::Flat);
                     *init = wrap_init(init);
-                    *acc = wrap_acc(acc, Rep::Flat);
                     tag_kind(&mut metadata.collection_kind);
                 }
                 HydroNode::FoldKeyed {
@@ -771,8 +928,8 @@ pub fn rewrite(ir: &mut [HydroRoot]) {
                         Rep::Keyed,
                         "provenance rewrite: flat input to fold_keyed"
                     );
+                    *acc = wrap_fold_acc(acc, init, Rep::Flat);
                     *init = wrap_init(init);
-                    *acc = wrap_acc(acc, Rep::Flat);
                     tag_kind(&mut metadata.collection_kind);
                 }
                 HydroNode::Reduce { f, input, metadata } => {

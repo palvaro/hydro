@@ -36,11 +36,12 @@ use hydro_lang::sim::ldfi::{Derivation, Exploration, Grade, Ldfi, Level, Outcome
 
 use crate::cluster::two_pc_ldfi::harness as two_pc;
 
-/// The columns: `(name, level, disjunctive provenance)`.
-const LEVELS: [(&str, Level, bool); 3] = [
-    ("exec", Level::Execution, false),
-    ("precise", Level::Precise, false),
-    ("disjunctive", Level::Precise, true),
+/// The columns: `(name, level, disjunctive provenance, aggregate witnesses)`.
+const LEVELS: [(&str, Level, bool, bool); 4] = [
+    ("exec", Level::Execution, false, false),
+    ("precise", Level::Precise, false, false),
+    ("disjunctive", Level::Precise, true, false),
+    ("aggregate", Level::Precise, true, true),
 ];
 
 /// One measurement: one configuration at one level.
@@ -66,6 +67,11 @@ struct Cell {
     replay_fallbacks: usize,
     /// Steps where the witness cap truncated (disjunctive provenance only).
     overflows: usize,
+    /// Aggregate witnesses: predicate outputs given a disjunction, outputs whose only minimal
+    /// witness was every input (the conjunction, as without the flag), and skips.
+    agg_disjunctions: usize,
+    agg_unchanged: usize,
+    agg_skips: usize,
     secs: f64,
 }
 
@@ -148,12 +154,13 @@ fn measure(
         true
     };
     for repeat in 0..repeats() {
-        for (name, level, disjunctive) in LEVELS {
+        for (name, level, disjunctive, aggregate) in LEVELS {
             let start = Instant::now();
             let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 configure(crashes)
                     .level(level)
                     .disjunctive_provenance(disjunctive)
+                    .aggregate_witnesses(aggregate)
                     .exploration(exploration())
                     .max_hypotheses(max_hypotheses())
                     .quiet()
@@ -173,13 +180,17 @@ fn measure(
                     let distinct: BTreeSet<&Derivation> = derivations.iter().copied().collect();
                     let total_deps: usize = derivations.iter().map(|d| d.len()).sum();
                     let all = outcome.runs().iter().flat_map(|h| &h.schedules);
-                    let (replays, fallbacks, overflows) = all.fold((0, 0, 0), |(r, f, o), s| {
-                        (
-                            r + s.replays,
-                            f + s.replay_fallbacks,
-                            o + s.witness_overflows,
-                        )
-                    });
+                    let (replays, fallbacks, overflows, agg_disjunctions, agg_unchanged, agg_skips) =
+                        all.fold((0, 0, 0, 0, 0, 0), |(r, f, o, d, u, k), s| {
+                            (
+                                r + s.replays,
+                                f + s.replay_fallbacks,
+                                o + s.witness_overflows,
+                                d + s.aggregate.disjunctions,
+                                u + s.aggregate.unchanged + s.aggregate.narrowed,
+                                k + s.aggregate.skips(),
+                            )
+                        });
                     Cell {
                         ctp,
                         repeat,
@@ -201,6 +212,9 @@ fn measure(
                         replays,
                         replay_fallbacks: fallbacks,
                         overflows,
+                        agg_disjunctions,
+                        agg_unchanged,
+                        agg_skips,
                         secs,
                     }
                 }
@@ -228,12 +242,15 @@ fn measure(
                         replays: 0,
                         replay_fallbacks: 0,
                         overflows: 0,
+                        agg_disjunctions: 0,
+                        agg_unchanged: 0,
+                        agg_skips: 0,
                         secs,
                     }
                 }
             };
             eprintln!(
-                "cell: ctp={ctp} n={n} load={txns} cr={crashes} #{repeat} {name}: {} hyp={} sched={} deriv={} ({} distinct, mean {:.2}, {:.2}/run) replays={} fallbacks={} overflows={} {:.1}s",
+                "cell: ctp={ctp} n={n} load={txns} cr={crashes} #{repeat} {name}: {} hyp={} sched={} deriv={} ({} distinct, mean {:.2}, {:.2}/run) replays={} fallbacks={} overflows={} agg-disj={} agg-unchanged={} agg-skips={} {:.1}s",
                 cell.verdict,
                 cell.hypotheses,
                 cell.schedules,
@@ -244,6 +261,9 @@ fn measure(
                 cell.replays,
                 cell.replay_fallbacks,
                 cell.overflows,
+                cell.agg_disjunctions,
+                cell.agg_unchanged,
+                cell.agg_skips,
                 cell.secs
             );
             out.push(cell);
@@ -287,7 +307,7 @@ fn render(cells: &[Cell]) -> String {
         )
         .unwrap();
         write!(out, "| config |").unwrap();
-        for (name, _, _) in LEVELS {
+        for (name, _, _, _) in LEVELS {
             write!(out, " {name} |").unwrap();
         }
         writeln!(out).unwrap();
@@ -305,7 +325,7 @@ fn render(cells: &[Cell]) -> String {
         }
         for label in &configs {
             write!(out, "| {label} |").unwrap();
-            for (name, _, _) in LEVELS {
+            for (name, _, _, _) in LEVELS {
                 match rows
                     .iter()
                     .find(|c| &config_label(c) == label && c.level == name)
@@ -331,11 +351,11 @@ fn render(cells: &[Cell]) -> String {
 
         writeln!(
             out,
-            "Detail (`derivations observed / distinct derivations / replays / replay fallbacks / witness overflows`):\n"
+            "Detail (`derivations observed / distinct derivations / replays / replay fallbacks / witness overflows / aggregate disjunctions / aggregate skips`):\n"
         )
         .unwrap();
         write!(out, "| config |").unwrap();
-        for (name, _, _) in LEVELS {
+        for (name, _, _, _) in LEVELS {
             write!(out, " {name} |").unwrap();
         }
         writeln!(out).unwrap();
@@ -346,19 +366,21 @@ fn render(cells: &[Cell]) -> String {
         writeln!(out).unwrap();
         for label in &configs {
             write!(out, "| {label} |").unwrap();
-            for (name, _, _) in LEVELS {
+            for (name, _, _, _) in LEVELS {
                 match rows
                     .iter()
                     .find(|c| &config_label(c) == label && c.level == name)
                 {
                     Some(c) => write!(
                         out,
-                        " {} / {} / {} / {} / {} |",
+                        " {} / {} / {} / {} / {} / {} / {} |",
                         c.derivations,
                         c.distinct_derivations,
                         c.replays,
                         c.replay_fallbacks,
-                        c.overflows
+                        c.overflows,
+                        c.agg_disjunctions,
+                        c.agg_skips
                     )
                     .unwrap(),
                     None => write!(out, " - |").unwrap(),

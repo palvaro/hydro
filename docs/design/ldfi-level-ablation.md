@@ -1534,3 +1534,209 @@ cell, so on them disjunctive provenance is a no-op by construction. On echo broa
 prunes the provably useless hypotheses (diagnostic above) and surfaces crash points on the
 echoing members that the single-witness search never names; the net hypothesis count rises
 (+10 %, +22 % at n=3; +40 % at n=4, where the witness cap of 8 is hit 150+ times per run).
+
+## Aggregate-local counterfactual witnesses
+
+The disjunction above only ever fired at a dedup, and the corpus' redundancy is not shaped like
+a dedup: a Paxos commit, a 2PC decision, an ISR acknowledgement are a `fold` (a count) over `n`
+contributions followed by a threshold predicate, and tag-propagation makes the fold's output the
+conjunction of *all* `n` inputs. "Any `k` of `n`" is lost at the aggregate, in hydrofrac as in
+Molly (which conjoins aggregates too). This section recovers it behind a second flag and
+measures what it buys. Same machine as above (an 8-core, 15 GiB host, two searches running at a
+time), same harnesses, an `aggregate` column added (`Level::Precise`,
+`disjunctive_provenance(true)`, `aggregate_witnesses(true)`).
+
+### What was built
+
+`Ldfi::aggregate_witnesses(bool)` (`LDFI_AGGREGATE=1`), default off. The mode is a run-time
+cell on the instance's `LineageHandles`, read by generated code, so one provenance-compiled
+program serves every column.
+
+**The fold records its inputs** (`sim/runtime/provenance.rs`, `Node::Agg`). Under the mode, a
+`fold` / `fold_keyed` accumulator's provenance cell is an aggregate cell: the conjunction of
+every input (what it resolves to, so every reader that does not know about aggregates sees
+exactly the formula it saw before) plus each input's value and provenance, up to
+`AGGREGATE_MAX_INPUTS = 10` of them, and a type-erased re-fold built from fresh instances of the
+fold's own `init` and `acc` closures (the rewrite emits the same `q!` expressions a second
+time; `codegen::agg_push`). The cell is copy-on-write like the conjunction: an accumulator the
+fold has already emitted is not mutated. `reduce` and `scan` are not aggregated (no initial
+state; a scan's state is not a set).
+
+**The predicate re-folds the subsets** (`codegen::agg_witness`). A `filter` (through a map the
+rewrite places after it, since a filter cannot replace its record's tag) or a `filter_map` whose
+input carries an aggregate cell with `n` inputs re-runs the fold on every one of the `2^n`
+subsets, in both input orders, and applies its own predicate to each result. The output's
+provenance becomes the disjunction of the **minimal passing subsets** (`Alts` of `All`s over
+the inputs' own provenances, so an input that is itself a dedup alternative composes) if and
+only if, on this run's inputs, the predicate is **upward-closed** (every superset of a passing
+subset passes), **order-independent** (both orders agree on every subset) and **passes the
+full set** (what actually happened). That is the soundness condition for a witness: a fault set
+that spares the witness spares a superset of it, and the aggregate over any superset still
+satisfies the predicate. It is checked, not assumed: the IR carries no commutativity
+annotation (`commutative = manual_proof!` is a type-level proof token), and a monotone fold
+under a non-monotone predicate (`count == 2`) is as common as the other way round. Where the
+check fails, the fold saw more than 10 inputs, or the re-folded value is not of the type the
+predicate sees, the output keeps the conjunction and the skip is counted by reason
+(`Schedule::aggregate`: `disjunctions`, `narrowed`, `unchanged`, `skipped_inputs`,
+`skipped_non_monotone`, `skipped_shape`, `capped`). More minimal subsets than
+`Ldfi::max_witnesses` keeps the first `cap` by size (dropping alternatives is sound). The empty
+subset is never offered as a witness even where the predicate accepts it (`count < min` on a
+key below threshold passes on no inputs): a keyed accumulator exists only once an input arrived,
+so the singletons are the witnesses there. (The first measurement pass lacked this rule and
+issued an empty disjunction to such outputs; every one of them in the corpus feeds the negative
+side of an `anti_join`, where its tag is dropped, so the tables below are unaffected, but their
+`d` counts include those outputs.)
+
+**The value the predicate sees is reshaped through casts, and nothing else.** A keyed fold's
+`entries()` (the cast from the keyed to the flat representation) pairs each re-fold with the
+record's key (`key_in_cast`), the reverse cast projects it away (`key_out_cast`), so
+`collect_quorum`'s `fold_keyed → entries → filter_map(success >= min)` and 2PC's
+`fold_keyed → filter(count >= n)` are both covered. Every operator that changes a record's value
+(`map`, `flat_map`, `scan`, `enumerate`, `filter_map`'s own output) strips the cell to its
+conjunction, and every combination (`join`, `cross`, a fold of a fold, a dedup) buries it in a
+larger formula, so no predicate ever re-evaluates an aggregate through a value it did not see;
+such records simply keep the conjunction. With the mode off every one of these steps is the
+identity on the formula: `cargo test -p hydro_lang --features ldfi --lib sim` passes, and
+`two_pc_ldfi::tests::single_derivation_search_is_unchanged_by_the_provenance_formula` still
+pins the thirteen hypotheses of the exhaustive 2PC+CTP `n=2 load=4` search.
+
+Unit tests (`sim::runtime::provenance::tests`): a 2-of-3 threshold yields the three pairs; an
+all-of-3 threshold keeps the conjunction (`unchanged`); an odd-count predicate, a threshold the
+full set fails, and a "last input" fold (order-dependent) fall back with `skipped_non_monotone`;
+a value of the wrong type falls back with `skipped_shape`; eleven inputs overflow the cell; the
+cap truncates; a shared cell is copied before it grows; the casts re-key and un-key; and with
+the mode off the step is a plain `extend`.
+
+### Where it fires in the corpus
+
+`LDFI_PROV_DEBUG` on one failure-free Paxos run, and the `aggregate` statistics per cell:
+
+- **Paxos, p2b commit quorum** (`collect_quorum(p2b, commit_quorum, 2f + 1)`): fires. The
+  `fold_keyed` counts the acknowledgements persisted for a slot, `entries()` re-keys,
+  `filter_map(success >= min)` emits the slot; the emitted record's witnesses are the minimal
+  acknowledgement subsets *among those the fold saw in that tick*. With the bug
+  (`commit_quorum = f = 1`) every acknowledgement is a witness on its own
+  (`[[5,6,7,11], [5,6,7,12]]` on the `(0, Some("y"))` send to the replicas: three deliveries
+  behind the payload and either p2b); with the correct `f + 1 = 2` of 3, a disjunction needs
+  all three acknowledgements batched into one tick, since `collect_quorum` emits the slot in the
+  tick the count reaches `min` and never again, and the replica send then reads
+  `[[16,17,22,23], [16,17,22,24], [16,17,23,24]]` (two deliveries behind the payload and two of
+  the three p2bs). In a 24-schedule probe of the correct variant (6 hypotheses × 4 schedules),
+  51 predicate outputs received a disjunction (2 per schedule, most of them the below-threshold
+  `success < min` filters of the two `collect_quorum`s, whose outputs only feed negations),
+  1,090 kept the conjunction as the only minimal subset (the all-of-`n` `received_from_all`
+  filters, and every 2-of-3 that saw exactly two acknowledgements), none was skipped, and four
+  sends to the replicas reached the wire with three witnesses.
+- **Paxos, p1b leader-election quorum** (`collect_quorum_with_response`): does not fire, by
+  construction of the library. Its output is the *responses* for keys that reached the
+  threshold, selected by `anti_join` against the keys below it — a negation, through which no
+  provenance flows — so each response carries only its own delivery, and `fold_early_stop`
+  (a `scan` + `flat_map`) then conjoins what it collected. The count's predicate never sits on
+  the records' path.
+- **2PC** (`fold_keyed(count) → filter(count >= num_participants)`): every output evaluated,
+  every one `unchanged` (the only minimal subset is every input: an all-of-`n` "quorum" is a
+  conjunction). The `aggregate` column is identical to `precise` and `disjunctive` cell for
+  cell.
+- **Reliable broadcast with echo**: no fold on the records' path; the `aggregate` column is
+  identical to `disjunctive`.
+- `hydro_std` quorum unit (`quorum_ldfi`, `collect_quorum` 2-of-3 with retransmitting
+  responders, 8 sampled schedules, cr=1): the declared quorum's witnesses go from
+  `[[5,7,10],[5,7,12]]` (every reply, with the retransmission alternative) to
+  `[[5,7],[5,10],[7,10]]`; the derivations of the goal shrink from six deliveries to four;
+  28 hypotheses to the certificate in both columns.
+
+### Paxos (p=2 a=3 cr=1, 4 schedules per hypothesis, cap 256), three repeats
+
+Cell = `verdict / hypotheses / schedules / mean derivation size / clauses per run / seconds`,
+then `(replays, aggregate disjunctions, aggregate skips)`. Witness overflows 0 except where
+noted.
+
+**Bug (commit quorum off by one):**
+
+| repeat | precise | disjunctive | aggregate |
+|---|---|---|---|
+| 1 | violated / 67 / 268 / 16.2 / 2.43 / 48s (r1057) | violated / 22 / 88 / 15.1 / 2.77 / 5s (r359) | violated / 21 / 84 / 14.7 / 3.95 / 4s (r350, d429, s0) |
+| 2 | violated / 23 / 92 / 15.8 / 2.52 / 5s (r351) | violated / 43 / 172 / 15.3 / 2.49 / 20s (r652) | violated / 47 / 188 / 15.2 / 3.02 / 23s (r749, d886, s0) |
+| 3 | violated / 56 / 224 / 15.7 / 2.45 / 29s (r866) | violated / 21 / 84 / 15.8 / 2.67 / 4s (r327) | violated / 53 / 212 / 15.9 / 3.26 / 28s (r767, d1026, s0) |
+
+Counterexamples: two p2a omissions to distinct acceptors (four cells), or those two plus one
+p1b omission (five cells: `precise` in repeats 1 and 3, `disjunctive` in repeat 2, `aggregate`
+in repeats 2 and 3 — the search's first hit, not a minimal one).
+
+**Correct:**
+
+Cap 256, three repeats:
+
+| repeat | precise | disjunctive | aggregate |
+|---|---|---|---|
+| 1 | budget / 256 / 1024 / 19.6 / 2.26 / 546s (r3818) | budget / 256 / 1024 / 19.8 / 2.16 / 503s (r3726) | budget / 256 / 1024 / 20.3 / 2.55 / 485s (r3930, d2774, s0; 4 overflows) |
+| 2 | budget / 256 / 1024 / 19.7 / 2.21 / 535s (r3786) | budget / 256 / 1024 / 19.9 / 2.20 / 617s (r3820) | budget / 256 / 1024 / 20.2 / 2.44 / 411s (r3614, d2944, s0; 1 overflow) |
+| 3 | budget / 256 / 1024 / 19.8 / 2.16 / 644s (r3670) | budget / 256 / 1024 / 19.8 / 2.11 / 562s (r3594) | budget / 256 / 1024 / 19.9 / 2.41 / 539s (r3700, d2875, s0; 3 overflows) |
+
+Cap 400, one pass (the correct variant does not finish within 256 in any column, so the
+certificate size needs the larger cap; one pass per column, so the counts carry the ±50 %
+draw variance noted for Paxos above):
+
+| precise | disjunctive | aggregate |
+|---|---|---|
+| certificate / 393 / 1572 / 20.2 / 1.83 / 1143s (r4708) | budget / 400 / 1600 / 20.4 / 1.89 / 1156s (r5142) | certificate / 339 / 1356 / 20.2 / 1.98 / 656s (r4054, d3858, s0; 5 overflows) |
+
+No counterexample in any correct cell. Verdicts agree wherever the search finished: every
+`budget` against `certificate` pair is the budget effect of the draw, as in the section above.
+
+### 2PC+CTP and echo broadcast (exhaustive, sanity)
+
+| protocol | config | precise | disjunctive | aggregate |
+|---|---|---|---|---|
+| 2PC | n=2 load=4 cr=1 | CEX / 2 / 32 / 8.00 / 8.00 / 0.5s | CEX / 2 / 32 / 8.00 / 8.00 / 0.5s | CEX / 2 / 32 / 8.00 / 8.00 / 0.5s |
+| 2PC+CTP | n=2 load=4 cr=1 | CERT(hand) / 13 / 414 / 7.81 / 19.69 / 4.5s | CERT(hand) / 13 / 414 / 7.81 / 19.69 / 4.5s | CERT(hand) / 13 / 414 / 7.81 / 19.69 / 4.5s |
+| broadcast, plain | n=3, 1 crash, POST positive | violated / 2 / 8 / 6.00 / 3.00 / 0.1s | violated / 2 / 8 / 6.00 / 3.00 / 0.1s | violated / 2 / 8 / 6.00 / 3.00 / 0.1s |
+| broadcast, echo | n=3, 1 crash, POST positive | certificate / 10 / 2641 / 4.55 / 264.00 / 23.6s | certificate / 11 / 2651 / 4.75 / 868.55 / 23.2s | certificate / 11 / 2651 / 4.75 / 868.55 / 23.5s |
+
+Replays identical column to column (2PC 352 / 2304; broadcast 54 / 16620 against 17280 for
+`precise`); aggregate disjunctions 0 in every cell (2PC: 128 and 1248 predicate outputs
+evaluated in the plain and the CTP cell, every one `unchanged`); skips 0.
+
+### Observations
+
+**The quorum now has witnesses, and the ILP sees them.** Predicate outputs received
+disjunctions in every Paxos cell (2,774–3,858 per correct cell, 429–1,026 per bug cell) with
+zero skips of any reason — the counting fold under a threshold is upward-closed and
+order-independent on every input set the runs produced, as expected — and the clauses per run
+rise by 10–40 % (bug 3.0–4.0 against 2.5–2.8; correct 2.4–2.6 against 2.1–2.3): the
+alternatives of the commit's single-witness clause. The witness cap of 8 is reached a handful
+of times per correct cell (1–5 overflows against 0): three acknowledgements batched into one
+tick give three pairs, and a pair crossed with the alternatives further up the formula can
+exceed eight.
+
+**It did not move the hypothesis count where the measurement can see it.** The bug's
+counterexample is draw-dominated at every level (precise 23–67, disjunctive 21–43, aggregate
+21–53) and the aggregate column is not consistently fewer; the correct variant exhausts 256 in
+every column and every repeat. At cap 400, in one pass each, `aggregate` certified at 339
+hypotheses and `precise` at 393 while `disjunctive` ran out at 400 — within the variance the
+earlier Paxos passes showed (`precise` 203, 230, 256+, 393 across this document), so a single
+pass does not separate them. Mean derivation size is unchanged (19.6–20.4 in every correct
+cell): the goal's derivation is dominated by the leader-election and payload deliveries, and
+removing one acknowledgement from the commit's witness is a small part of it.
+
+**Where the alternatives come from, and where they cannot.** `collect_quorum` emits a slot in
+the tick in which its count first reaches `min`, so with the correct `2` of `3` the predicate
+sees a third acknowledgement — and a second witness — only when the simulator batches all three
+into that tick: the alternatives exist in some schedules of a hypothesis and not others (four
+multi-witness replica sends in 24 schedules of the probe above). The p1b quorum has no
+aggregate on its records' path: `collect_quorum_with_response` selects the *responses* of
+qualifying keys by `anti_join` against the keys below threshold, and provenance does not flow
+through a negation, so no technique that re-folds an aggregate reaches it. The same holds for
+any quorum written as "the responses of keys whose count passed" rather than "the count passed".
+
+**Cost.** Wall time is within the draw noise (aggregate 411–539 s against 503–644 s per
+correct cell at cap 256; 656 s against 1143–1156 s at cap 400, with fewer hypotheses): the
+`2^n` re-folds at `n ≤ 3` are nothing against the simulation. Memory is bounded by the ten
+recorded inputs per live accumulator.
+
+**Sanity.** 2PC (all-of-`n`), with and without cooperative termination, and echo broadcast (no
+fold on the path) are identical to their `precise` / `disjunctive` cells, hypothesis for
+hypothesis and replay for replay; the `hydro_std` quorum unit shrinks its derivations from six
+deliveries to four at the same hypothesis count. Flag off, `cargo test -p hydro_lang
+--features ldfi --lib sim`, the pinned 2PC sequence and the Raft unclean-election test are
+unchanged.
