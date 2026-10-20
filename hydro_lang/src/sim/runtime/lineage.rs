@@ -49,7 +49,7 @@ use std::rc::Rc;
 use dfir_rs::bytes::Bytes;
 use dfir_rs::util::unsync::mpsc::Sender;
 
-use super::provenance::{DEFAULT_MAX_WITNESSES, Prov, RecordProv};
+use super::provenance::{AggregateMode, AggregateStats, DEFAULT_MAX_WITNESSES, Prov, RecordProv};
 use crate::location::dynamic::LocationId;
 
 /// Identifies one execution (async run or tick execution) within a simulation instance.
@@ -270,6 +270,11 @@ pub struct LineageHandles {
     /// The cap on witnesses per record when resolving (`0` for the default,
     /// [`DEFAULT_MAX_WITNESSES`]).
     pub witness_cap: Rc<Cell<usize>>,
+    /// Whether folds record their inputs and predicates compute aggregate-local
+    /// counterfactual witnesses (see `super::provenance`); set per run by the LDFI search.
+    pub aggregate: AggregateMode,
+    /// What aggregate witnesses did in this instance.
+    pub aggregate_stats: Rc<RefCell<AggregateStats>>,
     /// The message of a panic raised by the program's own code (an operator closure) and
     /// caught on the generated code's side of the dynamic-library boundary by
     /// [`erase_guarded`]; the host reports it. Unwinding across that boundary aborts the

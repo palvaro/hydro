@@ -107,8 +107,8 @@ use crate::sim::compiled::{
 };
 pub use crate::sim::observe::{LabelPlan, NotCheckedReason};
 use crate::sim::runtime::{
-    CrashPoint, DEFAULT_MAX_WITNESSES, DeliveryId, ExecId, LineageEvent, NodeKey, RecordProv,
-    SendFate, SendKey,
+    AggregateStats, CrashPoint, DEFAULT_MAX_WITNESSES, DeliveryId, ExecId, LineageEvent, NodeKey,
+    RecordProv, SendFate, SendKey,
 };
 use crate::sim::slice::{ChannelInfo, EcCollection, Slices};
 use crate::sim::spec::{Spec, SpecParts};
@@ -475,6 +475,10 @@ pub struct Schedule {
     /// record's alternatives (in the simulator's resolution of its formula, or in the
     /// closure's expansion), falling back to the single union derivation there.
     pub witness_overflows: usize,
+    /// Under [`Ldfi::aggregate_witnesses`]: what the predicates downstream of folds did with
+    /// their inputs' aggregate cells in this run (disjunctions issued, skips and their
+    /// reasons).
+    pub aggregate: AggregateStats,
     /// The run's event trace, for visualization (see [`crate::sim::viz`]). Retained for every
     /// failing schedule, and for every schedule under [`Ldfi::with_traces`].
     pub trace: Option<Rc<Trace>>,
@@ -835,6 +839,8 @@ pub struct Run<'a> {
     /// See [`Ldfi::disjunctive_provenance`] and [`Ldfi::max_witnesses`].
     disjunctive: bool,
     max_witnesses: usize,
+    /// See [`Ldfi::aggregate_witnesses`].
+    aggregate: bool,
     /// The scripted batch hooks placed under a traced pass-through policy at install.
     hooks: RefCell<Vec<TracedHook>>,
 }
@@ -982,6 +988,7 @@ impl Run<'_> {
         let slices = lineage_slices();
         let handles = lineage_handles();
         handles.witness_cap.set(self.max_witnesses);
+        handles.aggregate.set(self.aggregate);
         let mut faults = handles.faults.borrow_mut();
         for fault in self.faults {
             match fault {
@@ -1099,6 +1106,7 @@ impl Run<'_> {
             spec_pre,
             spec_post,
             spec_facts,
+            aggregate: lineage_handles().aggregate_stats.borrow().clone(),
             faults: self.faults.clone(),
             goal_port: self.goal_port,
             level: self.level,
@@ -1144,6 +1152,8 @@ struct RunRecord {
     /// Under a generated [`Spec`]: the facts correct members held (bincode), the search's fact
     /// domain when this is the failure-free probe.
     spec_facts: BTreeSet<Vec<u8>>,
+    /// See [`Schedule::aggregate`].
+    aggregate: AggregateStats,
     faults: FaultSet,
     goal_port: Option<usize>,
     level: Level,
@@ -1301,6 +1311,7 @@ impl RunRecord {
             replays: lineage.replays.get(),
             replay_fallbacks: lineage.replay_fallbacks.get(),
             witness_overflows: lineage.witness_overflows.get(),
+            aggregate: self.aggregate.clone(),
             trace,
         }
     }
@@ -3640,6 +3651,8 @@ pub struct Ldfi {
     disjunctive: bool,
     /// The cap on witnesses per record (see [`Self::max_witnesses`]).
     max_witnesses: usize,
+    /// Aggregate-local counterfactual witnesses (see [`Self::aggregate_witnesses`]).
+    aggregate: bool,
 }
 
 impl Default for Ldfi {
@@ -3667,6 +3680,7 @@ impl Ldfi {
             prov_graphs: false,
             disjunctive: false,
             max_witnesses: DEFAULT_MAX_WITNESSES,
+            aggregate: false,
         }
     }
 
@@ -3684,12 +3698,40 @@ impl Ldfi {
         self
     }
 
+    /// Under [`Self::disjunctive_provenance`], gives a record that passed a `filter` /
+    /// `filter_map` downstream of a `fold` the **minimal input subsets** on which re-running
+    /// the fold still satisfies the predicate, as alternatives, instead of the conjunction of
+    /// every input: a quorum of `k` out of `n` acknowledgements becomes `C(n, k)` witnesses
+    /// of `k` deliveries each. The fold's closures are re-run on every subset of the inputs
+    /// the accumulator saw (at most
+    /// [`AGGREGATE_MAX_INPUTS`](crate::sim::runtime::AGGREGATE_MAX_INPUTS)) and the predicate is checked
+    /// to be upward-closed and order-independent on them; where it is not, or the fold saw
+    /// too many inputs, the record keeps the conjunction and the schedule counts the skip
+    /// ([`Schedule::aggregate`]). Experimental; off by default; a no-op without
+    /// [`Self::disjunctive_provenance`] (the single-derivation reading of a disjunction is
+    /// its first alternative, so the record level would read a smaller derivation).
+    #[must_use]
+    pub fn aggregate_witnesses(mut self, on: bool) -> Self {
+        self.aggregate = on;
+        self
+    }
+
     /// Reads [`Self::disjunctive_provenance`] from `LDFI_DISJUNCTIVE` (`1` / `0`) if set.
     #[must_use]
     pub fn disjunctive_from_env(self) -> Self {
         match std::env::var("LDFI_DISJUNCTIVE").as_deref() {
             Ok("1" | "on" | "true") => self.disjunctive_provenance(true),
             Ok("0" | "off" | "false") => self.disjunctive_provenance(false),
+            _ => self,
+        }
+    }
+
+    /// Reads [`Self::aggregate_witnesses`] from `LDFI_AGGREGATE` (`1` / `0`) if set.
+    #[must_use]
+    pub fn aggregate_from_env(self) -> Self {
+        match std::env::var("LDFI_AGGREGATE").as_deref() {
+            Ok("1" | "on" | "true") => self.aggregate_witnesses(true),
+            Ok("0" | "off" | "false") => self.aggregate_witnesses(false),
             _ => self,
         }
     }
@@ -4034,6 +4076,7 @@ impl Ldfi {
                         level,
                         disjunctive: self.disjunctive,
                         max_witnesses: self.max_witnesses,
+                        aggregate: self.aggregate,
                         hooks: RefCell::new(vec![]),
                     };
                     run.install();
@@ -4616,6 +4659,7 @@ impl Ldfi {
                         level,
                         disjunctive: self.disjunctive,
                         max_witnesses: self.max_witnesses,
+                        aggregate: self.aggregate,
                         hooks: RefCell::new(vec![]),
                     };
                     run.install();
@@ -4704,6 +4748,7 @@ impl Ldfi {
                     level,
                     disjunctive: self.disjunctive,
                     max_witnesses: self.max_witnesses,
+                    aggregate: self.aggregate,
                     hooks: RefCell::new(vec![]),
                 };
                 run.install();

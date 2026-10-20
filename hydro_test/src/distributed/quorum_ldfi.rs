@@ -190,6 +190,8 @@ mod tests {
         Ldfi::new()
             .level(Level::Precise)
             .level_from_env()
+            .disjunctive_from_env()
+            .aggregate_from_env()
             .crashable_cluster("responder", &responders, 0..N)
             .crash_budget(crashes)
             .exploration(Exploration::Fuzz { instances: SAMPLED })

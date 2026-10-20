@@ -36,11 +36,12 @@ mod ablation {
     };
     use crate::distributed::reliable_delivery::{Ack, Msg, Receiver, Sender, reliable_delivery};
 
-    /// The columns: `(name, level, disjunctive provenance)`.
-    const LEVELS: [(&str, Level, bool); 3] = [
-        ("exec", Level::Execution, false),
-        ("precise", Level::Precise, false),
-        ("disjunctive", Level::Precise, true),
+    /// The columns: `(name, level, disjunctive provenance, aggregate witnesses)`.
+    const LEVELS: [(&str, Level, bool, bool); 4] = [
+        ("exec", Level::Execution, false, false),
+        ("precise", Level::Precise, false, false),
+        ("disjunctive", Level::Precise, true, false),
+        ("aggregate", Level::Precise, true, true),
     ];
 
     /// One measurement: one configuration at one level.
@@ -57,6 +58,9 @@ mod ablation {
         fallbacks: usize,
         /// Steps where the witness cap truncated (disjunctive provenance only).
         overflows: usize,
+        /// Aggregate witnesses: predicate outputs given a disjunction, and skips.
+        agg_disjunctions: usize,
+        agg_skips: usize,
         secs: f64,
     }
 
@@ -76,10 +80,13 @@ mod ablation {
         let schedules = outcome.runs().iter().flat_map(|h| &h.schedules);
         let (mut leaves, mut derivations, mut replays, mut fallbacks, mut overflows) =
             (0usize, 0usize, 0, 0, 0);
+        let (mut agg_disjunctions, mut agg_skips) = (0, 0);
         for s in schedules {
             replays += s.replays;
             fallbacks += s.replay_fallbacks;
             overflows += s.witness_overflows;
+            agg_disjunctions += s.aggregate.disjunctions;
+            agg_skips += s.aggregate.skips();
             if s.goal_held {
                 for d in &s.derivations {
                     leaves += d.len();
@@ -100,6 +107,8 @@ mod ablation {
             replays,
             fallbacks,
             overflows,
+            agg_disjunctions,
+            agg_skips,
             secs,
         }
     }
@@ -114,6 +123,8 @@ mod ablation {
             replays: 0,
             fallbacks: 0,
             overflows: 0,
+            agg_disjunctions: 0,
+            agg_skips: 0,
             secs: 0.0,
         }
     }
@@ -147,6 +158,9 @@ mod ablation {
         if c.replays > 0 || c.fallbacks > 0 || c.overflows > 0 {
             write!(s, " (r{} f{} o{})", c.replays, c.fallbacks, c.overflows).unwrap();
         }
+        if c.agg_disjunctions > 0 || c.agg_skips > 0 {
+            write!(s, " (agg d{} s{})", c.agg_disjunctions, c.agg_skips).unwrap();
+        }
         s
     }
 
@@ -154,7 +168,7 @@ mod ablation {
     fn table(rows: &[(String, Vec<Cell>)]) -> String {
         let mut out = String::new();
         out.push_str("| config |");
-        for (name, _, _) in LEVELS {
+        for (name, _, _, _) in LEVELS {
             write!(out, " {name} |").unwrap();
         }
         out.push('\n');
@@ -172,7 +186,8 @@ mod ablation {
         }
         out.push_str(
             "\nCells: `verdict / hypotheses / schedules / mean derivation size / clauses per run / wall secs`; \
-             `(rN fM oK)` = counterfactual replays, replay fallbacks, witness overflows.\n",
+             `(rN fM oK)` = counterfactual replays, replay fallbacks, witness overflows; \
+             `(agg dN sM)` = aggregate disjunctions, aggregate skips.\n",
         );
         out
     }
@@ -206,10 +221,10 @@ mod ablation {
     /// `catch_unwind`, so a level the program does not support is a cell, not a crash. A
     /// program compiled without provenance is searched at every level too (`Precise` then
     /// replays every record); the disjunctive column needs record provenance.
-    fn run_levels(provenance: bool, search: impl Fn(Level, bool) -> Outcome) -> Vec<Cell> {
+    fn run_levels(provenance: bool, search: impl Fn(Level, bool, bool) -> Outcome) -> Vec<Cell> {
         LEVELS
             .iter()
-            .map(|&(name, level, disjunctive)| {
+            .map(|&(name, level, disjunctive, aggregate)| {
                 if disjunctive && !provenance {
                     return unavailable("n/a: needs record provenance");
                 }
@@ -217,7 +232,7 @@ mod ablation {
                     return unavailable("skipped (LDFI_ABLATION_LEVEL)");
                 }
                 let start = Instant::now();
-                match catch_unwind(AssertUnwindSafe(|| search(level, disjunctive))) {
+                match catch_unwind(AssertUnwindSafe(|| search(level, disjunctive, aggregate))) {
                     Ok(outcome) => {
                         let cell = measure(&outcome, start.elapsed().as_secs_f64());
                         eprintln!("  {name}: {}", format_cell(&cell));
@@ -304,10 +319,11 @@ mod ablation {
         }
         let compiled = sim.compiled();
 
-        run_levels(provenance, |level, disjunctive| {
+        run_levels(provenance, |level, disjunctive, aggregate| {
             quiet(Ldfi::new())
                 .level(level)
                 .disjunctive_provenance(disjunctive)
+                .aggregate_witnesses(aggregate)
                 .crashable("broadcaster", &broadcaster)
                 .crashable_cluster("member", &members, 0..members_n)
                 .crash_budget(crashes)
@@ -384,10 +400,11 @@ mod ablation {
         }
         let compiled = sim.compiled();
 
-        run_levels(provenance, |level, disjunctive| {
+        run_levels(provenance, |level, disjunctive, aggregate| {
             quiet(Ldfi::new())
                 .level(level)
                 .disjunctive_provenance(disjunctive)
+                .aggregate_witnesses(aggregate)
                 .goal(&out)
                 .run(&compiled, async |run| {
                     for round in 1..=eot {

@@ -592,12 +592,19 @@ fn compile_sim_graph_trybuild(
         dfir_expr
     };
 
-    // Wrap to erase the concrete closure type so all locations can go in a Vec.
+    // Wrap to erase the concrete closure type so all locations can go in a Vec. The
+    // graph's operator closures may name `__hydro_lineage` (the provenance rewrite's
+    // aggregate witnesses do); the tick closure moves what it names, so each graph gets its
+    // own handle.
     let root = get_this_crate();
     let mut dfir_into_code_erased = |g: &DfirGraph| -> syn::Expr {
         let inner = dfir_into_code(g);
         syn::parse_quote! {
-            #root::sim::runtime::erase_guarded(#inner, __hydro_lineage.clone())
+            {
+                let __hydro_lineage_guard = __hydro_lineage.clone();
+                let __hydro_lineage = __hydro_lineage.clone();
+                #root::sim::runtime::erase_guarded(#inner, __hydro_lineage_guard)
+            }
         }
     };
 
