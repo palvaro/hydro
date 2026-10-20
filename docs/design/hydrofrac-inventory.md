@@ -10,7 +10,53 @@ Hydro's type system certifies consistent computation: a collection labelled `Eve
 
 ### 1. What it checks and how to run it
 
-Hydrofrac is driven from a test. Every protocol under test needs one, even when every property is supplied by the types: the test builds the flow, fixes cluster sizes, declares which nodes may crash and how many, and writes a body that drives inputs and timers. The body is not boilerplate — where it places the end of finite failures and how much recovery window it leaves decides whether a correct protocol certifies (§3; Part II §3). What the test does *not* have to do, on the common path, is say which collections to check or what to check about them. `Spec::all_labels` plus `Ldfi::search_all_labels` finds every IR node where the `EventualConsistency` label is *introduced* and every node where a labelled collection *exits* the labelled region, taps each, and runs one search per collection; the property is generated, only the harness is written (hydrofrac.md §"Using hydrofrac"). The label is a type parameter of the live collection — part of `Stream<T, L, B, O, R>`'s type, not an IR annotation — and the type system propagates it by its rules. It enters the type at exactly two kinds of operator: a network send over a transport whose guarantee grants it (`broadcast_closed` over `fail_stop` or `lossy_*`), or a programmer's `assert_has_consistency_of` with a proof. The compiler records each node's resulting type in its IR metadata (`metadata().consistency`), so the search can walk the IR and pick out the nodes whose output carries the label while none of their inputs do (`sim::observe`; auto-labels spec §3). Those are the introducing nodes, and each is a place where the type system has made an assumption about faults that nothing in the program checks. Downstream of one, the label marks a region of the dataflow graph. Downstream operators inherit the label and are not listed. The collection exits the region at the first consumer that does not carry the label (`weaken_consistency`, a `batch` into an unlabelled tick) or at a program output; a send to another location is not an exit, the collection continues there under that transport's rule. The exit is what the program delivers under the label. Both are checked because they can disagree, and the disagreement is the point: reliable broadcast's single-hop `broadcast_closed` introduces `EventualConsistency` and is violated by the sender's crash mid-fan-out, while its delivered set — derived from that same label by the type system — certifies, because of the echo the types cannot see (hydrofrac.md §"Which collections are checked"). The test below is exactly that case: it is the harness for `reliable_broadcast_closed`, and with `all_labels` it checks every `EventualConsistency` collection inside the protocol — the inner single-hop `broadcast_closed` the source issues, the echo the members issue, and the delivered set — in one run:
+Hydrofrac is driven from a test. Every protocol under test needs one, even when every property is supplied by the types: the test builds the flow, fixes cluster sizes, declares which nodes may crash and how many, and writes a body that drives inputs and timers. The body is not boilerplate — where it places the end of finite failures and how much recovery window it leaves decides whether a correct protocol certifies (§3; Part II §3). What the test does *not* have to do, on the common path, is say which collections to check or what to check about them. `Spec::all_labels` plus `Ldfi::search_all_labels` finds every IR node where the `EventualConsistency` label is *introduced* and every node where a labelled collection *exits* the labelled region, taps each, and runs one search per collection; the property is generated, only the harness is written (hydrofrac.md §"Using hydrofrac"). The label is a type parameter of the live collection — part of `Stream<T, L, B, O, R>`'s type, not an IR annotation — and the type system propagates it by its rules. It enters the type at exactly two kinds of operator: a network send over a transport whose guarantee grants it (`broadcast_closed` over `fail_stop` or `lossy_*`), or a programmer's `assert_has_consistency_of` with a proof. The compiler records each node's resulting type in its IR metadata (`metadata().consistency`), so the search can walk the IR and pick out the nodes whose output carries the label while none of their inputs do (`sim::observe`; auto-labels spec §3). Those are the introducing nodes, and each is a place where the type system has made an assumption about faults that nothing in the program checks. Downstream of one, the label marks a region of the dataflow graph. Downstream operators inherit the label and are not listed. The collection exits the region at the first consumer that does not carry the label (`weaken_consistency`, a `batch` into an unlabelled tick) or at a program output; a send to another location is not an exit, the collection continues there under that transport's rule. The exit is what the program delivers under the label. Both are checked because they can disagree, and the disagreement is the point: reliable broadcast's single-hop `broadcast_closed` introduces `EventualConsistency` and is violated by the sender's crash mid-fan-out, while its delivered set — derived from that same label by the type system — certifies, because of the echo the types cannot see (hydrofrac.md §"Which collections are checked").
+
+The simplest case first: one process broadcasting two items to a cluster of three over `fail_stop`, every node crashable, one crash. This is `ec_ldfi.rs::ec_broadcast_closed_fail_stop_breaks_under_a_sender_crash`, whose body is `process_to_cluster(Transport::FailStop, 1)`; the harness, trimmed to the lines that matter, is:
+
+```rust
+let mut flow = FlowBuilder::new();
+let source = flow.process::<Source>();
+let members = flow.cluster::<Member>();
+let (send, items) = source.sim_input::<Item, TotalOrder, ExactlyOnce>();
+
+// broadcast_closed over fail_stop introduces EventualConsistency.
+let at_members = items.broadcast_closed(&members, TCP.fail_stop().name("bcast").bincode());
+
+// The single-collection form: name the collection and the correct members by hand.
+let mut spec = Spec::new(&mut flow);
+let correct = spec.correct_members(&members, 0..MEMBERS);
+let observed = spec.observe_cluster(at_members.weaken_consistency());
+spec.eventual_consistency(observed, correct);
+
+let compiled = flow.sim()
+    .skip_consistency_assertions()
+    .with_cluster_size(&members, MEMBERS as usize)
+    .with_provenance()
+    .compiled();
+
+let outcome = Ldfi::new()
+    .level(Level::Precise)
+    .crashable("source", &source)
+    .crashable_cluster("member", &members, 0..MEMBERS)
+    .crash_budget(1)
+    .spec(&spec)
+    .search(&compiled, async |_run| {
+        send.send(Item(1));
+        send.send(Item(2));
+        hydro_lang::sim::quiesce().await;
+    });
+```
+
+The verdict is **Violated**, 5 hypotheses, `crash(source after bcast[→1]:Item(2))` (hydrofrac.md §"Results on existing Hydro code"); the test asserts only that the counterexample is a crash of `source`. The diagram below is the gallery's `plain_broadcast` entry. It is drawn from the same shape — one broadcaster, three members, `fail_stop`, one crash — but under `reliable_broadcast.rs`'s harness (`gallery_plain_broadcast`: one payload, and Part II's hand-written `PRE`/`POST` rather than the generated specification), which is why its caption says 2 hypotheses where the generated search above takes 5. The failing run is the one both searches find.
+
+![Lamport diagram of the plain broadcast counterexample: the broadcaster crashes after its second fan-out send](molly-viz-samples/plain_broadcast/failing.png)
+
+*The failing run for plain broadcast (`molly-viz-samples/plain_broadcast`), found after 2 hypotheses and 8 schedules: one lane per node, time downward; the broadcaster delivers `initial: Payload(42)` to member 0 and member 1, then `☠ crashed` ends its lane after `initial[→1]`, and its third send to member 2 is drawn gray dashed to a `✗` — lost because the sender had crashed — so members 0 and 1 hold the fact and member 2 never does. A red dashed `✗` would be an omission on a lossy channel, a dashed `EFF` rule the end of finite failures, and `★` marks the goal's support in a witness diagram; none of the three appears here because the channel is `fail_stop` and the body sets no cut.*
+
+What the picture shows is the premise the type system made. The transport granted `EventualConsistency` on the reasoning that "a failed connection stops *all* future deliveries to that recipient, which models the recipient as having failed" (`hydro_lang/src/networking/mod.rs`, `FailStop`'s `ConsistencyGuarantee`) — a statement about recipients that is silent about the sender — and one crash of the sender between two sends of one fan-out leaves two members with the item and one without, with nothing to retransmit it. This is the standard EC violation, and every single-hop `broadcast_closed` in the corpus (§5) fails the same way. The test uses the single-collection form — `Spec::new`, `observe_cluster` on the collection with its label dropped, `correct_members`, `spec.eventual_consistency(observed, correct)`, `Ldfi::search` (hydrofrac.md §"Using hydrofrac") — and `all_labels` runs exactly this once per collection it finds, with the same generated view; the only difference is that here the collection is named by hand.
+
+Whether the failure matters depends on what the program builds on top of the hop, and that is what `all_labels` separates. The second test is the harness for `reliable_broadcast_closed` (`ec_demos_ldfi.rs::ec_demo_reliable_broadcast_all_labels`), and with `all_labels` it checks every `EventualConsistency` collection inside the protocol — the inner single-hop `broadcast_closed` the source issues, the echo the members issue, and the delivered set — in one run:
 
 ```rust
 let mut flow = FlowBuilder::new();
@@ -44,7 +90,17 @@ let results = Ldfi::new()
 println!("{results}");
 ```
 
-It prints one line per labelled collection: the source's single-hop broadcast violated by `crash(source after …[→1]:2)` in 5 hypotheses, the members' echo broadcast violated by an echoer's crash in 3, and the delivered set certified in 10 hypotheses under exhaustive schedules (hydrofrac.md §"Using hydrofrac"). The third line exists because of the `weaken_consistency().sim_cluster_output()` call: `weaken_consistency` strips the label from the type (`Stream<T, L::DropConsistency, ..>`), which is what makes the node an exit, and `sim_cluster_output` registers it as a per-member output of the simulated cluster (`SimClusterReceiver`). Without that line the delivered set is never consumed outside the labelled region and only the two introducing nodes are reported. `results.verdicts` holds one `LabelVerdict` per collection, `Searched(outcome)` or `NotChecked(reason)`; tests assert with `results.at("file.rs:149")`, `results.all_certified_or_not_checked()` or `results.counterexamples()`.
+It prints one line per labelled collection: the source's single-hop broadcast violated by `crash(source after …[→1]:2)` in 5 hypotheses, the members' echo broadcast violated by an echoer's crash in 3, and the delivered set certified in 10 hypotheses under exhaustive schedules (hydrofrac.md §"Using hydrofrac"). The two violations are not defects. They are the premise the protocol exists to discharge: reliable broadcast builds a reliable delivered set out of an unreliable single-hop broadcast and an unreliable echo, and a result that reads "inner collections violated, delivered set certified" is the search showing the protocol doing exactly its job. The two inner failing runs:
+
+![Lamport diagram: the source crashes after its second item to member 1; its second item to member 2 is lost](molly-viz-samples/ec/ec_reliable_broadcast_inner_source_hop/failing.png)
+
+*`reliable_broadcast.rs:130`, the source's single hop (`molly-viz-samples/ec/ec_reliable_broadcast_inner_source_hop`): violated by `crash(source after reliable_broadcast.rs:130[→1]:2)` after 5 hypotheses and 5 schedules. The source delivers `1` and `2` to members 0 and 1, dies, and its `2` to member 2 is lost; member 2 receives `2` through the echoes on `:156` — its output `⇒` shows both items — but on this collection, the hop alone, member 2 holds `1` and members 0 and 1 hold `1` and `2`.*
+
+![Lamport diagram: member 0 crashes after echoing to member 1; its echo of 2 to member 2 is lost](molly-viz-samples/ec/ec_reliable_broadcast_inner_echo/failing.png)
+
+*`reliable_broadcast.rs:156`, the members' echo, keyed by echoer (`molly-viz-samples/ec/ec_reliable_broadcast_inner_echo`): violated by `crash(member@0 after reliable_broadcast.rs:156[0→1]:2)` after 3 hypotheses and 3 schedules. Member 0 echoes `1` and `2` to member 1, dies, and its echo of `2` to member 2 is lost; member 1 holds (member 0, `2`) and member 2 does not, while the merged delivered set is complete at both. The echo repairs the merged set, not the keyed record of who echoed.*
+
+The third line exists because of the `weaken_consistency().sim_cluster_output()` call: `weaken_consistency` strips the label from the type (`Stream<T, L::DropConsistency, ..>`), which is what makes the node an exit, and `sim_cluster_output` registers it as a per-member output of the simulated cluster (`SimClusterReceiver`). Without that line the delivered set is never consumed outside the labelled region and only the two introducing nodes are reported. `results.verdicts` holds one `LabelVerdict` per collection, `Searched(outcome)` or `NotChecked(reason)`; tests assert with `results.at("file.rs:149")`, `results.all_certified_or_not_checked()` or `results.counterexamples()`.
 
 The generated specification, `Spec::eventual_consistency`, is a universal over a fixed fact domain: a failure-free probe collects every fact seen at any member into `FACTS`, and under every later hypothesis each fact of `FACTS` present at some correct member must be present at every correct member. A fact absent everywhere creates no obligation; a probe that yields no facts is `Vacuous` (hydrofrac.md §"What hydrofrac checks").
 
@@ -72,7 +128,7 @@ Three questions define a fault model: what can fail, who can crash, and when. Hy
 
 **How many.** Every harness in the EC corpus allows one crash — "the searches below allow one crash", multi-Paxos "one crash allowed" (hydrofrac.md §"Every label of multi-Paxos") — and no source gives a reason: it is a convention, not a result. It can miss bugs. 2PC with cooperative termination certifies under one crash and breaks under two (history §9; Part II §4), which is exactly the shape a budget of 1 hides. For the generated property the ceiling is not `n − 1` but `n − 2` per cluster: with one correct member left, "every fact at some correct member is at every correct member" is trivially true, so the check needs at least two survivors to say anything. On the 3-member reliable broadcast `n − 2 = 1` and the harness is already at the ceiling; on multi-Paxos (3 acceptors, 3 learners, 1 proposer) it is not. The budget is global across every crashable node — `.crash_budget(k)` counts crashes, not crashes per cluster — so a per-cluster `n − 2` is not expressible today. The cost is real but bounded: echo reliable broadcast at `n = 3` goes from 10 hypotheses over 2,641 schedules at one crash to 32 over 7,271 at two, 50–190 s exhaustive (ablation §"Reliable broadcast" tables). The right budget for the generated check is therefore `n − 2` of the cluster being checked; the convention of 1 in the corpus is correct only where `n = 3` makes the two coincide (reliable broadcast) and is too low elsewhere (multi-Paxos). Making `n − 2` the `all_labels` default, with a per-cluster budget in the API, is an open item (Part IV, open doors).
 
-**When.** The body may mark an end of finite failures (`EFF`) once, with `run.end_of_finite_failures()`; after it no omission applies and no crash fires, and the rest of the run is failure-free recovery (ldfi.rs `Run::end_of_finite_failures`). The call is optional, and the snippet in §1 does not make it: without the call every send of the run is a fault candidate, which is right for a closed broadcast, since it has nothing to recover with. A protocol that converges by retrying needs the cut — with none, the adversary may drop every retransmission within the run — and where the body places it decides which messages the search can lose. Part II §3 has the full discussion and the open question about the form of the assumption.
+**When.** The body may mark an end of finite failures (`EFF`) once, with `run.end_of_finite_failures()`; after it no omission applies and no crash fires, and the rest of the run is failure-free recovery (ldfi.rs `Run::end_of_finite_failures`). The call is optional, and neither snippet in §1 makes it: without the call every send of the run is a fault candidate, which is right for a closed broadcast, since it has nothing to recover with. A protocol that converges by retrying needs the cut — with none, the adversary may drop every retransmission within the run — and where the body places it decides which messages the search can lose. Part II §3 has the full discussion and the open question about the form of the assumption.
 
 ### 4. Verdicts
 
@@ -87,41 +143,150 @@ Three questions define a fault model: what can fail, who can crash, and when. Hy
 
 (hydrofrac.md §"Judgements"; ldfi.rs `Outcome`, `Grade`.) Every certificate on this path carries `Grade::Generated`. The grade follows the specification, not the search: `Spec::eventual_consistency` has by construction the form the hitting-set inference is sound for — a positive obligation over a fixed fact domain that no extra observed fact can undo (hydrofrac.md §"Why the specification's form matters"). A second grade, `Grade::HandWritten`, printed RELATIVE, exists for specifications the test writes itself; `all_labels` never produces it, and Part II §2 says what it is worth. A third, `Goal`, belongs to the superseded goal API. `Strategy::Blind` ends in `Outcome::Exhausted` rather than a certificate.
 
-### 5. What it finds on the EC corpus
+### 5. The EC corpus, example by example
 
-What the automatic search finds is standard and predictable, and that is the point. A single-hop `broadcast_closed` that introduces the label is violated by its sender's crash mid-fan-out, because the transport's grant assumes the sender finishes. A delivered set after an echo cycle certifies. The receiving side of the echo, a cluster → cluster broadcast keyed by echoer, is violated by an echoer's crash: the echo repairs the merged set, not the keyed record of who echoed (hydrofrac.md §"Every label of multi-Paxos"). None of this surprises anyone who has read the protocol. The value is that the verdict is per label, mechanical, and separates the transport's assumption from what the program delivers under it — the line the type system draws and cannot check.
+What the automatic search finds is standard and predictable, and that is the point. A single-hop `broadcast_closed` that introduces the label is violated by its sender's crash mid-fan-out, because the transport's grant assumes the sender finishes. A delivered set after an echo cycle certifies. The receiving side of the echo, a cluster → cluster broadcast keyed by echoer, is violated by an echoer's crash: the echo repairs the merged set, not the keyed record of who echoed (hydrofrac.md §"Every label of multi-Paxos"). None of this surprises anyone who has read the protocol. The value is that the verdict is per label, mechanical, and separates the transport's assumption from what the program delivers under it — the line the type system draws and cannot check. The rest of this section is the corpus one test at a time, after the two in §1: configuration, verdict, and the failing run where there is one. Hypothesis counts are taken from the gallery reports (`molly-viz-samples/ec/*/report.md`), with hydrofrac.md's tables, produced by different runs, as the cross-check; under `Fuzz` the count varies by one between runs (hydrofrac.md §"Results on existing Hydro code"), and every disagreement is noted. Counts include the probe.
 
-![Lamport diagram of the plain broadcast counterexample: the broadcaster crashes after its second fan-out send](molly-viz-samples/plain_broadcast/failing.png)
+**`broadcast_closed` over `lossy_delayed_forever`, no crash.** `ec_ldfi.rs::ec_broadcast_closed_lossy_delayed_forever_breaks_under_one_omission`, body `process_to_cluster(Transport::LossyDelayedForever, 0)`: the §1 harness with the transport line changed and `.crash_budget(0)`, so the only faults in the universe are the omissions the channel admits. Two lines differ:
 
-*The failing run for plain broadcast (`molly-viz-samples/plain_broadcast`), found after 2 hypotheses and 8 schedules: one lane per node, time downward; the broadcaster delivers `initial: Payload(42)` to member 0 and member 1, then `☠ crashed` ends its lane after `initial[→1]`, and its third send to member 2 is drawn gray dashed to a `✗` — lost because the sender had crashed — so members 0 and 1 hold the fact and member 2 never does. A red dashed `✗` would be an omission on a lossy channel, a dashed `EFF` rule the end of finite failures, and `★` marks the goal's support in a witness diagram; none of the three appears here because the channel is `fail_stop` and the body sets no cut.*
+```rust
+let at_members = items.broadcast_closed(
+    &members,
+    TCP.lossy_delayed_forever().name("bcast").bincode(),
+);
+// ...
+// The simulator's own model of this transport is "a dropped message arrives at the
+// end"; the search's omission is the drop itself.
+sim = sim.test_safety_only();
+```
 
-**Every producer of the label, and the set-valued demos**, one crash allowed (hydrofrac.md §"Results on existing Hydro code"; tests in `hydro_test/src/cluster/ec_ldfi.rs` and `ec_demos_ldfi.rs`; counts include the probe and, under `Fuzz`, vary by one between runs):
+**Violated**, 2 hypotheses, `omit(bcast[→0]:Item(1))`, after 2 schedules (gallery report; hydrofrac.md §"Results on existing Hydro code" gives the same count and a different one of the six symmetric sends, `omit(bcast[→0]:Item(2))`). The test asserts that the counterexample is exactly one fault and that it is an omission.
+
+![Lamport diagram: the first item to member 0 is omitted on the lossy channel; everything else is delivered](molly-viz-samples/ec/ec_broadcast_closed_lossy/failing.png)
+
+*`molly-viz-samples/ec/ec_broadcast_closed_lossy`: the source's `Item(1)` to member 0 is the red dashed `✗` — omitted on the lossy channel — and the other five sends are delivered. No lane ends in `☠`: nothing crashed. Member 0 holds `Item(2)`, members 1 and 2 hold both.*
+
+The transport justifies its label by "dropped messages are modeled as indefinitely delayed, so the output on each member is always a lower bound of the ideal stream that is eventually delivered in full" (`hydro_lang/src/networking/mod.rs`, `LossyDelayedForever`'s `ConsistencyGuarantee`). A closed broadcast sends once and nothing retransmits, so "indefinitely delayed" is "never" for the member that missed it (ec_ldfi.rs module docs). This is the one case in the corpus where the fault model needs no crash at all: the omission is in the program's own declaration (§3).
+
+**`broadcast_closed`, cluster → cluster.** `ec_ldfi.rs::ec_broadcast_closed_cluster_to_cluster_breaks_under_a_source_crash`, body `cluster_to_cluster(1)`: a cluster of two sources, each broadcasting its own item, to three members over `fail_stop`; both clusters crashable, one crash, exhaustive. The receiving side of a cluster → cluster broadcast is keyed by the sending member, and the harness drops the key:
+
+```rust
+let sources = flow.cluster::<Source>();
+let (send, items) = sources.sim_input::<Item, TotalOrder, ExactlyOnce>();
+let at_members = items
+    .broadcast_closed(&members, TCP.fail_stop().name("bcast").bincode())
+    .values();
+// ... .crashable_cluster("source", &sources, 0..SOURCES)
+//     .crashable_cluster("member", &members, 0..MEMBERS)
+//     .search(&compiled, async |_run| {
+//         send.send(0, Item(10));
+//         send.send(1, Item(20));
+//         hydro_lang::sim::quiesce().await;
+//     })
+```
+
+**Violated**, 5 hypotheses, `crash(source@0 after bcast[0→1]:Item(10))`, after 5 schedules (gallery report; hydrofrac.md's table agrees).
+
+![Lamport diagram: source 0 crashes after delivering Item(10) to members 0 and 1; source 1 completes its fan-out](molly-viz-samples/ec/ec_broadcast_closed_cluster_to_cluster/failing.png)
+
+*`molly-viz-samples/ec/ec_broadcast_closed_cluster_to_cluster`: `source@0` delivers `Item(10)` to members 0 and 1 and dies; its send to member 2 is gray dashed. `source@1` completes its fan-out of `Item(20)` to all three. Every member holds `Item(20)`; member 2 lacks `Item(10)`.*
+
+Each source member is its own single-hop broadcaster, so a cluster of `n` sources is `n` copies of the §1 premise; one crash in any of them is enough.
+
+**Multi-Paxos under `all_labels`.** `ec_demos_ldfi.rs::ec_demo_multi_paxos_all_labels`: 1 proposer, 3 acceptors, 3 learners, all crashable, one crash, `Fuzz { instances: 8 }`. The body tells proposer 0 to lead round 1, quiesces, sends commands 7 and 8, and quiesces. The call is the §1 `all_labels` call with three crashable clusters and sampled schedules:
+
+```rust
+let outputs = multi_paxos(&acceptors, &learners, 2, leads, commands);
+let _learned = outputs.learned.weaken_consistency().sim_cluster_output();
+let spec = Spec::all_labels(&mut flow);
+// ...
+let results = Ldfi::new()
+    .level(Level::Precise)
+    .exploration(Exploration::Fuzz { instances: 8 })
+    .crashable_cluster("proposer", &proposers, 0..1)
+    .crashable_cluster("acceptor", &acceptors, 0..3)
+    .crashable_cluster("learner", &learners, 0..3)
+    .crash_budget(1)
+    .spec(&spec)
+    .search_all_labels(&compiled, async |_run| {
+        lead.send(0, 1);
+        hydro_lang::sim::quiesce().await;
+        command.send(0, 7);
+        command.send(0, 8);
+        hydro_lang::sim::quiesce().await;
+    });
+```
+
+It reports ten collections (line numbers into `hydro_std/src/ec_inference_demos/multi_paxos.rs`; hydrofrac.md §"Every label of multi-Paxos"). Five are violated, each by one crash: the proposer's `broadcast_closed` of prepares (`:281`, 5 hypotheses), of phase-2 accepts (`:549`, 8) and of chosen decrees to the learners (`:582`, gallery 10, hydrofrac.md 9), the `forward_ref` that carries `:549`'s entries into the acceptor's tick (`:286`, 8, by the same crash as `:549`), and the learners' echo keyed by echoer (`:591`, gallery 9, hydrofrac.md 10). Four report no violation under 8 sampled schedules per hypothesis: the chosen-slot broadcast among proposers (`:569`, 17–18) and its `.values()` (`:570`, 19), trivially, since the proposer cluster has one member; and the delivered `learned` set (`:588`, 25–26) and its `SpliceFact` map (`:608`, 25–26), because every learner that receives a decree echoes it to every learner and one crash leaves at least one echoer per decree. The `fold` into a `Singleton<SpliceState>` at `epoch_splice.rs:190` is not checked: not a stream. The two one-off count differences are the run-to-run variation hydrofrac.md records for `Fuzz`. The test asserts that `:588`'s exit certifies and that nothing hits the budget. One crash is the §3 convention, and here it is below the per-cluster ceiling: `n − 2` is 1 for the acceptors and 1 for the learners, and a global budget of 1 cannot crash one of each. The five failing runs:
+
+![Lamport diagram: the proposer crashes between its prepares to acceptors 1 and 2](molly-viz-samples/ec/ec_multi_paxos_labels_281_prepares/failing.png)
+
+*`:281`, prepares (`molly-viz-samples/ec/ec_multi_paxos_labels_281_prepares`): `crash(proposer@0 after multi_paxos.rs:281[0→1]:Ts { round: 1, writer: 0 })`, 5 hypotheses, 40 schedules. The round-1 prepare reaches acceptors 0 and 1, the proposer dies, acceptor 2's copy is lost; the two promises come back, and every phase-2 send below is gray dashed.*
+
+![Lamport diagram: the proposer crashes after the slot-1 accept to acceptor 1](molly-viz-samples/ec/ec_multi_paxos_labels_549_accepts/failing.png)
+
+*`:549`, phase-2 accepts (`molly-viz-samples/ec/ec_multi_paxos_labels_549_accepts`): `crash(proposer@0 after multi_paxos.rs:549[0→1]:(Ts { round: 1, writer: 0 }, 0, 1, Some(8)))`, 8 hypotheses, 64 schedules. The accept for slot 0 reaches all three acceptors; the accept for slot 1 reaches acceptors 0 and 1, the proposer dies, and acceptor 2 never sees slot 1.*
+
+![Lamport diagram: the same proposer crash, seen at the forward_ref into the acceptor's tick](molly-viz-samples/ec/ec_multi_paxos_labels_286_accepts_fwd/failing.png)
+
+*`:286`, the `forward_ref` carrying the accepts into the acceptor's tick batch (`molly-viz-samples/ec/ec_multi_paxos_labels_286_accepts_fwd`): the same crash, 8 hypotheses, 64 schedules, under a different schedule. Acceptor 2 receives slot 0 and not slot 1. Nothing between the broadcast and the batch retransmits, so the exit inherits the hop's verdict.*
+
+![Lamport diagram: the proposer crashes after sending slot 0's decree to learners 0 and 1](molly-viz-samples/ec/ec_multi_paxos_labels_582_learner_hop/failing.png)
+
+*`:582`, chosen decrees to the learners (`molly-viz-samples/ec/ec_multi_paxos_labels_582_learner_hop`): `crash(proposer@0 after multi_paxos.rs:582[0→1]:(1, 0, 0, Some(7)))`, 10 hypotheses, 80 schedules. Slot 0's decree reaches learners 0 and 1, the proposer dies, learner 2's copy is lost, and slot 1's decree is lost to all three. The learners' echo on `:591` carries slot 0 to learner 2 anyway — its `⇒` shows it — but on the hop alone learner 2 holds nothing. This is the premise the echo repairs.*
+
+![Lamport diagram: learner 0 crashes after echoing slot 0 to learner 1](molly-viz-samples/ec/ec_multi_paxos_labels_591_learner_echo/failing.png)
+
+*`:591`, the learners' echo keyed by echoer (`molly-viz-samples/ec/ec_multi_paxos_labels_591_learner_echo`): `crash(learner@0 after multi_paxos.rs:591[0→1]:(1, 0, 0, Some(7)))`, 9 hypotheses, 72 schedules. Learner 0 echoes slot 0 to learner 1 and dies before echoing it to learner 2; under learner 0's key that echo is at learner 1 and not at learner 2, while the merged `learned` set is complete at both.*
+
+**ISR replication under `all_labels`.** `isr_replication.rs::ldfi_all_labels_break_under_a_sender_crash`, `compile_all_labels(false, Encoding::Dataflow, DEFAULT_SHAPE, true, 8)`: 3 replicas, 4 rounds, 1 write; client, ZooKeeper and replicas crashable; one crash; `Fuzz { instances: 8 }`. The body sends the write and quiesces, then runs four rounds of replica timers and a ZK timer, and calls `run.end_of_finite_failures()` at the end of round 0. The protocol labels three collections (line numbers into `isr_replication.rs`): the client's write broadcast (`:343`, introduced and delivered), the replication `forward_ref` at the replicas (`:360`, delivered) and ZK's view broadcast (`:564`, introduced). **Violated**: `:343` in 2 hypotheses by `crash(client after write[→1]:Write(1))` (gallery: 2 hypotheses, 16 schedules), and `:564` and `:360` in 8 each by `crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] })` (gallery: 8 hypotheses, 64 schedules each; hydrofrac.md §"Every label of ISR replication, two-phase commit, and ABD" agrees). The companion test `ldfi_all_labels_with_the_harness_fault_model`, with the client and ZK held correct, reports no violation on all three in 4 hypotheses each: no crashable node sends on them. And with `EFF` right after the write, as the first version of the body had it, `:564` and `:360` report no violation in 5 hypotheses, because every ZK send lies after the cut and no ZK crash point is admissible (hydrofrac.md, same table); Part II §3 is the discussion of where the cut belongs.
+
+![Lamport diagram: the client crashes after its write to replica 1; the write to replica 2 is lost](molly-viz-samples/ec/ec_isr_all_labels_343_write/failing.png)
+
+*`:343`, the write broadcast (`molly-viz-samples/ec/ec_isr_all_labels_343_write`): the client's `Write(1)` reaches replicas 0 and 1, the client dies, replica 2's copy is lost. The leader's `repl` carries `Write(1)` to replica 2 anyway and the `client-ack` is suppressed at the dead client; the rest of the run — heartbeats, views, the `EFF` rule — is failure-free. On the write broadcast itself, replica 2 holds nothing.*
+
+![Lamport diagram: ZooKeeper crashes between two sends of its first view; every later view is lost](molly-viz-samples/ec/ec_isr_all_labels_564_view/failing.png)
+
+*`:564`, the view broadcast (`molly-viz-samples/ec/ec_isr_all_labels_564_view`): the first view reaches replicas 1 and 0, ZK dies, replica 2's copy is lost; the `EFF` rule follows, and every view ZK would have sent in the three later rounds is gray dashed because its sender is dead. Replicas 0 and 1 hold a view, replica 2 none.*
+
+![Lamport diagram: the same ZooKeeper crash, seen at the replication forward_ref](molly-viz-samples/ec/ec_isr_all_labels_360_replication_fwd/failing.png)
+
+*`:360`, the replication `forward_ref` at the replicas (`molly-viz-samples/ec/ec_isr_all_labels_360_replication_fwd`): the same crash, 8 hypotheses, 64 schedules. The view feeds the replication cycle, and the difference in views carries through to it (hydrofrac.md §"Every label of ISR replication, two-phase commit, and ABD").*
+
+**Two-phase commit under `all_labels`.** `two_pc_ldfi.rs::ldfi_all_labels_with_the_harness_fault_model`, `compile_all_labels(2, true, true, 8)`: two participants, one transaction, cooperative termination, coordinator and participants crashable, one crash, exhaustive. Four collections (line numbers into `two_pc_ldfi.rs`): the coordinator's prepare broadcast (`:86`) and commit broadcast (`:92`), each introduced and delivered, and the participants' peer channel (`:98` `forward_ref`, `:161` broadcast). **Violated**: `:86` in 2 hypotheses by `crash(coordinator after prepare[→0]:Txn(1))` (gallery: 2 hypotheses, 20 schedules) and `:92` in 2 by `crash(coordinator after commit[→0]:Txn(1))` (gallery: 2 hypotheses, 64 schedules; hydrofrac.md agrees on both). **Vacuous**: `:98` and `:161`, because the failure-free run carries no peer traffic — the termination timers fire after every decision is known, so no participant queries a peer — and a collection with no facts gives the specification nothing to protect. The companion `ldfi_all_labels_with_the_coordinator_correct` (`compile_all_labels(2, true, false, 8)`) certifies `:86` and `:92` in 3 and 5 hypotheses: a crashed participant is not required to hold anything, and the survivors receive everything (hydrofrac.md, same table).
+
+![Lamport diagram: the coordinator crashes after its prepare to participant 0](molly-viz-samples/ec/ec_two_pc_all_labels_86_prepare/failing.png)
+
+*`:86`, the prepare broadcast (`molly-viz-samples/ec/ec_two_pc_all_labels_86_prepare`): the prepare reaches participant 0, the coordinator dies, participant 1's copy is lost; participant 0 votes and queries its peer. Participant 1 never sees a prepare.*
+
+![Lamport diagram: the coordinator crashes after its commit to participant 0; participant 1 learns the decision from its peer](molly-viz-samples/ec/ec_two_pc_all_labels_92_commit/failing.png)
+
+*`:92`, the commit broadcast (`molly-viz-samples/ec/ec_two_pc_all_labels_92_commit`): both prepares and both votes complete, the commit reaches participant 0, the coordinator dies, participant 1's copy is lost. Participant 1 queries, participant 0 answers `Decided`, and participant 1 commits too — its `⇒` at the bottom. Cooperative termination repairs the decision; the commit hop is still a hop.*
+
+**ABD, and the class boundary.** ABD (`hydro_std/src/ec_inference_demos/abd.rs`, `all_labels_reports_the_register_as_not_a_stream`; 3 replicas, 1 client, one write, `Fuzz { instances: 8 }`, replicas and client crashable): the query broadcast (`:141`), the phase-2 `forward_ref` (`:150`), the writes filtered from it (`:161`) and the write broadcast (`:314`) are each one hop from the client and **violated** in 2 hypotheses each by the client's crash between two sends of its query or its write; the register `fold` at `:165` is a `Singleton`, **not checked**. `ec_all_labels_classes.rs::all_labels_reports_a_label_inside_a_tick` pins the other boundary: a `fail_stop` broadcast batched into the members' tick and labelled there by `assert_has_consistency_of` is reported `not checked: inside a tick`, while the broadcast before the tick is searched and violated by the source's crash, and the `all_ticks` after it is searched (hydrofrac.md §"Every label of ISR replication, two-phase commit, and ABD"). No figures for either.
+
+**The rest of the corpus**, without figures: the remaining producers of the label and the set-valued demos, one crash allowed (hydrofrac.md §"Results on existing Hydro code"; `ec_ldfi.rs`, `ec_demos_ldfi.rs`):
 
 | Program | Result |
 |---|---|
-| `broadcast_closed`, process → cluster, `fail_stop` | Violated, 5 hypotheses: `crash(source after bcast[→1]:Item(2))` |
-| `broadcast_closed`, process → cluster, `lossy_delayed_forever` | Violated, 2: `omit(bcast[→0]:Item(2))` |
-| `broadcast_closed`, cluster → cluster, `fail_stop` | Violated, 5 |
-| `broadcast_live_from_process` | Violated, 5 |
-| `leader_merge_broadcast` | Violated, 2: a leader crash mid-fan-out |
-| Echo reliable broadcast; `reliable_broadcast_closed`, `_live` | Certified, 10 hypotheses each, exhaustive |
+| `broadcast_live_from_process` | Violated, 5 hypotheses: a source crash interrupts the one-hop broadcast |
+| `leader_merge_broadcast` | Violated, 2: a leader crash mid-fan-out; the demo documents leader survival as an assumption |
+| Echo reliable broadcast (`hydro_test`); `reliable_broadcast_closed`, `_live` | Certified, 10 hypotheses each, exhaustive |
 | `uniform_reliable_broadcast_closed`, thresholds 1 and 2 | No violation, 28 hypotheses, 8 sampled schedules |
 | `g_set_gossip`, `_live` | No violation, 13, 8 sampled schedules |
-| `multi_paxos` learners' `learned`, 1 proposer, 3 acceptors, 3 learners | No violation, 24–26, 8 sampled schedules |
+| `multi_paxos` learners' `learned`, by hand (`Spec::new`), proposer held correct | No violation, 24–25, 8 sampled schedules; the `all_labels` run of the same collection above takes 25–26 because the observer carries every label's facts |
 
-**Multi-Paxos under `all_labels`.** Under `Spec::all_labels` multi-Paxos reports ten collections: every label-introducing single-hop `broadcast_closed` from the proposer (`:281`, `:549`, `:582`) is violated by the proposer's crash mid-fan-out in 5–9 hypotheses, the learners' echo keyed by echoer (`:591`) by a learner's crash in 10, the delivered `learned` set (`:588`) and its `SpliceFact` map (`:608`) pass in 25–26, and the `fold` into a `Singleton` at `epoch_splice.rs:190` is not checked (hydrofrac.md §"Every label of multi-Paxos"). The transport's grant at the introducing node is violated and the delivered set after the echo passes; only the search separates the two.
-
-**ISR, 2PC and ABD under `all_labels`** (hydrofrac.md §"Every label of ISR replication, two-phase commit, and ABD"). The hand-written harnesses of Part II also run under `all_labels`, with the nodes they hold correct run crashable too. ISR (3 replicas, 4 rounds, `Fuzz { instances: 8 }`) with only the replicas crashable passes its write broadcast (`:343`), replication forward (`:360`) and view broadcast (`:564`) in 4 hypotheses each, since no crashable node sends on them. With the client and ZooKeeper crashable, the write broadcast is violated in 2 by `crash(client after write[→1]:Write(1))`; the view broadcast and replication forward are violated in 8 each by ZK dying between two sends of one view, but only when the body ends finite failures after the first round — with the cut right after the write, every ZK send is past it and both pass in 5. 2PC with cooperative termination (two participants, one transaction, exhaustive) has its prepare (`:86`) and commit (`:92`) broadcasts violated in 2 each by the coordinator's crash between two sends, certified in 3 and 5 with the coordinator held correct, and its peer channels (`:98`, `:161`) vacuous: the termination timers fire after every decision is known, so the failure-free run carries no peer traffic. ABD's labelled streams (`:141`, `:150`, `:161`, `:314`) are each one hop from the client and violated in 2 by its crash; the register `fold` at `:165` is a `Singleton`, not checked. `ec_all_labels_classes.rs` pins the class boundary: a broadcast batched into the members' tick and labelled there is `not checked: inside a tick`, while the broadcast before the tick and the `all_ticks` after it are searched. The vacuous rows are statements about the body, not the protocol.
+What the corpus exposes is a gap in the transport-level justifications for the label. Treating a failed connection as a failed recipient does not account for a sender that dies halfway through a fan-out; treating a dropped message as indefinitely delayed does not make the surviving recipients converge when nothing retransmits. A transport label alone does not establish eventual consistency for the program using it — the echo, the gossip, the cooperative termination does — and the per-label verdicts are the mechanical record of where each program's labelled collections fall on that line (hydrofrac.md §"Results on existing Hydro code").
 
 ### 6. Reading a verdict: the visualizations
 
 A violation you cannot read is not useful, so `hydro_lang::sim::viz` (feature `ldfi`) draws Molly's two zoom levels and one more (molly-viz.md).
 
-*Zoom 0 and 1: Lamport diagrams.* A `Trace` is the serializable record of one run: nodes with their crash point, events in global scheduling order, messages in send order with fate (`Delivered | Omitted | Crashed`), and the `EFF` cut. It keeps no payload bytes; a message matches a `Dependency` by `(channel_id, from, to, FNV-1a hash of the bytes)`. A failing schedule always retains its trace; `Ldfi::with_traces()` retains every schedule's, which the witness picture needs. `lamport::mermaid` emits a `sequenceDiagram` (`->>` delivered, `-x` omitted, `--x` lost to the sender's crash, `💀` and `EFF` notes, `★` on highlighted messages); `lamport::dot` emits a pinned-position `neato` spacetime diagram (a lane per node, one rank per event on an invisible time spine, red dashed `✗` for omissions, gray dashed for crashed sends, `☠ crashed` ending a lane, a dashed `EFF` rule; commit c3164dd837 added self-placed labels that overlap nothing across the fifteen gallery files). The five `failing` diagrams are reproduced inline in this document — see the figures in §5 and Part II §4. `Outcome::viz()` returns a `Counterexample` with `lamport_*()` for the failing run, `witness()` for the last goal-held schedule with a trace, `support_lamport_*()` with `Trace::support(derivation)` highlighted, and `markdown()` for both as a report (commits 18fdd58cec, c3164dd837).
+*Zoom 0 and 1: Lamport diagrams.* A `Trace` is the serializable record of one run: nodes with their crash point, events in global scheduling order, messages in send order with fate (`Delivered | Omitted | Crashed`), and the `EFF` cut. It keeps no payload bytes; a message matches a `Dependency` by `(channel_id, from, to, FNV-1a hash of the bytes)`. A failing schedule always retains its trace; `Ldfi::with_traces()` retains every schedule's, which the witness picture needs. `lamport::mermaid` emits a `sequenceDiagram` (`->>` delivered, `-x` omitted, `--x` lost to the sender's crash, `💀` and `EFF` notes, `★` on highlighted messages); `lamport::dot` emits a pinned-position `neato` spacetime diagram (a lane per node, one rank per event on an invisible time spine, red dashed `✗` for omissions, gray dashed for crashed sends, `☠ crashed` ending a lane, a dashed `EFF` rule; commit c3164dd837 added self-placed labels that overlap nothing across the fifteen gallery files). Every violated collection of the EC corpus has its `failing` diagram inline in this document (§1 and §5, from `molly-viz-samples/ec/`), and the four hand-written cases have theirs in Part II §4. `Outcome::viz()` returns a `Counterexample` with `lamport_*()` for the failing run, `witness()` for the last goal-held schedule with a trace, `support_lamport_*()` with `Trace::support(derivation)` highlighted, and `markdown()` for both as a report (commits 18fdd58cec, c3164dd837).
 
 *Zoom 2: the why-provenance graph.* `Ldfi::with_provenance_graphs()` records a `ProvGraph` beside every derivation: `Goal`, `Output`, `Exec`, `Message`, `Alive`, `Base` and `Opaque` nodes; `Checked`, `Produced`, `Consumed`, `Carried`, `Derived`, `Counterfactual`, `Fallback` and `Alive` edges, each tagged `exec`, `record` or `replay`, so a `Precise` graph that hit an opaque record shows the `Opaque` node and the `Replay` edges beneath it. Recording never changes a derivation; `ProvGraph::dependencies()` equals the flat `Derivation`, which `ldfi_viz::provenance_graphs_agree_with_derivations_at_every_level` checks at both levels. `collapsed()` elides executions for the compact goal → messages picture (commit 567798e8ea; molly-viz.md §"Zoom level 2+").
 
-*The gallery* (`docs/design/molly-viz-samples/`) has five directories — `two_pc`, `isr_unclean_election`, `paxos_commit_quorum`, `reliable_delivery_gives_up`, `plain_broadcast` — each with `failing`, `witness_{execution,record}` and `provenance_{execution,record}` as `.dot` and `.png`, plus `report.md`. Regenerate with `MOLLY_VIZ_OUT=/tmp/gallery cargo test -p hydro_test gallery_ -- --test-threads=1`, then `neato -n2 -Tpng` for the Lamport files and `dot -Tpng` for the provenance graphs (gallery README). The ISR report shows the omitted `repl[0→1]`, the shrink, the acknowledgement, the `💀`, the `EFF` rule, and ZK's promotion of replica 1 beneath it.
+*The gallery* (`docs/design/molly-viz-samples/`) has five directories — `two_pc`, `isr_unclean_election`, `paxos_commit_quorum`, `reliable_delivery_gives_up`, `plain_broadcast` — each with `failing`, `witness_{execution,record}` and `provenance_{execution,record}` as `.dot` and `.png`, plus `report.md`, and an `ec/` directory with fourteen entries, one per violated collection of Part I, each with `failing` and `report.md` only. Regenerate with `MOLLY_VIZ_OUT=/tmp/gallery cargo test -p hydro_test gallery_ -- --test-threads=1`, then `neato -n2 -Tpng` for the Lamport files and `dot -Tpng` for the provenance graphs (gallery README). The ISR report shows the omitted `repl[0→1]`, the shrink, the acknowledgement, the `💀`, the `EFF` rule, and ZK's promotion of replica 1 beneath it.
 
 *Known limits.* External outputs render as a hex prefix; nodes the fault model does not name appear as `Process(locNvM)`; operators a record traversed are not tracked, so the graph shows which messages a fact rests on, not the `join` that combined them; alternative derivations of a deduplicated record are not drawn (molly-viz.md §"Limits").
 
