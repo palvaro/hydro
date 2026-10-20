@@ -1,90 +1,35 @@
-# Hydrofrac: inventory
+# Hydrofrac: what ships, what we learned, which doors are closed
 
-_What exists, what a result is worth, and the handful of ideas that make it work_
+_An inventory and retrospective of lineage-driven fault injection for Hydro, written against commit `2f156b6335` (bookmark `sandbox-6479bd3c-b09a-4092-b96d-1375d67833f6`, 2026-10-20)._
 
-Hydro's type system certifies **consistent computation**: a cluster collection labelled
-`EventualConsistency` (`Cluster<'a, Tag, EventualConsistency>`) is one whose members compute the
-same contents when given the same inputs, because every operator on the path is a deterministic
-function of its input *set* (order- and retry-insensitive). That guarantee has an unstated premise:
-*same inputs*. A `broadcast_closed` over `fail_stop` mints the label on the grounds that "a failed
-connection models the recipient as having failed"; a sender that dies between the second and third
-send of one fan-out leaves two members with different input sets, and every downstream operator is
-perfectly consistent with its own, wrong, input. **Hydrofrac discharges that premise**: it searches
-the program's declared fault model (crashes of registered nodes, omissions on lossy channels) for a
-fault set and schedule under which correct members end the run holding different facts. The label
-and the certificate together are convergence under faults; neither alone is. Nothing else in the
-toolchain has the output shape this needs: the type system cannot see which inputs arrive, the
-simulator explores interleavings but has no faults in its state space, and a random fault injector
-(Maelstrom, Jepsen) produces "ran for a while, saw nothing", which is not a completeness claim.
-
-This document is an inventory written after five rounds of development. Part I is the artifact:
-how to run it and exactly what each verdict is worth. Part II is the load-bearing ideas. The
-authoritative description is `docs/design/hydrofrac.md`; the reasoning behind its choices is in
-`docs/design/history-hydrofrac-development.md` (five rounds; §9 findings, §10 limits, §12 status)
-and `docs/design/history-hydrofrac-negation.md`. Where the history and the design doc disagree,
-this document follows the design doc and says so.
-
-> **Status note.** This inventory was synthesized from the design and history docs on branch
-> `ldfi-hydrofrac` (tip dated 2026-10-18). Later, unmerged Hydrofrac work exists on the sibling
-> sandbox branch `sandbox-6479bd3c-b09a-4092-b96d-1375d67833f6` (dated 2026-10-19): removal of
-> `Level::Slice`/`Counterfactual` (`4ddea33f19`), Record→Precise with replay everywhere
-> (`fafcd70fe3`), two clause-soundness fixes that had certified ISR's bug at 3 of 4 levels
-> (`4c43956b4b`), measured disjunctive provenance recommended off (`73a5db9c05`), and
-> `docs/design/ldfi-level-ablation.md`. Part II describes the `ldfi-hydrofrac` design; see the
-> "Unmerged sibling work" entries in the Appendix for the differences. Note also that the
-> `ldfi-hydrofrac` tip deletes the sedge/cress crates relative to `feat/sedge-overload-harness`,
-> likely a divergence artefact to resolve before merging.
+Hydro's type system certifies consistent computation: a collection labelled `EventualConsistency` is one whose contents at every cluster member are a deterministic function of the set of inputs that member received, insensitive to order and retries. The label is silent about whether the input sets are the same. A broadcaster that dies between the second and third send of one fan-out leaves two members with different inputs, and each member's contents are then perfectly consistent with its own inputs and different from its neighbour's. Hydrofrac discharges that missing premise. It runs the program in the Hydro simulator, injects the crashes and omissions the program's own transport declarations admit, and searches, lineage-first in the manner of Molly (Alvaro, Rosen, Hellerstein, SIGMOD 2015), for an execution in which a fact held by one correct member at the end of the run is absent at another. What converged, after six rounds, is a two-level tool (`Level::Execution` and `Level::Precise`), Molly's fault model (every failure at a time at or before the end of finite failures, enforced by the simulator), fault points at the sender on every network send, and a fault universe that is grown lazily from the derivations the search has seen. The last round's experiments — a four-level lineage ablation, disjunctive provenance, aggregate-local witnesses — mostly closed doors rather than opening them, and that is why I believe the design has converged rather than merely stopped.
 
 ---
 
-## PART I — The artifact
+## Part I — The artifact as it ships (`2f156b6335`)
 
-### What it checks
+### 1. What it checks and how to run it
 
-For every collection the program labels `EventualConsistency`, hydrofrac generates one
-specification (`Spec::eventual_consistency`, view in `hydro_lang/src/spec_views.rs`) and runs one
-lineage-driven search for a fault set that breaks it. The specification is:
-
-1. **Probe.** Run the body with no faults. Collect every fact any member of the collection holds
-   at the end into a fixed set, `FACTS`. If `FACTS` is empty, the verdict is `Vacuous`.
-2. **Per faulty run.** Exclude the members the hypothesis crashes. For each fact in `FACTS`, if any
-   surviving member holds it, every surviving member must hold it. As a count:
-   `|distinct (member, fact) pairs at correct members over FACTS| = |correct| × |FACTS present|`.
-
-Three correct members ending with `{1,2}`, `{1,2}`, `{1}` is the bug. `{1}`, `{1}`, `{1}` is fine:
-a fault may have kept item `2` out of the system altogether; EC requires convergence among
-survivors, not loss-free delivery. New facts that appear only in faulty runs are outside the
-domain and create no obligation (Part II, idea 5, says why that is essential rather than lazy).
-
-### How to run it
-
-**Automatic path** (`Spec::all_labels` + `Ldfi::search_all_labels`). The program needs no hooks and
-no observation points; the test supplies topology, workload, crashable nodes, crash budget and a
-body. This is `hydro_test/src/cluster/ec_all_labels_classes.rs`, lightly trimmed:
+The automatic path is `Spec::all_labels` plus `Ldfi::search_all_labels`. The test supplies a flow, cluster sizes, the crashable nodes, a crash budget and a body that drives inputs and timers; hydrofrac finds every IR node where the `EventualConsistency` label is minted or exits the labelled region, taps each, and runs one search per collection. Nothing is named and no property is written (hydrofrac.md §"Using hydrofrac"):
 
 ```rust
-use hydro_lang::sim::ldfi::{LabelVerdict, Ldfi, Level, NotCheckedReason, Outcome};
-use hydro_lang::sim::spec::Spec;
-
 let mut flow = FlowBuilder::new();
 let source = flow.process::<Source>();
 let members = flow.cluster::<Member>();
 let (send, items) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
 
-// Minted EventualConsistency by the transport; nothing here mentions hydrofrac.
-let at_members = items.broadcast_closed(&members, TCP.fail_stop().name("bcast").bincode());
-let _out = at_members.weaken_consistency().sim_cluster_output();
+let delivered = reliable_broadcast_closed(items, &members);   // labelled EventualConsistency
+delivered.weaken_consistency().sim_cluster_output();
 
-let spec = Spec::all_labels(&mut flow);          // names no collection
-
+let spec = Spec::all_labels(&mut flow);
 let compiled = flow.sim()
-    .skip_consistency_assertions()               // the simulator does not check the labels itself
+    .skip_consistency_assertions()
     .with_cluster_size(&members, 3)
-    .with_provenance()                           // needed for Level::Record
+    .with_provenance()
     .compiled();
 
 let results = Ldfi::new()
-    .level(Level::Record)
+    .level(Level::Precise)
     .crashable("source", &source)
     .crashable_cluster("member", &members, 0..3)
     .crash_budget(1)
@@ -94,583 +39,349 @@ let results = Ldfi::new()
         send.send(2);
         hydro_lang::sim::quiesce().await;
     });
-eprintln!("{results}");
-assert!(results.all_certified_or_not_checked());
+println!("{results}");
 ```
 
-`results` is a `LabelResults`: one `LabelResult { collection, verdict }` per labelled collection,
-`verdict: LabelVerdict = Searched(Outcome) | NotChecked(NotCheckedReason)`. Query per site with
-`results.at("file.rs:149")`, or `results.counterexamples()`. The default exploration is
-`Exploration::Exhaustive`; use `.exploration(Exploration::Fuzz { instances: n })` when the schedule
-space is too big, at the cost described below. `Level::Slice` is the default lineage level;
-`Level::Record` needs `.with_provenance()` and is what every EC harness uses. Knobs:
-`LDFI_LEVEL=exec|slice|record|replay` (via `.level_from_env()`), `LDFI_LINEAGE_DEBUG`,
-`LDFI_SOLVER_DEBUG`, `LDFI_REPLAY_DEBUG`. Everything is behind the `ldfi` feature of `hydro_lang`;
-the ILP solver (HiGHS via `good_lp`) builds from source and needs `cmake`, a C++ toolchain and
-`libclang`.
+It prints one line per labelled collection: the source's single-hop broadcast violated by `crash(source after …[→1]:2)` in 5 hypotheses, the members' echo broadcast violated by an echoer's crash in 3, and the delivered set certified in 10 hypotheses under exhaustive schedules (hydrofrac.md §"Using hydrofrac"). `results.verdicts` holds one `LabelVerdict` per collection, `Searched(outcome)` or `NotChecked(reason)`; tests assert with `results.at("file.rs:149")`, `results.all_certified_or_not_checked()` or `results.counterexamples()`.
 
-Which collections get a row: a node where the label is **minted** (a `broadcast_closed` over a
-granting transport, an `assert_has_consistency_of`) or where it **exits** the labelled region
-(`weaken_consistency`, a `batch` into an unlabelled tick, a program output). Both are reported
-because they disagree in exactly the interesting cases: reliable broadcast's first hop is minted
-and *violated*; its delivered set, derived from that label, *certifies* because of the echo the
-type system cannot see.
+The generated specification, `Spec::eventual_consistency`, is a universal over a fixed fact domain: a failure-free probe collects every fact seen at any member into `FACTS`, and under every later hypothesis each fact of `FACTS` present at some correct member must be present at every correct member. A fact absent everywhere creates no obligation; a probe that yields no facts is `Vacuous` (hydrofrac.md §"What hydrofrac checks").
 
-**Hand-written path.** Build `Spec::new(&mut flow)`, name what you observe
-(`spec.observe(..)`, `spec.observe_cluster(collection)`, `spec.observe_sequenced(..)`), name the
-correct members (`spec.correct_members(&cluster, 0..n)`), and either call
-`spec.eventual_consistency(observed, correct)` for the generated view on one collection, or write
-your own `spec.pre(view)` / `spec.post(view)` as Hydro over the observed facts. Then `Ldfi::search`.
-Harnesses: `hydro_test/src/cluster/{raft_ldfi,paxos_ldfi,two_pc_ldfi,ec_ldfi,ec_demos_ldfi}.rs`,
-`hydro_test/src/distributed/quorum_ldfi.rs`. The older goal API (`goal`, `goal_all_members`,
-`goal_witnessed` with `Run::witness` / `require`) still exists; no harness uses it.
+A property the types do not express is written by hand: `Spec::new(&mut flow)` gives an observer process; `spec.observe(..)` / `observe_cluster(..)` / `observe_sequenced(..)` ship an output stream to it; `spec.correct_members(&cluster, 0..n)` is the complement of the hypothesis's crash set; `spec.pre(view)` and `spec.post(view)` are bounded `Optional`s in the observer's tick, and a run with `PRE` non-empty and `POST` empty is a counterexample. `Ldfi::search` runs one such specification. The older goal API (`goal`, `goal_all_members`, `goal_witnessed`) is still compiled (ldfi.rs module docs §"Goals").
 
-**The body is part of the specification.** It decides which inputs arrive, which timers fire, and
-how long the protocol has to converge. Faults are admitted only before the body calls
-`run.end_of_finite_failures()`; the body must fire the protocol's recovery timers *after* that
-call, or a correct protocol "fails" (Part II, idea 6).
+`Ldfi::new()` defaults to `Level::Precise`, `Exploration::Exhaustive`, `Strategy::Lineage`, a crash budget of 0, a hypothesis budget of 256 and a witness cap of 8 (ldfi.rs `Ldfi::new`). The knobs and their environment overrides:
 
-### The verdicts
-
-| Verdict | What it is | What it is worth | What it does NOT imply |
+| Knob | Default | Env | Effect |
 |---|---|---|---|
-| **Certified** (`Outcome::Certificate`, `Grade::Generated`, `Exploration::Exhaustive`) | The ILP found no fault set within the bounds that hits every recorded derivation, and every hypothesis was run under every schedule. | A proof, within the fault model and bounds, that no admissible fault set and schedule leaves correct members with different `FACTS` at the end of this body. Composed with the label: convergence under the declared faults. | Nothing about other inputs, cluster sizes, timer patterns or horizons; nothing about delay, reordering, duplication, partition-with-recovery or Byzantine behaviour; nothing about facts outside `FACTS`; nothing about any *other* label, even one derived from this one. |
-| **Violated** (`Outcome::Counterexample`) | One admissible fault set and one explored schedule under which the check failed. Carries the faults, the failing schedule's deliveries, and every hypothesis tried. | A concrete reproduction. Needs no exhaustive exploration: one failing run is enough. | That the *protocol* is wrong rather than the *body* too short: a disagreement still present at the horizon may be "not yet converged". Inspect the execution. |
-| **Fuzz, no violation** (`Certificate` with `Exploration::Fuzz { instances }`) | Same search, but each hypothesis was run under `instances` sampled schedules. | Evidence that the lineage search exhausted its hypotheses without finding a failing *sampled* schedule. For protocols whose outcome under a fixed fault set does not depend on tick order, this is as good as exhaustive in practice (measured: 1 vs 8 schedules agreed on every protocol except Raft). | A certificate. A schedule-sensitive bug (Raft's elections are the known case) can hide in an unsampled interleaving. The `Display` says so. |
-| **Budget** (`Outcome::Budget`) | Hypothesis budget (default 256, `.max_hypotheses(n)`) ran out. | Nothing. The hypotheses tried are available for inspection. | Not a certificate, not a violation. |
-| **Vacuous** (`Outcome::Vacuous`) | The failure-free probe produced no facts (generated spec) or `PRE` never held (hand-written). | A verdict about the *harness*: the body protects nothing. Before this existed, such a search certified at once with an empty derivation. | Anything about the protocol. |
-| **Not checked** (`LabelVerdict::NotChecked`) | The collection is outside the generated spec's class: `LocalInputsOnly`, `NotAStream(kind)`, `InsideTick`, `Excluded`. | The label is enumerated and the reason stated, so nothing is silently skipped. | That the premise is discharged. `LocalInputsOnly` means there is genuinely nothing to search; `NotAStream` means the check is not built yet (open doors). |
-| **RELATIVE** (`Grade::HandWritten`, also `Grade::Goal`) | A `Certificate` under a hand-written `PRE`/`POST`. | "No fault set that hits every *recorded* derivation breaks the view." Useful as a directed bug-finder; the hypotheses it climbs through are real executions. | Soundness of the inference. A view that can be falsified by an *extra* fact (agreement, uniqueness, a final value) can fail under a fault set that leaves every recorded derivation intact; the search never proposes it (Part II, idea 5). |
+| `.level(Level::Execution \| Precise)` | `Precise` | `LDFI_LEVEL=exec\|precise` (`record` is an alias) | which lineage oracle derives a record (commit fafcd70fe3) |
+| `.disjunctive_provenance(bool)` | off | `LDFI_DISJUNCTIVE=1` via `.disjunctive_from_env()` | follow every witness of a deduplicated record (commit 73a5db9c05) |
+| `.aggregate_witnesses(bool)` | off | `LDFI_AGGREGATE=1` via `.aggregate_from_env()` | minimal passing input subsets at threshold folds (commit 2f156b6335) |
+| `.max_witnesses(k)` | 8 | — | cap on witnesses per record; overflow falls back to the union witness, soundly |
+| `.with_traces()`, `.with_provenance_graphs()` | off | — | retain every schedule's `Trace`; record a `ProvGraph` beside each derivation (viz) |
+| `.exploration(Exploration::Fuzz { instances })` | `Exhaustive` | — | sampled schedules; a certificate is then not a proof |
+| `.strategy(Strategy::Blind)` | `Lineage` | — | the ablation: same universe, no clauses |
+| `.max_hypotheses(n)` | 256 | — | `Outcome::Budget` when exceeded |
+| gallery tests | no-op | `MOLLY_VIZ_OUT=<dir>` | `gallery_*` tests write `.dot` and `report.md` (gallery README) |
+| ablation harnesses | no-op | `LDFI_ABLATION_OUT=<path>` | `level_ablation_*` tests write their Markdown grid (ablation header) |
 
-A test fails only on what it asserts: `LabelResults` is data, and nothing fails for a label the
-test does not look at.
+`LDFI_PROV_DEBUG`, `LDFI_SOLVER_DEBUG`, `LDFI_LINEAGE_DEBUG` and `LDFI_REPLAY_DEBUG` print, respectively, records with more than one witness, every clause and hypothesis, the lineage log and the replays (ldfi.rs). Building with the `ldfi` feature needs cmake and libclang for the HiGHS bindings (commit d34bd78add).
 
-### What it has found
+### 2. The fault model as shipped
 
-**Real defects in production code**, none injected (history §9.2, §9.1):
+Every failure happens at a time `≤ EFF`. The body declares the end of finite failures with `run.end_of_finite_failures()`; from then on omissions stop applying and no crash point fires. This is Molly's model and, since commit `4ddea33f19`, the simulator's filter (`FaultState::filter` in `sim/runtime/lineage.rs`) enforces it for both kinds of fault, and the search's kill relation (`Dependency::killed_by`) takes the run's pre-`EFF` send counts so that what the solver believes a crash kills is exactly what the simulator does (hydrofrac.md §"Transports supply the fault model").
 
-- **Paxos leader-change recommit loop** (`hydro_test/src/cluster/paxos.rs`). A new leader's
-  recommit values came from a fixed P1b snapshot and were re-sent every tick; each P2b round
-  triggered the next tick, so proposer and acceptors exchanged the same P2a/P2b forever. Surfaced as
-  the first faulty hypothesis never quiescing. Fixed by gating the recommit on the leader's first tick.
-- **Compartmentalized Paxos read quorum was not a column.** Election accepted any `rows` P1bs of
-  the `rows × cols` grid, so a proposer could be elected on one row, which does not intersect the
-  other row's write quorum. Agreement violation on the *correct* variant in 8 hypotheses, no fault
-  needed, only a P1b ordering. Fixed: P1bs name their acceptor and are counted per column.
-- **P1b quorum counted replies, not distinct acceptors.** A proposer that finds no leader re-sends
-  the same ballot's P1a, acceptors answer every P1a, `collect_quorum` counts replies, so two replies
-  from one acceptor made a quorum of two. Invisible until the body's `EFF` moved past the first
-  ballot; then violated on correct Paxos in 48 hypotheses and correct compartmentalized Paxos in 18.
-  Fixed by keeping one P1b per `(ballot, acceptor)`.
-- **`hydro_std::quorum::collect_quorum_with_response` was not a function of its input** despite its
-  `nondet!` justification (one batching emits `{a, b}`, another `{a, b, c}`). Found by exhaustive
-  schedule exploration in two schedules once a test asked. Fixed, along with an idempotence-justified
-  `fold` whose retry-only cast had no simulator implementation.
-- **Maelstrom backend: untagged shared channel type.** Every cluster-to-cluster channel shared one
-  message type, so two such channels deserialized each other's bytes. Found by the *first Maelstrom
-  run* of the Raft comparison, not by hydrofrac; a code path no simulator test reaches.
+The fault point is a filter the simulator inserts before every `Network` send; every channel is a fault point by construction and nothing is registered. The transport type is the fault model: a `lossy_*` channel admits **omission**, identified by `(channel, sender, destination, wire bytes)` — every byte-identical copy on that channel is dropped while finite failures last, so a retransmission with the same payload is the same fault; a `fail_stop` channel admits only its **sender's crash** (ldfi.rs module docs §"Fault vocabulary").
 
-**Injected bugs, as calibration.** Raft's election restriction comparing last-log index only
-(ignoring term; shipped in real implementations; passes all thirteen `raft.rs` tests) was found in
-**90 hypotheses**, four omissions and no crash, under a *generic* body shaped only by what correct
-Raft needs to converge: `{omit rpc[0→1]:AppendEntries(r0), omit rpc[0→2]:AppendEntries(r0),
-omit rpc[1→0]:AppendEntries(r1) ×2}`. Member 0 leads term 1 with `r0` unreplicated; member 1
-leads term 2 and commits `r1` at the same index while 0 never hears of it; in the heal phase 0
-campaigns with `(index 1, term 1)`, wins under the index-only check, and overwrites the committed
-`r1`. The author had not written this scenario down. **Honesty correction:** an earlier version
-reported "17 hypotheses" and a 25-vs-160-vs-random comparison. That body staged the bug's scenario
-by hand (who leads which term, when the stale node's timer fires), leaving the search two omissions
-to find. It is withdrawn; blind and random have not been re-measured on the generic body (a day of
-compute each). Under Maelstrom (12 runs, 29 min, partition and latency nemeses) the bug never
-occurred: its trigger is *selective* loss that keeps logs the same length while contents diverge,
-which a partition does not produce. Smaller calibrations: Paxos commit quorum of `f` instead of
-`f + 1`, three omissions, schedule-independent once `EFF` followed the first ballot;
-compartmentalized Paxos write quorum one acceptor short, 3 hypotheses; `collect_quorum` with a
-non-deduplicating caller, 5; tries-twice reliable delivery, 3 runs and two omissions (the paper's
-example).
+A crash is `crash(node after m)` or `crash(node before any send)`: the node performs every send up to and including `m`, every later send on every channel is dropped, and its external outputs are suppressed. Naming the point by a message rather than a send count keeps the hypothesis meaningful across runs whose send sequences differ, and lets one crash split the fan-out of a single broadcast. Only nodes registered with `.crashable` / `.crashable_cluster` may crash, within the budget. A crash point is named by a pre-`EFF` send of the run that minted it; in a run where that message is sent only after `EFF`, or never, the node survives (hydrofrac.md, same section).
 
-**Every producer of the label in the codebase** (`hydrofrac.md` "Results"; one crash allowed; counts
-include the probe):
+So `EFF` placement decides what is testable. The ISR harness declares `EFF` after the first round of replica timers so that the leader's acknowledgement and heartbeats lie inside the window; with `EFF` right after the client's write, the leader's post-acknowledgement crash is inadmissible and the unclean-election bug is outside the bounds (commit 4ddea33f19). The window after `EFF` is the recovery window, and a body that ends faults without firing the protocol's retransmission, gossip or election timers afterwards has not asked a convergence question. Where `EFF` falls also decides which messages are omission candidates: Paxos's P1b-counting bug became visible only when the body moved `EFF` past the first ballot (history §9.2).
+
+### 3. Verdicts
+
+| Verdict | What it is worth | What it does not imply |
+|---|---|---|
+| **Certified** (`Outcome::Certificate`, `Exploration::Exhaustive`) | No admissible fault set, under any schedule, breaks the generated check within this test's topology, workload, horizon, crash budget and `EFF`. | Nothing about other inputs, cluster sizes or longer horizons; nothing about convergence beyond the horizon. |
+| **Certified, RELATIVE** (`Grade::HandWritten`) | No hitting set remained; the recorded derivations persisted under every excluded fault set. | Soundness of the inference for the view: a hand-written `POST` falsified by an *extra* fact (agreement, uniqueness, a final value) can be missed (ldfi.rs `Grade`). |
+| **Violated** (`Outcome::Counterexample`) | A concrete fault set and a concrete schedule under which `PRE` held and `POST` did not. One failing run suffices; exhaustive exploration is not required. | That the protocol is wrong rather than the horizon too short; the trace must be read. |
+| **No violation under Fuzz** | `instances` sampled schedules per hypothesis passed and no hitting set remained. Evidence. | A certificate; a violation in an unsampled schedule is missed. |
+| **Budget** (`Outcome::Budget`) | The hypothesis cap was reached. | Anything about the protocol. |
+| **Vacuous** (`Outcome::Vacuous`) | The failure-free run never satisfied `PRE`: the harness protects nothing. | Anything about the protocol; a statement about the body. |
+| **Not checked** (`LabelVerdict::NotChecked(reason)`) | The collection is outside the generated specification's class: local inputs only, not a stream, inside a tick, excluded by the test. | Silence: the reason is printed, and nothing fails for a label the test does not assert on. |
+
+(hydrofrac.md §"Judgements"; ldfi.rs `Outcome`, `Grade`.) `Strategy::Blind` ends in `Outcome::Exhausted` rather than a certificate.
+
+### 4. What it has found
+
+**Real defects in production code**, all from the hand-written harnesses (history §9.2; hydrofrac.md §"Hand-written specifications"):
+
+- A message loop in Paxos's leader change: a new leader re-sent its recommits on every later tick and each round of P2bs triggered the next, so a partially replicated slot made proposer and acceptors exchange the same messages forever. Surfaced as the first faulty hypothesis never quiescing.
+- Compartmentalized Paxos's read quorum was a row, not a column: any `rows` P1bs of the grid elected a leader, which does not intersect the other row's write quorum. A violation of agreement on the *correct* variant in 8 hypotheses, with no fault, only a P1b ordering.
+- Paxos's P1b quorum counted replies, not distinct acceptors: a re-sent P1a drew a second P1b from the same acceptor, and two replies from one acceptor made a quorum. Violation on correct Paxos in 48 hypotheses and on correct compartmentalized Paxos in 18, once `EFF` was moved past the first ballot.
+- `collect_quorum_with_response` was not a function of its input despite its `nondet!` justification; an idempotence-justified `fold` lacked a simulator implementation of its retry-only cast. Both found by the simulator on the way.
+- Hydro's Maelstrom backend shared one untagged message type across every cluster-to-cluster channel, so two such channels deserialized each other's bytes. Found by the first Maelstrom run of the Raft comparison (history §9.1).
+
+**Injected bugs.** Raft's election restriction with index-only log comparison passes all thirteen of `raft.rs`'s behavioural tests and is found in 90 hypotheses with four omissions and no crash, a scenario I had not written down: member 0 wins term 1 and appends `r0`, lost on both links; member 1 wins term 2, appends `r1` at the same index and commits it, its replication to 0 lost twice; in the heal phase 0 campaigns with `(index 1, term 1)`, wins under the index-only check and overwrites the committed `r1` (history §9). Correct Raft certifies RELATIVE in 235 hypotheses under the same body. ISR's unclean election is `{omit(repl[0→1]), crash(replica@0 after client-ack)}` in 9 (closure) or 12 (dataflow) hypotheses at `Precise`, 14 at `Execution` (ablation §"ISR replication"). Plain 2PC breaks under one coordinator crash between two `commit` sends in 2 hypotheses at every size; 2PC with cooperative termination certifies under one crash in 9 / 13 / 18 / 23 hypotheses at `n=2/2/3/4` (loads 1/≥4/≥4/≥4) at `Precise`, and breaks under two (ablation §"2PC"; hooks §"Prototype status"). Core Paxos's commit quorum one short is found with two P2a omissions, and its correct variant certifies at `Precise` in 230 hypotheses within a cap of 256 where `Execution` runs out of budget (ablation §"Final: two levels", Raft/Paxos table). `hydro_std::quorum::collect_quorum` certifies for a deduplicating caller in 28 hypotheses and breaks for the naive one in 5 (history §9).
+
+**The `EventualConsistency` corpus**, one crash allowed (hydrofrac.md §"Results on existing Hydro code"):
 
 | Program | Result |
 |---|---|
-| `broadcast_closed` process→cluster, `fail_stop` | **Violated**, 5 hyp. `crash(source after bcast[→1]:Item(2))`: sender dies mid-fan-out. |
-| `broadcast_closed` process→cluster, `lossy_delayed_forever` | **Violated**, 2 hyp. `omit(bcast[→0]:Item(2))`: nothing retransmits; "indefinitely delayed" is never. |
-| `broadcast_closed` cluster→cluster, `fail_stop` | **Violated**, 5 hyp. |
-| `broadcast_live_from_process`, `leader_merge_broadcast` (ec_inference_demos) | **Violated**, 5 and 2 hyp. The demo's own prose caveat ("assumes the leader survives"), as a counterexample. |
-| Echo reliable broadcast (`hydro_test`), `reliable_broadcast_closed`, `reliable_broadcast_live` | **Certified**, 10 hyp. each, exhaustive. |
-| `uniform_reliable_broadcast_closed` (thresholds 1, 2), `g_set_gossip`, `g_set_gossip_live` | **Fuzz, no violation**, 28 / 13 hyp., 8 schedules per hyp. |
-| `multi_paxos`, learners' `learned`, proposer held correct | **Fuzz, no violation**, 24–25 hyp., 8 schedules. The learner echo cycle's result, not consensus's. |
-| `multi_paxos`, all ten labels under `Spec::all_labels`, proposer crashable | **5 violated** (single-hop mints `:281`, `:549`, `:582`, the exit `:286`, the keyed echo `:591`), **4 fuzz-no-violation** (`:569`, `:570` trivially, one proposer; `learned` `:588` and its `flat_map` `:608`), **1 not checked** (`epoch_splice.rs:190`, a `Singleton`). |
-| ISR, client and ZK crashable, `EFF` after the first round | `:343` write broadcast **Violated** by the client's mid-fan-out crash; `:564` view broadcast and `:360` replication **Violated**, 8 hyp.: ZK dies between two sends of one view. |
-| 2PC with cooperative termination, exhaustive | Coordinator crashable: `:86`, `:92` **Violated**, 2 hyp. each. Coordinator held correct: **Certified**, 3 and 5 hyp. Peer channels `:98`, `:161` **Vacuous**: the failure-free run never exercises termination. |
-| ABD (3 replicas, 1 client) | Every replica-labelled stream **Violated**, 2 hyp., by the client's crash between two sends. The register fold `:165` **Not checked**. |
+| `broadcast_closed`, process → cluster, `fail_stop` | Violated, 5 hypotheses: `crash(source after bcast[→1]:Item(2))` |
+| `broadcast_closed`, process → cluster, `lossy_delayed_forever` | Violated, 2: `omit(bcast[→0]:Item(2))` |
+| `broadcast_closed`, cluster → cluster, `fail_stop` | Violated, 5 |
+| `broadcast_live_from_process` | Violated, 5 |
+| `leader_merge_broadcast` | Violated, 2: a leader crash mid-fan-out |
+| Echo reliable broadcast; `reliable_broadcast_closed`, `_live` | Certified, 10 hypotheses each, exhaustive |
+| `uniform_reliable_broadcast_closed`, thresholds 1 and 2 | No violation, 28 hypotheses, 8 sampled schedules |
+| `g_set_gossip`, `_live` | No violation, 13, 8 sampled schedules |
+| `multi_paxos` learners' `learned`, 1 proposer, 3 acceptors, 3 learners | No violation, 24–26, 8 sampled schedules |
 
-The line the search drew without being told where it was: *every single-hop or single-point
-dissemination fails under one crash; every echo or gossip cycle holds.* Both transports that
-`networking/mod.rs` grants `EventualConsistency` justify it by reasoning about the recipient or
-about delay; neither survives one sender crash or one lost message. The label is a promise about the
-program using the transport, and only a program with a second dissemination path keeps it.
+Under `Spec::all_labels` multi-Paxos reports ten collections: every minted single-hop `broadcast_closed` from the proposer (`:281`, `:549`, `:582`) is violated by the proposer's crash mid-fan-out in 5–9 hypotheses, the learners' echo keyed by echoer (`:591`) by a learner's crash in 10, the delivered `learned` set (`:588`) and its `SpliceFact` map (`:608`) pass in 25–26, and the `fold` into a `Singleton` at `epoch_splice.rs:190` is not checked (hydrofrac.md §"Every label of multi-Paxos"). The minted transport grant is violated and the delivered set after the echo passes; only the search separates the two.
 
-Hand-written harnesses, graded RELATIVE: correct Raft certified in 235 hypotheses (durability of a
-committed entry); correct Paxos, Paxos+KV store, compartmentalized Paxos in 372, 301, 568; 2PC with
-cooperative termination certified under one crash, broken under two; `collect_quorum` with a
-deduplicating caller in 28; ISR's unclean election reproduces the Kafka bug.
+**An honesty note.** An earlier version of the Raft result reported the election-restriction bug found in 17 hypotheses. That number came from a body that staged the bug's scenario by hand — elected member 1, raced member 0's timer against a request, fired member 1's timer twice after `EFF` — so the search only had to find two omissions inside a scenario its author had arranged, and the Maelstrom comparison credited lineage for conditions the body had set up. I wrote that body and reported the number without saying so. It is withdrawn, with the 25-vs-160-vs-random comparison it fed; the 90 / 235 figures are from a generic body shaped only by what *correct* Raft needs to converge (history §9).
 
-Note on counts: the history (§1.2) reports "4 hypotheses" where the design doc reports "5" for the
-same `broadcast_closed` violations, and "Certificate, 26" for multi-Paxos where the design doc says
-"No violation found, 24–25, 8 sampled schedules". The design doc is current (counts include the
-probe; Fuzz is not a certificate) and is used above.
+### 5. Visualizations
 
-### Explicit non-coverage
+A violation you cannot read is not useful, so `hydro_lang::sim::viz` (feature `ldfi`) draws Molly's two zoom levels and one more (molly-viz.md).
 
-- **Simulator only.** The fault filter lives in the simulator's compilation of `Network` nodes
-  (`sim/builder.rs`), not in the IR; nothing exists under `deploy`. Embedded (raw-element) channels
-  carry no delivery id and are not fault points.
-- **Fault vocabulary.** Omission on lossy channels and permanent crash of registered nodes, both
-  before `EFF`. No delay, reordering, duplication, partition-with-recovery or Byzantine behaviour. A
-  `fail_stop` connection cannot fail on its own. A partition can be approximated by an omission set
-  (Raft's counterexample is four omissions on two links).
-- **Out of class, reported not checked:** scalar labels (`Singleton`, `Optional`,
-  `KeyedSingleton`: ABD's register, `epoch_splice`'s fold); labels inside a tick or atomic region;
-  collections with local inputs only; element types that are not `Clone + Serialize` (exclude with
-  `Spec::all_labels_except`).
-- **One test, one topology, one horizon per certificate.** Cluster sizes, inputs, timers and the
-  recovery window are the body's. **Fuzz is not a certificate**; uniform broadcast, gossip,
-  multi-Paxos, Raft and Paxos all sample schedules today. **Finite horizon**: never-converges and
-  not-yet-converged look the same; liveness is not checked.
-- **Static membership.** `_live` variants are tested for faults, not join timing; no
-  membership-change protocol exists on the branch.
-- **Precise lineage has gaps.** The provenance rewrite covers ~26 `HydroNode` variants and panics
-  by name on others (`entries_partially_ordered` on keyed streams; `leader_merge` runs at
-  `Level::Slice`). Replay needs hooked batches. Deduplicating operators keep one derivation per
-  record, so alternatives surface one hypothesis at a time.
-- **Tested scale.** A few hundred fault points, eight records of workload, up to eight nodes.
+*Zoom 0 and 1: Lamport diagrams.* A `Trace` is the serializable record of one run: nodes with their crash point, events in global scheduling order, messages in send order with fate (`Delivered | Omitted | Crashed`), and the `EFF` cut. It keeps no payload bytes; a message matches a `Dependency` by `(channel_id, from, to, FNV-1a hash of the bytes)`. A failing schedule always retains its trace; `Ldfi::with_traces()` retains every schedule's, which the witness picture needs. `lamport::mermaid` emits a `sequenceDiagram` (`->>` delivered, `-x` omitted, `--x` lost to the sender's crash, `💀` and `EFF` notes, `★` on highlighted messages); `lamport::dot` emits a pinned-position `neato` spacetime diagram (a lane per node, one rank per event on an invisible time spine, red dashed `✗` for omissions, gray dashed for crashed sends, `☠ crashed` ending a lane, a dashed `EFF` rule; commit c3164dd837 added self-placed labels that overlap nothing across the fifteen gallery files). `Outcome::viz()` returns a `Counterexample` with `lamport_*()` for the failing run, `witness()` for the last goal-held schedule with a trace, `support_lamport_*()` with `Trace::support(derivation)` highlighted, and `markdown()` for both as a report (commits 18fdd58cec, c3164dd837).
 
-### Cost
+*Zoom 2: the why-provenance graph.* `Ldfi::with_provenance_graphs()` records a `ProvGraph` beside every derivation: `Goal`, `Output`, `Exec`, `Message`, `Alive`, `Base` and `Opaque` nodes; `Checked`, `Produced`, `Consumed`, `Carried`, `Derived`, `Counterfactual`, `Fallback` and `Alive` edges, each tagged `exec`, `record` or `replay`, so a `Precise` graph that hit an opaque record shows the `Opaque` node and the `Replay` edges beneath it. Recording never changes a derivation; `ProvGraph::dependencies()` equals the flat `Derivation`, which `ldfi_viz::provenance_graphs_agree_with_derivations_at_every_level` checks at both levels. `collapsed()` elides executions for the compact goal → messages picture (commit 567798e8ea; molly-viz.md §"Zoom level 2+").
 
-| Search | Reported cost |
-|---|---|
-| Plain / reliable broadcast, 2PC (small, exhaustive) | Seconds. Observer replays ~8 per schedule, each a few ms. |
-| EC suite (`ec_ldfi`, `ec_demos_ldfi`) | ~1.5 min. Full `hydro_test` LDFI set ~7 min. |
-| Paxos injected bug | 8–50 s, 12–43 hypotheses (before `EFF` was moved); schedule-independent after. |
-| Raft injected bug (generic body) | **~30 min**: 90 hypotheses × 4 sampled schedules = 360 instances. |
-| Correct Raft, relative certificate | **~1 h**: 235 hypotheses, 940 instances, 365,000 counterfactual replays (624 panicked and were kept conservatively). Late hypotheses cost 3–4 min each, almost all replay. |
-| Correct Paxos ×3 (core, +KV, compartmentalized) | **~45 min** together, 4 sampled schedules per hypothesis. |
-| `Level::Counterfactual` vs recorded levels | ~5× wall time; 300–435 replays per search on ISR. |
-| Uniform reliable broadcast, exhaustive | 240,000 interleavings passed once; the test uses `Fuzz { instances: 8 }`. |
+*The gallery* (`docs/design/molly-viz-samples/`) has five directories — `two_pc`, `isr_unclean_election`, `paxos_commit_quorum`, `reliable_delivery_gives_up`, `plain_broadcast` — each with `failing`, `witness_{execution,record}` and `provenance_{execution,record}` as `.dot` and `.png`, plus `report.md`. Regenerate with `MOLLY_VIZ_OUT=/tmp/gallery cargo test -p hydro_test gallery_ -- --test-threads=1`, then `neato -n2 -Tpng` for the Lamport files and `dot -Tpng` for the provenance graphs (gallery README). The ISR report shows the omitted `repl[0→1]`, the shrink, the acknowledgement, the `💀`, the `EFF` rule, and ZK's promotion of replica 1 beneath it.
 
-The Raft and Paxos tests are `#[ignore]`d for runtime. Raft's `committed` under the generated
-specification has not been run (an hour).
+*Known limits.* External outputs render as a hex prefix; nodes the fault model does not name appear as `Process(locNvM)`; operators a record traversed are not tracked, so the graph shows which messages a fact rests on, not the `join` that combined them; alternative derivations of a deduplicated record are not drawn (molly-viz.md §"Limits").
+
+### 6. Explicit non-coverage and cost
+
+Hydrofrac runs only in the simulator; the filter is a simulator artefact, not an IR node, so nothing exists under `deploy` (history §10, §11.3). The fault vocabulary is omission and crash: no delay, no reordering (the schedule explorer's dimension), no partition primitive (omission sets express one), no Byzantine behaviour, no duplication (hydrofrac.md §"Limitations"). Embedded channels are not fault points (history §5.6). Scalar labelled collections (`Singleton`, `Optional`, `KeyedSingleton`), collections minted inside a tick, and collections with local inputs only are reported and not checked; an element type that is not `Clone + Serialize` fails the generated crate's compilation and has to be excluded with `Spec::all_labels_except` (hydrofrac.md §"Which collections are checked"). Membership is static. A certificate is for one test, one topology, one workload, one horizon.
+
+Cost, on an 8-core debug build: ISR unit searches take seconds to half a minute (ablation §"ISR replication"); the 2PC level grid of 144 searches takes 162 s (ablation §"2PC"); echo broadcast at `n=3`, two crashes, exhaustive, 52–76 s, while `n=4` exhaustive is 92,160 schedules per hypothesis (~5 min each) and runs under `fuzz 8` (ablation §"Reliable broadcast", §"Exhaustive feasibility probes"); the Paxos `Precise` certificate at 230 hypotheses took 116 s with one sampled schedule per hypothesis and 1143 s at 393 with four (ablation §"Final", §"Aggregate-local counterfactual witnesses"); Raft at `Precise` runs 4–5 s per hypothesis and the full durability searches take about thirty minutes for the bug and an hour for the certificate (ablation §"Raft"; history §9); the three corrected Paxos certificates (372, 301, 568 hypotheses) take about forty-five minutes together (hydrofrac.md §"Hand-written specifications"). Regression suites: `cargo test -p hydro_test ldfi -- --test-threads=1` (56 passed, 12 long certifications ignored, ~12 min) and `cargo test -p hydro_lang --features ldfi --lib sim` (233 passed) (commit 2f156b6335; ablation §"Regression suites").
 
 ---
 
-## PART II — What is going on: the load-bearing ideas
+## Part II — What we learned
 
-### 1. The fault point is a sender-side filter on every `Network` send, and the transport type is the fault model
+### 1. Provenance granularity: which levels earned their keep
 
-Every send half the simulator emits (`sim/builder.rs`, `create_network`) calls
-`LineageHandles::record_sent` before anything goes on the wire; that call consults a `FaultState`
-and returns `SendFate::{Delivered, Omitted, Crashed}`. A delivered send carries a fresh delivery id;
-an omitted or crashed one produces no `Recv`. The filter is there whether or not the test asked.
+The question was whether finer lineage buys fewer hypotheses, and how much finer it needs to be. At the start of the last round the code had four levels: `Execution` (L0: every output of an execution depends on every input of it and of every earlier execution at its node), `Slice` (L1: L0 narrowed by a static backward slice from the producing sink, then the default), `Record` (L2: record provenance from the `with_provenance()` IR rewrite, each element carrying the delivery ids it was computed from, replaying the node at a `Prov::OPAQUE` record), and `Counterfactual` (L3: node-local replay with deliveries removed one at a time, latest first, keeping those without which the record disappears) (ablation header). The experiment ran the *same* search at all four levels on the same provenance-compiled program, over 2PC (`n ∈ {2,3,4}` × load `{1,4,8}` × crash `{0,1}` × CTP), ISR (two encodings × bug/correct × three explorations), reliable broadcast and delivery, Raft and core Paxos (commits c11ac0147a, f956b8c5b4, 6b2acd41d8, 31d3eec1e8).
 
-The identity of a send is `SendKey { channel, from, to_member, bytes }`. An omission names one; it
-drops every byte-identical copy on that channel while finite failures last, so a retransmission of
-the same payload does not acquire a new identity (Molly's omission), while a retransmission with a
-different payload (Raft's heartbeat with a higher `leader_commit`) is a different message. The
-transport the program declared decides what the filter admits: `lossy_*` admits omission;
-`fail_stop` admits only the sender's crash. The program's networking declarations *are* its fault
-model, and the harness registers no channels.
+*L0 equals L1 in every cell of every protocol.* On 2PC the columns agree across all 36 configurations; on ISR in every cell of both encodings; on broadcast and delivery in every row; on Raft to the digit (ablation §"Observations (2PC)", §"ISR", §"Reliable broadcast", §"Raft"). The slice never separated a record from the inputs of its execution. On a closure-encoded protocol it cannot — `raft_step` is one IR sink — and on the dataflow encodings both inputs of a member's tick feed the same outputs.
 
-A crash is a pattern of applications of the same filter: `crash(node after message)` means the
-node performs every send up to and including the named one, then every later send on every channel
-is `Crashed` and every external output is suppressed; it never restarts. `CrashPoint::BeforeAnySend`
-is the degenerate case. Because the cut is at the sender, one crash point splits a single
-broadcast's fan-out, which is the counterexample for every single-hop broadcast in the table.
+*L2 pays exactly where there is background load or redundancy.* On 2PC+CTP, L2's derivation stays at `4·n` dependencies and its certificate count is load-invariant at 13 / 18 / 23 hypotheses for `n = 2 / 3 / 4`, while L0's grows about nine hypotheses per background transaction, to 51 / 76 / 101 at load 8: 101 → 23 at the largest cell (ablation §"2PC with cooperative termination"). The earlier "11 vs 73" reproduces as 18 vs 76 — 4.2× rather than 6.6× — deterministic over five repeats; the shift is uniform across levels and loads and is probably the harness, but this was not verified (ablation §"Observations (2PC)"). On ISR, clean, one crash: 31 → 12 (closure) and 31 → 18 (dataflow); on the bug 14 → 9 / 12. On echo broadcast: 15 → 10 at one crash and 73 → 32 at two, with 20–30% less wall time despite the bookkeeping, because execution lineage charges a member's delivery to *every* message in its tick batch (ablation §"Reliable broadcast"). On Paxos, L2 certified the correct variant in 195 and 230 hypotheses in two passes where L0 ran out at 256 (ablation §"Paxos", §"Final"). Reliable delivery is level-insensitive: one-leaf derivations.
 
-**Why not the obvious alternatives.** The first version put the fault point on the receiving
-`batch` hook, because interposition there was free (the scripted-hook layer existed). That
-conflated "a place to interpose" with "a model of the network": a channel consumed without a hooked
-batch could not be faulted; a `tee`d channel omitted at one consumer was delivered at others;
-crashes needed a separate mechanism because a receiver cannot stop a sender; and the soundness of
-every certificate rested on the author having registered every channel. The sender-side filter
-discharges that rule by construction (history §11). And why name a crash point by a message rather
-than a send count: under a different hypothesis the node's send sequence shifts, so `send #7` names
-a different message, the ILP's constraint means something else in the bug's world, and the first
-version certified a program with a known bug this way. With a message as identity, the hypothesis
-means the same thing in every schedule, and if the message is never sent the node simply survives.
+*L3 reproduced L2 wherever L2 applied, at two to ten times the cost.* On 2PC, L3's count equals L2's on every certificate at 3–10× the wall time (11.2 s against 1.3 s at `n=4 load=8`); on broadcast, identical hypotheses, schedules and derivations at 2.7–3.5× (65,388 replays against 17,280); on Paxos, same-sized derivations at 1.6–2.3× (ablation §"Observations (2PC)", §"Reliable broadcast", §"Paxos"). Its one real win is the dataflow ISR bug in 3 hypotheses instead of 12, because its failure-free derivation is `{hb×3, observed}` and the leader's crash is hypothesis #2 (ablation §"ISR"). That does not pay for Raft, where replay is ~5 s a hypothesis (ablation §"Recommendation record").
 
-### 2. Two nested searches
+*The Raft exception.* Raft is one `raft_step` closure per tick, so under the rewrite its outputs are opaque and L2 replays through the step — L2 *is* counterfactual lineage there, and L3 adds nothing. Derivations shrink 4.4× (46.4 → 10.5 leaves), but hypotheses go up: L0 certifies both variants in 59 hypotheses in 17–19 s; L2 runs out of a 64-hypothesis budget after 243–306 s and, given 160, certifies in 107 after 403 s. The over-approximate clause "everything delivered to the member" is hit by almost any fault set, so the universe saturates fast; the precise clauses each name a different path and must be defeated separately (ablation §"Raft"). A program that is closure-encoded end to end should pick `Execution` explicitly, and that is why `Execution` survives as a level (ablation §"Recommendation record").
 
-Hydrofrac searches **fault hypotheses**; under each hypothesis the simulator searches
-**schedules** (which runnable tick executes next, what an unhooked batch releases, which version a
-snapshot reveals). A counterexample is a (fault set, schedule) pair. The outer loop is Molly's
-(`Ldfi::run`, `sim/ldfi.rs`):
+*The collapse.* Commit `4ddea33f19` removed `Slice` and `Counterfactual`, with the re-measured two-level tables agreeing with the L0 and L2 columns in every cell. Commit `fafcd70fe3` then fixed the fallback the collapse had got wrong: a program compiled without `with_provenance()` had been silently downgraded to `Execution` (`Ldfi::effective_level`), when the right reading of a program with no tags is *every record opaque*, derived by replay. `Record` became `Precise` — record provenance where the program carries it, counterfactual replay where it does not, execution closure only where replay is inconclusive — and `effective_level` was deleted. On ISR compiled without provenance: the bug in 9 hypotheses instead of `Execution`'s 14, the certificate in 12 instead of 31, zero fallbacks; on 2PC+CTP `n=3 load=8`, 18 instead of 76, with 27 fallbacks because the coordinator's transactions arrive through an un-hooked `sim_input` and a solo replay never sends a `prepare` — the fallback doing its job; on `leader_merge_broadcast`, which the rewrite rejects, the same 2-hypothesis counterexample with 14 replays, 0 fallbacks and no pinned level (ablation §"Precise without provenance"). Replay is an oracle inside `Precise`, not a level: it runs at opaque records, at every record of programs without provenance, and at the observer for every hand-written view, which is why the `Execution` cells of the ISR tables show replays too.
 
-1. Run the probe; establish `FACTS`; record the first successful derivation.
-2. Each derivation becomes a clause: a breaking fault set must interrupt at least one delivery in it.
-   A clause also records the crashes that were *premises* of the run it came from (a derivation seen
-   in a world where a node was dead need not hold where it is alive), and the run's send sequences,
-   which give crash points their meaning.
-3. Build the candidate universe: for every dependency, its omission (if the channel is lossy) and
-   the crash of its sender right before that send (if the sender is crashable). Order weakest first:
-   omissions before crashes; within a node, later crash points before earlier ones.
-4. Solve an ILP (HiGHS via `good_lp`): one binary per candidate; minimise weighted count; one cover
-   constraint per clause; crash budget and one crash per node; a no-good per tried set; no superset
-   of a hypothesis whose every schedule was vacuous; when feasible, leave one `PRE` derivation intact.
-5. Run the hypothesis under `Exploration`. A violating schedule ⇒ `Counterexample`. Otherwise add
-   the new derivations and repeat. Infeasible ILP ⇒ `Certificate`; budget ⇒ `Budget`.
+### 2. The soundness bug the ablation caught
 
-**Why nested, and why ILP.** Molly fixed a synchronous schedule and did not explore reordering;
-Hydro protocols' outcomes can depend on tick order (Raft: whether a `RequestVote` lands before or
-after the old leader's `AppendEntries`), so a certificate on one schedule per hypothesis could land
-on the harmless interleaving and certify a known bug. Hence `Exploration::Exhaustive` is required
-for a certificate and `Fuzz` is reported as such. The ILP rather than SAT because "weakest first" is
-an objective and the budget and premise constraints are linear; same problem, more convenient
-solver. `Strategy::Blind` is the same loop with the cover constraints removed, the ablation that
-measures what lineage buys (2–7× fewer hypotheses on certificates; random injection misses 2PC bugs
-in 2–4 of 10 repeats at five or more participants and never terminates with a claim).
+The first ISR grid showed L2 finding the unclean-election bug while L0, L1 and L3 **certified** it, on both encodings, under `fuzz 1` and `fuzz 8`; the repo's own `ldfi_finds_the_unclean_election_bug{,_dataflow}` failed under `LDFI_NO_PROVENANCE=1` (certificate in 14) and `LDFI_LEVEL=replay` (certificate in 6) (ablation §"Soundness bug", pre-fix table; commit f956b8c5b4). The diagnosis written down at the time — vacuous hypotheses adding no clause and being read as coverage — did not survive the solver's own trace. The counterexample `X = {omit(repl[0→1]), crash(replica@0 after client-ack)}` was a superset of none of the vacuous sets the search saw. `X` was never proposed because **`X` was not a hitting set of the clauses the search had**: some clause claimed `POST` rested only on deliveries `X` does not kill, while the simulator shows `X` kills `POST`. Two unrelated gaps produced such clauses (commit 4c43956b4b).
 
-### 3. Four lineage levels, and every fallback points toward over-approximation
+*Root cause 1 (L0, L1): dependency ordinals clamped at `EFF`.* `Lineage::crash_ordinal` clamped a dependency's send ordinal to the sender's pre-`EFF` send count, assuming crash points lie before `EFF`; the simulator fired `crash(n after m)` wherever `m` was sent. In the omission world replica 0's acknowledgement was post-`EFF` (send #4 of `#0 repl[0→1] #1 repl[0→2] | EFF | #2 shrink #3 hb #4 client-ack #5 hb …`), every replica-0 dependency carried the clamped ordinal #2, and `killed_by` computed `position(client-ack) = 4 < 2`: the crash kills nothing of the clause, while in fact it kills the heartbeats #5–#7 that keep 0 the leader. L2 found the bug only by hypothesis order: its smaller failure-free clause made the crash hypothesis #2, before any omission-world clause existed. The fix made the ordinal exact and moved the pre-`EFF` clamp to where crash points are *proposed* (ablation §"Root cause 1").
 
-Lineage is reconstructed from the simulator's event log (`sim/runtime/lineage.rs`: `Exec`,
-`Released`, `Sent`, `Recv`, `Output`), not from the language, because Hydro programs are Rust
-closures over dataflow, not Datalog rules. The derivation of an output is the backward closure
-from the execution that produced it to the deliveries that supported it.
+*Root cause 2 (L3): sequenced observations never traced.* `Spec::observe_sequenced` enumerates before the observer's hooked batch, so the release payload is `bincode((usize, View))` while the wire bytes are `bincode(View)`; `payload_matches` never matched a view to ZK's send — the "32 untraced deliveries" on every ISR log line. Replay takes only matched releases as removable candidates, so at L3 the views were fixed facts with no lineage: derivation `{observed[0→]#2}`, two crash points, a certificate in 6. Accepting a serialized `usize` prefix made the derivation `{hb×3, observed[0→]#2}` and the bug appears at hypothesis #3 (ablation §"Root cause 2").
 
-| `Level` | What it records | Cost / what it buys |
-|---|---|---|
-| `Execution` | A tick execution depends on everything released into it, every arrival at its node before it, and every earlier execution of every tick at the node (persisted state, over-approximated). | Free; needs nothing from the program. Coarse: a step-closure protocol is one IR node, so everything depends on everything. |
-| `Slice` (default) | Same, narrowed by a static slice of the IR per sink (`sim/slice.rs`): which hooks, channels and local ticks a send or output can reach, split into same-execution and carried-through-`defer_tick`. | Free. Same weakness for closure-encoded protocols. |
-| `Record` | Record-level provenance by an IR rewrite (`sim/provenance.rs`, `SimFlow::with_provenance`): every element becomes `Tagged<T>` carrying the delivery ids it was computed from; `join` unions, `fold` accumulates, a send strips the tags into the `Sent` event. `Reference`-capturing closures emit `Prov::OPAQUE`. | Compile-time rewrite; keeps hypothesis counts flat as workload grows (2PC load 8: 11 hypotheses vs 73 under `Slice`). Panics by variant name on unsupported operators. |
-| `Counterfactual` | Node-local replay (`CompiledSim::replay`): re-run one node alone with its hooked batches fed their recorded releases, delete deliveries one at a time latest-first, keep a deletion if the output survives. Result: a 1-minimal sufficient set (ddmin sense). | ~5× wall time; a replay is a fresh instance of the dylib, ms each but thousands per hypothesis on Raft. Needs hooked batches. Sees through closures nothing else can; on closure-encoded ISR turns 14/27 into 6/14. |
+The alternative fix for root cause 1 — confining crash points to the window in the simulator — was tried as a one-line experiment and made the ISR bug unreachable at every level under that harness, because the acknowledgement was post-`EFF` in the omission world. The search was first made to agree with the simulator; then `4ddea33f19` adopted the simulator-side reading as Molly's model and moved the ISR harness's `EFF` past the first round so the acknowledgement lies inside the window in every world (ablation §"Root cause 1", §"Final"). Where history §10 says `EFF` "should not shape the design further", the current design disagrees: it is the fault model.
 
-**Why the fallback direction is the whole soundness story.** An extra dependency in a derivation
-gives the solver one more fault to try (cost). A missing dependency removes a constraint the
-breaking hypothesis would otherwise have to satisfy, so the search can certify a program with a
-bug (unsoundness). Every one of the four false certificates during development was an
-under-approximation: a byte-only match that attributed 2PC's `commit` to its `prepare`; a replay
-candidate set that excluded deliveries *after* the output's execution (a later echo can substitute);
-a replayed tick that legitimately had nothing to do; a node that would not reproduce its output
-even with everything kept. So: `Counterfactual` falls back to `Record`, `Record` to `Slice`, and a
-replay that panics (Raft's leader indexed past its log when fed recorded inputs against diverged
-state, 624 times in 365,000 replays) counts as "target not produced", keeping the delivery. The
-panic is caught on the generated side of the dylib boundary (`sim::runtime::erase_guarded`),
-because unwinding across it aborts the process, which it did.
+After the fix, verdicts agree at every level in every cell: ISR bug at L0 (14), L1 (14), L2 (12), L3 (3), pinned by `isr_replication::tests::ldfi_finds_the_unclean_election_bug_at_every_level`; every 2PC verdict and certificate count unchanged; every broadcast and delivery cell identical (ablation §"After the fix"). "The verdict is independent of the lineage level" is now a test, and it is the strongest argument for having run the ablation: a level grid is a soundness oracle for free, since the levels are supposed to differ only in cost. Vacuous-superset pruning was left as it was; nothing showed it changing a verdict (ablation §"Vacuous hypotheses").
 
-### 4. The specification is a Hydro flow at an observer process
+### 3. Disjunction: why Molly's disjunctive provenance bought nothing here
 
-A `Spec` (`hydro_lang/src/sim/spec.rs`) adds an **observer** process to the program. Observed
-collections are sent to it over an ordinary `fail_stop` channel and presented in the observer's
-tick as the accumulated set of facts so far. `PRE` and `POST` are bounded `Optional`s in that tick:
-a view holds if non-empty at the end of the run. The observer's ticks run eagerly and outside the
-schedule choice (it only consumes, so its interleaving is unobservable to the program; exploring it
-multiplied schedules by 64× before this rule). The fault model's own facts are fed before each run:
-`correct_members` (the complement of Molly's `crash` relation) and, for the generated view, the
-fact domain `FACTS`.
+Molly's lineage from one good run is a formula: a conjunction within a derivation, a disjunction across the alternative derivations of one fact, and the solver prunes every fault set that leaves some alternative intact without running it. Hydrofrac kept one witness per record — at a dedup, the first copy's — and rediscovered alternatives by simulation. Commit `73a5db9c05` recovered the disjunction behind `Ldfi::disjunctive_provenance(bool)`: `Prov` became a shared, lazily resolved handle over `Leaf(delivery) | All(children) | Alts(children)`; pass-through operators share the handle, combinations build `All`, and a `map(rebox)` before every in-tick `unique` gives each arrival a fresh `Alts` cell that `Tagged::eq` fills with the duplicate's alternatives (lazy and shared because DFIR's `unique` emits the first copy before its duplicate arrives). The formula resolves to a minimal DNF under `max_witnesses` (default 8; an overflowing conjunction falls back to the union witness, an overflowing disjunction keeps its first `cap` alternatives, both sound). With a cap of 1 the resolution is exactly the old single derivation, and `two_pc_ldfi::tests::single_derivation_search_is_unchanged_by_the_provenance_formula` pins the thirteen hypotheses of the exhaustive 2PC+CTP `n=2 load=4` search, in order, to the pre-change sequence (ablation §"What was built").
 
-Under `Spec::all_labels`, the observer's input is a placeholder *slot*. When the flow is compiled
-for the simulator, an IR pass (`sim/observe.rs`) enumerates labelled collections, decides class and
-`NotCheckedReason`, and taps each in-class one: the node becomes a `Tee` (as `.clone()` would), the
-new branch is mapped to `(collection index, bincode of the element)` and sent to the observer with
-exactly the IR a `.send()` would build. The slot becomes the union of the taps. The pass runs
-*before* network compilation and *before* the provenance rewrite, so the taps are traced like any
-other operator and lineage flows through them. `Ldfi::search_all_labels` then runs the ordinary
-loop once per in-class collection, telling the observer which index is current and which members of
-that collection's cluster are correct, and clearing the fact domain between searches.
+I expected this to reduce hypothesis counts. It did not, on any protocol, in any cell, in three measurement passes. On 2PC and 2PC+CTP every verdict and certificate count is identical, because no run exhibits two derivations of one fact: a participant queries its peers only after a timeout while uncertain, and the peer path fires only in worlds where the coordinator crashed, where the participant hears *only* the peer. Alternatives exist across worlds, not within a run, and Molly's single-run lineage would see what hydrofrac's does. On ISR, in both encodings, clauses per run are identical to two decimals across five repeats, which is only possible if no record resolved to more than one witness. On Paxos the P2b quorum is a `fold`, a conjunction (ablation §"Where the alternatives are", §"Complete grid: ISR, broadcast, delivery", §"Core Paxos").
 
-**Why a flow and not a Rust predicate.** LDFI needs the specification to have *lineage*: the
-derivation it negates is the derivation of `POST`, not of some concrete message the author named.
-The first version's goals were a Rust verdict alongside hand-named witness facts, and the two could
-disagree (a fact that was "ever" when it should have been "final"; a channel left unregistered);
-that was the main source of false certificates. Making the view a Hydro dataflow means record
-provenance and replay apply to it unchanged. Why fix `FACTS` from a probe: an open-ended "every
-member holds whatever any member holds" acquires a new obligation whenever a faulty run produces a
-new fact, which no earlier derivation explains, and a fresh fact is not the label's premise about
-the *given* inputs anyway. (The history §1.2 describes a generated `PRE` "some correct member holds
-some fact of `FACTS`"; the code, `spec_views::eventual_consistency`, has no `PRE`: non-vacuity is
-the probe having a non-empty domain. The design doc and code agree; the history is stale.)
+Echo broadcast is the one protocol with in-run alternatives, and there the hypothesis count went **up**: 10 → 11 at one crash and 32 → 39 at two under exhaustive exploration at `n=3`, reproduced exactly in two passes; 15 → 21 (+40%) at `n=4` under `fuzz 8`, identical over five repeats, with the witness cap of 8 overflowing for the first time in the corpus (156–176 times per search; four members give up to four witnesses per delivery and 4⁴ > 8). The diagnostic, reconstructed from the searches' own records with every hypothesis re-checked as a minimal hitting set, explains the arithmetic. The disjunctive failure-free run yields 16 derivations instead of one, and its clauses prune the two `crash(broadcaster after initial[→k])` hypotheses the single search ran — Molly's pruning, and it is real. But every alternative's deliveries become dependencies, and their senders' early sends enter the universe: `crash(member@1 before any send)`, `crash(member@2 after echo[2→0])`, `crash(member@2 before any send)`, minted by echoes from a higher-numbered member to a lower-numbered one, which never appear in any single-witness derivation because the lower-numbered member's first copy is always the broadcaster's `initial`. Saved 2, added 3; at two crashes saved 12, added 19. A blind search over all twelve fireable crash points confirmed the goal holds under every one (ablation §"Diagnostic"; commits aa10020989, 0bbf22d080).
 
-### 5. Monotonicity decides what a certificate is worth
+The deeper reason is structural. Hydrofrac's fault universe is grown lazily from the derivations it has seen; a crash point is proposed only once some derivation depends on the send that names it, so a fault that kills no observed dependency is never tried. That is itself most of the pruning Molly gets from the formula. Molly's universe is every message of the run, fixed up front, so the disjunction is what keeps *its* search from running every one of them; hydrofrac gets that from the universe instead. The DNF certificate is relative to a larger universe, so it is a stronger certificate at more runs, not a cheaper one (ablation §"Observations" under Disjunctive provenance). The flag stays off. The follow-up worth one experiment is DNF cover constraints over the single-derivation universe: keep every alternative as a clause but propose crash points only from the first-witness derivations, dropping (soundly) any clause the universe cannot hit, which would keep the two pruned broadcaster hypotheses without admitting the three new member ones (ablation §"Status").
 
-The hitting-set inference is: *a fault set that leaves every delivery of a derivation intact
-cannot break `POST`*. That is true only if `POST` is **monotone** in the observed facts: if a set
-`S` of deliveries suffices for `POST`, any superset does too. A fault set that leaves `S` intact
-produces some superset of `S`, and the inference needs that superset to still satisfy the view.
+### 4. Aggregate-local counterfactual witnesses
 
-The generated EC view is monotone by its form: `FACTS` and `correct` are fixed by the search before
-the run, so the view is a universal over fixed domains whose derivation is the record provenance of
-every `(member, fact)` pair; keep them all and the view holds. No analysis is involved, which is
-why it carries `Grade::Generated` and why the certificate is "within the fault model and the
-explored schedules". Hand-written views can have any shape, and the everyday ones are not
-monotone: *agreement* is the absence of a conflict (falsified by adding a fact); *durability of the
-final leader's log* reads a `max()` over views (a later fact changes it); *integrity* ("nobody
-delivered twice") holds with an empty derivation and certifies after one run having checked nothing.
-The search finds bugs in these when the breaking hypothesis also happens to displace a recorded
-fact; a conflict that appeared without displacing one would never be proposed. Hence
-`Grade::HandWritten`, RELATIVE, no soundness claim.
+The disjunction only ever fired at a dedup, and the corpus's redundancy is quorum-shaped: a `fold` (a count) over `n` inputs followed by a threshold predicate, whose output is tagged with the conjunction of all `n`. "Any `k` of `n`" is lost at the aggregate, in hydrofrac as in Molly. Commit `2f156b6335` recovers it behind `Ldfi::aggregate_witnesses(bool)` (`LDFI_AGGREGATE=1`, default off). Under the mode a `fold` / `fold_keyed` accumulator's cell is a `Node::Agg`: the conjunction of every input (what it resolves to, so every unaware reader sees the old formula) plus each input's value and provenance, up to `AGGREGATE_MAX_INPUTS = 10`, and a type-erased re-fold built from fresh instances of the fold's own `init` and `acc`. A downstream `filter` or `filter_map` re-runs the fold on all `2^n` subsets in both input orders and applies its own predicate; the output's provenance becomes the disjunction of the **minimal passing subsets** if and only if, on this run's inputs, the predicate is upward-closed, order-independent and passes the full set — checked empirically, since the IR carries no commutativity annotation. Otherwise the conjunction stays and the skip is counted by reason. The empty subset is never a witness; keyed↔flat casts re-key and project the re-folded value; every other value-changing operator strips the cell to its conjunction so no predicate re-evaluates an aggregate through a value it did not see (ablation §"What was built" under Aggregate-local witnesses). [NEEDS AUTHOR REASONING: why 10 for `AGGREGATE_MAX_INPUTS` and 8 for `max_witnesses` — measured, or round numbers?]
 
-**The false ISR certificate** is the concrete lesson (`history-hydrofrac-negation.md` §4). When
-observer-level counterfactual derivation landed, ISR's durability view, with the final leader read
-off `observe_sequenced(views).max()`, deleted views latest-first and never changed value (every
-view named replica 0), so the 1-minimal sufficient set was `{the appended write, the initial view}`
-with no heartbeat in it. The breaking hypothesis (lose a replication, crash the leader after the
-ack, let ZK promote the stale follower) kills neither; it *adds* a later view. Six hypotheses,
-certificate, bug present. Record provenance folds every view into the aggregate and so keeps the
-heartbeats that kept replica 0 the leader, and with them the crash point after the acknowledgement.
-So for hand-written views `spec_view` takes the **union** of the counterfactual and recorded
-derivations at the observer: sound where either is, minimal where both agree. (The generated view
-takes the recorded derivation alone, with no observer replay; its form makes that sufficient.) Why
-counterfactual at all: a view derived through
-negation (`filter_not_in`, `count() == 0`) has *no* record provenance for its emptiness, and under
-record provenance alone the negated agreement view certified plain broadcast after one run; replaying
-the observer with facts removed asks the same question of both formulations and gets identical
-derivations. The fourth round's syntactic polarity walk (`polarity.rs`), which tried to grade
-arbitrary views monotone/non-monotone/unknown, was removed in the fifth: once the one specification
-hydrofrac is *for* is generated and sound by form, there is nothing left to classify, and the walk
-could only approximate the property anyway.
+Where it fires: Paxos's P2b commit quorum (`collect_quorum(p2b, 2f+1)`: `fold_keyed → entries → filter_map(success >= min)`), with zero skips — but a second witness exists only in schedules that batch all three acknowledgements into the tick in which the count first reaches `min`, since `collect_quorum` emits a slot once. It does **not** fire on the P1b leader-election quorum: `collect_quorum_with_response` selects the *responses* of qualifying keys by `anti_join` against the keys below threshold, provenance does not flow through a negation, and the count's predicate never sits on the records' path; the same holds for any quorum written as "the responses of keys whose count passed". On 2PC (`count >= num_participants`, all-of-`n`) every output is `unchanged`; echo broadcast has no fold on the path (ablation §"Where it fires in the corpus").
 
-### 6. Where the end of finite failures falls decides what can be tested
+The numbers do not separate it from noise. Paxos bug at cap 256, three repeats: `precise` 23–67, `disjunctive` 21–43, `aggregate` 21–53 hypotheses to the counterexample, draw-dominated. Paxos correct exhausts 256 in every column and every repeat. At cap 400, one pass each, `aggregate` certified at 339 against `precise`'s 393 while `disjunctive` ran out at 400 — within the variance `precise` has shown across this document (203, 230, 256+, 393) — and mean derivation size is unchanged at 19.6–20.4, because the goal's derivation is dominated by leader-election and payload deliveries. 2PC and echo broadcast are identical to their `precise` cells hypothesis for hypothesis; the `hydro_std` quorum unit shrinks its derivations from six deliveries to four at the same 28 hypotheses. Wall time is within noise (ablation §"Paxos", §"Observations" under Aggregate-local witnesses).
 
-`Run::end_of_finite_failures()` flips a switch on every filter and records the event-log index.
-From then on omissions are ignored, and only sends recorded *before* that index are omission
-candidates in later hypotheses. Crash points lie before it too: `crash(node after m)` is proposed
-only for pre-`EFF` sends `m`. Every post-`EFF` dependency is killed by exactly the crashes that kill
-its sender's last pre-`EFF` send, which is how the solver sees it.
+It stays off. What would make it worth turning on: a protocol whose quorum predicate sits on the records' path (a count, not an anti-join of responses), whose alternatives appear in the failure-free run rather than only in favourable batchings, and a search long enough for a smaller clause to matter — then a multi-pass measurement with several sampled schedules, since one pass at ±50% draw variance cannot show it.
 
-Two consequences, both learned the hard way. First, **what is a fault point is the body's
-decision.** Paxos's P1b-counting defect was invisible for as long as the body's `EFF` preceded the
-new leader's first ballot: the first round of P1bs always arrived, and the quorum was distinct
-acceptors' by luck of ordering. Moving `EFF` past the first check made acceptor 0's P1b a fault
-point, made the injected bug's counterexample schedule-independent, and exposed the real defect. The
-ISR table shows the same thing in miniature: with `EFF` right after the write, no ZK send is a
-crash point and the view broadcast "passes"; with `EFF` after the first round, it is violated. A
-harness that cannot lose a message cannot test the protocol's handling of its loss. Second, **the
-window after `EFF` must be a real recovery window.** The first version allowed crashes at any send
-and produced a "violation" of correct Raft in which the leader crashed in the heal phase after the
-last election timer had fired, and the leaderless cluster was blamed. Raft's generic body went
-through four versions that "violated" correct Raft before the fifth gave it enough post-`EFF`
-election timers, same-term requests and heartbeat rounds to converge; none of those changes was in
-response to the buggy protocol. The history's §10 calls `EFF` "a leftover that should not shape the
-design further"; the design doc lists it among the declared fault bounds a certificate is relative
-to. The latter is the current position, and §9.2 of the same history is the reason.
-`[NEEDS AUTHOR REASONING: the long-term intent for EFF: a body-supplied bound forever, or something
-the convergence witness (open door 2) would replace?]`
+### 5. Fault point and fault model
 
-### 7. The simulator is a counterfactual oracle, and that is why hooks still matter
+The fault point is the sender because the first version put it at the consumer and paid for it. Round 1 used the simulator's scripted `BatchHook` — a standing `OmissionPolicy` on the receiving batch, channels registered by the harness — because interposition there was free. The cost: a `tee`d channel omitted at one consumer was delivered at the others; hook-free paths could not be faulted; crashes needed a separate mechanism in the send half; every faultable batch was a hook parameter in the protocol's signature; and every certificate rested on the author having registered every channel. All followed from one choice: a receiver-side test seam is not a model of the network (history §11). The filter on every `Network` send, with the transport type as the fault model, made every channel a fault point by construction.
 
-A simulated run is a function of a finite sequence of nondeterministic decisions, the scheduler's
-(which tick, what a batch releases) and the environment's (each send's fate); everything between is
-deterministic. Lineage, properly stated, is "which decisions does this fact depend on", and the
-simulator answers by re-running with one decision changed. Node-level replay (idea 3, and the
-observer replay of idea 5) is the coarse instance: the only decision it can alter is "which recorded
-releases this node's hooked batches made", which is why it needs hooks and why `RaftHooks` survive
-the move to the sender-side filter. The same determinism is what makes the outer loop valid: "the
-outcome still held, so the program has another derivation" is only an inference if the run differed
-from the last by the fault set alone. The decision-trace open door generalises this.
+The fault model is Molly's after two intermediate positions. The first version admitted crash points at any send; on Raft that "violated" durability on the *correct* protocol when the leader crashed in the heal phase after the body's last election timer had fired. A crash inside the convergence window needs a window of its own, which the body cannot supply without knowing where the crash fell (history §5.4). The search then confined *proposed* crash points to pre-`EFF` sends while the simulator still fired them anywhere — the clamp behind root cause 1 above. Commit `4ddea33f19` closed the gap at the simulator: a crash point named by a pre-`EFF` send fires only if that send happens before `EFF` in the run at hand, and the harness places `EFF` where the failures it means to admit lie. One model, one window, both halves agreeing.
+
+### 6. Monotonicity and what a certificate means
+
+The hitting-set inference — "a fault set that leaves this derivation intact cannot break the view" — is valid only for views monotone in the facts they observe. The generated specification has that form by construction: for a fixed fact and a fixed set of correct members, "every correct member holds this fact" is a positive obligation that another observed `(member, fact)` pair cannot undo, and fixing `FACTS` from the probe prevents a faulty run from minting a new obligation that no earlier lineage explains (hydrofrac.md §"Why the specification's form matters"). Hand-written agreement and durability are not monotone: agreement is the *absence* of a conflict, and durability of a write rests on the *final* leader view. A hypothesis can break either by adding a fact, removing nothing any clause names. Their certificates are graded `RELATIVE`, with no soundness claim for the inference (ldfi.rs `Grade`; history §10).
+
+The concrete lesson was a false certificate. When the observer-level counterfactual landed, `spec_view` took only the replay-derived minimal sufficient set, and on ISR's durability `POST` — the final leader read off `observe_sequenced(views).max()` — deleting views latest-first never changed the value, since the earlier view names the same leader. The sufficient set was the appended write and the *initial* view, with no heartbeat in its lineage; the breaking hypothesis (lose a replication, crash the leader after the acknowledgement, let ZK promote the stale follower) kills neither — it *adds* a later view. Six hypotheses, certificate, bug present. Record provenance, which folds every contribution of an aggregate into its value, kept the views and the heartbeats behind them, and `spec_view` now takes the **union** of the counterfactual and recorded derivations: sound where either is, minimal only where both agree (negation §4). The search finds the corpus's non-monotone bugs because the breaking hypothesis also displaces a recorded fact in `POST`'s derivation; a conflict that appeared without displacing one would not be proposed, and the grade says so.
+
+### 7. The specification is a Hydro flow
+
+`Spec` builds an observer at a dedicated process and compiles it with the program. Observations arrive over an ordinary `fail_stop` channel and are presented in the observer's tick as the set of facts so far; `PRE` and `POST` are bounded `Optional`s in that tick, and a view holds if it is non-empty at the end of the run, as a Datalog goal holds at fixpoint. Because the observer is a Hydro flow its outputs have lineage like any other output, and that is what the search negates (history §6.5). The observer's ticks run eagerly, outside the schedule choice: it only consumes, its interleaving is unobservable to the program, and exploring it multiplied schedules 64× before the rule (history §6.5). For `Spec::all_labels` the observer's input is a slot filled at compile time by an IR pass (`sim::observe`) that lists the labelled collections, turns each labelled node into a `Tee` as a `.clone()` would, maps the second branch to `(collection index, bincode of the element)` and sends it to the observer; the pass runs before network compilation and before the provenance rewrite, so the taps are traced like any operator (hydrofrac.md §"The specification is itself a Hydro flow"). `FACTS` comes from a failure-free probe before the first hypothesis; a probe that yields nothing, or a `PRE` that never holds in the failure-free run, is `Outcome::Vacuous` — a verdict about the harness, as the 2PC cooperative-termination rows under `all_labels` show when no peer is ever queried in the failure-free run (hydrofrac.md §"Every label of ISR replication, two-phase commit, and ABD").
 
 ---
 
-## Open doors
+## Part III — Doors
 
-1. **Scalar labels checked at their input stream.** A labelled `Singleton`/`Optional`/
-   `KeyedSingleton` is a function of a stream the type system already vouches for; the only premise
-   left is that every correct member receives the same inputs. Tap the labelling operator's input
-   and report under the scalar's site. ABD's register (`abd.rs:165`) is the first case; expected to
-   be violated by a client crash between two sends. "Final values equal" is explicitly *not*
-   planned: it re-proves the type system's conclusion. (The history §12 proposed exactly that
-   lattice-equality variant; the design doc's later commit `7d58ad20e0` supersedes it.)
-2. **Convergence witnesses in `PRE`.** Let a protocol that can report "settled" (a leader whose
-   view every correct member shares and whose latest heartbeat all have acknowledged) make
-   unconverged runs vacuous rather than counterexamples, instead of tuning body length. Raft would
-   need to expose the heartbeat acknowledgement as an output.
-3. **Decision-trace replay** as the general counterfactual oracle: record every draw with its
-   outcome, replay a prefix, override one decision, continue under a policy for the rest. Gives
-   why and why-not at any granularity, removes Level 3's dependence on hooks, and yields a decision
-   sequence rather than entropy bytes as a counterexample's schedule. The continuation policy after
-   an override is the one new piece of design. Does not repair the inference for non-monotone views.
-4. **Raft's `committed` under the generated specification.** The in-class form of the durability
-   harness; carries the sound grade; the harness exists; about an hour; has not been run.
-5. **Membership change.** Historically the richest vein (joint consensus, ZooKeeper
-   reconfiguration anomalies); nothing on the branch changes configuration while running. Needs
-   membership events as a driven `sim_input`, a decision whether a crashed member is also `Left`,
-   and a specification of agreement across an epoch boundary.
-6. **Smaller items from the roadmap**: replay cost on long runs (do not minimise over post-`EFF`
-   deliveries; cache replays across hypotheses sharing a script prefix; neither changes a verdict);
-   the filter as an IR node so the fault model exists under `deploy`, with delay, reordering and
-   partition at the same filter, and a receive-side source so replay needs no hooks; unmeasured
-   baselines (blind and random to the certificate on correct Raft, a coverage-guided fuzzer, Raft
-   under load); making "every label has a certificate" a failing check, which needs a registry of
-   specifications per compiled program.
+**Closed doors.** Sources: `history-hydrofrac-development.md` (history §n), `history-hydrofrac-negation.md` (negation §n), `ldfi-on-sim-hooks.md` (hooks §"title"), `ldfi-level-ablation.md` (ablation §"title"), and commits.
 
-## Appendix: Closed doors
+### Consumer-side simulator hooks as the fault point
+- **Tried:** round 1; standing `OmissionPolicy` / `PassthroughPolicy` on the receiving `BatchHook`, channels registered by the harness (hooks §"Prototype status").
+- **Closed because:** a test seam, not a network model: `tee`d outputs, hook-free paths, crashes as a separate mechanism, hook parameters in protocol signatures, certificates resting on complete registration (history §11).
+- **What it bought us:** the sender-side filter on every `Network` send with the transport type as the fault model; hooks survive as optional lineage precision and as what replay feeds (history §5.5, §11.5).
+- **Reopen only if:** never; the sender is where Molly defines omission and crash.
 
-Hydrofrac went through five rounds, and most of what the first three built is gone. Some doors below were ones LDFI's authors had already looked behind (clock-indexed crash points, De Morgan why-not provenance); others exist only because Hydro is a Rust dataflow with a simulator rather than a Datalog with a fixed schedule (the hook as fault point, the step closure as a lineage wall, the dylib boundary). Nearly all are dead ends; nearly every one fixed a limit worth knowing. Sources: `history-hydrofrac-development.md` (H §n), `history-hydrofrac-negation.md` (N §n), `ldfi-on-sim-hooks.md` (S, by section title), and commits on `ldfi-hydrofrac`.
-
-### The three walls
-
-Read together, the entries below are not twenty-odd separate mistakes. Nearly every door closed against one of three walls, each a limit of the setting rather than of the attempt.
-
-- **Wall 1 — the wrong fault point.** A fault injected anywhere but the sender, or named by anything but the message itself, is not the fault Molly reasons about: its identity shifts between hypotheses, or it misses channels, or it explores a dimension the program cannot see. *Consumer-side hooks; crash points named by send count; message identity by occurrence counting; every observed send as a crash candidate; exploring the observer's schedule; the earlier proposal (`lfdi-on-sim-hooks.md`); Maelstrom and partition nemeses.*
-
-- **Wall 2 — unsound inference on a non-monotone view.** The hitting-set argument says "derivation intact ⇒ view holds"; that is true only for views monotone in their intervenable facts, and only when the derivation itself is attributed soundly. Every false certificate came from here. *Round-1 lineage shortcuts; the static slice; record provenance alone; counterfactual lineage alone; the syntactic polarity check; agreement as the Raft property; letting a replay panic; replay shortcuts; the lattice-aware specification; the unmerged sibling work.*
-
-- **Wall 3 — the harness doing the protocol's job.** When the body arranges what the protocol should earn — convergence, a leader, a recovery window, a second statement of the property — the verdict is about the author's knowledge, not the protocol. *Crashes admissible at any send; hand-named goals; the staged Raft body; tuning the body; silent certification when `PRE` never held.*
-
-Two entries fit none: *measurement mistakes* and *the undischarged-premise lint* are about how the claim was measured and scoped, not about the mechanism. "Doors we never opened" are not closed doors.
-
-### Consumer-side hooks as the fault point
-- **Tried:** Round 1 (squashed into `cd6cae7fc6`; S "Prototype status"). Standing `OmissionPolicy` / `PassthroughPolicy` on the receiving `BatchHook`, channels registered by the harness. Hypothesis: the scripted-hook layer already interposes on every tick input and crosses the dylib boundary, so faults there are free. The first cut, scripting `release_values` + `pause()` from the harness, died earlier still: a schedule, not a policy, so the harness had to predict arrival order; and hold is not drop (S "Why that is the wrong fault point").
-- **Closed because:** a test seam, not a model of the network (H §11). A `tee`d channel omitted at one consumer was delivered at the others; hook-free paths (`recv.map(f).send(..)`, `sim_output`) could not be faulted; crashes needed a separate mechanism in the send half; every faultable batch was a hook parameter in the protocol's signature; and every certificate rested on the author having registered every channel. Replaced by the sender-side filter in `ab3ad7fe82`.
-- **What it bought us:** the filter on every `Network` send with the transport type as the fault model and every channel a fault point by construction (H §5); the distinction between interposition and schedule control, of which LDFI needs only the second. Hooks survive as optional lineage precision and as what Level 3 replay feeds.
-- **Reopen only if:** never — the sender is where Molly defines omission and crash.
-
-### Crash points named by send count
-- **Tried:** Round 1: `crash(node after k sends)` (S "Two soundness problems", 1; H §5.3).
-- **Closed because:** under another hypothesis the node's send sequence shifts, `send #7` names a different message, the clause's literals mean something else in the bug's world, and 2PC at load 2 was certified with the bug present.
-- **What it bought us:** `crash(node after sending m)`, `m` identified by `(channel, sender, destination, bytes)`; a node whose `m` is never sent survives; clauses carry the run's send sequences so the kill relation is evaluated in the run that produced them (H §7).
-- **Reopen only if:** never — Molly's logical clock is the stable identity, and the message is the closest thing the simulator has to one.
-
-### Message identity by occurrence counting
-- **Tried:** S "Message identity and time": `(channel, from, to, payload, k)`, retransmissions distinct faults.
-- **Closed because:** ordinals are unstable across hypotheses for the same reason send counts are. The built identity is the bytes; a byte-identical retransmission is omitted too while the fault stands (H §5.2), and a different payload (Raft's heartbeat with a higher `leader_commit`) is a different fault.
-- **What it bought us:** stable omission identity with no clock. [NEEDS AUTHOR REASONING: was "an identical retransmission is the same fault" accepted deliberately? A protocol retrying with identical bytes can only be tested for "all copies lost", never "first lost, retry delivered".]
+### Crash points named by send count; message identity by occurrence counting
+- **Tried:** `crash(node after k sends)` (hooks §"Two soundness problems", 1); `(channel, from, to, payload, k)` with retransmissions as distinct faults (hooks §"Message identity and time").
+- **Closed because:** under another hypothesis the send sequence shifts, `send #7` names a different message, and 2PC at load 2 was certified with the bug present.
+- **What it bought us:** `crash(node after m)` with `m` identified by `(channel, sender, destination, bytes)`; a node whose `m` is never sent survives; a byte-identical retransmission is the same omission (hydrofrac.md §"Transports supply the fault model"). [NEEDS AUTHOR REASONING: was "an identical retransmission is the same fault" accepted deliberately? A protocol that retries with identical bytes can be tested for "all copies lost" but never for "first lost, retry delivered".]
 - **Reopen only if:** a target retransmits byte-identical payloads and the bug needs one copy lost and another delivered.
 
-### Crashes admissible at any send
-- **Tried:** Round 1 proposed crash points for every send of the run; `EFF` was implemented by swapping every hook's policy to `deliver_all()` (H §5.4, §11.1).
-- **Closed because:** the swap became a switch on the filter; post-`EFF` crashes "violated" durability on *correct* Raft — the leader died in the heal phase after the last timer had fired, and a leaderless cluster was blamed for an entry it had no timer left to replicate. A crash inside the convergence window needs a second window the body cannot supply without knowing where the crash fell.
-- **What it bought us:** one convergence window; crash points proposed only for pre-`EFF` sends, and every post-`EFF` dependency killed by the crashes that kill its sender's last pre-`EFF` send. (Sibling work, below, found the simulator still *fired* post-`EFF` points and closed that too.)
-- **Reopen only if:** the body can express a recovery phase triggered by the crash itself.
-
-### Round-1 lineage shortcuts: "everything delivered", byte-only matching
-- **Tried:** Level 0 as "the whole delivered set is the derivation" (S "Level 0"); hook releases matched to sends by bytes alone.
-- **Closed because:** Level 0 put reliable delivery's acknowledgements into every support although nothing read them; byte matching attributed 2PC's `commit` to the `prepare` with the same payload, a false certificate (H §6.1).
-- **What it bought us:** `Level::Execution`, still the fallback at every level; channel-scoped matching for hooked releases; delivery ids minted at the send and carried on the wire, so receive-side attribution is exact (H §11.4).
-- **Reopen only if:** never.
-
-### The static slice as the precision instrument
-- **Tried:** Round 1, `sim/slice.rs`: a per-sink backward slice of the IR to narrow "every output depends on every input of every earlier execution". Two completeness bugs each manufactured a false certificate (a `forward_ref`-fed hook with no channel; ISR's `Reference`-captured state invisible to the walk).
-- **Closed because:** a step closure over a state struct (`raft_step`, `replica_step`) is one IR node, so the slice is Level 0 again; and even on dataflow-style ISR, Levels 0 and 1 coincide at every load — the slice cannot separate records that share a hook (S "Ablation"). A correctness requirement for Level 1, not a search improvement.
-- **What it bought us:** the diagnosis that ISR's hypothesis count was half coarse lineage and half the goal's dependence on liveness signals (every heartbeat kept the leader), which no precision removes; and that record provenance, not slicing, keeps counts flat under load (2PC load 8: 11 vs 73).
-- **Reopen only if:** never as a level (removed outright on the sibling branch).
-
 ### Every observed send as a crash candidate
-- **Tried:** S "Two soundness problems", 2. Level 2 certified ISR at load 2 because the leader's crash *between* two acknowledgements was not in the goal's lineage — the goal was conditioned on the acknowledgement, not derived from it. First fix: admit every observed send.
-- **Closed because:** it made the number of singleton hypotheses the number of sends, independent of lineage (2PC load 8: 46 instead of 11).
-- **What it bought us:** Molly's answer — the precondition's lineage widens the universe: the crash right after each send in a `PRE` derivation is a *preserve point*, and universe = clause candidates ∪ preserve points (H §7 step 5).
+- **Tried:** after message-named crashes, L2 certified ISR at load 2 because the leader's crash *between* two acknowledgements was in no goal derivation; the first fix admitted every observed send (hooks §"Two soundness problems", 2).
+- **Closed because:** singleton hypotheses became the number of sends, independent of lineage (2PC load 8: 46 instead of 11).
+- **What it bought us:** Molly's answer — the crash right after each send in a `PRE` derivation is a *preserve point*; universe = clause candidates ∪ preserve points.
 - **Reopen only if:** never.
-
-### Hand-named goals: `goal`, `witness`, `witness_final`, `require`
-- **Tried:** Rounds 1–2: the property stated twice, a Rust verdict in the body and named output facts for lineage (`f0dad9a851`). `witness_final` was added when ISR's final view, derived as an "ever" fact, certified the bug at load 2 (S "Two kinds of witness").
-- **Closed because:** the two encodings were never cross-checked and disagreed: a forgotten `require`, an unregistered channel, or an "ever" that should have been "final" was a wrong certificate with no warning (H §8.4, §10).
-- **What it bought us:** `Spec`: `PRE`/`POST` as Hydro views on an observer, so the verdict and its lineage are one object and the body only drives (H §6.5). The old API is compiled and unused. [NEEDS AUTHOR REASONING: kept as an escape hatch on purpose, or should it be deleted so no new harness is written on it?]
-- **Reopen only if:** never for harnesses.
 
 ### Exploring the observer's schedule
-- **Tried:** The observer as an ordinary location whose ticks the explorer interleaved.
-- **Closed because:** 64× more schedules on broadcast for an interleaving the program cannot observe (H §6.5).
+- **Tried:** the observer as an ordinary location whose ticks the explorer interleaved.
+- **Closed because:** 64× more schedules on broadcast for an interleaving the program cannot observe (history §6.5).
 - **What it bought us:** eager observer ticks outside the schedule choice.
 - **Reopen only if:** never.
 
-### Record provenance alone for the observer's views
-- **Tried:** Round 3: derive `POST` from the tags its value carried.
-- **Closed because:** a view that holds by *absence* (`filter_not_in`, an empty `count`) has no contributing records; the negated agreement `POST` had derivation `{}` and certified plain broadcast after one run (N §1; `e3928ed9fb`). Molly's De Morgan rewrite was considered and rejected: the simulator is a counterfactual oracle and need not know how the view was computed (N §2–3).
-- **What it bought us:** `Lineage::spec_view`, the observer replayed with facts removed one at a time; positive and negated agreement get identical derivations.
-- **Reopen only if:** never for hand-written views.
+### The static slice (`Level::Slice`, L1)
+- **Tried:** round 1's `sim/slice.rs`, a per-sink backward slice narrowing the execution closure; the default until the collapse (ablation header).
+- **Closed because:** L0 = L1 in every cell of every protocol measured (ablation §"Recommendation record"). Removed in commit 4ddea33f19.
+- **What it bought us:** the diagnosis that record provenance, not slicing, keeps counts flat under load; `sim/slice.rs` survives to name channels and hook inputs.
+- **Reopen only if:** never as a level.
 
-### Counterfactual lineage alone at the observer
-- **Tried:** Immediately after: `spec_view` took only the counterfactual derivation.
-- **Closed because:** ISR's durability `POST` reads the final leader off `observe_sequenced(views).max()`. Deleting views latest-first never changes the value, so the sufficient set was the write plus the *initial* view, with no heartbeat in its lineage; the breaking hypothesis (lose a replication, crash the leader after the acknowledgement, ZK promotes the stale follower) kills neither — it *adds* a view. Six hypotheses, certificate, bug present (N §4; `2dfc50feff`).
-- **What it bought us:** the union of counterfactual and recorded derivations, sound where either is; and the general statement that the hitting-set inference holds only for views monotone in their intervenable facts, final-value views being the everyday counterexample (H §10).
-- **Reopen only if:** the view is monotone by construction — which the generated specification is.
+### Counterfactual replay as a level (`Level::Counterfactual`, L3)
+- **Tried:** node-local replay as the top rung, falling back to L2 (ablation header).
+- **Closed because:** identical derivations to L2 wherever L2 applied, at 2–10× the cost; one win (dataflow ISR bug 3 vs 12) that does not pay for Raft at ~5 s a hypothesis (ablation §"Recommendation record"). Removed in commit 4ddea33f19.
+- **What it bought us:** replay as the oracle *inside* `Precise` for opaque records and programs without provenance (commit fafcd70fe3).
+- **Reopen only if:** never as a level.
+
+### Downgrading no-provenance programs to `Execution` (`Ldfi::effective_level`)
+- **Tried:** commit 4ddea33f19, as part of the collapse.
+- **Closed because:** a program with no tags should be *every record opaque*, derived by replay; the downgrade gave `leader_merge` the coarsest lineage and ISR 31 hypotheses instead of 12 (ablation §"Precise without provenance"). Removed in commit fafcd70fe3.
+- **What it bought us:** `Precise` as the uniform default; harnesses need not know whether their program carries provenance.
+- **Reopen only if:** never.
+
+### Disjunctive provenance on by default
+- **Tried:** commit 73a5db9c05, three measurement passes (ablation §"Disjunctive provenance", §"Complete grid" ×2).
+- **Closed because:** no reduction on any protocol; +10% / +22% / +40% hypotheses on echo broadcast, because alternative witnesses mint new crash points (ablation §"Diagnostic").
+- **What it bought us:** the formula representation (what `Precise` reads its single derivation from); the insight that a lazily grown universe already does Molly's pruning; the DNF-over-single-universe idea.
+- **Reopen only if:** a protocol exhibits in-run alternatives whose deliveries are sends the single path already names.
+
+### Aggregate witnesses on by default
+- **Tried:** commit 2f156b6335; Paxos × 3 repeats at cap 256, one pass at cap 400.
+- **Closed because:** draw-dominated; 339 vs 393 in one pass is within Paxos's ±50% variance; the P1b quorum is unreachable through its `anti_join` (ablation §"Observations" under Aggregate-local witnesses).
+- **What it bought us:** which quorum shapes carry recoverable "any `k` of `n`" and which do not.
+- **Reopen only if:** see Part II §4.
 
 ### The syntactic polarity check
-- **Tried:** Round 4, `polarity.rs` (`c55d449a20`; N §5 (b)): a static walk grading each view `Monotone` / `NonMonotone` / `Unknown` to label the certificate and license the counterfactual-only derivation.
-- **Closed because:** removed in `09618ccd96`. It could only approximate (the positive agreements of broadcast, 2PC and Raft graded `Unknown`; `first()` is an unclassifiable `scan`), and it existed only because hand-written views can have any shape. The generated specification — a universal over a fact domain and a member domain the hypothesis fixes — makes "derivation intact ⇒ view holds" true by its form, leaving nothing to classify (H §1.1, §6.5).
-- **What it bought us:** the grades survive as words: *within the fault model* for the generated specification, *RELATIVE, no soundness claim* for every hand-written one; N §4 is the written reason. The control case (integrity, true, non-monotone, certified after one run with nothing checked) is the example for anyone who asks why.
-- **Reopen only if:** hand-written specifications become a product rather than an escape hatch; even then a decision-trace oracle does not repair the inference for non-monotone views (N §5 (d)).
+- **Tried:** round 4, `polarity.rs`: a walk over the observer's dataflow grading each view `Monotone` / `NonMonotone` / `Unknown` (negation §5; history §12).
+- **Closed because:** it could only approximate (the positive agreements graded `Unknown`; `first()` is an unclassifiable `scan`), and once the specification was generated and sound by form there was nothing to classify. Removed in round 5.
+- **What it bought us:** the grades as words — within the fault model for the generated specification, RELATIVE for every hand-written one.
+- **Reopen only if:** hand-written specifications become a product rather than an escape hatch.
 
-### Agreement as the Raft property
-- **Tried:** Rounds 1–3: "no index holds two committed entries" (S "A Raft bug"; `881605b6c0`).
-- **Closed because:** agreement is the *absence* of a conflict; a hypothesis breaks it by making a member commit something else, removing no recorded fact. The staged bug was found only because the same omission also displaced member 1's recorded commit (H §6.5).
-- **What it bought us:** durability (`PRE`: some member committed `(i, r)`; `POST`: every correct member did), and the division of labour — agreement belongs to the simulator's own tests and Maelstrom (H §1.1).
-- **Reopen only if:** never for LDFI; outside the class by definition.
+### Counterfactual-only lineage at the observer
+- **Tried:** `spec_view` taking the replay-derived set alone.
+- **Closed because:** the false ISR certificate in 6 hypotheses on the final-view `POST` (negation §4).
+- **What it bought us:** the union of counterfactual and recorded derivations; the statement that the inference holds only for monotone views.
+- **Reopen only if:** the view is monotone by construction, which the generated specification is.
 
-### The staged Raft body and the "17 hypotheses" result
-- **Tried:** Rounds 1–4 reported the election-restriction bug in 25, 20, then 17 hypotheses with a body that elected member 1, raced member 0's timer against a request, ordered requests and heartbeats, and fired member 1's timer twice after `EFF` (H §9).
-- **Closed because:** everything the bug needs except the two lost messages was scripted by someone who knew it; the Maelstrom comparison credited lineage for conditions the body arranged; the author reported the number without saying so. Withdrawn with the 25-vs-160-vs-random-0/5 comparison.
-- **What it bought us:** a generic body shaped only by what *correct* Raft needs, never touched in response to the buggy protocol; the bug in 90 hypotheses with a four-omission, no-crash, schedule-independent counterexample the author had not written down; correct Raft certified in 235. Blind and random on this body are unmeasured (a day of compute each).
-- **Reopen only if:** never — the body is part of the claim.
+### Clamped crash ordinals; untraced sequenced observations
+- **Tried:** found, not tried: the two clause-soundness gaps that certified ISR's bug at L0/L1 and L3 (ablation §"Soundness bug").
+- **Closed because:** commit 4c43956b4b made the ordinal exact, moved the clamp to proposal, and taught `payload_matches` the `usize` prefix.
+- **What it bought us:** `ldfi_finds_the_unclean_election_bug_at_every_level`; the level grid as a soundness oracle.
+- **Reopen only if:** never.
 
-### Tuning the body until correct Raft converged
-- **Tried:** Round 5: four bodies "violated" durability on correct Raft (no post-`EFF` timer; no request of the new term; a timer spent on a re-armed suppression; too few heartbeats for the linear back-off), each lengthened; the fourth fix also changed the protocol (§5.3's conflict hint, because the long heal phase made a hypothesis an hour).
-- **Closed because:** a specification error treated as a scheduling problem. `PRE` = "some member committed" is true at the first commit, so a run too short to catch up read as a bug (H §1.1).
-- **What it bought us:** `PRE` must be a convergence witness, so an unconverged run is vacuous; `Outcome::Vacuous` when no hypothesis converges. The Raft harness is not yet on this pattern (needs the latest-heartbeat acknowledgement as an output; H §12 item 0).
-- **Reopen only if:** never — fix `PRE`, not the horizon.
+### The staged Raft body ("17 hypotheses")
+- **Tried:** rounds 1–4 reported 25, 20, then 17 hypotheses with a body that arranged everything the bug needed except the two lost messages (history §9).
+- **Closed because:** the body was part of the claim and its author knew the bug. Withdrawn.
+- **What it bought us:** a generic body shaped only by what correct Raft needs; the bug in 90, correct Raft in 235.
+- **Reopen only if:** never.
+
+### Tuning the harness body instead of `PRE`
+- **Tried:** round 5: four Raft bodies "violated" durability on the correct protocol (no post-`EFF` election timer; no request of the new term; a timer spent on a re-armed suppression; too few heartbeats for the linear back-off), each lengthened; the fourth also changed the protocol (history §9).
+- **Closed because:** `PRE` = "some member committed" is true at the first commit, so a run too short to catch up read as a bug: a specification error treated as a scheduling problem (history §1.1).
+- **What it bought us:** `PRE` as a convergence witness. The Raft harness is not yet on this pattern (history §12, item 0).
+- **Reopen only if:** never; fix `PRE`, not the horizon.
 
 ### Silent certification when `PRE` never held
-- **Tried:** Rounds 1–4: a failure-free run with `PRE` false contributed `{}`, the ILP was infeasible, outcome `Certificate` (H §7, §9). The ISR false certificate of round 1 had the same shape (S "ISR replication", lesson 1).
-- **Closed because:** the first generic Raft body sent requests to non-leaders, which this Raft drops; it certified in one run.
-- **What it bought us:** `Outcome::Vacuous`, a verdict about the harness. The no-superset-of-a-vacuous-set constraint remains a heuristic (vacuity is not monotone in the fault set).
+- **Tried:** rounds 1–4: a failure-free run with `PRE` false contributed `{}`, the ILP was infeasible, outcome `Certificate` (history §9).
+- **Closed because:** the first generic Raft body sent requests to non-leaders and certified in one run.
+- **What it bought us:** `Outcome::Vacuous`.
 - **Reopen only if:** never.
 
 ### Letting a counterfactual replay panic
-- **Tried:** Found, not tried: replay feeds recorded inputs to a member whose state has diverged; Raft's leader indexed past its log on an acknowledgement for an entry it never appended in the replayed world, and the panic unwound across the dylib boundary and aborted the process (H §6.4, §9).
+- **Tried:** found: Raft's leader indexed past its log under replayed inputs and the panic crossed the dylib boundary and aborted the process (history §9).
 - **Closed because:** a replay that cannot run is no evidence, and the abort took the search with it.
-- **What it bought us:** `sim::runtime::erase_guarded`; a real-run panic is a test failure; a replay panic is inconclusive and keeps the delivery in the derivation (weaker clause, never a dropped one). Hit 624 times in 365,000 Raft replays.
+- **What it bought us:** `sim::runtime::erase_guarded`; a replay panic is inconclusive and keeps the delivery. Hit 624 times in 365,000 Raft replays.
 - **Reopen only if:** never.
 
-### Replay shortcuts: earlier-only candidates; unminimized post-`EFF` deliveries
-- **Tried:** Round 2: minimize only over deliveries before the output's execution (S "Counterfactual lineage"). Round 5: skip minimizing post-`EFF` deliveries, which are not intervenable, to cut Raft replay cost (H §12 item 4).
-- **Closed because:** a later echo can substitute for the original, so the first gave an empty derivation and a false certificate on reliable broadcast; the second made recursion worse, since minimization is also what prunes redundant retransmissions.
-- **What it bought us:** candidates include later deliveries; a replayed tick may have nothing to do; a node that cannot reproduce its output with everything kept falls back to recorded lineage (H §6.4). Replay cost is in the recursion, not the per-replay time; caching across shared script prefixes is the open item.
-- **Reopen only if:** a variant skips minimization *and* does not recurse through what it keeps.
-
-### Maelstrom and partition nemeses for the election-restriction bug
-- **Tried:** Round 3 (`e25bfbd2b1`; H §9.1): a Raft-backed `lin-kv` workload, twelve runs, 29 minutes, partitions and latency nemeses, ~1,900 elections, an oracle for an overwritten committed index.
-- **Closed because:** the bug needs *selective* loss — `r0` to both followers, `r1` to the old leader, everything else delivered, so logs stay the same length while contents diverge. A partition drops everything on a link; the isolated node falls behind and the index-only check correctly denies it. And `EventualConsistency` + Maelstrom does not type-check: a premise is discharged by a completeness claim, not by "ran 29 minutes, no anomaly" (H §1.1).
-- **What it bought us:** the sharp statement of what hydrofrac is for (its output shape, not a race on a bug); a real bug in Hydro's Maelstrom backend; and the honest weak form of the bug-finding claim.
-- **Reopen only if:** a Maelstrom nemesis drops individual message identities, which narrows the second point only.
-
-### Measurement mistakes: schedule accounting and the lucky baseline
-- **Tried:** Round 1's tables charged LDFI 4–8 schedules per hypothesis against one instance per random fault set; the `bern` baseline visited nodes in registration order (S "Measurement grid").
-- **Closed because:** hooks under a policy draw no entropy, so one schedule per hypothesis gave every verdict of eight on protocols without schedule-sensitive bugs; and registration order spent the crash budget on the coordinator / replica 0 half the time — the critical node in both protocols. Lucky, not uninformed.
-- **What it bought us:** the corrected grid (lineage beats blind everywhere, 2–7× on certificates; beats uninformed random on 2PC at every size; ISR is "not yet a haystack") and the retraction of "random wins instances-to-bug". Raft keeps four schedules because its outcome does depend on the interleaving (H §5.5).
-- **Reopen only if:** never — but re-measure before quoting a Raft speed-up.
-
-### The undischarged-premise lint
-- **Tried:** Round 5 (`09618ccd96`): every search printed every `EventualConsistency` source and whether the specification observed it; the first version printed forty lines for `multi_paxos`.
-- **Closed because:** deleted in `aaa0ef79c8`. A report cannot fail a test, and making it one needed "every search over this program" (H §1.2). The direct route was to search every label.
-- **What it bought us:** `Spec::all_labels` / `search_all_labels`: one verdict per labelled collection, minted and exit nodes both (they disagree on reliable broadcast), `NotChecked(reason)` for the rest.
-- **Reopen only if:** never; `LabelResults` is the lint.
+### Agreement as the Raft property
+- **Tried:** rounds 1–3: "no index holds two committed entries" (hooks §"A Raft bug").
+- **Closed because:** agreement is the absence of a conflict; the staged bug was found only because the same omission also displaced a recorded commit (history §6.5, §10).
+- **What it bought us:** durability as the Raft property; agreement belongs to the simulator's own tests and Maelstrom.
+- **Reopen only if:** never for LDFI.
 
 ### A lattice-aware generated specification for `Singleton` outputs
-- **Tried:** Proposed (H §1.2, §12) for ABD's register: observe the final value per correct member, `POST` is equality.
-- **Closed because:** `7d58ad20e0`: checking the value re-proves the type system's conclusion. A labelled scalar is a function of its input stream, already vouched for; the only premise left is that every correct member gets the same inputs, so the tap goes on the input stream.
-- **What it bought us:** a cleaner class boundary — dissemination, never computation. Scalars are `NotChecked(NotAStream)` until the input tap is built.
+- **Tried:** proposed for ABD's register: observe the final value per correct member, `POST` equality (history §12, item 0).
+- **Closed because:** checking the value re-proves the type system's conclusion; the tap goes on the input stream (hydrofrac.md §"Next steps", 1; commit 7d58ad20e0).
+- **What it bought us:** a clean class boundary: dissemination, never computation.
 - **Reopen only if:** a scalar is labelled over an unlabelled input whose convergence nothing vouches for.
 
-### The earlier proposal (`lfdi-on-sim-hooks.md`, `f32054f9`)
-- **Tried:** Ordering cuts as "the easy 80%" of faults, a `ChannelHook` on the script-as-schedule model, a `CrashHook` fired `.at_quiescence()`, provenance as "a one-line codegen addition" (S "Appendix").
-- **Closed because:** orderings are the fuzzer's dimension and Molly fixed them; crash at a phase barrier cannot express "after prepare to A, before B"; the "one line" is the Level 2 rewrite (26 operators, `wrap_opaque` for `Reference` captures; H §6.3).
-- **What it bought us:** composition with the fuzzer — a hypothesis is a fault set, the explorer searches schedules under it, a counterexample is a pair (H §3).
+### The undischarged-premise lint
+- **Tried:** round 5: every search printed every `EventualConsistency` source and whether the specification observed it (history §1.2).
+- **Closed because:** a report cannot fail a test; the direct route was to search every label (auto-labels spec §1).
+- **What it bought us:** `Spec::all_labels` / `search_all_labels`; `LabelResults` is the lint.
 - **Reopen only if:** never.
 
-### Unmerged sibling work (`sandbox-6479bd3c…` and relatives, 19 Oct; not on `ldfi-hydrofrac`)
-Three further doors, with their own record in `docs/design/ldfi-level-ablation.md` on that branch. The author should confirm which are canonical.
-- **`Level::Slice` and `Level::Counterfactual` removed** (`4ddea33f19`): `Slice` matched `Execution` and `Counterfactual` matched `Record` on every protocol measured, the latter at 2–10× the replays; `Record` (renamed `Precise`, `fafcd70fe3`, which also undid a wrong downgrade for programs without provenance) is the default. The same commit made the simulator enforce "every failure ≤ `EFF`" after `4c43956b4b` found it had been firing post-`EFF` crash points the solver never proposed, one of two clause-soundness gaps that certified ISR's bug at three of four levels. [NEEDS AUTHOR REASONING: H §10 says `EFF` "should not shape the design further"; the sibling branch made it the simulator's fault model. Which stands?]
-- **Disjunctive record provenance** (`73a5db9c05`, flag, default off): all witnesses per record at dedups. Verdicts identical; counts unchanged on 2PC and ISR, *higher* on echo broadcast (10→11, 32→39) — alternatives prune two hypotheses and mint three new crash points. The lazily grown universe already did most of Molly's pruning. Reopen only as "DNF clauses over the single-derivation universe".
-- **Aggregate-local witnesses** ("any `k` of `n`" at a threshold fold): measurement incomplete at the branch tip. Open, not closed.
+### Maelstrom and partition nemeses for the election-restriction bug
+- **Tried:** a Raft-backed `lin-kv` workload; twelve runs, 29 minutes, partitions and latency nemeses, ~1,900 elections (history §9.1).
+- **Closed because:** the bug needs *selective* loss, and a partition drops everything on a link, so the isolated node falls behind and the index-only check correctly denies it. A premise is discharged by a completeness claim, not by "ran 29 minutes, no anomaly".
+- **What it bought us:** the sharp statement of what hydrofrac is for; a real bug in the Maelstrom backend.
+- **Reopen only if:** a nemesis drops individual message identities.
 
-### Doors we never opened
-- **Delay and reordering.** Expressible at the filter as hold-instead-of-drop (H §5.6); reordering is the schedule explorer's dimension.
-- **Partitions as a primitive.** Omission sets already express them, and partitions miss selective-loss bugs (H §9.1).
-- **Byzantine behaviour, duplication.** Outside Molly's vocabulary; duplication has no simulator hook (H §1.2).
-- **`cut_after(n)` on `fail_stop`.** Nothing has needed a reliable channel to fail other than by its sender's crash.
-- **The filter under `deploy`.** One OS-chosen interleaving per run, no determinism, replay or barriers (H §11.3): Molly's fixed schedule or worse.
-- **Receive-side source for hook-free replay.** Would free lineage from `BatchHook` (H §11.3); deferred, since replay is confined to opaque records.
-- **Decision-trace replay.** The general oracle (N §3); worth building only if the strengthened certificates are the ones users want, and it does not repair non-monotone views.
-- **Why-not provenance by rewrite.** Molly's route (N §5 (c)); the oracle answers without knowing how the view was computed.
-- **Exhaustive schedules for Raft; Raft's `committed` under the generated specification; blind/random on the generic Raft body; a coverage-guided fuzzer baseline; Raft under load.** Each an hour to a day of compute not yet spent (H §9, §10, §12).
-- **Membership change.** Nothing to run it on: static membership in the simulator; `dyn_raft` is on `main` (H §12).
+### Measurement mistakes
+- **Tried:** round 1 charged LDFI 4–8 schedules per hypothesis against one instance per random fault set, and the random baseline visited nodes in registration order, spending its crash budget on the coordinator half the time (hooks §"Ablation").
+- **Closed because:** hooks under a policy draw no entropy, so one schedule per hypothesis gave every verdict of eight on protocols without schedule-sensitive bugs; the baseline was lucky, not uninformed.
+- **What it bought us:** the corrected grid (lineage beats blind everywhere, 2–7× on certificates); the retraction of "random wins instances-to-bug"; Raft keeps four schedules because its outcome depends on the interleaving (history §5.5). The last round added two rules: wall seconds at load 20–30 are not benchmarks, and ≤4 concurrent exhaustive searches is the ceiling on a 15 GiB host (ablation §"Complete grid: ISR, broadcast, delivery").
+- **Reopen only if:** never; but re-measure before quoting a Raft speed-up.
+
+### Why most doors closed
+
+Nearly every entry above fell against one of three walls, and the last round added a fourth.
+
+*The wrong fault point.* A fault injected anywhere but the sender, or named by anything but the message, is not the fault Molly reasons about: its identity shifts between hypotheses, or it misses channels, or it explores a dimension the program cannot see. Consumer-side hooks; crash points by send count and occurrence-counted identity; every observed send as a crash candidate; exploring the observer's schedule; Maelstrom's partition nemeses.
+
+*Unsound inference on a non-monotone view, or on an unsoundly attributed derivation.* Every false certificate came from here. Counterfactual-only lineage at the observer; the polarity check; agreement as the Raft property; the clamped ordinals and untraced observations; letting a replay panic.
+
+*The harness doing the protocol's job.* When the body arranges what the protocol should earn, the verdict is about the author. The staged Raft body; tuning the body instead of `PRE`; silent certification when `PRE` never held.
+
+*Finer provenance does not pay once the search universe is lazy.* The slice, counterfactual as a level, disjunctive provenance and aggregate witnesses all hit this one. Each gives a more exact account of why a run succeeded; none changes which faults the search has reason to try, because hydrofrac proposes a fault only when some derivation depends on the send that names it, and the coarse account already names those sends. Where the finer account named *more* sends (the echo alternatives), the universe grew and the search ran longer for a stronger certificate. The one place finer lineage paid — record provenance over execution lineage under background load — is where the coarse account charged a record to deliveries it did not depend on, and that is already the default. The `effective_level` downgrade is this wall's mirror: coarser lineage where replay was free.
+
+Three entries fit none: the lattice-aware specification and the undischarged-premise lint were about the scope of the claim, and the measurement mistakes about how it was measured.
+
+### Doors never opened
+
+- **Delay and reordering.** Expressible at the filter as hold-instead-of-drop; reordering is the schedule explorer's dimension (history §5.6).
+- **Partitions as a primitive.** Omission sets already express them, and partitions miss selective-loss bugs (history §9.1).
+- **Byzantine behaviour, duplication.** Outside Molly's vocabulary; duplication has no simulator hook (hydrofrac.md §"Limitations").
+- **`cut_after(n)` on a `fail_stop` channel.** Nothing has needed a reliable channel to fail other than by its sender's crash (history §5.6).
+- **The filter under `deploy`.** One OS-chosen interleaving per run, no determinism, replay or barriers: Molly's fixed schedule or worse (history §11.3).
+- **A receive-side source for hook-free replay.** Would let `BatchHook` drop out of lineage entirely; deferred, since replay reproduces every hooked node and falls back soundly elsewhere (history §11.3).
+- **Why-not provenance by Molly's De Morgan rewrite.** The simulator answers the counterfactual question without knowing how the view was computed (negation §2–3).
+- **Exhaustive schedules for Raft; blind and random on the generic Raft body; a coverage-guided fuzzer baseline; Raft under load.** Each an hour to a day of compute not yet spent (history §9, §10).
+- **Raft `raft-bug` at `Precise` with a 256 cap in the shrunken ablation configuration**, to settle whether the L0 certificate on the bug variant there is a sampled-schedule miss (ablation §"Raft").
+- **The disjunction grid on 2PC `n ≥ 3` CTP, `n=4`, Paxos-correct and Raft**, lost to the out-of-memory reboot (ablation §"Complete grid: 2PC, Paxos, leader_merge").
+
+### Open doors
+
+- **Scalar labels checked at their input stream.** A labelled `Singleton` / `Optional` / `KeyedSingleton` is a function of a stream the types already vouch for; the tap goes on the labelling operator's input and the verdict is reported under the scalar's site. ABD's register (`abd.rs:165`) is the first case (hydrofrac.md §"Next steps", 1).
+- **Convergence witnesses in `PRE`.** So an unconverged run is vacuous rather than a counterexample; the Raft harness is the first candidate and needs the latest-heartbeat acknowledgement as an output (hydrofrac.md §"Next steps", 2; history §12, 0).
+- **Decision-trace replay.** Record every nondeterministic decision and replay a prefix with one changed: the general oracle of which node-local replay is the coarse instance. It does not by itself repair the inference for non-monotone views (negation §3; history §12, 1).
+- **Raft's `committed` under the generated specification.** The in-class form of the durability test, with the sound grade; about an hour per search, never run (hydrofrac.md §"Next steps", 4).
+- **Membership change.** Nothing on this branch changes configuration while running; the shape is written down — agreement across an epoch boundary, a crash during reconfiguration, membership events as a driven input (history §12, 2).
+- **DNF cover constraints over the single-derivation universe.** The one disjunction experiment left (ablation §"Status").
+- **Replay cost on long runs.** Caching replays across hypotheses whose scripts share a prefix; a Raft hypothesis late in the certificate search is three to four minutes, almost all replay (history §12, 4).
+- **The unmerged ablation knobs.** `LDFI_ABLATION_CTP` / `LDFI_ABLATION_LEVELS` for the 2PC harness (`017e8877af`, bookmark `sandbox-a76a3420-…`) and a parametrised `leader_merge_search` (`0157230103`, bookmark `sandbox-86fabe57-…`) are each one test-only commit on top of `2f156b6335`, written for the disjunction grid the reboot cut short.
+- **The old goal API.** `goal`, `goal_all_members`, `goal_witnessed`, `Run::witness` / `require` are compiled and unused by any harness (history §10). [NEEDS AUTHOR REASONING: kept as an escape hatch on purpose, or to be deleted so no new harness is written against it?]
+
+---
+
+## Status and housekeeping
+
+`2f156b6335` is 34 commits past `9d0ec39c92`, a squash whose tree equals `ldfi-hydrofrac` (`7d58ad20e0`, 2026-10-18). Those 34 commits are all of `sim::viz`, the four ablation harnesses, the soundness fix, the Molly fault model, the level collapse and the Precise rename, disjunctive and aggregate provenance, and the ablation document. Anything written against `ldfi-hydrofrac` describes four levels, a `Slice` default, post-`EFF` crash points that fire, and no visualizations. The merge base with `main` (`90d9d26736`) is `99dcd3de68` (2026-08-11); 80 commits on the hydrofrac side, 75 on `main`.
+
+`sandbox-e20764ef-…` (`b56e36ee15`) is a byte-identical tree to `2f156b6335` and can be dropped. `sandbox-86fabe57-…` (`0157230103`) and `sandbox-a76a3420-…` (`017e8877af`) are each one test-only commit on top of `2f156b6335` (above).
+
+The hydrofrac line's first commit (`cd6cae7fc6`, "sandbox init") removed the `sedge`, `sedge_macro`, `cress` and `cress_config_macro` crates that its base (`4de7c45e41`) carried; `main` has none of them either. Whatever branch carries sedge/cress will conflict with the hydrofrac line at the workspace `Cargo.toml` and `Cargo.lock`, and that has to be resolved before either merges toward `main`.
+
+`history-hydrofrac-development.md` carries a one-line header warning that its specifics may not match the code. It should say more loudly that it describes the state before the last round — four levels, `Slice` as default, crash points firing anywhere, `EFF` as "a leftover that should not shape the design" — or be marked archival and left alone. `molly-viz.md` §"Limits" still says alternative derivations are not drawn, which is true of the renderer but no longer of the data under `LDFI_DISJUNCTIVE=1`. The gallery files carry the suffix `record` where a regenerated gallery writes `precise` (gallery README).
