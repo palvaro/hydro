@@ -507,6 +507,18 @@ from the last by the fault set alone. The decision-trace open door generalises t
 
 Hydrofrac went through five rounds, and most of what the first three built is gone. Some doors below were ones LDFI's authors had already looked behind (clock-indexed crash points, De Morgan why-not provenance); others exist only because Hydro is a Rust dataflow with a simulator rather than a Datalog with a fixed schedule (the hook as fault point, the step closure as a lineage wall, the dylib boundary). Nearly all are dead ends; nearly every one fixed a limit worth knowing. Sources: `history-hydrofrac-development.md` (H §n), `history-hydrofrac-negation.md` (N §n), `ldfi-on-sim-hooks.md` (S, by section title), and commits on `ldfi-hydrofrac`.
 
+### The three walls
+
+Read together, the entries below are not twenty-odd separate mistakes. Nearly every door closed against one of three walls, each a limit of the setting rather than of the attempt.
+
+- **Wall 1 — the wrong fault point.** A fault injected anywhere but the sender, or named by anything but the message itself, is not the fault Molly reasons about: its identity shifts between hypotheses, or it misses channels, or it explores a dimension the program cannot see. *Consumer-side hooks; crash points named by send count; message identity by occurrence counting; every observed send as a crash candidate; exploring the observer's schedule; the earlier proposal (`lfdi-on-sim-hooks.md`); Maelstrom and partition nemeses.*
+
+- **Wall 2 — unsound inference on a non-monotone view.** The hitting-set argument says "derivation intact ⇒ view holds"; that is true only for views monotone in their intervenable facts, and only when the derivation itself is attributed soundly. Every false certificate came from here. *Round-1 lineage shortcuts; the static slice; record provenance alone; counterfactual lineage alone; the syntactic polarity check; agreement as the Raft property; letting a replay panic; replay shortcuts; the lattice-aware specification; the unmerged sibling work.*
+
+- **Wall 3 — the harness doing the protocol's job.** When the body arranges what the protocol should earn — convergence, a leader, a recovery window, a second statement of the property — the verdict is about the author's knowledge, not the protocol. *Crashes admissible at any send; hand-named goals; the staged Raft body; tuning the body; silent certification when `PRE` never held.*
+
+Two entries fit none: *measurement mistakes* and *the undischarged-premise lint* are about how the claim was measured and scoped, not about the mechanism. "Doors we never opened" are not closed doors.
+
 ### Consumer-side hooks as the fault point
 - **Tried:** Round 1 (squashed into `cd6cae7fc6`; S "Prototype status"). Standing `OmissionPolicy` / `PassthroughPolicy` on the receiving `BatchHook`, channels registered by the harness. Hypothesis: the scripted-hook layer already interposes on every tick input and crosses the dylib boundary, so faults there are free. The first cut, scripting `release_values` + `pause()` from the harness, died earlier still: a schedule, not a policy, so the harness had to predict arrival order; and hold is not drop (S "Why that is the wrong fault point").
 - **Closed because:** a test seam, not a model of the network (H §11). A `tee`d channel omitted at one consumer was delivered at the others; hook-free paths (`recv.map(f).send(..)`, `sim_output`) could not be faulted; crashes needed a separate mechanism in the send half; every faultable batch was a hook parameter in the protocol's signature; and every certificate rested on the author having registered every channel. Replaced by the sender-side filter in `ab3ad7fe82`.
