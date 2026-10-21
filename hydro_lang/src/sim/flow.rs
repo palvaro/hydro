@@ -198,6 +198,11 @@ impl<'a> SimFlow<'a> {
         let labels = super::observe::tap_labels(&mut self.ir).map(Rc::new);
         #[cfg(not(feature = "ldfi"))]
         let labels = None;
+        // What reaches each location, and whether it is order-insensitive (see `sim::order`):
+        // on the IR as the program built it, before the networks are compiled.
+        #[cfg(feature = "ldfi")]
+        let upstream_nondet =
+            Rc::new(super::order::Cones::new(&self.ir).nondet_by_destination(&self.ir));
 
         self.ir.iter_mut().for_each(|leaf| {
             leaf.compile_network::<SimDeploy>(
@@ -321,6 +326,8 @@ impl<'a> SimFlow<'a> {
             cluster_members: Rc::new(cluster_members),
             process_count,
             labels,
+            #[cfg(feature = "ldfi")]
+            upstream_nondet,
         }
     }
 

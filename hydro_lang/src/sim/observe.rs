@@ -37,6 +37,7 @@ use crate::live_collections::stream::networking::{
     deserialize_bincode_with_type, serialize_bincode_with_type,
 };
 use crate::networking::{NetworkingInfo, TcpFault};
+use crate::sim::order::{Cones, NondetSite};
 use crate::sim::slice::{EcCollection, EcKey, ec_collections, ec_key, is_ec};
 use crate::sim::spec::{SLOT_TAG, SLOT_TAG_SEPARATOR};
 use crate::staging_util::get_this_crate;
@@ -87,12 +88,22 @@ pub struct LabelPlan {
     /// observed exit after the merge, whose verdict is authoritative. The hop is still
     /// observed and searched; its verdict is informational.
     pub merged_at: Option<usize>,
+    /// The non-deterministic operators (those whose API takes a `nondet!` guard) in the
+    /// collection's causal cone, across every location (see [`crate::sim::order`]): empty when
+    /// the collection is order-insensitive upstream.
+    pub upstream_nondet: Vec<NondetSite>,
 }
 
 impl LabelPlan {
     /// Whether the collection is tapped and searched in its own right.
     pub fn is_searched(&self) -> bool {
         self.not_checked.is_none() && self.covered_by.is_none()
+    }
+
+    /// Whether no non-deterministic operator lies in the collection's causal cone (see
+    /// [`Self::upstream_nondet`] for the offending sites otherwise).
+    pub fn order_insensitive_upstream(&self) -> bool {
+        self.upstream_nondet.is_empty()
     }
 }
 
@@ -138,6 +149,7 @@ pub(crate) fn plan(collections: Vec<EcCollection>, excluded: &[String]) -> Vec<L
             collection,
             covered_by: None,
             merged_at: None,
+            upstream_nondet: vec![],
         })
         .collect();
     for i in 0..plans.len() {
@@ -251,12 +263,52 @@ pub(crate) fn tap_labels(ir: &mut [HydroRoot]) -> Option<Vec<LabelPlan>> {
     let (slot_metadata, excluded) = find_slot(ir)?;
     let root = get_this_crate();
 
-    let plans: Vec<LabelPlan> = plan(ec_collections(ir), &excluded);
+    let mut plans: Vec<LabelPlan> = plan(ec_collections(ir), &excluded);
     let index_of: HashMap<EcKey, usize> = plans
         .iter()
         .enumerate()
         .map(|(i, plan)| (plan.collection.key(), i))
         .collect();
+    // The non-deterministic operators upstream of each collection, on the IR as the program
+    // built it (before the taps, which add none).
+    {
+        let cones = Cones::new(ir);
+        let mut nodes: Vec<Vec<*const HydroNode>> = vec![vec![]; plans.len()];
+        let mut seen: HashSet<*const HydroNode> = HashSet::new();
+        fn collect(
+            node: &HydroNode,
+            seen: &mut HashSet<*const HydroNode>,
+            index_of: &HashMap<EcKey, usize>,
+            nodes: &mut [Vec<*const HydroNode>],
+        ) {
+            if !seen.insert(std::ptr::from_ref(node)) {
+                return;
+            }
+            if is_ec(node)
+                && let Some(&index) = index_of.get(&ec_key(node))
+            {
+                nodes[index].push(std::ptr::from_ref(node));
+            }
+            match node {
+                HydroNode::Tee { inner, .. }
+                | HydroNode::Reference { inner, .. }
+                | HydroNode::PartitionSide { inner, .. } => {
+                    collect(&inner.0.borrow(), seen, index_of, nodes)
+                }
+                _ => {
+                    for input in node.input() {
+                        collect(input, seen, index_of, nodes);
+                    }
+                }
+            }
+        }
+        for root in ir.iter() {
+            collect(root.input(), &mut seen, &index_of, &mut nodes);
+        }
+        for (plan, starts) in plans.iter_mut().zip(&nodes) {
+            plan.upstream_nondet = cones.nondet_upstream(starts);
+        }
+    }
 
     // The wire types: what each tap sends, and what the observer receives.
     let pair_type: syn::Type = parse_quote!((usize, ::std::vec::Vec<u8>));

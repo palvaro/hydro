@@ -163,6 +163,7 @@ fn measure(
                     .aggregate_witnesses(aggregate)
                     .exploration(exploration())
                     .max_hypotheses(max_hypotheses())
+                    .retain_schedules()
                     .quiet()
                     .run(sim, &body)
             }));

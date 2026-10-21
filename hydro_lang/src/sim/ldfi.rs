@@ -30,6 +30,13 @@
 //!   outputs are suppressed once it is dead). This is Molly's definition of a crash, named
 //!   by a message rather than a send count so the fault means the same thing in every run,
 //!   and it can split the fan-out of one broadcast.
+//! - **Sent-set crash** `crash(node having sent S)`, under [`CrashModel::SentSet`]
+//!   ([`Ldfi::crash_model`], or `LDFI_CRASH_MODEL=sent-set`): the node gets exactly the
+//!   messages of `S` out, in whatever order the run attempts them, every other send is dropped,
+//!   and it is dead once `S` is out or at `EFF`. A positional crash point's effect depends on
+//!   the order in which the run has the node attempt its sends; a sent set's does not, which is
+//!   what lets one schedule decide a hypothesis ([`Ldfi::schedule_reduction`]). The search
+//!   proposes only sets realizable in the run it read them from (see [`CrashModel`]).
 //!
 //! **Every failure happens at a time `≤ EFF`** (Molly's fault model): omissions apply only
 //! while finite failures last, and a crash happens only if its message is sent before the
@@ -111,6 +118,11 @@
 //!
 //! Each hypothesis is run under [`CompiledSim::exhaustive`] or a sampled exploration: the
 //! fault set is fixed and the simulator explores the batching/ordering schedules under it.
+//! When the checked collection's causal cone holds no non-deterministic operator
+//! ([`crate::sim::order`]) and crashes are sent sets, every schedule of a hypothesis ends in
+//! the same state, and the search runs one ([`Ldfi::schedule_reduction`]). Each explored
+//! schedule is folded into the search as soon as it finishes; only the schedules that
+//! contributed something are kept in the outcome ([`Hypothesis::schedules`]).
 //! The body drives time (timers are `sim_input`s), so the horizon `EOT` is what the body
 //! fires; the end of finite failures `EFF` is declared by [`Run::end_of_finite_failures`],
 //! after which omissions stop and only messages sent before it are omission candidates.
@@ -132,6 +144,7 @@ use crate::sim::compiled::{
     lineage_provenance_enabled, lineage_slices, replay_all_hooks, trace_all_hooks,
 };
 pub use crate::sim::observe::{LabelPlan, NotCheckedReason};
+pub use crate::sim::order::NondetSite;
 use crate::sim::runtime::{
     AggregateStats, CrashPoint, DEFAULT_MAX_WITNESSES, DeliveryId, ExecId, LineageEvent, NodeKey,
     RecordProv, SendFate, SendKey,
@@ -245,14 +258,105 @@ impl Display for Message {
 pub enum Fault {
     /// Discard every copy of this message on its channel.
     Omit(Message),
-    /// The node dies right after sending `after` (`None`: before its first send). Named by a
-    /// message rather than a send count so the fault means the same thing in every run.
+    /// The node dies, at the point `at` names (see [`CrashAt`]).
     Crash {
         /// The node label (`label` for a process, `label@member` for a cluster member).
         node: String,
-        /// The last message the node sends.
-        after: Option<SendId>,
+        /// Where the node dies.
+        at: CrashAt,
     },
+}
+
+/// Where a crashed node dies: how a crash point is named, which the search's
+/// [`CrashModel`] decides.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CrashAt {
+    /// Before its first send ([`CrashModel::Positional`]).
+    BeforeAnySend,
+    /// Right after it sends this message ([`CrashModel::Positional`]): named by a message
+    /// rather than a send count so the fault means the same thing in every run, but its
+    /// effect still depends on the order the run has the node attempt its sends in.
+    After(SendId),
+    /// Having sent exactly these messages before the end of finite failures
+    /// ([`CrashModel::SentSet`]; empty: before any send). Every other protocol send of the
+    /// node is dropped, in whatever order the run attempts them, and the node is dead once
+    /// the whole set is out, or at the end of finite failures.
+    Sent(BTreeSet<SendId>),
+}
+
+/// How crash points are named (see [`Ldfi::crash_model`]).
+///
+/// - [`Self::Positional`] (the default) is Molly's crash: `crash(node after m)`, the node
+///   performs its sends up to and including `m` and nothing after. What it kills depends on
+///   the order in which the run has the node attempt its sends: the same crash point splits
+///   a fan-out differently when the fan-out is emitted in another order (a `flat_map` versus a
+///   `cross_product`), so a hypothesis's outcome can differ between schedules, and the search
+///   sees a different hypothesis space under a different emission order.
+/// - [`Self::SentSet`] names a crash by the **set** of messages the node got out before it
+///   died (`crash(node having sent {m1, m2})`): a send is delivered iff it is in the set,
+///   whatever the order, so a crash, like an omission, means the same thing in every
+///   schedule. Under a fault set made only of omissions and sent-set crashes, a node's
+///   received *set* is then a function of its peers' sent sets, and a program whose computation
+///   upstream of the checked collection is insensitive to order and batching reaches the same
+///   final state in every schedule (the basis of [`Ldfi::schedule_reduction`]).
+///
+///   Not every set is *realizable*: a real crash leaves a prefix of some schedule's sends, so
+///   a set must respect the node's causality (a reply cannot be out while the request it
+///   answers is not). The search proposes only sets that are realizable because a run
+///   realized them: to kill a send, the distinct messages the node got out before it in the
+///   run the search read the send from (what a positional crash right before the send would
+///   leave, named by identity instead of position); to keep a pre-condition's send, the ones
+///   up to and including it; and everything it got out before the end of finite failures.
+///   So the hypothesis space is the positional one; what changes is what a hypothesis means in
+///   another schedule. Any subset of one execution's fan-out would be realizable too (its
+///   order is the program's emission order, not causality), but proposing every subset
+///   multiplies the hypotheses (reliable broadcast's 49 became more than 256) for no verdict
+///   the prefixes did not reach. In the run of another hypothesis the node may attempt sends
+///   the set does not name (a retransmission it did not need before): they are dropped, as a
+///   crashed node's would be.
+///
+///   Identity is by message, so a set cannot say "the first copy of `m` but not the second":
+///   the node dies once the whole set is out, and copies attempted after that are dropped.
+///   Which copies of a retransmitted message got out before then still depends on the order;
+///   a consumer that counts byte-identical copies is order-sensitive in this respect.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CrashModel {
+    /// `crash(node after m)`.
+    #[default]
+    Positional,
+    /// `crash(node having sent S)`.
+    SentSet,
+    /// [`Self::SentSet`] where it lets one schedule decide a hypothesis (a generated
+    /// specification over a collection with no non-deterministic operator upstream; see
+    /// [`Ldfi::schedule_reduction`]), [`Self::Positional`] everywhere else. An allow-list of
+    /// messages minted in one run cannot let through a message the node first sends under
+    /// another hypothesis (ISR's leader must shrink the in-sync set before it acknowledges,
+    /// when a replica's copy is lost), nor cut a retransmission with the same bytes; a
+    /// positional crash point does both. Measured on the corpus, sent sets changed verdicts
+    /// only on protocols with non-deterministic operators upstream, which `Auto` keeps
+    /// positional.
+    Auto,
+}
+
+impl Fault {
+    /// The crashed node's label, for a crash.
+    pub fn crashed_node(&self) -> Option<&str> {
+        match self {
+            Fault::Crash { node, .. } => Some(node),
+            Fault::Omit(_) => None,
+        }
+    }
+
+    /// A positional crash point (`after` `None`: before any send).
+    fn crash_after(node: &str, after: Option<SendId>) -> Fault {
+        Fault::Crash {
+            node: node.to_owned(),
+            at: match after {
+                None => CrashAt::BeforeAnySend,
+                Some(m) => CrashAt::After(m),
+            },
+        }
+    }
 }
 
 /// A message a node sent, as the identity of a crash point: the channel (sink id), the
@@ -308,9 +412,16 @@ impl Debug for Fault {
             Fault::Omit(m) => write!(f, "omit({m})"),
             Fault::Crash {
                 node,
-                after: Some(m),
+                at: CrashAt::After(m),
             } => write!(f, "crash({node} after {m})"),
-            Fault::Crash { node, after: None } => write!(f, "crash({node} before any send)"),
+            Fault::Crash {
+                node,
+                at: CrashAt::BeforeAnySend,
+            } => write!(f, "crash({node} before any send)"),
+            Fault::Crash {
+                node,
+                at: CrashAt::Sent(sent),
+            } => write!(f, "crash({node} having sent {})", render_set(sent)),
         }
     }
 }
@@ -347,6 +458,83 @@ pub type SendSequences = BTreeMap<String, Vec<SendId>>;
 /// failures (see [`Schedule::pre_eff_sends`]).
 pub type PreEffSends = BTreeMap<String, usize>;
 
+/// One protocol send a crashable node attempted in one run, whatever the filter did with it.
+#[derive(Clone, Debug)]
+pub struct SendAttempt {
+    /// The message, as a crash point names it.
+    pub id: SendId,
+    /// The execution that performed it: the sends of one execution are one fan-out.
+    pub exec: ExecId,
+    /// Whether it was attempted before the end of finite failures.
+    pub pre_eff: bool,
+    /// Whether a crash of this run dropped it.
+    pub crashed: bool,
+}
+
+/// Every crashable node's attempted protocol sends in one run, in order, indexed by the
+/// ordinal a [`Dependency`] carries: what a sent-set crash point ([`CrashAt::Sent`]) is read
+/// against.
+pub type SendAttempts = BTreeMap<String, Vec<SendAttempt>>;
+
+impl SendId {
+    /// Whether this is the identity of `message`'s send.
+    fn names(&self, message: &Message) -> bool {
+        self.channel == message.channel_id
+            && self.to_member == message.to_member
+            && self.bytes == message.payload
+    }
+}
+
+/// The attempt a dependency on `message`, sent by a node at `ordinal`, names in `attempts`
+/// (`None` for an observation, whose ordinal counts the protocol sends before it).
+fn attempt_of<'a>(
+    attempts: &'a SendAttempts,
+    node: &str,
+    ordinal: u64,
+    message: &Message,
+) -> Option<&'a SendAttempt> {
+    attempts
+        .get(node)
+        .and_then(|seq| seq.get(ordinal as usize))
+        .filter(|a| a.id.names(message))
+}
+
+/// The weakest realizable sent-set crash of a node that kills its pre-`EFF` send `seq[at]`
+/// (see [`CrashModel::SentSet`]): the node keeps every distinct message it got out before
+/// `EFF` and before this send, in this run. That set is a prefix of a real schedule's sends,
+/// so it is realizable; it is the set a positional crash right before the send would leave,
+/// named by identity instead of position. The send is killed by identity if it is the
+/// message's first copy, and by the node's death otherwise (it dies once the set is out,
+/// which in this run is before the copy).
+fn sent_set_kills(seq: &[SendAttempt], at: usize) -> Vec<CrashAt> {
+    vec![CrashAt::Sent(got_out(&seq[..at.min(seq.len())]))]
+}
+
+/// The distinct messages of `seq` the node got out before `EFF` (delivered or lost to an
+/// omission, not dropped by a crash of this run).
+fn got_out(seq: &[SendAttempt]) -> BTreeSet<SendId> {
+    seq.iter()
+        .filter(|a| a.pre_eff && !a.crashed)
+        .map(|a| a.id.clone())
+        .collect()
+}
+
+/// Whether a node under a sent-set crash point keeping `sent` is dead by its `at`-th attempt
+/// in the run `seq` describes: it has sent everything in `sent` before `EFF` by then.
+fn sent_set_dead_before(seq: &[SendAttempt], at: usize, sent: &BTreeSet<SendId>) -> bool {
+    let out: BTreeSet<&SendId> = seq[..at.min(seq.len())]
+        .iter()
+        .filter(|a| a.pre_eff)
+        .map(|a| &a.id)
+        .collect();
+    sent.iter().all(|id| out.contains(id))
+}
+
+/// Everything the node got out before the end of finite failures.
+fn all_pre_eff(seq: &[SendAttempt]) -> BTreeSet<SendId> {
+    got_out(seq)
+}
+
 impl Dependency {
     /// Whether `fault` prevents this delivery, in a run whose crashable nodes sent `sends`,
     /// `pre_eff` of them before the end of finite failures.
@@ -361,19 +549,46 @@ impl Dependency {
     /// would make the clause claim a crash kills nothing of what it does kill (a post-`EFF`
     /// delivery is killed by every earlier pre-`EFF` crash), and a hypothesis that breaks the
     /// goal would never be a hitting set (a false certificate).
-    pub fn killed_by(&self, fault: &Fault, sends: &SendSequences, pre_eff: &PreEffSends) -> bool {
+    ///
+    /// A sent-set crash point ([`CrashAt::Sent`]) kills a delivery iff the delivery is not in
+    /// its set or was sent after `EFF` (by which time the node is dead), read off `attempts`;
+    /// a dependency on an observation is killed by every crash of its node.
+    pub fn killed_by(
+        &self,
+        fault: &Fault,
+        sends: &SendSequences,
+        pre_eff: &PreEffSends,
+        attempts: &SendAttempts,
+    ) -> bool {
         match fault {
             Fault::Omit(message) => self.lossy && *message == self.message,
-            Fault::Crash { node, after } => {
+            Fault::Crash { node, at } => {
                 let Some((sender, ordinal)) = &self.sender else {
                     return false;
                 };
                 if sender != node {
                     return false;
                 }
-                match after {
-                    None => true,
-                    Some(m) => {
+                match at {
+                    CrashAt::BeforeAnySend => true,
+                    CrashAt::Sent(sent) => {
+                        match attempt_of(attempts, node, *ordinal, &self.message) {
+                            // Not in the set, after `EFF` (the node is dead by then), or a
+                            // copy attempted once the whole set was out (the node died then).
+                            Some(attempt) => {
+                                !attempt.pre_eff
+                                    || !sent.contains(&attempt.id)
+                                    || sent_set_dead_before(
+                                        &attempts[node],
+                                        *ordinal as usize,
+                                        sent,
+                                    )
+                            }
+                            // An observation: the node is not correct once crashed.
+                            None => true,
+                        }
+                    }
+                    CrashAt::After(m) => {
                         let fires_before = pre_eff.get(node).copied().unwrap_or(0);
                         sends
                             .get(node)
@@ -393,10 +608,35 @@ impl Dependency {
     /// to converge. A delivery sent after `EFF` is therefore killed by every crash point of
     /// its sender that fires in this run, and the weakest of those is the crash right after
     /// the sender's last pre-`EFF` send. [`Self::killed_by`] uses the exact position.
-    fn candidate_faults(&self, sends: &SendSequences, pre_eff: &PreEffSends) -> Vec<Fault> {
+    ///
+    /// Under [`CrashModel::SentSet`] the crash candidates are the realizable sent sets that
+    /// kill the delivery ([`sent_set_kills`]); one sent after `EFF`, or an observation, is
+    /// killed by every crash of its node, the weakest of which keeps everything the node sent
+    /// before `EFF`.
+    fn candidate_faults(
+        &self,
+        sends: &SendSequences,
+        pre_eff: &PreEffSends,
+        attempts: &SendAttempts,
+        model: CrashModel,
+    ) -> Vec<Fault> {
         let mut faults = vec![];
         if self.lossy {
             faults.push(Fault::Omit(self.message.clone()));
+        }
+        if model == CrashModel::SentSet {
+            if let Some((sender, ordinal)) = &self.sender {
+                let seq = attempts.get(sender).map(Vec::as_slice).unwrap_or(&[]);
+                let ats = match attempt_of(attempts, sender, *ordinal, &self.message) {
+                    Some(attempt) if attempt.pre_eff => sent_set_kills(seq, *ordinal as usize),
+                    _ => vec![CrashAt::Sent(all_pre_eff(seq))],
+                };
+                faults.extend(ats.into_iter().map(|at| Fault::Crash {
+                    node: sender.clone(),
+                    at,
+                }));
+            }
+            return faults;
         }
         if let Some((sender, ordinal)) = &self.sender {
             let cap = pre_eff.get(sender).copied().unwrap_or(0) as u64;
@@ -409,10 +649,7 @@ impl Dependency {
                         .cloned()
                 })
                 .flatten();
-            faults.push(Fault::Crash {
-                node: sender.clone(),
-                after,
-            });
+            faults.push(Fault::crash_after(sender, after));
         }
         faults
     }
@@ -474,6 +711,9 @@ pub struct Schedule {
     pub crashed_sends: Vec<(String, u64)>,
     /// Every crashable node's send sequence (the meaning of crash points in this run).
     pub sends: Rc<SendSequences>,
+    /// Every crashable node's attempted protocol sends, whatever their fate (the meaning of
+    /// sent-set crash points in this run).
+    pub attempts: Rc<SendAttempts>,
     /// Per crashable node, how many of its sends happened before the end of finite failures:
     /// the crash points that can fire in this run are `crash(node before any send)` and
     /// `crash(node after m)` for those `m` only, and they are the only ones the search
@@ -518,6 +758,8 @@ pub struct Clause {
     pub deps: Derivation,
     /// The run's send sequences.
     pub sends: Rc<SendSequences>,
+    /// The run's attempted sends (see [`Schedule::attempts`]).
+    pub attempts: Rc<SendAttempts>,
     /// The run's pre-`EFF` send counts (see [`Schedule::pre_eff_sends`]): the crash points
     /// that fire in this run, and so the ones this clause proposes and is hit by.
     pub pre_eff_sends: PreEffSends,
@@ -533,14 +775,14 @@ impl Clause {
     pub fn hit_by(&self, fault: &Fault) -> bool {
         self.deps
             .iter()
-            .any(|dep| dep.killed_by(fault, &self.sends, &self.pre_eff_sends))
+            .any(|dep| dep.killed_by(fault, &self.sends, &self.pre_eff_sends, &self.attempts))
     }
 
-    /// Every fault that kills some delivery of this clause.
-    pub fn candidate_faults(&self) -> impl Iterator<Item = Fault> + '_ {
-        self.deps
-            .iter()
-            .flat_map(|dep| dep.candidate_faults(&self.sends, &self.pre_eff_sends))
+    /// The weakest faults that kill some delivery of this clause, under `model`.
+    pub fn candidate_faults(&self, model: CrashModel) -> impl Iterator<Item = Fault> + '_ {
+        self.deps.iter().flat_map(move |dep| {
+            dep.candidate_faults(&self.sends, &self.pre_eff_sends, &self.attempts, model)
+        })
     }
 }
 
@@ -549,8 +791,234 @@ impl Clause {
 pub struct Hypothesis {
     /// The injected faults.
     pub faults: FaultSet,
-    /// Every schedule explored under the hypothesis.
+    /// The schedules kept for the outcome: the first one explored, a failing one, and every
+    /// one that contributed a derivation or a pre-condition derivation the search had not
+    /// seen; or every explored schedule under [`Ldfi::retain_schedules`] or
+    /// [`Ldfi::with_traces`]. The search itself reads every explored schedule as it finishes
+    /// ([`Self::explored`] of them) and keeps only what it needs.
     pub schedules: Vec<Schedule>,
+    /// How many schedules were explored under the hypothesis.
+    pub explored: usize,
+    /// Totals over every explored schedule, kept or not.
+    pub totals: ScheduleTotals,
+}
+
+/// What one hypothesis's explored schedules amount to, kept or not (see
+/// [`Hypothesis::schedules`]).
+#[derive(Clone, Debug, Default)]
+pub struct ScheduleTotals {
+    /// Schedules that were vacuous ([`Schedule::vacuous`]).
+    pub vacuous: usize,
+    /// Sum of [`Schedule::replays`].
+    pub replays: usize,
+    /// Sum of [`Schedule::replay_fallbacks`].
+    pub replay_fallbacks: usize,
+    /// Sum of [`Schedule::witness_overflows`].
+    pub witness_overflows: usize,
+    /// Sum of [`Schedule::unmatched_releases`].
+    pub unmatched_releases: usize,
+    /// The positional crash points observed (see [`Hypothesis::crash_points`]).
+    crash_points: BTreeSet<Fault>,
+    /// The messages observed on lossy channels (see [`Hypothesis::omittable`]).
+    omittable: BTreeSet<Message>,
+}
+
+impl ScheduleTotals {
+    fn add(&mut self, schedule: &Schedule) {
+        self.vacuous += usize::from(schedule.vacuous);
+        self.replays += schedule.replays;
+        self.replay_fallbacks += schedule.replay_fallbacks;
+        self.witness_overflows += schedule.witness_overflows;
+        self.unmatched_releases += schedule.unmatched_releases;
+        for (node, sends) in schedule.sends.iter() {
+            self.crash_points.insert(Fault::crash_after(node, None));
+            let pre_eff = schedule.pre_eff_sends.get(node).copied().unwrap_or(0);
+            for send in sends.iter().take(pre_eff) {
+                self.crash_points
+                    .insert(Fault::crash_after(node, Some(send.clone())));
+            }
+        }
+        self.omittable.extend(
+            schedule
+                .observed
+                .iter()
+                .filter(|d| d.lossy)
+                .map(|d| d.message.clone()),
+        );
+    }
+}
+
+/// The search's state across hypotheses that each explored schedule feeds (see
+/// `Ldfi::run_search`).
+struct SearchState<'a> {
+    observed: &'a mut BTreeSet<Fault>,
+    positions: &'a mut BTreeMap<Fault, u64>,
+    preserve_points: &'a mut BTreeSet<Fault>,
+    required: &'a mut Vec<Clause>,
+    clauses: &'a mut Vec<Clause>,
+}
+
+/// One hypothesis's schedules, folded in as each finishes.
+#[derive(Default)]
+struct HypothesisFold {
+    explored: usize,
+    all_vacuous: bool,
+    failing: Option<Schedule>,
+    new_derivations: BTreeSet<Derivation>,
+    /// Some schedule held `POST` with an empty derivation.
+    empty_post: bool,
+    unmatched: usize,
+    replays: usize,
+    fallbacks: usize,
+    kept: Vec<Schedule>,
+    totals: ScheduleTotals,
+    /// The facts the failure-free probe learned (see `learn_fact_domain`).
+    facts: BTreeSet<Vec<u8>>,
+}
+
+impl HypothesisFold {
+    /// Feeds one explored schedule to the search (exactly what reading the hypothesis's
+    /// schedules in order after the exploration used to do) and keeps it for the outcome if
+    /// it contributed, or if `keep_all`.
+    fn fold(
+        &mut self,
+        schedule: Schedule,
+        state: &mut SearchState<'_>,
+        premises: &BTreeSet<Fault>,
+        model: CrashModel,
+        keep_all: bool,
+    ) {
+        self.all_vacuous = if self.explored == 0 {
+            schedule.vacuous
+        } else {
+            self.all_vacuous && schedule.vacuous
+        };
+        self.explored += 1;
+        self.totals.add(&schedule);
+        self.unmatched += schedule.unmatched_releases;
+        self.replays += schedule.replays;
+        self.fallbacks += schedule.replay_fallbacks;
+        if schedule.goal_held {
+            self.new_derivations
+                .extend(schedule.derivations.iter().cloned());
+            self.empty_post |=
+                !schedule.vacuous && schedule.derivations.iter().any(BTreeSet::is_empty);
+        }
+        let mut contributed = self.explored == 1;
+        state
+            .observed
+            .extend(schedule.observed.iter().flat_map(|dep| {
+                dep.candidate_faults(
+                    &schedule.sends,
+                    &schedule.pre_eff_sends,
+                    &schedule.attempts,
+                    model,
+                )
+            }));
+        if !schedule.requirements.is_empty()
+            && !state
+                .required
+                .iter()
+                .any(|c| c.deps == schedule.requirements && c.premises == *premises)
+        {
+            state.required.push(Clause {
+                deps: schedule.requirements.clone(),
+                sends: schedule.sends.clone(),
+                attempts: schedule.attempts.clone(),
+                pre_eff_sends: schedule.pre_eff_sends.clone(),
+                premises: premises.clone(),
+            });
+            contributed = true;
+        }
+        if model == CrashModel::SentSet {
+            // The weakest crash that preserves a requirement's send.
+            for dep in &schedule.requirements {
+                if let Some((node, ordinal)) = &dep.sender
+                    && let Some(attempt) =
+                        attempt_of(&schedule.attempts, node, *ordinal, &dep.message)
+                    && attempt.pre_eff
+                {
+                    // Everything distinct the node sent up to and including the requirement's
+                    // send: it dies right after it, as a positional crash point there would.
+                    let kept = got_out(&schedule.attempts[node][..=(*ordinal as usize)]);
+                    state.preserve_points.insert(Fault::Crash {
+                        node: node.clone(),
+                        at: CrashAt::Sent(kept),
+                    });
+                }
+            }
+            for (node, seq) in schedule.attempts.iter() {
+                for sent in [BTreeSet::new(), all_pre_eff(seq)] {
+                    state.observed.insert(Fault::Crash {
+                        node: node.clone(),
+                        at: CrashAt::Sent(sent),
+                    });
+                }
+            }
+        } else {
+            for dep in &schedule.requirements {
+                // The weakest crash that preserves a requirement's send is the crash right
+                // after it. A requirement sent after `EFF` has no preserve point: every
+                // crash that fires in this run (a pre-`EFF` one) kills it.
+                if let Some((node, ordinal)) = &dep.sender
+                    && let Some(send) = schedule.sends.get(node).and_then(|seq| {
+                        let cap = schedule.pre_eff_sends.get(node).copied().unwrap_or(0);
+                        seq[..cap.min(seq.len())].get(*ordinal as usize)
+                    })
+                {
+                    state
+                        .preserve_points
+                        .insert(Fault::crash_after(node, Some(send.clone())));
+                }
+            }
+            for (node, sends) in schedule.sends.iter() {
+                state.observed.insert(Fault::crash_after(node, None));
+                let pre_eff = schedule.pre_eff_sends.get(node).copied().unwrap_or(0);
+                for (at, send) in sends.iter().enumerate().take(pre_eff) {
+                    let fault = Fault::crash_after(node, Some(send.clone()));
+                    let at = at as u64 + 1;
+                    state
+                        .positions
+                        .entry(fault)
+                        .and_modify(|p| *p = (*p).max(at))
+                        .or_insert(at);
+                }
+            }
+        }
+        if schedule.goal_held {
+            for derivation in &schedule.derivations {
+                if !state
+                    .clauses
+                    .iter()
+                    .any(|c| c.deps == *derivation && c.premises == *premises)
+                {
+                    state.clauses.push(Clause {
+                        deps: derivation.clone(),
+                        sends: schedule.sends.clone(),
+                        attempts: schedule.attempts.clone(),
+                        pre_eff_sends: schedule.pre_eff_sends.clone(),
+                        premises: premises.clone(),
+                    });
+                    contributed = true;
+                }
+            }
+        } else if self.failing.is_none() {
+            self.failing = Some(schedule.clone());
+            contributed = true;
+        }
+        if keep_all || contributed {
+            self.kept.push(schedule);
+        }
+    }
+
+    fn into_hypothesis(self, faults: FaultSet) -> Hypothesis {
+        Hypothesis {
+            faults,
+            schedules: self.kept,
+            explored: self.explored,
+            totals: self.totals,
+        }
+    }
 }
 
 /// What a certificate is worth: whether the hitting-set inference behind it ("a fault set that
@@ -611,10 +1079,14 @@ pub enum Outcome {
         /// Every hypothesis run, in order.
         runs: Vec<Hypothesis>,
         /// How each hypothesis's schedules were explored; a certificate is a proof only under
-        /// [`Exploration::Exhaustive`].
+        /// [`Exploration::Exhaustive`], or under [`Exploration::FirstSchedule`] with a
+        /// `reduction`.
         exploration: Exploration,
         /// What the certificate is worth (see [`Grade`]).
         grade: Grade,
+        /// Why one schedule per hypothesis decided every hypothesis, when the search reduced
+        /// the exploration to one ([`Ldfi::schedule_reduction`]).
+        reduction: Option<ScheduleReduction>,
     },
     /// The hypothesis budget ran out before the search finished.
     Budget {
@@ -638,40 +1110,22 @@ pub enum Outcome {
 }
 
 impl Hypothesis {
-    /// Every crash point observed in this hypothesis's schedules (a crashable node before its
-    /// first send, or after any message it sent): the crash vocabulary a lineage-blind
-    /// searcher can be given.
+    /// Every positional crash point observed in this hypothesis's explored schedules (a
+    /// crashable node before its first send, or after any message it sent before `EFF`): the
+    /// crash vocabulary a lineage-blind searcher can be given.
     pub fn crash_points(&self) -> Vec<Fault> {
-        let mut points: BTreeSet<Fault> = BTreeSet::new();
-        for schedule in &self.schedules {
-            for (node, sends) in schedule.sends.iter() {
-                points.insert(Fault::Crash {
-                    node: node.clone(),
-                    after: None,
-                });
-                let pre_eff = schedule.pre_eff_sends.get(node).copied().unwrap_or(0);
-                for send in sends.iter().take(pre_eff) {
-                    points.insert(Fault::Crash {
-                        node: node.clone(),
-                        after: Some(send.clone()),
-                    });
-                }
-            }
-        }
-        points.into_iter().collect()
+        self.totals.crash_points.iter().cloned().collect()
     }
 
-    /// The messages observed on lossy channels in this hypothesis's schedules: the omission
-    /// vocabulary a lineage-blind searcher can be given.
+    /// The messages observed on lossy channels in this hypothesis's explored schedules: the
+    /// omission vocabulary a lineage-blind searcher can be given.
     pub fn omittable(&self) -> Vec<Message> {
-        self.schedules
-            .iter()
-            .flat_map(|s| s.observed.iter())
-            .filter(|d| d.lossy)
-            .map(|d| d.message.clone())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect()
+        self.totals.omittable.iter().cloned().collect()
+    }
+
+    /// Whether every explored schedule was vacuous (and at least one was explored).
+    pub fn all_vacuous(&self) -> bool {
+        self.explored > 0 && self.totals.vacuous == self.explored
     }
 }
 
@@ -689,7 +1143,7 @@ impl Outcome {
 
     /// The total number of schedules explored across all hypothesis runs.
     pub fn schedules(&self) -> usize {
-        self.runs().iter().map(|h| h.schedules.len()).sum()
+        self.runs().iter().map(|h| h.explored).sum()
     }
 
     /// Whether the search found a violation.
@@ -760,6 +1214,7 @@ impl Display for Outcome {
                 runs,
                 exploration,
                 grade,
+                reduction,
             } => {
                 match exploration {
                     Exploration::Exhaustive => writeln!(
@@ -772,6 +1227,18 @@ impl Display for Outcome {
                         "LDFI: no fault set within bounds violated the goal in {instances} sampled schedule(s) per hypothesis ({} hypothesis run(s)); not a proof",
                         runs.len()
                     )?,
+                    Exploration::FirstSchedule => match reduction {
+                        Some(reduction) => writeln!(
+                            f,
+                            "LDFI: no fault set within bounds violates the goal under any schedule ({} hypothesis run(s), one schedule each: {reduction})",
+                            runs.len()
+                        )?,
+                        None => writeln!(
+                            f,
+                            "LDFI: no fault set within bounds violated the goal in the first schedule of each hypothesis ({} hypothesis run(s)); not a proof",
+                            runs.len()
+                        )?,
+                    },
                 }
                 writeln!(f, "  certificate {grade}")?;
                 for derivation in derivations {
@@ -787,7 +1254,7 @@ impl Display for Outcome {
             Outcome::Vacuous { runs } => writeln!(
                 f,
                 "LDFI: VACUOUS: the pre-condition never held in the failure-free run ({} schedule(s)); nothing to protect, nothing searched",
-                runs.iter().map(|h| h.schedules.len()).sum::<usize>()
+                runs.iter().map(|h| h.explored).sum::<usize>()
             ),
             Outcome::Exhausted { runs } => writeln!(
                 f,
@@ -812,6 +1279,38 @@ pub enum Exploration {
         /// Schedules sampled per hypothesis.
         instances: usize,
     },
+    /// One schedule per hypothesis: the first one [`Self::Exhaustive`] would explore, every
+    /// scheduling and batching choice at its first alternative (deterministic). Chosen by the
+    /// search itself under [`Ldfi::schedule_reduction`] when one schedule decides each
+    /// hypothesis; chosen by hand, it is a sample of one, like `Fuzz { instances: 1 }`.
+    FirstSchedule,
+}
+
+/// Why one schedule decided every hypothesis of a search (see [`Ldfi::schedule_reduction`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScheduleReduction {
+    /// The non-deterministic operators in the checked collection's cone that the test declared
+    /// order-insensitive ([`Ldfi::trust_order_insensitive`]): what the certificate assumes
+    /// rather than what the static check showed. Empty: no non-deterministic operator lies
+    /// upstream at all.
+    pub trusted: Vec<NondetSite>,
+}
+
+impl Display for ScheduleReduction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.trusted.is_empty() {
+            write!(
+                f,
+                "no non-deterministic operator upstream of the checked collection, sent-set crashes"
+            )
+        } else {
+            write!(
+                f,
+                "ASSUMING the non-deterministic operators {} order-insensitive (trusted by the test), sent-set crashes",
+                render_set(&self.trusted)
+            )
+        }
+    }
 }
 
 /// How the next hypothesis is chosen.
@@ -1017,6 +1516,7 @@ impl Run<'_> {
         handles.witness_cap.set(self.max_witnesses);
         handles.aggregate.set(self.aggregate);
         let mut faults = handles.faults.borrow_mut();
+        faults.observer = self.search.observer().cloned();
         for fault in self.faults {
             match fault {
                 Fault::Omit(message) => {
@@ -1030,17 +1530,23 @@ impl Run<'_> {
                         bytes: message.payload.clone(),
                     });
                 }
-                Fault::Crash { node, after } => {
+                Fault::Crash { node, at } => {
                     let key =
                         self.search.nodes.get(node).unwrap_or_else(|| {
                             panic!("crash fault names unregistered node {node:?}")
                         });
-                    let point = match after {
-                        None => CrashPoint::BeforeAnySend,
-                        Some(send) => CrashPoint::AfterSend {
+                    let point = match at {
+                        CrashAt::BeforeAnySend => CrashPoint::BeforeAnySend,
+                        CrashAt::After(send) => CrashPoint::AfterSend {
                             channel: send.channel,
                             to_member: send.to_member,
                             bytes: send.bytes.clone(),
+                        },
+                        CrashAt::Sent(sent) => CrashPoint::Sent {
+                            sent: sent
+                                .iter()
+                                .map(|send| (send.channel, send.to_member, send.bytes.clone()))
+                                .collect(),
                         },
                     };
                     faults.install(key.clone(), point);
@@ -1322,6 +1828,7 @@ impl RunRecord {
             requirements.extend(lineage.spec_view(*port, bytes, spec.facts.is_some()));
         }
         let (sends, pre_eff_sends) = lineage.send_sequences();
+        let attempts = lineage.send_attempts();
         Schedule {
             goal_held: self.goal_held,
             derivations,
@@ -1331,6 +1838,7 @@ impl RunRecord {
             dropped,
             crashed_sends,
             sends: Rc::new(sends),
+            attempts: Rc::new(attempts),
             pre_eff_sends,
             requirements,
             unmatched_releases: lineage.unmatched_releases,
@@ -1544,16 +2052,32 @@ fn build_trace(
     }
     // Where each installed crash took effect.
     for fault in faults {
-        let Fault::Crash { node, after } = fault else {
+        let Fault::Crash { node, at } = fault else {
             continue;
         };
         let Some(key) = search.nodes.get(node) else {
             continue;
         };
         let index = nodes.node_of(&key.0, key.1);
-        nodes.nodes[index].crash = match after {
-            None => Some(Crash::BeforeAnySend),
-            Some(send) => lineage
+        nodes.nodes[index].crash = match at {
+            CrashAt::BeforeAnySend => Some(Crash::BeforeAnySend),
+            CrashAt::Sent(sent) if sent.is_empty() => Some(Crash::BeforeAnySend),
+            // The last send of the set the node got out.
+            CrashAt::Sent(sent) => lineage
+                .sent
+                .iter()
+                .rposition(|record| {
+                    record.from == *key
+                        && record.fate != SendFate::Crashed
+                        && !record.observation
+                        && sent.iter().any(|send| {
+                            record.channel == send.channel
+                                && record.to.1 == send.to_member
+                                && record.bytes == send.bytes
+                        })
+                })
+                .map(|message| Crash::AfterEvent(messages[message].send_event)),
+            CrashAt::After(send) => lineage
                 .sent
                 .iter()
                 .position(|record| {
@@ -2093,6 +2617,26 @@ impl<'a> Lineage<'a> {
     }
 
     /// Every crashable node's performed sends, in order.
+    /// Every crashable node's attempted protocol sends, in order, whatever their fate (see
+    /// [`SendAttempts`]).
+    fn send_attempts(&self) -> SendAttempts {
+        let mut attempts: SendAttempts = BTreeMap::new();
+        for record in &self.sent {
+            if record.observation {
+                continue;
+            }
+            if let Some((node, _)) = &record.sender {
+                attempts.entry(node.clone()).or_default().push(SendAttempt {
+                    id: self.send_id(record),
+                    exec: record.exec,
+                    pre_eff: record.pre_eff,
+                    crashed: record.fate == SendFate::Crashed,
+                });
+            }
+        }
+        attempts
+    }
+
     fn send_sequences(&self) -> (SendSequences, PreEffSends) {
         let mut sequences: SendSequences = BTreeMap::new();
         let mut pre_eff: PreEffSends = BTreeMap::new();
@@ -3681,6 +4225,17 @@ pub struct Ldfi {
     max_witnesses: usize,
     /// Aggregate-local counterfactual witnesses (see [`Self::aggregate_witnesses`]).
     aggregate: bool,
+    /// See [`Self::schedule_reduction`]; `None` reads `LDFI_SCHEDULE_REDUCTION`, defaulting to
+    /// on.
+    schedule_reduction: Option<bool>,
+    /// Non-deterministic sites the test declares order-insensitive (see
+    /// [`Self::trust_order_insensitive`]), by substring of [`NondetSite::site`].
+    trusted_sites: Vec<String>,
+    /// Keep every explored schedule in the outcome (see [`Hypothesis::schedules`]).
+    retain_schedules: bool,
+    /// How crash points are named (see [`Self::crash_model`]); `None` reads `LDFI_CRASH_MODEL`
+    /// at search time, defaulting to [`CrashModel::Positional`].
+    crash_model: Option<CrashModel>,
 }
 
 impl Default for Ldfi {
@@ -3710,7 +4265,214 @@ impl Ldfi {
             disjunctive: false,
             max_witnesses: DEFAULT_MAX_WITNESSES,
             aggregate: false,
+            schedule_reduction: None,
+            trusted_sites: vec![],
+            retain_schedules: false,
+            crash_model: None,
         }
+    }
+
+    /// Whether the search may decide each hypothesis with **one** schedule
+    /// ([`Exploration::FirstSchedule`]) instead of the configured exploration, when that is
+    /// sound (default on; unset, `LDFI_SCHEDULE_REDUCTION=0` turns it off, to force
+    /// exploration). It is sound when:
+    ///
+    /// - the crash model is [`CrashModel::SentSet`], so every fault of a hypothesis
+    ///   (an omission by message identity, a crash by the set of messages the node got out)
+    ///   decides each send's fate by the send's identity alone, whatever the order;
+    /// - the goal is a generated `EventualConsistency` specification, which reads only the
+    ///   final contents of the checked collection at the correct members;
+    /// - no non-deterministic operator (one whose API takes a `nondet!` guard) lies in the
+    ///   causal cone of the checked collection, across every location ([`crate::sim::order`];
+    ///   [`LabelPlan::upstream_nondet`] under [`Self::search_all_labels`]), except the ones
+    ///   the test trusts ([`Self::trust_order_insensitive`]).
+    ///
+    /// Each node's received set is then a function of its peers' sent sets, so by induction
+    /// over the cone the checked collection's final contents, and the verdict, are the same in
+    /// every schedule of a hypothesis, including the failure-free probe that learns the fact
+    /// domain. The harness body is assumed not to branch on what it observes of the program
+    /// (it sends inputs, fires timers and awaits quiescence). Otherwise the configured
+    /// exploration runs, and the search says why (an offending operator, the positional
+    /// crash model, a hand-written specification).
+    #[must_use]
+    pub fn schedule_reduction(mut self, on: bool) -> Self {
+        self.schedule_reduction = Some(on);
+        self
+    }
+
+    /// Declares the non-deterministic operators at these sites (substrings of
+    /// [`NondetSite::site`], e.g. `"quorum.rs:150"`) order-insensitive: their consumers do not
+    /// depend on how the operator resolved its non-determinism (a `batch` whose consumer
+    /// persists what it has not used and fires each fact once). The static check cannot see
+    /// this; with it, [`Self::schedule_reduction`] treats the sites as order-insensitive, and
+    /// the certificate names them as the assumption it rests on
+    /// ([`ScheduleReduction::trusted`]).
+    #[must_use]
+    pub fn trust_order_insensitive<'s>(mut self, sites: impl IntoIterator<Item = &'s str>) -> Self {
+        self.trusted_sites
+            .extend(sites.into_iter().map(ToOwned::to_owned));
+        self
+    }
+
+    /// Keeps every explored schedule in the outcome, not only the ones that contributed
+    /// something (see [`Hypothesis::schedules`]). Costs memory in proportion to the schedules
+    /// explored.
+    #[must_use]
+    pub fn retain_schedules(mut self) -> Self {
+        self.retain_schedules = true;
+        self
+    }
+
+    /// How the schedules of each hypothesis are explored, why, and a line for the log (see
+    /// [`Self::schedule_reduction`]).
+    fn plan_exploration(
+        &self,
+        sim: &CompiledSim,
+        model: CrashModel,
+    ) -> (Exploration, Option<ScheduleReduction>, String) {
+        // `LDFI_EXPLORATION` (`exhaustive`, `fuzz:N`, `first`) overrides the configured
+        // exploration, for experiments.
+        let configured = match std::env::var("LDFI_EXPLORATION").as_deref() {
+            Ok("exhaustive") => Exploration::Exhaustive,
+            Ok("first") => Exploration::FirstSchedule,
+            Ok(other) if other.starts_with("fuzz:") => Exploration::Fuzz {
+                instances: other["fuzz:".len()..]
+                    .parse()
+                    .unwrap_or_else(|_| panic!("LDFI_EXPLORATION={other:?}: expected `fuzz:N`")),
+            },
+            Ok(other) if !other.is_empty() => {
+                panic!("LDFI_EXPLORATION={other:?}: expected `exhaustive`, `fuzz:N` or `first`")
+            }
+            _ => self.exploration,
+        };
+        let explore = |why: String| {
+            (
+                configured,
+                None,
+                format!("schedules explored ({configured:?}): {why}"),
+            )
+        };
+        let Some(Goal::Spec(spec)) = &self.search.goal else {
+            return explore("the goal is not a generated specification".to_owned());
+        };
+        if spec.facts.is_none() {
+            return explore("hand-written specification".to_owned());
+        }
+        if configured == Exploration::FirstSchedule {
+            return (
+                configured,
+                None,
+                "one schedule per hypothesis, as configured (a sample, not a reduction)".to_owned(),
+            );
+        }
+        let Some((racy, trusted)) = self.upstream_sites(sim) else {
+            return explore("hand-written specification".to_owned());
+        };
+        if !racy.is_empty() {
+            return explore(format!("non-deterministic upstream: {}", render_set(racy)));
+        }
+        if model != CrashModel::SentSet {
+            return explore(
+                "order-insensitive upstream, but crash points are positional (`CrashModel::SentSet` would reduce to one schedule)"
+                    .to_owned(),
+            );
+        }
+        let on = self.schedule_reduction.unwrap_or_else(|| {
+            !matches!(
+                std::env::var("LDFI_SCHEDULE_REDUCTION").as_deref(),
+                Ok("0" | "off" | "false")
+            )
+        });
+        if !on {
+            return explore("order-insensitive upstream, schedule reduction turned off".to_owned());
+        }
+        let reduction = ScheduleReduction {
+            trusted: trusted.into_iter().cloned().collect(),
+        };
+        let note = format!("one schedule per hypothesis: {reduction}");
+        (Exploration::FirstSchedule, Some(reduction), note)
+    }
+
+    /// Selects how crash points are named (see [`CrashModel`]). Unset, the model is read from
+    /// `LDFI_CRASH_MODEL` (`positional`, `sent-set` or `auto`) when the search starts, and is
+    /// [`CrashModel::Positional`] otherwise.
+    #[must_use]
+    pub fn crash_model(mut self, model: CrashModel) -> Self {
+        self.crash_model = Some(model);
+        self
+    }
+
+    /// The crash model as configured (see [`Self::crash_model`]); [`CrashModel::Auto`] is
+    /// resolved per search.
+    pub fn configured_crash_model(&self) -> CrashModel {
+        self.crash_model
+            .unwrap_or_else(|| match std::env::var("LDFI_CRASH_MODEL").as_deref() {
+                Ok("sent-set" | "sentset" | "set") => CrashModel::SentSet,
+                Ok("auto") => CrashModel::Auto,
+                Ok("positional" | "") | Err(_) => CrashModel::Positional,
+                Ok(other) => panic!(
+                    "LDFI_CRASH_MODEL={other:?}: expected `positional`, `sent-set` or `auto`"
+                ),
+            })
+    }
+
+    /// The crash model a search of `sim` runs under: the configured one, with
+    /// [`CrashModel::Auto`] resolved to [`CrashModel::SentSet`] when the goal is a generated
+    /// specification whose checked collection has no (untrusted) non-deterministic operator
+    /// upstream, and to [`CrashModel::Positional`] otherwise.
+    pub fn effective_crash_model(&self, sim: &CompiledSim) -> CrashModel {
+        match self.configured_crash_model() {
+            CrashModel::Auto => match self.racy_upstream(sim) {
+                Some(racy) if racy.is_empty() => CrashModel::SentSet,
+                _ => CrashModel::Positional,
+            },
+            model => model,
+        }
+    }
+
+    /// Under a generated specification, the non-deterministic operators upstream of the
+    /// checked collection that the test does not trust ([`Self::trust_order_insensitive`]),
+    /// and the trusted ones; `None` for any other goal.
+    fn upstream_sites<'a>(
+        &self,
+        sim: &'a CompiledSim,
+    ) -> Option<(Vec<&'a NondetSite>, Vec<&'a NondetSite>)> {
+        let Some(Goal::Spec(spec)) = &self.search.goal else {
+            return None;
+        };
+        spec.facts.as_ref()?;
+        let sites: &[NondetSite] = match &spec.all_labels {
+            Some(all) => all
+                .current
+                .get()
+                .and_then(|index| sim.labels().and_then(|labels| labels.get(index)))
+                .map(|plan| plan.upstream_nondet.as_slice())
+                .unwrap_or(&[]),
+            None => sim.nondet_upstream_of(&spec.observer),
+        };
+        // The test's trusted sites, and any named in `LDFI_TRUST_ORDER_INSENSITIVE`
+        // (comma-separated), for experiments.
+        let from_env: Vec<String> = std::env::var("LDFI_TRUST_ORDER_INSENSITIVE")
+            .map(|v| {
+                v.split(',')
+                    .filter(|t| !t.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (trusted, racy): (Vec<&NondetSite>, Vec<&NondetSite>) =
+            sites.iter().partition(|site| {
+                self.trusted_sites
+                    .iter()
+                    .chain(&from_env)
+                    .any(|t| site.site.contains(t.as_str()))
+            });
+        Some((racy, trusted))
+    }
+
+    /// See [`Self::upstream_sites`]: the untrusted ones.
+    fn racy_upstream<'a>(&self, sim: &'a CompiledSim) -> Option<Vec<&'a NondetSite>> {
+        self.upstream_sites(sim).map(|(racy, _)| racy)
     }
 
     /// Under [`Level::Precise`], follows **every** derivation of a record rather than the first
@@ -4089,6 +4851,99 @@ impl Ldfi {
         sim: &CompiledSim,
         body: impl AsyncFn(&Run<'_>) -> bool + RefUnwindSafe,
     ) -> Outcome {
+        let start = std::time::Instant::now();
+        let outcome = self.run_search(sim, body);
+        if let Ok(path) = std::env::var("LDFI_RECORD") {
+            self.record_outcome(sim, &outcome, start.elapsed(), &path);
+        }
+        outcome
+    }
+
+    /// Appends one line describing `outcome` to the file at `path` (`LDFI_RECORD`), for
+    /// comparing searches across configurations: the test, the label searched, the crash
+    /// model and exploration, the verdict, the counterexample (raw, and normalized to the
+    /// omitted messages and the crashed nodes, which is comparable across crash models),
+    /// the hypotheses and schedules run, and the wall time. Tab-separated.
+    fn record_outcome(
+        &self,
+        sim: &CompiledSim,
+        outcome: &Outcome,
+        elapsed: std::time::Duration,
+        path: &str,
+    ) {
+        use std::io::Write as _;
+        let label = match &self.search.goal {
+            Some(Goal::Spec(spec)) => spec
+                .all_labels
+                .as_ref()
+                .and_then(|all| all.current.get())
+                .and_then(|index| sim.labels().and_then(|l| l.get(index)))
+                .map(|plan| plan.collection.label.clone())
+                .unwrap_or_else(|| "-".to_owned()),
+            _ => "-".to_owned(),
+        };
+        let verdict = match outcome {
+            Outcome::Counterexample { .. } => "counterexample",
+            Outcome::Certificate { .. } => "certificate",
+            Outcome::Budget { .. } => "budget",
+            Outcome::Vacuous { .. } => "vacuous",
+            Outcome::Exhausted { .. } => "exhausted",
+        };
+        let (raw, normalized) = match outcome.counterexample() {
+            Some(faults) => {
+                let normalized: BTreeSet<String> = faults
+                    .iter()
+                    .map(|f| match f {
+                        Fault::Omit(m) => format!("omit({m})"),
+                        Fault::Crash { node, .. } => format!("crash({node})"),
+                    })
+                    .collect();
+                (render_set(faults), render_set(normalized))
+            }
+            None => ("-".to_owned(), "-".to_owned()),
+        };
+        let clean = |s: String| s.replace(['\t', '\n'], " ");
+        let line = [
+            std::thread::current().name().unwrap_or("?").to_owned(),
+            label,
+            format!("{:?}", self.effective_crash_model(sim)),
+            format!("{:?}", self.exploration),
+            verdict.to_owned(),
+            normalized,
+            raw,
+            outcome.runs().len().to_string(),
+            outcome.schedules().to_string(),
+            format!("{:.2}", elapsed.as_secs_f64()),
+            // The process's peak resident set so far (Linux), in MiB.
+            std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|status| {
+                    status
+                        .lines()
+                        .find_map(|l| l.strip_prefix("VmHWM:"))
+                        .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+                })
+                .map_or_else(|| "?".to_owned(), |kb| (kb / 1024).to_string()),
+            // How the schedules were explored, and why.
+            self.plan_exploration(sim, self.effective_crash_model(sim))
+                .2,
+        ]
+        .map(clean)
+        .join("\t");
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+
+    fn run_search(
+        &self,
+        sim: &CompiledSim,
+        body: impl AsyncFn(&Run<'_>) -> bool + RefUnwindSafe,
+    ) -> Outcome {
         let search = &self.search;
         self.assert_label_chosen();
         let goal_port = match &search.goal {
@@ -4130,16 +4985,36 @@ impl Ldfi {
             );
         }
         let mut slices: Option<Rc<Slices>> = None;
+        let model = self.effective_crash_model(sim);
+        let (exploration, reduction, exploration_note) = self.plan_exploration(sim, model);
 
         loop {
             if runs.len() >= self.max_hypotheses {
                 return Outcome::Budget { runs };
             }
 
-            let mut records: Vec<RunRecord> = vec![];
+            // A generated specification quantifies over the facts of the failure-free run,
+            // which the observer has to be told: the first failure-free run is a probe that
+            // learns them, and the search then starts over with the domain fed (section 1.1
+            // of the design document: Molly's "the good outcome persists").
+            let probing = matches!(&search.goal, Some(Goal::Spec(spec))
+                if spec.facts.as_ref().is_some_and(|facts| facts.domain.borrow().is_empty()))
+                && faults.is_empty();
+            // The crashes of this hypothesis: premises of every clause it yields.
+            let premises: BTreeSet<Fault> = faults
+                .iter()
+                .filter(|f| matches!(f, Fault::Crash { .. }))
+                .cloned()
+                .collect();
+            // Each schedule is folded into the search's state as soon as its execution has
+            // finished (outside the instance: counterfactual replays are instances of their
+            // own), and its record, the full event log, is dropped; only the schedules that
+            // contributed something are kept for the outcome (see `Hypothesis::schedules`).
+            let records: RefCell<Vec<RunRecord>> = RefCell::new(vec![]);
+            let mut fold = HypothesisFold::default();
             {
                 let faults_ref = &faults;
-                let records_ref = &mut records;
+                let records_ref = std::panic::AssertUnwindSafe(&records);
                 let slices_ref = &mut slices;
                 let body_ref = &body;
                 let instance = async || {
@@ -4160,26 +5035,53 @@ impl Ldfi {
                     };
                     run.install();
                     let goal_held = body_ref(&run).await;
-                    records_ref.push(run.finish(goal_held));
+                    records_ref.borrow_mut().push(run.finish(goal_held));
                     *slices_ref = Some(lineage_slices());
                 };
-                match self.exploration {
-                    Exploration::Exhaustive => {
-                        sim.exhaustive(instance);
+                let replayer = Replayer {
+                    sim,
+                    log: self.log,
+                    tag,
+                };
+                let mut state = SearchState {
+                    observed: &mut observed,
+                    positions: &mut positions,
+                    preserve_points: &mut preserve_points,
+                    required: &mut required,
+                    clauses: &mut clauses,
+                };
+                let mut after = || {
+                    for record in records.borrow_mut().drain(..) {
+                        if probing {
+                            fold.facts.extend(record.spec_facts);
+                            continue;
+                        }
+                        let schedule =
+                            record.schedule(search, Some(&replayer), self.traces, self.prov_graphs);
+                        fold.fold(
+                            schedule,
+                            &mut state,
+                            &premises,
+                            model,
+                            self.traces || self.retain_schedules,
+                        );
                     }
-                    Exploration::Fuzz { instances } => sim.fuzz_bounded(instances, instance),
+                };
+                match exploration {
+                    Exploration::Exhaustive => {
+                        sim.exhaustive_then(instance, &mut after);
+                    }
+                    Exploration::Fuzz { instances } => {
+                        sim.fuzz_bounded_then(instances, instance, &mut after)
+                    }
+                    Exploration::FirstSchedule => sim.first_schedule_then(instance, &mut after),
                 }
             }
-            // A generated specification quantifies over the facts of the failure-free run,
-            // which the observer has to be told: the first failure-free run is a probe that
-            // learns them, and the search then starts over with the domain fed (section 1.1
-            // of the design document: Molly's "the good outcome persists").
-            if let Some(Goal::Spec(spec)) = &search.goal
+            if probing
+                && let Some(Goal::Spec(spec)) = &search.goal
                 && let Some(facts) = &spec.facts
-                && faults.is_empty()
-                && facts.domain.borrow().is_empty()
             {
-                let learned = learn_fact_domain(&records);
+                let learned = std::mem::take(&mut fold.facts);
                 if learned.is_empty() {
                     // Nothing was held anywhere: the body protects nothing.
                     return Outcome::Vacuous { runs };
@@ -4194,99 +5096,17 @@ impl Ldfi {
                 continue;
             }
             tried.insert(faults.clone());
-            // Derivations are computed outside the instance: counterfactual replays are
-            // instances of their own.
-            let replayer = Replayer {
-                sim,
-                log: self.log,
-                tag,
-            };
-            let schedules: Vec<Schedule> = records
-                .iter()
-                .map(|record| {
-                    record.schedule(search, Some(&replayer), self.traces, self.prov_graphs)
-                })
-                .collect();
             // A hypothesis whose every schedule was vacuous: the pre-condition failed, or the
             // generated specification had nothing to hold (every producer of the facts was
             // dead; known only once the derivations are computed). Its supersets are not
             // proposed.
-            if !schedules.is_empty() && schedules.iter().all(|s| s.vacuous) {
+            if fold.explored > 0 && fold.all_vacuous {
                 vacuous_sets.push(faults.clone());
             }
-
-            let failing = schedules.iter().find(|s| !s.goal_held).cloned();
-            let new_derivations: BTreeSet<Derivation> = schedules
-                .iter()
-                .filter(|s| s.goal_held)
-                .flat_map(|s| s.derivations.iter().cloned())
-                .collect();
-            if self.log
-                && matches!(search.goal, Some(Goal::Spec(_)))
-                && schedules.iter().any(|s| {
-                    s.goal_held && !s.vacuous && s.derivations.iter().any(BTreeSet::is_empty)
-                })
-            {
+            if self.log && matches!(search.goal, Some(Goal::Spec(_))) && fold.empty_post {
                 eprintln!(
                     "{tag}: warning: POST held with an empty derivation: no observed fact's removal changes its final value (is it independent of the protocol's outputs?); the search will certify immediately"
                 );
-            }
-            // The crashes of this hypothesis: premises of every clause it yields.
-            let premises: BTreeSet<Fault> = faults
-                .iter()
-                .filter(|f| matches!(f, Fault::Crash { .. }))
-                .cloned()
-                .collect();
-            for schedule in &schedules {
-                observed.extend(schedule.observed.iter().flat_map(|dep| {
-                    dep.candidate_faults(&schedule.sends, &schedule.pre_eff_sends)
-                }));
-                if !schedule.requirements.is_empty()
-                    && !required
-                        .iter()
-                        .any(|c| c.deps == schedule.requirements && c.premises == premises)
-                {
-                    required.push(Clause {
-                        deps: schedule.requirements.clone(),
-                        sends: schedule.sends.clone(),
-                        pre_eff_sends: schedule.pre_eff_sends.clone(),
-                        premises: premises.clone(),
-                    });
-                }
-                for dep in &schedule.requirements {
-                    // The weakest crash that preserves a requirement's send is the crash right
-                    // after it. A requirement sent after `EFF` has no preserve point: every
-                    // crash that fires in this run (a pre-`EFF` one) kills it.
-                    if let Some((node, ordinal)) = &dep.sender
-                        && let Some(send) = schedule.sends.get(node).and_then(|seq| {
-                            let cap = schedule.pre_eff_sends.get(node).copied().unwrap_or(0);
-                            seq[..cap.min(seq.len())].get(*ordinal as usize)
-                        })
-                    {
-                        preserve_points.insert(Fault::Crash {
-                            node: node.clone(),
-                            after: Some(send.clone()),
-                        });
-                    }
-                }
-                for (node, sends) in schedule.sends.iter() {
-                    observed.insert(Fault::Crash {
-                        node: node.clone(),
-                        after: None,
-                    });
-                    let pre_eff = schedule.pre_eff_sends.get(node).copied().unwrap_or(0);
-                    for (at, send) in sends.iter().enumerate().take(pre_eff) {
-                        let fault = Fault::Crash {
-                            node: node.clone(),
-                            after: Some(send.clone()),
-                        };
-                        let at = at as u64 + 1;
-                        positions
-                            .entry(fault)
-                            .and_modify(|p| *p = (*p).max(at))
-                            .or_insert(at);
-                    }
-                }
             }
             if self.log
                 && runs.is_empty()
@@ -4304,38 +5124,34 @@ impl Ldfi {
                         }
                     );
                 }
+                eprintln!("{tag}: {exploration_note}");
             }
             if self.log {
-                let unmatched: usize = schedules.iter().map(|s| s.unmatched_releases).sum();
-                let replays: usize = schedules.iter().map(|s| s.replays).sum();
-                let fallbacks: usize = schedules.iter().map(|s| s.replay_fallbacks).sum();
                 eprintln!(
                     "{tag}: run #{} {}: {} schedule(s), goal {}; derivations {}{}{}",
                     runs.len() + 1,
                     render_set(&faults),
-                    schedules.len(),
-                    if failing.is_some() {
+                    fold.explored,
+                    if fold.failing.is_some() {
                         "VIOLATED"
                     } else {
                         "held"
                     },
-                    render_set(new_derivations.iter().map(render_set)),
-                    if unmatched > 0 {
-                        format!("; {unmatched} untraced deliveries")
+                    render_set(fold.new_derivations.iter().map(render_set)),
+                    if fold.unmatched > 0 {
+                        format!("; {} untraced deliveries", fold.unmatched)
                     } else {
                         String::new()
                     },
-                    if replays > 0 {
-                        format!("; {replays} replays, {fallbacks} fallbacks")
+                    if fold.replays > 0 {
+                        format!("; {} replays, {} fallbacks", fold.replays, fold.fallbacks)
                     } else {
                         String::new()
                     },
                 );
             }
-            runs.push(Hypothesis {
-                faults: faults.clone(),
-                schedules,
-            });
+            let failing = fold.failing.clone();
+            runs.push(fold.into_hypothesis(faults.clone()));
 
             if let Some(schedule) = failing {
                 return Outcome::Counterexample {
@@ -4346,31 +5162,8 @@ impl Ldfi {
             }
             // A failure-free run in which the pre-condition never held protects nothing: say
             // so rather than certify.
-            if runs.len() == 1
-                && faults.is_empty()
-                && runs[0].schedules.iter().all(|s| s.vacuous)
-                && !runs[0].schedules.is_empty()
-            {
+            if runs.len() == 1 && faults.is_empty() && runs[0].all_vacuous() {
                 return Outcome::Vacuous { runs };
-            }
-
-            for schedule in runs.last().into_iter().flat_map(|h| &h.schedules) {
-                if !schedule.goal_held {
-                    continue;
-                }
-                for derivation in &schedule.derivations {
-                    if !clauses
-                        .iter()
-                        .any(|c| c.deps == *derivation && c.premises == premises)
-                    {
-                        clauses.push(Clause {
-                            deps: derivation.clone(),
-                            sends: schedule.sends.clone(),
-                            pre_eff_sends: schedule.pre_eff_sends.clone(),
-                            premises: premises.clone(),
-                        });
-                    }
-                }
             }
 
             // Weakest first: omissions before crashes, and within a node a crash after a
@@ -4378,12 +5171,14 @@ impl Ldfi {
             let order = |fault: &Fault| -> (u8, String, std::cmp::Reverse<u64>, String) {
                 match fault {
                     Fault::Omit(m) => (0, String::new(), std::cmp::Reverse(0), format!("{m:?}")),
-                    Fault::Crash { node, after } => (
+                    Fault::Crash { node, at } => (
                         1,
                         node.clone(),
-                        std::cmp::Reverse(match after {
-                            Some(_) => positions.get(fault).copied().unwrap_or(0),
-                            None => 0,
+                        std::cmp::Reverse(match at {
+                            CrashAt::After(_) => positions.get(fault).copied().unwrap_or(0),
+                            CrashAt::BeforeAnySend => 0,
+                            // A crash that keeps more of the node's sends is weaker.
+                            CrashAt::Sent(sent) => sent.len() as u64,
                         }),
                         format!("{fault}"),
                     ),
@@ -4397,8 +5192,10 @@ impl Ldfi {
                     // its sends). The latter kill the same dependencies as the crash before
                     // the next dependency send but keep the pre-condition, which the lineage
                     // of the goal alone does not see.
-                    let mut universe: BTreeSet<Fault> =
-                        clauses.iter().flat_map(Clause::candidate_faults).collect();
+                    let mut universe: BTreeSet<Fault> = clauses
+                        .iter()
+                        .flat_map(|c| c.candidate_faults(model))
+                        .collect();
                     universe.extend(preserve_points.iter().cloned());
                     let mut universe: Vec<Fault> = universe.into_iter().collect();
                     universe.sort_by_key(order);
@@ -4453,7 +5250,8 @@ impl Ldfi {
                         Strategy::Lineage => Outcome::Certificate {
                             derivations: clauses.into_iter().map(|c| c.deps).collect(),
                             runs,
-                            exploration: self.exploration,
+                            exploration,
+                            reduction,
                             grade: match &search.goal {
                                 Some(Goal::Spec(spec)) if spec.facts.is_some() => Grade::Generated,
                                 Some(Goal::Spec(_)) => Grade::HandWritten,
@@ -4571,6 +5369,7 @@ impl Display for LabelResult {
                     Exploration::Fuzz { instances } => {
                         write!(f, ", {instances} sampled schedules")
                     }
+                    Exploration::FirstSchedule => write!(f, ", one schedule each"),
                 }
             }
             Outcome::Counterexample { faults, runs, .. } => write!(
@@ -5239,6 +6038,7 @@ mod tests {
         Clause {
             deps: deps.into_iter().collect(),
             sends: sends.clone(),
+            attempts: Rc::new(SendAttempts::new()),
             pre_eff_sends: sends
                 .iter()
                 .map(|(node, seq)| (node.clone(), seq.len()))
@@ -5252,14 +6052,14 @@ mod tests {
     fn universe_of(clauses: &[Clause]) -> Vec<Fault> {
         let mut universe: Vec<Fault> = clauses
             .iter()
-            .flat_map(Clause::candidate_faults)
+            .flat_map(|c| c.candidate_faults(CrashModel::Positional))
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
         let position = |fault: &Fault| -> u64 {
             let Fault::Crash {
                 node,
-                after: Some(m),
+                at: CrashAt::After(m),
             } = fault
             else {
                 return 0;
@@ -5378,30 +6178,37 @@ mod tests {
             &CrashBounds::budget(1),
         )
         .unwrap();
-        let later = Fault::Crash {
-            node: "s".to_owned(),
-            after: Some(m0),
-        };
+        let later = Fault::crash_after("s", Some(m0));
         assert_eq!(first, [later.clone()].into_iter().collect());
         let killed: Vec<bool> = clauses[0]
             .deps
             .iter()
-            .map(|d| d.killed_by(&later, &sends, &clauses[0].pre_eff_sends))
+            .map(|d| {
+                d.killed_by(
+                    &later,
+                    &sends,
+                    &clauses[0].pre_eff_sends,
+                    &SendAttempts::new(),
+                )
+            })
             .collect();
         assert_eq!(killed, [false, true]);
-        let earlier = Fault::Crash {
-            node: "s".to_owned(),
-            after: None,
-        };
+        let earlier = Fault::crash_after("s", None);
         assert!(clauses[0].deps.iter().all(|d| d.killed_by(
             &earlier,
             &sends,
-            &clauses[0].pre_eff_sends
+            &clauses[0].pre_eff_sends,
+            &SendAttempts::new()
         )));
         // In a run where `m0` was never sent, a crash after it never fires.
         let other_run = Rc::new(SendSequences::from([("s".to_owned(), vec![m1])]));
         let other_pre_eff: PreEffSends = [("s".to_owned(), 1)].into_iter().collect();
-        assert!(!reliable("to@1", 42, "s", 0).killed_by(&later, &other_run, &other_pre_eff));
+        assert!(!reliable("to@1", 42, "s", 0).killed_by(
+            &later,
+            &other_run,
+            &other_pre_eff,
+            &SendAttempts::new()
+        ));
     }
 
     /// Every failure happens at a time `≤ EFF`: a crash point named by a message that this run
@@ -5422,29 +6229,32 @@ mod tests {
         let pre_eff: PreEffSends = [("s".to_owned(), 2)].into_iter().collect();
         let dep_b = reliable("to", 2, "s", 1);
         let dep_d = reliable("to", 4, "s", 3);
-        let after = |m: &SendId| Fault::Crash {
-            node: "s".to_owned(),
-            after: Some(m.clone()),
-        };
+        let after = |m: &SendId| Fault::crash_after("s", Some(m.clone()));
         // A pre-EFF crash point kills every later send, post-EFF ones included.
-        assert!(dep_d.killed_by(&after(&a), &sends, &pre_eff));
-        assert!(dep_d.killed_by(&after(&b), &sends, &pre_eff));
-        assert!(dep_b.killed_by(&after(&a), &sends, &pre_eff));
-        assert!(!dep_b.killed_by(&after(&b), &sends, &pre_eff));
+        assert!(dep_d.killed_by(&after(&a), &sends, &pre_eff, &SendAttempts::new()));
+        assert!(dep_d.killed_by(&after(&b), &sends, &pre_eff, &SendAttempts::new()));
+        assert!(dep_b.killed_by(&after(&a), &sends, &pre_eff, &SendAttempts::new()));
+        assert!(!dep_b.killed_by(&after(&b), &sends, &pre_eff, &SendAttempts::new()));
         // A crash point named by a post-EFF send of this run (minted in some other run where
         // `c` was pre-EFF) does not fire here.
-        assert!(!dep_d.killed_by(&after(&c), &sends, &pre_eff));
-        assert!(!dep_d.killed_by(&after(&d), &sends, &pre_eff));
+        assert!(!dep_d.killed_by(&after(&c), &sends, &pre_eff, &SendAttempts::new()));
+        assert!(!dep_d.killed_by(&after(&d), &sends, &pre_eff, &SendAttempts::new()));
         // Had `c` been pre-EFF, the crash after it would kill `d`.
         let later_eff: PreEffSends = [("s".to_owned(), 3)].into_iter().collect();
-        assert!(dep_d.killed_by(&after(&c), &sends, &later_eff));
+        assert!(dep_d.killed_by(&after(&c), &sends, &later_eff, &SendAttempts::new()));
         // Proposal: the weakest crash point that kills `d` is the one right after the last
         // pre-EFF send, `b`; neither `c` nor `d` is minted as a crash point.
-        let proposed = dep_d.candidate_faults(&sends, &pre_eff);
+        let proposed = dep_d.candidate_faults(
+            &sends,
+            &pre_eff,
+            &SendAttempts::new(),
+            CrashModel::Positional,
+        );
         assert_eq!(proposed, vec![after(&b)]);
         let clause = Clause {
             deps: [dep_d].into_iter().collect(),
             sends,
+            attempts: Rc::new(SendAttempts::new()),
             pre_eff_sends: pre_eff,
             premises: BTreeSet::new(),
         };
@@ -5452,6 +6262,76 @@ mod tests {
         assert!(clause.hit_by(&after(&b)));
         assert!(!clause.hit_by(&after(&c)));
         assert!(!clause.hit_by(&after(&d)));
+    }
+
+    /// A sent-set crash kills a delivery iff the delivery is not in its set, was sent after
+    /// `EFF`, or is a copy attempted once the whole set was out; the candidate that kills a send
+    /// keeps what the node got out before it.
+    #[test]
+    fn sent_set_crashes_are_order_free_and_realizable() {
+        let channel = |name: &str| message(name, 0).channel_id;
+        let id = |name: &str, payload: u32| SendId {
+            channel: channel(name),
+            to_member: None,
+            bytes: bincode::serialize(&payload).unwrap(),
+            display: format!("{name}:{payload}"),
+        };
+        let attempt = |name: &str, payload: u32, exec: ExecId, pre_eff: bool| SendAttempt {
+            id: id(name, payload),
+            exec,
+            pre_eff,
+            crashed: false,
+        };
+        // Execution 1 sends `a`; execution 2 fans out `b`, `c`; execution 3 sends `d` after EFF.
+        let attempts: SendAttempts = [(
+            "s".to_owned(),
+            vec![
+                attempt("a", 1, 1, true),
+                attempt("b", 2, 2, true),
+                attempt("c", 3, 2, true),
+                attempt("d", 4, 3, false),
+            ],
+        )]
+        .into_iter()
+        .collect();
+        let none = SendSequences::new();
+        let pre = PreEffSends::new();
+        let dep_b = reliable("b", 2, "s", 1);
+        let dep_c = reliable("c", 3, "s", 2);
+        let dep_d = reliable("d", 4, "s", 3);
+        let sent = |ids: &[SendId]| Fault::Crash {
+            node: "s".to_owned(),
+            at: CrashAt::Sent(ids.iter().cloned().collect()),
+        };
+        let (a, b, c) = (id("a", 1), id("b", 2), id("c", 3));
+        // Kills: by membership, not by position.
+        let keep_ac = sent(&[a.clone(), c.clone()]);
+        assert!(dep_b.killed_by(&keep_ac, &none, &pre, &attempts));
+        assert!(!dep_c.killed_by(&keep_ac, &none, &pre, &attempts));
+        // A post-EFF send is killed by every crash: the node is dead by EFF.
+        assert!(dep_d.killed_by(
+            &sent(&[a.clone(), b.clone(), c.clone()]),
+            &none,
+            &pre,
+            &attempts
+        ));
+        // The candidate for `c`: what the node got out before it in this run.
+        let proposed = dep_c.candidate_faults(&none, &pre, &attempts, CrashModel::SentSet);
+        assert_eq!(proposed, vec![sent(&[a.clone(), b.clone()])]);
+        // A later copy of `b` (attempted after `{a, b}` was out) is killed by the node's death
+        // under a crash that keeps `b`, but not under one whose set is still incomplete.
+        let mut with_copy = attempts.clone();
+        with_copy
+            .get_mut("s")
+            .unwrap()
+            .push(attempt("b", 2, 4, true));
+        let copy = reliable("b", 2, "s", 4);
+        assert!(copy.killed_by(&sent(&[a.clone(), b.clone()]), &none, &pre, &with_copy));
+        let incomplete = sent(&[a.clone(), b.clone(), id("x", 9)]);
+        assert!(!copy.killed_by(&incomplete, &none, &pre, &with_copy));
+        // For the post-EFF `d`: everything sent before EFF.
+        let proposed = dep_d.candidate_faults(&none, &pre, &attempts, CrashModel::SentSet);
+        assert_eq!(proposed, vec![sent(&[a, b, c])]);
     }
 
     /// Every hypothesis the solver proposes under `bounds`, in order, until none is left.

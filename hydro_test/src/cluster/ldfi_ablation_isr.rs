@@ -93,7 +93,8 @@ fn measure(sim: &CompiledSim, ldfi: Ldfi, body: impl AsyncFn(&Run<'_>)) -> Resul
     let start = Instant::now();
     let body = AssertUnwindSafe(&body);
     let outcome = catch_unwind(AssertUnwindSafe(|| {
-        ldfi.search(sim, async |run| body(run).await)
+        ldfi.retain_schedules()
+            .search(sim, async |run| body(run).await)
     }))
     .map_err(|e| {
         e.downcast_ref::<String>()
