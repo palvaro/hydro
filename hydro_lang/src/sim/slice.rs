@@ -153,6 +153,23 @@ pub struct EcCollection {
     /// another location is not an exit: the collection continues there, labelled or not by the
     /// transport's own rule.)
     pub exit: bool,
+    /// The collection is the input stream of a labelled scalar (see [`Self::covered_by`]).
+    /// Usually it is also an exit (the aggregating operator itself is unlabelled); when it is
+    /// not, this is why it is listed.
+    pub aggregated: bool,
+    /// For a labelled scalar (`Singleton`, `Optional`, `KeyedSingleton`) computed by an
+    /// aggregation (`fold`, `reduce`, and their keyed forms) from a labelled stream: the index,
+    /// in the enumeration, of that stream. The type system vouches that the scalar is a
+    /// deterministic function of the stream (else the label would have been dropped), so the
+    /// scalar converges if the stream's contents reach every correct member: the stream is
+    /// what is checked.
+    pub covered_by: Option<usize>,
+    /// For a minted collection that is not itself an exit: the exits that a **merge**
+    /// downstream of it reaches, nearest first, by index in the enumeration. Non-empty only
+    /// when the collection is *merge-dominated* (see [`ec_collections`]): its contents are
+    /// combined with another labelled stream before anything leaves the labelled region, so
+    /// agreement is owed at the combination, which the exits check.
+    pub merged_into: Vec<usize>,
 }
 
 impl EcCollection {
@@ -181,6 +198,28 @@ pub(crate) type EcKey = (String, String, LocationId);
 /// function on the same cluster) are reported once, in first-seen order; a search over such a
 /// collection checks the union of their contents per member. A `Tee` stands for what it shares: it is neither a minting point
 /// nor, by itself, an exit, and the shared node is reported under its own source line.
+///
+/// Two structural relations are recorded alongside, both resting on the same principle: the
+/// type system keeps the label only on computations that are deterministic given their
+/// inputs, so convergence is owed only where inputs are **combined**, and derived state need
+/// not be checked on its own.
+///
+/// - **Scalars are covered by their input** ([`EcCollection::covered_by`]). A labelled
+///   `Singleton` / `Optional` / `KeyedSingleton` whose labelling node is, through
+///   pass-throughs (`assert_has_consistency_of`, casts, the `ObserveNonDet` of an
+///   at-least-once input, `Tee`s), a `Fold`, `Reduce`, `FoldKeyed` or `ReduceKeyed` over a
+///   labelled top-level stream is covered by that stream. The stream is listed (flagged
+///   [`EcCollection::aggregated`]) if it is not already.
+/// - **Merge-dominated hops** ([`EcCollection::merged_into`]). A minted collection that is not
+///   an exit is merge-dominated when, following its consumers downstream through labelled
+///   operators on its own cluster (a `Tee` to its branches, a `forward_ref`'s sink to its
+///   `CycleSource`), **every** path reaches a merge (a `Chain`, `ChainFirst` or
+///   `MergeOrdered` whose inputs are all labelled) before it reaches an exit or a send to
+///   another location, and at least one path reaches an exit after a merge. The hop's
+///   elements then reach the outside only combined with the other labelled inputs of the
+///   merge (an echo, a retransmission), and the exits after the merge are where agreement on
+///   the combination is checked. A hop that reaches an exit or a send unmerged is not
+///   dominated: its own contents leave the region and its own verdict stands.
 pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
     // Raw pointers: cycle sinks are followed from `CycleSource`s to find network ancestors;
     // nothing in `ir` moves during this walk.
@@ -197,6 +236,20 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
         by_key: HashMap<EcKey, usize>,
         collections: Vec<EcCollection>,
         seen: HashSet<*const HydroNode>,
+        /// The nodes recorded under each collection.
+        nodes: HashMap<*const HydroNode, usize>,
+        /// The keys of `nodes`, in first-recorded order.
+        node_order: Vec<*const HydroNode>,
+        /// The nodes recorded as exits (a collection's `exit` is the union over its nodes).
+        exit_nodes: HashSet<*const HydroNode>,
+        /// Labelled → labelled edges on one cluster, input to consumer.
+        consumers: HashMap<*const HydroNode, Vec<*const HydroNode>>,
+        /// Labelled nodes some send consumes.
+        sent: HashSet<*const HydroNode>,
+        /// Labelled merges.
+        merges: HashSet<*const HydroNode>,
+        /// A labelled scalar's node, and the node of the stream it aggregates.
+        aggregations: Vec<(*const HydroNode, *const HydroNode)>,
     }
     impl Found {
         fn record(
@@ -205,7 +258,7 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
             minted: bool,
             exit: bool,
             cycle_sinks: &HashMap<CycleId, *const HydroNode>,
-        ) {
+        ) -> *const HydroNode {
             with_shared_resolved(node, |node| {
                 let key = ec_key(node);
                 let fed = has_network_ancestor(node, cycle_sinks);
@@ -219,6 +272,9 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
                         in_tick: !matches!(node.metadata().location_id, LocationId::Cluster(_)),
                         minted: false,
                         exit: false,
+                        aggregated: false,
+                        covered_by: None,
+                        merged_into: vec![],
                     });
                     self.collections.len() - 1
                 });
@@ -226,7 +282,15 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
                 found.fed_by_network |= fed;
                 found.minted |= minted;
                 found.exit |= exit;
-            });
+                let ptr = std::ptr::from_ref(node);
+                if self.nodes.insert(ptr, index).is_none() {
+                    self.node_order.push(ptr);
+                }
+                if exit {
+                    self.exit_nodes.insert(ptr);
+                }
+                ptr
+            })
         }
     }
     fn visit(
@@ -245,6 +309,17 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
             if is_ec(input) && !is_ec(node) && !matches!(node, HydroNode::Network { .. }) {
                 with_casts_resolved(input, |input| found.record(input, false, true, cycle_sinks));
             }
+            if is_ec(input) {
+                if matches!(node, HydroNode::Network { .. }) {
+                    found.sent.insert(std::ptr::from_ref(input));
+                } else if is_ec(node) {
+                    found
+                        .consumers
+                        .entry(std::ptr::from_ref(input))
+                        .or_default()
+                        .push(std::ptr::from_ref(node));
+                }
+            }
         };
         match node {
             HydroNode::Tee { inner, .. }
@@ -256,14 +331,52 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
                 }
             }
         }
+        // A `forward_ref` continues the collection its sink receives.
+        if let HydroNode::CycleSource { cycle_id, .. } = node
+            && is_ec(node)
+            && let Some(&sink) = cycle_sinks.get(cycle_id)
+            // SAFETY: see the comment at the construction of `cycle_sinks`.
+            && is_ec(unsafe { &*sink })
+        {
+            found
+                .consumers
+                .entry(sink)
+                .or_default()
+                .push(std::ptr::from_ref(node));
+        }
+        if is_ec(node)
+            && matches!(
+                node,
+                HydroNode::Chain { .. }
+                    | HydroNode::ChainFirst { .. }
+                    | HydroNode::MergeOrdered { .. }
+            )
+            && node.input().into_iter().all(is_ec)
+        {
+            found.merges.insert(std::ptr::from_ref(node));
+        }
         if is_ec_minting(node) {
-            found.record(node, true, false, cycle_sinks);
+            let scalar = found.record(node, true, false, cycle_sinks);
+            // SAFETY: `scalar` points into `ir` (or a `Tee`'s cell), which does not move.
+            if let Some(input) = aggregated_input(unsafe { &*scalar }) {
+                let input = found.record(input, false, false, cycle_sinks);
+                let index = found.nodes[&input];
+                found.collections[index].aggregated = true;
+                found.aggregations.push((scalar, input));
+            }
         }
     }
     let mut found = Found {
         by_key: HashMap::new(),
         collections: vec![],
         seen: HashSet::new(),
+        nodes: HashMap::new(),
+        node_order: vec![],
+        exit_nodes: HashSet::new(),
+        consumers: HashMap::new(),
+        sent: HashSet::new(),
+        merges: HashSet::new(),
+        aggregations: vec![],
     };
     for root in ir {
         let input = root.input();
@@ -283,7 +396,135 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
             });
         }
     }
+
+    // A labelled scalar that is not minted (its aggregation is labelled too) is recorded only
+    // if it exits; look for its aggregation the same way.
+    let scalars: Vec<*const HydroNode> = found
+        .node_order
+        .iter()
+        .copied()
+        .filter(|ptr| !found.aggregations.iter().any(|(s, _)| s == ptr))
+        .collect();
+    for scalar in scalars {
+        // SAFETY: as above.
+        if let Some(input) = aggregated_input(unsafe { &*scalar }) {
+            let input = found.record(input, false, false, &cycle_sinks);
+            let index = found.nodes[&input];
+            found.collections[index].aggregated = true;
+            found.aggregations.push((scalar, input));
+        }
+    }
+    for (scalar, input) in &found.aggregations {
+        let (scalar, input) = (found.nodes[scalar], found.nodes[input]);
+        if scalar != input {
+            found.collections[scalar].covered_by.get_or_insert(input);
+        }
+    }
+
+    // Merge-dominated hops (see the function docs): breadth-first downstream from each node of
+    // a minted, non-exit collection, carrying whether a merge has been passed.
+    for index in 0..found.collections.len() {
+        let c = &found.collections[index];
+        if !c.minted || c.exit {
+            continue;
+        }
+        // Only the nodes a channel feeds: a node at the same site computed from local inputs
+        // alone (the member list a cluster-to-cluster `broadcast_closed` crosses its input
+        // with, labelled at the broadcast's own line) carries none of the hop's elements.
+        let starts: Vec<*const HydroNode> = found
+            .node_order
+            .iter()
+            .copied()
+            .filter(|ptr| found.nodes[ptr] == index)
+            // SAFETY: as above.
+            .filter(|ptr| has_network_ancestor(unsafe { &**ptr }, &cycle_sinks))
+            .collect();
+        if starts.is_empty() {
+            continue;
+        }
+        let mut queue: std::collections::VecDeque<(*const HydroNode, bool)> =
+            starts.iter().map(|ptr| (*ptr, false)).collect();
+        let mut seen: HashSet<(*const HydroNode, bool)> = queue.iter().copied().collect();
+        let mut dominated = true;
+        let mut merged_into: Vec<usize> = vec![];
+        while let Some((ptr, merged)) = queue.pop_front() {
+            let merged = merged || found.merges.contains(&ptr);
+            let is_start = starts.contains(&ptr);
+            if !is_start && found.exit_nodes.contains(&ptr) {
+                if !merged {
+                    dominated = false;
+                    break;
+                }
+                let exit = found.nodes[&ptr];
+                if !merged_into.contains(&exit) {
+                    merged_into.push(exit);
+                }
+            }
+            if !merged && found.sent.contains(&ptr) {
+                dominated = false;
+                break;
+            }
+            for &next in found.consumers.get(&ptr).into_iter().flatten() {
+                if seen.insert((next, merged)) {
+                    queue.push_back((next, merged));
+                }
+            }
+        }
+        if dominated {
+            found.collections[index].merged_into = merged_into;
+        }
+    }
     found.collections
+}
+
+/// The input stream a labelled scalar aggregates (see [`ec_collections`]): `node`, through
+/// pass-throughs (`AssertIsConsistent`, `Cast`, `ObserveNonDet` — the `assume_retries` an
+/// idempotent `fold` puts on an at-least-once input —, `Tee`, references), is a `Fold`,
+/// `Reduce`, `FoldKeyed` or `ReduceKeyed` whose input, through the same pass-throughs, is a
+/// labelled stream at a cluster's top level. `None` for anything else.
+fn aggregated_input(node: &HydroNode) -> Option<&HydroNode> {
+    if !is_ec(node)
+        || !matches!(
+            node.metadata().collection_kind,
+            CollectionKind::Singleton { .. }
+                | CollectionKind::Optional { .. }
+                | CollectionKind::KeyedSingleton { .. }
+        )
+    {
+        return None;
+    }
+    /// Through `AssertIsConsistent`, `Cast`, `ObserveNonDet`, `Tee` and references, as raw
+    /// pointers: the
+    /// shared cells' borrows end, the nodes do not move.
+    fn through(node: &HydroNode) -> *const HydroNode {
+        match node {
+            HydroNode::AssertIsConsistent { inner, .. }
+            | HydroNode::Cast { inner, .. }
+            | HydroNode::ObserveNonDet { inner, .. } => through(inner),
+            HydroNode::Tee { inner, .. } | HydroNode::Reference { inner, .. } => {
+                through(&inner.0.borrow())
+            }
+            _ => std::ptr::from_ref(node),
+        }
+    }
+    // SAFETY: the pointers point into the IR, which outlives this call and does not move.
+    let aggregation = unsafe { &*through(node) };
+    let (HydroNode::Fold { input, .. }
+    | HydroNode::Reduce { input, .. }
+    | HydroNode::FoldKeyed { input, .. }
+    | HydroNode::ReduceKeyed { input, .. }) = aggregation
+    else {
+        return None;
+    };
+    // SAFETY: as above.
+    let input = unsafe { &*through(input) };
+    (is_ec(input)
+        && matches!(input.metadata().location_id, LocationId::Cluster(_))
+        && matches!(
+            input.metadata().collection_kind,
+            CollectionKind::Stream { .. } | CollectionKind::KeyedStream { .. }
+        ))
+    .then_some(input)
 }
 
 /// Calls `f` on the first node under `node` that is not a labelled pass-through (a `Cast`

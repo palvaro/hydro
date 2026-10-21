@@ -359,6 +359,82 @@ mod tests {
         expect_certificate(gossip_search(true), "g_set_gossip_live");
     }
 
+    /// Every label of G-Set gossip (closed or live fan-out), automatically
+    /// (`Spec::all_labels`), on the setup of [`gossip_search`]. The G-Set is a labelled
+    /// `Singleton` (the `fold` at `crdt_gossip.rs:57`, `:141` live), covered by the stream it
+    /// folds: the merge of the fresh elements with the peers' gossiped state. Failures end
+    /// after the updates (`end_of_finite_failures`); the gossip rounds that follow are the
+    /// retransmission that makes the merged stream converge among the survivors.
+    fn gossip_all_labels(live: bool) -> hydro_lang::sim::ldfi::LabelResults {
+        const ROUNDS: u32 = 3;
+        let mut flow = FlowBuilder::new();
+        let members = flow.cluster::<Member>();
+        let (update, updates) = members.sim_input::<u32, TotalOrder, ExactlyOnce>();
+        let (tick, ticks) = members.sim_input::<(), TotalOrder, ExactlyOnce>();
+        let updates = updates.weaken_ordering::<NoOrder>();
+        let _set = if live {
+            g_set_gossip_live(&members, updates, ticks)
+        } else {
+            g_set_gossip(&members, updates, ticks)
+        };
+
+        let spec = Spec::all_labels(&mut flow);
+
+        let compiled: CompiledSim = flow
+            .sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&members, MEMBERS as usize)
+            .unit_test_fuzz_iterations(8)
+            .with_provenance()
+            .compiled();
+
+        let start = std::time::Instant::now();
+        let results = Ldfi::new()
+            .level(Level::Precise)
+            .exploration(Exploration::Fuzz { instances: 8 })
+            .crashable_cluster("member", &members, 0..MEMBERS)
+            .spec(&spec)
+            .search_all_labels(&compiled, async |run| {
+                for m in 0..MEMBERS {
+                    update.send(m, 10 + m);
+                }
+                hydro_lang::sim::quiesce().await;
+                run.end_of_finite_failures();
+                for _ in 0..ROUNDS {
+                    tick.send_many((0..MEMBERS).map(|m| (m, ())));
+                    hydro_lang::sim::quiesce().await;
+                }
+            });
+        eprintln!(
+            "{results}g_set_gossip (live: {live}): {:.1}s",
+            start.elapsed().as_secs_f64()
+        );
+        results
+    }
+
+    /// The G-Set, covered by its input, certifies under every admissible crash, closed and
+    /// live; so does every label that is a verdict (the single hops into the merge are
+    /// informational).
+    #[test]
+    fn ec_demo_g_set_gossip_all_labels() {
+        for (live, site) in [(false, "crdt_gossip.rs:57"), (true, "crdt_gossip.rs:141")] {
+            let results = gossip_all_labels(live);
+            let set: Vec<_> = results.at(site).collect();
+            assert_eq!(set.len(), 1, "{results}");
+            assert!(
+                matches!(
+                    set[0].verdict,
+                    LabelVerdict::CoveredBy {
+                        outcome: Outcome::Certificate { .. },
+                        ..
+                    }
+                ),
+                "{results}"
+            );
+            assert!(results.all_certified_or_not_checked(), "{results}");
+        }
+    }
+
     /// `leader_merge`'s EC label "silently assumes the leader's survival" (its docs): the
     /// leader crashing between two of its broadcast sends is the counterexample.
     #[test]
@@ -389,8 +465,9 @@ mod tests {
     /// Every label of `reliable_broadcast_closed`, automatically (`Spec::all_labels`): the
     /// delivered set certifies in the same 36 hypotheses as the manual search above (every
     /// admissible combination of a source crash point and one member's crash); the initial
-    /// single-hop broadcast the label is inferred from is violated by the source's crash
-    /// between two of its fan-out sends.
+    /// single-hop broadcast the label is inferred from is violated on its own by the source's
+    /// crash between two of its fan-out sends, and reported as an informational hop, since it
+    /// reaches the delivered set only merged with the echo.
     #[test]
     fn ec_demo_reliable_broadcast_all_labels() {
         let mut flow = FlowBuilder::new();
@@ -428,32 +505,52 @@ mod tests {
             panic!("{results}");
         };
         assert_eq!(runs.len(), 36, "{results}");
-        // The initial single-hop broadcast the label is inferred from: the source's crash.
+        // The initial single-hop broadcast the label is inferred from: on its own, violated
+        // by the source's crash; but it reaches the delivered set only merged with the echo,
+        // so it is a merge-dominated hop, informational, and the `unique` is its verdict.
         let initial: Vec<_> = results.at("reliable_broadcast.rs:130").collect();
         assert_eq!(initial.len(), 1, "{results}");
-        let LabelVerdict::Searched(Outcome::Counterexample { faults, .. }) = &initial[0].verdict
+        let LabelVerdict::Hop {
+            merged_at,
+            outcome: Outcome::Counterexample { faults, .. },
+        } = &initial[0].verdict
         else {
             panic!("{results}");
         };
+        assert!(merged_at.contains("reliable_broadcast.rs:149"), "{results}");
         assert!(
             faults
                 .iter()
                 .any(|f| matches!(f, Fault::Crash { node, .. } if node == "source")),
             "{results}"
         );
-        // Nothing is skipped silently: every label has a verdict.
+        // The echo hop, likewise merge-dominated.
+        let echo: Vec<_> = results.at("reliable_broadcast.rs:156").collect();
+        assert_eq!(echo.len(), 1, "{results}");
         assert!(
-            results
-                .verdicts
-                .iter()
-                .all(|r| matches!(r.verdict, LabelVerdict::Searched(_))),
+            matches!(&echo[0].verdict, LabelVerdict::Hop { merged_at, .. } if merged_at.contains("reliable_broadcast.rs:149")),
             "{results}"
         );
+        // Nothing is skipped silently: every label was searched; and with the hops
+        // informational, the protocol's labels hold.
+        assert!(
+            results.verdicts.iter().all(|r| matches!(
+                r.verdict,
+                LabelVerdict::Searched(_) | LabelVerdict::Hop { .. }
+            )),
+            "{results}"
+        );
+        assert!(results.all_certified_or_not_checked(), "{results}");
+        assert_eq!(results.counterexamples().count(), 0, "{results}");
     }
 
     /// Every label of `multi_paxos`, automatically. `learned` (the learners' delivered set)
     /// certifies as in the manual search above; the rest get verdicts, recorded in section 6
-    /// of `docs/design/hydrofrac.md`.
+    /// of `docs/design/hydrofrac.md`. The spliced log (`epoch_splice.rs:190`, a
+    /// `Singleton<SpliceState>`) is covered by the `SpliceFact` stream it folds
+    /// (`multi_paxos.rs:608`), and the learners' two single hops into `learned`, the
+    /// proposer's broadcast (`:582`) and the echo (`:591`), are informational: they reach
+    /// the outside only merged, at `:588`.
     #[test]
     fn ec_demo_multi_paxos_all_labels() {
         let mut flow = FlowBuilder::new();
@@ -507,11 +604,32 @@ mod tests {
             ),
             "{results}"
         );
+        let log: Vec<_> = results.at("epoch_splice.rs:190").collect();
+        assert_eq!(log.len(), 1, "{results}");
+        assert!(
+            matches!(
+                &log[0].verdict,
+                LabelVerdict::CoveredBy {
+                    input_site,
+                    outcome: Outcome::Certificate { .. },
+                } if input_site.contains("multi_paxos.rs:608")
+            ),
+            "{results}"
+        );
+        for hop in ["multi_paxos.rs:582", "multi_paxos.rs:591"] {
+            assert!(
+                results.at(hop).all(|r| matches!(
+                    &r.verdict,
+                    LabelVerdict::Hop { merged_at, .. } if merged_at.contains("multi_paxos.rs:588")
+                )),
+                "{hop}: {results}"
+            );
+        }
         assert!(
             !results
                 .verdicts
                 .iter()
-                .any(|r| matches!(r.verdict, LabelVerdict::Searched(Outcome::Budget { .. }))),
+                .any(|r| matches!(r.verdict.outcome(), Some(Outcome::Budget { .. }))),
             "{results}"
         );
     }

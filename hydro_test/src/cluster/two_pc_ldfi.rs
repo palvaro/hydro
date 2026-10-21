@@ -616,7 +616,7 @@ mod tests {
             !results
                 .verdicts
                 .iter()
-                .any(|r| matches!(r.verdict, LabelVerdict::Searched(Outcome::Budget { .. }))),
+                .any(|r| matches!(r.verdict.outcome(), Some(Outcome::Budget { .. }))),
             "{results}"
         );
         let coordinator_crashed = |site: &str| {
@@ -650,7 +650,7 @@ mod tests {
             !results
                 .verdicts
                 .iter()
-                .any(|r| matches!(r.verdict, LabelVerdict::Searched(Outcome::Budget { .. }))),
+                .any(|r| matches!(r.verdict.outcome(), Some(Outcome::Budget { .. }))),
             "{results}"
         );
         // The coordinator's broadcasts cannot be broken by a participant's crash: a crashed

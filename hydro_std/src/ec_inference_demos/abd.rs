@@ -121,7 +121,7 @@ pub struct AbdOutputs<'a, CL, T> {
 /// `writes` carries `(request_id, value)` and `reads` carries `request_id`,
 /// per client member; request ids must be unique per member across both, and
 /// each member must have at most one operation outstanding (see module docs).
-pub fn abd_register<'a, T, CL, R>(
+fn abd_register_with<'a, T, CL, R, const RELIABLE_PHASE2: bool>(
     replicas: &Cluster<'a, R>,
     majority: usize,
     writes: Stream<(u64, T), Cluster<'a, CL>, Unbounded, TotalOrder, ExactlyOnce>,
@@ -307,12 +307,15 @@ where
         .clone()
         .map(q!(|(rid, (ts, v))| ToReplica::Write { rid, ts, value: v }));
 
-    // Phase 2 to the replicas — fresh writes and read-repairs alike — closing
-    // the forward_ref cycle.
-    let phase2 = write_phase2
-        .merge_unordered(read_writeback)
-        .broadcast_closed(replicas, TCP.fail_stop().bincode())
-        .entries();
+    // Phase 2 to the replicas (writes and read-repairs), closing the forward_ref cycle.
+    let phase2 = write_phase2.merge_unordered(read_writeback);
+    let phase2 = if !RELIABLE_PHASE2 {
+        phase2
+            .broadcast_closed(replicas, TCP.fail_stop().bincode())
+            .entries()
+    } else {
+        super::reliable_broadcast::reliable_broadcast_closed_from_cluster(phase2, replicas)
+    };
     phase2_handle.complete(phase2);
 
     // ---- Completion: a Durable certificate on the rid ----------------------
@@ -336,6 +339,49 @@ where
         write_done,
         read_result,
     }
+}
+
+/// The multi-writer ABD register. `replicas` hold the state; every member of
+/// `clients` may read and write. `majority` must exceed half the replica
+/// cluster size (callers: `N / 2 + 1`).
+///
+/// `writes` carries `(request_id, value)` and `reads` carries `request_id`,
+/// per client member; request ids must be unique per member across both, and
+/// each member must have at most one operation outstanding (see module docs).
+///
+/// Phase 2 (writes and read write-backs) reaches the
+/// replicas by one `broadcast_closed`, O(n) messages per write.
+pub fn abd_register<'a, T, CL, R>(
+    replicas: &Cluster<'a, R>,
+    majority: usize,
+    writes: Stream<(u64, T), Cluster<'a, CL>, Unbounded, TotalOrder, ExactlyOnce>,
+    reads: Stream<u64, Cluster<'a, CL>, Unbounded, TotalOrder, ExactlyOnce>,
+) -> AbdOutputs<'a, CL, T>
+where
+    T: Clone + Eq + Hash + Serialize + DeserializeOwned + 'a,
+    CL: 'a,
+    R: 'a,
+{
+    abd_register_with::<T, CL, R, false>(replicas, majority, writes, reads)
+}
+
+/// [`abd_register`] with phase 2 over reliable broadcast
+/// ([`reliable_broadcast_closed_from_cluster`](super::reliable_broadcast::reliable_broadcast_closed_from_cluster)): every replica that receives a write (or a
+/// read write-back) echoes it to every replica, so a client crashing mid-phase-2 cannot
+/// leave the correct replicas' registers disagreeing on what was stored. The cost is
+/// O(n²) phase-2 messages per write instead of O(n). The protocol is otherwise identical.
+pub fn abd_register_reliable_phase2<'a, T, CL, R>(
+    replicas: &Cluster<'a, R>,
+    majority: usize,
+    writes: Stream<(u64, T), Cluster<'a, CL>, Unbounded, TotalOrder, ExactlyOnce>,
+    reads: Stream<u64, Cluster<'a, CL>, Unbounded, TotalOrder, ExactlyOnce>,
+) -> AbdOutputs<'a, CL, T>
+where
+    T: Clone + Eq + Hash + Serialize + DeserializeOwned + 'a,
+    CL: 'a,
+    R: 'a,
+{
+    abd_register_with::<T, CL, R, true>(replicas, majority, writes, reads)
 }
 
 // These tests were written against the `eventual_consistency` branch's simulator
@@ -596,37 +642,43 @@ mod tests {
 }
 
 /// Hydrofrac's automatic specification (`Spec::all_labels`) on the register: the one place in
-/// the demos where a labelled collection is a lattice `Singleton`, which the set-based
-/// specification does not apply to. The test lives here rather than in `hydro_test` because
-/// the simulator's hook metadata names the demo's private message types.
+/// the demos where a labelled collection is a lattice `Singleton`. The set-based specification
+/// does not observe a scalar, but the type system vouches that the register is a deterministic
+/// function of the write stream it folds, so the register is checked there: its verdict is its
+/// input stream's. The test lives here rather than in `hydro_test` because the simulator's
+/// hook metadata names the demo's private message types.
 #[cfg(test)]
 mod hydrofrac_tests {
+    use std::collections::BTreeMap;
+
     use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
     use hydro_lang::prelude::*;
     use hydro_lang::sim::compiled::CompiledSim;
     use hydro_lang::sim::ldfi::{
-        Exploration, LabelVerdict, Ldfi, Level, NotCheckedReason, Outcome,
+        Exploration, Fault, LabelResults, LabelVerdict, Ldfi, Level, Outcome,
     };
     use hydro_lang::sim::spec::Spec;
 
-    use super::abd_register;
+    use super::{abd_register, abd_register_reliable_phase2};
 
     pub struct Replica;
     pub struct Client;
 
-    /// The replica register (`abd.rs`, the `fold`) is labelled `EventualConsistency` and is a
-    /// `Singleton`: reported as not checked, with the reason. The stream collections of the
-    /// protocol (the clients' query broadcast and the phase-2 cycle) get verdicts; nothing is
-    /// skipped silently.
-    #[test]
-    fn all_labels_reports_the_register_as_not_a_stream() {
-        const REPLICAS: usize = 3;
+    const REPLICAS: usize = 3;
+
+    /// One client write under the automatic specification, with the client and every replica
+    /// crashable; phase 2 over `broadcast_closed` or, if `reliable`, over reliable broadcast.
+    fn all_labels(reliable: bool) -> LabelResults {
         let mut flow = FlowBuilder::new();
         let replicas = flow.cluster::<Replica>();
         let clients = flow.cluster::<Client>();
         let (w_send, writes) = clients.sim_input::<(u64, u32), TotalOrder, ExactlyOnce>();
         let (_r_send, reads) = clients.sim_input::<u64, TotalOrder, ExactlyOnce>();
-        let outs = abd_register(&replicas, REPLICAS / 2 + 1, writes, reads);
+        let outs = if reliable {
+            abd_register_reliable_phase2(&replicas, REPLICAS / 2 + 1, writes, reads)
+        } else {
+            abd_register(&replicas, REPLICAS / 2 + 1, writes, reads)
+        };
         let _done = outs.write_done.sim_cluster_output();
         let _read = outs.read_result.sim_cluster_output();
 
@@ -641,6 +693,7 @@ mod hydrofrac_tests {
             .with_provenance()
             .compiled();
 
+        let start = std::time::Instant::now();
         let results = Ldfi::new()
             .level(Level::Precise)
             .exploration(Exploration::Fuzz { instances: 8 })
@@ -651,19 +704,85 @@ mod hydrofrac_tests {
                 w_send.send(0, (1, 10u32));
                 hydro_lang::sim::quiesce().await;
             });
-        eprintln!("{results}");
+        eprintln!(
+            "{results}abd (reliable phase 2: {reliable}): {:.1}s",
+            start.elapsed().as_secs_f64()
+        );
+        results
+    }
+
+    /// The messages one write sends in the failure-free run, per channel (the observer's own
+    /// `observe` channel left out), from the first searched label's probe.
+    fn messages_per_write(results: &LabelResults) -> BTreeMap<String, usize> {
+        let (_, outcome) = results.searched().next().expect("a searched label");
+        let mut counts = BTreeMap::new();
+        for message in &outcome.runs()[0].schedules[0].delivered {
+            if message.channel != "observe" {
+                *counts.entry(message.channel.clone()).or_default() += 1;
+            }
+        }
+        counts
+    }
+
+    /// The register at `abd.rs:165` (a `fold` into a `Singleton`).
+    fn register(results: &LabelResults) -> &LabelVerdict {
+        let register: Vec<_> = results.at("abd.rs:165").collect();
+        assert_eq!(register.len(), 1, "{results}");
+        &register[0].verdict
+    }
+
+    /// The register is covered by its input, the writes filtered from the phase-2 stream
+    /// (`abd.rs:161`), and with phase 2 over a single `broadcast_closed` that input is
+    /// violated by the client crashing between two of its phase-2 sends: one replica stores
+    /// the write and the others never will.
+    #[test]
+    fn all_labels_checks_the_register_at_its_input() {
+        let results = all_labels(false);
+        eprintln!("messages per write: {:?}", messages_per_write(&results));
+        let LabelVerdict::CoveredBy {
+            input_site,
+            outcome: Outcome::Counterexample { faults, .. },
+        } = register(&results)
+        else {
+            panic!("the register must be covered by its input and violated: {results}");
+        };
+        assert!(input_site.contains("abd.rs:161"), "{results}");
         assert!(
-            results.verdicts.iter().any(|r| matches!(
-                &r.verdict,
-                LabelVerdict::NotChecked(NotCheckedReason::NotAStream(kind)) if kind == "Singleton"
-            )),
-            "the register is a Singleton and must be reported as not a stream: {results}"
+            faults
+                .iter()
+                .any(|f| matches!(f, Fault::Crash { node, .. } if node.starts_with("client"))),
+            "{results}"
         );
         assert!(
             !results
                 .verdicts
                 .iter()
-                .any(|r| matches!(r.verdict, LabelVerdict::Searched(Outcome::Budget { .. }))),
+                .any(|r| matches!(r.verdict.outcome(), Some(Outcome::Budget { .. }))),
+            "{results}"
+        );
+    }
+
+    /// With phase 2 over reliable broadcast, every replica that stores a write echoes it, so
+    /// the client's crash mid-phase-2 no longer splits the replicas: the register (through
+    /// its input) holds. The phase-1 query broadcast (`abd.rs:141`) is still a single hop and
+    /// still violated, which costs nothing: a lost query only delays the write.
+    #[test]
+    fn all_labels_reliable_phase2_certifies_the_register() {
+        let results = all_labels(true);
+        eprintln!("messages per write: {:?}", messages_per_write(&results));
+        let LabelVerdict::CoveredBy {
+            input_site,
+            outcome: Outcome::Certificate { .. },
+        } = register(&results)
+        else {
+            panic!("the register must be covered by its input and certified: {results}");
+        };
+        assert!(input_site.contains("abd.rs:161"), "{results}");
+        assert!(
+            !results
+                .verdicts
+                .iter()
+                .any(|r| matches!(r.verdict.outcome(), Some(Outcome::Budget { .. }))),
             "{results}"
         );
     }
