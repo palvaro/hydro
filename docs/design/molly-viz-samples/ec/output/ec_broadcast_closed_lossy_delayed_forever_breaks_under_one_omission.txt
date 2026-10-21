@@ -1,0 +1,15 @@
+# cargo test -p hydro_test --lib cluster::ec_ldfi::tests::ec_broadcast_closed_lossy_delayed_forever_breaks_under_one_omission -- --nocapture --test-threads=1 --exact
+
+test <unknown> ...	run time: 2.32747ms | iterations/s: 430 | exhaustive inputs: 1
+ldfi: fact domain learned from the failure-free run: 2 fact(s)
+ldfi: channels:
+  channel#37 "bcast": Process(loc1v1) → Cluster(loc2v1), lossy
+  channel#41 "observe": Cluster(loc2v1) → Process(loc3v1), reliable
+ldfi: crash bounds: crashes unbounded; not all 4 nodes at once; at most 1 of the checked cluster's 3 crashable member(s)
+ldfi: specification is generated (EventualConsistency)
+ldfi: run #1 {}: 1 schedule(s), goal held; derivations {{bcast[→0]:Item(1)←source#0, bcast[→0]:Item(2)←source#3, bcast[→1]:Item(1)←source#1, bcast[→1]:Item(2)←source#4, bcast[→2]:Item(1)←source#2, bcast[→2]:Item(2)←source#5, observed[0→]:Item(1) from member@0 through send #0←member@0#0, observed[0→]:Item(2) from member@0 through send #0←member@0#0, observed[1→]:Item(1) from member@1 through send #0←member@1#0, observed[1→]:Item(2) from member@1 through send #0←member@1#0, observed[2→]:Item(1) from member@2 through send #0←member@2#0, observed[2→]:Item(2) from member@2 through send #0←member@2#0}}
+ldfi: universe {omit(bcast[→0]:Item(1)), omit(bcast[→0]:Item(2)), omit(bcast[→1]:Item(1)), omit(bcast[→1]:Item(2)), omit(bcast[→2]:Item(1)), omit(bcast[→2]:Item(2)), crash(member@0 before any send), crash(member@1 before any send), crash(member@2 before any send), crash(source after bcast[→1]:Item(2)), crash(source after bcast[→0]:Item(2)), crash(source after bcast[→2]:Item(1)), crash(source after bcast[→1]:Item(1)), crash(source after bcast[→0]:Item(1)), crash(source before any send)}; preserve points {}; requirements {}
+ldfi: run #2 {omit(bcast[→0]:Item(1))}: 1 schedule(s), goal VIOLATED; derivations {}
+LDFI: goal violated after 2 hypothesis run(s) by {omit(bcast[→0]:Item(1))}
+  delivered in the failing schedule: {bcast[→1]:Item(1), bcast[→2]:Item(1), bcast[→0]:Item(2), bcast[→1]:Item(2), bcast[→2]:Item(2)}
+  omitted: {bcast[→0]:Item(1)}
