@@ -1,0 +1,16 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+     Running unittests src/lib.rs (target/debug/deps/hydro_test-9e9fb98b96c161c3)
+running 1 test
+test cluster::isr_replication::tests::compare_search_strategies ... 
+protocol     encoding  cr | ldfi/fuzz 8      runs sched    wall | blind/fuzz 8     runs sched    wall | brute/fuzz 8 om2 runs sched    wall | fuzz    inst 
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 25.62s
+Running a fuzz test without `cargo sim` and no reproducer found at /local/home/palvarox/hydro/.infinity/.sandboxes/.tmpdWMGFg/hydro_lang/src/sim/sim-failures/fuzz_faults_with<hydro_test__cluster__isr_replication__tests__compare_search_strategies.bin, using 152 iterations with random inputs.
+isr unclean  closure    1 |     violated    9      72   24.0s |     violated   19     152   57.5s |     violated   19     152   57.4s | violated  128
+Running a fuzz test without `cargo sim` and no reproducer found at /local/home/palvarox/hydro/.infinity/.sandboxes/.tmpdWMGFg/hydro_lang/src/sim/sim-failures/fuzz_faults_with<hydro_test__cluster__isr_replication__tests__compare_search_strategies.bin, using 152 iterations with random inputs.
+isr unclean  dataflow   1 |     violated   12      96    6.0s |     violated   19     152    9.7s |     violated   19     152    9.4s | violated   29
+Running a fuzz test without `cargo sim` and no reproducer found at /local/home/palvarox/hydro/.infinity/.sandboxes/.tmpdWMGFg/hydro_lang/src/sim/sim-failures/fuzz_faults_with<hydro_test__cluster__isr_replication__tests__compare_search_strategies.bin, using 504 iterations with random inputs.
+isr clean    closure    1 |  certificate   12      96   25.0s |    exhausted   63     504  169.5s |    exhausted   63     504  165.9s |     none  504
+Running a fuzz test without `cargo sim` and no reproducer found at /local/home/palvarox/hydro/.infinity/.sandboxes/.tmpdWMGFg/hydro_lang/src/sim/sim-failures/fuzz_faults_with<hydro_test__cluster__isr_replication__tests__compare_search_strategies.bin, using 504 iterations with random inputs.
+isr clean    dataflow   1 |  certificate   18     144    7.9s |    exhausted   63     504   30.4s |    exhausted   63     504   28.2s |     none  504
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 150 filtered out; finished in 691.88s

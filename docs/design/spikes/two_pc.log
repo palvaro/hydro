@@ -1,0 +1,30 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 25.77s
+     Running unittests src/lib.rs (target/debug/deps/hydro_test-9e9fb98b96c161c3)
+running 1 test
+test cluster::two_pc_ldfi::tests::compare_search_strategies ... 
+protocol    n  cr | ldfi/exhaustive  runs sched    wall | ldfi/fuzz 4      runs sched    wall | blind            runs sched    wall | brute (om<=2)    runs sched    wall | fuzz    inst 
+(blind and brute explore exhaustively where ldfi/exhaustive runs, 4 sampled schedules per hypothesis where it does not)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 30.35s
+Running a fuzz test without `cargo sim` and no reproducer found at /local/home/palvarox/hydro/.infinity/.sandboxes/.tmpdWMGFg/hydro_lang/src/sim/sim-failures/fuzz_faults_with<hydro_test__cluster__two_pc_ldfi__tests__compare_search_strategies.bin, using 2000 iterations with random inputs.
+2pc         2   1 |     violated    2      24    0.2s |     violated    2       8    0.1s |     violated    2      24    0.2s |     violated    2      24    0.2s | violated   25
+Running a fuzz test without `cargo sim` and no reproducer found at /local/home/palvarox/hydro/.infinity/.sandboxes/.tmpdWMGFg/hydro_lang/src/sim/sim-failures/fuzz_faults_with<hydro_test__cluster__two_pc_ldfi__tests__compare_search_strategies.bin, using 2000 iterations with random inputs.
+2pc + ctp   2   1 |  certificate    9     158    1.0s |  certificate    9      36    0.2s |    exhausted   14     238    1.8s |    exhausted   14     238    1.8s |     none 2000
+Running a fuzz test without `cargo sim` and no reproducer found at /local/home/palvarox/hydro/.infinity/.sandboxes/.tmpdWMGFg/hydro_lang/src/sim/sim-failures/fuzz_faults_with<hydro_test__cluster__two_pc_ldfi__tests__compare_search_strategies.bin, using 2000 iterations with random inputs.
+2pc + ctp   2   2 |     violated    5     120    1.0s |     violated    4      16    0.1s |     violated   15     262    1.9s |     violated   15     262    1.8s |     none 2000
+#259	iterations/s: 259	state space estimate: 266 (97.368%, 00s)
+#519	iterations/s: 260	state space estimate: 525 (98.857%, 00s)
+#779	iterations/s: 260	state space estimate: 782 (99.616%, 00s)
+#251	iterations/s: 251	state space estimate: 255 (98.431%, 00s)
+#514	iterations/s: 263	state space estimate: 519 (99.037%, 00s)
+#776	iterations/s: 262	state space estimate: 780 (99.487%, 00s)
+#266	iterations/s: 266	state space estimate: 272 (97.794%, 00s)
+#534	iterations/s: 268	state space estimate: 537 (99.441%, 00s)
+#803	iterations/s: 269	state space estimate: 807 (99.504%, 00s)
+Running a fuzz test without `cargo sim` and no reproducer found at /local/home/palvarox/hydro/.infinity/.sandboxes/.tmpdWMGFg/hydro_lang/src/sim/sim-failures/fuzz_faults_with<hydro_test__cluster__two_pc_ldfi__tests__compare_search_strategies.bin, using 2000 iterations with random inputs.
+2pc         3   1 |     violated    2    1152   15.9s |     violated    2       8    0.1s |     violated    2    1152   15.9s |     violated    2    1152   15.4s | violated   24
+Running a fuzz test without `cargo sim` and no reproducer found at /local/home/palvarox/hydro/.infinity/.sandboxes/.tmpdWMGFg/hydro_lang/src/sim/sim-failures/fuzz_faults_with<hydro_test__cluster__two_pc_ldfi__tests__compare_search_strategies.bin, using 2000 iterations with random inputs.
+2pc + ctp   3   1 |            -    -       -       - |  certificate   13      52    0.5s |    exhausted   30     120    1.6s |    exhausted   27     108    1.3s |     none 2000
+Running a fuzz test without `cargo sim` and no reproducer found at /local/home/palvarox/hydro/.infinity/.sandboxes/.tmpdWMGFg/hydro_lang/src/sim/sim-failures/fuzz_faults_with<hydro_test__cluster__two_pc_ldfi__tests__compare_search_strategies.bin, using 2000 iterations with random inputs.
+2pc + ctp   3   2 |            -    -       -       - |     violated    7      28    0.5s |     violated   35     140    2.4s |     violated   52     208    2.9s |     none 2000
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 150 filtered out; finished in 163.72s

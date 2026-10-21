@@ -1,0 +1,14 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+     Running unittests src/lib.rs (target/debug/deps/hydro_test-9e9fb98b96c161c3)
+running 1 test
+test cluster::ec_ldfi::tests::compare_search_strategies_echo_broadcast ... 
+cr  strategy   |      verdict runs   sched    wall
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 25.69s
+1   ldfi       |  certificate   10    2641    7.7s
+1   blind      |    exhausted   13    2329    5.9s
+1   brute      |    exhausted   13    2329    6.0s
+2   ldfi       |  certificate   21    4076   10.6s
+2   blind      |    exhausted   31    3511    9.1s
+2   brute      |    exhausted   31    3511    8.9s
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 150 filtered out; finished in 81.03s

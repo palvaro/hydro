@@ -21,14 +21,19 @@ pub fn collect_quorum_with_response<
 ) {
     let quorums = sliced! {
         let new_inputs = use::batch(responses.clone(), nondet!(
-            /// We always persist values that have not reached quorum, so even
-            /// with arbitrary batching we always produce deterministic quorum results.
+            /// Responses for a key below quorum are persisted; once a key reaches quorum,
+            /// every response for it is emitted exactly once, whether it arrived before the
+            /// quorum was reached (in this batch or an earlier one) or after (until `max`
+            /// have arrived). The emitted set is therefore the set of responses for keys with
+            /// at least `min` successes, whatever the batching. (An earlier version emitted
+            /// only the responses present in the batch that completed the quorum and dropped
+            /// later ones, so the output depended on how replies were batched.)
         ));
 
         let mut not_all = use::state_null::<Stream<_, _, Bounded, Order>>();
         let mut min_but_not_max = use::state_null::<Stream<K, _, Bounded, NoOrder>>();
 
-        let current_responses = not_all.chain(new_inputs);
+        let current_responses = not_all.chain(new_inputs.clone());
 
         let count_per_key = current_responses.clone().into_keyed().fold(
             q!(move || (0, 0)),
@@ -57,14 +62,20 @@ pub fn collect_quorum_with_response<
             current_responses.anti_join(not_reached_min_count)
         } else {
             let received_from_all = count_per_key
+                .clone()
                 .filter(q!(move |(success, error)| (success + error) >= max))
                 .keys();
 
             not_all = current_responses.clone().anti_join(received_from_all.clone());
 
-            let out = current_responses
+            // Keys reaching quorum in this execution: every response held for them.
+            let reaching_now = current_responses
                 .anti_join(not_reached_min_count)
-                .anti_join(min_but_not_max);
+                .anti_join(min_but_not_max.clone());
+            // Keys already at quorum: the responses that arrived in this execution.
+            let not_yet_at_quorum = count_per_key.keys().filter_not_in(min_but_not_max.clone());
+            let late = new_inputs.anti_join(not_yet_at_quorum);
+            let out = reaching_now.chain(late);
 
             min_but_not_max = reached_min_count.filter_not_in(received_from_all);
 
@@ -78,7 +89,12 @@ pub fn collect_quorum_with_response<
     };
 
     (
-        quorums.assert_has_consistency_of(manual_proof!(/** TODO */)),
+        quorums.assert_has_consistency_of(manual_proof!(
+            /// The emitted set is the set of successful responses for keys with at least
+            /// `min` successes among the responses received, a function of the set of
+            /// responses (see the batch's justification above); replicas receiving the same
+            /// responses emit the same set.
+        )),
         responses.filter_map(q!(move |(key, res)| match res {
             Ok(_) => None,
             Err(e) => Some((key, e)),
@@ -147,7 +163,10 @@ pub fn collect_quorum<'a, L: Location<'a>, Order: Ordering, K: Clone + Eq + Hash
     };
 
     (
-        just_reached_quorum.assert_has_consistency_of(manual_proof!(/** TODO */)),
+        just_reached_quorum.assert_has_consistency_of(manual_proof!(
+            /// The emitted set is the set of keys with at least `min` successes among the
+            /// responses received, each once: a function of the set of responses.
+        )),
         responses.filter_map(q!(move |(key, res)| match res {
             Ok(_) => None,
             Err(e) => Some((key, e)),
@@ -207,6 +226,41 @@ mod tests {
             out_recv
                 .assert_yields_only_unordered([(1, ()), (1, ()), (3, ()), (3, ())])
                 .await;
+        });
+    }
+
+    /// Three participants, a quorum of two, and all three reply for one key: every reply is
+    /// emitted, whatever the batching. Before the fix this exercises, the set emitted
+    /// depended on how the simulator batched the replies (the two that arrived first alone,
+    /// `{a, b}`, or all three when they arrived in one batch), so the output was not a
+    /// function of the set of responses, which the `nondet!` justification on the batch and
+    /// the consistency assertion on the result both claim; exhaustive exploration found the
+    /// two outcomes in two schedules.
+    #[test]
+    fn collect_quorum_with_response_output_is_independent_of_batching() {
+        let mut flow = FlowBuilder::new();
+        let node = flow.process::<()>();
+
+        let (in_send, input) = node.sim_input::<_, NoOrder, _>();
+        let out_recv = collect_quorum_with_response(input, 2, 3).0.sim_output();
+
+        flow.sim().exhaustive(async || {
+            in_send.send_many_unordered([
+                (1, Ok::<String, ()>("a".to_owned())),
+                (1, Ok("b".to_owned())),
+                (1, Ok("c".to_owned())),
+            ]);
+
+            let out = out_recv.collect_sorted::<Vec<_>>().await;
+            assert_eq!(
+                out,
+                vec![
+                    (1, "a".to_owned()),
+                    (1, "b".to_owned()),
+                    (1, "c".to_owned())
+                ],
+                "the emitted responses for a key that reached quorum should not depend on batching"
+            );
         });
     }
 

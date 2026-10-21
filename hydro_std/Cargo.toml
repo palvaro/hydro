@@ -32,5 +32,6 @@ stageleft_tool.workspace = true
 hydro_lang = { path = "../hydro_lang", version = "=0.17.0-alpha.6", features = [
     "deploy",
     "sim",
+    "ldfi",
 ] }
 hydro_deploy = { path = "../hydro_deploy/core", version = "=0.17.0-alpha.5" }
