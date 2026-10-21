@@ -82,7 +82,7 @@ mod tests {
             !results
                 .verdicts
                 .iter()
-                .any(|r| matches!(r.verdict, LabelVerdict::Searched(Outcome::Budget { .. }))),
+                .any(|r| matches!(r.verdict.outcome(), Some(Outcome::Budget { .. }))),
             "{results}"
         );
     }

@@ -236,6 +236,54 @@ where
     new_messages
 }
 
+/// Reliable broadcast from every member of a Cluster to a Cluster: the echo protocol of
+/// [`reliable_broadcast_closed`] with a cluster source, each message keyed by the member that
+/// broadcast it (`(sender, message)`, as `broadcast_closed(..).entries()` delivers it).
+///
+/// A sender may crash mid-broadcast, reaching some members and not others; every member
+/// that receives a message re-broadcasts it before delivering, so it reaches every correct
+/// member if any correct member delivered it. EC is inferred around the cycle exactly as in
+/// [`reliable_broadcast_closed`].
+///
+/// # Cost
+///
+/// O(n²) messages per input message, against O(n) for a plain `broadcast_closed`.
+pub fn reliable_broadcast_closed_from_cluster<
+    'a,
+    T: Clone + Eq + Hash + Serialize + DeserializeOwned + 'a,
+    L: 'a,
+    L2: 'a,
+    O: hydro_lang::live_collections::stream::Ordering,
+>(
+    source: Stream<T, Cluster<'a, L>, Unbounded, O, ExactlyOnce>,
+    cluster: &Cluster<'a, L2>,
+) -> Stream<
+    (hydro_lang::location::MemberId<L>, T),
+    Cluster<'a, L2, EventualConsistency>,
+    Unbounded,
+    NoOrder,
+    ExactlyOnce,
+> {
+    // Step 1: the senders' broadcast, keyed by sender. EC inferred.
+    let initial = source
+        .broadcast_closed(cluster, TCP.fail_stop().bincode())
+        .entries();
+
+    // Steps 2-5, as in `reliable_broadcast_closed_with_echoes`: merge the re-broadcasts,
+    // deduplicate, echo what is new, deliver.
+    let (rebroadcast_handle, rebroadcast_fwd) =
+        initial
+            .location()
+            .forward_ref::<Stream<(hydro_lang::location::MemberId<L>, T), _, Unbounded, NoOrder>>();
+    let new_messages = initial.merge_unordered(rebroadcast_fwd).unique();
+    let echo = new_messages
+        .clone()
+        .broadcast_closed(cluster, TCP.fail_stop().bincode())
+        .values();
+    rebroadcast_handle.complete(echo);
+    new_messages
+}
+
 // These tests were written against the `eventual_consistency` branch's simulator
 // (`SimFlow::with_crashable_cluster`, `SimClusterReceiver::collect_n_sorted`, driven
 // membership), which this branch does not have; its fault injection is hydrofrac

@@ -7,7 +7,9 @@
 //! `SimFlow::compiled` before network compilation and before the provenance rewrite:
 //!
 //! 1. enumerates the labelled collections ([`super::slice::ec_collections`]) and decides for
-//!    each whether the set-based specification applies ([`NotCheckedReason`]);
+//!    each whether the set-based specification applies ([`NotCheckedReason`]); a labelled
+//!    scalar computed by an aggregation from a labelled stream is checked at that stream
+//!    ([`LabelPlan::covered_by`]) and is not tapped itself;
 //! 2. **taps** each collection it applies to: the labelling node becomes a `Tee` (as
 //!    `Stream::clone` would make it) and a second branch is mapped to
 //!    `(index, bincode(element))` and sent to the observer over a `fail_stop` channel named
@@ -46,8 +48,9 @@ pub enum NotCheckedReason {
     /// from some members, so there is nothing to check.
     LocalInputsOnly,
     /// The collection is a `Singleton`, `Optional` or `KeyedSingleton`: a lattice value, which
-    /// the set-based specification does not observe correctly (it needs an equality variant,
-    /// not built). The string names the kind.
+    /// the set-based specification does not observe, and it is not an aggregation of an
+    /// observed labelled stream (which would cover it, [`LabelPlan::covered_by`]). The string
+    /// names the kind.
     NotAStream(String),
     /// The labelling node lives inside a tick: its bounded per-tick contents are not "the
     /// collection's contents".
@@ -77,10 +80,25 @@ pub struct LabelPlan {
     pub collection: EcCollection,
     /// Why it is not observed, if it is not.
     pub not_checked: Option<NotCheckedReason>,
+    /// For a labelled scalar checked at its input stream ([`EcCollection::covered_by`]): the
+    /// index of that stream's plan, which is observed. The scalar itself is not tapped.
+    pub covered_by: Option<usize>,
+    /// For a merge-dominated hop ([`EcCollection::merged_into`]): the index of the nearest
+    /// observed exit after the merge, whose verdict is authoritative. The hop is still
+    /// observed and searched; its verdict is informational.
+    pub merged_at: Option<usize>,
+}
+
+impl LabelPlan {
+    /// Whether the collection is tapped and searched in its own right.
+    pub fn is_searched(&self) -> bool {
+        self.not_checked.is_none() && self.covered_by.is_none()
+    }
 }
 
 /// Whether the set-based specification applies to `collection`, in the order the design
-/// document fixes: local inputs, then kind, then tick.
+/// document fixes: local inputs, then kind, then tick. A scalar is reported here as not a
+/// stream; [`plan`] then checks it at its input stream when it can.
 fn classify(collection: &EcCollection, excluded: &[String]) -> Option<NotCheckedReason> {
     if excluded
         .iter()
@@ -107,6 +125,42 @@ fn classify(collection: &EcCollection, excluded: &[String]) -> Option<NotChecked
         return Some(NotCheckedReason::InsideTick);
     }
     None
+}
+
+/// The plan for every collection of the enumeration: [`classify`], then a scalar whose input
+/// stream is observed is covered by it, and a merge-dominated hop is attributed to the nearest
+/// observed exit after its merge.
+pub(crate) fn plan(collections: Vec<EcCollection>, excluded: &[String]) -> Vec<LabelPlan> {
+    let mut plans: Vec<LabelPlan> = collections
+        .into_iter()
+        .map(|collection| LabelPlan {
+            not_checked: classify(&collection, excluded),
+            collection,
+            covered_by: None,
+            merged_at: None,
+        })
+        .collect();
+    for i in 0..plans.len() {
+        if let Some(input) = plans[i].collection.covered_by
+            && matches!(plans[i].not_checked, Some(NotCheckedReason::NotAStream(_)))
+            && plans[input].not_checked.is_none()
+        {
+            plans[i].not_checked = None;
+            plans[i].covered_by = Some(input);
+        }
+    }
+    for i in 0..plans.len() {
+        if !plans[i].is_searched() {
+            continue;
+        }
+        plans[i].merged_at = plans[i]
+            .collection
+            .merged_into
+            .iter()
+            .copied()
+            .find(|&exit| plans[exit].is_searched());
+    }
+    plans
 }
 
 /// The observation slot's metadata and the excluded labels, if `ir` has a slot.
@@ -197,13 +251,7 @@ pub(crate) fn tap_labels(ir: &mut [HydroRoot]) -> Option<Vec<LabelPlan>> {
     let (slot_metadata, excluded) = find_slot(ir)?;
     let root = get_this_crate();
 
-    let plans: Vec<LabelPlan> = ec_collections(ir)
-        .into_iter()
-        .map(|collection| LabelPlan {
-            not_checked: classify(&collection, &excluded),
-            collection,
-        })
-        .collect();
+    let plans: Vec<LabelPlan> = plan(ec_collections(ir), &excluded);
     let index_of: HashMap<EcKey, usize> = plans
         .iter()
         .enumerate()
@@ -233,7 +281,7 @@ pub(crate) fn tap_labels(ir: &mut [HydroRoot]) -> Option<Vec<LabelPlan>> {
         let Some(&index) = index_of.get(&ec_key(node)) else {
             return;
         };
-        if plans[index].not_checked.is_some() {
+        if !plans[index].is_searched() {
             return;
         }
         // Share the node: make it a `Tee` if it is not one, and take a second branch.

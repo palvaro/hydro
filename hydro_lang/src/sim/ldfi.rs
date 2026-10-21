@@ -4014,40 +4014,59 @@ impl Ldfi {
                 "`Ldfi::search_all_labels`: the compiled program carries no observation slot; was the `Spec::all_labels` created on the flow that was compiled?"
             )
         });
+        // Searched collections first (a covered scalar's verdict is its input's outcome), then
+        // one row per collection in enumeration order.
+        let mut outcomes: HashMap<usize, Outcome> = HashMap::new();
+        for (index, plan) in labels.iter().enumerate() {
+            if !plan.is_searched() {
+                continue;
+            }
+            let members = sim
+                .cluster_members(&plan.collection.location)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no cluster size for {:?}; call `with_cluster_size` before `compiled()`",
+                        plan.collection.location
+                    )
+                })
+                .to_vec();
+            all_labels.current.set(Some(index));
+            all_labels
+                .correct
+                .set_target(plan.collection.location.clone(), members);
+            facts.domain.borrow_mut().clear();
+            if self.log {
+                eprintln!(
+                    "hydrofrac: searching EventualConsistency at {} ({})",
+                    plan.collection.label,
+                    plan.collection.location_label()
+                );
+            }
+            let outcome = self.run(sim, async |run| {
+                body(run).await;
+                true
+            });
+            if self.log && outcome.is_counterexample() {
+                eprintln!("{outcome}");
+            }
+            outcomes.insert(index, outcome);
+        }
         let mut results = LabelResults { verdicts: vec![] };
         for (index, plan) in labels.iter().enumerate() {
             let verdict = if let Some(reason) = &plan.not_checked {
                 LabelVerdict::NotChecked(reason.clone())
+            } else if let Some(input) = plan.covered_by {
+                LabelVerdict::CoveredBy {
+                    input_site: labels[input].collection.label.clone(),
+                    outcome: outcomes[&input].clone(),
+                }
+            } else if let Some(exit) = plan.merged_at {
+                LabelVerdict::Hop {
+                    merged_at: labels[exit].collection.label.clone(),
+                    outcome: outcomes[&index].clone(),
+                }
             } else {
-                let members = sim
-                        .cluster_members(&plan.collection.location)
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "no cluster size for {:?}; call `with_cluster_size` before `compiled()`",
-                                plan.collection.location
-                            )
-                        })
-                        .to_vec();
-                all_labels.current.set(Some(index));
-                all_labels
-                    .correct
-                    .set_target(plan.collection.location.clone(), members);
-                facts.domain.borrow_mut().clear();
-                if self.log {
-                    eprintln!(
-                        "hydrofrac: searching EventualConsistency at {} ({})",
-                        plan.collection.label,
-                        plan.collection.location_label()
-                    );
-                }
-                let outcome = self.run(sim, async |run| {
-                    body(run).await;
-                    true
-                });
-                if self.log && outcome.is_counterexample() {
-                    eprintln!("{outcome}");
-                }
-                LabelVerdict::Searched(outcome)
+                LabelVerdict::Searched(outcomes[&index].clone())
             };
             let result = LabelResult {
                 collection: plan.collection.clone(),
@@ -4451,16 +4470,49 @@ impl Ldfi {
 
 /// The verdict of [`Ldfi::search_all_labels`] on one labelled collection.
 #[derive(Clone, Debug)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "an outcome carries every hypothesis; a few verdicts per program"
-)]
 pub enum LabelVerdict {
     /// The collection was searched: a certificate, a counterexample, an exhausted budget, or
     /// a vacuous failure-free run.
     Searched(Outcome),
+    /// A labelled scalar (`Singleton`, `Optional`, `KeyedSingleton`) computed by an
+    /// aggregation from a labelled stream ([`EcCollection::covered_by`]): the type system
+    /// vouches that the scalar is a deterministic function of the stream, so it converges if
+    /// the stream does. `outcome` is the stream's search, also reported under `input_site`'s
+    /// own row. It counts as the scalar's verdict ([`LabelResults::counterexamples`],
+    /// [`LabelResults::all_certified_or_not_checked`]).
+    CoveredBy {
+        /// The source site of the input stream.
+        input_site: String,
+        /// The input stream's outcome.
+        outcome: Outcome,
+    },
+    /// A merge-dominated hop ([`EcCollection::merged_into`]): its elements leave the labelled
+    /// region only merged with another labelled stream, and the exit at `merged_at` checks the
+    /// merge. `outcome` is the hop's own search, kept for information; it is not a verdict on
+    /// the label ([`LabelResults::counterexamples`] and
+    /// [`LabelResults::all_certified_or_not_checked`] skip it). A single hop of a broadcast
+    /// that an echo completes is the typical case: it may disagree, and the echo repairs it.
+    Hop {
+        /// The source site of the exit whose verdict is authoritative.
+        merged_at: String,
+        /// The hop's own outcome.
+        outcome: Outcome,
+    },
     /// The automatic specification does not apply to the collection.
     NotChecked(NotCheckedReason),
+}
+
+impl LabelVerdict {
+    /// The outcome of the search behind the verdict (the input's, for [`Self::CoveredBy`]),
+    /// if there was one.
+    pub fn outcome(&self) -> Option<&Outcome> {
+        match self {
+            LabelVerdict::Searched(outcome)
+            | LabelVerdict::CoveredBy { outcome, .. }
+            | LabelVerdict::Hop { outcome, .. } => Some(outcome),
+            LabelVerdict::NotChecked(_) => None,
+        }
+    }
 }
 
 /// One row of [`LabelResults`]: a labelled collection and its verdict.
@@ -4482,51 +4534,64 @@ impl LabelResult {
 impl Display for LabelResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let c = &self.collection;
-        let role = match (c.minted, c.exit) {
-            (true, true) => "minted and delivered",
-            (true, false) => "minted",
-            (false, true) => "delivered",
-            (false, false) => "",
+        let role = match (c.minted, c.exit, c.aggregated) {
+            (true, true, _) => "minted and delivered",
+            (true, false, _) => "minted",
+            (false, true, _) => "delivered",
+            (false, false, true) => "aggregated",
+            (false, false, false) => "",
         };
         write!(
             f,
             "EventualConsistency at {} ({:?}, {}, {role}): ",
             c.label, c.location, c.op
         )?;
-        match &self.verdict {
-            LabelVerdict::NotChecked(reason) => write!(f, "not checked: {reason}"),
-            LabelVerdict::Searched(outcome) => match outcome {
-                Outcome::Certificate {
-                    runs, exploration, ..
-                } => {
-                    write!(f, "CERTIFICATE, {} hypotheses", runs.len())?;
-                    match exploration {
-                        Exploration::Exhaustive => write!(f, ", exhaustive"),
-                        Exploration::Fuzz { instances } => {
-                            write!(f, ", {instances} sampled schedules")
-                        }
+        let outcome = match &self.verdict {
+            LabelVerdict::NotChecked(reason) => return write!(f, "not checked: {reason}"),
+            LabelVerdict::Searched(outcome) => outcome,
+            LabelVerdict::CoveredBy {
+                input_site,
+                outcome,
+            } => {
+                write!(f, "covered by its input at {input_site} — ")?;
+                outcome
+            }
+            LabelVerdict::Hop { merged_at, outcome } => {
+                write!(f, "informational, merged and checked at {merged_at}: ")?;
+                outcome
+            }
+        };
+        match outcome {
+            Outcome::Certificate {
+                runs, exploration, ..
+            } => {
+                write!(f, "CERTIFICATE, {} hypotheses", runs.len())?;
+                match exploration {
+                    Exploration::Exhaustive => write!(f, ", exhaustive"),
+                    Exploration::Fuzz { instances } => {
+                        write!(f, ", {instances} sampled schedules")
                     }
                 }
-                Outcome::Counterexample { faults, runs, .. } => write!(
+            }
+            Outcome::Counterexample { faults, runs, .. } => write!(
+                f,
+                "VIOLATED by {}, {} hypotheses",
+                render_set(faults),
+                runs.len()
+            ),
+            Outcome::Budget { runs } => {
+                write!(f, "BUDGET exhausted after {} hypotheses", runs.len())
+            }
+            Outcome::Vacuous { .. } => {
+                write!(f, "VACUOUS (nothing held in the failure-free run)")
+            }
+            Outcome::Exhausted { runs } => {
+                write!(
                     f,
-                    "VIOLATED by {}, {} hypotheses",
-                    render_set(faults),
+                    "exhausted the fault universe, {} runs, no violation",
                     runs.len()
-                ),
-                Outcome::Budget { runs } => {
-                    write!(f, "BUDGET exhausted after {} hypotheses", runs.len())
-                }
-                Outcome::Vacuous { .. } => {
-                    write!(f, "VACUOUS (nothing held in the failure-free run)")
-                }
-                Outcome::Exhausted { runs } => {
-                    write!(
-                        f,
-                        "exhausted the fault universe, {} runs, no violation",
-                        runs.len()
-                    )
-                }
-            },
+                )
+            }
         }
     }
 }
@@ -4542,12 +4607,19 @@ pub struct LabelResults {
 
 impl LabelResults {
     /// Whether every collection either certified or was not checked (no counterexample, no
-    /// exhausted budget, no vacuous search).
+    /// exhausted budget, no vacuous search). A covered scalar counts by its input's outcome; a
+    /// merge-dominated hop does not count (its merge's exit does).
     pub fn all_certified_or_not_checked(&self) -> bool {
         self.verdicts.iter().all(|r| {
             matches!(
                 r.verdict,
-                LabelVerdict::NotChecked(_) | LabelVerdict::Searched(Outcome::Certificate { .. })
+                LabelVerdict::NotChecked(_)
+                    | LabelVerdict::Hop { .. }
+                    | LabelVerdict::Searched(Outcome::Certificate { .. })
+                    | LabelVerdict::CoveredBy {
+                        outcome: Outcome::Certificate { .. },
+                        ..
+                    }
             )
         })
     }
@@ -4559,18 +4631,26 @@ impl LabelResults {
             .filter(move |r| r.collection.label.contains(site))
     }
 
-    /// The verdicts that were searched, with their outcomes.
+    /// The verdicts that were searched in their own right (including merge-dominated hops),
+    /// with their outcomes.
     pub fn searched(&self) -> impl Iterator<Item = (&LabelResult, &Outcome)> {
         self.verdicts.iter().filter_map(|r| match &r.verdict {
-            LabelVerdict::Searched(outcome) => Some((r, outcome)),
-            LabelVerdict::NotChecked(_) => None,
+            LabelVerdict::Searched(outcome) | LabelVerdict::Hop { outcome, .. } => {
+                Some((r, outcome))
+            }
+            LabelVerdict::CoveredBy { .. } | LabelVerdict::NotChecked(_) => None,
         })
     }
 
-    /// The counterexamples found, by label.
+    /// The counterexamples found, by label: those of searched collections and of covered
+    /// scalars (whose counterexample is also their input's), not those of merge-dominated hops.
     pub fn counterexamples(&self) -> impl Iterator<Item = (&LabelResult, &FaultSet)> {
         self.verdicts.iter().filter_map(|r| match &r.verdict {
-            LabelVerdict::Searched(Outcome::Counterexample { faults, .. }) => Some((r, faults)),
+            LabelVerdict::Searched(Outcome::Counterexample { faults, .. })
+            | LabelVerdict::CoveredBy {
+                outcome: Outcome::Counterexample { faults, .. },
+                ..
+            } => Some((r, faults)),
             _ => None,
         })
     }
