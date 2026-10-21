@@ -29,7 +29,7 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 
 use hydro_lang::forward_handle::ForwardHandle;
-use hydro_lang::live_collections::stream::{MinOrder, NoOrder, Ordering, TotalOrder};
+use hydro_lang::live_collections::stream::{ExactlyOnce, MinOrder, NoOrder, Ordering, TotalOrder};
 use hydro_lang::location::cluster::{
     CLUSTER_SELF_ID, ClusterIds, Consistency, EventualConsistency, NoConsistency,
 };
@@ -37,6 +37,7 @@ use hydro_lang::location::dynamic::LocationId;
 use hydro_lang::location::{Atomic, Cluster, Location, MemberId};
 use hydro_lang::networking::NetworkFor;
 use hydro_lang::prelude::*;
+use hydro_lang::sim_hooks::{BatchHook, OnCluster};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -98,6 +99,17 @@ pub struct AppendEntriesRequest<T, ClusterTag> {
     pub leader_commit: usize,
 }
 
+impl<T: PartialEq, ClusterTag> PartialEq for AppendEntriesRequest<T, ClusterTag> {
+    fn eq(&self, other: &Self) -> bool {
+        self.term == other.term
+            && self.leader == other.leader
+            && self.prev_log_index == other.prev_log_index
+            && self.prev_log_term == other.prev_log_term
+            && self.entries == other.entries
+            && self.leader_commit == other.leader_commit
+    }
+}
+
 impl<T: Clone, ClusterTag> Clone for AppendEntriesRequest<T, ClusterTag> {
     fn clone(&self) -> Self {
         AppendEntriesRequest {
@@ -141,6 +153,11 @@ pub struct AppendEntriesReply {
     /// meaningful when `success`, and lets the leader advance its commit index once a
     /// majority of `match_index`es reach an entry of the current term.
     pub match_index: usize,
+    /// On a log-matching rejection, where the leader should retry from (RAFT §5.3's
+    /// conflict optimization): one past the follower's last entry when its log is too short,
+    /// or the first index of the conflicting term when the entry at `prev_log_index` has
+    /// another term. `0` when the rejection carries no hint (a stale leader's term).
+    pub conflict_hint: usize,
 }
 
 /// The single wire format for all intra-cluster RAFT traffic: vote RPCs and
@@ -168,6 +185,18 @@ pub enum RaftRpc<T, ClusterTag> {
     AppendEntries(AppendEntriesRequest<T, ClusterTag>),
     /// Follower -> leader: acknowledge or reject an `AppendEntries`.
     AppendEntriesReply(AppendEntriesReply),
+}
+
+impl<T: PartialEq, ClusterTag> PartialEq for RaftRpc<T, ClusterTag> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (RaftRpc::RequestVote(a), RaftRpc::RequestVote(b)) => a == b,
+            (RaftRpc::RequestVoteResponse(a), RaftRpc::RequestVoteResponse(b)) => a == b,
+            (RaftRpc::AppendEntries(a), RaftRpc::AppendEntries(b)) => a == b,
+            (RaftRpc::AppendEntriesReply(a), RaftRpc::AppendEntriesReply(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 impl<T: Clone, ClusterTag> Clone for RaftRpc<T, ClusterTag> {
@@ -202,7 +231,7 @@ impl<T: Debug, ClusterTag> Debug for RaftRpc<T, ClusterTag> {
 ///
 /// Public only because staged (`q!`) code must reference it by path; not stable API.
 #[doc(hidden)]
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RequestVoteDto {
     /// The candidate's term.
     pub term: usize,
@@ -218,7 +247,7 @@ pub struct RequestVoteDto {
 ///
 /// Public only because staged (`q!`) code must reference it by path; not stable API.
 #[doc(hidden)]
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RequestVoteResponseDto {
     /// The term the vote is granted for.
     pub term: usize,
@@ -231,6 +260,13 @@ pub struct RaftConfig {
     /// computed as `cluster_size / 2 + 1`. Must match the deployed cluster size (in
     /// simulation tests, the value passed to `with_cluster_size`).
     pub cluster_size: usize,
+    /// **Injected bug, for fault-injection experiments only.** The §5.4.1 election
+    /// restriction compares last log *indexes* only, ignoring the last log term: a candidate
+    /// whose log is as long as the voter's but ends in an older term is granted the vote. A
+    /// member that missed a newer leader's entry (a lost `AppendEntries`) while keeping a
+    /// stale one of its own at the same index can then be elected and overwrite a committed
+    /// entry. Every unit test in this file passes with the bug on; it needs message loss.
+    pub election_restriction_ignores_term: bool,
 }
 
 /// A member's view of the election: its current term, and the leader of that term if
@@ -390,6 +426,8 @@ pub struct RaftStepInput<T, ClusterTag> {
     pub other_members: Vec<MemberId<ClusterTag>>,
     /// Total protocol cluster size; majorities are `cluster_size / 2 + 1`.
     pub cluster_size: usize,
+    /// Injected bug (see [`RaftConfig::election_restriction_ignores_term`]).
+    pub election_restriction_ignores_term: bool,
     /// Whether the election timer fired this tick.
     pub election_timer_fired: bool,
     /// Whether the heartbeat timer fired this tick.
@@ -448,6 +486,7 @@ pub fn raft_step<T: Clone, ClusterTag>(
         me,
         other_members,
         cluster_size,
+        election_restriction_ignores_term,
         election_timer_fired,
         heartbeat_timer_fired,
         requests,
@@ -534,8 +573,11 @@ pub fn raft_step<T: Clone, ClusterTag>(
                 // §5.4.1 election restriction: only grant if the candidate's log is
                 // at least as up-to-date as ours — this reads the *live* log, which
                 // is exactly the interlock the split-component design lacked.
-                let candidate_up_to_date =
-                    (dto.last_log_term, dto.last_log_index) >= state.last_log_position();
+                let candidate_up_to_date = if election_restriction_ignores_term {
+                    dto.last_log_index >= state.log.len()
+                } else {
+                    (dto.last_log_term, dto.last_log_index) >= state.last_log_position()
+                };
                 let can_vote =
                     state.voted_for.is_none() || state.voted_for.as_ref() == Some(&sender);
                 if candidate_up_to_date && can_vote {
@@ -566,6 +608,7 @@ pub fn raft_step<T: Clone, ClusterTag>(
                             term: state.term,
                             success: false,
                             match_index: 0,
+                            conflict_hint: 0,
                         }),
                     ));
                     continue;
@@ -591,12 +634,23 @@ pub fn raft_step<T: Clone, ClusterTag>(
                         && state.log[request.prev_log_index - 1].term_received
                             == request.prev_log_term);
                 if !log_matches {
+                    let conflict_hint = if state.log.len() < request.prev_log_index {
+                        state.log.len() + 1
+                    } else {
+                        let conflicting_term = state.log[request.prev_log_index - 1].term_received;
+                        state
+                            .log
+                            .iter()
+                            .position(|entry| entry.term_received == conflicting_term)
+                            .map_or(1, |position| position + 1)
+                    };
                     outbound.push((
                         sender,
                         RaftRpc::AppendEntriesReply(AppendEntriesReply {
                             term: state.term,
                             success: false,
                             match_index: 0,
+                            conflict_hint,
                         }),
                     ));
                     continue;
@@ -613,12 +667,21 @@ pub fn raft_step<T: Clone, ClusterTag>(
                             // contains all committed entries. Fail fast if this
                             // invariant is ever violated.
                             assert!(
-                                entry.index > state.commit_index,
+                                election_restriction_ignores_term
+                                    || entry.index > state.commit_index,
                                 "protocol violation: asked to truncate committed \
                                  entry at index {} (commit_index {})",
                                 entry.index,
                                 state.commit_index,
                             );
+                            if entry.index <= state.commit_index {
+                                // The injected bug has let a stale leader overwrite a
+                                // committed entry; roll the commit point back so the
+                                // overwrite is re-committed and re-emitted, making the
+                                // disagreement visible on the committed stream.
+                                state.commit_index = entry.index - 1;
+                                state.emitted_index = entry.index - 1;
+                            }
                             state.log.truncate(entry.index - 1);
                             state.log.push(entry);
                         }
@@ -640,6 +703,7 @@ pub fn raft_step<T: Clone, ClusterTag>(
                         term: state.term,
                         success: true,
                         match_index: new_match,
+                        conflict_hint: 0,
                     }),
                 ));
             }
@@ -663,9 +727,14 @@ pub fn raft_step<T: Clone, ClusterTag>(
                         *next = reply.match_index + 1;
                     }
                 } else {
-                    // Rejections back off next_index to retry earlier prefixes.
+                    // Rejections back off next_index to retry earlier prefixes: by one, or
+                    // straight to the follower's conflict hint when it gives one (§5.3).
                     if let Some(next) = state.next_index.get_mut(&sender) {
-                        *next = (*next - 1).max(1);
+                        let mut backed_off = (*next - 1).max(1);
+                        if reply.conflict_hint > 0 {
+                            backed_off = backed_off.min(reply.conflict_hint);
+                        }
+                        *next = backed_off;
                     }
                 }
             }
@@ -827,6 +896,68 @@ pub struct RaftOutputs<'a, T, ClusterTag> {
     pub leader_views: Stream<LeaderView<ClusterTag>, Cluster<'a, ClusterTag>>,
 }
 
+/// Hook on each member's batch of client requests.
+pub type RaftRequestHook<T, ClusterTag> =
+    BatchHook<T, TotalOrder, ExactlyOnce, OnCluster<ClusterTag>>;
+/// Hook on each member's election or heartbeat timer batch.
+pub type RaftTimerHook<ClusterTag> = BatchHook<(), TotalOrder, ExactlyOnce, OnCluster<ClusterTag>>;
+/// Hook on each member's batch of intra-cluster traffic, keyed by the sender.
+pub type RaftTrafficHook<T, ClusterTag> = BatchHook<
+    (MemberId<ClusterTag>, RaftRpc<T, ClusterTag>),
+    NoOrder,
+    ExactlyOnce,
+    OnCluster<ClusterTag>,
+>;
+
+/// The simulator hooks of [`raft_server`]'s four batches, as the payload of its
+/// non-determinism guard: a test binds them with `nondet!(/** .. */ hook = hooks)` after
+/// `flow.sim_hook()`, and every other caller's `nondet!(..)` leaves them `None`. This is what
+/// lets fault injection (`hydro_lang::sim::ldfi`) make every delivery into the RAFT step a
+/// traced, controllable event.
+pub struct RaftHooks<T, ClusterTag> {
+    /// Client requests.
+    pub requests: Option<RaftRequestHook<T, ClusterTag>>,
+    /// Election timer interrupts.
+    pub election_timer: Option<RaftTimerHook<ClusterTag>>,
+    /// Heartbeat timer interrupts.
+    pub heartbeat_timer: Option<RaftTimerHook<ClusterTag>>,
+    /// Intra-cluster traffic.
+    pub traffic: Option<RaftTrafficHook<T, ClusterTag>>,
+}
+
+impl<T, ClusterTag> Default for RaftHooks<T, ClusterTag> {
+    fn default() -> Self {
+        RaftHooks {
+            requests: None,
+            election_timer: None,
+            heartbeat_timer: None,
+            traffic: None,
+        }
+    }
+}
+
+impl<T, ClusterTag> Clone for RaftHooks<T, ClusterTag> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T, ClusterTag> Copy for RaftHooks<T, ClusterTag> {}
+
+impl<T, ClusterTag> hydro_lang::sim_hooks::SimHook for RaftHooks<T, ClusterTag>
+where
+    T: Serialize + DeserializeOwned + PartialEq,
+{
+    fn create(next_id: &mut dyn FnMut() -> usize) -> Self {
+        RaftHooks {
+            requests: Some(hydro_lang::sim_hooks::SimHook::create(next_id)),
+            election_timer: Some(hydro_lang::sim_hooks::SimHook::create(next_id)),
+            heartbeat_timer: Some(hydro_lang::sim_hooks::SimHook::create(next_id)),
+            traffic: Some(hydro_lang::sim_hooks::SimHook::create(next_id)),
+        }
+    }
+}
+
 /// The unified RAFT server: one state machine per member, advanced by [`raft_step`]
 /// inside a single tick that consumes every input the protocol reacts to (client
 /// requests, both timers, and all intra-cluster traffic over one channel).
@@ -842,7 +973,7 @@ pub fn raft_server<'a, T, ClusterTag, O, Net>(
     heartbeat_timer_interrupts: Stream<(), Cluster<'a, ClusterTag>>,
     config: RaftConfig,
     net: Net,
-    nondet_raft: NonDet,
+    mut nondet_raft: NonDet<RaftHooks<T, ClusterTag>>,
 ) -> RaftOutputs<'a, T, ClusterTag>
 where
     T: Clone + Serialize + DeserializeOwned + 'a,
@@ -852,6 +983,10 @@ where
     NoOrder: MinOrder<Net::OrderingGuarantee, Min = NoOrder>,
 {
     let cluster_size = config.cluster_size;
+    let election_restriction_ignores_term = config.election_restriction_ignores_term;
+    // The simulator hooks a test may have bound to the four batches (see `RaftHooks`);
+    // `None` everywhere outside such tests.
+    let hooks = nondet_raft.take_hook();
 
     // Fix an arbitrary total order for incoming requests up front (a no-op when the
     // input is already `TotalOrder`): the leader must place concurrent requests at
@@ -909,25 +1044,25 @@ where
         let request_batch = use::batch(requests, nondet!(
             /// Which requests are batched together only affects which log indexes the
             /// leader assigns them, folded into the arbitrary order fixed above.
-            nondet_raft
+            hook = hooks.requests
         ));
         let election_batch = use::batch(election_timer_interrupts, nondet!(
             /// When timer interrupts are processed relative to messages only affects
             /// which elections are attempted, which folds into the non-determinism of
             /// which member wins an election.
-            nondet_raft
+            hook = hooks.election_timer
         ));
         let heartbeat_batch = use::batch(heartbeat_timer_interrupts, nondet!(
             /// Heartbeat timing only affects when replication progress is made, not
             /// the committed sequence.
-            nondet_raft
+            hook = hooks.heartbeat_timer
         ));
         let traffic_batch = use::batch(traffic, nondet!(
             /// Message delivery interleavings shift which member wins elections and
             /// when entries replicate and commit, but never the committed sequence
             /// itself: every message is processed atomically against the member's
             /// full state.
-            nondet_raft
+            hook = hooks.traffic
         ));
 
         let mut server_state = use::state(|l| l.singleton(q!(RaftServerState::new())));
@@ -1004,6 +1139,7 @@ where
                         // Written without field shorthand: stageleft renames captured
                         // free variables, and shorthand hides the use site from it.
                         cluster_size: { cluster_size },
+                        election_restriction_ignores_term: { election_restriction_ignores_term },
                         election_timer_fired: *election_fired_ref,
                         heartbeat_timer_fired: *heartbeat_fired_ref,
                         requests: request_vec_ref.clone(),
@@ -1025,8 +1161,7 @@ where
         (outbound, committed, redirected, view_transitions)
     };
 
-    traffic_handle.complete(
-        outbound_messages
+    traffic_handle.complete(outbound_messages
             .into_keyed()
             // The channel's fault model is chosen by the caller: sim tests use
             // `TCP.fail_stop()` (the simulator cannot explore lossy channels without
@@ -1036,8 +1171,7 @@ where
             // heartbeat, and lost vote traffic is retried at the next election
             // timeout.
             .demux(cluster, net)
-            .entries(),
-    );
+            .entries());
 
     RaftOutputs {
         // The RAFT protocol itself is what justifies the consistency cast: every
@@ -1201,6 +1335,7 @@ mod tests {
             heartbeat_timer_interrupts,
             RaftConfig {
                 cluster_size: CLUSTER_SIZE,
+                election_restriction_ignores_term: false,
             },
             TCP.fail_stop().bincode(),
             nondet!(/** which member wins an election is inherently non-deterministic */),
@@ -1320,6 +1455,7 @@ mod tests {
             heartbeat_timer_interrupts,
             RaftConfig {
                 cluster_size: CLUSTER_SIZE,
+                election_restriction_ignores_term: false,
             },
             TCP.fail_stop().bincode(),
             nondet!(/** which member wins an election is inherently non-deterministic */),
@@ -1518,6 +1654,7 @@ mod tests {
                         .map(Self::id)
                         .collect(),
                     cluster_size: self.cluster_size,
+                    election_restriction_ignores_term: false,
                     election_timer_fired: election,
                     heartbeat_timer_fired: heartbeat,
                     requests: requests
@@ -1701,6 +1838,7 @@ mod tests {
                 me: StepCluster::id(1),
                 other_members: vec![StepCluster::id(0), StepCluster::id(2)],
                 cluster_size: 3,
+                election_restriction_ignores_term: false,
                 election_timer_fired: false,
                 heartbeat_timer_fired: false,
                 requests: vec![],
@@ -1748,6 +1886,7 @@ mod tests {
                 me: StepCluster::id(1),
                 other_members: vec![StepCluster::id(0), StepCluster::id(2)],
                 cluster_size: 3,
+                election_restriction_ignores_term: false,
                 election_timer_fired: false,
                 heartbeat_timer_fired: false,
                 requests: vec![],
@@ -1773,6 +1912,7 @@ mod tests {
                 me: StepCluster::id(1),
                 other_members: vec![StepCluster::id(0), StepCluster::id(2)],
                 cluster_size: 3,
+                election_restriction_ignores_term: false,
                 election_timer_fired: false,
                 heartbeat_timer_fired: false,
                 requests: vec![],
@@ -1790,6 +1930,7 @@ mod tests {
                 me: StepCluster::id(1),
                 other_members: vec![StepCluster::id(0), StepCluster::id(2)],
                 cluster_size: 3,
+                election_restriction_ignores_term: false,
                 election_timer_fired: false,
                 heartbeat_timer_fired: false,
                 requests: vec![],
@@ -1834,6 +1975,7 @@ mod tests {
                 me: StepCluster::id(0),
                 other_members: vec![StepCluster::id(1), StepCluster::id(2)],
                 cluster_size: 3,
+                election_restriction_ignores_term: false,
                 election_timer_fired: false,
                 heartbeat_timer_fired: false,
                 requests: vec![],
@@ -1843,6 +1985,7 @@ mod tests {
                         term: 3,
                         success: false,
                         match_index: 0,
+                        conflict_hint: 0,
                     }),
                 )],
             },
@@ -2162,7 +2305,10 @@ mod tests {
             requests,
             election_timer_interrupts,
             heartbeat_timer_interrupts,
-            RaftConfig { cluster_size: N },
+            RaftConfig {
+                cluster_size: N,
+                election_restriction_ignores_term: false,
+            },
             || TCP.fail_stop().bincode(),
             nondet!(
                 /** which member leads and how concurrent requests are ordered is
@@ -2360,7 +2506,10 @@ mod tests {
             requests,
             election_timer_interrupts,
             heartbeat_timer_interrupts,
-            RaftConfig { cluster_size: N },
+            RaftConfig {
+                cluster_size: N,
+                election_restriction_ignores_term: false,
+            },
             || TCP.fail_stop().bincode(),
             nondet!(
                 /** which member leads and how concurrent requests are ordered is
@@ -2503,7 +2652,10 @@ mod tests {
             requests,
             election_timer_interrupts,
             heartbeat_timer_interrupts,
-            RaftConfig { cluster_size: N },
+            RaftConfig {
+                cluster_size: N,
+                election_restriction_ignores_term: false,
+            },
             || TCP.fail_stop().bincode(),
             nondet!(
                 /** which member leads and how concurrent requests are ordered is
@@ -2601,7 +2753,10 @@ mod tests {
             requests,
             election_timer_interrupts,
             heartbeat_timer_interrupts,
-            RaftConfig { cluster_size: 3 },
+            RaftConfig {
+                cluster_size: 3,
+                election_restriction_ignores_term: false,
+            },
             || TCP.fail_stop().bincode(),
             nondet!(
                 /// Which member leads and how concurrent requests interleave in the

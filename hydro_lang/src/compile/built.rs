@@ -174,17 +174,31 @@ impl<'a> BuiltFlow<'a> {
             }
         }
 
+        // The observer process of a fault-injection specification (`sim::spec`) runs its
+        // ticks eagerly: it only consumes, so its interleaving is not a schedule choice.
+        #[cfg(feature = "ldfi")]
+        let eager_locations = self
+            .location_names
+            .iter()
+            .filter(|(_, name)| *name == std::any::type_name::<crate::sim::spec::Observer>())
+            .map(|(key, _)| crate::location::dynamic::LocationId::Process(key))
+            .collect();
+        #[cfg(not(feature = "ldfi"))]
+        let eager_locations = Default::default();
+
         SimFlow {
             ir: self.ir,
             processes,
             clusters,
             externals,
+            eager_locations,
             cluster_max_sizes: SparseSecondaryMap::new(),
             externals_port_registry: Default::default(),
             location_version: self.location_version,
             location_version_group_root: self.location_version_group_root,
             test_safety_only: false,
             skip_consistency_assertions: false,
+            provenance: false,
             unit_test_fuzz_iterations: 8192,
             _phantom: PhantomData,
         }
