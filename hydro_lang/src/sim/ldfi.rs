@@ -4111,6 +4111,7 @@ impl Ldfi {
             );
         }
         let mut slices: Option<Rc<Slices>> = None;
+        let hf_start = std::time::Instant::now();
 
         loop {
             if runs.len() >= self.max_hypotheses {
@@ -4143,6 +4144,9 @@ impl Ldfi {
                     let goal_held = body_ref(&run).await;
                     records_ref.push(run.finish(goal_held));
                     *slices_ref = Some(lineage_slices());
+                    if records_ref.len() % 1000 == 0 {
+                        eprintln!("HFPROG hyp={} sched={} t={:?}", render_set(faults_ref.iter()), records_ref.len(), std::time::SystemTime::now());
+                    }
                 };
                 match self.exploration {
                     Exploration::Exhaustive => {
@@ -4151,6 +4155,7 @@ impl Ldfi {
                     Exploration::Fuzz { instances } => sim.fuzz_bounded(instances, instance),
                 }
             }
+            eprintln!("HFHYP n={} faults={} schedules={} goal_failed={} t={:?}", runs.len(), render_set(faults.iter()), records.len(), records.iter().filter(|r| !r.goal_held).count(), hf_start.elapsed());
             // A generated specification quantifies over the facts of the failure-free run,
             // which the observer has to be told: the first failure-free run is a probe that
             // learns them, and the search then starts over with the domain fed (section 1.1

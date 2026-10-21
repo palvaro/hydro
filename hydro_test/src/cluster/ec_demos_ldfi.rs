@@ -98,7 +98,7 @@ mod tests {
         // uniform broadcast's threshold logic over the echoes is not (its schedule space ran
         // past 240,000 interleavings), so it is sampled.
         let (exploration, fuzz) = match which {
-            Broadcast::Uniform(_) => (Exploration::Fuzz { instances: 8 }, 8),
+            Broadcast::Uniform(_) => (Exploration::Exhaustive, 1),
             _ => (Exploration::Exhaustive, 1),
         };
         let compiled: CompiledSim = flow

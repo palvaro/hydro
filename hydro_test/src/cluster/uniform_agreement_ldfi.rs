@@ -143,7 +143,7 @@ mod tests {
         }
 
         let (exploration, fuzz) = match which {
-            Broadcast::Uniform(_) => (Exploration::Fuzz { instances: 8 }, 8),
+            Broadcast::Uniform(_) => (Exploration::Exhaustive, 1),
             Broadcast::Reliable => (Exploration::Exhaustive, 1),
         };
         let compiled: CompiledSim = flow
