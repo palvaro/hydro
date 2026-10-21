@@ -1,0 +1,720 @@
+
+running 1 test
+test <unknown> ...	run time: 2.401241ms | iterations/s: 416 | exhaustive inputs: 1
+blind: fact domain learned from the failure-free run: 2 fact(s)
+test <unknown> ...	run time: 1.41838ms | iterations/s: 705 | exhaustive inputs: 1
+blind: channels:
+  channel#21 "reliable_broadcast.rs:130": Process(loc1v1) → Cluster(loc2v1), reliable
+  channel#41 "reliable_broadcast.rs:156": Cluster(loc2v1) → Cluster(loc2v1), reliable
+  channel#67 "observe": Cluster(loc2v1) → Process(loc3v1), reliable
+blind: crash bounds: crashes unbounded; not all 4 nodes at once; at most 1 of the checked cluster's 3 crashable member(s)
+blind: specification is generated (EventualConsistency)
+blind: run #1 {}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:130[→2]:2←source#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 1)
+test <unknown> ...	run time: 1.300073ms | iterations/s: 769 | exhaustive inputs: 1
+blind: run #2 {crash(member@0 after reliable_broadcast.rs:156[0→1]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:130[→2]:2←source#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 2)
+test <unknown> ...	run time: 1.363655ms | iterations/s: 733 | exhaustive inputs: 1
+blind: run #3 {crash(member@0 after reliable_broadcast.rs:156[0→0]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:130[→2]:2←source#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 3)
+test <unknown> ...	run time: 1.367454ms | iterations/s: 731 | exhaustive inputs: 1
+blind: run #4 {crash(member@0 after reliable_broadcast.rs:156[0→2]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:130[→2]:2←source#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 4)
+test <unknown> ...	run time: 1.344908ms | iterations/s: 744 | exhaustive inputs: 1
+blind: run #5 {crash(member@0 after reliable_broadcast.rs:156[0→1]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:130[→2]:2←source#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 5)
+test <unknown> ...	run time: 1.37454ms | iterations/s: 728 | exhaustive inputs: 1
+blind: run #6 {crash(member@0 after reliable_broadcast.rs:156[0→0]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:130[→2]:2←source#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 6)
+test <unknown> ...	run time: 1.337098ms | iterations/s: 748 | exhaustive inputs: 1
+blind: run #7 {crash(member@0 before any send)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:130[→2]:2←source#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 7)
+test <unknown> ...	run time: 1.361482ms | iterations/s: 734 | exhaustive inputs: 1
+blind: run #8 {crash(member@1 after reliable_broadcast.rs:156[1→1]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:130[→2]:2←source#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 8)
+test <unknown> ...	run time: 1.376155ms | iterations/s: 727 | exhaustive inputs: 1
+blind: run #9 {crash(member@1 after reliable_broadcast.rs:156[1→0]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:130[→2]:2←source#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 9)
+test <unknown> ...	run time: 1.382237ms | iterations/s: 723 | exhaustive inputs: 1
+blind: run #10 {crash(member@1 after reliable_broadcast.rs:156[1→2]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:130[→2]:2←source#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 10)
+test <unknown> ...	run time: 1.423452ms | iterations/s: 703 | exhaustive inputs: 1
+blind: run #11 {crash(member@1 after reliable_broadcast.rs:156[1→1]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:130[→2]:2←source#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 11)
+test <unknown> ...	run time: 1.455404ms | iterations/s: 687 | exhaustive inputs: 1
+blind: run #12 {crash(member@1 after reliable_broadcast.rs:156[1→0]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:130[→2]:2←source#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 12)
+test <unknown> ...	run time: 1.386912ms | iterations/s: 721 | exhaustive inputs: 1
+blind: run #13 {crash(member@1 before any send)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:130[→2]:2←source#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 13)
+test <unknown> ...	run time: 1.380244ms | iterations/s: 725 | exhaustive inputs: 1
+blind: run #14 {crash(member@2 after reliable_broadcast.rs:156[2→1]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 14)
+test <unknown> ...	run time: 1.381013ms | iterations/s: 724 | exhaustive inputs: 1
+blind: run #15 {crash(member@2 after reliable_broadcast.rs:156[2→0]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 15)
+test <unknown> ...	run time: 1.368019ms | iterations/s: 731 | exhaustive inputs: 1
+blind: run #16 {crash(member@2 after reliable_broadcast.rs:156[2→2]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 16)
+test <unknown> ...	run time: 1.401747ms | iterations/s: 713 | exhaustive inputs: 1
+blind: run #17 {crash(member@2 after reliable_broadcast.rs:156[2→1]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 17)
+test <unknown> ...	run time: 1.39464ms | iterations/s: 717 | exhaustive inputs: 1
+blind: run #18 {crash(member@2 after reliable_broadcast.rs:156[2→0]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 18)
+test <unknown> ...	run time: 1.430979ms | iterations/s: 699 | exhaustive inputs: 1
+blind: run #19 {crash(member@2 before any send)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 19)
+test <unknown> ...	run time: 1.438683ms | iterations/s: 695 | exhaustive inputs: 1
+blind: run #20 {crash(source after reliable_broadcast.rs:130[→1]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:156[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 20)
+test <unknown> ...	run time: 1.464902ms | iterations/s: 683 | exhaustive inputs: 1
+blind: run #21 {crash(source after reliable_broadcast.rs:130[→0]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:156[0→1]:2←member@0#4, reliable_broadcast.rs:156[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 21)
+test <unknown> ...	run time: 1.317749ms | iterations/s: 759 | exhaustive inputs: 1
+blind: run #22 {crash(source after reliable_broadcast.rs:130[→2]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→2]:1←source#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 22)
+test <unknown> ...	run time: 1.314688ms | iterations/s: 761 | exhaustive inputs: 1
+blind: run #23 {crash(source after reliable_broadcast.rs:130[→1]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:156[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 23)
+test <unknown> ...	run time: 1.284228ms | iterations/s: 779 | exhaustive inputs: 1
+blind: run #24 {crash(source after reliable_broadcast.rs:130[→0]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:156[0→1]:1←member@0#1, reliable_broadcast.rs:156[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 24)
+test <unknown> ...	run time: 1.048579ms | iterations/s: 954 | exhaustive inputs: 1
+blind: run #25 {crash(source before any send)}: 1 schedule(s), goal held; derivations {}
+blind: universe size 24 (tried 25)
+test <unknown> ...	run time: 1.504163ms | iterations/s: 665 | exhaustive inputs: 1
+blind: run #26 {crash(member@0 after reliable_broadcast.rs:156[0→1]:2), crash(source after reliable_broadcast.rs:130[→1]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:156[1→2]:2←member@1#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 26)
+test <unknown> ...	run time: 1.550951ms | iterations/s: 645 | exhaustive inputs: 1
+blind: run #27 {crash(member@0 after reliable_broadcast.rs:156[0→1]:2), crash(source after reliable_broadcast.rs:130[→0]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:156[0→1]:2←member@0#4, reliable_broadcast.rs:156[1→2]:2←member@1#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 27)
+test <unknown> ...	run time: 1.538044ms | iterations/s: 650 | exhaustive inputs: 1
+blind: run #28 {crash(member@0 after reliable_broadcast.rs:156[0→0]:2), crash(source after reliable_broadcast.rs:130[→1]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:156[1→2]:2←member@1#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 28)
+test <unknown> ...	run time: 1.306473ms | iterations/s: 765 | exhaustive inputs: 1
+blind: run #29 {crash(member@0 after reliable_broadcast.rs:156[0→1]:2), crash(source after reliable_broadcast.rs:130[→2]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→2]:1←source#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 29)
+test <unknown> ...	run time: 1.3711ms | iterations/s: 729 | exhaustive inputs: 1
+blind: run #30 {crash(member@0 after reliable_broadcast.rs:156[0→0]:2), crash(source after reliable_broadcast.rs:130[→0]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→2]:1←source#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 30)
+test <unknown> ...	run time: 1.507674ms | iterations/s: 663 | exhaustive inputs: 1
+blind: run #31 {crash(member@0 after reliable_broadcast.rs:156[0→2]:1), crash(source after reliable_broadcast.rs:130[→1]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:156[1→2]:2←member@1#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 31)
+test <unknown> ...	run time: 1.34617ms | iterations/s: 743 | exhaustive inputs: 1
+blind: run #32 {crash(member@0 after reliable_broadcast.rs:156[0→0]:2), crash(source after reliable_broadcast.rs:130[→2]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→2]:1←source#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 32)
+test <unknown> ...	run time: 1.544741ms | iterations/s: 647 | exhaustive inputs: 1
+blind: run #33 {crash(member@0 after reliable_broadcast.rs:156[0→1]:1), crash(source after reliable_broadcast.rs:130[→1]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:156[1→2]:2←member@1#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 33)
+test <unknown> ...	run time: 1.40848ms | iterations/s: 710 | exhaustive inputs: 1
+blind: run #34 {crash(member@0 after reliable_broadcast.rs:156[0→1]:2), crash(source after reliable_broadcast.rs:130[→1]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:156[0→2]:1←member@0#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 34)
+test <unknown> ...	run time: 1.42451ms | iterations/s: 702 | exhaustive inputs: 1
+blind: run #35 {crash(member@0 after reliable_broadcast.rs:156[0→2]:1), crash(source after reliable_broadcast.rs:130[→0]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→2]:1←source#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 35)
+test <unknown> ...	run time: 1.34515ms | iterations/s: 743 | exhaustive inputs: 1
+blind: run #36 {crash(member@0 after reliable_broadcast.rs:156[0→1]:2), crash(source after reliable_broadcast.rs:130[→0]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:156[0→1]:1←member@0#1, reliable_broadcast.rs:156[0→2]:1←member@0#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 36)
+test <unknown> ...	run time: 1.414407ms | iterations/s: 707 | exhaustive inputs: 1
+blind: run #37 {crash(member@0 after reliable_broadcast.rs:156[0→0]:2), crash(source after reliable_broadcast.rs:130[→1]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:156[0→2]:1←member@0#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 37)
+test <unknown> ...	run time: 1.650347ms | iterations/s: 606 | exhaustive inputs: 1
+blind: run #38 {crash(member@0 after reliable_broadcast.rs:156[0→0]:1), crash(source after reliable_broadcast.rs:130[→1]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:156[1→2]:2←member@1#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 38)
+test <unknown> ...	run time: 1.347067ms | iterations/s: 742 | exhaustive inputs: 1
+blind: run #39 {crash(member@0 after reliable_broadcast.rs:156[0→1]:1), crash(source after reliable_broadcast.rs:130[→0]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→2]:1←source#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 39)
+test <unknown> ...	run time: 1.361548ms | iterations/s: 734 | exhaustive inputs: 1
+blind: run #40 {crash(member@0 after reliable_broadcast.rs:156[0→2]:1), crash(source after reliable_broadcast.rs:130[→2]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→2]:1←source#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 40)
+test <unknown> ...	run time: 1.324018ms | iterations/s: 755 | exhaustive inputs: 1
+blind: run #41 {crash(member@0 after reliable_broadcast.rs:156[0→0]:2), crash(source after reliable_broadcast.rs:130[→0]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:156[0→1]:1←member@0#1, reliable_broadcast.rs:156[0→2]:1←member@0#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 41)
+test <unknown> ...	run time: 1.52776ms | iterations/s: 655 | exhaustive inputs: 1
+blind: run #42 {crash(member@0 before any send), crash(source after reliable_broadcast.rs:130[→1]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:156[1→2]:2←member@1#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 42)
+test <unknown> ...	run time: 1.421167ms | iterations/s: 704 | exhaustive inputs: 1
+blind: run #43 {crash(member@0 after reliable_broadcast.rs:156[0→0]:1), crash(source after reliable_broadcast.rs:130[→0]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→2]:1←source#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 43)
+test <unknown> ...	run time: 1.365344ms | iterations/s: 732 | exhaustive inputs: 1
+blind: run #44 {crash(member@0 after reliable_broadcast.rs:156[0→2]:1), crash(source after reliable_broadcast.rs:130[→1]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:156[0→2]:1←member@0#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 44)
+test <unknown> ...	run time: 1.371557ms | iterations/s: 729 | exhaustive inputs: 1
+blind: run #45 {crash(member@0 after reliable_broadcast.rs:156[0→1]:1), crash(source after reliable_broadcast.rs:130[→2]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→2]:1←source#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 45)
+test <unknown> ...	run time: 1.373347ms | iterations/s: 728 | exhaustive inputs: 1
+blind: run #46 {crash(member@0 before any send), crash(source after reliable_broadcast.rs:130[→0]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→2]:1←source#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 46)
+test <unknown> ...	run time: 1.335939ms | iterations/s: 749 | exhaustive inputs: 1
+blind: run #47 {crash(member@0 after reliable_broadcast.rs:156[0→2]:1), crash(source after reliable_broadcast.rs:130[→0]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:156[0→1]:1←member@0#1, reliable_broadcast.rs:156[0→2]:1←member@0#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 47)
+test <unknown> ...	run time: 1.581925ms | iterations/s: 632 | exhaustive inputs: 1
+blind: run #48 {crash(member@1 after reliable_broadcast.rs:156[1→1]:2), crash(source after reliable_broadcast.rs:130[→1]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:156[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 48)
+test <unknown> ...	run time: 1.367363ms | iterations/s: 731 | exhaustive inputs: 1
+blind: run #49 {crash(member@0 after reliable_broadcast.rs:156[0→0]:1), crash(source after reliable_broadcast.rs:130[→2]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→2]:1←source#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 49)
+test <unknown> ...	run time: 1.387092ms | iterations/s: 721 | exhaustive inputs: 1
+blind: run #50 {crash(member@0 after reliable_broadcast.rs:156[0→1]:1), crash(source after reliable_broadcast.rs:130[→1]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:156[1→2]:1←member@1#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 50)
+test <unknown> ...	run time: 1.602411ms | iterations/s: 624 | exhaustive inputs: 1
+blind: run #51 {crash(member@1 after reliable_broadcast.rs:156[1→0]:2), crash(source after reliable_broadcast.rs:130[→1]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:156[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 51)
+test <unknown> ...	run time: 1.573217ms | iterations/s: 636 | exhaustive inputs: 1
+blind: run #52 {crash(member@1 after reliable_broadcast.rs:156[1→1]:2), crash(source after reliable_broadcast.rs:130[→0]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:156[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 52)
+test <unknown> ...	run time: 1.372418ms | iterations/s: 729 | exhaustive inputs: 1
+blind: run #53 {crash(member@0 before any send), crash(source after reliable_broadcast.rs:130[→2]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→2]:1←source#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 53)
+test <unknown> ...	run time: 1.380822ms | iterations/s: 724 | exhaustive inputs: 1
+blind: run #54 {crash(member@0 after reliable_broadcast.rs:156[0→1]:1), crash(source after reliable_broadcast.rs:130[→0]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:156[0→1]:1←member@0#1, reliable_broadcast.rs:156[1→2]:1←member@1#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 54)
+test <unknown> ...	run time: 1.357523ms | iterations/s: 737 | exhaustive inputs: 1
+blind: run #55 {crash(member@0 after reliable_broadcast.rs:156[0→0]:1), crash(source after reliable_broadcast.rs:130[→1]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:156[1→2]:1←member@1#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 55)
+test <unknown> ...	run time: 1.580663ms | iterations/s: 633 | exhaustive inputs: 1
+blind: run #56 {crash(member@1 after reliable_broadcast.rs:156[1→2]:1), crash(source after reliable_broadcast.rs:130[→1]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:156[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 56)
+test <unknown> ...	run time: 1.839308ms | iterations/s: 544 | exhaustive inputs: 1
+blind: run #57 {crash(member@1 after reliable_broadcast.rs:156[1→1]:2), crash(source after reliable_broadcast.rs:130[→2]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→2]:1←source#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 57)
+test <unknown> ...	run time: 1.591218ms | iterations/s: 628 | exhaustive inputs: 1
+blind: run #58 {crash(member@1 after reliable_broadcast.rs:156[1→0]:2), crash(source after reliable_broadcast.rs:130[→0]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:156[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 58)
+test <unknown> ...	run time: 1.357361ms | iterations/s: 737 | exhaustive inputs: 1
+blind: run #59 {crash(member@0 before any send), crash(source after reliable_broadcast.rs:130[→1]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:156[1→2]:1←member@1#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 59)
+test <unknown> ...	run time: 1.145294ms | iterations/s: 873 | exhaustive inputs: 1
+blind: run #60 {crash(member@0 after reliable_broadcast.rs:156[0→0]:1), crash(source after reliable_broadcast.rs:130[→0]:1)}: 1 schedule(s), goal held; derivations {}
+blind: universe size 24 (tried 60)
+test <unknown> ...	run time: 1.597164ms | iterations/s: 626 | exhaustive inputs: 1
+blind: run #61 {crash(member@1 after reliable_broadcast.rs:156[1→2]:1), crash(source after reliable_broadcast.rs:130[→0]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:156[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 61)
+test <unknown> ...	run time: 1.560978ms | iterations/s: 641 | exhaustive inputs: 1
+blind: run #62 {crash(member@1 after reliable_broadcast.rs:156[1→1]:1), crash(source after reliable_broadcast.rs:130[→1]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:156[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 62)
+test <unknown> ...	run time: 1.346229ms | iterations/s: 743 | exhaustive inputs: 1
+blind: run #63 {crash(member@1 after reliable_broadcast.rs:156[1→1]:2), crash(source after reliable_broadcast.rs:130[→1]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:156[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 63)
+test <unknown> ...	run time: 1.060177ms | iterations/s: 943 | exhaustive inputs: 1
+blind: run #64 {crash(member@0 before any send), crash(source after reliable_broadcast.rs:130[→0]:1)}: 1 schedule(s), goal held; derivations {}
+blind: universe size 24 (tried 64)
+test <unknown> ...	run time: 1.351493ms | iterations/s: 740 | exhaustive inputs: 1
+blind: run #65 {crash(member@1 after reliable_broadcast.rs:156[1→0]:2), crash(source after reliable_broadcast.rs:130[→2]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→2]:1←source#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 65)
+test <unknown> ...	run time: 1.520165ms | iterations/s: 658 | exhaustive inputs: 1
+blind: run #66 {crash(member@1 after reliable_broadcast.rs:156[1→1]:1), crash(source after reliable_broadcast.rs:130[→0]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:156[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 66)
+test <unknown> ...	run time: 1.360274ms | iterations/s: 735 | exhaustive inputs: 1
+blind: run #67 {crash(member@1 after reliable_broadcast.rs:156[1→0]:2), crash(source after reliable_broadcast.rs:130[→1]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:156[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 67)
+test <unknown> ...	run time: 1.295062ms | iterations/s: 772 | exhaustive inputs: 1
+blind: run #68 {crash(member@1 after reliable_broadcast.rs:156[1→1]:2), crash(source after reliable_broadcast.rs:130[→0]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:156[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 68)
+test <unknown> ...	run time: 1.564859ms | iterations/s: 639 | exhaustive inputs: 1
+blind: run #69 {crash(member@1 after reliable_broadcast.rs:156[1→0]:1), crash(source after reliable_broadcast.rs:130[→1]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:156[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 69)
+test <unknown> ...	run time: 1.963231ms | iterations/s: 509 | exhaustive inputs: 1
+blind: run #70 {crash(member@1 after reliable_broadcast.rs:156[1→2]:1), crash(source after reliable_broadcast.rs:130[→2]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→2]:1←source#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 70)
+test <unknown> ...	run time: 1.586785ms | iterations/s: 630 | exhaustive inputs: 1
+blind: run #71 {crash(member@1 after reliable_broadcast.rs:156[1→0]:1), crash(source after reliable_broadcast.rs:130[→0]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:156[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 71)
+test <unknown> ...	run time: 1.526ms | iterations/s: 655 | exhaustive inputs: 1
+blind: run #72 {crash(member@1 before any send), crash(source after reliable_broadcast.rs:130[→1]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:156[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 72)
+test <unknown> ...	run time: 1.332538ms | iterations/s: 750 | exhaustive inputs: 1
+blind: run #73 {crash(member@1 after reliable_broadcast.rs:156[1→0]:2), crash(source after reliable_broadcast.rs:130[→0]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:156[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 73)
+test <unknown> ...	run time: 1.345357ms | iterations/s: 743 | exhaustive inputs: 1
+blind: run #74 {crash(member@1 after reliable_broadcast.rs:156[1→1]:1), crash(source after reliable_broadcast.rs:130[→2]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→2]:1←source#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 74)
+test <unknown> ...	run time: 1.345688ms | iterations/s: 743 | exhaustive inputs: 1
+blind: run #75 {crash(member@1 after reliable_broadcast.rs:156[1→2]:1), crash(source after reliable_broadcast.rs:130[→1]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:156[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 75)
+test <unknown> ...	run time: 1.539456ms | iterations/s: 650 | exhaustive inputs: 1
+blind: run #76 {crash(member@1 before any send), crash(source after reliable_broadcast.rs:130[→0]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→2]:1←source#2, reliable_broadcast.rs:156[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 76)
+test <unknown> ...	run time: 1.322097ms | iterations/s: 756 | exhaustive inputs: 1
+blind: run #77 {crash(member@1 after reliable_broadcast.rs:156[1→2]:1), crash(source after reliable_broadcast.rs:130[→0]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:156[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 77)
+test <unknown> ...	run time: 1.330378ms | iterations/s: 752 | exhaustive inputs: 1
+blind: run #78 {crash(member@1 after reliable_broadcast.rs:156[1→0]:1), crash(source after reliable_broadcast.rs:130[→2]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→2]:1←source#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 78)
+test <unknown> ...	run time: 1.603101ms | iterations/s: 624 | exhaustive inputs: 1
+blind: run #79 {crash(member@2 after reliable_broadcast.rs:156[2→1]:2), crash(source after reliable_broadcast.rs:130[→1]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 79)
+test <unknown> ...	run time: 1.355979ms | iterations/s: 737 | exhaustive inputs: 1
+blind: run #80 {crash(member@1 after reliable_broadcast.rs:156[1→1]:1), crash(source after reliable_broadcast.rs:130[→1]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:156[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 80)
+test <unknown> ...	run time: 1.579376ms | iterations/s: 633 | exhaustive inputs: 1
+blind: run #81 {crash(member@2 after reliable_broadcast.rs:156[2→1]:2), crash(source after reliable_broadcast.rs:130[→0]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:156[0→1]:2←member@0#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 81)
+test <unknown> ...	run time: 1.344411ms | iterations/s: 744 | exhaustive inputs: 1
+blind: run #82 {crash(member@1 after reliable_broadcast.rs:156[1→0]:1), crash(source after reliable_broadcast.rs:130[→1]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:156[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 82)
+test <unknown> ...	run time: 1.336337ms | iterations/s: 748 | exhaustive inputs: 1
+blind: run #83 {crash(member@1 after reliable_broadcast.rs:156[1→1]:1), crash(source after reliable_broadcast.rs:130[→0]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:156[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 83)
+test <unknown> ...	run time: 1.502214ms | iterations/s: 666 | exhaustive inputs: 1
+blind: run #84 {crash(member@2 after reliable_broadcast.rs:156[2→0]:2), crash(source after reliable_broadcast.rs:130[→1]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 84)
+test <unknown> ...	run time: 1.330507ms | iterations/s: 752 | exhaustive inputs: 1
+blind: run #85 {crash(member@1 before any send), crash(source after reliable_broadcast.rs:130[→2]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→2]:1←source#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 85)
+test <unknown> ...	run time: 1.57593ms | iterations/s: 635 | exhaustive inputs: 1
+blind: run #86 {crash(member@2 after reliable_broadcast.rs:156[2→0]:2), crash(source after reliable_broadcast.rs:130[→0]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:156[0→1]:2←member@0#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 86)
+test <unknown> ...	run time: 1.369101ms | iterations/s: 730 | exhaustive inputs: 1
+blind: run #87 {crash(member@1 after reliable_broadcast.rs:156[1→0]:1), crash(source after reliable_broadcast.rs:130[→0]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:156[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 87)
+test <unknown> ...	run time: 1.318689ms | iterations/s: 758 | exhaustive inputs: 1
+blind: run #88 {crash(member@1 before any send), crash(source after reliable_broadcast.rs:130[→1]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:156[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 88)
+test <unknown> ...	run time: 2.235233ms | iterations/s: 447 | exhaustive inputs: 1
+blind: run #89 {crash(member@2 after reliable_broadcast.rs:156[2→2]:1), crash(source after reliable_broadcast.rs:130[→1]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 89)
+test <unknown> ...	run time: 1.68408ms | iterations/s: 594 | exhaustive inputs: 1
+blind: run #90 {crash(member@2 after reliable_broadcast.rs:156[2→1]:2), crash(source after reliable_broadcast.rs:130[→2]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 90)
+test <unknown> ...	run time: 1.565358ms | iterations/s: 639 | exhaustive inputs: 1
+blind: run #91 {crash(member@2 after reliable_broadcast.rs:156[2→2]:1), crash(source after reliable_broadcast.rs:130[→0]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:156[0→1]:2←member@0#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 91)
+test <unknown> ...	run time: 1.382906ms | iterations/s: 723 | exhaustive inputs: 1
+blind: run #92 {crash(member@2 after reliable_broadcast.rs:156[2→1]:2), crash(source after reliable_broadcast.rs:130[→1]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 92)
+test <unknown> ...	run time: 1.366355ms | iterations/s: 732 | exhaustive inputs: 1
+blind: run #93 {crash(member@1 before any send), crash(source after reliable_broadcast.rs:130[→0]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:156[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 93)
+test <unknown> ...	run time: 1.586399ms | iterations/s: 630 | exhaustive inputs: 1
+blind: run #94 {crash(member@2 after reliable_broadcast.rs:156[2→1]:1), crash(source after reliable_broadcast.rs:130[→1]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 94)
+test <unknown> ...	run time: 1.354188ms | iterations/s: 738 | exhaustive inputs: 1
+blind: run #95 {crash(member@2 after reliable_broadcast.rs:156[2→0]:2), crash(source after reliable_broadcast.rs:130[→2]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 95)
+test <unknown> ...	run time: 1.530587ms | iterations/s: 653 | exhaustive inputs: 1
+blind: run #96 {crash(member@2 after reliable_broadcast.rs:156[2→1]:1), crash(source after reliable_broadcast.rs:130[→0]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:156[0→1]:2←member@0#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 96)
+test <unknown> ...	run time: 1.608863ms | iterations/s: 622 | exhaustive inputs: 1
+blind: run #97 {crash(member@2 after reliable_broadcast.rs:156[2→0]:1), crash(source after reliable_broadcast.rs:130[→1]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 97)
+test <unknown> ...	run time: 1.352969ms | iterations/s: 739 | exhaustive inputs: 1
+blind: run #98 {crash(member@2 after reliable_broadcast.rs:156[2→0]:2), crash(source after reliable_broadcast.rs:130[→1]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 98)
+test <unknown> ...	run time: 1.356881ms | iterations/s: 737 | exhaustive inputs: 1
+blind: run #99 {crash(member@2 after reliable_broadcast.rs:156[2→1]:2), crash(source after reliable_broadcast.rs:130[→0]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:156[0→1]:1←member@0#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 99)
+test <unknown> ...	run time: 1.350907ms | iterations/s: 740 | exhaustive inputs: 1
+blind: run #100 {crash(member@2 after reliable_broadcast.rs:156[2→2]:1), crash(source after reliable_broadcast.rs:130[→2]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 100)
+test <unknown> ...	run time: 1.592579ms | iterations/s: 628 | exhaustive inputs: 1
+blind: run #101 {crash(member@2 before any send), crash(source after reliable_broadcast.rs:130[→1]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:130[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 101)
+test <unknown> ...	run time: 1.551078ms | iterations/s: 645 | exhaustive inputs: 1
+blind: run #102 {crash(member@2 after reliable_broadcast.rs:156[2→0]:1), crash(source after reliable_broadcast.rs:130[→0]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:156[0→1]:2←member@0#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 102)
+test <unknown> ...	run time: 1.356528ms | iterations/s: 737 | exhaustive inputs: 1
+blind: run #103 {crash(member@2 after reliable_broadcast.rs:156[2→2]:1), crash(source after reliable_broadcast.rs:130[→1]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 103)
+test <unknown> ...	run time: 1.412788ms | iterations/s: 708 | exhaustive inputs: 1
+blind: run #104 {crash(member@2 after reliable_broadcast.rs:156[2→0]:2), crash(source after reliable_broadcast.rs:130[→0]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:156[0→1]:1←member@0#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 104)
+test <unknown> ...	run time: 1.361525ms | iterations/s: 734 | exhaustive inputs: 1
+blind: run #105 {crash(member@2 after reliable_broadcast.rs:156[2→1]:1), crash(source after reliable_broadcast.rs:130[→2]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 105)
+test <unknown> ...	run time: 1.581287ms | iterations/s: 632 | exhaustive inputs: 1
+blind: run #106 {crash(member@2 before any send), crash(source after reliable_broadcast.rs:130[→0]:2)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→0]:2←source#3, reliable_broadcast.rs:130[→1]:1←source#1, reliable_broadcast.rs:156[0→1]:2←member@0#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 106)
+test <unknown> ...	run time: 1.506066ms | iterations/s: 664 | exhaustive inputs: 1
+blind: run #107 {crash(member@2 after reliable_broadcast.rs:156[2→1]:1), crash(source after reliable_broadcast.rs:130[→1]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 107)
+test <unknown> ...	run time: 1.401593ms | iterations/s: 713 | exhaustive inputs: 1
+blind: run #108 {crash(member@2 after reliable_broadcast.rs:156[2→2]:1), crash(source after reliable_broadcast.rs:130[→0]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:156[0→1]:1←member@0#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 108)
+test <unknown> ...	run time: 1.581022ms | iterations/s: 633 | exhaustive inputs: 1
+blind: run #109 {crash(member@2 after reliable_broadcast.rs:156[2→0]:1), crash(source after reliable_broadcast.rs:130[→2]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 109)
+test <unknown> ...	run time: 1.608661ms | iterations/s: 622 | exhaustive inputs: 1
+blind: run #110 {crash(member@2 before any send), crash(source after reliable_broadcast.rs:130[→2]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 110)
+test <unknown> ...	run time: 1.376516ms | iterations/s: 726 | exhaustive inputs: 1
+blind: run #111 {crash(member@2 after reliable_broadcast.rs:156[2→1]:1), crash(source after reliable_broadcast.rs:130[→0]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:156[0→1]:1←member@0#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 111)
+test <unknown> ...	run time: 1.392475ms | iterations/s: 718 | exhaustive inputs: 1
+blind: run #112 {crash(member@2 after reliable_broadcast.rs:156[2→0]:1), crash(source after reliable_broadcast.rs:130[→1]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 112)
+test <unknown> ...	run time: 1.363763ms | iterations/s: 733 | exhaustive inputs: 1
+blind: run #113 {crash(member@2 after reliable_broadcast.rs:156[2→0]:1), crash(source after reliable_broadcast.rs:130[→0]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:156[0→1]:1←member@0#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 113)
+test <unknown> ...	run time: 1.3401ms | iterations/s: 746 | exhaustive inputs: 1
+blind: run #114 {crash(member@2 before any send), crash(source after reliable_broadcast.rs:130[→1]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:130[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 114)
+test <unknown> ...	run time: 1.347567ms | iterations/s: 742 | exhaustive inputs: 1
+blind: run #115 {crash(member@2 before any send), crash(source after reliable_broadcast.rs:130[→0]:1)}: 1 schedule(s), goal held; derivations {{reliable_broadcast.rs:130[→0]:1←source#0, reliable_broadcast.rs:156[0→1]:1←member@0#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 115)
+MEASURE strategy=Blind verdict=Exhausted hypotheses=115 schedules=115 elapsed_ms=4194
+LDFI: no fault set within bounds violates the goal under any schedule (115 hypothesis run(s))
+  certificate within the fault model and the explored schedules (generated specification)
+
+test <unknown> ...	run time: 2.330058ms | iterations/s: 429 | exhaustive inputs: 1
+blind: fact domain learned from the failure-free run: 2 fact(s)
+test <unknown> ...	run time: 1.783388ms | iterations/s: 561 | exhaustive inputs: 1
+blind: channels:
+  channel#27 "fan_out.rs:270": Process(loc1v1) → Cluster(loc2v1), reliable
+  channel#53 "fan_out.rs:234": Cluster(loc2v1) → Cluster(loc2v1), reliable
+  channel#78 "observe": Cluster(loc2v1) → Process(loc3v1), reliable
+blind: crash bounds: crashes unbounded; not all 4 nodes at once; at most 1 of the checked cluster's 3 crashable member(s)
+blind: specification is generated (EventualConsistency)
+blind: run #1 {}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, fan_out.rs:270[→2]:1←source#2, fan_out.rs:270[→2]:2←source#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 1)
+test <unknown> ...	run time: 1.528066ms | iterations/s: 654 | exhaustive inputs: 1
+blind: run #2 {crash(member@0 after fan_out.rs:234[0→1]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, fan_out.rs:270[→2]:1←source#2, fan_out.rs:270[→2]:2←source#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 2)
+test <unknown> ...	run time: 1.580573ms | iterations/s: 633 | exhaustive inputs: 1
+blind: run #3 {crash(member@0 after fan_out.rs:234[0→0]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, fan_out.rs:270[→2]:1←source#2, fan_out.rs:270[→2]:2←source#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 3)
+test <unknown> ...	run time: 1.653957ms | iterations/s: 605 | exhaustive inputs: 1
+blind: run #4 {crash(member@0 after fan_out.rs:234[0→2]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, fan_out.rs:270[→2]:1←source#2, fan_out.rs:270[→2]:2←source#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 4)
+test <unknown> ...	run time: 1.645446ms | iterations/s: 608 | exhaustive inputs: 1
+blind: run #5 {crash(member@0 after fan_out.rs:234[0→1]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, fan_out.rs:270[→2]:1←source#2, fan_out.rs:270[→2]:2←source#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 5)
+test <unknown> ...	run time: 1.619779ms | iterations/s: 617 | exhaustive inputs: 1
+blind: run #6 {crash(member@0 after fan_out.rs:234[0→0]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, fan_out.rs:270[→2]:1←source#2, fan_out.rs:270[→2]:2←source#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 6)
+test <unknown> ...	run time: 1.63862ms | iterations/s: 610 | exhaustive inputs: 1
+blind: run #7 {crash(member@0 before any send)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, fan_out.rs:270[→2]:1←source#2, fan_out.rs:270[→2]:2←source#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 7)
+test <unknown> ...	run time: 1.677566ms | iterations/s: 596 | exhaustive inputs: 1
+blind: run #8 {crash(member@1 after fan_out.rs:234[1→1]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→2]:1←source#2, fan_out.rs:270[→2]:2←source#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 8)
+test <unknown> ...	run time: 1.726496ms | iterations/s: 579 | exhaustive inputs: 1
+blind: run #9 {crash(member@1 after fan_out.rs:234[1→0]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→2]:1←source#2, fan_out.rs:270[→2]:2←source#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 9)
+test <unknown> ...	run time: 1.702902ms | iterations/s: 587 | exhaustive inputs: 1
+blind: run #10 {crash(member@1 after fan_out.rs:234[1→2]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→2]:1←source#2, fan_out.rs:270[→2]:2←source#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 10)
+test <unknown> ...	run time: 1.653926ms | iterations/s: 605 | exhaustive inputs: 1
+blind: run #11 {crash(member@1 after fan_out.rs:234[1→1]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→2]:1←source#2, fan_out.rs:270[→2]:2←source#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 11)
+test <unknown> ...	run time: 1.662843ms | iterations/s: 601 | exhaustive inputs: 1
+blind: run #12 {crash(member@1 after fan_out.rs:234[1→0]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→2]:1←source#2, fan_out.rs:270[→2]:2←source#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 12)
+test <unknown> ...	run time: 1.576042ms | iterations/s: 635 | exhaustive inputs: 1
+blind: run #13 {crash(member@1 before any send)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→2]:1←source#2, fan_out.rs:270[→2]:2←source#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 13)
+test <unknown> ...	run time: 1.573417ms | iterations/s: 636 | exhaustive inputs: 1
+blind: run #14 {crash(member@2 after fan_out.rs:234[2→1]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 14)
+test <unknown> ...	run time: 1.559314ms | iterations/s: 641 | exhaustive inputs: 1
+blind: run #15 {crash(member@2 after fan_out.rs:234[2→0]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 15)
+test <unknown> ...	run time: 1.560982ms | iterations/s: 641 | exhaustive inputs: 1
+blind: run #16 {crash(member@2 after fan_out.rs:234[2→2]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 16)
+test <unknown> ...	run time: 1.567484ms | iterations/s: 638 | exhaustive inputs: 1
+blind: run #17 {crash(member@2 after fan_out.rs:234[2→1]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 17)
+test <unknown> ...	run time: 1.563148ms | iterations/s: 640 | exhaustive inputs: 1
+blind: run #18 {crash(member@2 after fan_out.rs:234[2→0]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 18)
+test <unknown> ...	run time: 1.594814ms | iterations/s: 627 | exhaustive inputs: 1
+blind: run #19 {crash(member@2 before any send)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 19)
+test <unknown> ...	run time: 1.653901ms | iterations/s: 605 | exhaustive inputs: 1
+blind: run #20 {crash(source after fan_out.rs:270[→1]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, fan_out.rs:270[→2]:1←source#2, fan_out.rs:234[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 20)
+test <unknown> ...	run time: 1.668415ms | iterations/s: 599 | exhaustive inputs: 1
+blind: run #21 {crash(source after fan_out.rs:270[→0]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→2]:1←source#2, fan_out.rs:234[0→1]:2←member@0#4, fan_out.rs:234[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 21)
+test <unknown> ...	run time: 1.371471ms | iterations/s: 729 | exhaustive inputs: 1
+blind: run #22 {crash(source after fan_out.rs:270[→2]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→2]:1←source#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 22)
+test <unknown> ...	run time: 1.401419ms | iterations/s: 714 | exhaustive inputs: 1
+blind: run #23 {crash(source after fan_out.rs:270[→1]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→1]:1←source#1, fan_out.rs:234[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 23)
+test <unknown> ...	run time: 1.411767ms | iterations/s: 708 | exhaustive inputs: 1
+blind: run #24 {crash(source after fan_out.rs:270[→0]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:234[0→1]:1←member@0#1, fan_out.rs:234[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 24)
+test <unknown> ...	run time: 992.431µs | iterations/s: 1008 | exhaustive inputs: 1
+blind: run #25 {crash(source before any send)}: 1 schedule(s), goal held; derivations {}
+blind: universe size 24 (tried 25)
+test <unknown> ...	run time: 1.619956ms | iterations/s: 617 | exhaustive inputs: 1
+blind: run #26 {crash(member@0 after fan_out.rs:234[0→1]:2), crash(source after fan_out.rs:270[→1]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, fan_out.rs:270[→2]:1←source#2, fan_out.rs:234[1→2]:2←member@1#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 26)
+test <unknown> ...	run time: 1.644328ms | iterations/s: 608 | exhaustive inputs: 1
+blind: run #27 {crash(member@0 after fan_out.rs:234[0→1]:2), crash(source after fan_out.rs:270[→0]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→2]:1←source#2, fan_out.rs:234[0→1]:2←member@0#4, fan_out.rs:234[1→2]:2←member@1#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 27)
+test <unknown> ...	run time: 1.667238ms | iterations/s: 600 | exhaustive inputs: 1
+blind: run #28 {crash(member@0 after fan_out.rs:234[0→0]:2), crash(source after fan_out.rs:270[→1]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, fan_out.rs:270[→2]:1←source#2, fan_out.rs:234[1→2]:2←member@1#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 28)
+test <unknown> ...	run time: 1.413537ms | iterations/s: 707 | exhaustive inputs: 1
+blind: run #29 {crash(member@0 after fan_out.rs:234[0→1]:2), crash(source after fan_out.rs:270[→2]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→2]:1←source#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 29)
+test <unknown> ...	run time: 1.550844ms | iterations/s: 645 | exhaustive inputs: 1
+blind: run #30 {crash(member@0 after fan_out.rs:234[0→0]:2), crash(source after fan_out.rs:270[→0]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→2]:1←source#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 30)
+test <unknown> ...	run time: 1.777662ms | iterations/s: 563 | exhaustive inputs: 1
+blind: run #31 {crash(member@0 after fan_out.rs:234[0→2]:1), crash(source after fan_out.rs:270[→1]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, fan_out.rs:270[→2]:1←source#2, fan_out.rs:234[1→2]:2←member@1#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 31)
+test <unknown> ...	run time: 1.529472ms | iterations/s: 654 | exhaustive inputs: 1
+blind: run #32 {crash(member@0 after fan_out.rs:234[0→0]:2), crash(source after fan_out.rs:270[→2]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→2]:1←source#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 32)
+test <unknown> ...	run time: 1.792062ms | iterations/s: 558 | exhaustive inputs: 1
+blind: run #33 {crash(member@0 after fan_out.rs:234[0→1]:1), crash(source after fan_out.rs:270[→1]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, fan_out.rs:270[→2]:1←source#2, fan_out.rs:234[1→2]:2←member@1#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 33)
+test <unknown> ...	run time: 1.48588ms | iterations/s: 673 | exhaustive inputs: 1
+blind: run #34 {crash(member@0 after fan_out.rs:234[0→1]:2), crash(source after fan_out.rs:270[→1]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→1]:1←source#1, fan_out.rs:234[0→2]:1←member@0#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 34)
+test <unknown> ...	run time: 1.639384ms | iterations/s: 610 | exhaustive inputs: 1
+blind: run #35 {crash(member@0 after fan_out.rs:234[0→2]:1), crash(source after fan_out.rs:270[→0]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→2]:1←source#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 35)
+test <unknown> ...	run time: 1.60435ms | iterations/s: 623 | exhaustive inputs: 1
+blind: run #36 {crash(member@0 after fan_out.rs:234[0→1]:2), crash(source after fan_out.rs:270[→0]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:234[0→1]:1←member@0#1, fan_out.rs:234[0→2]:1←member@0#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 36)
+test <unknown> ...	run time: 1.527004ms | iterations/s: 655 | exhaustive inputs: 1
+blind: run #37 {crash(member@0 after fan_out.rs:234[0→0]:2), crash(source after fan_out.rs:270[→1]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→1]:1←source#1, fan_out.rs:234[0→2]:1←member@0#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 37)
+test <unknown> ...	run time: 1.748122ms | iterations/s: 572 | exhaustive inputs: 1
+blind: run #38 {crash(member@0 after fan_out.rs:234[0→0]:1), crash(source after fan_out.rs:270[→1]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, fan_out.rs:270[→2]:1←source#2, fan_out.rs:234[1→2]:2←member@1#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 38)
+test <unknown> ...	run time: 1.544351ms | iterations/s: 648 | exhaustive inputs: 1
+blind: run #39 {crash(member@0 after fan_out.rs:234[0→1]:1), crash(source after fan_out.rs:270[→0]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→2]:1←source#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 39)
+test <unknown> ...	run time: 1.587006ms | iterations/s: 630 | exhaustive inputs: 1
+blind: run #40 {crash(member@0 after fan_out.rs:234[0→2]:1), crash(source after fan_out.rs:270[→2]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→2]:1←source#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 40)
+test <unknown> ...	run time: 1.488589ms | iterations/s: 672 | exhaustive inputs: 1
+blind: run #41 {crash(member@0 after fan_out.rs:234[0→0]:2), crash(source after fan_out.rs:270[→0]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:234[0→1]:1←member@0#1, fan_out.rs:234[0→2]:1←member@0#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 41)
+test <unknown> ...	run time: 1.700048ms | iterations/s: 588 | exhaustive inputs: 1
+blind: run #42 {crash(member@0 before any send), crash(source after fan_out.rs:270[→1]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, fan_out.rs:270[→2]:1←source#2, fan_out.rs:234[1→2]:2←member@1#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 42)
+test <unknown> ...	run time: 1.651943ms | iterations/s: 605 | exhaustive inputs: 1
+blind: run #43 {crash(member@0 after fan_out.rs:234[0→0]:1), crash(source after fan_out.rs:270[→0]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→2]:1←source#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 43)
+test <unknown> ...	run time: 1.59364ms | iterations/s: 627 | exhaustive inputs: 1
+blind: run #44 {crash(member@0 after fan_out.rs:234[0→2]:1), crash(source after fan_out.rs:270[→1]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→1]:1←source#1, fan_out.rs:234[0→2]:1←member@0#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 44)
+test <unknown> ...	run time: 1.614016ms | iterations/s: 620 | exhaustive inputs: 1
+blind: run #45 {crash(member@0 after fan_out.rs:234[0→1]:1), crash(source after fan_out.rs:270[→2]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→2]:1←source#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 45)
+test <unknown> ...	run time: 1.565291ms | iterations/s: 639 | exhaustive inputs: 1
+blind: run #46 {crash(member@0 before any send), crash(source after fan_out.rs:270[→0]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→2]:1←source#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 46)
+test <unknown> ...	run time: 1.598023ms | iterations/s: 626 | exhaustive inputs: 1
+blind: run #47 {crash(member@0 after fan_out.rs:234[0→2]:1), crash(source after fan_out.rs:270[→0]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:234[0→1]:1←member@0#1, fan_out.rs:234[0→2]:1←member@0#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 47)
+test <unknown> ...	run time: 1.95369ms | iterations/s: 512 | exhaustive inputs: 1
+blind: run #48 {crash(member@1 after fan_out.rs:234[1→1]:2), crash(source after fan_out.rs:270[→1]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→2]:1←source#2, fan_out.rs:234[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 48)
+test <unknown> ...	run time: 1.698155ms | iterations/s: 589 | exhaustive inputs: 1
+blind: run #49 {crash(member@0 after fan_out.rs:234[0→0]:1), crash(source after fan_out.rs:270[→2]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→2]:1←source#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 49)
+test <unknown> ...	run time: 1.68687ms | iterations/s: 593 | exhaustive inputs: 1
+blind: run #50 {crash(member@0 after fan_out.rs:234[0→1]:1), crash(source after fan_out.rs:270[→1]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:234[1→2]:1←member@1#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 50)
+test <unknown> ...	run time: 1.934183ms | iterations/s: 517 | exhaustive inputs: 1
+blind: run #51 {crash(member@1 after fan_out.rs:234[1→0]:2), crash(source after fan_out.rs:270[→1]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→2]:1←source#2, fan_out.rs:234[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 51)
+test <unknown> ...	run time: 1.914317ms | iterations/s: 522 | exhaustive inputs: 1
+blind: run #52 {crash(member@1 after fan_out.rs:234[1→1]:2), crash(source after fan_out.rs:270[→0]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→2]:1←source#2, fan_out.rs:234[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 52)
+test <unknown> ...	run time: 1.564722ms | iterations/s: 639 | exhaustive inputs: 1
+blind: run #53 {crash(member@0 before any send), crash(source after fan_out.rs:270[→2]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→2]:1←source#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 53)
+test <unknown> ...	run time: 1.64772ms | iterations/s: 607 | exhaustive inputs: 1
+blind: run #54 {crash(member@0 after fan_out.rs:234[0→1]:1), crash(source after fan_out.rs:270[→0]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:234[0→1]:1←member@0#1, fan_out.rs:234[1→2]:1←member@1#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 54)
+test <unknown> ...	run time: 1.646488ms | iterations/s: 607 | exhaustive inputs: 1
+blind: run #55 {crash(member@0 after fan_out.rs:234[0→0]:1), crash(source after fan_out.rs:270[→1]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:234[1→2]:1←member@1#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 55)
+test <unknown> ...	run time: 1.962746ms | iterations/s: 509 | exhaustive inputs: 1
+blind: run #56 {crash(member@1 after fan_out.rs:234[1→2]:1), crash(source after fan_out.rs:270[→1]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→2]:1←source#2, fan_out.rs:234[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 56)
+test <unknown> ...	run time: 1.730421ms | iterations/s: 578 | exhaustive inputs: 1
+blind: run #57 {crash(member@1 after fan_out.rs:234[1→1]:2), crash(source after fan_out.rs:270[→2]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→2]:1←source#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 57)
+test <unknown> ...	run time: 1.911188ms | iterations/s: 523 | exhaustive inputs: 1
+blind: run #58 {crash(member@1 after fan_out.rs:234[1→0]:2), crash(source after fan_out.rs:270[→0]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→2]:1←source#2, fan_out.rs:234[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 58)
+test <unknown> ...	run time: 1.687321ms | iterations/s: 593 | exhaustive inputs: 1
+blind: run #59 {crash(member@0 before any send), crash(source after fan_out.rs:270[→1]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→1]:1←source#1, fan_out.rs:234[1→2]:1←member@1#2, observed[1→]:1 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 59)
+test <unknown> ...	run time: 1.352012ms | iterations/s: 740 | exhaustive inputs: 1
+blind: run #60 {crash(member@0 after fan_out.rs:234[0→0]:1), crash(source after fan_out.rs:270[→0]:1)}: 1 schedule(s), goal held; derivations {}
+blind: universe size 24 (tried 60)
+test <unknown> ...	run time: 1.969844ms | iterations/s: 508 | exhaustive inputs: 1
+blind: run #61 {crash(member@1 after fan_out.rs:234[1→2]:1), crash(source after fan_out.rs:270[→0]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→2]:1←source#2, fan_out.rs:234[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 61)
+test <unknown> ...	run time: 1.91926ms | iterations/s: 521 | exhaustive inputs: 1
+blind: run #62 {crash(member@1 after fan_out.rs:234[1→1]:1), crash(source after fan_out.rs:270[→1]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→2]:1←source#2, fan_out.rs:234[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 62)
+test <unknown> ...	run time: 1.684526ms | iterations/s: 594 | exhaustive inputs: 1
+blind: run #63 {crash(member@1 after fan_out.rs:234[1→1]:2), crash(source after fan_out.rs:270[→1]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:234[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 63)
+test <unknown> ...	run time: 1.249467ms | iterations/s: 800 | exhaustive inputs: 1
+blind: run #64 {crash(member@0 before any send), crash(source after fan_out.rs:270[→0]:1)}: 1 schedule(s), goal held; derivations {}
+blind: universe size 24 (tried 64)
+test <unknown> ...	run time: 1.592096ms | iterations/s: 628 | exhaustive inputs: 1
+blind: run #65 {crash(member@1 after fan_out.rs:234[1→0]:2), crash(source after fan_out.rs:270[→2]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→2]:1←source#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 65)
+test <unknown> ...	run time: 1.840162ms | iterations/s: 543 | exhaustive inputs: 1
+blind: run #66 {crash(member@1 after fan_out.rs:234[1→1]:1), crash(source after fan_out.rs:270[→0]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→2]:1←source#2, fan_out.rs:234[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 66)
+test <unknown> ...	run time: 1.573842ms | iterations/s: 635 | exhaustive inputs: 1
+blind: run #67 {crash(member@1 after fan_out.rs:234[1→0]:2), crash(source after fan_out.rs:270[→1]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:234[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 67)
+test <unknown> ...	run time: 1.533212ms | iterations/s: 652 | exhaustive inputs: 1
+blind: run #68 {crash(member@1 after fan_out.rs:234[1→1]:2), crash(source after fan_out.rs:270[→0]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:234[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 68)
+test <unknown> ...	run time: 1.936399ms | iterations/s: 516 | exhaustive inputs: 1
+blind: run #69 {crash(member@1 after fan_out.rs:234[1→0]:1), crash(source after fan_out.rs:270[→1]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→2]:1←source#2, fan_out.rs:234[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 69)
+test <unknown> ...	run time: 1.652474ms | iterations/s: 605 | exhaustive inputs: 1
+blind: run #70 {crash(member@1 after fan_out.rs:234[1→2]:1), crash(source after fan_out.rs:270[→2]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→2]:1←source#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 70)
+test <unknown> ...	run time: 1.900883ms | iterations/s: 526 | exhaustive inputs: 1
+blind: run #71 {crash(member@1 after fan_out.rs:234[1→0]:1), crash(source after fan_out.rs:270[→0]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→2]:1←source#2, fan_out.rs:234[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 71)
+test <unknown> ...	run time: 1.854793ms | iterations/s: 539 | exhaustive inputs: 1
+blind: run #72 {crash(member@1 before any send), crash(source after fan_out.rs:270[→1]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→2]:1←source#2, fan_out.rs:234[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 72)
+test <unknown> ...	run time: 1.677974ms | iterations/s: 596 | exhaustive inputs: 1
+blind: run #73 {crash(member@1 after fan_out.rs:234[1→0]:2), crash(source after fan_out.rs:270[→0]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:234[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 73)
+test <unknown> ...	run time: 1.61317ms | iterations/s: 620 | exhaustive inputs: 1
+blind: run #74 {crash(member@1 after fan_out.rs:234[1→1]:1), crash(source after fan_out.rs:270[→2]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→2]:1←source#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 74)
+test <unknown> ...	run time: 1.638181ms | iterations/s: 610 | exhaustive inputs: 1
+blind: run #75 {crash(member@1 after fan_out.rs:234[1→2]:1), crash(source after fan_out.rs:270[→1]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:234[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 75)
+test <unknown> ...	run time: 1.901248ms | iterations/s: 526 | exhaustive inputs: 1
+blind: run #76 {crash(member@1 before any send), crash(source after fan_out.rs:270[→0]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→2]:1←source#2, fan_out.rs:234[0→2]:2←member@0#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 76)
+test <unknown> ...	run time: 1.700292ms | iterations/s: 588 | exhaustive inputs: 1
+blind: run #77 {crash(member@1 after fan_out.rs:234[1→2]:1), crash(source after fan_out.rs:270[→0]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:234[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 77)
+test <unknown> ...	run time: 1.604214ms | iterations/s: 623 | exhaustive inputs: 1
+blind: run #78 {crash(member@1 after fan_out.rs:234[1→0]:1), crash(source after fan_out.rs:270[→2]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→2]:1←source#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 78)
+test <unknown> ...	run time: 1.88311ms | iterations/s: 531 | exhaustive inputs: 1
+blind: run #79 {crash(member@2 after fan_out.rs:234[2→1]:2), crash(source after fan_out.rs:270[→1]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 79)
+test <unknown> ...	run time: 1.604085ms | iterations/s: 623 | exhaustive inputs: 1
+blind: run #80 {crash(member@1 after fan_out.rs:234[1→1]:1), crash(source after fan_out.rs:270[→1]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:234[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 80)
+test <unknown> ...	run time: 1.875361ms | iterations/s: 533 | exhaustive inputs: 1
+blind: run #81 {crash(member@2 after fan_out.rs:234[2→1]:2), crash(source after fan_out.rs:270[→0]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→1]:1←source#1, fan_out.rs:234[0→1]:2←member@0#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 81)
+test <unknown> ...	run time: 1.641735ms | iterations/s: 609 | exhaustive inputs: 1
+blind: run #82 {crash(member@1 after fan_out.rs:234[1→0]:1), crash(source after fan_out.rs:270[→1]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:234[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 82)
+test <unknown> ...	run time: 1.626741ms | iterations/s: 615 | exhaustive inputs: 1
+blind: run #83 {crash(member@1 after fan_out.rs:234[1→1]:1), crash(source after fan_out.rs:270[→0]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:234[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 83)
+test <unknown> ...	run time: 1.908907ms | iterations/s: 524 | exhaustive inputs: 1
+blind: run #84 {crash(member@2 after fan_out.rs:234[2→0]:2), crash(source after fan_out.rs:270[→1]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 84)
+test <unknown> ...	run time: 1.597449ms | iterations/s: 626 | exhaustive inputs: 1
+blind: run #85 {crash(member@1 before any send), crash(source after fan_out.rs:270[→2]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→2]:1←source#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 85)
+test <unknown> ...	run time: 1.937841ms | iterations/s: 516 | exhaustive inputs: 1
+blind: run #86 {crash(member@2 after fan_out.rs:234[2→0]:2), crash(source after fan_out.rs:270[→0]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→1]:1←source#1, fan_out.rs:234[0→1]:2←member@0#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 86)
+test <unknown> ...	run time: 1.65664ms | iterations/s: 604 | exhaustive inputs: 1
+blind: run #87 {crash(member@1 after fan_out.rs:234[1→0]:1), crash(source after fan_out.rs:270[→0]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:234[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 87)
+test <unknown> ...	run time: 1.635687ms | iterations/s: 611 | exhaustive inputs: 1
+blind: run #88 {crash(member@1 before any send), crash(source after fan_out.rs:270[→1]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:234[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 88)
+test <unknown> ...	run time: 1.919658ms | iterations/s: 521 | exhaustive inputs: 1
+blind: run #89 {crash(member@2 after fan_out.rs:234[2→2]:1), crash(source after fan_out.rs:270[→1]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 89)
+test <unknown> ...	run time: 1.672617ms | iterations/s: 598 | exhaustive inputs: 1
+blind: run #90 {crash(member@2 after fan_out.rs:234[2→1]:2), crash(source after fan_out.rs:270[→2]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 90)
+test <unknown> ...	run time: 1.930902ms | iterations/s: 518 | exhaustive inputs: 1
+blind: run #91 {crash(member@2 after fan_out.rs:234[2→2]:1), crash(source after fan_out.rs:270[→0]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→1]:1←source#1, fan_out.rs:234[0→1]:2←member@0#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 91)
+test <unknown> ...	run time: 1.676144ms | iterations/s: 597 | exhaustive inputs: 1
+blind: run #92 {crash(member@2 after fan_out.rs:234[2→1]:2), crash(source after fan_out.rs:270[→1]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 92)
+test <unknown> ...	run time: 1.689685ms | iterations/s: 592 | exhaustive inputs: 1
+blind: run #93 {crash(member@1 before any send), crash(source after fan_out.rs:270[→0]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:234[0→2]:1←member@0#2, observed[0→]:1 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0}}
+blind: universe size 24 (tried 93)
+test <unknown> ...	run time: 1.933579ms | iterations/s: 517 | exhaustive inputs: 1
+blind: run #94 {crash(member@2 after fan_out.rs:234[2→1]:1), crash(source after fan_out.rs:270[→1]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 94)
+test <unknown> ...	run time: 1.703669ms | iterations/s: 587 | exhaustive inputs: 1
+blind: run #95 {crash(member@2 after fan_out.rs:234[2→0]:2), crash(source after fan_out.rs:270[→2]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 95)
+test <unknown> ...	run time: 2.204671ms | iterations/s: 454 | exhaustive inputs: 1
+blind: run #96 {crash(member@2 after fan_out.rs:234[2→1]:1), crash(source after fan_out.rs:270[→0]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→1]:1←source#1, fan_out.rs:234[0→1]:2←member@0#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 96)
+test <unknown> ...	run time: 1.994656ms | iterations/s: 501 | exhaustive inputs: 1
+blind: run #97 {crash(member@2 after fan_out.rs:234[2→0]:1), crash(source after fan_out.rs:270[→1]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 97)
+test <unknown> ...	run time: 1.701029ms | iterations/s: 588 | exhaustive inputs: 1
+blind: run #98 {crash(member@2 after fan_out.rs:234[2→0]:2), crash(source after fan_out.rs:270[→1]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 98)
+test <unknown> ...	run time: 2.469859ms | iterations/s: 405 | exhaustive inputs: 1
+blind: run #99 {crash(member@2 after fan_out.rs:234[2→1]:2), crash(source after fan_out.rs:270[→0]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:234[0→1]:1←member@0#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 99)
+test <unknown> ...	run time: 2.451826ms | iterations/s: 408 | exhaustive inputs: 1
+blind: run #100 {crash(member@2 after fan_out.rs:234[2→2]:1), crash(source after fan_out.rs:270[→2]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 100)
+test <unknown> ...	run time: 2.557968ms | iterations/s: 391 | exhaustive inputs: 1
+blind: run #101 {crash(member@2 before any send), crash(source after fan_out.rs:270[→1]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→1]:1←source#1, fan_out.rs:270[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 101)
+test <unknown> ...	run time: 1.871018ms | iterations/s: 534 | exhaustive inputs: 1
+blind: run #102 {crash(member@2 after fan_out.rs:234[2→0]:1), crash(source after fan_out.rs:270[→0]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→1]:1←source#1, fan_out.rs:234[0→1]:2←member@0#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 102)
+test <unknown> ...	run time: 1.697099ms | iterations/s: 589 | exhaustive inputs: 1
+blind: run #103 {crash(member@2 after fan_out.rs:234[2→2]:1), crash(source after fan_out.rs:270[→1]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 103)
+test <unknown> ...	run time: 1.707794ms | iterations/s: 586 | exhaustive inputs: 1
+blind: run #104 {crash(member@2 after fan_out.rs:234[2→0]:2), crash(source after fan_out.rs:270[→0]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:234[0→1]:1←member@0#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 104)
+test <unknown> ...	run time: 1.605449ms | iterations/s: 623 | exhaustive inputs: 1
+blind: run #105 {crash(member@2 after fan_out.rs:234[2→1]:1), crash(source after fan_out.rs:270[→2]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 105)
+test <unknown> ...	run time: 1.915682ms | iterations/s: 522 | exhaustive inputs: 1
+blind: run #106 {crash(member@2 before any send), crash(source after fan_out.rs:270[→0]:2)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→0]:2←source#3, fan_out.rs:270[→1]:1←source#1, fan_out.rs:234[0→1]:2←member@0#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 106)
+test <unknown> ...	run time: 1.691335ms | iterations/s: 591 | exhaustive inputs: 1
+blind: run #107 {crash(member@2 after fan_out.rs:234[2→1]:1), crash(source after fan_out.rs:270[→1]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 107)
+test <unknown> ...	run time: 1.785115ms | iterations/s: 560 | exhaustive inputs: 1
+blind: run #108 {crash(member@2 after fan_out.rs:234[2→2]:1), crash(source after fan_out.rs:270[→0]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:234[0→1]:1←member@0#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 108)
+test <unknown> ...	run time: 1.78546ms | iterations/s: 560 | exhaustive inputs: 1
+blind: run #109 {crash(member@2 after fan_out.rs:234[2→0]:1), crash(source after fan_out.rs:270[→2]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 109)
+test <unknown> ...	run time: 1.67749ms | iterations/s: 596 | exhaustive inputs: 1
+blind: run #110 {crash(member@2 before any send), crash(source after fan_out.rs:270[→2]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 110)
+test <unknown> ...	run time: 1.740433ms | iterations/s: 575 | exhaustive inputs: 1
+blind: run #111 {crash(member@2 after fan_out.rs:234[2→1]:1), crash(source after fan_out.rs:270[→0]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:234[0→1]:1←member@0#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 111)
+test <unknown> ...	run time: 1.73625ms | iterations/s: 576 | exhaustive inputs: 1
+blind: run #112 {crash(member@2 after fan_out.rs:234[2→0]:1), crash(source after fan_out.rs:270[→1]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 112)
+test <unknown> ...	run time: 1.710316ms | iterations/s: 585 | exhaustive inputs: 1
+blind: run #113 {crash(member@2 after fan_out.rs:234[2→0]:1), crash(source after fan_out.rs:270[→0]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:234[0→1]:1←member@0#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 113)
+test <unknown> ...	run time: 1.674623ms | iterations/s: 597 | exhaustive inputs: 1
+blind: run #114 {crash(member@2 before any send), crash(source after fan_out.rs:270[→1]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:270[→1]:1←source#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 114)
+test <unknown> ...	run time: 1.722533ms | iterations/s: 581 | exhaustive inputs: 1
+blind: run #115 {crash(member@2 before any send), crash(source after fan_out.rs:270[→0]:1)}: 1 schedule(s), goal held; derivations {{fan_out.rs:270[→0]:1←source#0, fan_out.rs:234[0→1]:1←member@0#1, observed[0→]:1 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0}}
+blind: universe size 24 (tried 115)
+MEASURE strategy=Blind verdict=Exhausted hypotheses=115 schedules=115 elapsed_ms=4095
+LDFI: no fault set within bounds violates the goal under any schedule (115 hypothesis run(s))
+  certificate within the fault model and the explored schedules (generated specification)
+
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 149 filtered out; finished in 21.48s
+
+RC 0 WALL 24.065492717

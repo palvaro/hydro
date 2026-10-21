@@ -1,0 +1,364 @@
+
+running 1 test
+hydrofrac: searching EventualConsistency at isr_replication.rs:360 (Cluster(loc3v1))
+test <unknown> ...	run time: 257.105739ms | iterations/s: 31 | rng inputs: 8
+blind: fact domain learned from the failure-free run: 1 fact(s)
+test <unknown> ...	run time: 212.674383ms | iterations/s: 38 | rng inputs: 8
+blind: channels:
+  channel#68 "write": Process(loc1v1) → Cluster(loc3v1), reliable
+  channel#194 "repl": Cluster(loc3v1) → Cluster(loc3v1), lossy
+  channel#203 "ack": Cluster(loc3v1) → Cluster(loc3v1), reliable
+  channel#248 "shrink": Cluster(loc3v1) → Process(loc2v1), reliable
+  channel#292 "hb": Cluster(loc3v1) → Process(loc2v1), reliable
+  channel#345 "view": Process(loc2v1) → Cluster(loc3v1), reliable
+  channel#351 "client-ack": Cluster(loc3v1) → Process(loc1v1), reliable
+  channel#399 "observe#399": Cluster(loc3v1) → Process(loc4v1), reliable
+  channel#403 "observe#403": Cluster(loc3v1) → Process(loc4v1), reliable
+  channel#408 "observe#408": Cluster(loc3v1) → Process(loc4v1), reliable
+blind: crash bounds: crashes unbounded; not all 5 nodes at once; at most 1 of the checked cluster's 3 crashable member(s)
+blind: specification is generated (EventualConsistency)
+blind: run #1 {}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, observed[0→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@0 through send #4←replica@0#4, observed[1→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@1 through send #2←replica@1#2, observed[2→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@2 through send #2←replica@2#2}}
+blind: universe size 13 (tried 1)
+test <unknown> ...	run time: 202.852231ms | iterations/s: 39 | rng inputs: 8
+blind: run #2 {omit(repl[0→1]:Write(1))}: 8 schedule(s), goal held; derivations {}
+blind: universe size 14 (tried 2)
+test <unknown> ...	run time: 209.341165ms | iterations/s: 38 | rng inputs: 8
+blind: run #3 {omit(repl[0→2]:Write(1))}: 8 schedule(s), goal held; derivations {}
+blind: universe size 15 (tried 3)
+test <unknown> ...	run time: 193.172866ms | iterations/s: 41 | rng inputs: 8
+blind: run #4 {crash(replica@0 after client-ack[0→]:Write(1))}: 8 schedule(s), goal held; derivations {}
+blind: universe size 15 (tried 4)
+test <unknown> ...	run time: 200.606164ms | iterations/s: 40 | rng inputs: 8
+blind: run #5 {crash(replica@0 after hb[0→]:())}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, observed[1→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@1 through send #2←replica@1#2, observed[2→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@2 through send #2←replica@2#2}}
+blind: universe size 15 (tried 5)
+test <unknown> ...	run time: 210.506053ms | iterations/s: 38 | rng inputs: 8
+blind: run #6 {crash(replica@0 after shrink[0→]:[1])}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, observed[1→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@1 through send #2←replica@1#2, observed[2→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@2 through send #2←replica@2#2}}
+blind: universe size 15 (tried 6)
+test <unknown> ...	run time: 211.586798ms | iterations/s: 38 | rng inputs: 8
+blind: run #7 {crash(replica@0 after shrink[0→]:[2])}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, observed[1→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@1 through send #2←replica@1#2, observed[2→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@2 through send #2←replica@2#2}}
+blind: universe size 15 (tried 7)
+test <unknown> ...	run time: 186.91683ms | iterations/s: 43 | rng inputs: 8
+blind: run #8 {crash(replica@0 after repl[0→2]:Write(1))}: 8 schedule(s), goal held; derivations {}
+blind: universe size 15 (tried 8)
+test <unknown> ...	run time: 179.749394ms | iterations/s: 45 | rng inputs: 8
+blind: run #9 {crash(replica@0 after repl[0→1]:Write(1))}: 8 schedule(s), goal held; derivations {}
+blind: universe size 15 (tried 9)
+test <unknown> ...	run time: 170.167013ms | iterations/s: 47 | rng inputs: 8
+blind: run #10 {crash(replica@0 before any send)}: 8 schedule(s), goal held; derivations {}
+blind: universe size 15 (tried 10)
+test <unknown> ...	run time: 197.846416ms | iterations/s: 40 | rng inputs: 8
+blind: run #11 {crash(replica@1 after hb[1→]:())}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, observed[0→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@0 through send #4←replica@0#4, observed[2→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@2 through send #2←replica@2#2}}
+blind: universe size 15 (tried 11)
+test <unknown> ...	run time: 186.428552ms | iterations/s: 43 | rng inputs: 8
+blind: run #12 {crash(replica@1 after ack[1→0]:Write(1))}: 8 schedule(s), goal held; derivations {}
+blind: universe size 15 (tried 12)
+test <unknown> ...	run time: 194.166084ms | iterations/s: 41 | rng inputs: 8
+blind: run #13 {crash(replica@1 before any send)}: 8 schedule(s), goal held; derivations {}
+blind: universe size 15 (tried 13)
+test <unknown> ...	run time: 194.027841ms | iterations/s: 41 | rng inputs: 8
+blind: run #14 {crash(replica@2 after hb[2→]:())}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, observed[0→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@0 through send #4←replica@0#4, observed[1→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@1 through send #2←replica@1#2}}
+blind: universe size 15 (tried 14)
+test <unknown> ...	run time: 185.963012ms | iterations/s: 43 | rng inputs: 8
+blind: run #15 {crash(replica@2 after ack[2→0]:Write(1))}: 8 schedule(s), goal held; derivations {}
+blind: universe size 15 (tried 15)
+test <unknown> ...	run time: 186.396277ms | iterations/s: 43 | rng inputs: 8
+blind: run #16 {crash(replica@2 before any send)}: 8 schedule(s), goal held; derivations {}
+blind: universe size 15 (tried 16)
+MEASURE strategy=Blind verdict=Exhausted hypotheses=16 schedules=128 elapsed_ms=3506
+EventualConsistency at isr_replication.rs:360 (Cluster(loc3v1), CycleSource, delivered): CERTIFICATE, 16 hypotheses, 8 sampled schedules
+hydrofrac: searching EventualConsistency at isr_replication.rs:343 (Cluster(loc3v1))
+test <unknown> ...	run time: 202.190513ms | iterations/s: 40 | rng inputs: 8
+blind: fact domain learned from the failure-free run: 1 fact(s)
+test <unknown> ...	run time: 209.092508ms | iterations/s: 38 | rng inputs: 8
+blind: channels:
+  channel#68 "write": Process(loc1v1) → Cluster(loc3v1), reliable
+  channel#194 "repl": Cluster(loc3v1) → Cluster(loc3v1), lossy
+  channel#203 "ack": Cluster(loc3v1) → Cluster(loc3v1), reliable
+  channel#248 "shrink": Cluster(loc3v1) → Process(loc2v1), reliable
+  channel#292 "hb": Cluster(loc3v1) → Process(loc2v1), reliable
+  channel#345 "view": Process(loc2v1) → Cluster(loc3v1), reliable
+  channel#351 "client-ack": Cluster(loc3v1) → Process(loc1v1), reliable
+  channel#399 "observe#399": Cluster(loc3v1) → Process(loc4v1), reliable
+  channel#403 "observe#403": Cluster(loc3v1) → Process(loc4v1), reliable
+  channel#408 "observe#408": Cluster(loc3v1) → Process(loc4v1), reliable
+blind: crash bounds: crashes unbounded; not all 5 nodes at once; at most 1 of the checked cluster's 3 crashable member(s)
+blind: specification is generated (EventualConsistency)
+blind: run #1 {}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 13 (tried 1)
+test <unknown> ...	run time: 204.143933ms | iterations/s: 39 | rng inputs: 8
+blind: run #2 {omit(repl[0→1]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 14 (tried 2)
+test <unknown> ...	run time: 215.023493ms | iterations/s: 37 | rng inputs: 8
+blind: run #3 {omit(repl[0→2]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 15 (tried 3)
+test <unknown> ...	run time: 189.181822ms | iterations/s: 42 | rng inputs: 8
+blind: run #4 {crash(replica@0 after client-ack[0→]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 15 (tried 4)
+test <unknown> ...	run time: 198.101419ms | iterations/s: 40 | rng inputs: 8
+blind: run #5 {crash(replica@0 after hb[0→]:())}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 15 (tried 5)
+test <unknown> ...	run time: 212.451211ms | iterations/s: 38 | rng inputs: 8
+blind: run #6 {crash(replica@0 after shrink[0→]:[1])}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 15 (tried 6)
+test <unknown> ...	run time: 209.236229ms | iterations/s: 38 | rng inputs: 8
+blind: run #7 {crash(replica@0 after shrink[0→]:[2])}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 15 (tried 7)
+test <unknown> ...	run time: 188.753211ms | iterations/s: 42 | rng inputs: 8
+blind: run #8 {crash(replica@0 after repl[0→2]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 15 (tried 8)
+test <unknown> ...	run time: 183.594934ms | iterations/s: 44 | rng inputs: 8
+blind: run #9 {crash(replica@0 after repl[0→1]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 15 (tried 9)
+test <unknown> ...	run time: 170.359598ms | iterations/s: 47 | rng inputs: 8
+blind: run #10 {crash(replica@0 before any send)}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 15 (tried 10)
+test <unknown> ...	run time: 203.041276ms | iterations/s: 39 | rng inputs: 8
+blind: run #11 {crash(replica@1 after hb[1→]:())}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 15 (tried 11)
+test <unknown> ...	run time: 190.764163ms | iterations/s: 42 | rng inputs: 8
+blind: run #12 {crash(replica@1 after ack[1→0]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 15 (tried 12)
+test <unknown> ...	run time: 194.935382ms | iterations/s: 41 | rng inputs: 8
+blind: run #13 {crash(replica@1 before any send)}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 15 (tried 13)
+test <unknown> ...	run time: 210.269643ms | iterations/s: 38 | rng inputs: 8
+blind: run #14 {crash(replica@2 after hb[2→]:())}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0}}
+blind: universe size 15 (tried 14)
+test <unknown> ...	run time: 189.619593ms | iterations/s: 42 | rng inputs: 8
+blind: run #15 {crash(replica@2 after ack[2→0]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0}}
+blind: universe size 15 (tried 15)
+test <unknown> ...	run time: 191.411633ms | iterations/s: 42 | rng inputs: 8
+blind: run #16 {crash(replica@2 before any send)}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0}}
+blind: universe size 15 (tried 16)
+test <unknown> ...	run time: 196.940168ms | iterations/s: 41 | rng inputs: 8
+blind: run #17 {omit(repl[0→1]:Write(1)), omit(repl[0→2]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 16 (tried 17)
+test <unknown> ...	run time: 207.319631ms | iterations/s: 39 | rng inputs: 8
+blind: run #18 {crash(replica@0 after shrink[0→]:[1, 2])}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 16 (tried 18)
+test <unknown> ...	run time: 191.937967ms | iterations/s: 42 | rng inputs: 8
+blind: run #19 {omit(repl[0→1]:Write(1)), crash(replica@0 after client-ack[0→]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 16 (tried 19)
+test <unknown> ...	run time: 193.484637ms | iterations/s: 41 | rng inputs: 8
+blind: run #20 {omit(repl[0→1]:Write(1)), crash(replica@0 after hb[0→]:())}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 16 (tried 20)
+test <unknown> ...	run time: 290.415545ms | iterations/s: 28 | rng inputs: 8
+blind: run #21 {omit(repl[0→2]:Write(1)), crash(replica@0 after client-ack[0→]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 16 (tried 21)
+test <unknown> ...	run time: 204.219882ms | iterations/s: 39 | rng inputs: 8
+blind: run #22 {omit(repl[0→1]:Write(1)), crash(replica@0 after shrink[0→]:[1, 2])}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 16 (tried 22)
+test <unknown> ...	run time: 192.409409ms | iterations/s: 42 | rng inputs: 8
+blind: run #23 {omit(repl[0→2]:Write(1)), crash(replica@0 after hb[0→]:())}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 16 (tried 23)
+test <unknown> ...	run time: 188.321117ms | iterations/s: 42 | rng inputs: 8
+blind: run #24 {omit(repl[0→1]:Write(1)), crash(replica@0 after shrink[0→]:[1])}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 17 (tried 24)
+test <unknown> ...	run time: 210.010805ms | iterations/s: 38 | rng inputs: 8
+blind: run #25 {crash(replica@2 after client-ack[2→]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0}}
+blind: universe size 17 (tried 25)
+test <unknown> ...	run time: 202.895483ms | iterations/s: 39 | rng inputs: 8
+blind: run #26 {omit(repl[0→2]:Write(1)), crash(replica@0 after shrink[0→]:[1, 2])}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 17 (tried 26)
+test <unknown> ...	run time: 203.61319ms | iterations/s: 39 | rng inputs: 8
+blind: run #27 {omit(repl[0→2]:Write(1)), crash(replica@0 after shrink[0→]:[1])}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 17 (tried 27)
+test <unknown> ...	run time: 207.994887ms | iterations/s: 38 | rng inputs: 8
+blind: run #28 {omit(repl[0→1]:Write(1)), crash(replica@0 after shrink[0→]:[2])}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 17 (tried 28)
+test <unknown> ...	run time: 185.566145ms | iterations/s: 43 | rng inputs: 8
+blind: run #29 {omit(repl[0→1]:Write(1)), crash(replica@0 after repl[0→2]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 17 (tried 29)
+test <unknown> ...	run time: 185.287882ms | iterations/s: 43 | rng inputs: 8
+blind: run #30 {omit(repl[0→2]:Write(1)), crash(replica@0 after shrink[0→]:[2])}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 30)
+test <unknown> ...	run time: 232.75971ms | iterations/s: 34 | rng inputs: 8
+blind: run #31 {crash(replica@1 after client-ack[1→]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 31)
+test <unknown> ...	run time: 181.120585ms | iterations/s: 44 | rng inputs: 8
+blind: run #32 {omit(repl[0→2]:Write(1)), crash(replica@0 after repl[0→2]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 32)
+test <unknown> ...	run time: 175.212995ms | iterations/s: 46 | rng inputs: 8
+blind: run #33 {omit(repl[0→1]:Write(1)), crash(replica@0 after repl[0→1]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 33)
+test <unknown> ...	run time: 256.023107ms | iterations/s: 31 | rng inputs: 8
+blind: run #34 {omit(repl[0→2]:Write(1)), crash(replica@0 after repl[0→1]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 34)
+test <unknown> ...	run time: 174.676982ms | iterations/s: 46 | rng inputs: 8
+blind: run #35 {omit(repl[0→1]:Write(1)), crash(replica@0 before any send)}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 35)
+test <unknown> ...	run time: 174.082094ms | iterations/s: 46 | rng inputs: 8
+blind: run #36 {omit(repl[0→2]:Write(1)), crash(replica@0 before any send)}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 36)
+test <unknown> ...	run time: 204.897106ms | iterations/s: 39 | rng inputs: 8
+blind: run #37 {omit(repl[0→1]:Write(1)), crash(replica@1 after client-ack[1→]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 37)
+test <unknown> ...	run time: 208.03543ms | iterations/s: 38 | rng inputs: 8
+blind: run #38 {omit(repl[0→2]:Write(1)), crash(replica@1 after client-ack[1→]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 38)
+test <unknown> ...	run time: 190.639516ms | iterations/s: 42 | rng inputs: 8
+blind: run #39 {omit(repl[0→1]:Write(1)), crash(replica@1 after hb[1→]:())}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 39)
+test <unknown> ...	run time: 190.972564ms | iterations/s: 42 | rng inputs: 8
+blind: run #40 {omit(repl[0→2]:Write(1)), crash(replica@1 after hb[1→]:())}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 40)
+test <unknown> ...	run time: 208.288296ms | iterations/s: 38 | rng inputs: 8
+blind: run #41 {omit(repl[0→1]:Write(1)), crash(replica@1 after ack[1→0]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 41)
+test <unknown> ...	run time: 184.43449ms | iterations/s: 43 | rng inputs: 8
+blind: run #42 {omit(repl[0→2]:Write(1)), crash(replica@1 after ack[1→0]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 42)
+test <unknown> ...	run time: 186.223012ms | iterations/s: 43 | rng inputs: 8
+blind: run #43 {omit(repl[0→1]:Write(1)), crash(replica@1 before any send)}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 43)
+test <unknown> ...	run time: 177.944918ms | iterations/s: 45 | rng inputs: 8
+blind: run #44 {omit(repl[0→2]:Write(1)), crash(replica@1 before any send)}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 44)
+test <unknown> ...	run time: 204.232932ms | iterations/s: 39 | rng inputs: 8
+blind: run #45 {omit(repl[0→1]:Write(1)), crash(replica@2 after client-ack[2→]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0}}
+blind: universe size 18 (tried 45)
+test <unknown> ...	run time: 189.42335ms | iterations/s: 42 | rng inputs: 8
+blind: run #46 {omit(repl[0→1]:Write(1)), crash(replica@2 after hb[2→]:())}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0}}
+blind: universe size 18 (tried 46)
+test <unknown> ...	run time: 206.929665ms | iterations/s: 39 | rng inputs: 8
+blind: run #47 {omit(repl[0→2]:Write(1)), crash(replica@2 after client-ack[2→]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0}}
+blind: universe size 18 (tried 47)
+test <unknown> ...	run time: 192.665431ms | iterations/s: 42 | rng inputs: 8
+blind: run #48 {omit(repl[0→2]:Write(1)), crash(replica@2 after hb[2→]:())}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0}}
+blind: universe size 18 (tried 48)
+test <unknown> ...	run time: 182.970387ms | iterations/s: 44 | rng inputs: 8
+blind: run #49 {omit(repl[0→1]:Write(1)), crash(replica@2 after ack[2→0]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0}}
+blind: universe size 18 (tried 49)
+test <unknown> ...	run time: 178.186275ms | iterations/s: 45 | rng inputs: 8
+blind: run #50 {omit(repl[0→1]:Write(1)), crash(replica@2 before any send)}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0}}
+blind: universe size 18 (tried 50)
+test <unknown> ...	run time: 203.224414ms | iterations/s: 39 | rng inputs: 8
+blind: run #51 {omit(repl[0→2]:Write(1)), crash(replica@2 after ack[2→0]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0}}
+blind: universe size 18 (tried 51)
+test <unknown> ...	run time: 186.182817ms | iterations/s: 43 | rng inputs: 8
+blind: run #52 {omit(repl[0→2]:Write(1)), crash(replica@2 before any send)}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0}}
+blind: universe size 18 (tried 52)
+test <unknown> ...	run time: 183.058236ms | iterations/s: 44 | rng inputs: 8
+blind: run #53 {omit(repl[0→1]:Write(1)), omit(repl[0→2]:Write(1)), crash(replica@0 after client-ack[0→]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 53)
+test <unknown> ...	run time: 179.131739ms | iterations/s: 45 | rng inputs: 8
+blind: run #54 {omit(repl[0→1]:Write(1)), omit(repl[0→2]:Write(1)), crash(replica@0 after hb[0→]:())}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 54)
+test <unknown> ...	run time: 174.081326ms | iterations/s: 46 | rng inputs: 8
+blind: run #55 {omit(repl[0→1]:Write(1)), omit(repl[0→2]:Write(1)), crash(replica@0 after shrink[0→]:[1, 2])}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 55)
+test <unknown> ...	run time: 197.201139ms | iterations/s: 41 | rng inputs: 8
+blind: run #56 {omit(repl[0→1]:Write(1)), omit(repl[0→2]:Write(1)), crash(replica@0 after shrink[0→]:[1])}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 56)
+test <unknown> ...	run time: 201.498077ms | iterations/s: 40 | rng inputs: 8
+blind: run #57 {omit(repl[0→1]:Write(1)), omit(repl[0→2]:Write(1)), crash(replica@0 after shrink[0→]:[2])}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 57)
+test <unknown> ...	run time: 176.276528ms | iterations/s: 45 | rng inputs: 8
+blind: run #58 {omit(repl[0→1]:Write(1)), omit(repl[0→2]:Write(1)), crash(replica@0 after repl[0→2]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 58)
+test <unknown> ...	run time: 201.238645ms | iterations/s: 40 | rng inputs: 8
+blind: run #59 {omit(repl[0→1]:Write(1)), omit(repl[0→2]:Write(1)), crash(replica@0 after repl[0→1]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 59)
+test <unknown> ...	run time: 197.898604ms | iterations/s: 40 | rng inputs: 8
+blind: run #60 {omit(repl[0→1]:Write(1)), omit(repl[0→2]:Write(1)), crash(replica@0 before any send)}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 60)
+test <unknown> ...	run time: 195.634654ms | iterations/s: 41 | rng inputs: 8
+blind: run #61 {omit(repl[0→1]:Write(1)), omit(repl[0→2]:Write(1)), crash(replica@1 after client-ack[1→]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 61)
+test <unknown> ...	run time: 184.859914ms | iterations/s: 43 | rng inputs: 8
+blind: run #62 {omit(repl[0→1]:Write(1)), omit(repl[0→2]:Write(1)), crash(replica@1 after hb[1→]:())}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 62)
+test <unknown> ...	run time: 196.031327ms | iterations/s: 41 | rng inputs: 8
+blind: run #63 {omit(repl[0→1]:Write(1)), omit(repl[0→2]:Write(1)), crash(replica@1 after ack[1→0]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 63)
+test <unknown> ...	run time: 177.75889ms | iterations/s: 45 | rng inputs: 8
+blind: run #64 {omit(repl[0→1]:Write(1)), omit(repl[0→2]:Write(1)), crash(replica@1 before any send)}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+blind: universe size 18 (tried 64)
+test <unknown> ...	run time: 208.150574ms | iterations/s: 38 | rng inputs: 8
+blind: run #65 {omit(repl[0→1]:Write(1)), omit(repl[0→2]:Write(1)), crash(replica@2 after client-ack[2→]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0}}
+blind: universe size 18 (tried 65)
+test <unknown> ...	run time: 181.13891ms | iterations/s: 44 | rng inputs: 8
+blind: run #66 {omit(repl[0→1]:Write(1)), omit(repl[0→2]:Write(1)), crash(replica@2 after hb[2→]:())}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0}}
+blind: universe size 18 (tried 66)
+test <unknown> ...	run time: 195.343129ms | iterations/s: 41 | rng inputs: 8
+blind: run #67 {omit(repl[0→1]:Write(1)), omit(repl[0→2]:Write(1)), crash(replica@2 after ack[2→0]:Write(1))}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0}}
+blind: universe size 18 (tried 67)
+test <unknown> ...	run time: 177.689278ms | iterations/s: 45 | rng inputs: 8
+blind: run #68 {omit(repl[0→1]:Write(1)), omit(repl[0→2]:Write(1)), crash(replica@2 before any send)}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0}}
+blind: universe size 18 (tried 68)
+MEASURE strategy=Blind verdict=Exhausted hypotheses=68 schedules=544 elapsed_ms=16112
+EventualConsistency at isr_replication.rs:343 (Cluster(loc3v1), AssertIsConsistent, minted and delivered): CERTIFICATE, 68 hypotheses, 8 sampled schedules
+hydrofrac: searching EventualConsistency at isr_replication.rs:564 (Cluster(loc3v1))
+test <unknown> ...	run time: 210.598352ms | iterations/s: 38 | rng inputs: 8
+blind: fact domain learned from the failure-free run: 1 fact(s)
+test <unknown> ...	run time: 208.69308ms | iterations/s: 38 | rng inputs: 8
+blind: channels:
+  channel#68 "write": Process(loc1v1) → Cluster(loc3v1), reliable
+  channel#194 "repl": Cluster(loc3v1) → Cluster(loc3v1), lossy
+  channel#203 "ack": Cluster(loc3v1) → Cluster(loc3v1), reliable
+  channel#248 "shrink": Cluster(loc3v1) → Process(loc2v1), reliable
+  channel#292 "hb": Cluster(loc3v1) → Process(loc2v1), reliable
+  channel#345 "view": Process(loc2v1) → Cluster(loc3v1), reliable
+  channel#351 "client-ack": Cluster(loc3v1) → Process(loc1v1), reliable
+  channel#399 "observe#399": Cluster(loc3v1) → Process(loc4v1), reliable
+  channel#403 "observe#403": Cluster(loc3v1) → Process(loc4v1), reliable
+  channel#408 "observe#408": Cluster(loc3v1) → Process(loc4v1), reliable
+blind: crash bounds: crashes unbounded; not all 5 nodes at once; at most 1 of the checked cluster's 3 crashable member(s)
+blind: specification is generated (EventualConsistency)
+blind: run #1 {}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, observed[0→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@0 through send #4←replica@0#4, observed[1→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@1 through send #2←replica@1#2, observed[2→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@2 through send #2←replica@2#2}}
+blind: universe size 13 (tried 1)
+test <unknown> ...	run time: 202.811433ms | iterations/s: 39 | rng inputs: 8
+blind: run #2 {omit(repl[0→1]:Write(1))}: 8 schedule(s), goal held; derivations {}
+blind: universe size 14 (tried 2)
+test <unknown> ...	run time: 204.129772ms | iterations/s: 39 | rng inputs: 8
+blind: run #3 {omit(repl[0→2]:Write(1))}: 8 schedule(s), goal held; derivations {}
+blind: universe size 15 (tried 3)
+test <unknown> ...	run time: 188.136353ms | iterations/s: 43 | rng inputs: 8
+blind: run #4 {crash(replica@0 after client-ack[0→]:Write(1))}: 8 schedule(s), goal held; derivations {}
+blind: universe size 15 (tried 4)
+test <unknown> ...	run time: 197.047184ms | iterations/s: 41 | rng inputs: 8
+blind: run #5 {crash(replica@0 after hb[0→]:())}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, observed[1→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@1 through send #2←replica@1#2, observed[2→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@2 through send #2←replica@2#2}}
+blind: universe size 15 (tried 5)
+test <unknown> ...	run time: 207.243835ms | iterations/s: 39 | rng inputs: 8
+blind: run #6 {crash(replica@0 after shrink[0→]:[1])}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, observed[1→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@1 through send #2←replica@1#2, observed[2→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@2 through send #2←replica@2#2}}
+blind: universe size 15 (tried 6)
+test <unknown> ...	run time: 206.691142ms | iterations/s: 39 | rng inputs: 8
+blind: run #7 {crash(replica@0 after shrink[0→]:[2])}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, observed[1→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@1 through send #2←replica@1#2, observed[2→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@2 through send #2←replica@2#2}}
+blind: universe size 15 (tried 7)
+test <unknown> ...	run time: 191.582996ms | iterations/s: 42 | rng inputs: 8
+blind: run #8 {crash(replica@0 after repl[0→2]:Write(1))}: 8 schedule(s), goal held; derivations {}
+blind: universe size 15 (tried 8)
+test <unknown> ...	run time: 181.116415ms | iterations/s: 44 | rng inputs: 8
+blind: run #9 {crash(replica@0 after repl[0→1]:Write(1))}: 8 schedule(s), goal held; derivations {}
+blind: universe size 15 (tried 9)
+test <unknown> ...	run time: 170.291107ms | iterations/s: 47 | rng inputs: 8
+blind: run #10 {crash(replica@0 before any send)}: 8 schedule(s), goal held; derivations {}
+blind: universe size 15 (tried 10)
+test <unknown> ...	run time: 193.616293ms | iterations/s: 41 | rng inputs: 8
+blind: run #11 {crash(replica@1 after hb[1→]:())}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, observed[0→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@0 through send #4←replica@0#4, observed[2→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@2 through send #2←replica@2#2}}
+blind: universe size 15 (tried 11)
+test <unknown> ...	run time: 187.354729ms | iterations/s: 43 | rng inputs: 8
+blind: run #12 {crash(replica@1 after ack[1→0]:Write(1))}: 8 schedule(s), goal held; derivations {}
+blind: universe size 15 (tried 12)
+test <unknown> ...	run time: 188.766922ms | iterations/s: 42 | rng inputs: 8
+blind: run #13 {crash(replica@1 before any send)}: 8 schedule(s), goal held; derivations {}
+blind: universe size 15 (tried 13)
+test <unknown> ...	run time: 191.559394ms | iterations/s: 42 | rng inputs: 8
+blind: run #14 {crash(replica@2 after hb[2→]:())}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, observed[0→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@0 through send #4←replica@0#4, observed[1→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@1 through send #2←replica@1#2}}
+blind: universe size 15 (tried 14)
+test <unknown> ...	run time: 186.665803ms | iterations/s: 43 | rng inputs: 8
+blind: run #15 {crash(replica@2 after ack[2→0]:Write(1))}: 8 schedule(s), goal held; derivations {}
+blind: universe size 15 (tried 15)
+test <unknown> ...	run time: 188.087269ms | iterations/s: 43 | rng inputs: 8
+blind: run #16 {crash(replica@2 before any send)}: 8 schedule(s), goal held; derivations {}
+blind: universe size 15 (tried 16)
+MEASURE strategy=Blind verdict=Exhausted hypotheses=16 schedules=128 elapsed_ms=3426
+EventualConsistency at isr_replication.rs:564 (Cluster(loc3v1), AssertIsConsistent, minted): CERTIFICATE, 16 hypotheses, 8 sampled schedules
+EventualConsistency at isr_replication.rs:360 (Cluster(loc3v1), CycleSource, delivered): CERTIFICATE, 16 hypotheses, 8 sampled schedules
+EventualConsistency at isr_replication.rs:343 (Cluster(loc3v1), AssertIsConsistent, minted and delivered): CERTIFICATE, 68 hypotheses, 8 sampled schedules
+EventualConsistency at isr_replication.rs:564 (Cluster(loc3v1), AssertIsConsistent, minted): CERTIFICATE, 16 hypotheses, 8 sampled schedules
+
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 149 filtered out; finished in 28.07s
+
+RC 0 WALL 33.545209868

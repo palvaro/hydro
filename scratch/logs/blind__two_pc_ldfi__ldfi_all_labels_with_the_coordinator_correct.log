@@ -1,0 +1,57 @@
+
+running 1 test
+hydrofrac: searching EventualConsistency at two_pc_ldfi.rs:86 (Cluster(loc2v1))
+test <unknown> ...	run time: 52.219355ms | iterations/s: 306 | exhaustive inputs: 16
+blind: fact domain learned from the failure-free run: 1 fact(s)
+test <unknown> ...	run time: 52.931015ms | iterations/s: 302 | exhaustive inputs: 16
+blind: channels:
+  channel#46 "prepare": Process(loc1v1) → Cluster(loc2v1), reliable
+  channel#89 "commit": Process(loc1v1) → Cluster(loc2v1), reliable
+  channel#150 "peer": Cluster(loc2v1) → Cluster(loc2v1), reliable
+  channel#178 "vote": Cluster(loc2v1) → Process(loc1v1), reliable
+  channel#263 "observe#263": Cluster(loc2v1) → Process(loc3v1), reliable
+  channel#267 "observe#267": Cluster(loc2v1) → Process(loc3v1), reliable
+  channel#272 "observe#272": Cluster(loc2v1) → Process(loc3v1), reliable
+  channel#277 "observe#277": Cluster(loc2v1) → Process(loc3v1), reliable
+blind: crash bounds: crashes unbounded; not all 3 nodes at once; at most 0 of the checked cluster's 2 crashable member(s)
+blind: specification is generated (EventualConsistency)
+blind: run #1 {}: 16 schedule(s), goal held; derivations {{observed[0→]:(0, [1, 0, 0, 0]) from participant@0 through send #0←participant@0#0, observed[1→]:(0, [1, 0, 0, 0]) from participant@1 through send #0←participant@1#0}}
+blind: universe size 2 (tried 1)
+MEASURE strategy=Blind verdict=Exhausted hypotheses=1 schedules=16 elapsed_ms=109
+EventualConsistency at two_pc_ldfi.rs:86 (Cluster(loc2v1), AssertIsConsistent, minted and delivered): CERTIFICATE, 1 hypotheses, exhaustive
+hydrofrac: searching EventualConsistency at two_pc_ldfi.rs:92 (Cluster(loc2v1))
+test <unknown> ...	run time: 49.64782ms | iterations/s: 322 | exhaustive inputs: 16
+blind: fact domain learned from the failure-free run: 1 fact(s)
+test <unknown> ...	run time: 51.315368ms | iterations/s: 312 | exhaustive inputs: 16
+blind: channels:
+  channel#46 "prepare": Process(loc1v1) → Cluster(loc2v1), reliable
+  channel#89 "commit": Process(loc1v1) → Cluster(loc2v1), reliable
+  channel#150 "peer": Cluster(loc2v1) → Cluster(loc2v1), reliable
+  channel#178 "vote": Cluster(loc2v1) → Process(loc1v1), reliable
+  channel#263 "observe#263": Cluster(loc2v1) → Process(loc3v1), reliable
+  channel#267 "observe#267": Cluster(loc2v1) → Process(loc3v1), reliable
+  channel#272 "observe#272": Cluster(loc2v1) → Process(loc3v1), reliable
+  channel#277 "observe#277": Cluster(loc2v1) → Process(loc3v1), reliable
+blind: crash bounds: crashes unbounded; not all 3 nodes at once; at most 0 of the checked cluster's 2 crashable member(s)
+blind: specification is generated (EventualConsistency)
+blind: run #1 {}: 16 schedule(s), goal held; derivations {{vote[0→]:Txn(1)←participant@0#0, vote[1→]:Txn(1)←participant@1#0, observed[0→]:(1, [1, 0, 0, 0]) from participant@0 through send #1←participant@0#1, observed[1→]:(1, [1, 0, 0, 0]) from participant@1 through send #1←participant@1#1}}
+blind: universe size 2 (tried 1)
+MEASURE strategy=Blind verdict=Exhausted hypotheses=1 schedules=16 elapsed_ms=105
+EventualConsistency at two_pc_ldfi.rs:92 (Cluster(loc2v1), AssertIsConsistent, minted and delivered): CERTIFICATE, 1 hypotheses, exhaustive
+hydrofrac: searching EventualConsistency at two_pc_ldfi.rs:98 (Cluster(loc2v1))
+test <unknown> ...	run time: 48.572871ms | iterations/s: 329 | exhaustive inputs: 16
+MEASURE strategy=Blind verdict=Vacuous hypotheses=0 schedules=0 elapsed_ms=48
+EventualConsistency at two_pc_ldfi.rs:98 (Cluster(loc2v1), CycleSource, delivered): VACUOUS (nothing held in the failure-free run)
+hydrofrac: searching EventualConsistency at two_pc_ldfi.rs:161 (Cluster(loc2v1))
+test <unknown> ...	run time: 49.045232ms | iterations/s: 326 | exhaustive inputs: 16
+MEASURE strategy=Blind verdict=Vacuous hypotheses=0 schedules=0 elapsed_ms=49
+EventualConsistency at two_pc_ldfi.rs:161 (Cluster(loc2v1), AssertIsConsistent, minted): VACUOUS (nothing held in the failure-free run)
+EventualConsistency at two_pc_ldfi.rs:86 (Cluster(loc2v1), AssertIsConsistent, minted and delivered): CERTIFICATE, 1 hypotheses, exhaustive
+EventualConsistency at two_pc_ldfi.rs:92 (Cluster(loc2v1), AssertIsConsistent, minted and delivered): CERTIFICATE, 1 hypotheses, exhaustive
+EventualConsistency at two_pc_ldfi.rs:98 (Cluster(loc2v1), CycleSource, delivered): VACUOUS (nothing held in the failure-free run)
+EventualConsistency at two_pc_ldfi.rs:161 (Cluster(loc2v1), AssertIsConsistent, minted): VACUOUS (nothing held in the failure-free run)
+
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 149 filtered out; finished in 11.31s
+
+RC 0 WALL 11.641714101
