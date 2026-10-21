@@ -17,7 +17,7 @@ The intended result is a separation of existing Hydro code into two groups:
 
 Not every search reaches one of these conclusions. Sampled schedules, exhausted search budgets, empty probe results, and collections outside the generated specification's class are reported separately. A certificate is not a proof for all inputs, all cluster sizes, or arbitrarily long executions.
 
-This document describes the current implementation. Development history is in `history-hydrofrac-development.md`.
+This document describes the current implementation and is the user guide. The per-example gallery of the EC corpus is `hydrofrac-ec-corpus.md`; the design retrospective is `hydrofrac-retrospective.md`; development history is in `history-hydrofrac-development.md`.
 
 ## Why Hydro needs hydrofrac
 
@@ -102,7 +102,66 @@ Fixing `FACTS` does not make arbitrary program logic monotone. The certification
 
 The program does not need fault-injection hooks or observation points. Hydrofrac instruments the network operators already present in its flow and taps the collections it already labels.
 
-The test instantiates the program, asks for a specification over all of its labels, registers the crashable nodes, and drives an execution:
+Hydrofrac is driven from a test that builds the flow, fixes cluster sizes, declares which nodes may crash, and writes a body that drives inputs and timers. It does not say which collections to check or what to check about them: `Spec::all_labels` plus `Ldfi::search_all_labels` finds every labelled collection and runs one search per collection.
+
+### The simplest example
+
+One process broadcasts two items to a cluster of three over `fail_stop`, and every node is crashable. This is `ec_broadcast_closed_all_labels` in `hydro_test/src/cluster/ec_ldfi.rs`, trimmed to the lines that matter:
+
+```rust
+let mut flow = FlowBuilder::new();
+let source = flow.process::<Source>();
+let members = flow.cluster::<Member>();
+let (send, items) = source.sim_input::<Item, TotalOrder, ExactlyOnce>();
+
+// This collection is labelled EventualConsistency by the transport.
+let at_members = items.broadcast_closed(&members, TCP.fail_stop().name("bcast").bincode());
+let _out = at_members.weaken_consistency().sim_cluster_output();
+
+let spec = Spec::all_labels(&mut flow); // Names no collection.
+
+let compiled: CompiledSim = flow.sim()
+    .skip_consistency_assertions() // The simulator does not yet check them.
+    .with_cluster_size(&members, 3)
+    .with_provenance()
+    .compiled();
+
+let results = Ldfi::new()
+    .level(Level::Precise)
+    .crashable("source", &source)
+    .crashable_cluster("member", &members, 0..3)
+    .spec(&spec)
+    .search_all_labels(&compiled, async |_run| {
+        send.send(Item(1));
+        send.send(Item(2));
+        hydro_lang::sim::quiesce().await;
+    });
+println!("{results}");
+```
+
+`all_labels` finds the one labelled collection, the members' side of the `broadcast_closed`, which is both where the label is minted and (through `weaken_consistency`) where it exits. The test registers four crashable nodes and sets no `.crash_budget`, so every combination of their crashes is admissible except the ones that cannot say anything. The search logs the bounds before the first hypothesis, then the verdict:
+
+```text
+ldfi: crash bounds: crashes unbounded; not all 4 nodes at once; at most 1 of the checked cluster's 3 crashable member(s)
+```
+
+```text
+EventualConsistency at ec_ldfi.rs:270 (Cluster(loc2v1), AssertIsConsistent, minted and delivered): VIOLATED by {crash(source after bcast[→1]:Item(2))}, 5 hypotheses
+```
+
+![Lamport diagram of the broadcast_closed counterexample: the source crashes after its second item to member 1; its second item to member 2 is lost](molly-viz-samples/ec/ec_broadcast_closed_all_labels/failing.png)
+
+*The failing run, one lane per node, time downward. The source delivers `Item(1)` and `Item(2)` to members 0 and 1, then `☠ crashed` ends its lane; its `Item(2)` to member 2 is drawn gray dashed to a `✗`, lost because the sender had crashed. Members 0 and 1 hold `Item(2)` and member 2 never does.*
+
+The picture shows the premise the type system made. `FailStop`'s `ConsistencyGuarantee` (`hydro_lang/src/networking/mod.rs`) reasons that a failed connection stops all future deliveries to that recipient, which models the recipient as having failed. That says nothing about the sender. One crash of the sender between two sends of one fan-out leaves two members with the item and one without, and nothing retransmits it. Every single-hop `broadcast_closed` in the corpus fails the same way.
+
+### A protocol with an echo
+
+Whether the failure matters depends on what the program builds on top of the hop, and that is what `all_labels` separates. The second harness, `ec_demo_reliable_broadcast_all_labels` in `hydro_test/src/cluster/ec_demos_ldfi.rs`, checks `reliable_broadcast_closed`:
+
+![Dataflow of reliable_broadcast_closed with the EventualConsistency-labelled region shaded: two bold broadcast_closed nodes where the label enters, a double-bordered weaken_consistency where it exits](molly-viz-samples/figures/reliable_broadcast_regions.png)
+
+*`reliable_broadcast_closed` as `Spec::all_labels` sees it. The shaded region is the collections whose type carries `EventualConsistency`. The source's `broadcast_closed` (`:130`) and the members' echo `broadcast_closed` (`:156`) are its two minting nodes, bold. `forward_ref`, `merge_unordered` and `unique` inherit the label. The delivered set leaves the region at the test's `weaken_consistency`, double-bordered: the exit.*
 
 ```rust
 let mut flow = FlowBuilder::new();
@@ -110,14 +169,14 @@ let source = flow.process::<Source>();
 let members = flow.cluster::<Member>();
 let (send, items) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
 
-// This output is labelled EventualConsistency.
-let delivered = reliable_broadcast_closed(items, &members);
+let delivered = reliable_broadcast_closed(items, &members); // labelled EventualConsistency
+// Drop the label and make the stream a program output: this is the *exit*
+// of the labelled region, the collection all_labels reports as "delivered".
 delivered.weaken_consistency().sim_cluster_output();
 
-let spec = Spec::all_labels(&mut flow); // Names no collection.
-
+let spec = Spec::all_labels(&mut flow);
 let compiled = flow.sim()
-    .skip_consistency_assertions() // The simulator does not yet check them.
+    .skip_consistency_assertions()
     .with_cluster_size(&members, 3)
     .with_provenance()
     .compiled();
@@ -135,33 +194,62 @@ let results = Ldfi::new()
 println!("{results}");
 ```
 
-For this program it prints:
+It prints one line per labelled collection:
 
 ```text
 EventualConsistency at reliable_broadcast.rs:130 (Cluster(loc2v1), AssertIsConsistent, minted): VIOLATED by {crash(source after reliable_broadcast.rs:130[→1]:2)}, 5 hypotheses
 EventualConsistency at reliable_broadcast.rs:156 (Cluster(loc2v1), AssertIsConsistent, minted): VIOLATED by {crash(member@0 after reliable_broadcast.rs:156[0→1]:2)}, 3 hypotheses
-EventualConsistency at reliable_broadcast.rs:149 (Cluster(loc2v1), Unique, delivered): CERTIFICATE, 10 hypotheses, exhaustive
+EventualConsistency at reliable_broadcast.rs:149 (Cluster(loc2v1), Unique, delivered): CERTIFICATE, 36 hypotheses, exhaustive
 ```
 
-One line per labelled collection. The first is the source's initial broadcast, violated by the source's crash between two sends. The second is the members' echo broadcast, violated by an echoing member's crash. The third is the delivered set the program exposes, certified: the echo repairs what the sender's crash leaves missing.
+The first is the source's initial broadcast, violated by the source's crash between two sends: the same failing run as the first example, except that member 2 now receives `2` through the echoes, so only the hop itself disagrees. The second is the members' echo broadcast, violated by an echoing member's crash. The third is the delivered set the program exposes, certified under exhaustive schedules: the echo repairs what the sender's crash leaves missing. The two violations are not defects. Reliable broadcast builds a reliable delivered set out of an unreliable single-hop broadcast and an unreliable echo, and "inner collections violated, delivered set certified" is the search showing the protocol doing its job.
 
-`results.verdicts` holds the same information as values, one `LabelVerdict` per collection: `Searched(outcome)` or `NotChecked(reason)`. A test asserts on it per site (`results.at("file.rs:149")`) or overall (`results.all_certified_or_not_checked()`).
+![Lamport diagram: member 0 crashes after echoing to member 1; its echo of 2 to member 2 is lost](molly-viz-samples/ec/ec_reliable_broadcast_inner_echo/failing.png)
+
+*`reliable_broadcast.rs:156`, the members' echo, keyed by echoer. Member 0 echoes `1` and `2` to member 1, dies, and its echo of `2` to member 2 is lost. Member 1 holds (member 0, `2`) and member 2 does not, while the merged delivered set is complete at both. The echo repairs the merged set, not the keyed record of who echoed.*
+
+The third line exists because of the `weaken_consistency().sim_cluster_output()` call, which strips the label from the type and registers the stream as a per-member output of the simulated cluster. Without it only the two minting nodes are reported. The certificate was 10 hypotheses when this test carried `.crash_budget(1)`; under the default bounds the search also runs every admissible pair (a crash point of the source together with one member's crash), and each pair survives and adds a hypothesis.
+
+`results.verdicts` holds the same information as values, one `LabelVerdict` per collection: `Searched(outcome)` or `NotChecked(reason)`. A test asserts on it per site (`results.at("file.rs:149")`), overall (`results.all_certified_or_not_checked()`), or by iterating `results.counterexamples()`. Each verdict includes either the faults and failing schedule, or the successful search's scope, grade, hypothesis count, and exploration mode.
 
 To check one collection by hand, build the specification with `Spec::new`, name the collection with `spec.observe_cluster(collection)` and the members with `spec.correct_members(&cluster, 0..n)`, call `spec.eventual_consistency(observed, correct)`, and run `Ldfi::search`. The search is the same.
 
-The body determines which inputs arrive, which timers fire, and how long the protocol has to converge. For protocols that depend on retransmission, gossip, or leader changes, the body must fire the appropriate timers after `run.end_of_finite_failures()`. Ending faults without giving the protocol a recovery window is not a useful convergence test.
+The remaining examples of the corpus, one per violated collection with its failing run, are in `hydrofrac-ec-corpus.md`.
 
-Each verdict includes either the faults and failing schedule, or the successful search's scope, grade, hypothesis count, and exploration mode.
+### What the test sets
+
+Besides the flow and the body, an `all_labels` test sets four things on `Ldfi::new()`. The builder has other methods; they are tuning and measurement knobs, described in `hydrofrac-retrospective.md`.
+
+- **Which nodes may crash.** `.crashable("name", &process)` and `.crashable_cluster("name", &cluster, 0..n)` register the nodes a hypothesis may crash. The default, nothing crashable, is the absence of a declaration: the search is omissions-only until the test says otherwise. The test does not say how many registered nodes may crash at once; by default the search tries every combination, minus the ones that cannot violate anything. `.crash_budget(k)` exists for a protocol with a stated tolerance where the unbounded search is impractical; its only use in the corpus is multi-Paxos, with `f = 1`. See "Crash bounds" below.
+
+- **Which schedules.** `.exploration(Exploration::Exhaustive)`, the default, explores every schedule the simulator can produce under each hypothesis; a certificate from it is a proof over that finite space. `Exploration::Fuzz { instances }` samples `instances` schedules per hypothesis, and the result is then "no violation found", never a certificate. Multi-Paxos, ISR and ABD use `Fuzz { instances: 8 }` because exhaustive exploration of a leader-election run is out of reach; reliable broadcast and 2PC are exhaustive.
+
+- **Which lineage.** Compile the program `.with_provenance()` and leave `.level()` at its default, `Level::Precise`, which reads the deliveries an output depended on from provenance recorded on each record. `Level::Execution` attributes every output to every input of the execution that produced it: coarser, more hypotheses, same verdicts. Without `.with_provenance()` the search still runs at `Precise`, recovering the same information by replaying a node with a delivery removed, which is slower.
+
+- **How long to search.** `.max_hypotheses(n)`, default 256. The search ends with a counterexample, an infeasible solver (certificate), or this budget; the third is `Outcome::Budget`, which says nothing about the protocol and means "raise it or shrink the test". In the corpus it was hit only by Raft and by noisy single-schedule Paxos runs.
+
+Building with the `ldfi` feature needs cmake and a C++ toolchain for the HiGHS solver bindings (`good_lp`, built from source).
+
+The body determines which inputs arrive, which timers fire, and how long the protocol has to converge. For protocols that depend on retransmission, gossip, or leader changes, the body must fire the appropriate timers after `run.end_of_finite_failures()`; see "When faults may happen" below.
 
 ### Which collections are checked
 
-A **labelled collection** is a node in the program's IR where the `EventualConsistency` label is *minted* or where it *exits* the labelled region.
+A **labelled collection** is a node in the program's IR where the `EventualConsistency` label is *minted* or where it *exits* the labelled region. The label is a type parameter of the live collection, part of `Stream<T, L, B, O, R>`'s type, and the compiler records each node's resulting type in its IR metadata (`metadata().consistency`), so the search can walk the IR and pick out the nodes whose output carries the label while none of their inputs do (`sim::observe`).
 
-A label is minted at a node with no labelled input: a `broadcast_closed` over a transport that grants the label, or an `assert_has_consistency_of`. The minting point is where the type system's assumption about faults lives.
+A label is minted at a node with no labelled input. It enters the type at two kinds of operator:
+
+- A network fan-out whose output location is `Cluster<_, N::ConsistencyGuarantee>`, over a transport that grants the label:
+  - `broadcast_closed` in `hydro_lang` (process → cluster and cluster → cluster; `live_collections/stream/networking.rs`);
+  - `fan_out` and `fan_out_from_process` in `hydro_std::ec_inference_demos`, and their clients `broadcast_live` and `broadcast_live_from_process`.
+
+  The granting transports are `TCP.fail_stop()`, `TCP.lossy_delayed_forever()` and `UDP.lossy_delayed_forever()`. Plain `lossy` grants `NoConsistency`; `send`, `demux`, `round_robin` and the membership-snapshotting `broadcast` grant nothing (`hydro_lang/src/networking/mod.rs`).
+- A programmer's `assert_has_consistency_of` with a proof. Each fan-out is this underneath: a `demux` followed by a library `manual_proof!`.
+
+The minting point is where the type system's assumption about faults lives.
 
 A collection exits the labelled region at a consumer that does not carry the label (`weaken_consistency`, a `batch` into an unlabelled tick) or at a program output. A send to another location is not an exit: the collection continues there under the transport's own rule. The exit is what the program delivers under the label.
 
-Both are reported because they can disagree. Reliable broadcast's initial single-hop broadcast is minted `EventualConsistency` and is violated by the sender's crash. Its delivered set, derived from that label by the type system, certifies anyway, because of the echo the type system cannot see. Only the search distinguishes the two.
+Both are reported because they can disagree, as reliable broadcast's minted single hop and certified delivered set show above. Only the search distinguishes the two.
 
 The operators between a mint and an exit inherit the label and are not listed. A `Tee` and a label-preserving `Cast` stand for the collection they share. Nodes at the same source site, of the same operator, on the same cluster are one collection; when there is one node per cluster member, the collection is their union.
 
@@ -201,13 +289,54 @@ Omissions are available on lossy channels such as `lossy_delayed_forever`. A `fa
 crash(node after message)
 ```
 
-The node performs sends through the named message. Later sends are dropped, and its external outputs are suppressed. Naming the crash point by a message rather than a send count makes the hypothesis usable across schedules. It also allows hydrofrac to crash a sender between two sends in a single broadcast fan-out.
+The node performs sends through the named message. Later sends are dropped, and its external outputs are suppressed. Naming the crash point by a message rather than a send count makes the hypothesis usable across schedules. It also allows hydrofrac to crash a sender between two sends in a single broadcast fan-out, which is how every single-hop `broadcast_closed` in the corpus is violated.
 
-Only nodes registered by the test are crashable. By default every combination of their crashes is admissible: the protocol is expected to uphold the specification under all of them, and the search tries them weakest first (fewest faults; a crash after a later message before one after an earlier message). Two families of fault sets are never proposed, as constraints of the hitting-set program, because they cannot violate anything: every node of the program crashing, and, for the generated specification over a cluster `C`, all or all but one of `C`'s members crashing (one surviving member agrees with itself). The bound on `C` applies only to the cluster the checked collection lives on; a crash anywhere else withholds inputs, which is what the specification is about. Every other combination that leaves nothing to check is found out by running it: a hypothesis whose every schedule is vacuous is recorded as such and none of its supersets is proposed. A test with a fault model of its own (`f` crashes of `2f + 1` replicas) states it with `.crash_budget(f)`.
+Only nodes registered with `.crashable` / `.crashable_cluster` may crash. Crashes are declared by the test and omissions are not because of where the information lives: a `lossy_*` transport is the program's statement that messages on that channel may be dropped, while nothing in the program says whether the client, ZooKeeper or the coordinator is part of what is being tested. The corpus harnesses hold such senders correct so the search is about the protocol, then run them crashable separately to watch the premise fail.
 
-**Every failure happens at a time `≤ EFF`.** This is Molly's fault model, and the simulator's filter enforces it for both kinds of fault. The test declares the end of finite failures (`Run::end_of_finite_failures`); from then on omissions stop applying and no crash point fires. A crash point is named by a message that was sent before `EFF` in the run that proposed it. In another run the same message may be sent only after `EFF`, or never; the crash then does not happen in that run (a node already dead stays dead: crashes are permanent). The execution after `EFF` is failure-free recovery, the window in which the protocol is expected to converge, and a crash point only ever proposed from pre-`EFF` sends. The search's account of what a crash kills (`Dependency::killed_by`) follows the simulator exactly: a crash after `m` kills every later send of the node, before or after `EFF`, provided `m` was sent before `EFF` in that run.
+#### Crash bounds
 
-A harness therefore has to place `EFF` late enough for the failures it means to admit. The ISR harness declares it after the first round of replica timers, so the leader's acknowledgement and heartbeats lie inside the window; with `EFF` right after the client's write, the leader's crash after the acknowledgement is not an admissible failure, and the unclean-election bug is outside the bounds.
+How many registered nodes crash in one hypothesis is not the test's to say. The specification says what the protocol must uphold; the nodes that may fail are the test's declaration; how many fail at once is something the protocol survives or does not, and the search's job is to find out. `Ldfi::new()` therefore sets no crash budget (`crash_budget` is an `Option<usize>`, `None` by default) and tries fault sets weakest first: fewest faults, then a crash after a later message before one after an earlier message. Before the crash-budget change (1538508755) every corpus harness set `.crash_budget(1)` by convention, which can hide bugs: 2PC with cooperative termination certifies under one crash and breaks under two.
+
+Two families of fault sets cannot violate anything and are excluded as constraints of the hitting-set program rather than run:
+
+- **Every node of the program crashing.** `Σ crashes ≤ N − 1` over the program's `N` nodes, counting every process and cluster member but not the specification's observer (`CompiledSim::node_count`). It binds only when everything is crashable; with a non-crashable node left, crashing all the crashable ones is admissible.
+- **All or all but one of the checked cluster's members crashing.** For the generated specification over a cluster `C`, `Σ crashes of C's crashable members ≤ |C| − 2`. One survivor agrees with itself. The bound applies only to the cluster the checked collection lives on (the collection's cluster under `search_all_labels`, the `correct_members` cluster under `Spec::eventual_consistency`); a crash anywhere else withholds inputs, which is what the specification is about. Hand-written specifications get no such bound.
+
+Every other vacuous combination is found by running it: a hypothesis whose every schedule is vacuous is recorded, and none of its supersets is proposed. The search prints the bounds it works under as one `ldfi: crash bounds:` line before the first hypothesis.
+
+The vacuity rule had a gap that the unbounded search exposed: the vacuous set was computed before derivations, so it saw a failed hand-written `PRE` but not the generated specification's vacuity (no correct member holds any fact of the domain), and every superset of "the proposer crashed before anything was chosen" was enumerated. The vacuous set is now taken from the schedules after derivation ([ldfi-level-ablation.md](ldfi-level-ablation.md#unbounded-crash-budget-with-vacuity-constraints)).
+
+The cost of removing the default budget, measured once per test: no verdict changed and every counterexample is still a single fault at the same hypothesis count, while certificates grew where the protocol survives two crashes (reliable broadcast's delivered set from 10 hypotheses to 36 under `all_labels`, uniform broadcast from 28 to 105). Multi-Paxos's `learned` set, with seven crashable nodes, did not finish within 2,000 hypotheses unbounded; its tests keep `.crash_budget(1)`, the protocol's own stated fault model (`f = 1` of three acceptors), which is the kind of claim `.crash_budget` is for.
+
+#### When faults may happen
+
+**Every failure happens at a time `≤ EFF`.** This is Molly's fault model, and the simulator's filter enforces it for both kinds of fault. The body may declare the end of finite failures once, with `run.end_of_finite_failures()`; from then on omissions stop applying and no crash point fires. The execution after `EFF` is failure-free recovery, the window in which the protocol is expected to converge.
+
+A crash point is named by a message that was sent before `EFF` in the run that proposed it. In another run the same message may be sent only after `EFF`, or never; the crash then does not happen in that run (a node already dead stays dead: crashes are permanent). The search's account of what a crash kills (`Dependency::killed_by`) follows the simulator exactly: a crash after `m` kills every later send of the node, before or after `EFF`, provided `m` was sent before `EFF` in that run.
+
+The call is optional, and neither harness in "Using hydrofrac" makes it. Without it every send of the run is a fault candidate, which is right for a closed broadcast, since it has nothing to recover with. A protocol that converges by retrying needs the cut: with none, the adversary may drop every retransmission within the run, and no retry-based protocol could certify. Where the body places it decides which messages the search can lose.
+
+The ISR harness's body (`isr_replication.rs`, the `body` function) is the shape to copy. The `run` it receives is the `Run` handle every body gets as its argument, the `_run` the earlier examples ignore:
+
+```rust
+async |run| {
+    for w in 1..=writes {
+        h.write_send.send(Write(w));           // the client's writes
+    }
+    hydro_lang::sim::quiesce().await;
+    for round in 0..rounds {
+        h.replica_timer.send_many((0..members).map(|m| (m, ())));   // replicas heartbeat
+        hydro_lang::sim::quiesce().await;
+        h.zk_timer.send(());                   // ZooKeeper recomputes the view
+        hydro_lang::sim::quiesce().await;
+        if round == 0 {
+            run.end_of_finite_failures();      // faults may fall anywhere up to here
+        }
+    }
+}
+```
+
+Everything before the call, the writes and the first round of replica and ZooKeeper timers, is where crashes and omissions may land; the remaining `rounds − 1` rounds run failure-free and are the protocol's chance to recover. A harness has to place `EFF` late enough for the failures it means to admit. With `EFF` right after the client's write, the leader's crash after the acknowledgement is not an admissible failure, and the unclean-election bug is outside the bounds.
 
 The program's transport declarations therefore determine what can go wrong, while the test determines which nodes may crash and when faults must stop.
 
@@ -233,7 +362,9 @@ Hydrofrac has two lineage oracles, selected by `Level`:
 | `Execution` | Every input to the execution that produced the output, and to earlier executions of the same tick (persisted state). Sound but coarse; available for any program. |
 | `Precise` | Record provenance where the program carries it, counterfactual replay where it does not; falls back to execution lineage only when replay is inconclusive. The default. |
 
-Record provenance is added by an IR rewrite through `SimFlow::with_provenance`: each element carries the delivery ids it was computed from. An element that came out of a closure the rewrite cannot see into carries an opaque mark instead; at such a record hydrofrac derives the step by **counterfactual replay** of the node alone (its recorded deliveries removed one at a time, keeping those without which the node no longer produces the record). A program compiled without `with_provenance()` (because the rewrite does not support one of its operators, or by choice) has no tags at all, and `Precise` treats every record of it as opaque: every send and output is derived by replay. Replay is thus an oracle inside `Precise`, not a level of its own: measured as a standalone level it produced the same derivations as record provenance wherever record provenance applied, at two to ten times the cost (`ldfi-level-ablation.md`). A static-slice narrowing of the execution closure was also measured and removed: it never separated a record from the inputs of its execution on any protocol in the corpus.
+Record provenance is added by an IR rewrite through `SimFlow::with_provenance`: each element carries the delivery ids it was computed from. An element that came out of a closure the rewrite cannot see into carries an opaque mark instead; at such a record hydrofrac derives the step by **counterfactual replay** of the node alone (its recorded deliveries removed one at a time, keeping those without which the node no longer produces the record).
+
+A program compiled without `with_provenance()` (because the rewrite does not support one of its operators, or by choice) has no tags at all, and `Precise` treats every record of it as opaque: every send and output is derived by replay. Replay is thus an oracle inside `Precise`, not a level of its own: measured as a standalone level it produced the same derivations as record provenance wherever record provenance applied, at two to ten times the cost (`ldfi-level-ablation.md`). A static-slice narrowing of the execution closure was also measured and removed: it never separated a record from the inputs of its execution on any protocol in the corpus.
 
 When replay cannot produce a usable result, hydrofrac falls back: a replay that does not reproduce the node's output (or panics), a node with no scripted inputs to replay against, or a search with no replay oracle goes to the record provenance where there is any, and from there to the execution closure; the search counts these fallbacks per schedule. `Ldfi::new()` defaults to `Precise`; on a program compiled without `with_provenance()` the search logs that it is replaying every record.
 
@@ -271,22 +402,24 @@ This checks that every present fact occurs at every correct member. A fact absen
 
 Because the observer is a Hydro flow, its outputs have lineage just like the program's outputs. Hydrofrac uses that lineage to build the search constraints.
 
-`Spec::all_labels` leaves the observer's input as a slot to be filled at compile time. When the flow is compiled for the simulator, a pass over the IR (`sim::observe`) lists the labelled collections and taps each one in the specification's class. The labelled node becomes a `Tee`, as a `.clone()` would make it. The second branch is mapped to `(collection index, bincode of the element)` and sent to the observer over a `fail_stop` channel, exactly the IR a `.send()` to the observer would build. The slot becomes the union of the taps. The pass runs before network compilation and before the provenance rewrite, so the taps are compiled and traced like any other operator and lineage flows through them. A `Tee` branch is invisible to the rest of the program, whose own behaviour is unchanged.
+`Spec::all_labels` leaves the observer's input as a slot to be filled at compile time. When the flow is compiled for the simulator, a pass over the IR (`sim::observe`) lists the labelled collections and taps each one in the specification's class. The labelled node becomes a `Tee`, as a `.clone()` would make it. The second branch is mapped to `(collection index, bincode of the element)` and sent to the observer over a `fail_stop` channel, exactly the IR a `.send()` to the observer would build. The slot becomes the union of the taps.
+
+The pass runs before network compilation and before the provenance rewrite, so the taps are compiled and traced like any other operator and lineage flows through them. A `Tee` branch is invisible to the rest of the program, whose own behaviour is unchanged.
 
 ## Judgements
 
 The distinction between a certificate and a successful test run should be explicit.
 
-| Result | Meaning |
-|---|---|
-| **Certified** | Exhaustive exploration completed without a violation, and no further fault hypothesis remains within the declared bounds. |
-| **Violated** | An allowed fault set and explored schedule failed the generated check. The result includes the counterexample. |
-| **Fuzz result: no violation found** | Sampled schedules passed. This is evidence, not a certificate. |
-| **Budget exhausted** | The search stopped before reaching a conclusion. |
-| **Vacuous** | The probe supplied no facts to check. |
-| **Not checked** | The collection is outside the generated specification's class. The reason is reported. |
+| Verdict | What it is worth | What it does not imply |
+|---|---|---|
+| **Certified** (`Outcome::Certificate`, `Grade::Generated`, `Exploration::Exhaustive`) | No admissible fault set, under any schedule, breaks the generated check within this test's topology, workload, horizon, crash bounds and `EFF`. | Anything about other inputs, cluster sizes or longer horizons; convergence beyond the horizon. |
+| **Violated** (`Outcome::Counterexample`) | A concrete fault set and schedule under which some fact of `FACTS` is present at one correct member and absent at another at the end of the run. One failing run suffices; exhaustive exploration is not required. | That the protocol is wrong rather than the horizon too short; the trace must be read. |
+| **No violation under Fuzz** | `instances` sampled schedules per hypothesis passed and no hitting set remained. Evidence. | A certificate; a violation in an unsampled schedule is missed. |
+| **Budget** (`Outcome::Budget`) | The hypothesis cap was reached. | Anything about the protocol. |
+| **Vacuous** (`Outcome::Vacuous`) | The failure-free probe collected no facts: the harness protects nothing. | Anything about the protocol; it is a statement about the body. |
+| **Not checked** (`LabelVerdict::NotChecked(reason)`) | The collection is outside the generated specification's class: local inputs only, not a stream, inside a tick, excluded by the test. | Silence: the reason is printed, and nothing fails for a label the test does not assert on. |
 
-A counterexample does not require exhaustive exploration: one failing execution is enough. A certificate does.
+Every certificate on the `all_labels` path carries `Grade::Generated`. The grade follows the specification, not the search: `Spec::eventual_consistency` has by construction the form the hitting-set inference is sound for, a positive obligation over a fixed fact domain that no extra observed fact can undo. `Grade::HandWritten`, printed RELATIVE, is the grade of specifications the test writes itself; `all_labels` never produces it, and "Hand-written specifications" below says what it is worth. `Grade::Goal` belongs to the superseded goal API. `Strategy::Blind` ends in `Outcome::Exhausted` rather than a certificate.
 
 For complete EC, certification combines with the existing type-level reasoning. The type system establishes consistency given the same inputs; hydrofrac supplies bounded evidence that the protocol's fault handling preserves the required dissemination. Neither result substitutes for the other.
 
@@ -297,7 +430,7 @@ The existing tests cover every producer of the `EventualConsistency` label in th
 - `hydro_test/src/cluster/ec_ldfi.rs`
 - `hydro_test/src/cluster/ec_demos_ldfi.rs`
 
-The searches below run under the default crash bounds (every combination of crashes of the registered nodes that leaves at least two members of the checked cluster correct), except multi-Paxos, whose test states the protocol's own fault model, one crash, because the unbounded search does not finish within 2,000 hypotheses (see `ldfi-level-ablation.md`, "Unbounded crash budget with vacuity constraints"). Hypothesis counts include the probe. Under `Fuzz`, the count varies by one between runs; where two runs differed, both are given.
+The searches below run under the default crash bounds (every combination of crashes of the registered nodes, minus the two excluded families: every node dead, and fewer than two correct members of the checked cluster), except multi-Paxos, whose test states the protocol's own fault model, one crash, because the unbounded search does not finish within 2,000 hypotheses ([ldfi-level-ablation.md](ldfi-level-ablation.md#unbounded-crash-budget-with-vacuity-constraints)). Hypothesis counts include the probe. Under `Fuzz`, the count varies by one between runs; where two runs differed, both are given. The per-example gallery, with each violated collection's failing run, is `hydrofrac-ec-corpus.md`.
 
 | Program | Result |
 |---|---|
@@ -361,26 +494,52 @@ The vacuous rows are statements about the body. A termination protocol whose pre
 
 ## Hand-written specifications
 
-Hydrofrac can also check properties that Hydro's types do not express.
+Hydrofrac can also check properties that Hydro's types do not express: agreement, durability, "the leader has every acknowledged write". The test writes the property as a Hydro flow, and `Ldfi::search` runs the same search over it. Because hydrofrac is then checking a view it did not construct, three things change: the grade on the certificate, the soundness caveat behind the grade, and the weight that falls on where the body ends finite failures.
 
-A hand-written `Spec` has two Hydro views:
+### Writing one
 
-- A **precondition**: if empty, the run is ignored.
-- A **postcondition**: if empty while the precondition is nonempty, the run is a counterexample.
+`Spec::new(&mut flow)` adds an observer process to the program. The streams the property mentions are shipped to that observer with `spec.observe(stream)` (from a process), `spec.observe_cluster(stream)` (from every member, tagged with the member) or `spec.observe_sequenced(stream)` (keeping arrival order). Over those streams the test builds two bounded `Optional`s in the observer's tick and registers them as `spec.pre(..)` and `spec.post(..)`:
 
-`Ldfi` also accepts simpler output goals through `goal`, `goal_all_members`, and `goal_witnessed`.
+- **`PRE`** is the precondition that says the run is one the property speaks about. If it is empty, the run is ignored. A `PRE` that never holds in the failure-free run is `Outcome::Vacuous`, a verdict about the harness.
+- **`POST`** is the conclusion. A run in which `PRE` is non-empty and `POST` is empty is a counterexample.
 
-These interfaces support checks for committed-entry durability in Raft and Paxos, two-phase commit atomicity, ISR replication agreement, quorum counting, and retry-until-ack delivery. Their certificates are marked **RELATIVE**, because hydrofrac does not establish that an arbitrary specification has the form required by the lineage search's completeness argument.
+A view holds if it is non-empty at the end of the run, as a Datalog goal holds at fixpoint. `spec.correct_members(&cluster, 0..n)` gives the set of members the current hypothesis did not crash, for properties quantified over survivors.
 
-These tests have found substantive defects:
+The ISR durability check (`hydro_test/src/cluster/isr_replication.rs`) is the pattern in full. `PRE`: the client's first write was acknowledged and a final leader exists (the leader of `observe_sequenced(views).max()`). `POST`: that leader is among the replicas that appended the write. If a crash lets a replica that never saw the write win the election, `PRE` holds, `POST` is empty, and the search reports the crash.
+
+The older goal API (`goal`, `goal_all_members`, `goal_witnessed`) still compiles but is superseded by `pre`/`post`.
+
+### What a hand-written certificate is worth
+
+A certificate from a `pre`/`post` specification is `Grade::HandWritten` and prints as **Certified, RELATIVE**. What it says: no hitting set remained; the recorded derivations persisted under every excluded fault set. What it does not say: that the inference was sound for this view.
+
+The hitting-set inference ("a fault set that leaves this derivation intact cannot break the view") is valid only for views monotone in the facts they observe. The generated specification has that form by construction (see "Why the specification's form matters"). Hand-written agreement and durability do not: agreement is the *absence* of a conflict, and durability of a write rests on the *final* leader view. A hypothesis can break either by adding a fact, removing nothing any clause names. A hand-written `POST` falsified by an extra fact can therefore be missed, and the grade says so.
+
+The concrete lesson was a false certificate. When the observer-level counterfactual was first used alone, ISR's durability `POST` read the final leader off `observe_sequenced(views).max()`, and deleting views latest-first never changed the value, since the earlier view names the same leader. The derivation held the appended write and the initial view, with no heartbeat in its lineage. The breaking hypothesis (lose a replication, crash the leader after the acknowledgement, let ZK promote the stale follower) kills neither; it *adds* a later view. Six hypotheses, certificate, bug present.
+
+Record provenance, which folds every contribution of an aggregate into its value, kept the views and the heartbeats behind them, and the observer's derivation is now the **union** of the counterfactual and recorded derivations: sound where either is, minimal only where both agree (`history-hydrofrac-negation.md`). The search finds the corpus's non-monotone bugs because the breaking hypothesis also displaces a recorded fact in `POST`'s derivation; a conflict that appeared without displacing one would not be proposed.
+
+### Bounding failures
+
+The `EFF` rule of "When faults may happen" carries more weight here. Finite failures is the fairness assumption that makes the convergence question answerable at all, and the body has to fire the protocol's timers after the cut or it has not asked the question: four Raft bodies failed correct Raft this way before the fifth ([history-hydrofrac-development.md](history-hydrofrac-development.md#9-what-it-has-found)).
+
+Where the cut falls decides which messages the search can lose. The ISR harness's cut was moved past the first round so the acknowledgement lies inside the window in every world. The Paxos harness's cut was moved from before the new leader's first ballot to after it, which made the P1a/P1b exchange faultable, grew the correct variant's certificate from 196 to 372 hypotheses, and exposed a production defect the old cut had hidden ([history-hydrofrac-development.md](history-hydrofrac-development.md#92-paxos-and-two-defects-the-simulator-found-on-the-way)). The harness that cannot lose a message cannot test the protocol's handling of its loss.
+
+Whether a point on the body's timeline is the right form of the fairness assumption is an open question, discussed in `hydrofrac-retrospective.md`.
+
+### What these harnesses have found
+
+These interfaces support checks for committed-entry durability in Raft and Paxos, two-phase commit atomicity, ISR replication agreement, quorum counting, and retry-until-ack delivery. They have found substantive defects:
 
 - An injected Raft election-restriction bug, using index-only log comparison, was found in 90 hypotheses with four omissions and no crash. The scenario had not been written down by the author. Correct Raft completed a relative certification search in 235 hypotheses under the same bounds.
 - Production Paxos counted P1b replies rather than distinct acceptors. The defect became visible after the test moved `EFF` past the first ballot. Correct Paxos, the Paxos key-value store, and compartmentalized Paxos completed relative certification searches in 372, 301, and 568 hypotheses.
 - Simulator exploration also exposed two non-fault defects: `collect_quorum_with_response` was not a function of its input despite its `nondet!` justification, and an idempotence-justified `fold` lacked a simulator implementation of its retry-only cast. Both were fixed.
 
-The larger tests are ignored by default for runtime. The Raft bug and correct-version searches take roughly thirty minutes and an hour; the three corrected Paxos searches take about forty-five minutes together.
+The larger tests are ignored by default for runtime. The Raft bug and correct-version searches take roughly thirty minutes and an hour; the three corrected Paxos searches take about forty-five minutes together. The failing runs of the 2PC, ISR, Paxos and reliable-delivery harnesses are drawn in the gallery under `molly-viz-samples/` (see `molly-viz.md`).
 
 ## Limitations
+
+**Hydrofrac runs only in the simulator.** The fault filter is a simulator artefact, not an IR node, so nothing exists under `deploy`. Embedded channels are not fault points.
 
 **A certificate covers a test, not all executions.** Changing the workload, cluster size, timers, or horizon requires another test. Exhaustive fault search does not generalize those choices.
 
@@ -396,7 +555,9 @@ The larger tests are ignored by default for runtime. The Raft bug and correct-ve
 
 **Not every labelled collection is in the class.** The automatic specification checks unbounded streams at a cluster's top level that a network channel feeds. Lattice values, collections inside a tick, and collections with local inputs only are reported with the reason and not searched. Observing a collection requires its element type to be `Clone + Serialize`; one that is not must be excluded with `Spec::all_labels_except`. The verdicts do not fail a test by themselves: `LabelResults` is what a test asserts on, and nothing fails for a label the test does not look at.
 
-**The fault vocabulary is limited.** Byzantine behavior and duplication are not modelled. There is no separate partition primitive, although omission sets on lossy channels can represent partitions. The Raft counterexample uses four omissions on two links.
+**The fault vocabulary is limited.** Omission and crash only: no delay, no reordering (that is the schedule explorer's dimension), no Byzantine behavior, no duplication. There is no separate partition primitive, although omission sets on lossy channels can represent partitions. The Raft counterexample uses four omissions on two links.
+
+**Cost.** On an 8-core debug build, ISR unit searches take seconds to half a minute, exhaustive echo broadcast at `n = 3` about a minute, and the hand-written Raft and Paxos searches half an hour to an hour each. The regression suites are `cargo test -p hydro_test ldfi -- --test-threads=1` (about 12 min, long certifications ignored) and `cargo test -p hydro_lang --features ldfi --lib sim`.
 
 ## Next steps
 

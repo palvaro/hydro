@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
-"""Render docs/design/hydrofrac-inventory.md to hydrofrac-inventory.pdf.
+"""Render one or more design docs in docs/design/ from Markdown to PDF.
+
+Each ``NAME.md`` given on the command line is written to ``NAME.pdf`` beside it.
+With no arguments, renders the three hydrofrac docs: ``hydrofrac.md``,
+``hydrofrac-ec-corpus.md`` and ``hydrofrac-retrospective.md``. Relative image
+paths in a doc are resolved against that doc's directory.
 
 Setup (once):
 
     python3 -m venv $TMPDIR/pdfenv
     $TMPDIR/pdfenv/bin/pip install markdown 'weasyprint==52.5' pillow
 
-Run (from anywhere; paths are resolved relative to this file):
+Run (from anywhere; default paths are resolved relative to this file):
 
-    $TMPDIR/pdfenv/bin/python docs/design/render-inventory.py
+    $TMPDIR/pdfenv/bin/python docs/design/render-design-doc.py
+    $TMPDIR/pdfenv/bin/python docs/design/render-design-doc.py docs/design/hydrofrac.md
 
 What it does beyond a plain markdown → HTML → PDF conversion:
 
@@ -49,8 +55,7 @@ from PIL import Image
 from weasyprint import HTML, CSS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SRC = os.path.join(HERE, "hydrofrac-inventory.md")
-OUT = os.path.join(HERE, "hydrofrac-inventory.pdf")
+DEFAULT_SRCS = ["hydrofrac.md", "hydrofrac-ec-corpus.md", "hydrofrac-retrospective.md"]
 
 # Portrait column and landscape frame (Letter minus the margins below).
 PORTRAIT_W, PORTRAIT_H = 7.0, 8.5
@@ -122,9 +127,9 @@ def image_dpi(path, im):
     return PRINT_DPI if name == "failing-print.png" else DEFAULT_DPI
 
 
-def image_inches(src):
+def image_inches(src, base_dir):
     """(width_in, height_in) at the image's natural dpi, or None."""
-    path = os.path.join(HERE, html.unescape(src))
+    path = os.path.join(base_dir, html.unescape(src))
     try:
         with Image.open(path) as im:
             w, h = im.size
@@ -164,24 +169,29 @@ def place_figure(w, h, caption_html=""):
     return "oversize", dw, dh, dw + 0.8, dh + 1.4 + 0.2 * extra_lines
 
 
-def prefer_print_render(src):
+def prefer_print_render(src, base_dir):
     """Swap failing.png for failing-print.png when a print re-render exists."""
     base, name = os.path.split(html.unescape(src))
     if name != "failing.png":
         return src
     candidate = os.path.join(base, "failing-print.png")
-    if os.path.exists(os.path.join(HERE, candidate)):
+    if os.path.exists(os.path.join(base_dir, candidate)):
         return html.escape(candidate, quote=True)
     return src
 
 
-def rewrite_img(m):
-    attrs = m.group(1)
-    attrs = re.sub(r'src="([^"]*)"', lambda s: 'src="%s"' % prefer_print_render(s.group(1)), attrs)
-    return "<img" + attrs + ">"
+def rewrite_imgs(html_text, base_dir):
+    def rewrite_img(m):
+        attrs = m.group(1)
+        attrs = re.sub(
+            r'src="([^"]*)"', lambda s: 'src="%s"' % prefer_print_render(s.group(1), base_dir), attrs
+        )
+        return "<img" + attrs + ">"
+
+    return re.sub(r"<img\b([^>]*?)\s*/?>", rewrite_img, html_text)
 
 
-def wrap_figures(html_text):
+def wrap_figures(html_text, base_dir):
     """Wrap img + em-caption pairs in <figure>; return (html, extra_css, placements)."""
     pat = re.compile(r"<p>(<img\b[^>]*>)</p>\s*<p><em>(.*?)</em></p>", re.S)
     extra_css = []
@@ -191,7 +201,7 @@ def wrap_figures(html_text):
     def repl(m):
         img, caption = m.group(1), m.group(2)
         src = re.search(r'src="([^"]*)"', img)
-        size = image_inches(src.group(1)) if src else None
+        size = image_inches(src.group(1), base_dir) if src else None
         if not size:
             return "<figure>%s<figcaption>%s</figcaption></figure>" % (img, caption)
         w, h = size
@@ -217,8 +227,9 @@ def wrap_figures(html_text):
     return out, "\n".join(extra_css), placements
 
 
-def main():
-    with open(SRC, encoding="utf-8") as f:
+def render(src, out):
+    base_dir = os.path.dirname(os.path.abspath(src))
+    with open(src, encoding="utf-8") as f:
         md_text = preprocess_markdown(f.read())
 
     body = markdown.markdown(
@@ -227,19 +238,32 @@ def main():
         output_format="html5",
     )
     body = soft_break_code_in_cells(body)
-    body = re.sub(r"<img\b([^>]*?)\s*/?>", rewrite_img, body)
-    body, extra_css, placements = wrap_figures(body)
+    body = rewrite_imgs(body, base_dir)
+    body, extra_css, placements = wrap_figures(body, base_dir)
 
-    for src, w, h, placement, dw, dh, pw, ph in placements:
+    for img_src, w, h, placement, dw, dh, pw, ph in placements:
         page = "" if pw is None else " on %.1fx%.1fin page" % (pw, ph)
-        print("%-9s %5.1fx%4.1fin -> %5.1fx%4.1fin%s  %s" % (placement, w, h, dw, dh, page, src), file=sys.stderr)
+        print("%-9s %5.1fx%4.1fin -> %5.1fx%4.1fin%s  %s" % (placement, w, h, dw, dh, page, img_src), file=sys.stderr)
 
     doc = '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>%s</body></html>' % body
-    HTML(string=doc, base_url=HERE + os.sep).write_pdf(
-        OUT, stylesheets=[CSS(string=CSS_TEXT), CSS(string=extra_css)]
+    HTML(string=doc, base_url=base_dir + os.sep).write_pdf(
+        out, stylesheets=[CSS(string=CSS_TEXT), CSS(string=extra_css)]
     )
-    print("wrote", OUT, file=sys.stderr)
+    print("wrote", out, file=sys.stderr)
+
+
+def main(argv):
+    if len(argv) > 1 and argv[1] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    srcs = argv[1:] or [os.path.join(HERE, name) for name in DEFAULT_SRCS]
+    for src in srcs:
+        if not src.endswith(".md"):
+            print("error: not a .md file:", src, file=sys.stderr)
+            return 2
+        render(src, src[: -len(".md")] + ".pdf")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main(sys.argv))
