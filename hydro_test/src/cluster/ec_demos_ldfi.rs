@@ -463,8 +463,8 @@ mod tests {
     }
 
     /// Every label of `reliable_broadcast_closed`, automatically (`Spec::all_labels`): the
-    /// delivered set certifies in the same 36 hypotheses as the manual search above (every
-    /// admissible combination of a source crash point and one member's crash); the initial
+    /// delivered set certifies in the same 49 hypotheses as the manual closed search above (every
+    /// admissible combination of a source crash point and one member's crash point); the initial
     /// single-hop broadcast the label is inferred from is violated on its own by the source's
     /// crash between two of its fan-out sends, and reported as an informational hop, since it
     /// reaches the delivered set only merged with the echo.
@@ -504,7 +504,7 @@ mod tests {
         else {
             panic!("{results}");
         };
-        assert_eq!(runs.len(), 36, "{results}");
+        assert_eq!(runs.len(), 49, "{results}");
         // The initial single-hop broadcast the label is inferred from: on its own, violated
         // by the source's crash; but it reaches the delivered set only merged with the echo,
         // so it is a merge-dominated hop, informational, and the `unique` is its verdict.

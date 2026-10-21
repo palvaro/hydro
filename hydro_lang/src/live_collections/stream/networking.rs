@@ -1343,25 +1343,26 @@ impl<'a, T, L, B: Boundedness, C: Consistency, O: Ordering, R: Retries>
             key: to.key,
             _phantom: PhantomData,
         };
-        let member_ids = self
-            .location
-            .source_iter(q!(cluster_ids
-                .iter()
-                .map(|id| MemberId::from_tagless(id.clone()))))
-            .assert_has_consistency_of_trusted::<Cluster<'a, L, C>>(manual_proof!(
-                /// ClusterIds is deploy-time metadata, identical on every cluster member.
-            ));
 
-        self.cross_product(member_ids)
-            .map(q!(|(data, member_id)| (member_id, data)))
-            .into_keyed()
-            .demux(to, via)
-            .assert_has_consistency_of_trusted(manual_proof!(
-                /// Closed broadcast with fixed membership: every source member sends to every
-                /// destination member, and the network's failure policy (tracked by
-                /// `NetworkFor::ConsistencyGuarantee`) delivers the same messages to every live
-                /// member, so all destinations materialize the same elements.
-            ))
+        // The destination member ids are local deploy-time configuration, not replicated data,
+        // so they are read inside the fan-out closure rather than crossed in as a second
+        // stream: a stream at this location would have to carry the source's consistency
+        // label, and only the received messages below should carry the label this method
+        // grants.
+        self.flat_map_ordered(q!(move |data| {
+            cluster_ids
+                .iter()
+                .map(move |id| (MemberId::from_tagless(id.clone()), data.clone()))
+                .collect::<Vec<_>>()
+        }))
+        .into_keyed()
+        .demux(to, via)
+        .assert_has_consistency_of_trusted(manual_proof!(
+            /// Closed broadcast with fixed membership: every source member sends to every
+            /// destination member, and the network's failure policy (tracked by
+            /// `NetworkFor::ConsistencyGuarantee`) delivers the same messages to every live
+            /// member, so all destinations materialize the same elements.
+        ))
     }
 
     #[cfg(feature = "sim")]

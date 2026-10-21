@@ -135,8 +135,8 @@ let spec = Spec::all_labels(&mut flow);
 One line per labelled collection:
 
 ```
-EventualConsistency at reliable_broadcast.rs:130 (Cluster(loc2v1), AssertIsConsistent, minted): informational, merged and checked at reliable_broadcast.rs:149: VIOLATED by {crash(source after reliable_broadcast.rs:130[→1]:2)}, 5 hypotheses
-EventualConsistency at reliable_broadcast.rs:156 (Cluster(loc2v1), AssertIsConsistent, minted): informational, merged and checked at reliable_broadcast.rs:149: VIOLATED by {crash(member@0 after reliable_broadcast.rs:156[0→1]:2)}, 3 hypotheses
+EventualConsistency at reliable_broadcast.rs:130 (Cluster(loc2v1), AssertIsConsistent, minted): VIOLATED by {crash(source after reliable_broadcast.rs:130[→1]:2)}, 5 hypotheses
+EventualConsistency at reliable_broadcast.rs:156 (Cluster(loc2v1), AssertIsConsistent, minted): VIOLATED by {crash(member@0 after reliable_broadcast.rs:156[0→1]:2)}, 3 hypotheses
 EventualConsistency at reliable_broadcast.rs:149 (Cluster(loc2v1), Unique, delivered): CERTIFICATE, 36 hypotheses, exhaustive
 ```
 
@@ -179,7 +179,7 @@ The count was 28 under a budget of one crash. The unbounded search also runs eve
 
 ## Multi-Paxos: every label
 
-**Harness:** `ec_demos_ldfi.rs::ec_demo_multi_paxos_all_labels` · **Topology:** 1 proposer, 3 acceptors, 3 learners · **Transport:** `TCP.fail_stop()` throughout · **Faults:** every cluster crashable, `.crash_budget(1)`, `Fuzz { instances: 8 }` · **Verdicts:** 3 Violated, 2 Informational (violated on their own), 4 no violation under `Fuzz`, 1 Covered by its input (no violation) · **Hypotheses:** 5 to 26 per label
+**Harness:** `ec_demos_ldfi.rs::ec_demo_multi_paxos_all_labels` · **Topology:** 1 proposer, 3 acceptors, 3 learners · **Transport:** `TCP.fail_stop()` throughout · **Faults:** every cluster crashable, `.crash_budget(1)`, `Fuzz { instances: 8 }` · **Verdicts:** 5 Violated, 4 no violation under `Fuzz`, 1 Not checked · **Hypotheses:** 5 to 26 per label
 
 The body tells proposer 0 to lead round 1, quiesces, sends commands 7 and 8, and quiesces. This is the one EC harness with an explicit crash budget. `f = 1` of three acceptors is the protocol's stated fault model, and the unbounded search of the `learned` set over seven crashable nodes does not finish (a proposer crash point, up to three acceptor crash points and a learner crash remain admissible together, and each such set survives and adds a hypothesis; the 256-hypothesis budget was hit at 212 s and 659 hypotheses in half an hour produced no verdict).
 
@@ -213,11 +213,11 @@ EventualConsistency at multi_paxos.rs:286 (Cluster(loc2v1), CycleSource, deliver
 EventualConsistency at multi_paxos.rs:549 (Cluster(loc2v1), AssertIsConsistent, minted): VIOLATED by {crash(proposer@0 after multi_paxos.rs:549[0→1]:(Ts { round: 1, writer: Legacy { raw_id: 0 } }, 0, 1, Some(8)))}, 8 hypotheses
 EventualConsistency at multi_paxos.rs:569 (Cluster(loc1v1), AssertIsConsistent, minted): CERTIFICATE, 6 hypotheses, 8 sampled schedules
 EventualConsistency at multi_paxos.rs:570 (Cluster(loc1v1), Map, delivered): CERTIFICATE, 6 hypotheses, 8 sampled schedules
-EventualConsistency at multi_paxos.rs:582 (Cluster(loc3v1), AssertIsConsistent, minted): informational, merged and checked at multi_paxos.rs:588: VIOLATED by {crash(proposer@0 after multi_paxos.rs:582[0→1]:(1, 0, 0, Some(7)))}, 11 hypotheses
+EventualConsistency at multi_paxos.rs:582 (Cluster(loc3v1), AssertIsConsistent, minted): VIOLATED by {crash(proposer@0 after multi_paxos.rs:582[0→1]:(1, 0, 0, Some(7)))}, 11 hypotheses
 EventualConsistency at multi_paxos.rs:588 (Cluster(loc3v1), Unique, delivered): CERTIFICATE, 25 hypotheses, 8 sampled schedules
-EventualConsistency at multi_paxos.rs:591 (Cluster(loc3v1), AssertIsConsistent, minted): informational, merged and checked at multi_paxos.rs:588: VIOLATED by {crash(learner@0 after multi_paxos.rs:591[0→1]:(1, 0, 0, Some(7)))}, 9 hypotheses
+EventualConsistency at multi_paxos.rs:591 (Cluster(loc3v1), AssertIsConsistent, minted): VIOLATED by {crash(learner@0 after multi_paxos.rs:591[0→1]:(1, 0, 0, Some(7)))}, 9 hypotheses
 EventualConsistency at multi_paxos.rs:608 (Cluster(loc3v1), FlatMap, delivered): CERTIFICATE, 26 hypotheses, 8 sampled schedules
-EventualConsistency at epoch_splice.rs:190 (Cluster(loc3v1), AssertIsConsistent, minted): covered by its input at multi_paxos.rs:608 — CERTIFICATE, 26 hypotheses, 8 sampled schedules
+EventualConsistency at epoch_splice.rs:190 (Cluster(loc3v1), AssertIsConsistent, minted): not checked: Singleton (not a set-valued collection)
 ```
 
 Reading the ten lines as three groups:
@@ -226,9 +226,7 @@ Reading the ten lines as three groups:
 
 **No violation under 8 sampled schedules.** The chosen-slot broadcast among proposers (`:569`) and its `.values()` (`:570`) hold trivially: the proposer cluster has one member, so its cap is zero crashes and the proposer never crashes under its own labels. The delivered `learned` set (`:588`) and its `SpliceFact` map (`:608`) hold because every learner that receives a decree echoes it to every learner, and one crash leaves at least one echoer per decree.
 
-**Covered by its input.** The `fold` into a `Singleton<SpliceState>` in `epoch_splice.rs` is not a stream; the type system vouches that it is a deterministic function of the `SpliceFact` stream it folds (`:608`), so it is checked there and carries `:608`'s verdict.
-
-**Informational.** `:582` and `:591` are violated on their own but reach the outside only through the merge at `:588` (`learned = initial.merge_unordered(echo_fwd).unique()`), whose verdict is the label's; they are reported as merge-dominated hops and left out of `counterexamples()`.
+**Not checked.** The `fold` into a `Singleton<SpliceState>` in `epoch_splice.rs` is not a stream.
 
 Two counts moved relative to earlier runs. `:569`/`:570` were 17–19 hypotheses and are now 6, because the vacuity fix stops the search from re-running supersets of a proposer crash under which nothing was chosen. `:582` is 11 in this transcript and 10 in the gallery run, the run-to-run variation `Fuzz` produces. The test asserts that `:588`'s exit certifies and that no label hits the budget.
 
@@ -339,25 +337,25 @@ Under the former budget of one crash the same two labels certified in 3 and 5 hy
 
 ## ABD
 
-**Harness:** `abd.rs::all_labels_checks_the_register_at_its_input` (`hydro_std/src/ec_inference_demos/abd.rs`) · **Topology:** 1 client, 3 replicas · **Transport:** `TCP.fail_stop()` · **Faults:** client and replicas crashable, no budget, `Fuzz { instances: 8 }` · **Verdicts:** 4 Violated, 1 Covered by its input (violated) · **Hypotheses:** 2 each
+**Harness:** `abd.rs::all_labels_reports_the_register_as_not_a_stream` (`hydro_std/src/ec_inference_demos/abd.rs`) · **Topology:** 1 client, 3 replicas · **Transport:** `TCP.fail_stop()` · **Faults:** client and replicas crashable, no budget, `Fuzz { instances: 8 }` · **Verdicts:** 4 Violated, 1 Not checked · **Hypotheses:** 2 each
 
-One write. The query broadcast (`:141`), the phase-2 `forward_ref` (`:150`), the writes filtered from it (`:161`) and the write broadcast (`:314`) are each one hop from the client. The register `fold` (`:165`) is a `Singleton`, checked at the write stream it folds (`:161`).
+One write. The query broadcast (`:141`), the phase-2 `forward_ref` (`:150`), the writes filtered from it (`:161`) and the write broadcast (`:314`) are each one hop from the client. The register `fold` (`:165`) is a `Singleton`.
 
 ```
 EventualConsistency at abd.rs:141 (Cluster(loc1v1), AssertIsConsistent, minted and delivered): VIOLATED by {crash(client@0 after abd.rs:141[0→1]:Query { rid: 1 })}, 2 hypotheses
 EventualConsistency at abd.rs:150 (Cluster(loc1v1), CycleSource, delivered): VIOLATED by {crash(client@0 after abd.rs:314[0→1]:Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 })}, 2 hypotheses
 EventualConsistency at abd.rs:161 (Cluster(loc1v1), FilterMap, delivered): VIOLATED by {crash(client@0 after abd.rs:314[0→1]:Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 })}, 2 hypotheses
 EventualConsistency at abd.rs:314 (Cluster(loc1v1), AssertIsConsistent, minted): VIOLATED by {crash(client@0 after abd.rs:314[0→1]:Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 })}, 2 hypotheses
-EventualConsistency at abd.rs:165 (Cluster(loc1v1), AssertIsConsistent, minted and delivered): covered by its input at abd.rs:161 — VIOLATED by {crash(client@0 after abd.rs:314[0→1]:Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 })}, 2 hypotheses
+EventualConsistency at abd.rs:165 (Cluster(loc1v1), AssertIsConsistent, minted and delivered): not checked: Singleton (not a set-valued collection)
 ```
 
-Four instances of the sender's mid-fan-out crash, by the client between two sends of its query or of its write. In each search the first hypothesis after the probe is a client crash point, so each is found in 2. The register carries `:161`'s verdict. With phase 2 over reliable broadcast (`abd_register_reliable_phase2`, test `all_labels_reliable_phase2_certifies_the_register`) the register, `:150` and `:161` hold under 8 sampled schedules, at 9 extra phase-2 messages per write with three replicas. No figure was produced for ABD.
+Four instances of the sender's mid-fan-out crash, by the client between two sends of its query or of its write. In each search the first hypothesis after the probe is a client crash point, so each is found in 2. The register is the class boundary of the next section. No figure was produced for ABD.
 
 ## Class boundaries: what `all_labels` does not check
 
 The generated specification is a universal over a fixed fact domain: a failure-free probe collects every fact seen at any member into `FACTS`, and under every later hypothesis each fact present at some correct member must be present at every correct member. That form needs a set-valued stream whose end-of-run contents can be compared across members. Four kinds of labelled collection fall outside it and are reported as `not checked` with a reason (`NotCheckedReason` in `hydro_lang/src/sim/observe.rs`), never silently skipped:
 
-- **Not a stream.** A `Singleton`, `Optional` or `KeyedSingleton` that is not an aggregation of a labelled stream: a lattice value, which the set-based specification does not observe. Printed as `Singleton (not a set-valued collection)`. An aggregation of a labelled stream (ABD's register `fold`, multi-Paxos's `SpliceState` in `epoch_splice.rs`, the G-Set) is checked at that stream instead and printed `covered by its input at <site>`.
+- **Not a stream.** A `Singleton`, `Optional` or `KeyedSingleton` such as ABD's register `fold` or multi-Paxos's `SpliceState` in `epoch_splice.rs`: a lattice value, which the set-based specification does not observe correctly. Printed as `Singleton (not a set-valued collection)`.
 - **Inside a tick.** The labelling node lives inside a tick, so its bounded per-tick contents are not "the collection's contents". Printed as `inside a tick`.
 - **Local inputs only.** No network channel feeds the collection, so no fault in the model can withhold an input from some members.
 - **Excluded by the test** with `Spec::all_labels_except`.
