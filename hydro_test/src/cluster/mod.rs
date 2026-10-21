@@ -44,3 +44,5 @@ pub mod two_pc;
 #[cfg(feature = "tokio")]
 pub mod two_pc_bench;
 pub mod two_pc_ldfi;
+#[cfg(test)]
+mod uniform_agreement_ldfi;
