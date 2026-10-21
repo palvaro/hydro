@@ -1,0 +1,815 @@
+diff --git a/docs/design/spikes/bruteforce-vs-lineage.md b/docs/design/spikes/bruteforce-vs-lineage.md
+new file mode 100644
+index 0000000000..7e9f70b81e
+--- /dev/null
++++ b/docs/design/spikes/bruteforce-vs-lineage.md
+@@ -0,0 +1,89 @@
++# Spike: brute-force fault enumeration vs. lineage-driven search
++
++## What we did
++
++- Added `Strategy::BruteForce` to `hydro_lang::sim::ldfi`: the same run loop and the same
++  observed fault universe as `Strategy::Blind`, but the next hypothesis comes from a pure
++  combinatorial enumerator (`enumerate_hypothesis`, a depth-first walk over combinations by
++  increasing size, then lexicographic in the weakest-first order) instead of the HiGHS ILP, and
++  the omissions of one hypothesis are capped by a new `Ldfi::max_omissions(n)` (default
++  unbounded). Crash constraints (one crash per node, crash budget, "not every node", checked
++  cluster cap) and the tried / vacuous-superset pruning are mirrored from `solve_hypothesis`.
++- Unit tests: brute force with no omission cap proposes exactly the sets the blind ILP does
++  over a mixed omission/crash universe; the caps, the bounds and the vacuous sets prune.
++- Added a `brute` column, and wall-clock (`Instant`, search only, compile excluded) to the
++  existing head-to-head harnesses: `two_pc_ldfi::compare_search_strategies`,
++  `isr_replication::compare_search_strategies`, and a new
++  `ec_ldfi::compare_search_strategies_echo_broadcast` (echo reliable broadcast, three members,
++  crash budget 1 and 2, exhaustive). Each asserts every strategy agrees on whether a violation
++  exists.
++- Ran all three in the default `dev` (unoptimized) profile, `--test-threads=1`, on the branch
++  `hydrofrac-crash-budget` plus this patch. Logs: `ec_echo.log`, `two_pc.log`, `isr.log`.
++
++## Measurements
++
++"instances" is simulator instances (schedules explored, summed over hypotheses). `exh` is
++`Exploration::Exhaustive`; `fuzz k` is `Exploration::Fuzz { instances: k }` per hypothesis.
++`brute` ran with `max_omissions(2)` everywhere.
++
++| example | config | strategy | outcome | hypotheses | instances | wall seconds |
++|---|---|---|---|---|---|---|
++| echo reliable broadcast, n=3 | crash budget 1, exh | ldfi (Precise) | certificate | 10 | 2641 | 7.7 |
++| echo reliable broadcast, n=3 | crash budget 1, exh | blind | exhausted | 13 | 2329 | 5.9 |
++| echo reliable broadcast, n=3 | crash budget 1, exh | brute | exhausted | 13 | 2329 | 6.0 |
++| echo reliable broadcast, n=3 | crash budget 2, exh | ldfi (Precise) | certificate | 21 | 4076 | 10.6 |
++| echo reliable broadcast, n=3 | crash budget 2, exh | blind | exhausted | 31 | 3511 | 9.1 |
++| echo reliable broadcast, n=3 | crash budget 2, exh | brute | exhausted | 31 | 3511 | 8.9 |
++| 2pc, n=2 | 1 crash, exh | ldfi | violated | 2 | 24 | 0.2 |
++| 2pc, n=2 | 1 crash, exh | blind | violated | 2 | 24 | 0.2 |
++| 2pc, n=2 | 1 crash, exh | brute | violated | 2 | 24 | 0.2 |
++| 2pc + ctp, n=2 | 1 crash, exh | ldfi | certificate | 9 | 158 | 1.0 |
++| 2pc + ctp, n=2 | 1 crash, exh | blind | exhausted | 14 | 238 | 1.8 |
++| 2pc + ctp, n=2 | 1 crash, exh | brute | exhausted | 14 | 238 | 1.8 |
++| 2pc + ctp, n=2 | 2 crashes, exh | ldfi | violated | 5 | 120 | 1.0 |
++| 2pc + ctp, n=2 | 2 crashes, exh | blind | violated | 15 | 262 | 1.9 |
++| 2pc + ctp, n=2 | 2 crashes, exh | brute | violated | 15 | 262 | 1.8 |
++| 2pc, n=3 | 1 crash, exh | ldfi | violated | 2 | 1152 | 15.9 |
++| 2pc, n=3 | 1 crash, exh | blind | violated | 2 | 1152 | 15.9 |
++| 2pc, n=3 | 1 crash, exh | brute | violated | 2 | 1152 | 15.4 |
++| 2pc + ctp, n=3 | 1 crash, fuzz 4 | ldfi | certificate | 13 | 52 | 0.5 |
++| 2pc + ctp, n=3 | 1 crash, fuzz 4 | blind | exhausted | 30 | 120 | 1.6 |
++| 2pc + ctp, n=3 | 1 crash, fuzz 4 | brute | exhausted | 27 | 108 | 1.3 |
++| 2pc + ctp, n=3 | 2 crashes, fuzz 4 | ldfi | violated | 7 | 28 | 0.5 |
++| 2pc + ctp, n=3 | 2 crashes, fuzz 4 | blind | violated | 35 | 140 | 2.4 |
++| 2pc + ctp, n=3 | 2 crashes, fuzz 4 | brute | violated | 52 | 208 | 2.9 |
++| isr unclean, closure | 1 crash, fuzz 8 | ldfi | violated | 9 | 72 | 24.0 |
++| isr unclean, closure | 1 crash, fuzz 8 | blind | violated | 19 | 152 | 57.5 |
++| isr unclean, closure | 1 crash, fuzz 8 | brute | violated | 19 | 152 | 57.4 |
++| isr unclean, dataflow | 1 crash, fuzz 8 | ldfi | violated | 12 | 96 | 6.0 |
++| isr unclean, dataflow | 1 crash, fuzz 8 | blind | violated | 19 | 152 | 9.7 |
++| isr unclean, dataflow | 1 crash, fuzz 8 | brute | violated | 19 | 152 | 9.4 |
++| isr clean, closure | 1 crash, fuzz 8 | ldfi | certificate | 12 | 96 | 25.0 |
++| isr clean, closure | 1 crash, fuzz 8 | blind | exhausted | 63 | 504 | 169.5 |
++| isr clean, closure | 1 crash, fuzz 8 | brute | exhausted | 63 | 504 | 165.9 |
++| isr clean, dataflow | 1 crash, fuzz 8 | ldfi | certificate | 18 | 144 | 7.9 |
++| isr clean, dataflow | 1 crash, fuzz 8 | blind | exhausted | 63 | 504 | 30.4 |
++| isr clean, dataflow | 1 crash, fuzz 8 | brute | exhausted | 63 | 504 | 28.2 |
++
++The random fuzzer columns of the existing harnesses were unchanged by this spike (2pc: violated
++in 25 / 24 instances for n=2 / n=3 without CTP, none in 2000 with CTP; ISR: violated in 128 / 29
++instances unclean, none in 504 clean).
++
++## Raw observations
++
++- Verdicts agree across the three strategies in every row (the harness asserts it; no
++  disagreement was observed).
++- Under exhaustive exploration `brute` and `blind` proposed the same hypotheses in the same
++  number (2pc and echo broadcast are `fail_stop`-only, so the universe is crashes only and
++  `max_omissions` never binds; ISR's lossy `repl` channel yields too few omittable messages for
++  a cap of 2 to bind within 63 hypotheses). Under sampled exploration their hypothesis counts
++  differ (27 vs 30, 52 vs 35) because the universe grows with whatever schedules were sampled
++  and the ILP's sum-of-indices tie-break is not the enumerator's lexicographic order.
++- Wall time tracks simulator instances, not the solver: the ILP's per-hypothesis cost was not
++  measurable against runs of 0.1–3 s per hypothesis (brute ≤ blind by 0–4 % everywhere).
++- `ldfi` used fewer hypotheses than `blind`/`brute` in every row where they differed, but on
++  echo broadcast it explored *more* schedules (2641 vs 2329; 4076 vs 3511) and took longer,
++  because its weakest-first crash points leave more of the protocol running per hypothesis.
++- The first search of a fresh `CompiledSim` paid ~45 s of trybuild compilation in an earlier
++  version of the echo-broadcast harness; the harness now compiles once per comparison and the
++  numbers above exclude it.
+diff --git a/hydro_lang/src/sim/ldfi.rs b/hydro_lang/src/sim/ldfi.rs
+index 8977d38960..7c974b5959 100644
+--- a/hydro_lang/src/sim/ldfi.rs
++++ b/hydro_lang/src/sim/ldfi.rs
+@@ -629,8 +629,8 @@ pub enum Outcome {
+         runs: Vec<Hypothesis>,
+     },
+     /// Every admissible fault set over the observed fault universe was tried without a
+-    /// violation ([`Strategy::Blind`] only; lineage-driven search ends with a
+-    /// [`Outcome::Certificate`] instead).
++    /// violation ([`Strategy::Blind`] and [`Strategy::BruteForce`] only; lineage-driven search
++    /// ends with a [`Outcome::Certificate`] instead).
+     Exhausted {
+         /// Every hypothesis run, in order.
+         runs: Vec<Hypothesis>,
+@@ -823,6 +823,12 @@ pub enum Strategy {
+     /// observed delivery), the same order, but no lineage, so hypotheses are simply the
+     /// untried admissible fault sets by increasing weight. Measures what lineage buys.
+     Blind,
++    /// The baseline: the same loop and the same fault universe as [`Strategy::Blind`], but
++    /// hypotheses are enumerated combinatorially (by increasing size, then weakest first)
++    /// rather than by the hitting-set solver, and the omissions of one hypothesis are capped
++    /// by [`Ldfi::max_omissions`]. Measures what the solver, and lineage, buy over plain
++    /// bounded fault enumeration.
++    BruteForce,
+ }
+ 
+ /// How a goal's derivations are read off the outputs.
+@@ -3669,6 +3675,9 @@ pub struct Ldfi {
+     level: Level,
+     /// An explicit cap on the crashes of one hypothesis; `None` (the default) is unbounded.
+     crash_budget: Option<usize>,
++    /// A cap on the omissions of one hypothesis under [`Strategy::BruteForce`]; `None` (the
++    /// default) is unbounded.
++    max_omissions: Option<usize>,
+     max_hypotheses: usize,
+     log: bool,
+     /// Whether every schedule keeps its [`Trace`] (failing schedules always do).
+@@ -3703,6 +3712,7 @@ impl Ldfi {
+             exploration: Exploration::Exhaustive,
+             level: Level::Precise,
+             crash_budget: None,
++            max_omissions: None,
+             max_hypotheses: 256,
+             log: true,
+             traces: false,
+@@ -3879,6 +3889,18 @@ impl Ldfi {
+         self
+     }
+ 
++    /// Caps the number of omission faults in one hypothesis under [`Strategy::BruteForce`]
++    /// (the other strategies ignore it: lineage and the solver bound the search by themselves).
++    /// By default there is no cap, and the brute-force enumeration over `M` observed lossy
++    /// messages visits every one of their `2^M` subsets. The cap is what makes bounded fault
++    /// enumeration tractable, at the price of a verdict that is relative to it: an
++    /// [`Outcome::Exhausted`] says nothing about hypotheses with more omissions.
++    #[must_use]
++    pub fn max_omissions(mut self, omissions: usize) -> Self {
++        self.max_omissions = Some(omissions);
++        self
++    }
++
+     /// Names the external output whose values witness the goal: every value the program
+     /// produces on it is one derivation of the goal.
+     #[must_use]
+@@ -4098,6 +4120,7 @@ impl Ldfi {
+         let level = self.level;
+         let tag = match (self.strategy, level) {
+             (Strategy::Blind, _) => "blind",
++            (Strategy::BruteForce, _) => "brute",
+             (Strategy::Lineage, Level::Execution) => "ldfi/exec",
+             (Strategy::Lineage, Level::Precise) => "ldfi",
+         };
+@@ -4426,6 +4449,17 @@ impl Ldfi {
+                     universe.sort_by_key(order);
+                     next_hypothesis(&universe, &[], &[], &tried, &vacuous_sets, &bounds)
+                 }
++                Strategy::BruteForce => {
++                    let mut universe: Vec<Fault> = observed.iter().cloned().collect();
++                    universe.sort_by_key(order);
++                    enumerate_hypothesis(
++                        &universe,
++                        self.max_omissions,
++                        &tried,
++                        &vacuous_sets,
++                        &bounds,
++                    )
++                }
+             };
+             match next {
+                 Some(next) => faults = next,
+@@ -4441,7 +4475,7 @@ impl Ldfi {
+                                 _ => Grade::Goal,
+                             },
+                         },
+-                        Strategy::Blind => Outcome::Exhausted { runs },
++                        Strategy::Blind | Strategy::BruteForce => Outcome::Exhausted { runs },
+                     };
+                 }
+             }
+@@ -5112,6 +5146,118 @@ fn solve_hypothesis(
+     }
+ }
+ 
++/// The next hypothesis of [`Strategy::BruteForce`]: the first untried admissible subset of
++/// `universe` (sorted weakest first) by increasing size, and within a size in lexicographic
++/// order of positions in `universe`, so the weakest faults are combined first. Admissible means
++/// what it means for [`solve_hypothesis`] with no clauses: at most one crash per node, the
++/// crashes within `bounds`, no superset of a vacuous set; plus at most `max_omissions`
++/// omissions (`None`: unbounded). No solver and no lineage: a depth-first walk over the
++/// combinations with the constraints as pruning. `None` when every admissible set was tried.
++fn enumerate_hypothesis(
++    universe: &[Fault],
++    max_omissions: Option<usize>,
++    tried: &BTreeSet<FaultSet>,
++    vacuous: &[FaultSet],
++    bounds: &CrashBounds,
++) -> Option<FaultSet> {
++    struct Walk<'a> {
++        universe: &'a [Fault],
++        max_omissions: usize,
++        max_crashes: usize,
++        checked: Option<&'a CheckedCluster>,
++        tried: &'a BTreeSet<FaultSet>,
++        vacuous: &'a [FaultSet],
++        chosen: Vec<usize>,
++    }
++
++    impl Walk<'_> {
++        fn admits(&self, fault: &Fault) -> bool {
++            let picked = || self.chosen.iter().map(|&i| &self.universe[i]);
++            match fault {
++                Fault::Omit(_) => {
++                    picked().filter(|f| matches!(f, Fault::Omit(_))).count() < self.max_omissions
++                }
++                Fault::Crash { node, .. } => {
++                    let crashed: Vec<&String> = picked()
++                        .filter_map(|f| match f {
++                            Fault::Crash { node, .. } => Some(node),
++                            Fault::Omit(_) => None,
++                        })
++                        .collect();
++                    crashed.len() < self.max_crashes
++                        && !crashed.contains(&node)
++                        && self.checked.is_none_or(|checked| {
++                            !checked.nodes.contains(node)
++                                || crashed
++                                    .iter()
++                                    .filter(|n| checked.nodes.contains(**n))
++                                    .count()
++                                    < checked.cap
++                        })
++                }
++            }
++        }
++
++        /// The first untried admissible set that extends `chosen` with `remaining` more faults
++        /// drawn from `universe[start..]`.
++        fn pick(&mut self, start: usize, remaining: usize) -> Option<FaultSet> {
++            if remaining == 0 {
++                let set: FaultSet = self
++                    .chosen
++                    .iter()
++                    .map(|&i| self.universe[i].clone())
++                    .collect();
++                let fresh =
++                    !self.tried.contains(&set) && !self.vacuous.iter().any(|v| v.is_subset(&set));
++                return fresh.then_some(set);
++            }
++            for i in start..self.universe.len().saturating_sub(remaining - 1) {
++                if !self.admits(&self.universe[i]) {
++                    continue;
++                }
++                self.chosen.push(i);
++                let found = self.pick(i + 1, remaining - 1);
++                self.chosen.pop();
++                if found.is_some() {
++                    return found;
++                }
++            }
++            None
++        }
++    }
++
++    let omissions = universe
++        .iter()
++        .filter(|f| matches!(f, Fault::Omit(_)))
++        .count();
++    let crash_nodes = universe
++        .iter()
++        .filter_map(|f| match f {
++            Fault::Crash { node, .. } => Some(node),
++            Fault::Omit(_) => None,
++        })
++        .collect::<BTreeSet<_>>()
++        .len();
++    let max_omissions = max_omissions.map_or(omissions, |m| m.min(omissions));
++    let mut max_crashes = crash_nodes;
++    if let Some(budget) = bounds.budget {
++        max_crashes = max_crashes.min(budget);
++    }
++    if bounds.nodes >= 1 {
++        max_crashes = max_crashes.min(bounds.nodes - 1);
++    }
++    let mut walk = Walk {
++        universe,
++        max_omissions,
++        max_crashes,
++        checked: bounds.checked.as_ref(),
++        tried,
++        vacuous,
++        chosen: vec![],
++    };
++    (0..=max_omissions + max_crashes).find_map(|size| walk.pick(0, size))
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -5560,4 +5706,108 @@ mod tests {
+             all_hypotheses(&clauses, &unbounded)
+         );
+     }
++
++    /// Every hypothesis [`enumerate_hypothesis`] proposes over `universe`, in order.
++    fn enumerate_all(
++        universe: &[Fault],
++        max_omissions: Option<usize>,
++        vacuous: &[FaultSet],
++        bounds: &CrashBounds,
++    ) -> Vec<FaultSet> {
++        let mut tried = BTreeSet::from([FaultSet::new()]);
++        let mut out = vec![];
++        while let Some(h) = enumerate_hypothesis(universe, max_omissions, &tried, vacuous, bounds) {
++            assert!(tried.insert(h.clone()), "a hypothesis is proposed once");
++            out.push(h);
++            assert!(out.len() < 10_000, "the enumeration terminates");
++        }
++        out
++    }
++
++    /// A universe of two lossy messages and two crashable senders with two crash points each
++    /// (before any send, and after the first send).
++    fn mixed_universe() -> (Vec<Clause>, Vec<Fault>) {
++        let (m0, m1) = (send(0, 1), send(1, 1));
++        let (n0, n1) = (send(0, 2), send(1, 2));
++        let sends = Rc::new(SendSequences::from([
++            ("s".to_owned(), vec![m0, m1]),
++            ("t".to_owned(), vec![n0, n1]),
++        ]));
++        let clauses = vec![clause(
++            [
++                lossy("a", 1),
++                lossy("a", 2),
++                reliable("r", 1, "s", 0),
++                reliable("r", 2, "s", 1),
++                reliable("r", 3, "t", 0),
++                reliable("r", 4, "t", 1),
++            ],
++            &sends,
++        )];
++        let universe = universe_of(&clauses);
++        (clauses, universe)
++    }
++
++    /// Without an omission cap the brute-force enumeration visits exactly the sets the blind
++    /// solver does (no clauses), by non-decreasing size.
++    #[test]
++    fn brute_force_matches_blind_solver_without_an_omission_cap() {
++        let (_, universe) = mixed_universe();
++        assert_eq!(universe.len(), 2 + 2 + 2, "{universe:?}");
++        for bounds in [
++            CrashBounds::budget(1),
++            CrashBounds {
++                budget: None,
++                nodes: 3,
++                checked: None,
++            },
++        ] {
++            let brute = enumerate_all(&universe, None, &[], &bounds);
++            let mut tried = BTreeSet::from([FaultSet::new()]);
++            let mut blind = vec![];
++            while let Some(h) = next_hypothesis(&universe, &[], &[], &tried, &[], &bounds) {
++                assert!(tried.insert(h.clone()));
++                blind.push(h);
++            }
++            assert!(
++                brute.windows(2).all(|w| w[0].len() <= w[1].len()),
++                "{brute:?}"
++            );
++            assert_eq!(
++                brute.iter().cloned().collect::<BTreeSet<_>>(),
++                blind.iter().cloned().collect::<BTreeSet<_>>()
++            );
++        }
++    }
++
++    /// The omission cap, the one-crash-per-node rule, the crash bounds and the vacuous sets
++    /// all prune.
++    #[test]
++    fn brute_force_honours_caps_and_vacuous_sets() {
++        let (_, universe) = mixed_universe();
++        let omits = |h: &FaultSet| h.iter().filter(|f| matches!(f, Fault::Omit(_))).count();
++        let crashes = |h: &FaultSet| h.len() - omits(h);
++        // ≤ 1 omission, ≤ 1 crash: 2 + 4 + 2·4 sets.
++        let all = enumerate_all(&universe, Some(1), &[], &CrashBounds::budget(1));
++        assert_eq!(all.len(), 2 + 4 + 8, "{all:?}");
++        assert!(all.iter().all(|h| omits(h) <= 1 && crashes(h) <= 1));
++        // Unbounded crashes, two nodes: never two crash points of the same node.
++        let all = enumerate_all(&universe, Some(0), &[], &CrashBounds::default());
++        assert_eq!(all.len(), 4 + 4, "{all:?}");
++        // The checked-cluster cap binds on its members only.
++        let checked = CrashBounds {
++            budget: None,
++            nodes: 0,
++            checked: Some(CheckedCluster {
++                nodes: BTreeSet::from(["s".to_owned(), "t".to_owned()]),
++                cap: 1,
++            }),
++        };
++        let all = enumerate_all(&universe, Some(0), &[], &checked);
++        assert_eq!(all.len(), 4, "{all:?}");
++        // No superset of a vacuous set.
++        let vacuous = vec![FaultSet::from([universe[0].clone()])];
++        let all = enumerate_all(&universe, Some(2), &vacuous, &CrashBounds::budget(0));
++        assert_eq!(all, vec![FaultSet::from([universe[1].clone()])]);
++    }
+ }
+diff --git a/hydro_test/src/cluster/ec_ldfi.rs b/hydro_test/src/cluster/ec_ldfi.rs
+index 2e7f4644d1..47c244d3eb 100644
+--- a/hydro_test/src/cluster/ec_ldfi.rs
++++ b/hydro_test/src/cluster/ec_ldfi.rs
+@@ -37,8 +37,9 @@
+ mod tests {
+     use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
+     use hydro_lang::prelude::*;
++    use hydro_lang::sim::SimSender;
+     use hydro_lang::sim::compiled::CompiledSim;
+-    use hydro_lang::sim::ldfi::{Fault, LabelResults, Ldfi, Level, Outcome};
++    use hydro_lang::sim::ldfi::{Fault, LabelResults, Ldfi, Level, Outcome, Strategy};
+     use hydro_lang::sim::spec::Spec;
+     use serde::{Deserialize, Serialize};
+ 
+@@ -155,6 +156,23 @@ mod tests {
+     /// The reliable broadcast of [`super::super::reliable_broadcast`] (every member re-broadcasts
+     /// what it first sees) under the generated specification, with or without the echo.
+     fn echo_broadcast(echo: bool) -> Outcome {
++        let (compiled, send, configure) = compile_echo_broadcast(echo);
++        configure(Ldfi::new()).search(&compiled, async |_run| {
++            send.send(Payload(42));
++            hydro_lang::sim::quiesce().await;
++        })
++    }
++
++    /// The compiled echoing (or plain) broadcast under the generated specification, the input
++    /// the body feeds, and the search configuration (crashable nodes and the specification) to
++    /// apply to an [`Ldfi`].
++    fn compile_echo_broadcast(
++        echo: bool,
++    ) -> (
++        CompiledSim,
++        SimSender<Payload, TotalOrder, ExactlyOnce>,
++        impl Fn(Ldfi) -> Ldfi,
++    ) {
+         let mut flow = FlowBuilder::new();
+         let broadcaster = flow.process::<Broadcaster>();
+         let members = flow.cluster::<Member>();
+@@ -181,15 +199,69 @@ mod tests {
+             .with_provenance()
+             .compiled();
+ 
+-        Ldfi::new()
+-            .level(Level::Precise)
+-            .crashable("broadcaster", &broadcaster)
+-            .crashable_cluster("member", &members, 0..MEMBERS)
+-            .spec(&spec)
+-            .search(&compiled, async |_run| {
+-                source_send.send(Payload(42));
+-                hydro_lang::sim::quiesce().await;
+-            })
++        let configure = move |ldfi: Ldfi| {
++            ldfi.level(Level::Precise)
++                .crashable("broadcaster", &broadcaster)
++                .crashable_cluster("member", &members, 0..MEMBERS)
++                .spec(&spec)
++        };
++        (compiled, source_send, configure)
++    }
++
++    /// Lineage-driven search against the two lineage-blind searchers on the echoing reliable
++    /// broadcast (three members, `fail_stop` links, so the fault universe is crashes only), with
++    /// a crash budget of one and of two, every hypothesis explored exhaustively. Prints, per
++    /// strategy, the verdict, the hypotheses, the simulator instances and the wall time; the
++    /// verdicts must agree.
++    #[test]
++    fn compare_search_strategies_echo_broadcast() {
++        fn verdict(o: &Outcome) -> &'static str {
++            match o {
++                Outcome::Counterexample { .. } => "violated",
++                Outcome::Certificate { .. } => "certificate",
++                Outcome::Exhausted { .. } => "exhausted",
++                Outcome::Budget { .. } => "budget",
++                Outcome::Vacuous { .. } => "vacuous",
++            }
++        }
++        eprintln!(
++            "\n{:<3} {:<10} | {:>12} {:>4} {:>7} {:>7}",
++            "cr", "strategy", "verdict", "runs", "sched", "wall"
++        );
++        let (compiled, send, configure) = compile_echo_broadcast(true);
++        for crashes in [1, 2] {
++            let mut verdicts = vec![];
++            for (name, strategy) in [
++                ("ldfi", Strategy::Lineage),
++                ("blind", Strategy::Blind),
++                ("brute", Strategy::BruteForce),
++            ] {
++                let started = std::time::Instant::now();
++                let outcome = configure(Ldfi::new())
++                    .strategy(strategy)
++                    .crash_budget(crashes)
++                    .quiet()
++                    .search(&compiled, async |_run| {
++                        send.send(Payload(42));
++                        hydro_lang::sim::quiesce().await;
++                    });
++                let took = started.elapsed();
++                eprintln!(
++                    "{:<3} {:<10} | {:>12} {:>4} {:>7} {:>6.1}s",
++                    crashes,
++                    name,
++                    verdict(&outcome),
++                    outcome.runs().len(),
++                    outcome.schedules(),
++                    took.as_secs_f64()
++                );
++                verdicts.push(outcome.is_counterexample());
++            }
++            assert!(
++                verdicts.iter().all(|v| *v == verdicts[0]),
++                "the strategies must agree on whether a violation exists: {verdicts:?}"
++            );
++        }
+     }
+ 
+     fn expect_counterexample(outcome: Outcome, what: &str) -> Vec<Fault> {
+diff --git a/hydro_test/src/cluster/isr_replication.rs b/hydro_test/src/cluster/isr_replication.rs
+index 662153c090..d01cc32830 100644
+--- a/hydro_test/src/cluster/isr_replication.rs
++++ b/hydro_test/src/cluster/isr_replication.rs
+@@ -1267,22 +1267,29 @@ mod tests {
+                 Outcome::Vacuous { .. } => "vacuous",
+             }
+         }
+-        fn cell(o: &Outcome) -> String {
++        fn cell((o, took): &(Outcome, std::time::Duration)) -> String {
+             format!(
+-                "{:>12} {:>4} {:>7}",
++                "{:>12} {:>4} {:>7} {:>6.1}s",
+                 verdict(o),
+                 o.runs().len(),
+-                o.schedules()
++                o.schedules(),
++                took.as_secs_f64()
+             )
+         }
++        fn timed(f: impl FnOnce() -> Outcome) -> (Outcome, std::time::Duration) {
++            let started = std::time::Instant::now();
++            let outcome = f();
++            (outcome, started.elapsed())
++        }
+ 
+         eprintln!(
+-            "\n{:<12} {:<8} {:>3} | {:<25} | {:<25} | {:<13}",
++            "\n{:<12} {:<8} {:>3} | {:<33} | {:<33} | {:<33} | {:<13}",
+             "protocol",
+             "encoding",
+             "cr",
+-            "ldfi/fuzz 8      runs sched",
+-            "blind/fuzz 8     runs sched",
++            "ldfi/fuzz 8      runs sched    wall",
++            "blind/fuzz 8     runs sched    wall",
++            "brute/fuzz 8 om2 runs sched    wall",
+             "fuzz    inst"
+         );
+         for (unclean, encoding, crashes) in [
+@@ -1292,22 +1299,41 @@ mod tests {
+             (false, Encoding::Dataflow, 1),
+         ] {
+             let (compiled, h, configure) = compile(unclean, encoding, DEFAULT_SHAPE, 8);
+-            let ldfi = configure(crashes)
+-                .exploration(Exploration::Fuzz { instances: SAMPLED })
+-                .quiet()
+-                .search(&compiled, async |run| body(&h, run).await);
+-            let blind = configure(crashes)
+-                .strategy(Strategy::Blind)
+-                .exploration(Exploration::Fuzz { instances: SAMPLED })
+-                .quiet()
+-                .search(&compiled, async |run| body(&h, run).await);
++            let ldfi = timed(|| {
++                configure(crashes)
++                    .exploration(Exploration::Fuzz { instances: SAMPLED })
++                    .quiet()
++                    .search(&compiled, async |run| body(&h, run).await)
++            });
++            let blind = timed(|| {
++                configure(crashes)
++                    .strategy(Strategy::Blind)
++                    .exploration(Exploration::Fuzz { instances: SAMPLED })
++                    .quiet()
++                    .search(&compiled, async |run| body(&h, run).await)
++            });
++            // Bounded fault enumeration (at most two omissions): no lineage and no solver.
++            let brute = timed(|| {
++                configure(crashes)
++                    .strategy(Strategy::BruteForce)
++                    .max_omissions(2)
++                    .exploration(Exploration::Fuzz { instances: SAMPLED })
++                    .quiet()
++                    .search(&compiled, async |run| body(&h, run).await)
++            });
++            let (ldfi, blind, brute_outcome) = (&ldfi, &blind, &brute.0);
++            let (ldfi_outcome, blind_outcome) = (&ldfi.0, &blind.0);
+             // The fuzzer draws from the same vocabulary: crashes, and omission of every message
+             // observed on a lossy channel in the failure-free run. It gets as many instances as
+             // the blind search spent.
+-            let omittable = ldfi.runs()[0].omittable();
+-            let crash_points = ldfi.runs()[0].crash_points();
+-            let (compiled_fuzz, h_fuzz, configure_fuzz) =
+-                compile(unclean, encoding, DEFAULT_SHAPE, blind.schedules().max(1));
++            let omittable = ldfi_outcome.runs()[0].omittable();
++            let crash_points = ldfi_outcome.runs()[0].crash_points();
++            let (compiled_fuzz, h_fuzz, configure_fuzz) = compile(
++                unclean,
++                encoding,
++                DEFAULT_SHAPE,
++                blind_outcome.schedules().max(1),
++            );
+             let fuzz = configure_fuzz(crashes).quiet().fuzz_faults(
+                 &compiled_fuzz,
+                 &omittable,
+@@ -1318,15 +1344,16 @@ mod tests {
+                 },
+             );
+             eprintln!(
+-                "{:<12} {:<8} {:>3} | {} | {} | {:>8} {:>4}",
++                "{:<12} {:<8} {:>3} | {} | {} | {} | {:>8} {:>4}",
+                 if unclean { "isr unclean" } else { "isr clean" },
+                 match encoding {
+                     Encoding::Closure => "closure",
+                     Encoding::Dataflow => "dataflow",
+                 },
+                 crashes,
+-                cell(&ldfi),
+-                cell(&blind),
++                cell(ldfi),
++                cell(blind),
++                cell(&brute),
+                 if fuzz.violation.is_some() {
+                     "violated"
+                 } else {
+@@ -1334,8 +1361,16 @@ mod tests {
+                 },
+                 fuzz.runs,
+             );
+-            assert_eq!(ldfi.is_counterexample(), blind.is_counterexample());
+-            assert!(ldfi.runs().len() <= blind.runs().len());
++            assert_eq!(
++                ldfi_outcome.is_counterexample(),
++                blind_outcome.is_counterexample()
++            );
++            assert_eq!(
++                ldfi_outcome.is_counterexample(),
++                brute_outcome.is_counterexample(),
++                "lineage and brute-force enumeration must agree on whether a violation exists"
++            );
++            assert!(ldfi_outcome.runs().len() <= blind_outcome.runs().len());
+         }
+     }
+ }
+diff --git a/hydro_test/src/cluster/two_pc_ldfi.rs b/hydro_test/src/cluster/two_pc_ldfi.rs
+index 8889b9dc61..feca6623c2 100644
+--- a/hydro_test/src/cluster/two_pc_ldfi.rs
++++ b/hydro_test/src/cluster/two_pc_ldfi.rs
+@@ -723,28 +723,38 @@ mod tests {
+                 Outcome::Vacuous { .. } => "vacuous",
+             }
+         }
+-        fn cell(o: Option<&Outcome>) -> String {
++        fn cell(o: Option<&(Outcome, std::time::Duration)>) -> String {
+             match o {
+-                Some(o) => format!(
+-                    "{:>12} {:>4} {:>7}",
++                Some((o, took)) => format!(
++                    "{:>12} {:>4} {:>7} {:>6.1}s",
+                     verdict(o),
+                     o.runs().len(),
+-                    o.schedules()
++                    o.schedules(),
++                    took.as_secs_f64()
+                 ),
+-                None => format!("{:>12} {:>4} {:>7}", "-", "-", "-"),
++                None => format!("{:>12} {:>4} {:>7} {:>7}", "-", "-", "-", "-"),
+             }
+         }
++        fn timed(f: impl FnOnce() -> Outcome) -> (Outcome, std::time::Duration) {
++            let started = std::time::Instant::now();
++            let outcome = f();
++            (outcome, started.elapsed())
++        }
+ 
+         eprintln!(
+-            "\n{:<10} {:>2} {:>3} | {:<25} | {:<25} | {:<25} | {:<13}",
++            "\n{:<10} {:>2} {:>3} | {:<33} | {:<33} | {:<33} | {:<33} | {:<13}",
+             "protocol",
+             "n",
+             "cr",
+-            "ldfi/exhaustive  runs sched",
+-            "ldfi/fuzz 4      runs sched",
+-            "blind            runs sched",
++            "ldfi/exhaustive  runs sched    wall",
++            "ldfi/fuzz 4      runs sched    wall",
++            "blind            runs sched    wall",
++            "brute (om<=2)    runs sched    wall",
+             "fuzz    inst"
+         );
++        eprintln!(
++            "(blind and brute explore exhaustively where ldfi/exhaustive runs, {SAMPLED} sampled schedules per hypothesis where it does not)"
++        );
+         for (participants, ctp, crashes, full) in [
+             (2, false, 1, true),
+             (2, true, 1, true),
+@@ -755,21 +765,42 @@ mod tests {
+         ] {
+             let (compiled, h, configure) = compile(participants, ctp, FUZZ_INSTANCES);
+             let exhaustive = full.then(|| {
++                timed(|| {
++                    configure(crashes)
++                        .quiet()
++                        .search(&compiled, async |run| body(&h, run).await)
++                })
++            });
++            let sampled = timed(|| {
+                 configure(crashes)
++                    .exploration(Exploration::Fuzz { instances: SAMPLED })
+                     .quiet()
+                     .search(&compiled, async |run| body(&h, run).await)
+             });
+-            let sampled = configure(crashes)
+-                .exploration(Exploration::Fuzz { instances: SAMPLED })
+-                .quiet()
+-                .search(&compiled, async |run| body(&h, run).await);
+-            let blind = full.then(|| {
++            // The lineage-blind searchers explore like the `ldfi/exhaustive` column where that
++            // column runs, and like the `ldfi/fuzz` column where it does not.
++            let exploration = if full {
++                Exploration::Exhaustive
++            } else {
++                Exploration::Fuzz { instances: SAMPLED }
++            };
++            let blind = Some(timed(|| {
+                 configure(crashes)
+                     .strategy(Strategy::Blind)
++                    .exploration(exploration)
+                     .quiet()
+                     .search(&compiled, async |run| body(&h, run).await)
+-            });
+-            let crash_points = sampled.runs()[0].crash_points();
++            }));
++            // Bounded fault enumeration: the baseline of a tool with no lineage and no solver.
++            let brute = Some(timed(|| {
++                configure(crashes)
++                    .strategy(Strategy::BruteForce)
++                    .max_omissions(2)
++                    .exploration(exploration)
++                    .quiet()
++                    .search(&compiled, async |run| body(&h, run).await)
++            }));
++            let crash_points = sampled.0.runs()[0].crash_points();
+             let fuzz: FuzzOutcome = configure(crashes).quiet().fuzz_faults(
+                 &compiled,
+                 &[],
+@@ -781,13 +812,14 @@ mod tests {
+             );
+ 
+             eprintln!(
+-                "{:<10} {:>2} {:>3} | {} | {} | {} | {:>8} {:>4}",
++                "{:<10} {:>2} {:>3} | {} | {} | {} | {} | {:>8} {:>4}",
+                 if ctp { "2pc + ctp" } else { "2pc" },
+                 participants,
+                 crashes,
+                 cell(exhaustive.as_ref()),
+                 cell(Some(&sampled)),
+                 cell(blind.as_ref()),
++                cell(brute.as_ref()),
+                 if fuzz.violation.is_some() {
+                     "violated"
+                 } else {
+@@ -796,12 +828,20 @@ mod tests {
+                 fuzz.runs,
+             );
+ 
+-            if let (Some(exhaustive), Some(blind)) = (&exhaustive, &blind) {
++            if let (Some((exhaustive, _)), Some((blind, _))) = (&exhaustive, &blind) {
++                let sampled = &sampled.0;
+                 assert_eq!(
+                     exhaustive.is_counterexample(),
+                     blind.is_counterexample(),
+                     "lineage and blind search must agree on whether a violation exists"
+                 );
++                if let Some((brute, _)) = &brute {
++                    assert_eq!(
++                        exhaustive.is_counterexample(),
++                        brute.is_counterexample(),
++                        "lineage and brute-force enumeration must agree on whether a violation exists"
++                    );
++                }
+                 assert!(
+                     exhaustive.runs().len() <= blind.runs().len(),
+                     "lineage took more runs than blind enumeration"
