@@ -428,20 +428,12 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
         if !c.minted || c.exit {
             continue;
         }
-        // Only the nodes a channel feeds: a node at the same site computed from local inputs
-        // alone (the member list a cluster-to-cluster `broadcast_closed` crosses its input
-        // with, labelled at the broadcast's own line) carries none of the hop's elements.
         let starts: Vec<*const HydroNode> = found
             .node_order
             .iter()
             .copied()
             .filter(|ptr| found.nodes[ptr] == index)
-            // SAFETY: as above.
-            .filter(|ptr| has_network_ancestor(unsafe { &**ptr }, &cycle_sinks))
             .collect();
-        if starts.is_empty() {
-            continue;
-        }
         let mut queue: std::collections::VecDeque<(*const HydroNode, bool)> =
             starts.iter().map(|ptr| (*ptr, false)).collect();
         let mut seen: HashSet<(*const HydroNode, bool)> = queue.iter().copied().collect();
