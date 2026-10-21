@@ -29,7 +29,7 @@ PY
 neato -n2 -Gdpi=160 -Tpng /tmp/print.dot -o failing-print.png
 ```
 
-`docs/design/render-inventory.py` substitutes `failing-print.png` for `failing.png`
+`docs/design/render-design-doc.py` substitutes `failing-print.png` for `failing.png`
 wherever one exists, and places each figure from its natural size in inches
 (pixels / dpi; 160 dpi for `failing-print.png`, 110 dpi for `failing.png`, else the
 `-Gdpi=` in a sibling `.dot`), never upscaling:
@@ -85,6 +85,6 @@ multi-Paxos diagrams: that needs × 2.7, and the longest labels would then be
 requires either the visualiser spacing lanes relative to the label width and
 font (so the diagram is narrower in points to begin with), or the PDF giving
 these figures an oversize page instead of landscape Letter — which is what
-`render-inventory.py` now does: on a 30.8 in wide page the multi-Paxos labels are
+`render-design-doc.py` now does: on a 30.8 in wide page the multi-Paxos labels are
 11.6–12 pt, readable when zoomed on screen, but the page itself no longer fits a
 Letter printer.

@@ -476,4 +476,4 @@ The committed gallery tests are `gallery_two_pc`, `gallery_isr_unclean_election`
 
 **The dataflow figure.** `molly-viz-samples/figures/reliable_broadcast_regions.dot` is a hand-written Graphviz rendering of the `reliable_broadcast_closed` IR with the labelled region shaded; render with `dot -Tpng -Gdpi=150`.
 
-**The PDF.** `docs/design/render-inventory.py` renders a Markdown file in this directory to PDF, wrapping each image plus its italic caption into a figure, placing each figure from its natural size, and substituting `failing-print.png` where one exists. Its `SRC` and `OUT` constants name the input and output files. The placement rules are in `ec/PRINT.md`.
+**The PDF.** `docs/design/render-design-doc.py` renders Markdown files in this directory to PDF (pass the `.md` paths as arguments; with none it renders the three hydrofrac docs), wrapping each image plus its italic caption into a figure, placing each figure from its natural size, and substituting `failing-print.png` where one exists. The placement rules are in `ec/PRINT.md`.
