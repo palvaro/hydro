@@ -278,6 +278,18 @@ impl<'a> SimFlow<'a> {
 
         let (cluster_max_sizes, cluster_member_ids) = self.cluster_sizing();
         let cluster_members = cluster_member_ids.clone();
+        // The program's processes, less the observer a specification adds (an eager location;
+        // see `sim::spec`), for `CompiledSim::node_count`.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "nondeterministic iteration order, fine for a count"
+        )]
+        let eager_processes = self
+            .eager_locations
+            .iter()
+            .filter(|location| matches!(location, LocationId::Process(_)))
+            .count();
+        let process_count = self.processes.len() - eager_processes;
         drop(flow_build_span);
 
         let (bin, trybuild) = create_sim_graph_trybuild(
@@ -307,6 +319,7 @@ impl<'a> SimFlow<'a> {
             provenance: self.provenance,
             eager_locations: Rc::new(self.eager_locations),
             cluster_members: Rc::new(cluster_members),
+            process_count,
             labels,
         }
     }

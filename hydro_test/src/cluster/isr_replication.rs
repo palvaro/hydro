@@ -928,14 +928,16 @@ pub(crate) mod harness {
     /// hand-written one: every collection the protocol labels `EventualConsistency` (the
     /// `write` and `view` broadcasts) is observed, nothing is named. The protocol's outputs
     /// go to plain simulator outputs. `senders_crashable` adds the client and ZK, which the
-    /// harness's own fault model holds correct, to the crashable set.
+    /// harness's own fault model holds correct, to the crashable set. The returned
+    /// configuration takes an explicit crash budget, or `None` for the default (every
+    /// combination of crashes but the vacuous ones).
     pub(crate) fn compile_all_labels(
         unclean: bool,
         encoding: Encoding,
         shape: Shape,
         senders_crashable: bool,
         fuzz_iterations: usize,
-    ) -> (CompiledSim, Harness, impl Fn(usize) -> Ldfi) {
+    ) -> (CompiledSim, Harness, impl Fn(Option<usize>) -> Ldfi) {
         let Shape { members, .. } = shape;
         let mut flow = FlowBuilder::new();
         let client = flow.process::<Client>();
@@ -982,12 +984,14 @@ pub(crate) mod harness {
             replica_timer,
             zk_timer,
         };
-        let configure = move |crashes: usize| {
+        let configure = move |crashes: Option<usize>| {
             let mut ldfi = Ldfi::new()
                 .level(Level::Precise)
                 .crashable_cluster("replica", &replicas_id, 0..members)
-                .crash_budget(crashes)
                 .spec(&spec);
+            if let Some(crashes) = crashes {
+                ldfi = ldfi.crash_budget(crashes);
+            }
             if senders_crashable {
                 ldfi = ldfi.crashable("client", &client_id).crashable("zk", &zk_id);
             }
@@ -1169,12 +1173,12 @@ mod tests {
     /// Every `EventualConsistency` label of the protocol, automatically (`Spec::all_labels`),
     /// under the harness's own fault model (replicas crashable, client and ZK correct): the
     /// `write` and `view` broadcasts are the labelled collections; with their senders held
-    /// correct nothing within one crash breaks them. Reports every verdict.
+    /// correct no combination of replica crashes breaks them. Reports every verdict.
     #[test]
     fn ldfi_all_labels_with_the_harness_fault_model() {
         let (compiled, h, configure) =
             compile_all_labels(false, Encoding::Dataflow, DEFAULT_SHAPE, false, 8);
-        let results = configure(1)
+        let results = configure(None)
             .exploration(Exploration::Fuzz { instances: SAMPLED })
             .search_all_labels(&compiled, async |run| body(&h, run).await);
         eprintln!("{results}");
@@ -1202,7 +1206,7 @@ mod tests {
     fn ldfi_all_labels_break_under_a_sender_crash() {
         let (compiled, h, configure) =
             compile_all_labels(false, Encoding::Dataflow, DEFAULT_SHAPE, true, 8);
-        let results = configure(1)
+        let results = configure(None)
             .exploration(Exploration::Fuzz { instances: SAMPLED })
             .search_all_labels(&compiled, async |run| body(&h, run).await);
         eprintln!("{results}");

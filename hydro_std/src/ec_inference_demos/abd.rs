@@ -642,11 +642,10 @@ mod hydrofrac_tests {
             .compiled();
 
         let results = Ldfi::new()
-            .level(Level::Record)
+            .level(Level::Precise)
             .exploration(Exploration::Fuzz { instances: 8 })
             .crashable_cluster("replica", &replicas, 0..REPLICAS as u32)
             .crashable_cluster("client", &clients, 0..1)
-            .crash_budget(1)
             .spec(&spec)
             .search_all_labels(&compiled, async |_run| {
                 w_send.send(0, (1, 10u32));

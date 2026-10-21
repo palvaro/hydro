@@ -1740,3 +1740,80 @@ hypothesis and replay for replay; the `hydro_std` quorum unit shrinks its deriva
 deliveries to four at the same hypothesis count. Flag off, `cargo test -p hydro_lang
 --features ldfi --lib sim`, the pinned 2PC sequence and the Raft unclean-election test are
 unchanged.
+
+## Unbounded crash budget with vacuity constraints
+
+The default crash budget is now unbounded: every combination of crashes of the registered
+nodes is admissible, and `Ldfi::crash_budget(k)` is an explicit statement a test makes about
+its fault model. Two families of fault sets are excluded as constraints of the hitting-set
+program because they cannot violate anything: every node of the program crashing (`Σ ≤ N − 1`
+over the `N` nodes, crashable or not, so it binds only when everything is crashable), and, for
+the generated `EventualConsistency` specification over a cluster `C`, all or all but one of
+`C`'s members crashing (`Σ ≤ |C| − 2` over `C`'s crashable members; one survivor agrees with
+itself). Every other vacuous combination is found by running it: a hypothesis whose every
+schedule is vacuous is recorded and none of its supersets is proposed.
+
+That last rule had a gap this measurement exposed. The generated specification's vacuity
+("no correct member holds any fact of the domain", the Molly case in which the run yields no
+clause) is decided when the derivations are computed, but the vacuous set was recorded from
+the run records before that, so it only ever saw a failed `PRE`. Under one crash the gap was
+invisible; unbounded, every superset of "the proposer crashed before anything was chosen"
+was enumerated (multi-Paxos `:569`/`:570`: 55 and 51 hypotheses; the reliable broadcast
+delivered set: 45 under `all_labels`, 27 by hand). The vacuous set is now taken from the
+schedules.
+
+The EC corpus, before (one crash, the harnesses' former `.crash_budget(1)`) and after (the
+default bounds). One run each, warm build, `--test-threads=1`; the first test of each run
+(`fail_stop`) pays for the test crate's dylib prebuild. Counterexamples are given once where
+they are the same fault.
+
+| Test / label | One crash: verdict, hyps, secs | Unbounded: verdict, hyps, secs |
+|---|---|---|
+| `ec_ldfi` `broadcast_closed` process → cluster, `fail_stop` | violated `crash(source after bcast[→1]:Item(2))`, 5, 72.6 (prebuild) | same, 5, 43.7 (prebuild) |
+| `ec_ldfi` `broadcast_closed` process → cluster, `lossy_delayed_forever` (was budget 0) | violated `omit(bcast[→0]:Item(1))`, 2, 2.2 | same, 2, 2.3 |
+| `ec_ldfi` `broadcast_closed` cluster → cluster | violated `crash(source@0 after bcast[0→1]:Item(10))`, 5, 5.5 | same, 5, 5.6 |
+| `ec_ldfi` plain / echo broadcast (`ec_generated_spec_separates_…`) | violated 2 / certificate 10, 20.5 | violated 2 / certificate 21, 24.0 |
+| `ec_ldfi` `ec_broadcast_closed_all_labels` (new) | — | violated `crash(source after bcast[→1]:Item(2))`, 5, 6.2 |
+| `ec_demos` `broadcast_live_from_process` | violated, 5, 5.9 | same, 5, 5.9 |
+| `ec_demos` `reliable_broadcast_closed`, `_live` | certificate 10 each, 11.6 | certificate 36 each, 12.2 |
+| `ec_demos` `uniform_reliable_broadcast_closed` thresholds 1, 2 (fuzz 8) | no violation 28 each, 14.8 | no violation 105 each, 22.1 |
+| `ec_demos` `g_set_gossip`, `_live` (fuzz 8) | no violation 13 each, 29.2 | no violation 13 each, 26.0 |
+| `ec_demos` `leader_merge_broadcast` | violated `crash(leader after merged[→1]:…)`, 2, 6.6 | same, 2, 5.1 |
+| `ec_demos` `multi_paxos` `learned` (fuzz 8) | no violation 24, 15.0 | **budget 256** at 211.9 s; with `max_hypotheses(2000)`: **no verdict after 659 hypotheses, > 30 min** (1 / 24 / 101 / 299 / 161 / 73 hypotheses of 0 … 5 crashes) |
+| `ec_demos` reliable broadcast `all_labels` `:130` / `:156` / `:149` | violated 5 / violated 3 / certificate 10, 7.3 | violated 5 / violated 3 / certificate 36, 7.9 |
+| `ec_demos` multi-Paxos `all_labels` `:281` / `:286` / `:549` / `:569` / `:570` / `:582` / `:591` / `:588` / `:608` | V 5 / V 8 / V 8 / C 18 / C 18 / V 10 / V 10 / C 25 / C 25, 33.5 | V 5 / V 8 / V 8 / C 23 / C 23 / V 11 / V 8 / **budget 256** / **budget 256**, 445.8 |
+| `ec_all_labels_classes` `:31` / `:36` / `:41` | violated 5 / not checked / violated 5, 14.5 | same, 14.2 |
+| ISR `all_labels`, replicas crashable, `:343` / `:360` / `:564` (fuzz 8) | certificate 4 / 7 / 7, 19.8 | same, 19.7 |
+| ISR `all_labels`, client and ZK crashable too | violated `crash(client …)` 2 / `crash(zk …)` 8 / 8, 9.3 | same, 9.4 |
+| 2PC `all_labels`, coordinator crashable, `:86` / `:92` / `:98` / `:161` | violated 2 / violated 2 / vacuous / vacuous, 12.4 | same, 12.5 |
+| 2PC `all_labels`, coordinator correct, `:86` / `:92` | certificate 3 / 5, 4.7 | certificate **1 / 1**, 4.4 |
+| ABD `all_labels`, `:141` / `:150` / `:161` / `:314` / `:165` (fuzz 8) | (did not compile: `Level::Record`) | violated `crash(client@0 …)` 2 each / not checked, 32.1 |
+
+**No verdict changed, and no counterexample involves more than one fault.** Every violation
+of the corpus is a single crash (or, on the lossy channel, a single omission) and is found at
+the same hypothesis as before, because the search is weakest-first and the one-fault
+hypotheses come first whatever the budget. The 2PC coordinator-correct cell is the vacuity
+bound at work: two participants, both crashable, cap `|C| − 2 = 0`, so no fault set is
+admissible and the failure-free run is the certificate (before, the single crashes were run
+and held).
+
+**Certificates grew where the protocol survives more than one crash.** The echo broadcast
+needs 21 (by hand) and 36 (`all_labels`) hypotheses against 10: the pairs of a source crash
+point and one member's crash (a second member would be the cap). Uniform broadcast's sampled
+search grows from 28 to 105 hypotheses for the same reason. Gossip and the ISR harness are
+unchanged: their crashable set is the checked three-member cluster, so the cap leaves exactly
+the one-crash enumeration; the violated labels of ISR, 2PC and ABD are found at the same
+single crash as before.
+
+**One certificate became impractical.** Multi-Paxos's `learned` set has seven nodes, all
+crashable, and the learner cap of one still admits a proposer crash point, up to three
+acceptor crash points and a learner crash in one hypothesis; each such set survives (the
+protocol tolerates it, or is vacuous only in some of the eight sampled schedules) and
+contributes new clauses. 659 hypotheses in 30 minutes did not finish, with 5-crash sets under
+way. The two multi-Paxos tests therefore state the protocol's own fault model, one crash
+(`f = 1` of three acceptors), with `.crash_budget(1)`; they are the only EC-corpus tests
+with an explicit budget. Under it, with the cluster cap and the vacuous-set fix, they are
+cheaper than before: `learned` 25 hypotheses in 15.0 s; `all_labels` 32.5 s with `:569` and
+`:570` at 5–6 hypotheses (the one-member proposer cluster has a cap of zero, so the proposer
+never crashes under its own labels, and the acceptor crashes that remain are tried once each)
+against 18, and `:588`/`:608` at 25–26.

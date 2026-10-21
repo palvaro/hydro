@@ -17,13 +17,15 @@
 //! - [`g_set_gossip`] and [`g_set_gossip_live`]: state-based gossip; should certify.
 //! - [`uniform_reliable_broadcast_closed`]: delivery after a threshold of echoes; the
 //!   threshold is a quorum argument and the generated spec will say whether its delivered
-//!   set converges under one crash.
+//!   set converges under the crashes that leave two members correct.
 //! - [`leader_merge_broadcast`]: EC rests on the leader; the leader crashing mid-broadcast
 //!   should break it, which is the branch's own claim.
 //!
 //! Membership in the simulator is static ("everyone joined"), so the `_live` variants are
 //! exercised for faults, not for join timing. All channels in these demos are `fail_stop`,
-//! so the fault vocabulary is crashes.
+//! so the fault vocabulary is crashes, under the default crash bounds: every combination of
+//! crashes of the registered nodes except the vacuous ones (all of them; all or all but one
+//! of the checked cluster's members).
 
 #[cfg(test)]
 mod tests {
@@ -60,9 +62,8 @@ mod tests {
     }
 
     /// A process source broadcasting two items to a cluster of three, under the generated
-    /// specification on the demo's EC output. Source and members crashable, budget
-    /// `crashes`.
-    fn broadcast_search(which: Broadcast, crashes: usize) -> Outcome {
+    /// specification on the demo's EC output. Source and members crashable.
+    fn broadcast_search(which: Broadcast) -> Outcome {
         let mut flow = FlowBuilder::new();
         let source = flow.process::<Source>();
         let members = flow.cluster::<Member>();
@@ -113,7 +114,6 @@ mod tests {
             .exploration(exploration)
             .crashable("source", &source)
             .crashable_cluster("member", &members, 0..MEMBERS)
-            .crash_budget(crashes)
             .spec(&spec)
             .search(&compiled, async |_run| {
                 send.send(1);
@@ -127,7 +127,7 @@ mod tests {
     /// output is an unbounded set-valued singleton per member; it is observed through
     /// `sample_eager` and flattened, so the facts are the elements each member's set has
     /// held.
-    fn gossip_search(live: bool, crashes: usize) -> Outcome {
+    fn gossip_search(live: bool) -> Outcome {
         const ROUNDS: u32 = 3;
         let mut flow = FlowBuilder::new();
         let members = flow.cluster::<Member>();
@@ -174,7 +174,6 @@ mod tests {
             .level_from_env()
             .exploration(Exploration::Fuzz { instances: 8 })
             .crashable_cluster("member", &members, 0..MEMBERS)
-            .crash_budget(crashes)
             .spec(&spec)
             .search(&compiled, async |_run| {
                 for m in 0..MEMBERS {
@@ -191,7 +190,7 @@ mod tests {
     /// Two writers send keyed values to one leader process, which merges them into one
     /// order and broadcasts it to three replicas (`leader_merge_broadcast`). The EC label on
     /// the replicas' stream rests on the leader; leader and replicas are crashable.
-    fn leader_merge_search(crashes: usize) -> Outcome {
+    fn leader_merge_search() -> Outcome {
         let mut flow = FlowBuilder::new();
         let writers = flow.cluster::<Writer>();
         let leader = flow.process::<Source>();
@@ -228,7 +227,6 @@ mod tests {
             .level_from_env()
             .crashable("leader", &leader)
             .crashable_cluster("replica", &replicas, 0..MEMBERS)
-            .crash_budget(crashes)
             .spec(&spec)
             .search(&compiled, async |_run| {
                 write.send(0, 100);
@@ -245,8 +243,8 @@ mod tests {
     /// three acceptors (majority two), three learners. The EC output is `learned`, the chosen
     /// decrees at each learner, disseminated by the leader's broadcast plus a learner-side
     /// echo cycle ("every live learner converges to the same set"). Proposers, acceptors and
-    /// learners are crashable; all channels are `fail_stop`.
-    fn multi_paxos_search(crashes: usize) -> Outcome {
+    /// learners are crashable, one crash per hypothesis; all channels are `fail_stop`.
+    fn multi_paxos_search() -> Outcome {
         let mut flow = FlowBuilder::new();
         let proposers = flow.cluster::<Proposer>();
         let acceptors = flow.cluster::<Acceptor>();
@@ -278,7 +276,10 @@ mod tests {
             .crashable_cluster("proposer", &proposers, 0..1)
             .crashable_cluster("acceptor", &acceptors, 0..3)
             .crashable_cluster("learner", &learners, 0..MEMBERS)
-            .crash_budget(crashes)
+            // The protocol's own fault model: one crash (`f = 1` of three acceptors). Under the
+            // default bounds the search does not finish within 2,000 hypotheses (see
+            // `docs/design/ldfi-level-ablation.md`, "Unbounded crash budget").
+            .crash_budget(1)
             .spec(&spec)
             .search(&compiled, async |_run| {
                 lead.send(0, 1);
@@ -309,7 +310,7 @@ mod tests {
     /// membership breaks under the sender's crash between two fan-out sends.
     #[test]
     fn ec_demo_broadcast_live_breaks_under_a_sender_crash() {
-        let faults = expect_counterexample(broadcast_search(Broadcast::Live, 1), "broadcast_live");
+        let faults = expect_counterexample(broadcast_search(Broadcast::Live), "broadcast_live");
         assert!(
             faults
                 .iter()
@@ -319,27 +320,27 @@ mod tests {
     }
 
     /// The echo cycle is the retransmission the premises assume: reliable broadcast, closed
-    /// and live, certifies under one crash.
+    /// and live, certifies under every combination of crashes that leaves two members correct.
     #[test]
-    fn ec_demo_reliable_broadcast_certifies_under_one_crash() {
+    fn ec_demo_reliable_broadcast_certifies() {
         expect_certificate(
-            broadcast_search(Broadcast::ReliableClosed, 1),
+            broadcast_search(Broadcast::ReliableClosed),
             "reliable_broadcast_closed",
         );
         expect_certificate(
-            broadcast_search(Broadcast::ReliableLive, 1),
+            broadcast_search(Broadcast::ReliableLive),
             "reliable_broadcast_live",
         );
     }
 
     /// Uniform reliable broadcast delivers after `threshold` echoes. With a threshold of
-    /// two among three members, one crash leaves two correct members; the test reports what
-    /// the search finds for thresholds 1 and 2.
+    /// two among three members, the admissible crashes leave two correct members; the test
+    /// reports what the search finds for thresholds 1 and 2.
     #[test]
-    fn ec_demo_uniform_broadcast_under_one_crash() {
-        let one = broadcast_search(Broadcast::Uniform(1), 1);
+    fn ec_demo_uniform_broadcast() {
+        let one = broadcast_search(Broadcast::Uniform(1));
         eprintln!("uniform(1): {one}");
-        let two = broadcast_search(Broadcast::Uniform(2), 1);
+        let two = broadcast_search(Broadcast::Uniform(2));
         eprintln!("uniform(2): {two}");
         assert!(
             !matches!(one, Outcome::Budget { .. } | Outcome::Vacuous { .. }),
@@ -351,18 +352,18 @@ mod tests {
         );
     }
 
-    /// State-based G-Set gossip converges under one crash, closed and live.
+    /// State-based G-Set gossip converges under the admissible crashes, closed and live.
     #[test]
-    fn ec_demo_g_set_gossip_certifies_under_one_crash() {
-        expect_certificate(gossip_search(false, 1), "g_set_gossip");
-        expect_certificate(gossip_search(true, 1), "g_set_gossip_live");
+    fn ec_demo_g_set_gossip_certifies() {
+        expect_certificate(gossip_search(false), "g_set_gossip");
+        expect_certificate(gossip_search(true), "g_set_gossip_live");
     }
 
     /// `leader_merge`'s EC label "silently assumes the leader's survival" (its docs): the
     /// leader crashing between two of its broadcast sends is the counterexample.
     #[test]
     fn ec_demo_leader_merge_breaks_under_a_leader_crash() {
-        let faults = expect_counterexample(leader_merge_search(1), "leader_merge_broadcast");
+        let faults = expect_counterexample(leader_merge_search(), "leader_merge_broadcast");
         assert!(
             faults
                 .iter()
@@ -377,7 +378,7 @@ mod tests {
     /// the search reports.
     #[test]
     fn ec_demo_multi_paxos_learned_under_one_crash() {
-        let outcome = multi_paxos_search(1);
+        let outcome = multi_paxos_search();
         eprintln!("{outcome}");
         assert!(
             !matches!(outcome, Outcome::Budget { .. } | Outcome::Vacuous { .. }),
@@ -386,9 +387,10 @@ mod tests {
     }
 
     /// Every label of `reliable_broadcast_closed`, automatically (`Spec::all_labels`): the
-    /// delivered set certifies in the same 10 hypotheses as the manual search above; the
-    /// initial single-hop broadcast the label is inferred from is violated by the source's
-    /// crash between two of its fan-out sends.
+    /// delivered set certifies in the same 36 hypotheses as the manual search above (every
+    /// admissible combination of a source crash point and one member's crash); the initial
+    /// single-hop broadcast the label is inferred from is violated by the source's crash
+    /// between two of its fan-out sends.
     #[test]
     fn ec_demo_reliable_broadcast_all_labels() {
         let mut flow = FlowBuilder::new();
@@ -411,7 +413,6 @@ mod tests {
             .level(Level::Precise)
             .crashable("source", &source)
             .crashable_cluster("member", &members, 0..MEMBERS)
-            .crash_budget(1)
             .spec(&spec)
             .search_all_labels(&compiled, async |_run| {
                 send.send(1);
@@ -426,7 +427,7 @@ mod tests {
         else {
             panic!("{results}");
         };
-        assert_eq!(runs.len(), 10, "{results}");
+        assert_eq!(runs.len(), 36, "{results}");
         // The initial single-hop broadcast the label is inferred from: the source's crash.
         let initial: Vec<_> = results.at("reliable_broadcast.rs:130").collect();
         assert_eq!(initial.len(), 1, "{results}");
@@ -483,6 +484,7 @@ mod tests {
             .crashable_cluster("proposer", &proposers, 0..1)
             .crashable_cluster("acceptor", &acceptors, 0..3)
             .crashable_cluster("learner", &learners, 0..MEMBERS)
+            // One crash: the protocol's fault model, as in `multi_paxos_search`.
             .crash_budget(1)
             .spec(&spec)
             .search_all_labels(&compiled, async |_run| {

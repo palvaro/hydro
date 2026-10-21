@@ -352,13 +352,15 @@ pub(crate) mod harness {
     /// hand-written one: every collection the protocol labels `EventualConsistency` (the
     /// `prepare`, `commit` and `peer` broadcasts) is observed, nothing is named. The
     /// committed transactions go to a plain simulator output. `coordinator_crashable` is the
-    /// harness's own fault model; without it the coordinator is held correct.
+    /// harness's own fault model; without it the coordinator is held correct. The returned
+    /// configuration takes an explicit crash budget, or `None` for the default (every
+    /// combination of crashes but the vacuous ones).
     pub(crate) fn compile_all_labels(
         participants_count: u32,
         ctp: bool,
         coordinator_crashable: bool,
         fuzz_iterations: usize,
-    ) -> (CompiledSim, Harness, impl Fn(usize) -> Ldfi) {
+    ) -> (CompiledSim, Harness, impl Fn(Option<usize>) -> Ldfi) {
         let mut flow = FlowBuilder::new();
         let coordinator = flow.process::<Coordinator>();
         let participants = flow.cluster::<Participant>();
@@ -403,12 +405,14 @@ pub(crate) mod harness {
             txn_send,
             timeout_send,
         };
-        let configure = move |crashes: usize| {
+        let configure = move |crashes: Option<usize>| {
             let mut ldfi = Ldfi::new()
                 .level(Level::Precise)
                 .crashable_cluster("participant", &participants_id, 0..participants_count)
-                .crash_budget(crashes)
                 .spec(&spec);
+            if let Some(crashes) = crashes {
+                ldfi = ldfi.crash_budget(crashes);
+            }
             if coordinator_crashable {
                 ldfi = ldfi.crashable("coordinator", &coordinator_id);
             }
@@ -606,7 +610,7 @@ mod tests {
     #[test]
     fn ldfi_all_labels_with_the_harness_fault_model() {
         let (compiled, h, configure) = compile_all_labels(2, true, true, 8);
-        let results = configure(1).search_all_labels(&compiled, async |run| body(&h, run).await);
+        let results = configure(None).search_all_labels(&compiled, async |run| body(&h, run).await);
         eprintln!("{results}");
         assert!(
             !results
@@ -636,7 +640,7 @@ mod tests {
     #[test]
     fn ldfi_all_labels_with_the_coordinator_correct() {
         let (compiled, h, configure) = compile_all_labels(2, true, false, 8);
-        let results = configure(1).search_all_labels(&compiled, async |run| body(&h, run).await);
+        let results = configure(None).search_all_labels(&compiled, async |run| body(&h, run).await);
         eprintln!("{results}");
         assert!(
             !results.verdicts.is_empty(),

@@ -34,7 +34,6 @@
 //! Ldfi::new()
 //!     .crashable("broadcaster", &broadcaster)
 //!     .crashable_cluster("member", &members, 0..3)
-//!     .crash_budget(1)
 //!     .spec(spec)
 //!     .search(&compiled, async |_run| {
 //!         source.send(Payload(42));
@@ -87,6 +86,7 @@
 //! certifies, and the certificate is only as good as the vocabulary's inability to produce
 //! such a run.
 
+use std::any::TypeId;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::hash::Hash;
@@ -125,10 +125,18 @@ pub(crate) struct CorrectFeed {
     /// The cluster and its members. Fixed at construction by [`Spec::correct_members`]; set
     /// by the search, once per labelled collection, for an automatic specification. `None`
     /// feeds nothing.
-    pub target: Rc<std::panic::AssertUnwindSafe<RefCell<Option<(LocationId, Vec<u32>)>>>>,
+    pub target: ClusterTarget,
+    /// The cluster's tag type `C`, by which [`Spec::eventual_consistency`] finds the feed its
+    /// `correct` stream came from.
+    pub tag: TypeId,
     /// Sends one member id into the observer.
     pub send: Rc<dyn Fn(u32) + RefUnwindSafe>,
 }
+
+/// A cluster and its members, shared between a [`CorrectFeed`] and the search's crash bounds
+/// (`AssertUnwindSafe`: written between runs, never inside the simulator's unwind scope).
+pub(crate) type ClusterTarget =
+    Rc<std::panic::AssertUnwindSafe<RefCell<Option<(LocationId, Vec<u32>)>>>>;
 
 impl CorrectFeed {
     /// Feeds every member of the cluster that is not in `crashed`.
@@ -184,6 +192,10 @@ pub(crate) struct FactFeed {
     /// The domain, filled by the search from the probe run. (`AssertUnwindSafe`: the search
     /// writes it between runs, never inside the simulator's unwind scope.)
     pub domain: Rc<std::panic::AssertUnwindSafe<RefCell<std::collections::BTreeSet<Vec<u8>>>>>,
+    /// The checked cluster and its members (shared with the [`CorrectFeed`] the specification
+    /// quantifies over), for the search's crash bounds: all or all but one of them crashing is
+    /// vacuous. `None` if the `correct` stream came from no [`Spec::correct_members`] feed.
+    pub cluster: Option<ClusterTarget>,
 }
 
 impl FactFeed {
@@ -288,6 +300,7 @@ impl<'a> Spec<'a> {
             .sim_input::<MemberId<Observed>, TotalOrder, ExactlyOnce>();
         let correct_feed = CorrectFeed {
             target: Rc::new(std::panic::AssertUnwindSafe(RefCell::new(None))),
+            tag: TypeId::of::<Observed>(),
             send: {
                 let sender = std::panic::AssertUnwindSafe(correct_sender);
                 Rc::new(move |member| sender.send(MemberId::from_raw_id(member)))
@@ -416,6 +429,7 @@ impl<'a> Spec<'a> {
                 Location::id(cluster),
                 members.into_iter().collect(),
             ))))),
+            tag: TypeId::of::<C>(),
             send: {
                 // The sender holds only a port id and `PhantomData<MemberId<C>>`.
                 let sender = std::panic::AssertUnwindSafe(sender);
@@ -454,18 +468,29 @@ impl<'a> Spec<'a> {
     /// protocol time to converge, and a protocol with retransmission or leader change needs the
     /// body to let that happen. A `FACTS` fact that no correct member holds under a hypothesis
     /// (its producer crashed before producing it) is not required of anyone, as in Molly.
+    ///
+    /// The search never proposes crashing all, or all but one, of the members `correct` ranges
+    /// over (the cluster of the [`Self::correct_members`] call it came from): a single survivor
+    /// agrees with itself. See the crash bounds in [`Ldfi`](super::ldfi::Ldfi)'s module docs.
     pub fn eventual_consistency<C, T, R: Retries>(
         &mut self,
         observed: Stream<(MemberId<C>, T), Tick<Process<'a, Observer>>, Bounded, TotalOrder, R>,
         correct: Stream<MemberId<C>, Tick<Process<'a, Observer>>, Bounded, TotalOrder>,
     ) where
-        C: 'a,
+        C: 'static,
         T: Clone + Eq + Hash + Ord + Serialize + DeserializeOwned + 'static,
     {
         assert!(
             self.facts.is_none(),
             "a Spec has one generated specification"
         );
+        // The feed `correct` came from: the latest `correct_members` over this cluster type.
+        let cluster = self
+            .correct
+            .iter()
+            .rev()
+            .find(|feed| feed.tag == TypeId::of::<C>())
+            .map(|feed| feed.target.clone());
         let (sender, domain) = self.observer.sim_input::<T, TotalOrder, ExactlyOnce>();
         let domain = self.accumulate(domain);
         let (post, held_facts) = crate::spec_views::eventual_consistency(observed, correct, domain);
@@ -482,6 +507,7 @@ impl<'a> Spec<'a> {
                 })
             },
             domain: Rc::new(std::panic::AssertUnwindSafe(Default::default())),
+            cluster,
         });
         self.post(post);
     }

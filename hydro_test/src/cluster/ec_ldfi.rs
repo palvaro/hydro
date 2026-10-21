@@ -12,15 +12,19 @@
 //!   transport's `ConsistencyGuarantee` is `EventualConsistency`, justified in
 //!   `hydro_lang::networking` by "a failed connection models the *recipient* as having
 //!   failed"). The sender is not considered; a crash of the sender between two sends of one
-//!   fan-out leaves two members with different sets. One crash.
+//!   fan-out leaves two members with different sets.
 //! - The same over `lossy_delayed_forever` (also `EventualConsistency`, justified by "dropped
 //!   messages are modeled as indefinitely delayed, so the output is a lower bound that is
 //!   eventually delivered in full"). The closed broadcast sends once and nothing retransmits,
-//!   so a message delayed forever is a message a member never gets. One omission, no crash.
+//!   so a message delayed forever is a message a member never gets. One omission.
 //! - [`Stream::broadcast_closed`] from a cluster to a cluster (every source member to every
 //!   destination member), over `fail_stop`. A source member crashing mid-fan-out.
 //! - The echoing reliable broadcast of [`super::reliable_broadcast`], as the control: the
 //!   same specification, generated rather than written, certifies it.
+//!
+//! Every search runs under the default crash bounds: any combination of crashes of the
+//! registered nodes (source and members), minus the vacuous ones (see the crash bounds in
+//! `hydro_lang::sim::ldfi`).
 //!
 //! The other producers of the label, for the record: `source_interval*` on a cluster asserts
 //! it on a stream of `()` (trivially the same contents at every member); keyed `fold` /
@@ -33,7 +37,8 @@
 mod tests {
     use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
     use hydro_lang::prelude::*;
-    use hydro_lang::sim::ldfi::{Fault, Ldfi, Level, Outcome};
+    use hydro_lang::sim::compiled::CompiledSim;
+    use hydro_lang::sim::ldfi::{Fault, LabelResults, Ldfi, Level, Outcome};
     use hydro_lang::sim::spec::Spec;
     use serde::{Deserialize, Serialize};
 
@@ -59,7 +64,7 @@ mod tests {
     /// `broadcast_closed` from one process to a cluster of three, under the generated
     /// specification. The body sends two items and quiesces; there is nothing to converge
     /// beyond delivery, so quiescence is the convergence witness.
-    fn process_to_cluster(transport: Transport, crashes: usize) -> Outcome {
+    fn process_to_cluster(transport: Transport) -> Outcome {
         let mut flow = FlowBuilder::new();
         let source = flow.process::<Source>();
         let members = flow.cluster::<Member>();
@@ -102,7 +107,6 @@ mod tests {
             .level(Level::Precise)
             .crashable("source", &source)
             .crashable_cluster("member", &members, 0..MEMBERS)
-            .crash_budget(crashes)
             .spec(&spec)
             .search(&compiled, async |_run| {
                 send.send(Item(1));
@@ -113,7 +117,7 @@ mod tests {
 
     /// `broadcast_closed` from a cluster of two sources to a cluster of three members over
     /// `fail_stop`, each source broadcasting its own item.
-    fn cluster_to_cluster(crashes: usize) -> Outcome {
+    fn cluster_to_cluster() -> Outcome {
         let mut flow = FlowBuilder::new();
         let sources = flow.cluster::<Source>();
         let members = flow.cluster::<Member>();
@@ -140,7 +144,6 @@ mod tests {
             .level(Level::Precise)
             .crashable_cluster("source", &sources, 0..SOURCES)
             .crashable_cluster("member", &members, 0..MEMBERS)
-            .crash_budget(crashes)
             .spec(&spec)
             .search(&compiled, async |_run| {
                 send.send(0, Item(10));
@@ -151,7 +154,7 @@ mod tests {
 
     /// The reliable broadcast of [`super::super::reliable_broadcast`] (every member re-broadcasts
     /// what it first sees) under the generated specification, with or without the echo.
-    fn echo_broadcast(echo: bool, crashes: usize) -> Outcome {
+    fn echo_broadcast(echo: bool) -> Outcome {
         let mut flow = FlowBuilder::new();
         let broadcaster = flow.process::<Broadcaster>();
         let members = flow.cluster::<Member>();
@@ -182,7 +185,6 @@ mod tests {
             .level(Level::Precise)
             .crashable("broadcaster", &broadcaster)
             .crashable_cluster("member", &members, 0..MEMBERS)
-            .crash_budget(crashes)
             .spec(&spec)
             .search(&compiled, async |_run| {
                 source_send.send(Payload(42));
@@ -203,7 +205,7 @@ mod tests {
     #[test]
     fn ec_broadcast_closed_fail_stop_breaks_under_a_sender_crash() {
         let faults = expect_counterexample(
-            process_to_cluster(Transport::FailStop, 1),
+            process_to_cluster(Transport::FailStop),
             "broadcast_closed over fail_stop",
         );
         assert!(
@@ -216,11 +218,12 @@ mod tests {
 
     /// Process → cluster over `lossy_delayed_forever`: the label is `EventualConsistency` too,
     /// on the reading that a dropped message is only delayed. Nothing retransmits a closed
-    /// broadcast, so one omission and no crash refute the premise.
+    /// broadcast, so one omission (the weakest fault, tried before any crash) refutes the
+    /// premise.
     #[test]
     fn ec_broadcast_closed_lossy_delayed_forever_breaks_under_one_omission() {
         let faults = expect_counterexample(
-            process_to_cluster(Transport::LossyDelayedForever, 0),
+            process_to_cluster(Transport::LossyDelayedForever),
             "broadcast_closed over lossy_delayed_forever",
         );
         assert_eq!(faults.len(), 1, "one omission suffices: {faults:?}");
@@ -230,7 +233,7 @@ mod tests {
     /// Cluster → cluster over `fail_stop`: a source member crashing mid-fan-out.
     #[test]
     fn ec_broadcast_closed_cluster_to_cluster_breaks_under_a_source_crash() {
-        let faults = expect_counterexample(cluster_to_cluster(1), "cluster broadcast_closed");
+        let faults = expect_counterexample(cluster_to_cluster(), "cluster broadcast_closed");
         assert!(
             faults
                 .iter()
@@ -240,15 +243,95 @@ mod tests {
     }
 
     /// Control: the generated specification separates the protocols the way the hand-written
-    /// one did. Plain broadcast breaks; the echoing broadcast certifies under one crash.
+    /// one did. Plain broadcast breaks; the echoing broadcast certifies under every
+    /// combination of crashes that leaves two members correct.
     #[test]
     fn ec_generated_spec_separates_plain_from_reliable_broadcast() {
-        expect_counterexample(echo_broadcast(false, 1), "plain broadcast");
-        let outcome = echo_broadcast(true, 1);
+        expect_counterexample(echo_broadcast(false), "plain broadcast");
+        let outcome = echo_broadcast(true);
         eprintln!("{outcome}");
         assert!(
             matches!(outcome, Outcome::Certificate { .. }),
             "reliable broadcast: expected a certificate, got {outcome}"
+        );
+    }
+
+    /// Plain `broadcast_closed` from one process to a cluster of three over `fail_stop`, with
+    /// nothing named by the test: [`Spec::all_labels`] finds the collection the transport
+    /// labels `EventualConsistency` and [`Ldfi::search_all_labels`] searches it. `configure`
+    /// adjusts the search (the gallery entry keeps traces).
+    fn broadcast_closed_all_labels(configure: impl FnOnce(Ldfi) -> Ldfi) -> LabelResults {
+        let mut flow = FlowBuilder::new();
+        let source = flow.process::<Source>();
+        let members = flow.cluster::<Member>();
+        let (send, items) = source.sim_input::<Item, TotalOrder, ExactlyOnce>();
+
+        // This collection is labelled EventualConsistency by the transport.
+        let at_members = items.broadcast_closed(&members, TCP.fail_stop().name("bcast").bincode());
+        let _out = at_members.weaken_consistency().sim_cluster_output();
+
+        let spec = Spec::all_labels(&mut flow); // Names no collection.
+
+        let compiled: CompiledSim = flow
+            .sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&members, MEMBERS as usize)
+            .with_provenance()
+            .compiled();
+
+        configure(
+            Ldfi::new()
+                .level(Level::Precise)
+                .crashable("source", &source)
+                .crashable_cluster("member", &members, 0..MEMBERS)
+                .spec(&spec),
+        )
+        .search_all_labels(&compiled, async |_run| {
+            send.send(Item(1));
+            send.send(Item(2));
+            hydro_lang::sim::quiesce().await;
+        })
+    }
+
+    /// Every label of a plain `broadcast_closed`, automatically: the one labelled collection is
+    /// violated by the source's crash between two of its fan-out sends.
+    #[test]
+    fn ec_broadcast_closed_all_labels() {
+        let results = broadcast_closed_all_labels(|ldfi| ldfi);
+        println!("{results}");
+        let mut counterexamples = results.counterexamples();
+        let Some((_, faults)) = counterexamples.next() else {
+            panic!("the single-hop broadcast should be violated: {results}");
+        };
+        assert!(
+            faults
+                .iter()
+                .any(|f| matches!(f, Fault::Crash { node, .. } if node == "source")),
+            "the counterexample should be the source's crash: {results}"
+        );
+    }
+
+    /// The gallery entry for the test above (see `ldfi_viz`): the failing run's Lamport diagram
+    /// and report, written under `$MOLLY_VIZ_OUT/ec_broadcast_closed_all_labels/`.
+    #[test]
+    fn gallery_ec_broadcast_closed_all_labels() {
+        use crate::cluster::ldfi_viz::{gallery_dir, write_gallery};
+
+        let Some(dir) = gallery_dir("ec_broadcast_closed_all_labels") else {
+            return;
+        };
+        let results =
+            broadcast_closed_all_labels(|ldfi| ldfi.with_traces().with_provenance_graphs());
+        println!("{results}");
+        let (_, outcome) = results
+            .searched()
+            .find(|(_, outcome)| outcome.is_counterexample())
+            .expect("the single-hop broadcast is violated");
+        write_gallery(
+            &dir,
+            "broadcast_closed (all labels)",
+            Level::Precise,
+            outcome,
         );
     }
 }

@@ -55,7 +55,6 @@ mod tests {
             .level(Level::Precise)
             .crashable("source", &source)
             .crashable_cluster("member", &members, 0..MEMBERS)
-            .crash_budget(1)
             .spec(&spec)
             .search_all_labels(&compiled, async |_run| {
                 send.send(1);

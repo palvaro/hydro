@@ -900,6 +900,9 @@ pub struct CompiledSim {
     pub(super) eager_locations: Rc<HashSet<LocationId>>,
     /// Each cluster's member ids (from `SimFlow::with_cluster_size`).
     pub(super) cluster_members: Rc<std::collections::BTreeMap<LocationId, Vec<u32>>>,
+    /// The number of processes of the program, not counting the observer a specification adds
+    /// (`sim::spec`).
+    pub(super) process_count: usize,
     /// The labelled collections and whether each is observed, when the flow carries an
     /// automatic specification (`Spec::all_labels`; see `sim::observe`).
     #[cfg(feature = "ldfi")]
@@ -971,6 +974,12 @@ impl CompiledSim {
     /// Each cluster's member ids, from `SimFlow::with_cluster_size`.
     pub fn cluster_members(&self, cluster: &LocationId) -> Option<&[u32]> {
         self.cluster_members.get(cluster).map(Vec::as_slice)
+    }
+
+    /// The number of nodes of the program: every process and every cluster member, except the
+    /// observer a specification adds (`sim::spec`), which is not a node of the program.
+    pub fn node_count(&self) -> usize {
+        self.process_count + self.cluster_members.values().map(Vec::len).sum::<usize>()
     }
 
     /// Executes the given closure with a single instance of the compiled simulation.

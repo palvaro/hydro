@@ -65,8 +65,34 @@
 //!
 //! A support is a set of [`Dependency`]s (message, sender, ordinal). A fault *kills* a
 //! dependency if it is `omit` of that message on a lossy channel, or `crash(sender, m)`
-//! with `m` sent before the dependency. A hypothesis is a hitting set under `kills`; crash
-//! literals are capped by [`Ldfi::crash_budget`].
+//! with `m` sent before the dependency. A hypothesis is a hitting set under `kills`, with at
+//! most one crash per node.
+//!
+//! # Crash bounds
+//!
+//! Every combination of crashes of the registered nodes is admissible by default: the
+//! protocol is expected to uphold its specification under all of them, and the ones that
+//! leave nothing to check are simply vacuous ([`Outcome::Vacuous`] for the failure-free run; a
+//! hypothesis whose every schedule was vacuous, because `PRE` failed or because no correct
+//! member held any fact of a generated specification's domain, is recorded and none of its
+//! supersets is proposed). Two families of hypotheses are never proposed, as constraints of
+//! the hitting-set program rather than runs, because they cannot violate anything:
+//!
+//! - **every node of the program crashing**: nothing is left that could hold anything. The
+//!   bound is `N − 1` over the program's `N` nodes (processes and cluster members, not the
+//!   specification's observer), so it binds only when every node is crashable; with a
+//!   non-crashable node left, crashing all the crashable ones is admissible;
+//! - under a generated `EventualConsistency` specification over a cluster `C`, **all or all
+//!   but one of `C`'s members crashing**: a single surviving member agrees with itself. The
+//!   bound is `|C| − 2` over the crashable members of the checked cluster (the collection's
+//!   cluster under [`Ldfi::search_all_labels`]; the [`Spec::correct_members`] cluster under
+//!   [`Spec::eventual_consistency`]), and only that cluster: a crash elsewhere withholds
+//!   inputs, which is exactly what the specification is about. A hand-written specification
+//!   gets no such bound; what it quantifies over is its own business.
+//!
+//! [`Ldfi::crash_budget`] adds an explicit cap when a test's fault model has one (`f` of
+//! `2f + 1`); it is not needed for termination, since the candidate faults of a search are
+//! finite and every hypothesis is tried at most once.
 //!
 //! # Goals
 //!
@@ -461,8 +487,9 @@ pub struct Schedule {
     pub requirements: Derivation,
     /// Deliveries at registered hooks that could not be traced to a send (a lineage gap).
     pub unmatched_releases: usize,
-    /// Whether the body declared the run vacuous ([`Run::mark_vacuous`]: the goal's
-    /// pre-condition failed, so the run says nothing about the protocol).
+    /// Whether the run was vacuous: the body declared it so ([`Run::mark_vacuous`]), a
+    /// [`Spec`]'s `PRE` failed, or the generated specification had nothing to hold (no correct
+    /// member holds any fact of the domain). The run says nothing about the protocol.
     pub vacuous: bool,
     /// Counterfactual replays run to derive this schedule's lineage (at records without usable
     /// provenance under [`Level::Precise`], and at the observer for a hand-written
@@ -3640,7 +3667,8 @@ pub struct Ldfi {
     strategy: Strategy,
     exploration: Exploration,
     level: Level,
-    crash_budget: usize,
+    /// An explicit cap on the crashes of one hypothesis; `None` (the default) is unbounded.
+    crash_budget: Option<usize>,
     max_hypotheses: usize,
     log: bool,
     /// Whether every schedule keeps its [`Trace`] (failing schedules always do).
@@ -3662,8 +3690,9 @@ impl Default for Ldfi {
 }
 
 impl Ldfi {
-    /// A search with no crashable nodes, a crash budget of 0, and a budget of 256
-    /// hypotheses. Omission is available on every lossy channel of the program.
+    /// A search with no crashable nodes, an unbounded crash budget (every combination of
+    /// crashes of the registered nodes is admissible; see [`Self::crash_budget`]), and a budget
+    /// of 256 hypotheses. Omission is available on every lossy channel of the program.
     pub fn new() -> Self {
         Ldfi {
             search: Search {
@@ -3673,7 +3702,7 @@ impl Ldfi {
             strategy: Strategy::Lineage,
             exploration: Exploration::Exhaustive,
             level: Level::Precise,
-            crash_budget: 0,
+            crash_budget: None,
             max_hypotheses: 256,
             log: true,
             traces: false,
@@ -3833,10 +3862,20 @@ impl Ldfi {
         self.search.nodes.insert(label, key);
     }
 
-    /// The maximum number of crash faults in one hypothesis.
+    /// Caps the number of crash faults in one hypothesis. By default there is no cap: the
+    /// protocol is expected to uphold its specification under every combination of crashes of
+    /// the registered crashable nodes, and the search tries them weakest first. Two
+    /// combinations are never proposed because they cannot violate anything (see the module
+    /// docs): every node of the program crashing, and, for a generated `EventualConsistency`
+    /// specification, all or all-but-one of the checked cluster's members crashing. Everything
+    /// else is left to the runs themselves: a hypothesis whose every schedule is vacuous is
+    /// recorded as such and none of its supersets is proposed.
+    ///
+    /// A bound is a statement about the fault model a test means to admit (`f` crashes of
+    /// `2f + 1` replicas), and makes the certificate smaller.
     #[must_use]
     pub fn crash_budget(mut self, crashes: usize) -> Self {
-        self.crash_budget = crashes;
+        self.crash_budget = Some(crashes);
         self
     }
 
@@ -3912,6 +3951,26 @@ impl Ldfi {
                 all_labels.current.get().is_some(),
                 "a `Spec::all_labels` specification is driven by `Ldfi::search_all_labels`"
             );
+        }
+    }
+
+    /// The crash bounds of the search as configured: the explicit budget, the number of nodes
+    /// of the program, and, under a generated `EventualConsistency` specification, the checked
+    /// cluster's crashable members (read now, as [`Self::search_all_labels`] points the
+    /// specification at one collection at a time).
+    fn crash_bounds(&self, sim: &CompiledSim) -> CrashBounds {
+        let checked = match &self.search.goal {
+            Some(Goal::Spec(spec)) => spec
+                .facts
+                .as_ref()
+                .and_then(|facts| facts.cluster.as_ref())
+                .and_then(|cluster| cluster.borrow().clone()),
+            _ => None,
+        };
+        CrashBounds {
+            budget: self.crash_budget,
+            nodes: sim.node_count(),
+            checked: CrashBounds::checked_cluster(&self.search.nodes, checked.as_ref()),
         }
     }
 
@@ -4035,6 +4094,7 @@ impl Ldfi {
         let mut vacuous_sets: Vec<FaultSet> = vec![];
         let mut tried: BTreeSet<FaultSet> = BTreeSet::new();
         let mut faults = FaultSet::new();
+        let bounds = self.crash_bounds(sim);
         let level = self.level;
         let tag = match (self.strategy, level) {
             (Strategy::Blind, _) => "blind",
@@ -4115,9 +4175,6 @@ impl Ldfi {
                 continue;
             }
             tried.insert(faults.clone());
-            if !records.is_empty() && records.iter().all(|r| r.vacuous) {
-                vacuous_sets.push(faults.clone());
-            }
             // Derivations are computed outside the instance: counterfactual replays are
             // instances of their own.
             let replayer = Replayer {
@@ -4131,6 +4188,13 @@ impl Ldfi {
                     record.schedule(search, Some(&replayer), self.traces, self.prov_graphs)
                 })
                 .collect();
+            // A hypothesis whose every schedule was vacuous: the pre-condition failed, or the
+            // generated specification had nothing to hold (every producer of the facts was
+            // dead; known only once the derivations are computed). Its supersets are not
+            // proposed.
+            if !schedules.is_empty() && schedules.iter().all(|s| s.vacuous) {
+                vacuous_sets.push(faults.clone());
+            }
 
             let failing = schedules.iter().find(|s| !s.goal_held).cloned();
             let new_derivations: BTreeSet<Derivation> = schedules
@@ -4210,6 +4274,7 @@ impl Ldfi {
                 && let Some(slices) = &slices
             {
                 eprintln!("{tag}: channels:\n{}", describe_channels(slices));
+                eprintln!("{tag}: crash bounds: {bounds}");
                 if let Some(Goal::Spec(spec)) = &search.goal {
                     eprintln!(
                         "{tag}: specification is {}",
@@ -4353,20 +4418,13 @@ impl Ldfi {
                         &required,
                         &tried,
                         &vacuous_sets,
-                        self.crash_budget,
+                        &bounds,
                     )
                 }
                 Strategy::Blind => {
                     let mut universe: Vec<Fault> = observed.iter().cloned().collect();
                     universe.sort_by_key(order);
-                    next_hypothesis(
-                        &universe,
-                        &[],
-                        &[],
-                        &tried,
-                        &vacuous_sets,
-                        self.crash_budget,
-                    )
+                    next_hypothesis(&universe, &[], &[], &tried, &vacuous_sets, &bounds)
                 }
             };
             match next {
@@ -4620,7 +4678,7 @@ impl Ldfi {
             Some(Goal::Any { port } | Goal::AllMembers { port, .. }) => Some(*port),
             Some(Goal::Witnessed | Goal::Spec(_)) | None => None,
         };
-        let crash_budget = self.crash_budget;
+        let crash_budget = self.crash_budget.unwrap_or(usize::MAX);
         let FuzzConfig {
             omittable,
             crash_points,
@@ -4771,9 +4829,92 @@ impl Ldfi {
     }
 }
 
+/// The bounds on the crashes of one hypothesis, as the solver sees them (see
+/// [`Ldfi::crash_budget`] and the module docs).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CrashBounds {
+    /// An explicit cap on the number of crashes ([`Ldfi::crash_budget`]); `None` is unbounded.
+    budget: Option<usize>,
+    /// The number of nodes of the program ([`CompiledSim::node_count`]), crashable or not.
+    /// Crashing every node is vacuous, so a hypothesis holds at most `nodes - 1` crashes; the
+    /// bound binds only when every node is crashable.
+    nodes: usize,
+    /// For a generated `EventualConsistency` specification, the crashable members of the
+    /// checked cluster and how many of them may crash in one hypothesis (`|C| - 2`: one
+    /// surviving member agrees with itself). `None` when nothing is checked at a cluster or
+    /// the cap cannot bind.
+    checked: Option<CheckedCluster>,
+}
+
+/// The crashable members of the cluster a generated specification checks, and the cap on
+/// how many of them one hypothesis may crash.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CheckedCluster {
+    /// The node labels (see [`Ldfi::crashable_cluster`]) of the checked cluster's crashable
+    /// members.
+    nodes: BTreeSet<String>,
+    /// At most this many of `nodes` crash in one hypothesis.
+    cap: usize,
+}
+
+impl CrashBounds {
+    /// Bounds for a test of the solver: an explicit budget and nothing else.
+    #[cfg(test)]
+    fn budget(crashes: usize) -> Self {
+        CrashBounds {
+            budget: Some(crashes),
+            nodes: 0,
+            checked: None,
+        }
+    }
+
+    /// The members of the checked cluster, `members` of `cluster`, that are crashable under
+    /// `nodes`, with the cap `|members| - 2`; `None` when the cap cannot bind (fewer
+    /// crashable members than the cap, or no cluster).
+    fn checked_cluster(
+        nodes: &BTreeMap<String, NodeKey>,
+        checked: Option<&(LocationId, Vec<u32>)>,
+    ) -> Option<CheckedCluster> {
+        let (cluster, members) = checked?;
+        let crashable: BTreeSet<String> = nodes
+            .iter()
+            .filter(|(_, (location, member))| {
+                location == cluster && member.is_some_and(|m| members.contains(&m))
+            })
+            .map(|(label, _)| label.clone())
+            .collect();
+        let cap = members.len().saturating_sub(2);
+        (crashable.len() > cap).then_some(CheckedCluster {
+            nodes: crashable,
+            cap,
+        })
+    }
+}
+
+impl Display for CrashBounds {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.budget {
+            Some(budget) => write!(f, "at most {budget} crash(es)")?,
+            None => write!(f, "crashes unbounded")?,
+        }
+        if self.nodes >= 1 {
+            write!(f, "; not all {} nodes at once", self.nodes)?;
+        }
+        if let Some(checked) = &self.checked {
+            write!(
+                f,
+                "; at most {} of the checked cluster's {} crashable member(s)",
+                checked.cap,
+                checked.nodes.len()
+            )?;
+        }
+        Ok(())
+    }
+}
+
 /// The next hypothesis: a minimum-weight subset of `universe` (sorted) that kills some
-/// dependency of every clause, holds at most `crash_budget` crashes and at most one crash per
-/// node, and has not been tried. `None` when no such set exists: some clause is empty, or the
+/// dependency of every clause, holds crashes within `bounds` and at most one crash per node,
+/// and has not been tried. `None` when no such set exists: some clause is empty, or the
 /// hitting-set problem is infeasible over the candidate faults, which is the certificate.
 /// With no clauses this enumerates every admissible subset by weight (the blind search).
 ///
@@ -4785,8 +4926,12 @@ impl Ldfi {
 ///   crash after a later message), so a hypothesis leaves as much of the protocol running as
 ///   a minimum hitting set allows;
 /// - cover: for every clause `D`, `Σ { x_f : f kills some d ∈ D } ≥ 1`;
-/// - `Σ_{crash} x_f ≤ crash_budget`, and `Σ_{f = crash(n, ·)} x_f ≤ 1` per node (an earlier
-///   crash of the same node dominates a later one);
+/// - `Σ_{f = crash(n, ·)} x_f ≤ 1` per node (an earlier crash of the same node dominates a
+///   later one);
+/// - the crash bounds: `Σ_{crash} x_f ≤ budget` when a budget is set; `Σ_{crash} x_f ≤ N − 1`
+///   for the `N` nodes of the program (every node dead is vacuous; binds only when every node
+///   is crashable); and, for a generated `EventualConsistency` specification over a cluster `C`,
+///   `Σ_{f = crash(m, ·), m ∈ C} x_f ≤ |C| − 2` (one surviving member agrees with itself);
 /// - a no-good per tried set `T`: `Σ_{f∈T} x_f − Σ_{f∉T} x_f ≤ |T| − 1`, excluding exactly `T`.
 fn next_hypothesis(
     universe: &[Fault],
@@ -4794,18 +4939,17 @@ fn next_hypothesis(
     required: &[Clause],
     tried: &BTreeSet<FaultSet>,
     vacuous: &[FaultSet],
-    crash_budget: usize,
+    bounds: &CrashBounds,
 ) -> Option<FaultSet> {
     // Prefer a hypothesis that preserves some observed derivation of the pre-condition (a
     // run whose pre-condition fails contributes nothing); if none exists, drop the
     // preference rather than the search.
     if !required.is_empty()
-        && let Some(next) =
-            solve_hypothesis(universe, clauses, required, tried, vacuous, crash_budget)
+        && let Some(next) = solve_hypothesis(universe, clauses, required, tried, vacuous, bounds)
     {
         return Some(next);
     }
-    solve_hypothesis(universe, clauses, &[], tried, vacuous, crash_budget)
+    solve_hypothesis(universe, clauses, &[], tried, vacuous, bounds)
 }
 
 /// [`next_hypothesis`] with the pre-condition preference as a hard constraint when
@@ -4817,7 +4961,7 @@ fn solve_hypothesis(
     required: &[Clause],
     tried: &BTreeSet<FaultSet>,
     vacuous: &[FaultSet],
-    crash_budget: usize,
+    bounds: &CrashBounds,
 ) -> Option<FaultSet> {
     use good_lp::{Expression, ProblemVariables, ResolutionError, Solution, SolverModel, variable};
 
@@ -4898,8 +5042,23 @@ fn solve_hypothesis(
     let crashes: Vec<usize> = (0..universe.len())
         .filter(|&i| matches!(universe[i], Fault::Crash { .. }))
         .collect();
-    let crash_total: Expression = crashes.iter().map(|&i| Expression::from(x[i])).sum();
-    model.add_constraint(crash_total.leq(crash_budget as f64));
+    // The crash bounds. With at most one crash per node (below), the sum of the crash
+    // variables is the number of crashed nodes.
+    let crash_total = || -> Expression { crashes.iter().map(|&i| Expression::from(x[i])).sum() };
+    if let Some(budget) = bounds.budget {
+        model.add_constraint(crash_total().leq(budget as f64));
+    }
+    if bounds.nodes >= 1 {
+        model.add_constraint(crash_total().leq(bounds.nodes as f64 - 1.0));
+    }
+    if let Some(checked) = &bounds.checked {
+        let in_cluster: Expression = crashes
+            .iter()
+            .filter(|&&i| matches!(&universe[i], Fault::Crash { node, .. } if checked.nodes.contains(node)))
+            .map(|&i| Expression::from(x[i]))
+            .sum();
+        model.add_constraint(in_cluster.leq(checked.cap as f64));
+    }
     let nodes: BTreeSet<&String> = crashes
         .iter()
         .filter_map(|&i| match &universe[i] {
@@ -5056,12 +5215,28 @@ mod tests {
         let mut tried = BTreeSet::new();
         // Every minimal hitting set (one literal per clause) comes first, each exactly once...
         for _ in 0..4 {
-            let h = next_hypothesis(&universe, &clauses, &[], &tried, &[], 0).unwrap();
+            let h = next_hypothesis(
+                &universe,
+                &clauses,
+                &[],
+                &tried,
+                &[],
+                &CrashBounds::budget(0),
+            )
+            .unwrap();
             assert_eq!(h.len(), 2);
             assert!(tried.insert(h));
         }
         // ...and only then the non-minimal ones.
-        let h = next_hypothesis(&universe, &clauses, &[], &tried, &[], 0).unwrap();
+        let h = next_hypothesis(
+            &universe,
+            &clauses,
+            &[],
+            &tried,
+            &[],
+            &CrashBounds::budget(0),
+        )
+        .unwrap();
         assert_eq!(h.len(), 3);
     }
 
@@ -5070,7 +5245,17 @@ mod tests {
         let sends = Rc::new(SendSequences::new());
         let clauses = vec![clause([lossy("req", 1)], &sends), clause([], &sends)];
         let universe = universe_of(&clauses);
-        assert!(next_hypothesis(&universe, &clauses, &[], &BTreeSet::new(), &[], 0).is_none());
+        assert!(
+            next_hypothesis(
+                &universe,
+                &clauses,
+                &[],
+                &BTreeSet::new(),
+                &[],
+                &CrashBounds::budget(0)
+            )
+            .is_none()
+        );
     }
 
     /// A crash after message `m` kills every send after `m`'s position in the run, so one
@@ -5091,13 +5276,28 @@ mod tests {
         let universe = universe_of(&clauses);
         let tried = BTreeSet::new();
         assert_eq!(
-            next_hypothesis(&universe, &clauses, &[], &tried, &[], 0),
+            next_hypothesis(
+                &universe,
+                &clauses,
+                &[],
+                &tried,
+                &[],
+                &CrashBounds::budget(0)
+            ),
             None,
             "a reliable channel admits no omission; with no crash budget nothing can be done"
         );
         // Weakest first: the crash after `m0` (killing only `m1`) is tried before the crash
         // before any send (killing both).
-        let first = next_hypothesis(&universe, &clauses, &[], &tried, &[], 1).unwrap();
+        let first = next_hypothesis(
+            &universe,
+            &clauses,
+            &[],
+            &tried,
+            &[],
+            &CrashBounds::budget(1),
+        )
+        .unwrap();
         let later = Fault::Crash {
             node: "s".to_owned(),
             after: Some(m0),
@@ -5172,5 +5372,192 @@ mod tests {
         assert!(clause.hit_by(&after(&b)));
         assert!(!clause.hit_by(&after(&c)));
         assert!(!clause.hit_by(&after(&d)));
+    }
+
+    /// Every hypothesis the solver proposes under `bounds`, in order, until none is left.
+    fn all_hypotheses(clauses: &[Clause], bounds: &CrashBounds) -> Vec<FaultSet> {
+        let universe = universe_of(clauses);
+        let mut tried = BTreeSet::new();
+        let mut out = vec![];
+        while let Some(h) = next_hypothesis(&universe, clauses, &[], &tried, &[], bounds) {
+            assert!(tried.insert(h.clone()), "a hypothesis is proposed once");
+            out.push(h);
+            assert!(out.len() < 1000, "the enumeration terminates");
+        }
+        out
+    }
+
+    fn crashed_nodes(h: &FaultSet) -> BTreeSet<&str> {
+        h.iter()
+            .filter_map(|f| match f {
+                Fault::Crash { node, .. } => Some(node.as_str()),
+                Fault::Omit(_) => None,
+            })
+            .collect()
+    }
+
+    /// Three members each sending one message over reliable channels: a clause of three
+    /// dependencies, each killable only by its sender's crash before any send.
+    fn three_senders() -> Vec<Clause> {
+        let sends = Rc::new(SendSequences::from([
+            ("m@0".to_owned(), vec![send(0, 1)]),
+            ("m@1".to_owned(), vec![send(0, 2)]),
+            ("m@2".to_owned(), vec![send(0, 3)]),
+        ]));
+        vec![clause(
+            [
+                reliable("to", 1, "m@0", 0),
+                reliable("to", 2, "m@1", 0),
+                reliable("to", 3, "m@2", 0),
+            ],
+            &sends,
+        )]
+    }
+
+    /// Without a budget the enumeration is every admissible crash set by size, except the one
+    /// that crashes every node of the program (here the three senders are the whole program):
+    /// with every node dead, nothing is left to check.
+    #[test]
+    fn unbounded_never_proposes_crashing_every_node() {
+        let clauses = three_senders();
+        let bounds = CrashBounds {
+            budget: None,
+            nodes: 3,
+            checked: None,
+        };
+        let proposed = all_hypotheses(&clauses, &bounds);
+        // Singles first, then pairs; the triple is never proposed.
+        assert_eq!(proposed.len(), 6, "{proposed:?}");
+        assert!(proposed[..3].iter().all(|h| h.len() == 1), "{proposed:?}");
+        assert!(proposed[3..].iter().all(|h| h.len() == 2), "{proposed:?}");
+        assert!(
+            proposed.iter().all(|h| crashed_nodes(h).len() < 3),
+            "{proposed:?}"
+        );
+    }
+
+    /// Crashing every *crashable* node is proposed when a node that cannot crash remains: the
+    /// bound is over the program's nodes, not the registered ones.
+    #[test]
+    fn crashing_every_crashable_node_is_proposed_when_another_node_remains() {
+        let clauses = three_senders();
+        // A fourth node (a receiver that is not crashable, say) is part of the program.
+        let bounds = CrashBounds {
+            budget: None,
+            nodes: 4,
+            checked: None,
+        };
+        let proposed = all_hypotheses(&clauses, &bounds);
+        assert_eq!(proposed.len(), 7, "{proposed:?}");
+        assert_eq!(crashed_nodes(&proposed[6]).len(), 3, "{proposed:?}");
+        // A single crashable node among others: its crash is admissible.
+        let sends = Rc::new(SendSequences::from([("s".to_owned(), vec![send(0, 1)])]));
+        let clauses = vec![clause([reliable("to", 1, "s", 0)], &sends)];
+        let bounds = CrashBounds {
+            budget: None,
+            nodes: 2,
+            checked: None,
+        };
+        let proposed = all_hypotheses(&clauses, &bounds);
+        assert_eq!(proposed.len(), 1, "{proposed:?}");
+        assert_eq!(crashed_nodes(&proposed[0]), ["s"].into_iter().collect());
+    }
+
+    /// Under a generated `EventualConsistency` specification over a three-member cluster whose
+    /// members are all crashable, no hypothesis crashes two of them: one survivor agrees with
+    /// itself. Crashes outside the cluster are not counted against that cap.
+    #[test]
+    fn ec_check_never_crashes_all_but_one_member_of_the_checked_cluster() {
+        let mut clauses = three_senders();
+        // A source outside the cluster whose send the clause also depends on.
+        let sends = Rc::new(SendSequences::from([
+            ("src".to_owned(), vec![send(1, 9)]),
+            ("m@0".to_owned(), vec![send(0, 1)]),
+        ]));
+        clauses.push(clause(
+            [reliable("in", 9, "src", 0), reliable("to", 1, "m@0", 0)],
+            &sends,
+        ));
+        use crate::location::LocationKey;
+        let members_loc = LocationId::Cluster(LocationKey::TEST_KEY_1);
+        let nodes: BTreeMap<String, NodeKey> = [
+            (
+                "src".to_owned(),
+                (LocationId::Process(LocationKey::FIRST), None),
+            ),
+            ("m@0".to_owned(), (members_loc.clone(), Some(0))),
+            ("m@1".to_owned(), (members_loc.clone(), Some(1))),
+            ("m@2".to_owned(), (members_loc.clone(), Some(2))),
+        ]
+        .into_iter()
+        .collect();
+        let checked = (members_loc, vec![0, 1, 2]);
+        let cluster = CrashBounds::checked_cluster(&nodes, Some(&checked)).unwrap();
+        assert_eq!(cluster.cap, 1);
+        assert_eq!(cluster.nodes.len(), 3);
+        let bounds = CrashBounds {
+            budget: None,
+            nodes: nodes.len(),
+            checked: Some(cluster),
+        };
+        let proposed = all_hypotheses(&clauses, &bounds);
+        assert!(!proposed.is_empty());
+        for h in &proposed {
+            let members = crashed_nodes(h)
+                .into_iter()
+                .filter(|n| n.starts_with("m@"))
+                .count();
+            assert!(
+                members <= 1,
+                "{h:?} crashes {members} members of the checked cluster"
+            );
+        }
+        // `src` is outside the cluster: a member's crash together with it is proposed.
+        assert!(
+            proposed
+                .iter()
+                .any(|h| crashed_nodes(h).contains("src") && crashed_nodes(h).len() == 2),
+            "{proposed:?}"
+        );
+        // The cap cannot bind when fewer members are crashable than it allows: no constraint.
+        let fewer: BTreeMap<String, NodeKey> = nodes
+            .iter()
+            .filter(|(label, _)| label.as_str() != "m@2" && label.as_str() != "m@1")
+            .map(|(l, k)| (l.clone(), k.clone()))
+            .collect();
+        assert_eq!(CrashBounds::checked_cluster(&fewer, Some(&checked)), None);
+        // A cluster the search does not check contributes nothing.
+        let other = (LocationId::Cluster(LocationKey::TEST_KEY_2), vec![0, 1, 2]);
+        assert_eq!(CrashBounds::checked_cluster(&nodes, Some(&other)), None);
+        assert_eq!(CrashBounds::checked_cluster(&nodes, None), None);
+    }
+
+    /// An explicit budget still bounds, on top of the vacuity constraints.
+    #[test]
+    fn an_explicit_crash_budget_still_bounds() {
+        let clauses = three_senders();
+        let one = CrashBounds {
+            budget: Some(1),
+            nodes: 3,
+            checked: None,
+        };
+        let proposed = all_hypotheses(&clauses, &one);
+        assert_eq!(proposed.len(), 3, "{proposed:?}");
+        assert!(proposed.iter().all(|h| h.len() == 1), "{proposed:?}");
+        let none = CrashBounds::budget(0);
+        assert!(all_hypotheses(&clauses, &none).is_empty());
+        // A budget above the vacuity bound changes nothing.
+        let two = CrashBounds {
+            budget: Some(2),
+            ..one.clone()
+        };
+        let unbounded = CrashBounds {
+            budget: None,
+            ..one
+        };
+        assert_eq!(
+            all_hypotheses(&clauses, &two),
+            all_hypotheses(&clauses, &unbounded)
+        );
     }
 }

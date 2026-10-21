@@ -80,7 +80,7 @@ A certificate applies to:
 - **One collection.** Every labelled collection gets its own search and its own verdict. Certifying one does not certify another, even one derived from it.
 - **One topology and workload.** Cluster sizes, input values, and timer firings come from the test.
 - **The declared fault model.** Transport types determine available omissions; the test registers crashable nodes.
-- **The declared fault bounds.** These include the crash budget and the end of finite failures, `EFF`.
+- **The declared fault bounds.** The end of finite failures, `EFF`, and the crash budget if the test sets one (by default every combination of crashes of the registered nodes is admissible).
 - **The test's horizon.** The specification is evaluated when the test finishes driving the run.
 - **The explored schedules.** A certificate requires `Exploration::Exhaustive`. `Exploration::Fuzz { instances }` produces a sampled result, not a certificate.
 
@@ -126,7 +126,6 @@ let results = Ldfi::new()
     .level(Level::Precise)
     .crashable("source", &source)
     .crashable_cluster("member", &members, 0..3)
-    .crash_budget(1)
     .spec(&spec)
     .search_all_labels(&compiled, async |_run| {
         send.send(1);
@@ -204,13 +203,13 @@ crash(node after message)
 
 The node performs sends through the named message. Later sends are dropped, and its external outputs are suppressed. Naming the crash point by a message rather than a send count makes the hypothesis usable across schedules. It also allows hydrofrac to crash a sender between two sends in a single broadcast fan-out.
 
-Only nodes registered by the test are crashable. Crashes count against the crash budget.
+Only nodes registered by the test are crashable. By default every combination of their crashes is admissible: the protocol is expected to uphold the specification under all of them, and the search tries them weakest first (fewest faults; a crash after a later message before one after an earlier message). Two families of fault sets are never proposed, as constraints of the hitting-set program, because they cannot violate anything: every node of the program crashing, and, for the generated specification over a cluster `C`, all or all but one of `C`'s members crashing (one surviving member agrees with itself). The bound on `C` applies only to the cluster the checked collection lives on; a crash anywhere else withholds inputs, which is what the specification is about. Every other combination that leaves nothing to check is found out by running it: a hypothesis whose every schedule is vacuous is recorded as such and none of its supersets is proposed. A test with a fault model of its own (`f` crashes of `2f + 1` replicas) states it with `.crash_budget(f)`.
 
 **Every failure happens at a time `≤ EFF`.** This is Molly's fault model, and the simulator's filter enforces it for both kinds of fault. The test declares the end of finite failures (`Run::end_of_finite_failures`); from then on omissions stop applying and no crash point fires. A crash point is named by a message that was sent before `EFF` in the run that proposed it. In another run the same message may be sent only after `EFF`, or never; the crash then does not happen in that run (a node already dead stays dead: crashes are permanent). The execution after `EFF` is failure-free recovery, the window in which the protocol is expected to converge, and a crash point only ever proposed from pre-`EFF` sends. The search's account of what a crash kills (`Dependency::killed_by`) follows the simulator exactly: a crash after `m` kills every later send of the node, before or after `EFF`, provided `m` was sent before `EFF` in that run.
 
 A harness therefore has to place `EFF` late enough for the failures it means to admit. The ISR harness declares it after the first round of replica timers, so the leader's acknowledgement and heartbeats lie inside the window; with `EFF` right after the client's write, the leader's crash after the acknowledgement is not an admissible failure, and the unclean-election bug is outside the bounds.
 
-The program's transport declarations therefore determine what can go wrong, while the test determines how much can go wrong and when faults must stop.
+The program's transport declarations therefore determine what can go wrong, while the test determines which nodes may crash and when faults must stop.
 
 ### Lineage explains successful outcomes
 
@@ -298,20 +297,20 @@ The existing tests cover every producer of the `EventualConsistency` label in th
 - `hydro_test/src/cluster/ec_ldfi.rs`
 - `hydro_test/src/cluster/ec_demos_ldfi.rs`
 
-The searches below allow one crash. Hypothesis counts include the probe. Under `Fuzz`, the count varies by one between runs; where two runs differed, both are given. The multi-Paxos test keeps its proposer correct.
+The searches below run under the default crash bounds (every combination of crashes of the registered nodes that leaves at least two members of the checked cluster correct), except multi-Paxos, whose test states the protocol's own fault model, one crash, because the unbounded search does not finish within 2,000 hypotheses (see `ldfi-level-ablation.md`, "Unbounded crash budget with vacuity constraints"). Hypothesis counts include the probe. Under `Fuzz`, the count varies by one between runs; where two runs differed, both are given.
 
 | Program | Result |
 |---|---|
 | `broadcast_closed`, process → cluster, `fail_stop` | **Violated**, 5 hypotheses. `crash(source after bcast[→1]:Item(2))` interrupts a fan-out. |
-| `broadcast_closed`, process → cluster, `lossy_delayed_forever` | **Violated**, 2 hypotheses. `omit(bcast[→0]:Item(2))` loses an item that is never retransmitted. |
+| `broadcast_closed`, process → cluster, `lossy_delayed_forever` | **Violated**, 2 hypotheses. `omit(bcast[→0]:Item(1))` loses an item that is never retransmitted. |
 | `broadcast_closed`, cluster → cluster, `fail_stop` | **Violated**, 5 hypotheses. `crash(source@0 after bcast[0→1]:Item(10))`. |
 | `broadcast_live_from_process` | **Violated**, 5 hypotheses. A source crash interrupts the one-hop broadcast. |
 | `leader_merge_broadcast` | **Violated**, 2 hypotheses. A leader crash interrupts dissemination of `(writer 0, 100)`. The demo documents leader survival as an assumption. |
-| Echo reliable broadcast, `hydro_test` version | **Certified**, 10 hypotheses, exhaustive schedules. |
-| `reliable_broadcast_closed`, `reliable_broadcast_live` | **Certified**, 10 hypotheses each, exhaustive schedules. |
-| `uniform_reliable_broadcast_closed`, thresholds 1 and 2 | **No violation found**, 28 hypotheses each, 8 sampled schedules per hypothesis. |
+| Echo reliable broadcast, `hydro_test` version | **Certified**, 21 hypotheses, exhaustive schedules (10 under one crash). |
+| `reliable_broadcast_closed`, `reliable_broadcast_live` | **Certified**, 36 hypotheses each, exhaustive schedules (10 under one crash). |
+| `uniform_reliable_broadcast_closed`, thresholds 1 and 2 | **No violation found**, 105 hypotheses each, 8 sampled schedules per hypothesis (28 under one crash). |
 | `g_set_gossip`, `g_set_gossip_live` | **No violation found**, 13 hypotheses each, 8 sampled schedules per hypothesis. |
-| `multi_paxos`, learners' `learned` output; 1 proposer, 3 acceptors, 3 learners | **No violation found**, 24–25 hypotheses, 8 sampled schedules per hypothesis. Learners rebroadcast learned values; this check exercises that dissemination path. |
+| `multi_paxos`, learners' `learned` output; 1 proposer, 3 acceptors, 3 learners, one crash | **No violation found**, 24–25 hypotheses, 8 sampled schedules per hypothesis. Learners rebroadcast learned values; this check exercises that dissemination path. |
 
 The distinction is straightforward in this corpus. Single-hop dissemination fails when one crash or omission interrupts delivery. Protocols with echo or gossip mechanisms pass the searches performed so far, with exhaustive certification for the smaller schedule spaces.
 
@@ -321,17 +320,17 @@ Some other labels do not introduce an independent network fault question. Algebr
 
 ### Every label of multi-Paxos
 
-`Spec::all_labels` over `multi_paxos` reports ten collections. The run has 1 proposer, 3 acceptors, and 3 learners, all crashable, with one crash allowed and `Fuzz { instances: 8 }`. The body tells proposer 0 to lead round 1, quiesces, sends commands 7 and 8, and quiesces. Line numbers are into `hydro_std/src/ec_inference_demos/multi_paxos.rs` unless named otherwise.
+`Spec::all_labels` over `multi_paxos` reports ten collections. The run has 1 proposer, 3 acceptors, and 3 learners, all crashable, with one crash allowed (the protocol's fault model, stated by the test; see above) and `Fuzz { instances: 8 }`. The body tells proposer 0 to lead round 1, quiesces, sends commands 7 and 8, and quiesces. Line numbers are into `hydro_std/src/ec_inference_demos/multi_paxos.rs` unless named otherwise.
 
 | Site | Collection | Result |
 |---|---|---|
 | `:281`, acceptors, minted and delivered | `broadcast_closed` of prepares, proposer → acceptors. Its `.entries()` goes straight into the acceptor's tick batch (`:303`), so the mint is also the exit. | **Violated**, 5 hypotheses. `crash(proposer@0 after :281[0→1]:Ts { round: 1, writer: 0 })`: the proposer dies between the prepares to acceptors 0 and 1. |
 | `:549`, acceptors, minted | `broadcast_closed` of phase-2 accepts, proposer → acceptors. | **Violated**, 8 hypotheses. `crash(proposer@0 after :549[0→1]:(Ts { round: 1, writer: 0 }, 0, 1, Some(8)))`: the accept for slot 1 reaches acceptor 0 only. |
 | `:286`, acceptors, delivered | The `forward_ref` that closes the accept cycle; the same stream as `:549`'s entries, exiting at `use::batch(accepts_fwd, ..)` (`:308`). | **Violated**, 8 hypotheses, by the same crash. Nothing between the broadcast and the batch retransmits. |
-| `:569`, proposers, minted | `broadcast_closed` of chosen slots, proposer → proposers. | **No violation found**, 17–18 hypotheses, 8 sampled schedules per hypothesis. The proposer cluster has one member, so agreement holds trivially. |
-| `:570`, proposers, delivered | The `.values()` of `:569`, exiting at `weaken_consistency()` (`:571`). | **No violation found**, 19 hypotheses, 8 sampled schedules per hypothesis; trivial for the same reason. |
-| `:582`, learners, minted | `broadcast_closed` of chosen decrees, proposer → learners: the first hop of the learner echo. | **Violated**, 9 hypotheses. `crash(proposer@0 after :582[0→1]:(1, 0, 0, Some(7)))`: slot 0 reaches learner 0 only. This is the premise the echo repairs. |
-| `:591`, learners, minted | `broadcast_closed` of the echo, learners → learners, keyed by echoer. | **Violated**, 10 hypotheses. `crash(learner@0 after :591[0→1]:(1, 0, 0, Some(7)))`: learner 0 dies partway through echoing slot 0, and under its own key that echo is present at some correct learners and absent at others. |
+| `:569`, proposers, minted | `broadcast_closed` of chosen slots, proposer → proposers. | **No violation found**, 5–6 hypotheses, 8 sampled schedules per hypothesis. The proposer cluster has one member, so agreement holds trivially, and the crash bounds never crash it (all but one member of a one-member cluster is none); the acceptor crashes that remain are tried once each. |
+| `:570`, proposers, delivered | The `.values()` of `:569`, exiting at `weaken_consistency()` (`:571`). | **No violation found**, 5–6 hypotheses, 8 sampled schedules per hypothesis; trivial for the same reason. |
+| `:582`, learners, minted | `broadcast_closed` of chosen decrees, proposer → learners: the first hop of the learner echo. | **Violated**, 10–11 hypotheses. `crash(proposer@0 after :582[0→1]:(1, 0, 0, Some(7)))`: slot 0 reaches learner 0 only. This is the premise the echo repairs. |
+| `:591`, learners, minted | `broadcast_closed` of the echo, learners → learners, keyed by echoer. | **Violated**, 9–10 hypotheses. `crash(learner@0 after :591[0→1]:(1, 0, 0, Some(7)))`: learner 0 dies partway through echoing slot 0, and under its own key that echo is present at some correct learners and absent at others. |
 | `:588`, learners, delivered | `learned = initial.merge_unordered(echo_fwd).unique()`, exiting at the test's `weaken_consistency()`. | **No violation found**, 25–26 hypotheses, 8 sampled schedules per hypothesis. Every learner that receives a decree echoes it to every learner; one crash leaves at least one echoer per decree. |
 | `:608`, learners, delivered | The `SpliceFact` `flat_map_unordered` of `learned`, exiting into the fold at `epoch_splice.rs:190`. | **No violation found**, 25–26 hypotheses, 8 sampled schedules per hypothesis. A function of `learned`, element by element. |
 | `epoch_splice.rs:190`, learners, minted | The `fold` with `commutative = manual_proof!` into `Singleton<SpliceState>`. | **Not checked**: not a stream. |
@@ -342,11 +341,11 @@ The pattern is the one reliable broadcast shows above. A minted single-hop `broa
 
 ### Every label of ISR replication, two-phase commit, and ABD
 
-The hand-written harnesses described below also run under `Spec::all_labels` (`isr_replication.rs` and `two_pc_ldfi.rs`, `*_all_labels` tests; `abd.rs` in `hydro_std`). The senders those harnesses hold correct (the client and ZooKeeper; the coordinator) are also run crashable, since a `broadcast_closed` from a process has no premise other than the sender's survival.
+The hand-written harnesses described below also run under `Spec::all_labels` (`isr_replication.rs` and `two_pc_ldfi.rs`, `*_all_labels` tests; `abd.rs` in `hydro_std`), under the default crash bounds. The senders those harnesses hold correct (the client and ZooKeeper; the coordinator) are also run crashable, since a `broadcast_closed` from a process has no premise other than the sender's survival.
 
 | Program, fault model | Site | Result |
 |---|---|---|
-| ISR (3 replicas, 4 rounds, `Fuzz { instances: 8 }`), replicas crashable | `:343` write broadcast, client → replicas (minted and delivered); `:360` replication `forward_ref` at the replicas (delivered); `:564` view broadcast, ZK → replicas (minted) | **No violation found**, 4 hypotheses each. No crashable node sends on these channels. |
+| ISR (3 replicas, 4 rounds, `Fuzz { instances: 8 }`), replicas crashable | `:343` write broadcast, client → replicas (minted and delivered); `:360` replication `forward_ref` at the replicas (delivered); `:564` view broadcast, ZK → replicas (minted) | **No violation found**, 4 (`:343`) and 7 (`:360`, `:564`) hypotheses. No crashable node sends on these channels. |
 | ISR, client and ZK crashable too, `EFF` right after the write | `:343` | **Violated**, 2 hypotheses. `crash(client after write[→1]:Write(1))`. |
 | | `:564`, `:360` | **No violation found**, 5 hypotheses each. Every ZK send lies after `EFF`, so no ZK crash point is admissible within the bounds the body sets. |
 | ISR, client and ZK crashable, `EFF` after the first round | `:343` | **Violated**, 2 hypotheses, by the client's crash as above. |
@@ -354,7 +353,7 @@ The hand-written harnesses described below also run under `Spec::all_labels` (`i
 | 2PC with cooperative termination (2 participants, 1 transaction, exhaustive), coordinator and participants crashable | `:86` prepare broadcast (minted and delivered) | **Violated**, 2 hypotheses. `crash(coordinator after prepare[→0]:Txn(1))`. |
 | | `:92` commit broadcast (minted and delivered) | **Violated**, 2 hypotheses. `crash(coordinator after commit[→0]:Txn(1))`. |
 | | `:98` peer `forward_ref`, `:161` peer broadcast | **Vacuous.** The failure-free run carries no peer traffic: the termination timers fire after every decision is known, so no participant queries a peer. |
-| 2PC, coordinator held correct | `:86`, `:92` | **Certified**, 3 and 5 hypotheses. `:98` and `:161` vacuous as above. |
+| 2PC, coordinator held correct | `:86`, `:92` | **Certified**, 1 hypothesis each: with two participants, any crash leaves a single correct member, so no fault set is admissible and the failure-free run is the certificate. `:98` and `:161` vacuous as above. |
 | ABD (3 replicas, 1 client, one write, `Fuzz { instances: 8 }`), replicas and client crashable | `:141` query broadcast, `:150` phase-2 `forward_ref`, `:161` the writes filtered from it, `:314` write broadcast | **Violated**, 2 hypotheses each, by the client's crash between two sends of its query or its write. Every stream the replicas label is a single hop from the client. |
 | | `:165` the register `fold` | **Not checked**: not a stream. |
 
