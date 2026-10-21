@@ -4,8 +4,6 @@
 members = [
     "benches",
     "copy_span",
-    "cress",
-    "cress_config_macro",
     "dfir_lang",
     "dfir_macro",
     "dfir_rs",
@@ -25,8 +23,6 @@ members = [
     "lattices_macro",
     "lattices",
     "multiplatform_test",
-    "sedge",
-    "sedge_macro",
     "sinktools",
     "variadics_macro",
     "variadics",

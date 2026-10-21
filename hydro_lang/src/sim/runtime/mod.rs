@@ -30,12 +30,16 @@ use colored::Colorize;
 use crate::location::dynamic::LocationId;
 
 mod inline;
+mod lineage;
 mod observation;
+mod provenance;
 mod scripted;
 mod tick_input;
 
 pub use inline::*;
+pub use lineage::*;
 pub use observation::*;
+pub use provenance::*;
 pub use scripted::*;
 pub use tick_input::*;
 
