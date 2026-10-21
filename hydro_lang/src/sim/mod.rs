@@ -62,10 +62,26 @@ pub mod flow;
 pub mod hooks;
 
 #[cfg(stageleft_runtime)]
-pub mod prompt_schedule;
+#[cfg(feature = "ldfi")]
+pub mod ldfi;
 
 #[cfg(stageleft_runtime)]
-pub mod extension;
+#[cfg(feature = "ldfi")]
+pub mod spec;
+
+#[cfg(stageleft_runtime)]
+#[cfg(feature = "ldfi")]
+pub mod observe;
+
+#[cfg(stageleft_runtime)]
+#[cfg(feature = "ldfi")]
+pub mod viz;
+
+#[cfg(stageleft_runtime)]
+pub mod provenance;
+
+#[cfg(stageleft_runtime)]
+pub mod slice;
 
 #[cfg(stageleft_runtime)]
 pub(crate) mod versioned_network;

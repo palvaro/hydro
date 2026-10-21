@@ -18,10 +18,6 @@ test_docker = ["hydro_lang/docker_deploy"]
 test_ecs = ["hydro_lang/ecs_deploy"]
 maelstrom = ["hydro_lang/maelstrom"]
 stageleft_macro_entrypoint = ["hydro_lang/stageleft_macro_entrypoint"]
-# The overload harness. Optional: `./scripts/sedge hydro_test` turns it on; nothing else links it
-# (every use is gated on `cfg(feature = "sedge")`). Declared explicitly, not as the implicit
-# feature of the optional dependency, so that the deployed program's build can enable it too.
-sedge = ["dep:sedge", "tokio"]
 # Enables Verus-checked proofs of algebraic properties (e.g.
 # `commutative = verus_proof_commutative_fold!(...)`). The proofs are only
 # checked when building with the Verus driver: `cargo verus verify --features verus`.
@@ -31,11 +27,6 @@ verus = ["dep:vstd", "hydro_lang/verus"]
 
 [dependencies]
 hydro_lang = { path = "../hydro_lang", version = "=0.17.0-alpha.6", default-features = false }
-# The schedule-amplification checker. Optional: `./scripts/cress hydro_test` turns it on, as does
-# `cargo test --features cress` for the hand-wired checker tests; nothing else links it (every use
-# is gated on `cfg(feature = "cress")`).
-cress = { path = "../cress", version = "^0.1.0", optional = true }
-sedge = { path = "../sedge", version = "^0.1.0", optional = true }
 hydro_std = { path = "../hydro_std", version = "=0.17.0-alpha.6", default-features = false }
 stageleft.workspace = true
 rand = "0.10"
@@ -68,6 +59,7 @@ futures = "0.3.0"
 hydro_deploy = { path = "../hydro_deploy/core", version = "=0.17.0-alpha.5" }
 hydro_lang = { path = "../hydro_lang", version = "=0.17.0-alpha.6", features = [
     "deploy",
+    "ldfi",
     "maelstrom",
     "sim",
     "viz",
