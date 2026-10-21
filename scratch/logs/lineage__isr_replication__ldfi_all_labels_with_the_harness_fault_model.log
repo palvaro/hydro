@@ -1,0 +1,118 @@
+
+running 1 test
+hydrofrac: searching EventualConsistency at isr_replication.rs:360 (Cluster(loc3v1))
+test <unknown> ...	run time: 218.8844ms | iterations/s: 37 | rng inputs: 8
+ldfi: fact domain learned from the failure-free run: 1 fact(s)
+test <unknown> ...	run time: 206.680544ms | iterations/s: 39 | rng inputs: 8
+ldfi: channels:
+  channel#68 "write": Process(loc1v1) → Cluster(loc3v1), reliable
+  channel#194 "repl": Cluster(loc3v1) → Cluster(loc3v1), lossy
+  channel#203 "ack": Cluster(loc3v1) → Cluster(loc3v1), reliable
+  channel#248 "shrink": Cluster(loc3v1) → Process(loc2v1), reliable
+  channel#292 "hb": Cluster(loc3v1) → Process(loc2v1), reliable
+  channel#345 "view": Process(loc2v1) → Cluster(loc3v1), reliable
+  channel#351 "client-ack": Cluster(loc3v1) → Process(loc1v1), reliable
+  channel#399 "observe#399": Cluster(loc3v1) → Process(loc4v1), reliable
+  channel#403 "observe#403": Cluster(loc3v1) → Process(loc4v1), reliable
+  channel#408 "observe#408": Cluster(loc3v1) → Process(loc4v1), reliable
+ldfi: crash bounds: crashes unbounded; not all 5 nodes at once; at most 1 of the checked cluster's 3 crashable member(s)
+ldfi: specification is generated (EventualConsistency)
+ldfi: run #1 {}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, observed[0→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@0 through send #4←replica@0#4, observed[1→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@1 through send #2←replica@1#2, observed[2→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@2 through send #2←replica@2#2}}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1))}; preserve points {}; requirements {}
+test <unknown> ...	run time: 196.779825ms | iterations/s: 41 | rng inputs: 8
+ldfi: run #2 {crash(replica@0 after hb[0→]:())}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, observed[1→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@1 through send #2←replica@1#2, observed[2→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@2 through send #2←replica@2#2}}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1))}; preserve points {}; requirements {}
+test <unknown> ...	run time: 188.382473ms | iterations/s: 42 | rng inputs: 8
+ldfi: run #3 {crash(replica@0 after client-ack[0→]:Write(1))}: 8 schedule(s), goal held; derivations {}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1))}; preserve points {}; requirements {}
+test <unknown> ...	run time: 199.065268ms | iterations/s: 40 | rng inputs: 8
+ldfi: run #4 {crash(replica@1 after hb[1→]:())}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, observed[0→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@0 through send #4←replica@0#4, observed[2→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@2 through send #2←replica@2#2}}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1))}; preserve points {}; requirements {}
+test <unknown> ...	run time: 184.269669ms | iterations/s: 43 | rng inputs: 8
+ldfi: run #5 {crash(replica@1 after ack[1→0]:Write(1))}: 8 schedule(s), goal held; derivations {}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1))}; preserve points {}; requirements {}
+test <unknown> ...	run time: 193.718392ms | iterations/s: 41 | rng inputs: 8
+ldfi: run #6 {crash(replica@2 after hb[2→]:())}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, observed[0→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@0 through send #4←replica@0#4, observed[1→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@1 through send #2←replica@1#2}}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1))}; preserve points {}; requirements {}
+test <unknown> ...	run time: 188.308137ms | iterations/s: 42 | rng inputs: 8
+ldfi: run #7 {crash(replica@2 after ack[2→0]:Write(1))}: 8 schedule(s), goal held; derivations {}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1))}; preserve points {}; requirements {}
+MEASURE strategy=Lineage verdict=Certificate hypotheses=7 schedules=56 elapsed_ms=1632
+EventualConsistency at isr_replication.rs:360 (Cluster(loc3v1), CycleSource, delivered): CERTIFICATE, 7 hypotheses, 8 sampled schedules
+hydrofrac: searching EventualConsistency at isr_replication.rs:343 (Cluster(loc3v1))
+test <unknown> ...	run time: 203.797956ms | iterations/s: 39 | rng inputs: 8
+ldfi: fact domain learned from the failure-free run: 1 fact(s)
+test <unknown> ...	run time: 208.601206ms | iterations/s: 38 | rng inputs: 8
+ldfi: channels:
+  channel#68 "write": Process(loc1v1) → Cluster(loc3v1), reliable
+  channel#194 "repl": Cluster(loc3v1) → Cluster(loc3v1), lossy
+  channel#203 "ack": Cluster(loc3v1) → Cluster(loc3v1), reliable
+  channel#248 "shrink": Cluster(loc3v1) → Process(loc2v1), reliable
+  channel#292 "hb": Cluster(loc3v1) → Process(loc2v1), reliable
+  channel#345 "view": Process(loc2v1) → Cluster(loc3v1), reliable
+  channel#351 "client-ack": Cluster(loc3v1) → Process(loc1v1), reliable
+  channel#399 "observe#399": Cluster(loc3v1) → Process(loc4v1), reliable
+  channel#403 "observe#403": Cluster(loc3v1) → Process(loc4v1), reliable
+  channel#408 "observe#408": Cluster(loc3v1) → Process(loc4v1), reliable
+ldfi: crash bounds: crashes unbounded; not all 5 nodes at once; at most 1 of the checked cluster's 3 crashable member(s)
+ldfi: specification is generated (EventualConsistency)
+ldfi: run #1 {}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+ldfi: universe {crash(replica@0 before any send), crash(replica@1 before any send), crash(replica@2 before any send)}; preserve points {}; requirements {}
+test <unknown> ...	run time: 173.68682ms | iterations/s: 46 | rng inputs: 8
+ldfi: run #2 {crash(replica@0 before any send)}: 8 schedule(s), goal held; derivations {{observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+ldfi: universe {crash(replica@0 before any send), crash(replica@1 before any send), crash(replica@2 before any send)}; preserve points {}; requirements {}
+test <unknown> ...	run time: 187.662711ms | iterations/s: 43 | rng inputs: 8
+ldfi: run #3 {crash(replica@1 before any send)}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+ldfi: universe {crash(replica@0 before any send), crash(replica@1 before any send), crash(replica@2 before any send)}; preserve points {}; requirements {}
+test <unknown> ...	run time: 190.417952ms | iterations/s: 42 | rng inputs: 8
+ldfi: run #4 {crash(replica@2 before any send)}: 8 schedule(s), goal held; derivations {{observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0}}
+ldfi: universe {crash(replica@0 before any send), crash(replica@1 before any send), crash(replica@2 before any send)}; preserve points {}; requirements {}
+MEASURE strategy=Lineage verdict=Certificate hypotheses=4 schedules=32 elapsed_ms=994
+EventualConsistency at isr_replication.rs:343 (Cluster(loc3v1), AssertIsConsistent, minted and delivered): CERTIFICATE, 4 hypotheses, 8 sampled schedules
+hydrofrac: searching EventualConsistency at isr_replication.rs:564 (Cluster(loc3v1))
+test <unknown> ...	run time: 207.638332ms | iterations/s: 39 | rng inputs: 8
+ldfi: fact domain learned from the failure-free run: 1 fact(s)
+test <unknown> ...	run time: 208.678968ms | iterations/s: 38 | rng inputs: 8
+ldfi: channels:
+  channel#68 "write": Process(loc1v1) → Cluster(loc3v1), reliable
+  channel#194 "repl": Cluster(loc3v1) → Cluster(loc3v1), lossy
+  channel#203 "ack": Cluster(loc3v1) → Cluster(loc3v1), reliable
+  channel#248 "shrink": Cluster(loc3v1) → Process(loc2v1), reliable
+  channel#292 "hb": Cluster(loc3v1) → Process(loc2v1), reliable
+  channel#345 "view": Process(loc2v1) → Cluster(loc3v1), reliable
+  channel#351 "client-ack": Cluster(loc3v1) → Process(loc1v1), reliable
+  channel#399 "observe#399": Cluster(loc3v1) → Process(loc4v1), reliable
+  channel#403 "observe#403": Cluster(loc3v1) → Process(loc4v1), reliable
+  channel#408 "observe#408": Cluster(loc3v1) → Process(loc4v1), reliable
+ldfi: crash bounds: crashes unbounded; not all 5 nodes at once; at most 1 of the checked cluster's 3 crashable member(s)
+ldfi: specification is generated (EventualConsistency)
+ldfi: run #1 {}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, observed[0→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@0 through send #4←replica@0#4, observed[1→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@1 through send #2←replica@1#2, observed[2→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@2 through send #2←replica@2#2}}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1))}; preserve points {}; requirements {}
+test <unknown> ...	run time: 197.322836ms | iterations/s: 41 | rng inputs: 8
+ldfi: run #2 {crash(replica@0 after hb[0→]:())}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, observed[1→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@1 through send #2←replica@1#2, observed[2→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@2 through send #2←replica@2#2}}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1))}; preserve points {}; requirements {}
+test <unknown> ...	run time: 185.704109ms | iterations/s: 43 | rng inputs: 8
+ldfi: run #3 {crash(replica@0 after client-ack[0→]:Write(1))}: 8 schedule(s), goal held; derivations {}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1))}; preserve points {}; requirements {}
+test <unknown> ...	run time: 193.527826ms | iterations/s: 41 | rng inputs: 8
+ldfi: run #4 {crash(replica@1 after hb[1→]:())}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, observed[0→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@0 through send #4←replica@0#4, observed[2→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@2 through send #2←replica@2#2}}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1))}; preserve points {}; requirements {}
+test <unknown> ...	run time: 183.901818ms | iterations/s: 44 | rng inputs: 8
+ldfi: run #5 {crash(replica@1 after ack[1→0]:Write(1))}: 8 schedule(s), goal held; derivations {}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1))}; preserve points {}; requirements {}
+test <unknown> ...	run time: 191.998511ms | iterations/s: 42 | rng inputs: 8
+ldfi: run #6 {crash(replica@2 after hb[2→]:())}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, observed[0→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@0 through send #4←replica@0#4, observed[1→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@1 through send #2←replica@1#2}}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1))}; preserve points {}; requirements {}
+test <unknown> ...	run time: 181.530434ms | iterations/s: 44 | rng inputs: 8
+ldfi: run #7 {crash(replica@2 after ack[2→0]:Write(1))}: 8 schedule(s), goal held; derivations {}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1))}; preserve points {}; requirements {}
+MEASURE strategy=Lineage verdict=Certificate hypotheses=7 schedules=56 elapsed_ms=1606
+EventualConsistency at isr_replication.rs:564 (Cluster(loc3v1), AssertIsConsistent, minted): CERTIFICATE, 7 hypotheses, 8 sampled schedules
+EventualConsistency at isr_replication.rs:360 (Cluster(loc3v1), CycleSource, delivered): CERTIFICATE, 7 hypotheses, 8 sampled schedules
+EventualConsistency at isr_replication.rs:343 (Cluster(loc3v1), AssertIsConsistent, minted and delivered): CERTIFICATE, 4 hypotheses, 8 sampled schedules
+EventualConsistency at isr_replication.rs:564 (Cluster(loc3v1), AssertIsConsistent, minted): CERTIFICATE, 7 hypotheses, 8 sampled schedules
+
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 149 filtered out; finished in 9.28s
+
+RC 0 WALL 10.595338327

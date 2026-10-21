@@ -1,0 +1,69 @@
+
+running 1 test
+hydrofrac: searching EventualConsistency at ec_all_labels_classes.rs:31 (Cluster(loc2v1))
+test <unknown> ...	run time: 767.009312ms | iterations/s: 289 | exhaustive inputs: 222
+ldfi: fact domain learned from the failure-free run: 2 fact(s)
+test <unknown> ...	run time: 961.80641ms | iterations/s: 231 | exhaustive inputs: 222
+ldfi: channels:
+  channel#21 "bcast": Process(loc1v1) → Cluster(loc2v1), reliable
+  channel#65 "observe#65": Cluster(loc2v1) → Process(loc3v1), reliable
+  channel#69 "observe#69": Cluster(loc2v1) → Process(loc3v1), reliable
+ldfi: crash bounds: crashes unbounded; not all 4 nodes at once; at most 1 of the checked cluster's 3 crashable member(s)
+ldfi: specification is generated (EventualConsistency)
+ldfi: run #1 {}: 222 schedule(s), goal held; derivations {{bcast[→0]:1←source#0, bcast[→0]:2←source#3, bcast[→1]:1←source#1, bcast[→1]:2←source#4, bcast[→2]:1←source#2, bcast[→2]:2←source#5, observed[0→]:(0, [1, 0, 0, 0]) from member@0 through send #0←member@0#0, observed[0→]:(0, [2, 0, 0, 0]) from member@0 through send #0←member@0#0, observed[1→]:(0, [1, 0, 0, 0]) from member@1 through send #0←member@1#0, observed[1→]:(0, [2, 0, 0, 0]) from member@1 through send #0←member@1#0, observed[2→]:(0, [1, 0, 0, 0]) from member@2 through send #0←member@2#0, observed[2→]:(0, [2, 0, 0, 0]) from member@2 through send #0←member@2#0}}
+ldfi: universe {crash(member@0 before any send), crash(member@1 before any send), crash(member@2 before any send), crash(source after bcast[→1]:2), crash(source after bcast[→0]:2), crash(source after bcast[→2]:1), crash(source after bcast[→1]:1), crash(source after bcast[→0]:1), crash(source before any send)}; preserve points {}; requirements {}
+test <unknown> ...	run time: 683.513409ms | iterations/s: 325 | exhaustive inputs: 222
+ldfi: run #2 {crash(member@0 before any send)}: 222 schedule(s), goal held; derivations {{bcast[→1]:1←source#1, bcast[→1]:2←source#4, bcast[→2]:1←source#2, bcast[→2]:2←source#5, observed[1→]:(0, [1, 0, 0, 0]) from member@1 through send #0←member@1#0, observed[1→]:(0, [2, 0, 0, 0]) from member@1 through send #0←member@1#0, observed[2→]:(0, [1, 0, 0, 0]) from member@2 through send #0←member@2#0, observed[2→]:(0, [2, 0, 0, 0]) from member@2 through send #0←member@2#0}}
+ldfi: universe {crash(member@0 before any send), crash(member@1 before any send), crash(member@2 before any send), crash(source after bcast[→1]:2), crash(source after bcast[→0]:2), crash(source after bcast[→2]:1), crash(source after bcast[→1]:1), crash(source after bcast[→0]:1), crash(source before any send)}; preserve points {}; requirements {}
+test <unknown> ...	run time: 678.848229ms | iterations/s: 327 | exhaustive inputs: 222
+ldfi: run #3 {crash(member@1 before any send)}: 222 schedule(s), goal held; derivations {{bcast[→0]:1←source#0, bcast[→0]:2←source#3, bcast[→2]:1←source#2, bcast[→2]:2←source#5, observed[0→]:(0, [1, 0, 0, 0]) from member@0 through send #0←member@0#0, observed[0→]:(0, [2, 0, 0, 0]) from member@0 through send #0←member@0#0, observed[2→]:(0, [1, 0, 0, 0]) from member@2 through send #0←member@2#0, observed[2→]:(0, [2, 0, 0, 0]) from member@2 through send #0←member@2#0}}
+ldfi: universe {crash(member@0 before any send), crash(member@1 before any send), crash(member@2 before any send), crash(source after bcast[→1]:2), crash(source after bcast[→0]:2), crash(source after bcast[→2]:1), crash(source after bcast[→1]:1), crash(source after bcast[→0]:1), crash(source before any send)}; preserve points {}; requirements {}
+test <unknown> ...	run time: 683.56088ms | iterations/s: 325 | exhaustive inputs: 222
+ldfi: run #4 {crash(member@2 before any send)}: 222 schedule(s), goal held; derivations {{bcast[→0]:1←source#0, bcast[→0]:2←source#3, bcast[→1]:1←source#1, bcast[→1]:2←source#4, observed[0→]:(0, [1, 0, 0, 0]) from member@0 through send #0←member@0#0, observed[0→]:(0, [2, 0, 0, 0]) from member@0 through send #0←member@0#0, observed[1→]:(0, [1, 0, 0, 0]) from member@1 through send #0←member@1#0, observed[1→]:(0, [2, 0, 0, 0]) from member@1 through send #0←member@1#0}}
+ldfi: universe {crash(member@0 before any send), crash(member@1 before any send), crash(member@2 before any send), crash(source after bcast[→1]:2), crash(source after bcast[→0]:2), crash(source after bcast[→2]:1), crash(source after bcast[→1]:1), crash(source after bcast[→0]:1), crash(source before any send)}; preserve points {}; requirements {}
+test <unknown> ...	run time: 192.386691ms | iterations/s: 312 | exhaustive inputs: 60
+ldfi: run #5 {crash(source after bcast[→1]:2)}: 60 schedule(s), goal VIOLATED; derivations {}
+MEASURE strategy=Lineage verdict=Counterexample hypotheses=5 schedules=948 elapsed_ms=4230
+LDFI: goal violated after 5 hypothesis run(s) by {crash(source after bcast[→1]:2)}
+  delivered in the failing schedule: {bcast[→0]:1, bcast[→1]:1, bcast[→2]:1, bcast[→0]:2, bcast[→1]:2}
+  sends lost to crashes: {source#5}
+
+EventualConsistency at ec_all_labels_classes.rs:31 (Cluster(loc2v1), AssertIsConsistent, minted and delivered): VIOLATED by {crash(source after bcast[→1]:2)}, 5 hypotheses
+EventualConsistency at ec_all_labels_classes.rs:36 (Cluster(loc2v1), AssertIsConsistent, minted): not checked: inside a tick
+hydrofrac: searching EventualConsistency at ec_all_labels_classes.rs:41 (Cluster(loc2v1))
+test <unknown> ...	run time: 698.537182ms | iterations/s: 318 | exhaustive inputs: 222
+ldfi: fact domain learned from the failure-free run: 2 fact(s)
+test <unknown> ...	run time: 771.708943ms | iterations/s: 288 | exhaustive inputs: 222
+ldfi: channels:
+  channel#21 "bcast": Process(loc1v1) → Cluster(loc2v1), reliable
+  channel#65 "observe#65": Cluster(loc2v1) → Process(loc3v1), reliable
+  channel#69 "observe#69": Cluster(loc2v1) → Process(loc3v1), reliable
+ldfi: crash bounds: crashes unbounded; not all 4 nodes at once; at most 1 of the checked cluster's 3 crashable member(s)
+ldfi: specification is generated (EventualConsistency)
+ldfi: run #1 {}: 222 schedule(s), goal held; derivations {{bcast[→0]:1←source#0, bcast[→0]:2←source#3, bcast[→1]:1←source#1, bcast[→1]:2←source#4, bcast[→2]:1←source#2, bcast[→2]:2←source#5, observed[0→]:(2, [10, 0, 0, 0]) from member@0 through send #0←member@0#0, observed[0→]:(2, [20, 0, 0, 0]) from member@0 through send #0←member@0#0, observed[1→]:(2, [10, 0, 0, 0]) from member@1 through send #0←member@1#0, observed[1→]:(2, [20, 0, 0, 0]) from member@1 through send #0←member@1#0, observed[2→]:(2, [10, 0, 0, 0]) from member@2 through send #0←member@2#0, observed[2→]:(2, [20, 0, 0, 0]) from member@2 through send #0←member@2#0}}
+ldfi: universe {crash(member@0 before any send), crash(member@1 before any send), crash(member@2 before any send), crash(source after bcast[→1]:2), crash(source after bcast[→0]:2), crash(source after bcast[→2]:1), crash(source after bcast[→1]:1), crash(source after bcast[→0]:1), crash(source before any send)}; preserve points {}; requirements {}
+test <unknown> ...	run time: 586.300796ms | iterations/s: 379 | exhaustive inputs: 222
+ldfi: run #2 {crash(member@0 before any send)}: 222 schedule(s), goal held; derivations {{bcast[→1]:1←source#1, bcast[→1]:2←source#4, bcast[→2]:1←source#2, bcast[→2]:2←source#5, observed[1→]:(2, [10, 0, 0, 0]) from member@1 through send #0←member@1#0, observed[1→]:(2, [20, 0, 0, 0]) from member@1 through send #0←member@1#0, observed[2→]:(2, [10, 0, 0, 0]) from member@2 through send #0←member@2#0, observed[2→]:(2, [20, 0, 0, 0]) from member@2 through send #0←member@2#0}}
+ldfi: universe {crash(member@0 before any send), crash(member@1 before any send), crash(member@2 before any send), crash(source after bcast[→1]:2), crash(source after bcast[→0]:2), crash(source after bcast[→2]:1), crash(source after bcast[→1]:1), crash(source after bcast[→0]:1), crash(source before any send)}; preserve points {}; requirements {}
+test <unknown> ...	run time: 594.798695ms | iterations/s: 373 | exhaustive inputs: 222
+ldfi: run #3 {crash(member@1 before any send)}: 222 schedule(s), goal held; derivations {{bcast[→0]:1←source#0, bcast[→0]:2←source#3, bcast[→2]:1←source#2, bcast[→2]:2←source#5, observed[0→]:(2, [10, 0, 0, 0]) from member@0 through send #0←member@0#0, observed[0→]:(2, [20, 0, 0, 0]) from member@0 through send #0←member@0#0, observed[2→]:(2, [10, 0, 0, 0]) from member@2 through send #0←member@2#0, observed[2→]:(2, [20, 0, 0, 0]) from member@2 through send #0←member@2#0}}
+ldfi: universe {crash(member@0 before any send), crash(member@1 before any send), crash(member@2 before any send), crash(source after bcast[→1]:2), crash(source after bcast[→0]:2), crash(source after bcast[→2]:1), crash(source after bcast[→1]:1), crash(source after bcast[→0]:1), crash(source before any send)}; preserve points {}; requirements {}
+test <unknown> ...	run time: 703.263745ms | iterations/s: 316 | exhaustive inputs: 222
+ldfi: run #4 {crash(member@2 before any send)}: 222 schedule(s), goal held; derivations {{bcast[→0]:1←source#0, bcast[→0]:2←source#3, bcast[→1]:1←source#1, bcast[→1]:2←source#4, observed[0→]:(2, [10, 0, 0, 0]) from member@0 through send #0←member@0#0, observed[0→]:(2, [20, 0, 0, 0]) from member@0 through send #0←member@0#0, observed[1→]:(2, [10, 0, 0, 0]) from member@1 through send #0←member@1#0, observed[1→]:(2, [20, 0, 0, 0]) from member@1 through send #0←member@1#0}}
+ldfi: universe {crash(member@0 before any send), crash(member@1 before any send), crash(member@2 before any send), crash(source after bcast[→1]:2), crash(source after bcast[→0]:2), crash(source after bcast[→2]:1), crash(source after bcast[→1]:1), crash(source after bcast[→0]:1), crash(source before any send)}; preserve points {}; requirements {}
+test <unknown> ...	run time: 224.196425ms | iterations/s: 268 | exhaustive inputs: 60
+ldfi: run #5 {crash(source after bcast[→1]:2)}: 60 schedule(s), goal VIOLATED; derivations {}
+MEASURE strategy=Lineage verdict=Counterexample hypotheses=5 schedules=948 elapsed_ms=3870
+LDFI: goal violated after 5 hypothesis run(s) by {crash(source after bcast[→1]:2)}
+  delivered in the failing schedule: {bcast[→0]:1, bcast[→1]:1, bcast[→2]:1, bcast[→0]:2, bcast[→1]:2}
+  sends lost to crashes: {source#5}
+
+EventualConsistency at ec_all_labels_classes.rs:41 (Cluster(loc2v1), YieldConcat, delivered): VIOLATED by {crash(source after bcast[→1]:2)}, 5 hypotheses
+EventualConsistency at ec_all_labels_classes.rs:31 (Cluster(loc2v1), AssertIsConsistent, minted and delivered): VIOLATED by {crash(source after bcast[→1]:2)}, 5 hypotheses
+EventualConsistency at ec_all_labels_classes.rs:36 (Cluster(loc2v1), AssertIsConsistent, minted): not checked: inside a tick
+EventualConsistency at ec_all_labels_classes.rs:41 (Cluster(loc2v1), YieldConcat, delivered): VIOLATED by {crash(source after bcast[→1]:2)}, 5 hypotheses
+
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 149 filtered out; finished in 14.51s
+
+RC 0 WALL 27.627285480

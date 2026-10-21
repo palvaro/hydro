@@ -1,0 +1,57 @@
+
+running 1 test
+hydrofrac: searching EventualConsistency at two_pc_ldfi.rs:86 (Cluster(loc2v1))
+test <unknown> ...	run time: 52.822264ms | iterations/s: 303 | exhaustive inputs: 16
+ldfi: fact domain learned from the failure-free run: 1 fact(s)
+test <unknown> ...	run time: 53.021117ms | iterations/s: 302 | exhaustive inputs: 16
+ldfi: channels:
+  channel#46 "prepare": Process(loc1v1) → Cluster(loc2v1), reliable
+  channel#89 "commit": Process(loc1v1) → Cluster(loc2v1), reliable
+  channel#150 "peer": Cluster(loc2v1) → Cluster(loc2v1), reliable
+  channel#178 "vote": Cluster(loc2v1) → Process(loc1v1), reliable
+  channel#263 "observe#263": Cluster(loc2v1) → Process(loc3v1), reliable
+  channel#267 "observe#267": Cluster(loc2v1) → Process(loc3v1), reliable
+  channel#272 "observe#272": Cluster(loc2v1) → Process(loc3v1), reliable
+  channel#277 "observe#277": Cluster(loc2v1) → Process(loc3v1), reliable
+ldfi: crash bounds: crashes unbounded; not all 3 nodes at once; at most 0 of the checked cluster's 2 crashable member(s)
+ldfi: specification is generated (EventualConsistency)
+ldfi: run #1 {}: 16 schedule(s), goal held; derivations {{observed[0→]:(0, [1, 0, 0, 0]) from participant@0 through send #0←participant@0#0, observed[1→]:(0, [1, 0, 0, 0]) from participant@1 through send #0←participant@1#0}}
+ldfi: universe {crash(participant@0 before any send), crash(participant@1 before any send)}; preserve points {}; requirements {}
+MEASURE strategy=Lineage verdict=Certificate hypotheses=1 schedules=16 elapsed_ms=110
+EventualConsistency at two_pc_ldfi.rs:86 (Cluster(loc2v1), AssertIsConsistent, minted and delivered): CERTIFICATE, 1 hypotheses, exhaustive
+hydrofrac: searching EventualConsistency at two_pc_ldfi.rs:92 (Cluster(loc2v1))
+test <unknown> ...	run time: 49.581925ms | iterations/s: 323 | exhaustive inputs: 16
+ldfi: fact domain learned from the failure-free run: 1 fact(s)
+test <unknown> ...	run time: 50.926296ms | iterations/s: 314 | exhaustive inputs: 16
+ldfi: channels:
+  channel#46 "prepare": Process(loc1v1) → Cluster(loc2v1), reliable
+  channel#89 "commit": Process(loc1v1) → Cluster(loc2v1), reliable
+  channel#150 "peer": Cluster(loc2v1) → Cluster(loc2v1), reliable
+  channel#178 "vote": Cluster(loc2v1) → Process(loc1v1), reliable
+  channel#263 "observe#263": Cluster(loc2v1) → Process(loc3v1), reliable
+  channel#267 "observe#267": Cluster(loc2v1) → Process(loc3v1), reliable
+  channel#272 "observe#272": Cluster(loc2v1) → Process(loc3v1), reliable
+  channel#277 "observe#277": Cluster(loc2v1) → Process(loc3v1), reliable
+ldfi: crash bounds: crashes unbounded; not all 3 nodes at once; at most 0 of the checked cluster's 2 crashable member(s)
+ldfi: specification is generated (EventualConsistency)
+ldfi: run #1 {}: 16 schedule(s), goal held; derivations {{vote[0→]:Txn(1)←participant@0#0, vote[1→]:Txn(1)←participant@1#0, observed[0→]:(1, [1, 0, 0, 0]) from participant@0 through send #1←participant@0#1, observed[1→]:(1, [1, 0, 0, 0]) from participant@1 through send #1←participant@1#1}}
+ldfi: universe {crash(participant@0 after vote[0→]:Txn(1)), crash(participant@0 before any send), crash(participant@1 after vote[1→]:Txn(1)), crash(participant@1 before any send)}; preserve points {}; requirements {}
+MEASURE strategy=Lineage verdict=Certificate hypotheses=1 schedules=16 elapsed_ms=105
+EventualConsistency at two_pc_ldfi.rs:92 (Cluster(loc2v1), AssertIsConsistent, minted and delivered): CERTIFICATE, 1 hypotheses, exhaustive
+hydrofrac: searching EventualConsistency at two_pc_ldfi.rs:98 (Cluster(loc2v1))
+test <unknown> ...	run time: 48.642414ms | iterations/s: 329 | exhaustive inputs: 16
+MEASURE strategy=Lineage verdict=Vacuous hypotheses=0 schedules=0 elapsed_ms=48
+EventualConsistency at two_pc_ldfi.rs:98 (Cluster(loc2v1), CycleSource, delivered): VACUOUS (nothing held in the failure-free run)
+hydrofrac: searching EventualConsistency at two_pc_ldfi.rs:161 (Cluster(loc2v1))
+test <unknown> ...	run time: 48.789291ms | iterations/s: 328 | exhaustive inputs: 16
+MEASURE strategy=Lineage verdict=Vacuous hypotheses=0 schedules=0 elapsed_ms=49
+EventualConsistency at two_pc_ldfi.rs:161 (Cluster(loc2v1), AssertIsConsistent, minted): VACUOUS (nothing held in the failure-free run)
+EventualConsistency at two_pc_ldfi.rs:86 (Cluster(loc2v1), AssertIsConsistent, minted and delivered): CERTIFICATE, 1 hypotheses, exhaustive
+EventualConsistency at two_pc_ldfi.rs:92 (Cluster(loc2v1), AssertIsConsistent, minted and delivered): CERTIFICATE, 1 hypotheses, exhaustive
+EventualConsistency at two_pc_ldfi.rs:98 (Cluster(loc2v1), CycleSource, delivered): VACUOUS (nothing held in the failure-free run)
+EventualConsistency at two_pc_ldfi.rs:161 (Cluster(loc2v1), AssertIsConsistent, minted): VACUOUS (nothing held in the failure-free run)
+
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 149 filtered out; finished in 38.88s
+
+RC 0 WALL 39.198996863

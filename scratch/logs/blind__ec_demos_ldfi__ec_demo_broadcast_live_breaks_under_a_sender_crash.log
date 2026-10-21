@@ -1,0 +1,23 @@
+
+running 1 test
+test <unknown> ...	run time: 3.149084ms | iterations/s: 318 | exhaustive inputs: 1
+blind: fact domain learned from the failure-free run: 2 fact(s)
+test <unknown> ...	run time: 1.852277ms | iterations/s: 540 | exhaustive inputs: 1
+blind: channels:
+  channel#43 "bcast": Process(loc1v1) → Cluster(loc2v1), reliable
+  channel#47 "observe": Cluster(loc2v1) → Process(loc3v1), reliable
+blind: crash bounds: crashes unbounded; not all 4 nodes at once; at most 1 of the checked cluster's 3 crashable member(s)
+blind: specification is generated (EventualConsistency)
+blind: run #1 {}: 1 schedule(s), goal held; derivations {{bcast[→0]:1←source#0, bcast[→0]:2←source#3, bcast[→1]:1←source#1, bcast[→1]:2←source#4, bcast[→2]:1←source#2, bcast[→2]:2←source#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+blind: universe size 6 (tried 1)
+test <unknown> ...	run time: 1.507556ms | iterations/s: 663 | exhaustive inputs: 1
+blind: run #2 {crash(source after bcast[→1]:2)}: 1 schedule(s), goal VIOLATED; derivations {}
+MEASURE strategy=Blind verdict=Counterexample hypotheses=2 schedules=2 elapsed_ms=10
+LDFI: goal violated after 2 hypothesis run(s) by {crash(source after bcast[→1]:2)}
+  delivered in the failing schedule: {bcast[→0]:1, bcast[→1]:1, bcast[→2]:1, bcast[→0]:2, bcast[→1]:2}
+  sends lost to crashes: {source#5}
+
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 149 filtered out; finished in 6.42s
+
+RC 0 WALL 10.302229112

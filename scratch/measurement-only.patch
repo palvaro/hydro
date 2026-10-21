@@ -1,0 +1,132 @@
+--- a/hydro_lang/src/sim/ldfi.rs	2026-10-21 18:01:29.533053217 +0000
++++ b/hydro_lang/src/sim/ldfi.rs	2026-10-21 17:52:44.052003721 +0000
+@@ -3796,6 +3796,24 @@
+         self
+     }
+ 
++    // MEASUREMENT-ONLY PATCH (not for commit): `LDFI_STRATEGY=blind|lineage` and
++    // `LDFI_MAX_HYPOTHESES=<n>` override the configured strategy / hypothesis budget.
++    fn eff_strategy(&self) -> Strategy {
++        match std::env::var("LDFI_STRATEGY").as_deref() {
++            Ok("blind") => Strategy::Blind,
++            Ok("lineage") => Strategy::Lineage,
++            _ => self.strategy,
++        }
++    }
++
++    // MEASUREMENT-ONLY PATCH (not for commit).
++    fn eff_max_hypotheses(&self) -> usize {
++        std::env::var("LDFI_MAX_HYPOTHESES")
++            .ok()
++            .and_then(|v| v.parse().ok())
++            .unwrap_or(self.max_hypotheses)
++    }
++
+     /// Selects how hypotheses are chosen (default [`Strategy::Lineage`]).
+     #[must_use]
+     pub fn strategy(mut self, strategy: Strategy) -> Self {
+@@ -4070,6 +4088,51 @@
+         sim: &CompiledSim,
+         body: impl AsyncFn(&Run<'_>) -> bool + RefUnwindSafe,
+     ) -> Outcome {
++        // MEASUREMENT-ONLY PATCH: time each search and print a parseable summary line.
++        let t0 = std::time::Instant::now();
++        let outcome = self.run_inner(sim, body);
++        let verdict = match &outcome {
++            Outcome::Counterexample { .. } => "Counterexample",
++            Outcome::Certificate { .. } => "Certificate",
++            Outcome::Budget { .. } => "Budget",
++            Outcome::Vacuous { .. } => "Vacuous",
++            Outcome::Exhausted { .. } => "Exhausted",
++            #[allow(unreachable_patterns)]
++            _ => "Other",
++        };
++        eprintln!(
++            "MEASURE strategy={:?} verdict={} hypotheses={} schedules={} elapsed_ms={}",
++            self.eff_strategy(),
++            verdict,
++            outcome.runs().len(),
++            outcome.schedules(),
++            t0.elapsed().as_millis()
++        );
++        // MEASUREMENT-ONLY PATCH: so the test's assertions (which expect a certificate) do
++        // not abort a multi-search test under `LDFI_STRATEGY=blind`, report an exhausted
++        // blind search as a certificate with no derivations.
++        match outcome {
++            Outcome::Exhausted { runs } if std::env::var("LDFI_BLIND_AS_CERT").is_ok() => {
++                Outcome::Certificate {
++                    derivations: vec![],
++                    runs,
++                    exploration: self.exploration,
++                    grade: match &self.search.goal {
++                        Some(Goal::Spec(spec)) if spec.facts.is_some() => Grade::Generated,
++                        Some(Goal::Spec(_)) => Grade::HandWritten,
++                        _ => Grade::Goal,
++                    },
++                }
++            }
++            outcome => outcome,
++        }
++    }
++
++    fn run_inner(
++        &self,
++        sim: &CompiledSim,
++        body: impl AsyncFn(&Run<'_>) -> bool + RefUnwindSafe,
++    ) -> Outcome {
+         let search = &self.search;
+         self.assert_label_chosen();
+         let goal_port = match &search.goal {
+@@ -4096,13 +4159,13 @@
+         let mut faults = FaultSet::new();
+         let bounds = self.crash_bounds(sim);
+         let level = self.level;
+-        let tag = match (self.strategy, level) {
++        let tag = match (self.eff_strategy(), level) {
+             (Strategy::Blind, _) => "blind",
+             (Strategy::Lineage, Level::Execution) => "ldfi/exec",
+             (Strategy::Lineage, Level::Precise) => "ldfi",
+         };
+         if self.log
+-            && self.strategy == Strategy::Lineage
++            && self.eff_strategy() == Strategy::Lineage
+             && level == Level::Precise
+             && !sim.provenance
+         {
+@@ -4113,7 +4176,7 @@
+         let mut slices: Option<Rc<Slices>> = None;
+ 
+         loop {
+-            if runs.len() >= self.max_hypotheses {
++            if runs.len() >= self.eff_max_hypotheses() {
+                 return Outcome::Budget { runs };
+             }
+ 
+@@ -4370,7 +4433,7 @@
+                     ),
+                 }
+             };
+-            let next = match self.strategy {
++            let next = match self.eff_strategy() {
+                 Strategy::Lineage => {
+                     // The weakest faults that kill some dependency of a clause (the omission
+                     // of a lossy delivery; the crash right before a dependency's send), plus
+@@ -4424,13 +4487,17 @@
+                 Strategy::Blind => {
+                     let mut universe: Vec<Fault> = observed.iter().cloned().collect();
+                     universe.sort_by_key(order);
++                    // MEASUREMENT-ONLY PATCH: log the blind universe size.
++                    if self.log {
++                        eprintln!("{tag}: universe size {} (tried {})", universe.len(), tried.len());
++                    }
+                     next_hypothesis(&universe, &[], &[], &tried, &vacuous_sets, &bounds)
+                 }
+             };
+             match next {
+                 Some(next) => faults = next,
+                 None => {
+-                    return match self.strategy {
++                    return match self.eff_strategy() {
+                         Strategy::Lineage => Outcome::Certificate {
+                             derivations: clauses.into_iter().map(|c| c.deps).collect(),
+                             runs,

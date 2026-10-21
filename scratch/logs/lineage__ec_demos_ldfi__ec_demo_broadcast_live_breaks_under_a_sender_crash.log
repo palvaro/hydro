@@ -1,0 +1,32 @@
+
+running 1 test
+test <unknown> ...	run time: 2.216512ms | iterations/s: 451 | exhaustive inputs: 1
+ldfi: fact domain learned from the failure-free run: 2 fact(s)
+test <unknown> ...	run time: 1.273553ms | iterations/s: 785 | exhaustive inputs: 1
+ldfi: channels:
+  channel#43 "bcast": Process(loc1v1) → Cluster(loc2v1), reliable
+  channel#47 "observe": Cluster(loc2v1) → Process(loc3v1), reliable
+ldfi: crash bounds: crashes unbounded; not all 4 nodes at once; at most 1 of the checked cluster's 3 crashable member(s)
+ldfi: specification is generated (EventualConsistency)
+ldfi: run #1 {}: 1 schedule(s), goal held; derivations {{bcast[→0]:1←source#0, bcast[→0]:2←source#3, bcast[→1]:1←source#1, bcast[→1]:2←source#4, bcast[→2]:1←source#2, bcast[→2]:2←source#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+ldfi: universe {crash(member@0 before any send), crash(member@1 before any send), crash(member@2 before any send), crash(source after bcast[→1]:2), crash(source after bcast[→0]:2), crash(source after bcast[→2]:1), crash(source after bcast[→1]:1), crash(source after bcast[→0]:1), crash(source before any send)}; preserve points {}; requirements {}
+test <unknown> ...	run time: 1.09597ms | iterations/s: 912 | exhaustive inputs: 1
+ldfi: run #2 {crash(member@0 before any send)}: 1 schedule(s), goal held; derivations {{bcast[→1]:1←source#1, bcast[→1]:2←source#4, bcast[→2]:1←source#2, bcast[→2]:2←source#5, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+ldfi: universe {crash(member@0 before any send), crash(member@1 before any send), crash(member@2 before any send), crash(source after bcast[→1]:2), crash(source after bcast[→0]:2), crash(source after bcast[→2]:1), crash(source after bcast[→1]:1), crash(source after bcast[→0]:1), crash(source before any send)}; preserve points {}; requirements {}
+test <unknown> ...	run time: 1.396716ms | iterations/s: 716 | exhaustive inputs: 1
+ldfi: run #3 {crash(member@1 before any send)}: 1 schedule(s), goal held; derivations {{bcast[→0]:1←source#0, bcast[→0]:2←source#3, bcast[→2]:1←source#2, bcast[→2]:2←source#5, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[2→]:1 from member@2 through send #0←member@2#0, observed[2→]:2 from member@2 through send #0←member@2#0}}
+ldfi: universe {crash(member@0 before any send), crash(member@1 before any send), crash(member@2 before any send), crash(source after bcast[→1]:2), crash(source after bcast[→0]:2), crash(source after bcast[→2]:1), crash(source after bcast[→1]:1), crash(source after bcast[→0]:1), crash(source before any send)}; preserve points {}; requirements {}
+test <unknown> ...	run time: 1.32486ms | iterations/s: 755 | exhaustive inputs: 1
+ldfi: run #4 {crash(member@2 before any send)}: 1 schedule(s), goal held; derivations {{bcast[→0]:1←source#0, bcast[→0]:2←source#3, bcast[→1]:1←source#1, bcast[→1]:2←source#4, observed[0→]:1 from member@0 through send #0←member@0#0, observed[0→]:2 from member@0 through send #0←member@0#0, observed[1→]:1 from member@1 through send #0←member@1#0, observed[1→]:2 from member@1 through send #0←member@1#0}}
+ldfi: universe {crash(member@0 before any send), crash(member@1 before any send), crash(member@2 before any send), crash(source after bcast[→1]:2), crash(source after bcast[→0]:2), crash(source after bcast[→2]:1), crash(source after bcast[→1]:1), crash(source after bcast[→0]:1), crash(source before any send)}; preserve points {}; requirements {}
+test <unknown> ...	run time: 1.239006ms | iterations/s: 807 | exhaustive inputs: 1
+ldfi: run #5 {crash(source after bcast[→1]:2)}: 1 schedule(s), goal VIOLATED; derivations {}
+MEASURE strategy=Lineage verdict=Counterexample hypotheses=5 schedules=5 elapsed_ms=41
+LDFI: goal violated after 5 hypothesis run(s) by {crash(source after bcast[→1]:2)}
+  delivered in the failing schedule: {bcast[→0]:1, bcast[→1]:1, bcast[→2]:1, bcast[→0]:2, bcast[→1]:2}
+  sends lost to crashes: {source#5}
+
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 149 filtered out; finished in 5.82s
+
+RC 0 WALL 6.141323815
