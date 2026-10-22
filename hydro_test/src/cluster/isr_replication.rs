@@ -1003,7 +1003,9 @@ pub(crate) mod harness {
 
 #[cfg(test)]
 mod tests {
-    use hydro_lang::sim::ldfi::{Exploration, Fault, LabelVerdict, Level, Outcome, Strategy};
+    use hydro_lang::sim::ldfi::{
+        CrashAt, CrashModel, Exploration, Fault, LabelVerdict, Level, Outcome, Strategy,
+    };
 
     use super::Encoding;
     use super::harness::{DEFAULT_SHAPE, body, compile, compile_all_labels, compile_with};
@@ -1050,6 +1052,41 @@ mod tests {
     #[test]
     fn ldfi_finds_the_unclean_election_bug_dataflow() {
         finds_the_unclean_election_bug(Encoding::Dataflow);
+    }
+
+    /// Regression test for a false certificate under closed sent sets
+    /// (`CrashModel::SentSet`): once the replication to replica 1 is lost, the leader must send
+    /// `zk Shrink([1])` before it acknowledges, a message no earlier run of the search sent.
+    /// Every sent set the search minted for the leader's crash came from such a run, so a
+    /// closed set dropped the shrink, the acknowledgement never happened, and every hypothesis
+    /// with the omission was vacuous. An open set (`CrashModel::SentSetOpen`) lets a message
+    /// the node was never seen to send through while the node is alive, and the bug is found.
+    #[test]
+    fn ldfi_finds_the_unclean_election_bug_with_open_sent_sets() {
+        let (compiled, h, configure) = compile(true, Encoding::Closure, DEFAULT_SHAPE, 8);
+        let outcome = configure(1)
+            .crash_model(CrashModel::SentSetOpen)
+            .exploration(Exploration::Fuzz { instances: SAMPLED })
+            .search(&compiled, async |run| body(&h, run).await);
+        eprintln!("{outcome}");
+        let Outcome::Counterexample { faults, runs, .. } = &outcome else {
+            panic!("expected a counterexample, got {outcome}");
+        };
+        assert!(
+            faults.iter().any(|f| matches!(f, Fault::Omit(_))),
+            "the counterexample needs a lost replication: {faults:?}"
+        );
+        assert!(
+            faults.iter().any(|f| matches!(
+                f,
+                Fault::Crash { node, at: CrashAt::Sent(_) } if node == "replica@0"
+            )),
+            "the counterexample needs the leader's sent-set crash: {faults:?}"
+        );
+        assert!(
+            runs.last().is_some_and(|h| h.novel_sends > 0),
+            "the counterexample's run should let a never-seen send (the shrink) through"
+        );
     }
 
     /// The verdict does not depend on the lineage level. Regression test for two false
