@@ -424,7 +424,9 @@ pub(crate) mod harness {
 
 #[cfg(test)]
 mod tests {
-    use hydro_lang::sim::ldfi::{Exploration, Fault, FuzzOutcome, LabelVerdict, Outcome, Strategy};
+    use hydro_lang::sim::ldfi::{
+        CrashAt, Exploration, Fault, FuzzOutcome, LabelVerdict, Outcome, Strategy,
+    };
 
     use super::harness::{body, compile, compile_all_labels};
 
@@ -449,7 +451,7 @@ mod tests {
         // the commit to participant 0).
         assert_eq!(faults.len(), 1);
         assert!(
-            matches!(faults.first(), Some(Fault::Crash { node, after: Some(m) })
+            matches!(faults.first(), Some(Fault::Crash { node, at: CrashAt::After(m) })
                 if node == "coordinator" && m.to_string().starts_with("commit[→0]:")),
             "expected the coordinator to die after its first commit: {faults:?}"
         );
@@ -677,7 +679,7 @@ mod tests {
         assert!(
             faults
                 .iter()
-                .any(|f| matches!(f, Fault::Crash { node, after: Some(m) }
+                .any(|f| matches!(f, Fault::Crash { node, at: CrashAt::After(m) }
                 if node == "coordinator" && m.to_string().starts_with("commit["))),
             "the coordinator must die after a commit: {faults:?}"
         );

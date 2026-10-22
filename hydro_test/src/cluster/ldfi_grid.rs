@@ -434,7 +434,8 @@ mod grid {
                 let mut ldfi = configure()
                     .level(level)
                     .exploration(Exploration::Fuzz { instances: 1 })
-                    .max_hypotheses(MAX_HYPOTHESES);
+                    .max_hypotheses(MAX_HYPOTHESES)
+                    .retain_schedules();
                 if std::env::var("LDFI_GRID_VERBOSE").is_err() {
                     ldfi = ldfi.quiet();
                 }

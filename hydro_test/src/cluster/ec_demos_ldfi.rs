@@ -34,7 +34,9 @@ mod tests {
     use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
     use hydro_lang::prelude::*;
     use hydro_lang::sim::compiled::CompiledSim;
-    use hydro_lang::sim::ldfi::{Exploration, Fault, LabelVerdict, Ldfi, Level, Outcome};
+    use hydro_lang::sim::ldfi::{
+        CrashModel, Exploration, Fault, LabelVerdict, Ldfi, Level, Outcome,
+    };
     use hydro_lang::sim::spec::Spec;
     use hydro_std::ec_inference_demos::broadcast_live::broadcast_live_from_process;
     use hydro_std::ec_inference_demos::crdt_gossip::{g_set_gossip, g_set_gossip_live};
@@ -541,6 +543,127 @@ mod tests {
         );
         assert!(results.all_certified_or_not_checked(), "{results}");
         assert_eq!(results.counterexamples().count(), 0, "{results}");
+    }
+
+    /// The static order check (`hydro_lang::sim::order`): the delivered set of
+    /// `reliable_broadcast_closed` has no non-deterministic operator in its causal cone (the
+    /// source's fan-out, the echo cycle, the `unique`), while multi-Paxos's `learned` has the
+    /// proposers' and acceptors' batches upstream.
+    #[test]
+    fn ec_demo_order_insensitivity_of_the_corpus() {
+        let mut flow = FlowBuilder::new();
+        let source = flow.process::<Source>();
+        let members = flow.cluster::<Member>();
+        let (_send, items) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+        let _out = reliable_broadcast_closed(items, &members)
+            .weaken_consistency()
+            .sim_cluster_output();
+        let _spec = Spec::all_labels(&mut flow);
+        let compiled: CompiledSim = flow
+            .sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&members, MEMBERS as usize)
+            .compiled();
+        let labels = compiled.labels().unwrap();
+        let delivered = labels
+            .iter()
+            .find(|plan| plan.collection.label.contains("reliable_broadcast.rs:149"))
+            .unwrap();
+        assert!(
+            delivered.order_insensitive_upstream(),
+            "{:?}",
+            delivered.upstream_nondet
+        );
+
+        let mut flow = FlowBuilder::new();
+        let proposers = flow.cluster::<Proposer>();
+        let acceptors = flow.cluster::<Acceptor>();
+        let learners = flow.cluster::<Learner>();
+        let (_lead, leads) = proposers.sim_input::<u64, TotalOrder, ExactlyOnce>();
+        let (_command, commands) = proposers.sim_input::<u32, TotalOrder, ExactlyOnce>();
+        let outputs = multi_paxos(&acceptors, &learners, 2, leads, commands);
+        let _learned = outputs.learned.weaken_consistency().sim_cluster_output();
+        let _spec = Spec::all_labels(&mut flow);
+        let compiled: CompiledSim = flow
+            .sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&proposers, 1)
+            .with_cluster_size(&acceptors, 3)
+            .with_cluster_size(&learners, MEMBERS as usize)
+            .compiled();
+        let learned = compiled
+            .labels()
+            .unwrap()
+            .iter()
+            .find(|plan| {
+                plan.collection.label.contains("multi_paxos.rs:588") && plan.collection.exit
+            })
+            .unwrap();
+        assert!(
+            learned
+                .upstream_nondet
+                .iter()
+                .any(|site| site.op == "batch"),
+            "{:?}",
+            learned.upstream_nondet
+        );
+    }
+
+    /// With sent-set crashes, reliable broadcast's delivered set is decided by one schedule per
+    /// hypothesis (`Ldfi::schedule_reduction`), and certifies as under the positional model.
+    #[test]
+    fn ec_demo_reliable_broadcast_certifies_in_one_schedule_per_hypothesis() {
+        let mut flow = FlowBuilder::new();
+        let source = flow.process::<Source>();
+        let members = flow.cluster::<Member>();
+        let (send, items) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+        let delivered = reliable_broadcast_closed(items, &members).weaken_consistency();
+        let mut spec = Spec::new(&mut flow);
+        let correct = spec.correct_members(&members, 0..MEMBERS);
+        let observed = spec.observe_cluster(delivered);
+        spec.eventual_consistency(observed, correct);
+        let compiled: CompiledSim = flow
+            .sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&members, MEMBERS as usize)
+            .with_provenance()
+            .compiled();
+        let outcome = Ldfi::new()
+            .crash_model(CrashModel::Auto)
+            .crashable("source", &source)
+            .crashable_cluster("member", &members, 0..MEMBERS)
+            .spec(&spec)
+            .search(&compiled, async |_run| {
+                send.send(1);
+                send.send(2);
+                hydro_lang::sim::quiesce().await;
+            });
+        eprintln!("{outcome}");
+        let Outcome::Certificate {
+            runs,
+            exploration,
+            reduction,
+            ..
+        } = &outcome
+        else {
+            panic!("{outcome}");
+        };
+        assert_eq!(*exploration, Exploration::FirstSchedule);
+        assert!(
+            reduction.as_ref().is_some_and(|r| r.trusted.is_empty()),
+            "{outcome}"
+        );
+        assert!(runs.iter().all(|h| h.explored == 1), "{outcome}");
+        assert!(
+            runs.iter().flat_map(|h| &h.faults).all(|f| matches!(
+                f,
+                Fault::Crash {
+                    at: hydro_lang::sim::ldfi::CrashAt::Sent(_),
+                    ..
+                }
+            )),
+            "{outcome}"
+        );
     }
 
     /// Every label of `multi_paxos`, automatically. `learned` (the learners' delivered set)
