@@ -23,7 +23,8 @@
 //! every schedule. [`Counterexample`] bundles the pictures for an [`Outcome`].
 //!
 //! Under [`Ldfi::viz_out`](crate::sim::ldfi::Ldfi::viz_out) or `MOLLY_VIZ_OUT`, the search
-//! writes the first picture of every counterexample it finds to disk by itself ([`out`]).
+//! keeps what all three pictures need and writes them for every counterexample it finds to
+//! disk by itself ([`out`]).
 
 pub mod lamport;
 pub mod out;
@@ -196,7 +197,7 @@ impl<'a> Counterexample<'a> {
             _ => {
                 let _ = writeln!(
                     out,
-                    "_(no witness trace retained; run the search with `Ldfi::with_traces()`)_\n"
+                    "_(no witness trace retained; run the search with `Ldfi::with_traces()` or `Ldfi::viz_out`)_\n"
                 );
             }
         }

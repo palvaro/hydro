@@ -230,22 +230,6 @@ mod tests {
         })
     }
 
-    /// The gallery entry (see `ldfi_viz`): plain broadcast, three members, one crash.
-    #[test]
-    fn gallery_plain_broadcast() {
-        use crate::cluster::ldfi_viz::{gallery_dir, write_gallery};
-
-        let Some(dir) = gallery_dir("plain_broadcast") else {
-            return;
-        };
-        for level in [Level::Execution, Level::Precise] {
-            let outcome = search_with(false, 1, Post::Positive, |ldfi| {
-                ldfi.level(level).with_traces().with_provenance_graphs()
-            });
-            write_gallery(&dir, "plain broadcast", level, &outcome);
-        }
-    }
-
     /// Plain broadcast violates agreement under one crash: the broadcaster dies after its
     /// second send, members 0 and 1 deliver, member 2 never does. Lineage makes the search
     /// two runs: the failure-free derivation of `POST` is the three deliveries, each resting
