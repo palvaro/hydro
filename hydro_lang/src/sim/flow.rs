@@ -13,7 +13,7 @@ use super::builder::SimBuilder;
 use super::compiled::{CompiledSim, CompiledSimInstance};
 use super::graph::{SimDeploy, SimExternal, SimNode, compile_sim, create_sim_graph_trybuild};
 use crate::compile::builder::StmtId;
-use crate::compile::ir::HydroRoot;
+use crate::compile::ir::{HydroNode, HydroRoot};
 use crate::location::LocationKey;
 use crate::location::dynamic::LocationId;
 use crate::prelude::Cluster;
@@ -31,6 +31,10 @@ pub struct SimFlow<'a> {
     /// [`SimExternal`] for each External.
     pub(crate) externals: SparseSecondaryMap<LocationKey, SimExternal>,
 
+    /// Locations whose ticks the scheduler runs as soon as they are runnable, without making
+    /// their interleaving a schedule choice (a specification's observer, which only consumes).
+    pub(crate) eager_locations: HashSet<LocationId>,
+
     /// Max size of each cluster.
     pub(crate) cluster_max_sizes: SparseSecondaryMap<LocationKey, usize>,
     /// Handle to state handling `external`s' ports.
@@ -44,6 +48,8 @@ pub struct SimFlow<'a> {
     /// the same logical location. Every location has an entry (its own key unless it is a
     /// `next_version` successor); populated eagerly at location creation.
     pub(crate) location_version_group_root: SecondaryMap<LocationKey, LocationKey>,
+    /// Each location's name (its Rust type name), for reports.
+    pub(crate) location_names: SecondaryMap<LocationKey, String>,
 
     /// When true, the simulator only tests safety properties (not liveness).
     pub(crate) test_safety_only: bool,
@@ -52,6 +58,8 @@ pub struct SimFlow<'a> {
     /// When false (default), encountering a consistency assertion panics because
     /// validating consistency assertions is not yet supported in the simulator.
     pub(crate) skip_consistency_assertions: bool,
+    /// Compile with record-level provenance (see [`super::provenance`]).
+    pub(crate) provenance: bool,
 
     /// Number of iterations to use for fuzzing, defaults to 8192
     pub(crate) unit_test_fuzz_iterations: usize,
@@ -88,6 +96,17 @@ impl<'a> SimFlow<'a> {
     #[must_use]
     pub fn skip_consistency_assertions(mut self) -> Self {
         self.skip_consistency_assertions = true;
+        self
+    }
+
+    /// Compiles the simulation with record-level provenance: every element carries the set
+    /// of channel deliveries it was computed from, and network sends / external outputs
+    /// record it in the lineage log (LDFI "Level 2" lineage; see [`super::provenance`]).
+    /// Supported for the dataflow operators the LDFI examples use; unsupported operators
+    /// panic at compile time.
+    #[must_use]
+    pub fn with_provenance(mut self) -> Self {
+        self.provenance = true;
         self
     }
 
@@ -139,31 +158,6 @@ impl<'a> SimFlow<'a> {
         self.compiled().deterministic(thunk)
     }
 
-    /// Runs the test body against one execution of the program in which every scheduling
-    /// decision is drawn from the given bolero driver. See
-    /// [`crate::sim::compiled::CompiledSim::run_with_driver`], including why it exists and when
-    /// it should be deleted in favor of [`SimFlow::deterministic`].
-    pub fn run_with_driver<D: bolero::bolero_engine::driver::Driver + 'static>(
-        self,
-        driver: D,
-        thunk: impl AsyncFnOnce() + RefUnwindSafe,
-    ) {
-        self.compiled().run_with_driver(driver, async |instance| {
-            instance.run_with_scheduler(thunk()).await
-        })
-    }
-
-    /// Runs the test body against one execution of the program under the *prompt* schedule:
-    /// every batch releases everything buffered, every snapshot observes the oldest unobserved
-    /// version, and ready ticks run round-robin. See
-    /// [`crate::sim::prompt_schedule::PromptScheduleDriver`]. Unlike
-    /// [`SimFlow::deterministic`], this does not require the program's hooks to be scripted; it
-    /// is the stand-in for `deterministic()` described there, to be deleted once
-    /// `deterministic()` can take its place.
-    pub fn run_prompt(self, thunk: impl AsyncFnOnce() + RefUnwindSafe) {
-        self.run_with_driver(super::prompt_schedule::PromptScheduleDriver::default(), thunk)
-    }
-
     /// Compiles the simulation into a dynamically loadable library, and returns a handle to it.
     pub fn compiled(mut self) -> CompiledSim {
         use dfir_lang::graph::{eliminate_extra_unions_tees, partition_graph};
@@ -183,6 +177,7 @@ impl<'a> SimFlow<'a> {
             next_hoff_id: crate::Counter::default(),
             test_safety_only: self.test_safety_only,
             skip_consistency_assertions: self.skip_consistency_assertions,
+            provenance: self.provenance,
             channel_tables: BTreeMap::new(),
             bound_sim_hooks: HashMap::new(),
         };
@@ -197,6 +192,20 @@ impl<'a> SimFlow<'a> {
 
         let mut seen_tees_instantiate: HashMap<_, _> = HashMap::new();
         let mut seen_cluster_members = HashSet::new();
+
+        // An automatic specification (`Spec::all_labels`) observes every labelled collection:
+        // the taps are ordinary network sends, inserted before the networks are compiled and
+        // before the provenance rewrite (see `sim::observe`).
+        #[cfg(feature = "ldfi")]
+        let labels = super::observe::tap_labels(&mut self.ir).map(Rc::new);
+        #[cfg(not(feature = "ldfi"))]
+        let labels = None;
+        // What reaches each location, and whether it is order-insensitive (see `sim::order`):
+        // on the IR as the program built it, before the networks are compiled.
+        #[cfg(feature = "ldfi")]
+        let upstream_nondet =
+            Rc::new(super::order::Cones::new(&self.ir).nondet_by_destination(&self.ir));
+
         self.ir.iter_mut().for_each(|leaf| {
             leaf.compile_network::<SimDeploy>(
                 &mut SparseSecondaryMap::new(),
@@ -216,6 +225,12 @@ impl<'a> SimFlow<'a> {
                 &self.location_version,
             );
         }
+
+        if self.provenance {
+            super::provenance::rewrite(&mut self.ir);
+        }
+        collapse_ticks_around_atomic(&mut self.ir);
+        let slices = Rc::new(super::slice::compute(&mut self.ir));
 
         let mut seen_tees = HashMap::new();
         let mut built_tees = HashMap::new();
@@ -269,6 +284,19 @@ impl<'a> SimFlow<'a> {
         }
 
         let (cluster_max_sizes, cluster_member_ids) = self.cluster_sizing();
+        let cluster_members = cluster_member_ids.clone();
+        // The program's processes, less the observer a specification adds (an eager location;
+        // see `sim::spec`), for `CompiledSim::node_count`.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "nondeterministic iteration order, fine for a count"
+        )]
+        let eager_processes = self
+            .eager_locations
+            .iter()
+            .filter(|location| matches!(location, LocationId::Process(_)))
+            .count();
+        let process_count = self.processes.len() - eager_processes;
         drop(flow_build_span);
 
         let (bin, trybuild) = create_sim_graph_trybuild(
@@ -294,6 +322,20 @@ impl<'a> SimFlow<'a> {
             lib,
             externals_port_registry: self.externals_port_registry.take(),
             unit_test_fuzz_iterations: self.unit_test_fuzz_iterations,
+            slices,
+            provenance: self.provenance,
+            eager_locations: Rc::new(self.eager_locations),
+            cluster_members: Rc::new(cluster_members),
+            process_count,
+            labels,
+            location_names: Rc::new(
+                self.location_names
+                    .iter()
+                    .map(|(key, name)| (key, super::source_names::short_type_name(name)))
+                    .collect(),
+            ),
+            #[cfg(feature = "ldfi")]
+            upstream_nondet,
         }
     }
 
@@ -359,4 +401,36 @@ impl<'a> SimFlow<'a> {
 
         (cluster_sizes, cluster_member_ids)
     }
+}
+
+/// A tick created on an atomic location (`Tick { tick: None, parent_location: Atomic(t) }`, as
+/// `Optional::or` does on a top-level atomic optional) is the atomic region's own tick `t`:
+/// production emission places it in `t`'s loop. The simulator keys its per-tick DFIR graphs
+/// and hooks by the location, so the alias is rewritten to `t` before emission.
+fn collapse_ticks_around_atomic(ir: &mut [HydroRoot]) {
+    fn collapse(location: &mut LocationId) {
+        match location {
+            LocationId::Tick {
+                tick: None,
+                parent_location,
+            } => {
+                collapse(parent_location);
+                if let LocationId::Atomic(inner) = parent_location.as_ref() {
+                    *location = inner.as_ref().clone();
+                }
+            }
+            LocationId::Tick {
+                tick: Some(_),
+                parent_location,
+            } => collapse(parent_location),
+            LocationId::Atomic(inner) => collapse(inner),
+            LocationId::Process(_) | LocationId::Cluster(_) => {}
+        }
+    }
+    crate::compile::ir::transform_bottom_up(
+        ir,
+        &mut |_| {},
+        &mut |node: &mut HydroNode| collapse(&mut node.metadata_mut().location_id),
+        false,
+    );
 }
