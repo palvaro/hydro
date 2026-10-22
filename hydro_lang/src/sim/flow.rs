@@ -48,6 +48,8 @@ pub struct SimFlow<'a> {
     /// the same logical location. Every location has an entry (its own key unless it is a
     /// `next_version` successor); populated eagerly at location creation.
     pub(crate) location_version_group_root: SecondaryMap<LocationKey, LocationKey>,
+    /// Each location's name (its Rust type name), for reports.
+    pub(crate) location_names: SecondaryMap<LocationKey, String>,
 
     /// When true, the simulator only tests safety properties (not liveness).
     pub(crate) test_safety_only: bool,
@@ -321,6 +323,12 @@ impl<'a> SimFlow<'a> {
             cluster_members: Rc::new(cluster_members),
             process_count,
             labels,
+            location_names: Rc::new(
+                self.location_names
+                    .iter()
+                    .map(|(key, name)| (key, super::source_names::short_type_name(name)))
+                    .collect(),
+            ),
         }
     }
 

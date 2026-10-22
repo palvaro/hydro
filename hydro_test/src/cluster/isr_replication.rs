@@ -1181,7 +1181,6 @@ mod tests {
         let results = configure(None)
             .exploration(Exploration::Fuzz { instances: SAMPLED })
             .search_all_labels(&compiled, async |run| body(&h, run).await);
-        eprintln!("{results}");
         assert!(
             !results.verdicts.is_empty(),
             "the protocol labels collections"
@@ -1209,7 +1208,6 @@ mod tests {
         let results = configure(None)
             .exploration(Exploration::Fuzz { instances: SAMPLED })
             .search_all_labels(&compiled, async |run| body(&h, run).await);
-        eprintln!("{results}");
         let crashed_sender = |site: &str, sender: &str| {
             results.at(site).any(|r| {
                 matches!(&r.verdict, LabelVerdict::Searched(Outcome::Counterexample { faults, .. })

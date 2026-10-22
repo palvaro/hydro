@@ -145,6 +145,10 @@ use crate::sim::viz::provenance::{
 use crate::sim::viz::trace::{Crash, Fate, TraceEvent, TraceEventKind, TraceMessage, TraceNode};
 use crate::sim::{SimClusterReceiver, SimReceiver};
 
+#[path = "ldfi_report.rs"]
+mod report;
+use report::ReportNames;
+
 /// A message as the omission vocabulary names it: the channel it travelled on, its sender
 /// and destination (members, for cluster endpoints), and its payload. Identity is by those
 /// four: omitting a message omits every byte-identical copy from that sender to that
@@ -256,13 +260,16 @@ pub enum Fault {
 }
 
 /// A message a node sent, as the identity of a crash point: the channel (sink id), the
-/// destination member, and the wire bytes. `display` is derived and not part of identity.
+/// destination member, and the wire bytes. `display` and `payload` are derived and not part
+/// of identity.
 #[derive(Clone)]
 pub struct SendId {
     channel: usize,
     to_member: Option<u32>,
     bytes: Vec<u8>,
     display: String,
+    /// The payload's `Debug` rendering alone, for plain-words reports.
+    payload: String,
 }
 
 impl PartialEq for SendId {
@@ -2038,6 +2045,7 @@ impl<'a> Lineage<'a> {
                 ),
                 render_payload(record)
             ),
+            payload: render_payload(record),
         }
     }
 
@@ -3996,8 +4004,9 @@ impl Ldfi {
     /// automatic specification ([`Spec::all_labels`]) and the shared `body`, and returns a
     /// verdict for each: the [`Outcome`] of its search, or why it was not checked. Every
     /// setting of this `Ldfi` (crashable nodes, budget, exploration, level) applies to every
-    /// collection. Unless [`Self::quiet`], prints one summary line per collection as it
-    /// finishes, and the full outcome of a counterexample.
+    /// collection. Unless [`Self::quiet`], prints a progress line before each search, the full
+    /// outcome of each counterexample, and, at the end, the report ([`LabelResults`]'s
+    /// `Display`) once; a caller that prints the results itself should set [`Self::quiet`].
     pub fn search_all_labels(
         &self,
         sim: &CompiledSim,
@@ -4016,6 +4025,7 @@ impl Ldfi {
         });
         // Searched collections first (a covered scalar's verdict is its input's outcome), then
         // one row per collection in enumeration order.
+        let names = ReportNames::new(sim, &self.search.nodes);
         let mut outcomes: HashMap<usize, Outcome> = HashMap::new();
         for (index, plan) in labels.iter().enumerate() {
             if !plan.is_searched() {
@@ -4037,9 +4047,10 @@ impl Ldfi {
             facts.domain.borrow_mut().clear();
             if self.log {
                 eprintln!(
-                    "hydrofrac: searching EventualConsistency at {} ({})",
-                    plan.collection.label,
-                    plan.collection.location_label()
+                    "hydrofrac: checking {} / {} ({})",
+                    names.group(&plan.collection.location),
+                    report::collection_name(&plan.collection),
+                    plan.collection.label
                 );
             }
             let outcome = self.run(sim, async |run| {
@@ -4051,7 +4062,10 @@ impl Ldfi {
             }
             outcomes.insert(index, outcome);
         }
-        let mut results = LabelResults { verdicts: vec![] };
+        let mut results = LabelResults {
+            verdicts: vec![],
+            names,
+        };
         for (index, plan) in labels.iter().enumerate() {
             let verdict = if let Some(reason) = &plan.not_checked {
                 LabelVerdict::NotChecked(reason.clone())
@@ -4068,14 +4082,13 @@ impl Ldfi {
             } else {
                 LabelVerdict::Searched(outcomes[&index].clone())
             };
-            let result = LabelResult {
+            results.verdicts.push(LabelResult {
                 collection: plan.collection.clone(),
                 verdict,
-            };
-            if self.log {
-                eprintln!("{result}");
-            }
-            results.verdicts.push(result);
+            });
+        }
+        if self.log {
+            eprintln!("hydrofrac: EventualConsistency results\n{results}");
         }
         results
     }
@@ -4532,77 +4545,36 @@ impl LabelResult {
 }
 
 impl Display for LabelResult {
+    /// One line: the collection's name and site, and its verdict in the report's words, with
+    /// faults in their exact notation (the full report, [`LabelResults`], names nodes and
+    /// messages in plain words).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let c = &self.collection;
-        let role = match (c.minted, c.exit, c.aggregated) {
-            (true, true, _) => "minted and delivered",
-            (true, false, _) => "minted",
-            (false, true, _) => "delivered",
-            (false, false, true) => "aggregated",
-            (false, false, false) => "",
-        };
         write!(
             f,
-            "EventualConsistency at {} ({:?}, {}, {role}): ",
-            c.label, c.location, c.op
-        )?;
-        let outcome = match &self.verdict {
-            LabelVerdict::NotChecked(reason) => return write!(f, "not checked: {reason}"),
-            LabelVerdict::Searched(outcome) => outcome,
-            LabelVerdict::CoveredBy {
-                input_site,
-                outcome,
-            } => {
-                write!(f, "covered by its input at {input_site} — ")?;
-                outcome
-            }
-            LabelVerdict::Hop { merged_at, outcome } => {
-                write!(f, "informational, merged and checked at {merged_at}: ")?;
-                outcome
-            }
-        };
-        match outcome {
-            Outcome::Certificate {
-                runs, exploration, ..
-            } => {
-                write!(f, "CERTIFICATE, {} hypotheses", runs.len())?;
-                match exploration {
-                    Exploration::Exhaustive => write!(f, ", exhaustive"),
-                    Exploration::Fuzz { instances } => {
-                        write!(f, ", {instances} sampled schedules")
-                    }
-                }
-            }
-            Outcome::Counterexample { faults, runs, .. } => write!(
-                f,
-                "VIOLATED by {}, {} hypotheses",
-                render_set(faults),
-                runs.len()
-            ),
-            Outcome::Budget { runs } => {
-                write!(f, "BUDGET exhausted after {} hypotheses", runs.len())
-            }
-            Outcome::Vacuous { .. } => {
-                write!(f, "VACUOUS (nothing held in the failure-free run)")
-            }
-            Outcome::Exhausted { runs } => {
-                write!(
-                    f,
-                    "exhausted the fault universe, {} runs, no violation",
-                    runs.len()
-                )
-            }
-        }
+            "{} ({}, {:?}): {}",
+            report::collection_name(&self.collection),
+            self.collection.label,
+            self.collection.location,
+            report::single_verdict(self)
+        )
     }
 }
 
 /// The result of [`Ldfi::search_all_labels`]: one verdict per collection the program labels
-/// `EventualConsistency`, in the program's enumeration order. Displays as a table, one line
-/// per collection.
+/// `EventualConsistency`, in the program's enumeration order.
+///
+/// Displays as a report for people: one block per cluster (named by its `crashable_cluster`
+/// label, else its type), one row per collection (named by the variable its statement binds,
+/// with its `file:line`), verdicts and faults in plain words, merge-dominated hops nested under
+/// the exit they merge into, and a summary line. The alternate form (`{:#}`), or the
+/// `HYDROFRAC_VERBOSE` environment variable, adds each row's exact site, operator, role and
+/// fault notation. See the `report` module for the naming rules.
 #[derive(Clone, Debug, Default)]
 pub struct LabelResults {
     /// The verdicts.
     pub verdicts: Vec<LabelResult>,
+    /// How the report names locations and channels.
+    names: ReportNames,
 }
 
 impl LabelResults {
@@ -4653,15 +4625,6 @@ impl LabelResults {
             } => Some((r, faults)),
             _ => None,
         })
-    }
-}
-
-impl Display for LabelResults {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for result in &self.verdicts {
-            writeln!(f, "{result}")?;
-        }
-        Ok(())
     }
 }
 
@@ -5230,6 +5193,7 @@ mod tests {
             to_member: None,
             bytes: bincode::serialize(&payload).unwrap(),
             display: format!("ch{channel}:{payload}"),
+            payload: payload.to_string(),
         }
     }
 

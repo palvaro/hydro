@@ -705,7 +705,7 @@ mod hydrofrac_tests {
                 hydro_lang::sim::quiesce().await;
             });
         eprintln!(
-            "{results}abd (reliable phase 2: {reliable}): {:.1}s",
+            "abd (reliable phase 2: {reliable}): {:.1}s",
             start.elapsed().as_secs_f64()
         );
         results

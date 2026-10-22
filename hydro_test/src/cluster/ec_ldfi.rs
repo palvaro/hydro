@@ -298,7 +298,6 @@ mod tests {
     #[test]
     fn ec_broadcast_closed_all_labels() {
         let results = broadcast_closed_all_labels(|ldfi| ldfi);
-        println!("{results}");
         let mut counterexamples = results.counterexamples();
         let Some((_, faults)) = counterexamples.next() else {
             panic!("the single-hop broadcast should be violated: {results}");
@@ -322,7 +321,6 @@ mod tests {
         };
         let results =
             broadcast_closed_all_labels(|ldfi| ldfi.with_traces().with_provenance_graphs());
-        println!("{results}");
         let (_, outcome) = results
             .searched()
             .find(|(_, outcome)| outcome.is_counterexample())

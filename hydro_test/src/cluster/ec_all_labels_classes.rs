@@ -61,7 +61,6 @@ mod tests {
                 send.send(2);
                 hydro_lang::sim::quiesce().await;
             });
-        eprintln!("{results}");
         assert!(
             results.verdicts.iter().any(|r| r.collection.in_tick
                 && matches!(

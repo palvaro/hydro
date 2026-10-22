@@ -103,6 +103,9 @@ pub struct ChannelInfo {
     /// (`.name("..")` on the networking config), else the `file:line` of the `send`, else
     /// `ch#id`. Made unique across the program.
     pub label: String,
+    /// A name for reports: the channel's name if the program gave it one, else the variable
+    /// the user's `send` statement binds (see `sim::source_names`). Not unique.
+    pub name: Option<String>,
 }
 
 /// The slices of every sink in a compiled program, and the program's channels.
@@ -170,6 +173,10 @@ pub struct EcCollection {
     /// combined with another labelled stream before anything leaves the labelled region, so
     /// agreement is owed at the combination, which the exits check.
     pub merged_into: Vec<usize>,
+    /// A name for reports: the node's tag, else the variable the user's statement binds (or
+    /// the function whose tail expression it is), read back from the source (see
+    /// `sim::source_names`). `None` when neither is available.
+    pub name: Option<String>,
 }
 
 impl EcCollection {
@@ -275,6 +282,7 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
                         aggregated: false,
                         covered_by: None,
                         merged_into: vec![],
+                        name: ec_name(node),
                     });
                     self.collections.len() - 1
                 });
@@ -587,6 +595,14 @@ pub(crate) fn ec_label(node: &HydroNode) -> String {
         .unwrap_or_else(|| ec_op(node))
 }
 
+/// The report name of a labelled collection (see [`EcCollection::name`]).
+fn ec_name(node: &HydroNode) -> Option<String> {
+    node.metadata().tag.clone().or_else(|| {
+        crate::sim::source_names::user_frame(&node.metadata().op.backtrace)
+            .and_then(|frame| crate::sim::source_names::site_name(&frame))
+    })
+}
+
 /// The operator name of `node` (`Network`, `Unique`, ...).
 fn ec_op(node: &HydroNode) -> String {
     let name = node.print_root();
@@ -799,12 +815,14 @@ pub fn compute(ir: &mut [HydroRoot]) -> Slices {
         hook_feeds: HashMap<usize, RawFeeds>,
         /// State cell → the merged slice of every node whose closure mutates it.
         writers: HashMap<*const HydroNode, RawSlice>,
-        /// Every `Network` node, in traversal order: `(id, from, to, lossy, name, span)`.
+        /// Every `Network` node, in traversal order: `(id, from, to, lossy, name, span,
+        /// report name)`.
         channels: Vec<(
             usize,
             LocationId,
             LocationId,
             bool,
+            Option<String>,
             Option<String>,
             Option<String>,
         )>,
@@ -928,6 +946,10 @@ pub fn compute(ir: &mut [HydroRoot]) -> Slices {
                         lossy,
                         name.clone(),
                         user_span(&metadata.op.backtrace),
+                        name.clone().or_else(|| {
+                            crate::sim::source_names::user_frame(&metadata.op.backtrace)
+                                .and_then(|frame| crate::sim::source_names::site_name(&frame))
+                        }),
                     ));
                 }
             }
@@ -1061,7 +1083,7 @@ pub fn compute(ir: &mut [HydroRoot]) -> Slices {
     // unique with the id where two channels would otherwise share a label.
     let base_labels: Vec<String> = channels
         .iter()
-        .map(|(id, _, _, _, name, span)| {
+        .map(|(id, _, _, _, name, span, _)| {
             name.clone()
                 .or_else(|| {
                     span.as_ref().map(|span| {
@@ -1074,7 +1096,7 @@ pub fn compute(ir: &mut [HydroRoot]) -> Slices {
                 .unwrap_or_else(|| format!("ch{id}"))
         })
         .collect();
-    for (i, (id, from, to, lossy, _, _)) in channels.into_iter().enumerate() {
+    for (i, (id, from, to, lossy, _, _, report_name)) in channels.into_iter().enumerate() {
         let label = &base_labels[i];
         let unique = base_labels.iter().filter(|l| *l == label).count() == 1;
         let label = if unique {
@@ -1090,6 +1112,7 @@ pub fn compute(ir: &mut [HydroRoot]) -> Slices {
                 to,
                 lossy,
                 label,
+                name: report_name,
             },
         );
     }

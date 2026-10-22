@@ -406,7 +406,7 @@ mod tests {
                 }
             });
         eprintln!(
-            "{results}g_set_gossip (live: {live}): {:.1}s",
+            "g_set_gossip (live: {live}): {:.1}s",
             start.elapsed().as_secs_f64()
         );
         results
@@ -496,7 +496,6 @@ mod tests {
                 send.send(2);
                 hydro_lang::sim::quiesce().await;
             });
-        eprintln!("{results}");
         // The delivered set (`new_messages`, the `unique`): the manual search's certificate.
         let delivered: Vec<_> = results.at("reliable_broadcast.rs:149").collect();
         assert_eq!(delivered.len(), 1, "{results}");
@@ -591,7 +590,6 @@ mod tests {
                 command.send(0, 8);
                 hydro_lang::sim::quiesce().await;
             });
-        eprintln!("{results}");
         let learned: Vec<_> = results
             .at("multi_paxos.rs:588")
             .filter(|r| r.collection.exit)
