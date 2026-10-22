@@ -84,6 +84,9 @@ pub mod provenance;
 pub mod slice;
 
 #[cfg(stageleft_runtime)]
+pub(crate) mod source_names;
+
+#[cfg(stageleft_runtime)]
 pub(crate) mod versioned_network;
 
 #[cfg(stageleft_runtime)]

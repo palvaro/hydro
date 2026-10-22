@@ -907,6 +907,8 @@ pub struct CompiledSim {
     /// automatic specification (`Spec::all_labels`; see `sim::observe`).
     #[cfg(feature = "ldfi")]
     pub(super) labels: Option<Rc<Vec<super::observe::LabelPlan>>>,
+    /// Each location's short type name (`Learner`), for reports.
+    pub(super) location_names: Rc<std::collections::BTreeMap<crate::location::LocationKey, String>>,
     #[cfg(not(feature = "ldfi"))]
     #[expect(
         dead_code,
@@ -969,6 +971,17 @@ impl CompiledSim {
     #[cfg(feature = "ldfi")]
     pub fn labels(&self) -> Option<&[super::observe::LabelPlan]> {
         self.labels.as_deref().map(Vec::as_slice)
+    }
+
+    /// The short type name of a process or cluster (`Learner` for `flow.cluster::<Learner>()`),
+    /// for reports.
+    pub fn location_name(&self, location: &LocationId) -> Option<&str> {
+        match location.root() {
+            LocationId::Process(key) | LocationId::Cluster(key) => {
+                self.location_names.get(key).map(String::as_str)
+            }
+            _ => None,
+        }
     }
 
     /// Each cluster's member ids, from `SimFlow::with_cluster_size`.

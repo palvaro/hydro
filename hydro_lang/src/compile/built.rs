@@ -196,6 +196,7 @@ impl<'a> BuiltFlow<'a> {
             externals_port_registry: Default::default(),
             location_version: self.location_version,
             location_version_group_root: self.location_version_group_root,
+            location_names: self.location_names,
             test_safety_only: false,
             skip_consistency_assertions: false,
             provenance: false,

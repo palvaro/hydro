@@ -611,7 +611,6 @@ mod tests {
     fn ldfi_all_labels_with_the_harness_fault_model() {
         let (compiled, h, configure) = compile_all_labels(2, true, true, 8);
         let results = configure(None).search_all_labels(&compiled, async |run| body(&h, run).await);
-        eprintln!("{results}");
         assert!(
             !results
                 .verdicts
@@ -641,7 +640,6 @@ mod tests {
     fn ldfi_all_labels_with_the_coordinator_correct() {
         let (compiled, h, configure) = compile_all_labels(2, true, false, 8);
         let results = configure(None).search_all_labels(&compiled, async |run| body(&h, run).await);
-        eprintln!("{results}");
         assert!(
             !results.verdicts.is_empty(),
             "the protocol labels collections"

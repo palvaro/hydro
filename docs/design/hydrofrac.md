@@ -135,8 +135,7 @@ let results = Ldfi::new()
         send.send(Item(1));
         send.send(Item(2));
         hydro_lang::sim::quiesce().await;
-    });
-println!("{results}");
+    }); // prints the report (see below) unless `.quiet()`
 ```
 
 `all_labels` finds the one labelled collection, the members' side of the `broadcast_closed`, which is both where the label is minted and (through `weaken_consistency`) where it exits. The test registers four crashable nodes and sets no `.crash_budget`, so every combination of their crashes is admissible except the ones that cannot say anything. The search logs the bounds before the first hypothesis, then the verdict:
@@ -146,7 +145,10 @@ ldfi: crash bounds: crashes unbounded; not all 4 nodes at once; at most 1 of the
 ```
 
 ```text
-EventualConsistency at ec_ldfi.rs:270 (Cluster(loc2v1), AssertIsConsistent, minted and delivered): VIOLATED by {crash(source after bcast[→1]:Item(2))}, 5 hypotheses
+members (3 members)
+  at_members  ec_ldfi.rs:270  DIVERGES under crash(source after sending bcast 2 to member 1)
+
+summary: 0 hold, 1 DIVERGE (members/at_members)
 ```
 
 ![Lamport diagram of the broadcast_closed counterexample: the source crashes after its second item to member 1; its second item to member 2 is lost](molly-viz-samples/ec/ec_broadcast_closed_all_labels/failing.png)
@@ -190,25 +192,30 @@ let results = Ldfi::new()
         send.send(1);
         send.send(2);
         hydro_lang::sim::quiesce().await;
-    });
-println!("{results}");
+    }); // prints the report (see below) unless `.quiet()`
 ```
 
-It prints one line per labelled collection:
+It prints a report, one block per cluster and one row per labelled collection:
 
 ```text
-EventualConsistency at reliable_broadcast.rs:130 (Cluster(loc2v1), AssertIsConsistent, minted): VIOLATED by {crash(source after reliable_broadcast.rs:130[→1]:2)}, 5 hypotheses
-EventualConsistency at reliable_broadcast.rs:156 (Cluster(loc2v1), AssertIsConsistent, minted): VIOLATED by {crash(member@0 after reliable_broadcast.rs:156[0→1]:2)}, 3 hypotheses
-EventualConsistency at reliable_broadcast.rs:149 (Cluster(loc2v1), Unique, delivered): CERTIFICATE, 36 hypotheses, exhaustive
+members (3 members)
+  new_messages  reliable_broadcast.rs:149  certified (49 fault sets, all schedules)
+  hops merged into new_messages:
+    initial  :130  diverges alone under crash(source after sending initial 2 to member 1)
+    echo     :156  diverges alone under crash(member@0 after sending echo 2 to member 1)
+
+summary: 1 hold
 ```
 
-The first is the source's initial broadcast, violated by the source's crash between two sends: the same failing run as the first example, except that member 2 now receives `2` through the echoes, so only the hop itself disagrees. The second is the members' echo broadcast, violated by an echoing member's crash. The third is the delivered set the program exposes, certified under exhaustive schedules: the echo repairs what the sender's crash leaves missing. The two violations are not defects. Reliable broadcast builds a reliable delivered set out of an unreliable single-hop broadcast and an unreliable echo, and "inner collections violated, delivered set certified" is the search showing the protocol doing its job.
+A cluster is named by its `crashable_cluster` label (else its type), a collection by the variable its statement binds (else the enclosing function, else its operator), a message by its channel's name or `send` variable and a shortened payload. `{results:#}` (or `HYDROFRAC_VERBOSE=1`) adds each row's exact site, operator, role and fault notation. Unless `Ldfi::quiet`, `search_all_labels` prints the report itself.
+
+The two hops are informational: each reaches the outside only merged into `new_messages`, which decides. The first is the source's initial broadcast, which diverges alone under the source's crash between two sends: the same failing run as the first example, except that member 2 now receives `2` through the echoes, so only the hop itself disagrees. The second is the members' echo broadcast, which diverges alone under an echoing member's crash. The first row is the delivered set the program exposes, certified under exhaustive schedules: the echo repairs what the sender's crash leaves missing. The two violations are not defects. Reliable broadcast builds a reliable delivered set out of an unreliable single-hop broadcast and an unreliable echo, and "inner collections violated, delivered set certified" is the search showing the protocol doing its job.
 
 ![Lamport diagram: member 0 crashes after echoing to member 1; its echo of 2 to member 2 is lost](molly-viz-samples/ec/ec_reliable_broadcast_inner_echo/failing.png)
 
 *`reliable_broadcast.rs:156`, the members' echo, keyed by echoer. Member 0 echoes `1` and `2` to member 1, dies, and its echo of `2` to member 2 is lost. Member 1 holds (member 0, `2`) and member 2 does not, while the merged delivered set is complete at both. The echo repairs the merged set, not the keyed record of who echoed.*
 
-The third line exists because of the `weaken_consistency().sim_cluster_output()` call, which strips the label from the type and registers the stream as a per-member output of the simulated cluster. Without it only the two minting nodes are reported. The certificate was 10 hypotheses when this test carried `.crash_budget(1)`; under the default bounds the search also runs every admissible pair (a crash point of the source together with one member's crash), and each pair survives and adds a hypothesis.
+The `new_messages` row exists because of the `weaken_consistency().sim_cluster_output()` call, which strips the label from the type and registers the stream as a per-member output of the simulated cluster. Without it only the two minting nodes are reported. The certificate was 10 hypotheses when this test carried `.crash_budget(1)`; under the default bounds the search also runs every admissible pair (a crash point of the source together with one member's crash), and each pair survives and adds a hypothesis.
 
 `results.verdicts` holds the same information as values, one `LabelVerdict` per collection: `Searched(outcome)` or `NotChecked(reason)`. A test asserts on it per site (`results.at("file.rs:149")`), overall (`results.all_certified_or_not_checked()`), or by iterating `results.counterexamples()`. Each verdict includes either the faults and failing schedule, or the successful search's scope, grade, hypothesis count, and exploration mode.
 
