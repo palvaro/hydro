@@ -310,26 +310,58 @@ mod tests {
         );
     }
 
-    /// The gallery entry for the test above (see `ldfi_viz`): the failing run's Lamport diagram
-    /// and report, written under `$MOLLY_VIZ_OUT/ec_broadcast_closed_all_labels/`.
+    /// The gallery entry for the test above: with `MOLLY_VIZ_OUT` set, the search itself writes
+    /// the failing run's Lamport diagram under
+    /// `$MOLLY_VIZ_OUT/gallery_ec_broadcast_closed_all_labels/<cluster>/<collection>/` (see
+    /// `hydro_lang::sim::viz::out`). A no-op otherwise.
     #[test]
     fn gallery_ec_broadcast_closed_all_labels() {
-        use crate::cluster::ldfi_viz::{gallery_dir, write_gallery};
-
-        let Some(dir) = gallery_dir("ec_broadcast_closed_all_labels") else {
+        if std::env::var_os(hydro_lang::sim::viz::out::ENV).is_none() {
             return;
-        };
-        let results =
-            broadcast_closed_all_labels(|ldfi| ldfi.with_traces().with_provenance_graphs());
-        let (_, outcome) = results
-            .searched()
-            .find(|(_, outcome)| outcome.is_counterexample())
-            .expect("the single-hop broadcast is violated");
-        write_gallery(
-            &dir,
-            "broadcast_closed (all labels)",
-            Level::Precise,
-            outcome,
+        }
+        let results = broadcast_closed_all_labels(|ldfi| ldfi);
+        assert!(
+            results.diagrams().next().is_some(),
+            "the single-hop broadcast is violated, and its diagram written: {results}"
         );
+    }
+
+    /// Under `Ldfi::viz_out`, `search_all_labels` writes every counterexample's Lamport diagram
+    /// at `<dir>/<cluster>/<collection>/failing.dot` (and `failing.png` when `neato` is
+    /// available), and the report names it under the row.
+    #[test]
+    fn ec_broadcast_closed_all_labels_writes_diagrams() {
+        let dir = std::env::temp_dir().join(format!("hydrofrac-viz-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let results = broadcast_closed_all_labels(|ldfi| ldfi.viz_out(&dir));
+        let diagrams: Vec<_> = results.diagrams().collect();
+        assert_eq!(
+            diagrams.len(),
+            results.counterexamples().count(),
+            "one diagram per counterexample: {results}"
+        );
+        let (result, diagram) = diagrams[0];
+        assert!(diagram.dot.starts_with(&dir), "{}", diagram.dot.display());
+        assert!(diagram.dot.ends_with("failing.dot"));
+        assert_eq!(
+            diagram.dot.components().count(),
+            dir.components().count() + 3
+        );
+        let dot = std::fs::read_to_string(&diagram.dot).unwrap();
+        assert!(dot.contains("layout=neato"), "{dot}");
+        assert!(
+            dot.contains("crashed"),
+            "the source's crash is drawn: {dot}"
+        );
+        if let Some(png) = &diagram.png {
+            assert!(png.is_file(), "{}", png.display());
+        }
+        let report = results.to_string();
+        assert!(
+            report.contains(&format!("diagram: {}", diagram.path().display())),
+            "the report names the diagram under {}: {report}",
+            result.label()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

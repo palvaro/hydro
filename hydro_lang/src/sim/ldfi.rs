@@ -152,6 +152,7 @@ use crate::sim::runtime::{
 use crate::sim::slice::{ChannelInfo, EcCollection, Slices};
 use crate::sim::spec::{Spec, SpecParts};
 use crate::sim::viz::Trace;
+use crate::sim::viz::out::{self as viz_files, Diagram};
 use crate::sim::viz::provenance::{
     ProvEdgeKind, ProvFate, ProvGraph, ProvKey, ProvLevel, ProvMessage, ProvNodeKind, ProvRecorder,
 };
@@ -4244,6 +4245,8 @@ pub struct Ldfi {
     /// How crash points are named (see [`Self::crash_model`]); `None` reads `LDFI_CRASH_MODEL`
     /// at search time, defaulting to [`CrashModel::Positional`].
     crash_model: Option<CrashModel>,
+    /// Where counterexample diagrams go (see [`Self::viz_out`]); `None` reads `MOLLY_VIZ_OUT`.
+    viz_out: Option<std::path::PathBuf>,
 }
 
 impl Default for Ldfi {
@@ -4277,6 +4280,7 @@ impl Ldfi {
             trusted_sites: vec![],
             retain_schedules: false,
             crash_model: None,
+            viz_out: None,
         }
     }
 
@@ -4566,6 +4570,16 @@ impl Ldfi {
         self
     }
 
+    /// Writes the Lamport diagram of every counterexample's failing run under `dir`
+    /// (`failing.dot`, and `failing.png` when Graphviz's `neato` is on the `PATH`), and names
+    /// it in the report. Without it, the `MOLLY_VIZ_OUT` environment variable does the same
+    /// under `$MOLLY_VIZ_OUT/<test name>`. See [`crate::sim::viz::out`] for the layout.
+    #[must_use]
+    pub fn viz_out(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.viz_out = Some(dir.into());
+        self
+    }
+
     /// Selects how hypotheses are chosen (default [`Strategy::Lineage`]).
     #[must_use]
     pub fn strategy(mut self, strategy: Strategy) -> Self {
@@ -4827,6 +4841,7 @@ impl Ldfi {
         let mut results = LabelResults {
             verdicts: vec![],
             names,
+            diagrams: vec![],
         };
         for (index, plan) in labels.iter().enumerate() {
             let verdict = if let Some(reason) = &plan.not_checked {
@@ -4850,6 +4865,9 @@ impl Ldfi {
                 upstream_nondet: plan.upstream_nondet.clone(),
             });
         }
+        if let Some(root) = viz_files::root(self.viz_out.as_deref()) {
+            report::write_diagrams(&mut results, &root);
+        }
         if self.log {
             eprintln!("hydrofrac: EventualConsistency results\n{results}");
         }
@@ -4869,6 +4887,18 @@ impl Ldfi {
         let outcome = self.run_search(sim, body);
         if let Ok(path) = std::env::var("LDFI_RECORD") {
             self.record_outcome(sim, &outcome, start.elapsed(), &path);
+        }
+        // A hand-written goal's counterexample is drawn here; `search_all_labels` draws its
+        // own, named by collection.
+        let all_labels =
+            matches!(&self.search.goal, Some(Goal::Spec(spec)) if spec.all_labels.is_some());
+        if !all_labels
+            && outcome.is_counterexample()
+            && let Some(root) = viz_files::root(self.viz_out.as_deref())
+            && let Some(diagram) = viz_files::write(&viz_files::claim(root), &outcome)
+            && self.log
+        {
+            eprintln!("hydrofrac: diagram: {}", diagram.path().display());
         }
         outcome
     }
@@ -5377,6 +5407,9 @@ pub struct LabelResults {
     pub verdicts: Vec<LabelResult>,
     /// How the report names locations and channels.
     names: ReportNames,
+    /// The diagram of each verdict's counterexample, parallel to `verdicts` (empty unless
+    /// diagrams were requested; see [`Ldfi::viz_out`]).
+    diagrams: Vec<Option<Diagram>>,
 }
 
 impl LabelResults {
@@ -5414,6 +5447,16 @@ impl LabelResults {
             }
             LabelVerdict::CoveredBy { .. } | LabelVerdict::NotChecked(_) => None,
         })
+    }
+
+    /// The Lamport diagrams written for the counterexamples (under [`Ldfi::viz_out`] or
+    /// `MOLLY_VIZ_OUT`), by row: searched collections, covered scalars (their input's diagram)
+    /// and merge-dominated hops.
+    pub fn diagrams(&self) -> impl Iterator<Item = (&LabelResult, &Diagram)> {
+        self.verdicts
+            .iter()
+            .zip(&self.diagrams)
+            .filter_map(|(r, d)| Some((r, d.as_ref()?)))
     }
 
     /// The counterexamples found, by label: those of searched collections and of covered

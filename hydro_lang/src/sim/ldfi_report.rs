@@ -16,6 +16,10 @@
 //! summary: 5 hold, 1 DIVERGE (acceptors/prepares)
 //! ```
 //!
+//! When diagrams are requested ([`Ldfi::viz_out`](super::Ldfi::viz_out) or `MOLLY_VIZ_OUT`),
+//! each `DIVERGES` and `diverges alone` row is followed by `    diagram: <path>`, the Lamport
+//! diagram of its failing run (see [`crate::sim::viz::out`]).
+//!
 //! Within a cluster, collections searched in their own right come first, then covered scalars,
 //! then those not checked, then merge-dominated hops under the exit they merge into. A site is
 //! `file:line` at its file's first mention and `:line` after.
@@ -45,6 +49,7 @@ use super::{
 use crate::location::dynamic::LocationId;
 use crate::sim::compiled::CompiledSim;
 use crate::sim::slice::EcCollection;
+use crate::sim::viz::out::{self as viz_files, Diagram};
 
 /// How the report names locations and channels.
 #[derive(Clone, Debug, Default)]
@@ -444,6 +449,80 @@ struct Row {
     site: String,
     verdict: String,
     detail: String,
+    /// The counterexample's diagram, when one was written.
+    diagram: Option<String>,
+}
+
+/// A diagram's line in the report: the rendering, else the DOT source and why there is no
+/// rendering.
+fn diagram_line(diagram: &Diagram) -> String {
+    match &diagram.png {
+        Some(png) => png.display().to_string(),
+        None => format!(
+            "{} (no PNG: `neato` not on PATH; render with `neato -n2 -Tpng`)",
+            diagram.dot.display()
+        ),
+    }
+}
+
+/// The line number of a `file:line` site, if it has one.
+fn line_of(label: &str) -> Option<&str> {
+    let (_, line) = label.rsplit_once(':')?;
+    (!line.is_empty() && line.chars().all(|c| c.is_ascii_digit())).then_some(line)
+}
+
+/// Writes the Lamport diagram of every counterexample of `results` under `root`, at
+/// `<cluster>/<collection>/` by the report's names (see [`crate::sim::viz::out`]), and records
+/// where each went. A covered scalar shares its input's diagram.
+pub(super) fn write_diagrams(results: &mut LabelResults, root: &std::path::Path) {
+    let names = &results.names;
+    let dir_name = |result: &LabelResult| {
+        (
+            viz_files::sanitize(&names.group(&result.collection.location)),
+            viz_files::sanitize(&name(result)),
+        )
+    };
+    let mut taken: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for result in &results.verdicts {
+        *taken.entry(dir_name(result)).or_default() += 1;
+    }
+    let mut diagrams: Vec<Option<Diagram>> = results
+        .verdicts
+        .iter()
+        .map(|result| {
+            let (LabelVerdict::Searched(outcome) | LabelVerdict::Hop { outcome, .. }) =
+                &result.verdict
+            else {
+                return None;
+            };
+            if !outcome.is_counterexample() {
+                return None;
+            }
+            let (cluster, mut collection) = dir_name(result);
+            if taken[&(cluster.clone(), collection.clone())] > 1
+                && let Some(line) = line_of(&result.collection.label)
+            {
+                collection = format!("{collection}_{line}");
+            }
+            viz_files::write(
+                &viz_files::claim(root.join(cluster).join(collection)),
+                outcome,
+            )
+        })
+        .collect();
+    for (i, result) in results.verdicts.iter().enumerate() {
+        if let LabelVerdict::CoveredBy { input_site, .. } = &result.verdict {
+            diagrams[i] = results
+                .verdicts
+                .iter()
+                .position(|r| {
+                    r.collection.label == *input_site
+                        && r.collection.location == result.collection.location
+                })
+                .and_then(|input| diagrams[input].clone());
+        }
+    }
+    results.diagrams = diagrams;
 }
 
 fn write_rows(
@@ -470,6 +549,9 @@ fn write_rows(
         )?;
         if verbose {
             writeln!(f, "{indent}    {}", row.detail)?;
+        }
+        if let Some(diagram) = &row.diagram {
+            writeln!(f, "{indent}    diagram: {diagram}")?;
         }
     }
     Ok(())
@@ -507,6 +589,12 @@ impl Display for LabelResults {
                 site: site(&result.collection.label, mentioned),
                 verdict,
                 detail: detail(result),
+                diagram: self
+                    .verdicts
+                    .iter()
+                    .position(|r| std::ptr::eq(r, result))
+                    .and_then(|i| self.diagrams.get(i)?.as_ref())
+                    .map(diagram_line),
             };
             // Checked collections, then covered scalars, then what was not checked.
             for result in results {

@@ -28,6 +28,24 @@ done
 set). The schedules a hypothesis is run under are sampled, so a regenerated witness may differ
 in its interleaving; the fault sets are stable.
 
+## Automatic diagrams
+
+Any search draws its counterexamples by itself when `MOLLY_VIZ_OUT=<dir>` is set (or under
+`Ldfi::viz_out(<dir>)`, which drops the `<test>` level): `search_all_labels` writes
+`<dir>/<test>/<cluster>/<collection>/failing.{dot,png}` for every `DIVERGES` and
+`diverges alone` row, named as in the report (a duplicate name gets its line,
+`<collection>_<line>`), and prints the path under the row; a hand-written `search` writes
+`<dir>/<test>/failing.{dot,png}`. The PNG is rendered with `neato -n2 -Tpng -Gdpi=110` when
+`neato` is on the `PATH`. See `hydro_lang::sim::viz::out`. For example:
+
+```sh
+MOLLY_VIZ_OUT=/tmp/viz cargo test -p hydro_test --lib \
+  cluster::ec_demos_ldfi::tests::ec_demo_multi_paxos_all_labels -- --nocapture --exact
+```
+
+writes `/tmp/viz/ec_demo_multi_paxos_all_labels/{acceptors/{prepares,accepts_fwd,accepts},learners/{initial,echo}}/failing.{dot,png}`.
+The `gallery_*` tests above additionally write witness and provenance pictures.
+
 ## The counterexamples
 
 - **`two_pc/`** — blocking two-phase commit, two participants, one crash allowed
