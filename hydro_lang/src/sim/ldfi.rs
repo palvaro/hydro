@@ -283,9 +283,10 @@ pub enum CrashAt {
     /// effect still depends on the order the run has the node attempt its sends in.
     After(SendId),
     /// Having sent exactly these messages before the end of finite failures
-    /// ([`CrashModel::SentSet`]; empty: before any send). Every other protocol send of the
-    /// node is dropped, in whatever order the run attempts them, and the node is dead once
-    /// the whole set is out, or at the end of finite failures.
+    /// ([`CrashModel::SentSet`], [`CrashModel::SentSetOpen`]; empty: before any send). Every
+    /// other protocol send of the node is dropped (under [`CrashModel::SentSetOpen`], every
+    /// other one the node is known to send), in whatever order the run attempts them, and the
+    /// node is dead once the whole set is out, or at the end of finite failures.
     Sent(BTreeSet<SendId>),
 }
 
@@ -324,23 +325,50 @@ pub enum CrashAt {
 ///   the node dies once the whole set is out, and copies attempted after that are dropped.
 ///   Which copies of a retransmitted message got out before then still depends on the order;
 ///   a consumer that counts byte-identical copies is order-sensitive in this respect.
+///
+///   A set minted in one run is an allow-list: a message the node first sends under another
+///   hypothesis is dropped, though a crash right after the set's last message would have let
+///   it out had the node attempted it before that message. ISR's leader, once a replica's copy
+///   is lost, must shrink the in-sync set before it acknowledges; no earlier run sent that
+///   shrink, so every proposed crash of the leader dropped it, the acknowledgement never
+///   happened, and the search certified the unclean-election bug away.
+/// - [`Self::SentSetOpen`] fixes this: the same sets, read against the messages the node is
+///   **known** to send (every protocol send it attempted in an earlier run of the search,
+///   the failure-free probe included). A known message outside the set is dropped, a message
+///   in the set is delivered, and a message never seen before is delivered while the node is
+///   alive (before the whole set is out and before `EFF`); the node dies as under
+///   [`Self::SentSet`]. The kill relation is the same (a clause's deliveries are known by the
+///   time a later hypothesis runs), and so is the hypothesis space. A never-seen send's fate
+///   does depend on whether the node attempts it before the set is complete, which is a
+///   matter of order; in a computation with no non-deterministic operator upstream none
+///   arises (losing messages only shrinks what a deterministic Hydro node sends), so the
+///   schedule reduction's argument is unaffected there, and the search reports any such send
+///   it saw ([`Hypothesis::novel_sends`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CrashModel {
     /// `crash(node after m)`.
     #[default]
     Positional,
-    /// `crash(node having sent S)`.
+    /// `crash(node having sent S)`, closed: every send outside `S` is dropped.
     SentSet,
-    /// [`Self::SentSet`] where it lets one schedule decide a hypothesis (a generated
+    /// `crash(node having sent S)`, open to the messages the node was never seen to send.
+    SentSetOpen,
+    /// A sent-set model ([`Self::SentSetOpen`] by default; [`Self::SentSet`] under
+    /// [`Ldfi::auto_sent_set`]) where it lets one schedule decide a hypothesis (a generated
     /// specification over a collection with no non-deterministic operator upstream; see
-    /// [`Ldfi::schedule_reduction`]), [`Self::Positional`] everywhere else. An allow-list of
-    /// messages minted in one run cannot let through a message the node first sends under
-    /// another hypothesis (ISR's leader must shrink the in-sync set before it acknowledges,
-    /// when a replica's copy is lost), nor cut a retransmission with the same bytes; a
-    /// positional crash point does both. Measured on the corpus, sent sets changed verdicts
-    /// only on protocols with non-deterministic operators upstream, which `Auto` keeps
-    /// positional.
+    /// [`Ldfi::schedule_reduction`]), [`Self::Positional`] everywhere else. A sent set cannot
+    /// cut a retransmission with the same bytes; a positional crash point can. Measured on the
+    /// corpus, sent sets changed verdicts only on protocols with non-deterministic operators
+    /// upstream, which `Auto` keeps positional.
     Auto,
+}
+
+impl CrashModel {
+    /// Whether crash points are named by sent sets ([`Self::SentSet`] or
+    /// [`Self::SentSetOpen`]); [`Self::Auto`] must be resolved first.
+    pub fn names_sent_sets(self) -> bool {
+        matches!(self, CrashModel::SentSet | CrashModel::SentSetOpen)
+    }
 }
 
 impl Fault {
@@ -632,7 +660,7 @@ impl Dependency {
         if self.lossy {
             faults.push(Fault::Omit(self.message.clone()));
         }
-        if model == CrashModel::SentSet {
+        if model.names_sent_sets() {
             if let Some((sender, ordinal)) = &self.sender {
                 let seq = attempts.get(sender).map(Vec::as_slice).unwrap_or(&[]);
                 let ats = match attempt_of(attempts, sender, *ordinal, &self.message) {
@@ -809,6 +837,10 @@ pub struct Hypothesis {
     pub explored: usize,
     /// Totals over every explored schedule, kept or not.
     pub totals: ScheduleTotals,
+    /// Under [`CrashModel::SentSetOpen`]: the sends, over every explored schedule, that an open
+    /// sent-set crash point let through because the crashed node had never been seen to attempt
+    /// them (in a computation with no non-deterministic operator upstream there are none).
+    pub novel_sends: u64,
 }
 
 /// What one hypothesis's explored schedules amount to, kept or not (see
@@ -882,6 +914,8 @@ struct HypothesisFold {
     totals: ScheduleTotals,
     /// The facts the failure-free probe learned (see `learn_fact_domain`).
     facts: BTreeSet<Vec<u8>>,
+    /// See [`Hypothesis::novel_sends`].
+    novel_sends: u64,
 }
 
 impl HypothesisFold {
@@ -938,7 +972,7 @@ impl HypothesisFold {
             });
             contributed = true;
         }
-        if model == CrashModel::SentSet {
+        if model.names_sent_sets() {
             // The weakest crash that preserves a requirement's send.
             for dep in &schedule.requirements {
                 if let Some((node, ordinal)) = &dep.sender
@@ -1025,6 +1059,7 @@ impl HypothesisFold {
             schedules: self.kept,
             explored: self.explored,
             totals: self.totals,
+            novel_sends: self.novel_sends,
         }
     }
 }
@@ -1377,7 +1412,15 @@ pub struct Run<'a> {
     aggregate: bool,
     /// The scripted batch hooks placed under a traced pass-through policy at install.
     hooks: RefCell<Vec<TracedHook>>,
+    /// Under [`CrashModel::SentSetOpen`], the messages each node is known to send (every
+    /// protocol send it attempted in an earlier run of the search): a sent-set crash point is
+    /// installed open to the others. `None`: sent sets are closed.
+    known: Option<&'a KnownSends>,
 }
+
+/// Per node, the identities (channel, destination member, wire bytes) of every protocol send it
+/// attempted in some run of the search so far (see [`CrashModel::SentSetOpen`]).
+type KnownSends = HashMap<NodeKey, std::collections::HashSet<(usize, Option<u32>, Vec<u8>)>>;
 
 impl Run<'_> {
     /// Marks this run as vacuous: the goal's pre-condition did not hold, so the goal holds
@@ -1555,6 +1598,9 @@ impl Run<'_> {
                                 .iter()
                                 .map(|send| (send.channel, send.to_member, send.bytes.clone()))
                                 .collect(),
+                            known: self
+                                .known
+                                .map(|known| known.get(key).cloned().unwrap_or_default()),
                         },
                     };
                     faults.install(key.clone(), point);
@@ -1648,6 +1694,7 @@ impl Run<'_> {
             spec_post,
             spec_facts,
             aggregate: lineage_handles().aggregate_stats.borrow().clone(),
+            novel_sends: lineage_handles().faults.borrow().novel.values().sum(),
             faults: self.faults.clone(),
             goal_port: self.goal_port,
             level: self.level,
@@ -1695,6 +1742,9 @@ struct RunRecord {
     spec_facts: BTreeSet<Vec<u8>>,
     /// See [`Schedule::aggregate`].
     aggregate: AggregateStats,
+    /// Sends an open sent-set crash point let through because the node was never seen to
+    /// attempt them (see [`CrashModel::SentSetOpen`]).
+    novel_sends: u64,
     faults: FaultSet,
     goal_port: Option<usize>,
     level: Level,
@@ -1716,6 +1766,29 @@ fn learn_fact_domain(records: &[RunRecord]) -> BTreeSet<Vec<u8>> {
 }
 
 impl RunRecord {
+    /// Adds every protocol send of this run (whatever its fate; observations excluded) to
+    /// `known`, by sender (see [`CrashModel::SentSetOpen`]).
+    fn learn_sends(&self, observer: Option<&LocationId>, known: &mut KnownSends) {
+        for event in &self.events {
+            if let LineageEvent::Sent {
+                channel,
+                from,
+                from_member,
+                to,
+                to_member,
+                bytes,
+                ..
+            } = event
+                && observer != Some(to)
+            {
+                known
+                    .entry((from.clone(), *from_member))
+                    .or_default()
+                    .insert((*channel, *to_member, bytes.clone()));
+            }
+        }
+    }
+
     fn crashed_member(&self, cluster: &str, member: u32) -> bool {
         let label = member_label(cluster, member);
         self.faults
@@ -4213,6 +4286,10 @@ pub enum Level {
     Precise,
 }
 
+/// The sent-set model [`CrashModel::Auto`] resolves to unless configured otherwise (see
+/// [`Ldfi::auto_sent_set`]).
+const AUTO_SENT_SET_DEFAULT: CrashModel = CrashModel::SentSet;
+
 /// An LDFI search configuration: the crashable nodes, the goal, and the budgets. The
 /// program's channels are fault points by construction (see the module docs).
 pub struct Ldfi {
@@ -4247,6 +4324,9 @@ pub struct Ldfi {
     crash_model: Option<CrashModel>,
     /// Where counterexample diagrams go (see [`Self::viz_out`]); `None` reads `MOLLY_VIZ_OUT`.
     viz_out: Option<std::path::PathBuf>,
+    /// The sent-set model [`CrashModel::Auto`] resolves to (see [`Self::auto_sent_set`]);
+    /// `None` reads `LDFI_AUTO_SENT_SET`.
+    auto_sent_set: Option<CrashModel>,
 }
 
 impl Default for Ldfi {
@@ -4281,6 +4361,7 @@ impl Ldfi {
             retain_schedules: false,
             crash_model: None,
             viz_out: None,
+            auto_sent_set: None,
         }
     }
 
@@ -4383,9 +4464,9 @@ impl Ldfi {
         if !racy.is_empty() {
             return explore(format!("non-deterministic upstream: {}", render_set(racy)));
         }
-        if model != CrashModel::SentSet {
+        if !model.names_sent_sets() {
             return explore(
-                "order-insensitive upstream, but crash points are positional (`CrashModel::SentSet` would reduce to one schedule)"
+                "order-insensitive upstream, but crash points are positional (`CrashModel::SentSetOpen` would reduce to one schedule)"
                     .to_owned(),
             );
         }
@@ -4406,7 +4487,8 @@ impl Ldfi {
     }
 
     /// Selects how crash points are named (see [`CrashModel`]). Unset, the model is read from
-    /// `LDFI_CRASH_MODEL` (`positional`, `sent-set` or `auto`) when the search starts, and is
+    /// `LDFI_CRASH_MODEL` (`positional`, `sent-set`, `sent-set-open` or `auto`) when the search
+    /// starts, and is
     /// [`CrashModel::Positional`] otherwise.
     #[must_use]
     pub fn crash_model(mut self, model: CrashModel) -> Self {
@@ -4420,22 +4502,49 @@ impl Ldfi {
         self.crash_model
             .unwrap_or_else(|| match std::env::var("LDFI_CRASH_MODEL").as_deref() {
                 Ok("sent-set" | "sentset" | "set") => CrashModel::SentSet,
+                Ok("sent-set-open" | "open") => CrashModel::SentSetOpen,
                 Ok("auto") => CrashModel::Auto,
                 Ok("positional" | "") | Err(_) => CrashModel::Positional,
                 Ok(other) => panic!(
-                    "LDFI_CRASH_MODEL={other:?}: expected `positional`, `sent-set` or `auto`"
+                    "LDFI_CRASH_MODEL={other:?}: expected `positional`, `sent-set`, `sent-set-open` or `auto`"
                 ),
             })
     }
 
+    /// Selects the sent-set model [`CrashModel::Auto`] resolves to where it uses sent sets:
+    /// [`CrashModel::SentSetOpen`] (the default) or [`CrashModel::SentSet`]. Unset, it is read
+    /// from `LDFI_AUTO_SENT_SET` (`open` or `closed`). Panics on any other model.
+    #[must_use]
+    pub fn auto_sent_set(mut self, model: CrashModel) -> Self {
+        assert!(
+            model.names_sent_sets(),
+            "`Ldfi::auto_sent_set` takes `CrashModel::SentSet` or `CrashModel::SentSetOpen`, not {model:?}"
+        );
+        self.auto_sent_set = Some(model);
+        self
+    }
+
+    /// The sent-set model [`CrashModel::Auto`] resolves to (see [`Self::auto_sent_set`]).
+    fn auto_sent_set_model(&self) -> CrashModel {
+        self.auto_sent_set
+            .unwrap_or_else(|| match std::env::var("LDFI_AUTO_SENT_SET").as_deref() {
+                Ok("closed" | "sent-set") => CrashModel::SentSet,
+                Ok("open" | "sent-set-open") => CrashModel::SentSetOpen,
+                Ok("") | Err(_) => AUTO_SENT_SET_DEFAULT,
+                Ok(other) => {
+                    panic!("LDFI_AUTO_SENT_SET={other:?}: expected `open` or `closed`")
+                }
+            })
+    }
+
     /// The crash model a search of `sim` runs under: the configured one, with
-    /// [`CrashModel::Auto`] resolved to [`CrashModel::SentSet`] when the goal is a generated
-    /// specification whose checked collection has no (untrusted) non-deterministic operator
-    /// upstream, and to [`CrashModel::Positional`] otherwise.
+    /// [`CrashModel::Auto`] resolved to its sent-set model ([`Self::auto_sent_set`]) when the
+    /// goal is a generated specification whose checked collection has no (untrusted)
+    /// non-deterministic operator upstream, and to [`CrashModel::Positional`] otherwise.
     pub fn effective_crash_model(&self, sim: &CompiledSim) -> CrashModel {
         match self.configured_crash_model() {
             CrashModel::Auto => match self.racy_upstream(sim) {
-                Some(racy) if racy.is_empty() => CrashModel::SentSet,
+                Some(racy) if racy.is_empty() => self.auto_sent_set_model(),
                 _ => CrashModel::Positional,
             },
             model => model,
@@ -4979,6 +5088,13 @@ impl Ldfi {
             // How the schedules were explored, and why.
             self.plan_exploration(sim, self.effective_crash_model(sim))
                 .2,
+            // Sends open sent sets let through that no earlier run attempted.
+            outcome
+                .runs()
+                .iter()
+                .map(|h| h.novel_sends)
+                .sum::<u64>()
+                .to_string(),
         ]
         .map(clean)
         .join("\t");
@@ -5043,6 +5159,10 @@ impl Ldfi {
         let mut slices: Option<Rc<Slices>> = None;
         let model = self.effective_crash_model(sim);
         let (exploration, reduction, exploration_note) = self.plan_exploration(sim, model);
+        // Under `SentSetOpen`, the protocol sends each node attempted in the runs so far
+        // (frozen while a hypothesis runs, so that every schedule of it means the same thing).
+        let mut known: KnownSends = HashMap::new();
+        let observer = search.observer().cloned();
 
         loop {
             if runs.len() >= self.max_hypotheses {
@@ -5068,8 +5188,10 @@ impl Ldfi {
             // contributed something are kept for the outcome (see `Hypothesis::schedules`).
             let records: RefCell<Vec<RunRecord>> = RefCell::new(vec![]);
             let mut fold = HypothesisFold::default();
+            let mut learned_sends: KnownSends = HashMap::new();
             {
                 let faults_ref = &faults;
+                let known_ref = &known;
                 let records_ref = std::panic::AssertUnwindSafe(&records);
                 let slices_ref = &mut slices;
                 let body_ref = &body;
@@ -5088,6 +5210,7 @@ impl Ldfi {
                         max_witnesses: self.max_witnesses,
                         aggregate: self.aggregate,
                         hooks: RefCell::new(vec![]),
+                        known: (model == CrashModel::SentSetOpen).then_some(known_ref),
                     };
                     run.install();
                     let goal_held = body_ref(&run).await;
@@ -5108,6 +5231,10 @@ impl Ldfi {
                 };
                 let mut after = || {
                     for record in records.borrow_mut().drain(..) {
+                        fold.novel_sends += record.novel_sends;
+                        if model == CrashModel::SentSetOpen {
+                            record.learn_sends(observer.as_ref(), &mut learned_sends);
+                        }
                         if probing {
                             fold.facts.extend(record.spec_facts);
                             continue;
@@ -5132,6 +5259,9 @@ impl Ldfi {
                     }
                     Exploration::FirstSchedule => sim.first_schedule_then(instance, &mut after),
                 }
+            }
+            for (node, sends) in learned_sends {
+                known.entry(node).or_default().extend(sends);
             }
             if probing
                 && let Some(Goal::Spec(spec)) = &search.goal
@@ -5184,7 +5314,7 @@ impl Ldfi {
             }
             if self.log {
                 eprintln!(
-                    "{tag}: run #{} {}: {} schedule(s), goal {}; derivations {}{}{}",
+                    "{tag}: run #{} {}: {} schedule(s), goal {}; derivations {}{}{}{}",
                     runs.len() + 1,
                     render_set(&faults),
                     fold.explored,
@@ -5204,6 +5334,20 @@ impl Ldfi {
                     } else {
                         String::new()
                     },
+                    if fold.novel_sends > 0 {
+                        format!(
+                            "; {} never-seen send(s) let through by open sent sets",
+                            fold.novel_sends
+                        )
+                    } else {
+                        String::new()
+                    },
+                );
+            }
+            if self.log && reduction.is_some() && fold.novel_sends > 0 {
+                eprintln!(
+                    "{tag}: warning: an open sent-set crash let through {} send(s) no earlier run attempted, under one schedule per hypothesis: whether such a send precedes the end of the set depends on the order, which the reduction assumes it cannot",
+                    fold.novel_sends
                 );
             }
             let failing = fold.failing.clone();
@@ -5619,6 +5763,7 @@ impl Ldfi {
                         max_witnesses: self.max_witnesses,
                         aggregate: self.aggregate,
                         hooks: RefCell::new(vec![]),
+                        known: None,
                     };
                     run.install();
                     let goal_held = body_ref(&run).await;
@@ -5708,6 +5853,7 @@ impl Ldfi {
                     max_witnesses: self.max_witnesses,
                     aggregate: self.aggregate,
                     hooks: RefCell::new(vec![]),
+                    known: None,
                 };
                 run.install();
                 let goal_held = body_ref(&run).await;

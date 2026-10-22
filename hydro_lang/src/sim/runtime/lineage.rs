@@ -33,6 +33,8 @@
 //!   alone, as it is under omission, so it does not depend on the order in which the
 //!   schedule had the node attempt its sends; a positional crash point does (the same
 //!   `AfterSend` splits a fan-out differently when the fan-out is emitted in another order).
+//!   An *open* set also carries the messages the node is known to send: a send outside both
+//!   is one the set could not name, and is delivered while the node is alive.
 //! - **End of finite failures.** [`FaultState::end_finite_failures`] is a switch: from then
 //!   on no new failure happens. Omissions are ignored, and a crash point whose message has
 //!   not been sent by then never fires (a node that is already dead stays dead: a crash is
@@ -182,6 +184,15 @@ pub enum CrashPoint {
     /// the module docs).
     Sent {
         sent: HashSet<(usize, Option<u32>, Vec<u8>)>,
+        /// `None`: the set is **closed**, every protocol send outside `sent` is dropped.
+        /// `Some(known)`: the set is **open** to messages outside `known`, the messages the
+        /// node is known to send (the search collects them from every earlier run): a send in
+        /// `known` but not in `sent` is dropped, and a send the node was never seen to attempt
+        /// is delivered while the node is alive (before the whole of `sent` is out and before
+        /// `EFF`). A crash right after the last message of `sent` would have let such a send
+        /// out had the node attempted it before that message; a set minted in an earlier run
+        /// cannot name it (see `CrashModel::SentSetOpen` in `sim::ldfi`).
+        known: Option<HashSet<(usize, Option<u32>, Vec<u8>)>>,
     },
 }
 
@@ -208,6 +219,9 @@ pub struct FaultState {
     /// the protocol, and a [`CrashPoint::Sent`] lets it through while the node is alive (as
     /// it does the node's external outputs).
     pub observer: Option<LocationId>,
+    /// Per node with an open [`CrashPoint::Sent`], how many sends outside its `known` set it
+    /// got out (the open set's novel messages).
+    pub novel: HashMap<NodeKey, u64>,
 }
 
 impl FaultState {
@@ -234,10 +248,10 @@ impl FaultState {
             CrashPoint::BeforeAnySend => {
                 self.dead.insert(node.clone());
             }
-            CrashPoint::Sent { sent } if sent.is_empty() => {
+            CrashPoint::Sent { sent, .. } if sent.is_empty() => {
                 self.dead.insert(node.clone());
             }
-            CrashPoint::Sent { sent } => {
+            CrashPoint::Sent { sent, .. } => {
                 self.pending.insert(node.clone(), sent.clone());
             }
             CrashPoint::AfterSend { .. } => {}
@@ -271,7 +285,7 @@ impl FaultState {
         if self.dead.contains(&key.from) {
             return SendFate::Crashed;
         }
-        if let Some(CrashPoint::Sent { sent }) = self.crash_points.get(&key.from) {
+        if let Some(CrashPoint::Sent { sent, known }) = self.crash_points.get(&key.from) {
             // An observation is not a send of the protocol: it goes through while the node is
             // alive, as the node's external outputs do.
             if self.observer.as_ref() == Some(to) {
@@ -279,6 +293,17 @@ impl FaultState {
             }
             let id = (key.channel, key.to_member, key.bytes.clone());
             if !sent.contains(&id) {
+                // An open set lets through what the node was never seen to send.
+                if known.as_ref().is_some_and(|known| !known.contains(&id)) {
+                    *self.novel.entry(key.from.clone()).or_insert(0) += 1;
+                    if !self.finite_failures_ended
+                        && self.is_lossy(key.channel)
+                        && self.omissions.contains(key)
+                    {
+                        return SendFate::Omitted;
+                    }
+                    return SendFate::Delivered;
+                }
                 return SendFate::Crashed;
             }
             if let Some(pending) = self.pending.get_mut(&key.from) {
@@ -598,7 +623,41 @@ mod tests {
     fn sent(bytes: &[u8]) -> CrashPoint {
         CrashPoint::Sent {
             sent: bytes.iter().map(|b| (7, None, vec![*b])).collect(),
+            known: None,
         }
+    }
+
+    fn sent_open(bytes: &[u8], known: &[u8]) -> CrashPoint {
+        CrashPoint::Sent {
+            sent: bytes.iter().map(|b| (7, None, vec![*b])).collect(),
+            known: Some(known.iter().map(|b| (7, None, vec![*b])).collect()),
+        }
+    }
+
+    /// An open sent set drops a known message outside the set, delivers a message never seen
+    /// before while the node is alive, and drops everything once the set is out.
+    #[test]
+    fn open_sent_set_lets_novel_sends_through_while_alive() {
+        let mut faults = FaultState::default();
+        // Known: 0, 1, 2; the set keeps 0 and 2.
+        faults.install(node(), sent_open(&[0, 2], &[0, 1, 2]));
+        assert_eq!(faults.filter(&key(1), &to()), SendFate::Crashed);
+        assert_eq!(faults.filter(&key(9), &to()), SendFate::Delivered);
+        assert_eq!(faults.filter(&key(0), &to()), SendFate::Delivered);
+        assert!(!faults.is_dead(&node()));
+        assert_eq!(faults.filter(&key(2), &to()), SendFate::Delivered);
+        assert!(faults.is_dead(&node()));
+        assert_eq!(faults.filter(&key(8), &to()), SendFate::Crashed);
+        assert_eq!(faults.novel.get(&node()), Some(&1));
+        // Dead at `EFF` if the set is not out by then, novel sends included.
+        let mut faults = FaultState::default();
+        faults.install(node(), sent_open(&[0, 2], &[0, 1, 2]));
+        faults.end_finite_failures();
+        assert_eq!(faults.filter(&key(9), &to()), SendFate::Crashed);
+        // A closed set drops the novel message.
+        let mut faults = FaultState::default();
+        faults.install(node(), sent(&[0, 2]));
+        assert_eq!(faults.filter(&key(9), &to()), SendFate::Crashed);
     }
 
     /// A sent-set crash delivers exactly its set, in whatever order the node attempts it,
