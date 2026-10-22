@@ -193,7 +193,8 @@ mod ablation {
     }
 
     fn quiet(ldfi: Ldfi) -> Ldfi {
-        let ldfi = ldfi.exploration(exploration());
+        // The tables sum per-schedule statistics: keep every schedule.
+        let ldfi = ldfi.exploration(exploration()).retain_schedules();
         if std::env::var("LDFI_ABLATION_VERBOSE").is_ok() {
             ldfi
         } else {

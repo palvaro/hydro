@@ -39,8 +39,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::{self, Display, Write as _};
 
 use super::{
-    Exploration, Fault, FaultSet, LabelResult, LabelResults, LabelVerdict, Message, NodeKey,
-    Outcome, render_set,
+    CrashAt, Exploration, Fault, FaultSet, LabelResult, LabelResults, LabelVerdict, Message,
+    NodeKey, Outcome, SendId, render_set,
 };
 use crate::location::dynamic::LocationId;
 use crate::sim::compiled::CompiledSim;
@@ -174,22 +174,36 @@ impl ReportNames {
         }
     }
 
+    /// A send in plain words: the message and, when known, its recipient.
+    fn send(&self, send: &SendId) -> String {
+        let message = self.message(send.channel, &send.payload);
+        match self.channels.get(&send.channel) {
+            Some(c) => format!("{message} to {}", self.node(&c.to, send.to_member)),
+            None => message,
+        }
+    }
+
     /// A fault in plain words.
     pub(super) fn fault(&self, fault: &Fault) -> String {
         match fault {
-            Fault::Crash { node, after: None } => format!("crash({node} before sending anything)"),
             Fault::Crash {
                 node,
-                after: Some(send),
+                at: CrashAt::BeforeAnySend,
+            } => format!("crash({node} before sending anything)"),
+            Fault::Crash {
+                node,
+                at: CrashAt::Sent(sent),
+            } if sent.is_empty() => format!("crash({node} before sending anything)"),
+            Fault::Crash {
+                node,
+                at: CrashAt::After(send),
+            } => format!("crash({node} after sending {})", self.send(send)),
+            Fault::Crash {
+                node,
+                at: CrashAt::Sent(sent),
             } => {
-                let message = self.message(send.channel, &send.payload);
-                match self.channels.get(&send.channel) {
-                    Some(c) => format!(
-                        "crash({node} after sending {message} to {})",
-                        self.node(&c.to, send.to_member)
-                    ),
-                    None => format!("crash({node} after sending {message})"),
-                }
+                let sends: Vec<String> = sent.iter().map(|s| self.send(s)).collect();
+                format!("crash({node} having sent only {})", sends.join(", "))
             }
             Fault::Omit(m) => self.omit(m),
         }
@@ -248,7 +262,10 @@ fn count(n: usize, one: &str) -> String {
 fn verdict(names: &ReportNames, outcome: &Outcome, brief: bool) -> String {
     match outcome {
         Outcome::Certificate {
-            runs, exploration, ..
+            runs,
+            exploration,
+            reduction,
+            ..
         } => {
             let (word, detail) = match exploration {
                 Exploration::Exhaustive => (
@@ -263,6 +280,27 @@ fn verdict(names: &ReportNames, outcome: &Outcome, brief: bool) -> String {
                         count(*instances, "sampled schedule")
                     ),
                 ),
+                Exploration::FirstSchedule => match reduction {
+                    Some(reduction) => {
+                        let mut detail = format!(
+                            "{}, one schedule each: order-insensitive upstream",
+                            count(runs.len(), "fault set")
+                        );
+                        if !reduction.trusted.is_empty() {
+                            let trusted: Vec<String> = reduction
+                                .trusted
+                                .iter()
+                                .map(|t| format!("{} at {}", t.op, t.site))
+                                .collect();
+                            let _ = write!(detail, ", trusting {}", trusted.join(", "));
+                        }
+                        ("certified", detail)
+                    }
+                    None => (
+                        "no violation found",
+                        format!("{}, first schedule only", count(runs.len(), "fault set")),
+                    ),
+                },
             };
             if brief {
                 word.to_owned()
@@ -380,6 +418,18 @@ fn detail(result: &LabelResult) -> String {
             let _ = write!(out, ": certificate {grade}");
         }
         _ => {}
+    }
+    if !matches!(result.verdict, LabelVerdict::NotChecked(_)) {
+        if result.upstream_nondet.is_empty() {
+            out.push_str("; order-insensitive upstream");
+        } else {
+            let sites: Vec<String> = result
+                .upstream_nondet
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            let _ = write!(out, "; non-deterministic upstream: {}", sites.join(", "));
+        }
     }
     out
 }

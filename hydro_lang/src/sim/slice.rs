@@ -645,7 +645,7 @@ struct RawSlice {
 }
 
 /// The closures a node evaluates (which may capture references to other nodes).
-fn closures(node: &HydroNode) -> Vec<&ClosureExpr> {
+pub(crate) fn closures(node: &HydroNode) -> Vec<&ClosureExpr> {
     match node {
         HydroNode::Map { f, .. }
         | HydroNode::FlatMap { f, .. }
@@ -666,7 +666,7 @@ fn closures(node: &HydroNode) -> Vec<&ClosureExpr> {
 }
 
 /// `(referenced node address, is_mut)` for every reference a closure captures.
-fn captures(closure: &ClosureExpr) -> Vec<(*const HydroNode, bool, &SharedNode)> {
+pub(crate) fn captures(closure: &ClosureExpr) -> Vec<(*const HydroNode, bool, &SharedNode)> {
     closure
         .singleton_refs
         .iter()
@@ -1122,7 +1122,7 @@ pub fn compute(ir: &mut [HydroRoot]) -> Slices {
 /// The `file:line` of the first frame of `backtrace` outside `hydro_lang` itself: where the
 /// program called `send`, rather than the networking layer's own frames.
 #[cfg(feature = "build")]
-fn user_span(backtrace: &crate::compile::ir::backtrace::Backtrace) -> Option<String> {
+pub(crate) fn user_span(backtrace: &crate::compile::ir::backtrace::Backtrace) -> Option<String> {
     let own = concat!("hydro_lang", "/src/");
     backtrace
         .elements()
@@ -1137,7 +1137,7 @@ fn user_span(backtrace: &crate::compile::ir::backtrace::Backtrace) -> Option<Str
 }
 
 #[cfg(not(feature = "build"))]
-fn user_span(backtrace: &crate::compile::ir::backtrace::Backtrace) -> Option<String> {
+pub(crate) fn user_span(backtrace: &crate::compile::ir::backtrace::Backtrace) -> Option<String> {
     backtrace.format_span()
 }
 

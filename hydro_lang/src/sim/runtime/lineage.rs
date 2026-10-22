@@ -26,6 +26,13 @@
 //!   everything the node sends after time `t`), with the crash time named by a message.
 //!   It works on reliable (`fail_stop`) channels, whose receivers then see a prefix, and it
 //!   can split the sends of one execution, which "crashed mid fan-out" needs.
+//! - **Sent-set crash.** Alternatively ([`CrashPoint::Sent`]) a crash is named by the *set*
+//!   of messages the node got out before dying: a protocol send in the set is delivered, any
+//!   other is dropped, and the node is dead once the whole set is out or at the end of finite
+//!   failures, whichever comes first. The fate of a send is then a function of its identity
+//!   alone, as it is under omission, so it does not depend on the order in which the
+//!   schedule had the node attempt its sends; a positional crash point does (the same
+//!   `AfterSend` splits a fan-out differently when the fan-out is emitted in another order).
 //! - **End of finite failures.** [`FaultState::end_finite_failures`] is a switch: from then
 //!   on no new failure happens. Omissions are ignored, and a crash point whose message has
 //!   not been sent by then never fires (a node that is already dead stays dead: a crash is
@@ -165,6 +172,17 @@ pub enum CrashPoint {
         to_member: Option<u32>,
         bytes: Vec<u8>,
     },
+    /// The node crashes having sent exactly the messages of `sent` (by channel, destination
+    /// member, and wire bytes) before the end of finite failures: every other protocol send
+    /// it attempts is dropped, whatever the order it attempts them in, and it is dead (every
+    /// later send dropped, external outputs and observations suppressed) once it has sent all
+    /// of `sent`, or at the end of finite failures, whichever comes first. An empty `sent` is
+    /// a crash before any send. Unlike [`Self::AfterSend`], the fate of every send is a
+    /// function of the send's identity alone, not of its position among the node's sends (see
+    /// the module docs).
+    Sent {
+        sent: HashSet<(usize, Option<u32>, Vec<u8>)>,
+    },
 }
 
 /// The faults installed in one simulation instance, and what the filter has done so far.
@@ -183,6 +201,13 @@ pub struct FaultState {
     pub dead: HashSet<NodeKey>,
     /// Sends attempted so far per node (whatever their fate), for reports.
     pub sends: HashMap<NodeKey, u64>,
+    /// Per node with a [`CrashPoint::Sent`], the messages of its sent set it has not sent yet:
+    /// the node dies once this is empty.
+    pub pending: HashMap<NodeKey, HashSet<(usize, Option<u32>, Vec<u8>)>>,
+    /// The specification's observer, if any: a send to it is an observation, not a message of
+    /// the protocol, and a [`CrashPoint::Sent`] lets it through while the node is alive (as
+    /// it does the node's external outputs).
+    pub observer: Option<LocationId>,
 }
 
 impl FaultState {
@@ -205,16 +230,31 @@ impl FaultState {
 
     /// Installs a crash point (a `BeforeAnySend` kills the node immediately).
     pub fn install(&mut self, node: NodeKey, point: CrashPoint) {
-        if point == CrashPoint::BeforeAnySend {
-            self.dead.insert(node.clone());
+        match &point {
+            CrashPoint::BeforeAnySend => {
+                self.dead.insert(node.clone());
+            }
+            CrashPoint::Sent { sent } if sent.is_empty() => {
+                self.dead.insert(node.clone());
+            }
+            CrashPoint::Sent { sent } => {
+                self.pending.insert(node.clone(), sent.clone());
+            }
+            CrashPoint::AfterSend { .. } => {}
         }
         self.crash_points.insert(node, point);
     }
 
     /// Declares the end of finite failures: omissions stop applying, and no crash point fires
-    /// from now on (a node already dead stays dead).
+    /// from now on (a node already dead stays dead). A node with a [`CrashPoint::Sent`] dies
+    /// here if it has not died yet: its crash happens at a time `≤ EFF`.
     pub fn end_finite_failures(&mut self) {
         self.finite_failures_ended = true;
+        for (node, point) in &self.crash_points {
+            if matches!(point, CrashPoint::Sent { .. }) {
+                self.dead.insert(node.clone());
+            }
+        }
     }
 
     /// Whether the node has died.
@@ -226,10 +266,34 @@ impl FaultState {
     /// afterwards if this send was its crash point and finite failures have not ended). A
     /// crash point fires whether or not the send itself was omitted: the node performed the
     /// send; the network lost it.
-    fn filter(&mut self, key: &SendKey) -> SendFate {
+    fn filter(&mut self, key: &SendKey, to: &LocationId) -> SendFate {
         *self.sends.entry(key.from.clone()).or_insert(0) += 1;
         if self.dead.contains(&key.from) {
             return SendFate::Crashed;
+        }
+        if let Some(CrashPoint::Sent { sent }) = self.crash_points.get(&key.from) {
+            // An observation is not a send of the protocol: it goes through while the node is
+            // alive, as the node's external outputs do.
+            if self.observer.as_ref() == Some(to) {
+                return SendFate::Delivered;
+            }
+            let id = (key.channel, key.to_member, key.bytes.clone());
+            if !sent.contains(&id) {
+                return SendFate::Crashed;
+            }
+            if let Some(pending) = self.pending.get_mut(&key.from) {
+                pending.remove(&id);
+                if pending.is_empty() {
+                    self.dead.insert(key.from.clone());
+                }
+            }
+            if !self.finite_failures_ended
+                && self.is_lossy(key.channel)
+                && self.omissions.contains(key)
+            {
+                return SendFate::Omitted;
+            }
+            return SendFate::Delivered;
         }
         if !self.finite_failures_ended
             && let Some(CrashPoint::AfterSend {
@@ -366,7 +430,7 @@ impl LineageHandles {
             to_member,
             bytes: bytes.to_vec(),
         };
-        let fate = self.faults.borrow_mut().filter(&key);
+        let fate = self.faults.borrow_mut().filter(&key, to);
         let id = self.next_delivery.get();
         self.next_delivery.set(id + 1);
         self.note_prov(prov);
@@ -527,6 +591,56 @@ mod tests {
         }
     }
 
+    fn to() -> LocationId {
+        LocationId::Process(crate::location::LocationKey::FIRST)
+    }
+
+    fn sent(bytes: &[u8]) -> CrashPoint {
+        CrashPoint::Sent {
+            sent: bytes.iter().map(|b| (7, None, vec![*b])).collect(),
+        }
+    }
+
+    /// A sent-set crash delivers exactly its set, in whatever order the node attempts it,
+    /// drops everything else, and kills the node once the set is sent.
+    #[test]
+    fn sent_set_crash_is_order_free() {
+        for order in [[0u8, 1, 2], [2, 1, 0], [1, 2, 0]] {
+            let mut faults = FaultState::default();
+            faults.install(node(), sent(&[0, 2]));
+            let fates: Vec<SendFate> = order
+                .iter()
+                .map(|b| faults.filter(&key(*b), &to()))
+                .collect();
+            for (b, fate) in order.iter().zip(&fates) {
+                let expected = if *b == 1 {
+                    SendFate::Crashed
+                } else {
+                    SendFate::Delivered
+                };
+                assert_eq!(*fate, expected, "order {order:?}");
+            }
+            assert!(faults.is_dead(&node()));
+            assert_eq!(faults.filter(&key(0), &to()), SendFate::Crashed);
+        }
+    }
+
+    /// A sent-set crash whose set is not complete at the end of finite failures kills the node
+    /// there; an empty set kills it at installation.
+    #[test]
+    fn sent_set_crash_dies_by_eff() {
+        let mut faults = FaultState::default();
+        faults.install(node(), sent(&[0, 2]));
+        assert_eq!(faults.filter(&key(0), &to()), SendFate::Delivered);
+        assert!(!faults.is_dead(&node()));
+        faults.end_finite_failures();
+        assert!(faults.is_dead(&node()));
+        assert_eq!(faults.filter(&key(2), &to()), SendFate::Crashed);
+        let mut faults = FaultState::default();
+        faults.install(node(), sent(&[]));
+        assert!(faults.is_dead(&node()));
+    }
+
     fn after(bytes: u8) -> CrashPoint {
         CrashPoint::AfterSend {
             channel: 7,
@@ -540,13 +654,13 @@ mod tests {
     fn crash_point_fires_before_eff_and_is_permanent() {
         let mut faults = FaultState::default();
         faults.install(node(), after(1));
-        assert_eq!(faults.filter(&key(0)), SendFate::Delivered);
-        assert_eq!(faults.filter(&key(1)), SendFate::Delivered);
+        assert_eq!(faults.filter(&key(0), &to()), SendFate::Delivered);
+        assert_eq!(faults.filter(&key(1), &to()), SendFate::Delivered);
         assert!(faults.is_dead(&node()));
-        assert_eq!(faults.filter(&key(2)), SendFate::Crashed);
+        assert_eq!(faults.filter(&key(2), &to()), SendFate::Crashed);
         // Permanent across the end of finite failures.
         faults.end_finite_failures();
-        assert_eq!(faults.filter(&key(3)), SendFate::Crashed);
+        assert_eq!(faults.filter(&key(3), &to()), SendFate::Crashed);
     }
 
     /// Molly's fault model: every failure happens at a time `≤ EFF`. A crash point whose
@@ -555,12 +669,12 @@ mod tests {
     fn crash_point_named_by_a_post_eff_send_does_not_fire() {
         let mut faults = FaultState::default();
         faults.install(node(), after(1));
-        assert_eq!(faults.filter(&key(0)), SendFate::Delivered);
+        assert_eq!(faults.filter(&key(0), &to()), SendFate::Delivered);
         faults.end_finite_failures();
-        assert_eq!(faults.filter(&key(1)), SendFate::Delivered);
+        assert_eq!(faults.filter(&key(1), &to()), SendFate::Delivered);
         assert!(!faults.is_dead(&node()));
-        assert_eq!(faults.filter(&key(2)), SendFate::Delivered);
-        assert_eq!(faults.filter(&key(1)), SendFate::Delivered);
+        assert_eq!(faults.filter(&key(2), &to()), SendFate::Delivered);
+        assert_eq!(faults.filter(&key(1), &to()), SendFate::Delivered);
     }
 
     /// `BeforeAnySend` kills the node at installation, which is before `EFF` by construction.
@@ -569,6 +683,6 @@ mod tests {
         let mut faults = FaultState::default();
         faults.install(node(), CrashPoint::BeforeAnySend);
         assert!(faults.is_dead(&node()));
-        assert_eq!(faults.filter(&key(0)), SendFate::Crashed);
+        assert_eq!(faults.filter(&key(0), &to()), SendFate::Crashed);
     }
 }

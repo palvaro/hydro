@@ -75,6 +75,10 @@ pub mod observe;
 
 #[cfg(stageleft_runtime)]
 #[cfg(feature = "ldfi")]
+pub mod order;
+
+#[cfg(stageleft_runtime)]
+#[cfg(feature = "ldfi")]
 pub mod viz;
 
 #[cfg(stageleft_runtime)]

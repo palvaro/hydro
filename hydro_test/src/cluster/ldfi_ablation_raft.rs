@@ -176,7 +176,8 @@ mod tests {
                     .exploration(Exploration::Fuzz {
                         instances: schedules,
                     })
-                    .max_hypotheses(max_hyp);
+                    .max_hypotheses(max_hyp)
+                    .retain_schedules();
                 if !verbose {
                     ldfi = ldfi.quiet();
                 }

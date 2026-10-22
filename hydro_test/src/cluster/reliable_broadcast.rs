@@ -96,7 +96,7 @@ pub fn broadcast<'a>(
 mod tests {
     use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
     use hydro_lang::prelude::*;
-    use hydro_lang::sim::ldfi::{Fault, Grade, Ldfi, Level, Outcome};
+    use hydro_lang::sim::ldfi::{CrashAt, Fault, Grade, Ldfi, Level, Outcome};
     use hydro_lang::sim::spec::Spec;
 
     use super::{Broadcaster, EchoHook, InitialHook, Member, Payload, broadcast};
@@ -261,7 +261,7 @@ mod tests {
         // The broadcaster dies after its second fan-out send.
         assert_eq!(faults.len(), 1);
         assert!(
-            matches!(faults.first(), Some(Fault::Crash { node, after: Some(m) })
+            matches!(faults.first(), Some(Fault::Crash { node, at: CrashAt::After(m) })
                 if node == "broadcaster" && m.to_string().starts_with("initial[→1]:")),
             "expected the broadcaster to die after its second send: {faults:?}"
         );
@@ -353,7 +353,7 @@ mod tests {
             panic!("expected a counterexample, got {outcome}");
         };
         assert!(
-            matches!(faults.first(), Some(Fault::Crash { node, after: Some(m) })
+            matches!(faults.first(), Some(Fault::Crash { node, at: CrashAt::After(m) })
                 if node == "broadcaster" && m.to_string().starts_with("initial[→1]:")),
             "expected the broadcaster to die after its second send: {faults:?}"
         );
