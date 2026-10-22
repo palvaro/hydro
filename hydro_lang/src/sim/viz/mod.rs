@@ -21,8 +21,12 @@
 //! The first two are drawn from a [`Trace`], which the search retains on every failing
 //! [`Schedule`] and, under [`Ldfi::with_traces`](crate::sim::ldfi::Ldfi::with_traces), on
 //! every schedule. [`Counterexample`] bundles the pictures for an [`Outcome`].
+//!
+//! Under [`Ldfi::viz_out`](crate::sim::ldfi::Ldfi::viz_out) or `MOLLY_VIZ_OUT`, the search
+//! writes the first picture of every counterexample it finds to disk by itself ([`out`]).
 
 pub mod lamport;
+pub mod out;
 pub mod provenance;
 pub mod trace;
 
