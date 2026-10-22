@@ -4570,10 +4570,13 @@ impl Ldfi {
         self
     }
 
-    /// Writes the Lamport diagram of every counterexample's failing run under `dir`
-    /// (`failing.dot`, and `failing.png` when Graphviz's `neato` is on the `PATH`), and names
-    /// it in the report. Without it, the `MOLLY_VIZ_OUT` environment variable does the same
-    /// under `$MOLLY_VIZ_OUT/<test name>`. See [`crate::sim::viz::out`] for the layout.
+    /// Writes the pictures of every counterexample under `dir`: the failing run's Lamport
+    /// diagram (`failing.dot`), a run in which the goal held with its support highlighted
+    /// (`witness.dot`), the why-provenance graph behind that support (`provenance.dot`), a PNG
+    /// of each when Graphviz is on the `PATH`, and `report.md`; and names them in the report.
+    /// Implies [`Self::with_traces`] and [`Self::with_provenance_graphs`]. Without it, the
+    /// `MOLLY_VIZ_OUT` environment variable does the same under `$MOLLY_VIZ_OUT/<test name>`.
+    /// See [`crate::sim::viz::out`] for the layout.
     #[must_use]
     pub fn viz_out(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         self.viz_out = Some(dir.into());
@@ -4866,7 +4869,7 @@ impl Ldfi {
             });
         }
         if let Some(root) = viz_files::root(self.viz_out.as_deref()) {
-            report::write_diagrams(&mut results, &root);
+            report::write_diagrams(&mut results, &root, self.level);
         }
         if self.log {
             eprintln!("hydrofrac: EventualConsistency results\n{results}");
@@ -4895,10 +4898,15 @@ impl Ldfi {
         if !all_labels
             && outcome.is_counterexample()
             && let Some(root) = viz_files::root(self.viz_out.as_deref())
-            && let Some(diagram) = viz_files::write(&viz_files::claim(root), &outcome)
+            && let Some(diagram) = viz_files::write(
+                &viz_files::claim(root),
+                &outcome,
+                &viz_files::test_name(),
+                self.level,
+            )
             && self.log
         {
-            eprintln!("hydrofrac: diagram: {}", diagram.path().display());
+            eprintln!("hydrofrac: {}", report::diagram_line(&diagram));
         }
         outcome
     }
@@ -4990,6 +4998,10 @@ impl Ldfi {
     ) -> Outcome {
         let search = &self.search;
         self.assert_label_chosen();
+        // Writing pictures needs every schedule's trace (for the witness) and provenance
+        // graphs (for the derivation behind it); see `viz::out`.
+        let viz = viz_files::root(self.viz_out.as_deref()).is_some();
+        let (traces, prov_graphs) = (self.traces || viz, self.prov_graphs || viz);
         let goal_port = match &search.goal {
             Some(Goal::Any { port } | Goal::AllMembers { port, .. }) => Some(*port),
             Some(Goal::Witnessed | Goal::Spec(_)) | None => None,
@@ -5101,13 +5113,13 @@ impl Ldfi {
                             continue;
                         }
                         let schedule =
-                            record.schedule(search, Some(&replayer), self.traces, self.prov_graphs);
+                            record.schedule(search, Some(&replayer), traces, prov_graphs);
                         fold.fold(
                             schedule,
                             &mut state,
                             &premises,
                             model,
-                            self.traces || self.retain_schedules,
+                            traces || self.retain_schedules,
                         );
                     }
                 };
@@ -5449,7 +5461,7 @@ impl LabelResults {
         })
     }
 
-    /// The Lamport diagrams written for the counterexamples (under [`Ldfi::viz_out`] or
+    /// The pictures written for the counterexamples (under [`Ldfi::viz_out`] or
     /// `MOLLY_VIZ_OUT`), by row: searched collections, covered scalars (their input's diagram)
     /// and merge-dominated hops.
     pub fn diagrams(&self) -> impl Iterator<Item = (&LabelResult, &Diagram)> {

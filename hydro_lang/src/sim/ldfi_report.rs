@@ -17,8 +17,9 @@
 //! ```
 //!
 //! When diagrams are requested ([`Ldfi::viz_out`](super::Ldfi::viz_out) or `MOLLY_VIZ_OUT`),
-//! each `DIVERGES` and `diverges alone` row is followed by `    diagram: <path>`, the Lamport
-//! diagram of its failing run (see [`crate::sim::viz::out`]).
+//! each `DIVERGES` and `diverges alone` row is followed by
+//! `    diagrams: failing.png, witness.png, provenance.png in <dir>`, the pictures of its
+//! counterexample (see [`crate::sim::viz::out`]).
 //!
 //! Within a cluster, collections searched in their own right come first, then covered scalars,
 //! then those not checked, then merge-dominated hops under the exit they merge into. A site is
@@ -453,16 +454,25 @@ struct Row {
     diagram: Option<String>,
 }
 
-/// A diagram's line in the report: the rendering, else the DOT source and why there is no
-/// rendering.
-fn diagram_line(diagram: &Diagram) -> String {
-    match &diagram.png {
-        Some(png) => png.display().to_string(),
-        None => format!(
-            "{} (no PNG: `neato` not on PATH; render with `neato -n2 -Tpng`)",
-            diagram.dot.display()
-        ),
+/// A counterexample's line in the report: `diagrams: failing.png, witness.png, provenance.png
+/// in <dir>` (the DOT sources, and why, where a picture could not be rendered).
+pub(super) fn diagram_line(diagram: &Diagram) -> String {
+    let file = |path: &std::path::Path| {
+        path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        )
+    };
+    let files: Vec<String> = diagram.pictures().map(|p| file(p.path())).collect();
+    let mut line = format!(
+        "diagrams: {} in {}",
+        files.join(", "),
+        diagram.dir.display()
+    );
+    if diagram.pictures().any(|p| p.png.is_none()) {
+        line.push_str(" (some not rendered: Graphviz not on PATH; render `failing`/`witness` with `neato -n2 -Tpng`, `provenance` with `dot -Tpng`)");
     }
+    line
 }
 
 /// The line number of a `file:line` site, if it has one.
@@ -471,10 +481,14 @@ fn line_of(label: &str) -> Option<&str> {
     (!line.is_empty() && line.chars().all(|c| c.is_ascii_digit())).then_some(line)
 }
 
-/// Writes the Lamport diagram of every counterexample of `results` under `root`, at
+/// Writes the pictures of every counterexample of `results` under `root`, at
 /// `<cluster>/<collection>/` by the report's names (see [`crate::sim::viz::out`]), and records
 /// where each went. A covered scalar shares its input's diagram.
-pub(super) fn write_diagrams(results: &mut LabelResults, root: &std::path::Path) {
+pub(super) fn write_diagrams(
+    results: &mut LabelResults,
+    root: &std::path::Path,
+    level: super::Level,
+) {
     let names = &results.names;
     let dir_name = |result: &LabelResult| {
         (
@@ -504,9 +518,16 @@ pub(super) fn write_diagrams(results: &mut LabelResults, root: &std::path::Path)
             {
                 collection = format!("{collection}_{line}");
             }
+            let title = format!(
+                "{}/{}",
+                names.group(&result.collection.location),
+                name(result)
+            );
             viz_files::write(
                 &viz_files::claim(root.join(cluster).join(collection)),
                 outcome,
+                &title,
+                level,
             )
         })
         .collect();
@@ -551,7 +572,7 @@ fn write_rows(
             writeln!(f, "{indent}    {}", row.detail)?;
         }
         if let Some(diagram) = &row.diagram {
-            writeln!(f, "{indent}    diagram: {diagram}")?;
+            writeln!(f, "{indent}    {diagram}")?;
         }
     }
     Ok(())

@@ -259,7 +259,7 @@ mod tests {
     /// Plain `broadcast_closed` from one process to a cluster of three over `fail_stop`, with
     /// nothing named by the test: [`Spec::all_labels`] finds the collection the transport
     /// labels `EventualConsistency` and [`Ldfi::search_all_labels`] searches it. `configure`
-    /// adjusts the search (the gallery entry keeps traces).
+    /// adjusts the search.
     fn broadcast_closed_all_labels(configure: impl FnOnce(Ldfi) -> Ldfi) -> LabelResults {
         let mut flow = FlowBuilder::new();
         let source = flow.process::<Source>();
@@ -310,25 +310,11 @@ mod tests {
         );
     }
 
-    /// The gallery entry for the test above: with `MOLLY_VIZ_OUT` set, the search itself writes
-    /// the failing run's Lamport diagram under
-    /// `$MOLLY_VIZ_OUT/gallery_ec_broadcast_closed_all_labels/<cluster>/<collection>/` (see
-    /// `hydro_lang::sim::viz::out`). A no-op otherwise.
-    #[test]
-    fn gallery_ec_broadcast_closed_all_labels() {
-        if std::env::var_os(hydro_lang::sim::viz::out::ENV).is_none() {
-            return;
-        }
-        let results = broadcast_closed_all_labels(|ldfi| ldfi);
-        assert!(
-            results.diagrams().next().is_some(),
-            "the single-hop broadcast is violated, and its diagram written: {results}"
-        );
-    }
-
-    /// Under `Ldfi::viz_out`, `search_all_labels` writes every counterexample's Lamport diagram
-    /// at `<dir>/<cluster>/<collection>/failing.dot` (and `failing.png` when `neato` is
-    /// available), and the report names it under the row.
+    /// Under `Ldfi::viz_out`, `search_all_labels` writes every counterexample's pictures at
+    /// `<dir>/<cluster>/<collection>/`, with nothing else asked of the test: the failing run
+    /// (`failing.dot`), a run in which the goal held with its support highlighted
+    /// (`witness.dot`), the provenance graph behind it (`provenance.dot`), a PNG of each when
+    /// Graphviz is available, and `report.md`; and the report names them under the row.
     #[test]
     fn ec_broadcast_closed_all_labels_writes_diagrams() {
         let dir = std::env::temp_dir().join(format!("hydrofrac-viz-test-{}", std::process::id()));
@@ -338,28 +324,76 @@ mod tests {
         assert_eq!(
             diagrams.len(),
             results.counterexamples().count(),
-            "one diagram per counterexample: {results}"
+            "one set of pictures per counterexample: {results}"
         );
         let (result, diagram) = diagrams[0];
-        assert!(diagram.dot.starts_with(&dir), "{}", diagram.dot.display());
-        assert!(diagram.dot.ends_with("failing.dot"));
+        assert!(diagram.dir.starts_with(&dir), "{}", diagram.dir.display());
         assert_eq!(
-            diagram.dot.components().count(),
-            dir.components().count() + 3
+            diagram.dir.components().count(),
+            dir.components().count() + 2,
+            "<dir>/<cluster>/<collection>"
         );
-        let dot = std::fs::read_to_string(&diagram.dot).unwrap();
+        let failing = &diagram.failing;
+        assert_eq!(failing.dot, diagram.dir.join("failing.dot"));
+        let dot = std::fs::read_to_string(&failing.dot).unwrap();
         assert!(dot.contains("layout=neato"), "{dot}");
         assert!(
             dot.contains("crashed"),
             "the source's crash is drawn: {dot}"
         );
-        if let Some(png) = &diagram.png {
-            assert!(png.is_file(), "{}", png.display());
+
+        // The witness and its provenance come without `with_traces`/`with_provenance_graphs`.
+        let witness = diagram.witness.as_ref().expect("a witness run is drawn");
+        assert_eq!(witness.dot, diagram.dir.join("witness.dot"));
+        let dot = std::fs::read_to_string(&witness.dot).unwrap();
+        assert!(dot.contains("layout=neato"), "{dot}");
+        let provenance = diagram
+            .provenance
+            .as_ref()
+            .expect("the witness's provenance graph is drawn");
+        assert_eq!(provenance.dot, diagram.dir.join("provenance.dot"));
+        let dot = std::fs::read_to_string(&provenance.dot).unwrap();
+        assert!(dot.starts_with("digraph"), "{dot}");
+        assert!(
+            dot.contains("precise-level lineage"),
+            "titled with the level: {dot}"
+        );
+        let report = diagram.report.as_ref().expect("report.md");
+        assert!(
+            std::fs::read_to_string(report)
+                .unwrap()
+                .contains("```mermaid")
+        );
+
+        let neato = std::process::Command::new("neato")
+            .arg("-V")
+            .output()
+            .is_ok_and(|o| o.status.success());
+        for picture in diagram.pictures() {
+            if let Some(png) = &picture.png {
+                assert!(png.is_file(), "{}", png.display());
+            } else {
+                assert!(
+                    !neato,
+                    "Graphviz is installed but {} was not rendered",
+                    picture.dot.display()
+                );
+            }
         }
         let report = results.to_string();
+        let names = |p: &hydro_lang::sim::viz::out::Picture| {
+            p.path().file_name().unwrap().to_string_lossy().into_owned()
+        };
+        let line = format!(
+            "diagrams: {}, {}, {} in {}",
+            names(failing),
+            names(witness),
+            names(provenance),
+            diagram.dir.display()
+        );
         assert!(
-            report.contains(&format!("diagram: {}", diagram.path().display())),
-            "the report names the diagram under {}: {report}",
+            report.contains(&line),
+            "the report names the pictures under {}: {report}",
             result.label()
         );
         let _ = std::fs::remove_dir_all(&dir);
