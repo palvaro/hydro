@@ -43,7 +43,8 @@ thread_local! {
 }
 
 /// Returns the canonical ident for a captured ref at the given index within a closure.
-pub(crate) fn handoff_ref_ident(index: usize) -> syn::Ident {
+#[doc(hidden)]
+pub fn handoff_ref_ident(index: usize) -> syn::Ident {
     syn::Ident::new(
         &format!("__hydro_singleton_ref_{}", index),
         Span::call_site(),

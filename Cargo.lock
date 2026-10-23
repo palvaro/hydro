@@ -2856,6 +2856,7 @@ dependencies = [
  "hdrhistogram",
  "hydro_deploy",
  "hydro_lang",
+ "hydrofrac",
  "serde",
  "stageleft",
  "stageleft_tool",
@@ -2876,6 +2877,7 @@ dependencies = [
  "hydro_deploy",
  "hydro_lang",
  "hydro_std",
+ "hydrofrac",
  "include_mdtests",
  "palette",
  "proptest",
@@ -2924,10 +2926,16 @@ dependencies = [
 name = "hydrofrac"
 version = "0.0.0"
 dependencies = [
+ "bincode",
  "good_lp",
  "hydro_lang",
+ "proc-macro-crate 3.4.0",
+ "proc-macro2",
+ "quote",
+ "serde",
  "stageleft",
  "stageleft_tool",
+ "syn 2.0.111",
 ]
 
 [[package]]
