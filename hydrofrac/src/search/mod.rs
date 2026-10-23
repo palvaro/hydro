@@ -18,5 +18,7 @@ pub use clause::{
 pub use ilp::{Backend, CheckedCluster, CrashBounds, hitting_set, weights};
 pub use sweep::{HYPOTHESIS_BUDGET, Next, Sweep, Tolerance};
 
-#[cfg(test)]
+// Runtime-only: the staged copy of this crate (compiled into simulation dylibs) does not need
+// the tests, and drops private impls they rely on.
+#[cfg(all(test, stageleft_runtime))]
 mod tests;
