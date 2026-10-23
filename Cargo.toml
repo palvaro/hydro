@@ -19,6 +19,7 @@ members = [
     "hydro_test",
     "hydro_test_embedded",
     "hydro_test_template",
+    "hydrofrac",
     "include_mdtests",
     "lattices_macro",
     "lattices",
@@ -57,6 +58,11 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+# The hitting-set ILP's branch-and-bound (hydrofrac) is the search's inner loop; unoptimized it
+# dominates test time.
+[profile.dev.package.microlp]
+opt-level = 3
 
 [profile.dev.package.website_playground]
 debug-assertions = false
