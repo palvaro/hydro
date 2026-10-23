@@ -86,6 +86,14 @@ pub trait SimHook {
     fn take_halt(&mut self) -> bool {
         false
     }
+
+    /// Decides, without any schedule choice, to release everything currently buffered. Returns
+    /// `false` (deciding nothing) if this kind of hook has no such deterministic decision; the
+    /// scheduler then decides as usual. Used for eager locations
+    /// (`SimFlow::with_eager_location`).
+    fn release_all(&mut self) -> bool {
+        false
+    }
 }
 
 /// A hook that can make inline decisions during the execution of a tick.
@@ -206,6 +214,11 @@ impl<T> SimHook for StreamHook<T, TotalOrder> {
         !self.input.borrow().is_empty()
     }
 
+    fn release_all(&mut self) -> bool {
+        self.to_release = Some(self.input.borrow_mut().drain(..).collect());
+        true
+    }
+
     fn autonomous_decision<'a>(
         &mut self,
         driver: &mut Borrowed<'a>,
@@ -271,6 +284,11 @@ impl<T> SimHook for StreamHook<T, NoOrder> {
 
     fn can_make_nontrivial_decision(&self) -> bool {
         !self.input.borrow().is_empty()
+    }
+
+    fn release_all(&mut self) -> bool {
+        self.to_release = Some(self.input.borrow_mut().drain(..).collect());
+        true
     }
 
     fn autonomous_decision<'a>(
@@ -369,6 +387,17 @@ impl<K: Hash + Eq + Clone, V> SimHook for KeyedStreamHook<K, V, TotalOrder> {
         !self.input.borrow().values().all(|q| q.is_empty())
     }
 
+    fn release_all(&mut self) -> bool {
+        let mut current_input = self.input.borrow_mut();
+        #[expect(clippy::disallowed_methods, reason = "FxHasher is deterministic")]
+        let items = current_input
+            .iter_mut()
+            .flat_map(|(key, queue)| queue.drain(..).map(|v| (key.clone(), v)))
+            .collect();
+        self.to_release = Some(items);
+        true
+    }
+
     fn autonomous_decision<'a>(
         &mut self,
         driver: &mut Borrowed<'a>,
@@ -459,6 +488,17 @@ impl<K: Hash + Eq + Clone, V> SimHook for KeyedStreamHook<K, V, NoOrder> {
     fn can_make_nontrivial_decision(&self) -> bool {
         #[expect(clippy::disallowed_methods, reason = "FxHasher is deterministic")]
         !self.input.borrow().values().all(|q| q.is_empty())
+    }
+
+    fn release_all(&mut self) -> bool {
+        let mut current_input = self.input.borrow_mut();
+        #[expect(clippy::disallowed_methods, reason = "FxHasher is deterministic")]
+        let items = current_input
+            .iter_mut()
+            .flat_map(|(key, queue)| queue.drain(..).map(|v| (key.clone(), v)))
+            .collect();
+        self.to_release = Some(items);
+        true
     }
 
     fn autonomous_decision<'a>(

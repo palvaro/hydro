@@ -565,6 +565,21 @@ pub trait DfirBuilder {
         operator_tag: Option<&str>,
     );
 
+    /// Called once per [`HydroNode::Network`], just before [`Self::create_network`] for the same
+    /// `tag_id`, with the channel's user-facing name (if any) and the receiving node's metadata.
+    /// Builders that keep a channel table (the simulator) override this; the default ignores it.
+    fn network_metadata(
+        &mut self,
+        _tag_id: StmtId,
+        _name: Option<&str>,
+        _metadata: &HydroIrMetadata,
+    ) {
+    }
+
+    /// Called once per [`HydroRoot::SendExternal`], just before [`Self::create_external_output`]
+    /// for the same `tag_id`, with the external port it sends on. The default ignores it.
+    fn external_output_metadata(&mut self, _tag_id: StmtId, _port: ExternalPortId) {}
+
     #[expect(clippy::too_many_arguments, reason = "TODO")]
     fn create_network(
         &mut self,
@@ -1684,6 +1699,7 @@ impl HydroRoot {
             }
 
             HydroRoot::SendExternal {
+                to_port_id,
                 serialize_fn,
                 instantiate_fn,
                 input,
@@ -1712,6 +1728,7 @@ impl HydroRoot {
                             }
                         };
 
+                        graph_builders.external_output_metadata(stmt_id, *to_port_id);
                         graph_builders.create_external_output(
                             &input.metadata().location_id,
                             sink_expr,
@@ -1891,6 +1908,19 @@ impl HydroRoot {
 
     pub fn input_metadata(&self) -> &HydroIrMetadata {
         self.input().metadata()
+    }
+
+    /// Mutable access to the root's input node, for IR passes that rewrite or wrap it (see
+    /// `SimFlow::with_ir_pass`).
+    pub fn input_mut(&mut self) -> &mut HydroNode {
+        match self {
+            HydroRoot::ForEach { input, .. }
+            | HydroRoot::SendExternal { input, .. }
+            | HydroRoot::DestSink { input, .. }
+            | HydroRoot::CycleSink { input, .. }
+            | HydroRoot::EmbeddedOutput { input, .. }
+            | HydroRoot::Null { input, .. } => input,
+        }
     }
 
     pub fn print_root(&self) -> String {
@@ -5293,12 +5323,13 @@ impl HydroNode {
                     }
 
                     HydroNode::Network {
+                        name,
                         networking_info,
                         serialize,
                         deserialize,
                         instantiate_fn,
                         input,
-                        ..
+                        metadata,
                     } => {
                         let input_ident = ident_stack.pop().unwrap();
 
@@ -5324,6 +5355,11 @@ impl HydroNode {
                                     }
                                 };
 
+                                graph_builders.network_metadata(
+                                    stmt_id,
+                                    name.as_deref(),
+                                    metadata,
+                                );
                                 graph_builders.create_network(
                                     &input.metadata().location_id,
                                     &out_location,

@@ -1280,3 +1280,7 @@ fn sim_continue_if_failure_in_fuzz_repro_is_reported() {
                 .await;
         });
 }
+
+// Declared last so the line numbers in this file's trace snapshots do not move.
+#[cfg(feature = "hydrofrac")]
+mod network_hook;
