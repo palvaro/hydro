@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use hydro_lang::compile::builder::CycleId;
 use hydro_lang::compile::ir::backtrace::Backtrace;
-use hydro_lang::compile::ir::{CollectionKind, HydroNode, HydroRoot};
+use hydro_lang::compile::ir::{ClosureExpr, CollectionKind, HydroNode, HydroRoot};
 use hydro_lang::location::dynamic::{ClusterConsistency, LocationId};
 
 use super::source_names;
@@ -597,13 +597,41 @@ fn has_network_ancestor(
                     go(unsafe { &**sink }, cycle_sinks, seen)
                 })
             }
-            _ => node
-                .input()
-                .into_iter()
-                .any(|input| go(input, cycle_sinks, seen)),
+            _ => {
+                node.input()
+                    .into_iter()
+                    .any(|input| go(input, cycle_sinks, seen))
+                    || closure_refs(node).any(|input| go(input, cycle_sinks, seen))
+            }
         }
     }
     go(node, cycle_sinks, &mut HashSet::new())
+}
+
+/// The singleton references `node`'s closures read (`HydroNode::Reference`s, which
+/// [`HydroNode::input`] does not list): a closure that reads state fed by the network is fed
+/// by the network.
+fn closure_refs(node: &HydroNode) -> impl Iterator<Item = &HydroNode> {
+    let closures: Vec<&ClosureExpr> = match node {
+        HydroNode::Map { f, .. }
+        | HydroNode::FlatMap { f, .. }
+        | HydroNode::FlatMapStreamBlocking { f, .. }
+        | HydroNode::Filter { f, .. }
+        | HydroNode::FilterMap { f, .. }
+        | HydroNode::Inspect { f, .. }
+        | HydroNode::PartitionShared { f, .. }
+        | HydroNode::Reduce { f, .. }
+        | HydroNode::ReduceKeyed { f, .. }
+        | HydroNode::ReduceKeyedWatermark { f, .. } => vec![f],
+        HydroNode::Fold { init, acc, .. }
+        | HydroNode::Scan { init, acc, .. }
+        | HydroNode::ScanAsyncBlocking { init, acc, .. }
+        | HydroNode::FoldKeyed { init, acc, .. } => vec![init, acc],
+        _ => vec![],
+    };
+    closures
+        .into_iter()
+        .flat_map(|f| f.singleton_refs().iter().map(|(node, _)| node))
 }
 
 /// The `file:line` of the first frame of `backtrace` outside `hydro_lang` itself: where the
