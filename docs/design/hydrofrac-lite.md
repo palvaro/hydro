@@ -39,14 +39,19 @@ Design rules:
 ```rust
 let mut flow = FlowBuilder::new();
 // ... program, with its `EventualConsistency` labels ...
-let check = hydrofrac::EcCheck::new(&mut flow);          // taps every label; the host checks them
-let sim = flow.sim().with_cluster_size(&members, 3).compiled();
-check.run(&sim, async || {                               // faults may strike while this drives inputs;
-    send.send(Item(1));                                  // on return the network heals and the run quiesces
-    send.send(Item(2));
+let mut check = hydrofrac::EcCheck::new();
+let sim = check                                          // taps every label; the host checks them
+    .instrument(flow.sim().with_cluster_size(&members, 3))
+    .compiled();
+check.run(&sim, async || {                               // faults may strike while this drives inputs
+    send.send(Item(1));                                  // and while the run settles; then the network
+    send.send(Item(2));                                  // heals and the run quiesces again
 })
 .assert_holds();                                         // panics with the report; writes diagrams
 ```
+
+The check instruments the `SimFlow` rather than the `FlowBuilder`: everything it adds (the taps, hook points,
+provenance) is simulator-only and is registered on the `SimFlow`, so the program itself is untouched.
 
 That is the whole API surface for the common case. Compare a typical research harness
 (`hydro_test/src/cluster/ec_ldfi.rs:263-294`):
@@ -239,8 +244,11 @@ answer was to bound the adversary to a window of faults, after which the network
 recovery has to deliver. The research branch called the end of that window `end_of_finite_failures` (EFF).
 
 **Convention.**
-- Faults are admitted while the `run` closure executes, including any `quiesce().await` inside it.
-- When the closure returns, the network **heals**: omissions stop applying, and no crash point fires after heal
+- Faults are admitted while the `run` closure executes, including any `quiesce().await` inside it, and while
+  the work it caused settles: when the closure returns, the check first quiesces under faults. (The simulator
+  runs the program only while the closure is blocked, so a closure that sends its inputs and returns has
+  caused no sends yet; healing at that point would admit no fault at all.)
+- Then the network **heals**: omissions stop applying, and no crash point fires after heal
   (the research `FaultState::end_finite_failures` semantics). Crashes that already happened persist.
 - The check then quiesces (implied, as in §2). For a body that already ends in `quiesce().await` this does
   nothing, since healing creates no new work.

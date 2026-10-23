@@ -11,6 +11,7 @@
 #[cfg(stageleft_runtime)]
 hydro_lang::setup!();
 
+pub mod check;
 pub mod fault;
 pub mod lamport;
 pub mod lineage;
@@ -23,3 +24,6 @@ pub mod search;
 // gates its items itself, so that its tests' staged closures still resolve).
 #[cfg(stageleft_runtime)]
 pub mod spec;
+
+#[cfg(stageleft_runtime)]
+pub use check::{EcCheck, Results, Verdict};
