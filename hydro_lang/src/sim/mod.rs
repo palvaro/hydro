@@ -90,6 +90,9 @@ pub mod provenance;
 pub mod feedback_campaign;
 
 #[cfg(stageleft_runtime)]
+pub mod network_hook;
+
+#[cfg(stageleft_runtime)]
 mod provenance_ir;
 
 #[cfg(stageleft_runtime)]
