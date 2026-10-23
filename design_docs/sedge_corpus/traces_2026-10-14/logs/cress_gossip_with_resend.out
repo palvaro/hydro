@@ -1,0 +1,9 @@
+Checking gossip_with_resend (resend_off)…
+warning: profile package spec `website_playground` in profile `release` did not match any packages
+warning: profile package spec `website_playground` in profile `dev` did not match any packages
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.25s
+Checking gossip_with_resend (resend_on)…
+✓ BENIGN  gossip_with_resend (resend_off)  growth: -  multiplier: -  location: -
+    outputs: conserved: wire, merged, acks_sent; level: inbox_depth, outstanding_depth
+! HAZARDOUS  gossip_with_resend (resend_on)  growth: grows, degree 2  multiplier: 8.97x  location: hydro_test/src/cluster/witnesses/gossip_resend.rs:190, batch of (usize, ())
+    outputs: amplified: wire, merged, acks_sent; level: inbox_depth, outstanding_depth

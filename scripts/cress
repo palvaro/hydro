@@ -75,6 +75,7 @@ export CRESS_RESULTS_DIR="$root/target/cress"
 runner_dir="$CRESS_RESULTS_DIR/runner"
 mkdir -p "$CRESS_RESULTS_DIR/reports" "$runner_dir/src"
 : > "$CRESS_RESULTS_DIR/results.tsv"
+: > "$CRESS_RESULTS_DIR/conservation.tsv"
 
 # This tiny generated binary links the requested crate so its registered checks are present. It
 # deliberately uses `cargo run`, not Cargo's test harness. Keeping it under target/ avoids adding

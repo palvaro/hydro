@@ -34,11 +34,14 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::Report;
+use hydro_lang::compile::builder::ExternalPortId;
 use hydro_lang::live_collections::boundedness::Boundedness;
 use hydro_lang::live_collections::keyed_stream::KeyedStream;
 use hydro_lang::live_collections::stream::{Ordering, Retries, Stream};
 use hydro_lang::location::cluster::Consistency;
-use hydro_lang::location::{Cluster, Process};
+use hydro_lang::location::dynamic::LocationId;
+use hydro_lang::location::{Atomic, Cluster, Location, Process};
+use hydro_lang::sim::extension::{cluster_receiver_port, receiver_port};
 
 /// A value the generated harness can feed to a data input. See the [module docs](self).
 pub trait InputValue: Sized {
@@ -133,9 +136,61 @@ impl InputCounter {
 
 /// Everything a Hydro function may return that the generated harness knows how to sink. See the
 /// [module docs](self).
+///
+/// [`SimOutputs::sink_named`] does the same as [`SimOutputs::sink_all`] and also records, for
+/// every stream it sinks, the output port it was sunk to, the location it lives on and a name,
+/// so that the checker can count what each output stream produced in every run and classify it
+/// (see [`crate::Conservation`]). The default implementation forgets the ports; the derive and
+/// the stream implementations record them.
 pub trait SimOutputs {
     /// Attach every stream in `self` to a simulation output so the compiler keeps it.
     fn sink_all(self);
+
+    /// Like [`SimOutputs::sink_all`], recording each sunk stream under `name` (a struct field's
+    /// name, or `name.0`, `name.1`, ... for a tuple) in `outputs`.
+    fn sink_named(self, name: &str, outputs: &mut OutputPorts)
+    where
+        Self: Sized,
+    {
+        let _ = (name, outputs);
+        self.sink_all();
+    }
+}
+
+/// One output stream of the program under check, as the checker counts it.
+#[derive(Debug, Clone)]
+pub struct NamedOutput {
+    /// The field name the stream was returned under.
+    pub name: String,
+    /// The simulation output port the stream was sunk to.
+    pub port: ExternalPortId,
+    /// The process or cluster the stream lives on.
+    pub root: LocationId,
+    /// Whether the item type is a plain number (an integer or float), which is what a level
+    /// sample (a queue depth per tick) looks like; a stream of records is not.
+    pub numeric: bool,
+}
+
+/// The output streams [`SimOutputs::sink_named`] recorded.
+#[derive(Debug, Clone, Default)]
+pub struct OutputPorts {
+    pub outputs: Vec<NamedOutput>,
+}
+
+impl OutputPorts {
+    /// No outputs recorded.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Whether `T` is one of the primitive numeric types, read from its type name.
+fn is_numeric<T>() -> bool {
+    matches!(
+        std::any::type_name::<T>(),
+        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128"
+            | "isize" | "f32" | "f64"
+    )
 }
 
 impl SimOutputs for () {
@@ -152,6 +207,17 @@ where
     fn sink_all(self) {
         let _ = self.sim_output();
     }
+
+    fn sink_named(self, name: &str, outputs: &mut OutputPorts) {
+        let root = Location::id(self.location()).root().clone();
+        let receiver = self.sim_output();
+        outputs.outputs.push(NamedOutput {
+            name: name.to_owned(),
+            port: receiver_port(&receiver),
+            root,
+            numeric: is_numeric::<T>(),
+        });
+    }
 }
 
 impl<'a, T, L, B, C, O, R> SimOutputs for Stream<T, Cluster<'a, L, C>, B, O, R>
@@ -165,6 +231,37 @@ where
     fn sink_all(self) {
         let _ = self.sim_cluster_output();
     }
+
+    fn sink_named(self, name: &str, outputs: &mut OutputPorts) {
+        let root = Location::id(self.location()).root().clone();
+        let receiver = self.sim_cluster_output();
+        outputs.outputs.push(NamedOutput {
+            name: name.to_owned(),
+            port: cluster_receiver_port(&receiver),
+            root,
+            numeric: is_numeric::<T>(),
+        });
+    }
+}
+
+/// A stream on an [`Atomic`] location is sunk as the stream on the underlying top-level
+/// location: `end_atomic` yields it back into the asynchronous context, where `sim_output`
+/// applies. The checker counts the same records either way.
+impl<'a, T, L, B, O, R> SimOutputs for Stream<T, Atomic<L>, B, O, R>
+where
+    L: Location<'a>,
+    B: Boundedness,
+    O: Ordering,
+    R: Retries,
+    Stream<T, L, B, O, R>: SimOutputs,
+{
+    fn sink_all(self) {
+        self.end_atomic().sink_all();
+    }
+
+    fn sink_named(self, name: &str, outputs: &mut OutputPorts) {
+        self.end_atomic().sink_named(name, outputs);
+    }
 }
 
 impl<'a, K, V, L, B, O, R> SimOutputs for KeyedStream<K, V, Process<'a, L>, B, O, R>
@@ -177,6 +274,10 @@ where
 {
     fn sink_all(self) {
         let _ = self.entries().sim_output();
+    }
+
+    fn sink_named(self, name: &str, outputs: &mut OutputPorts) {
+        self.entries().sink_named(name, outputs);
     }
 }
 
@@ -192,28 +293,38 @@ where
     fn sink_all(self) {
         let _ = self.entries().sim_cluster_output();
     }
+
+    fn sink_named(self, name: &str, outputs: &mut OutputPorts) {
+        self.entries().sink_named(name, outputs);
+    }
 }
 
 macro_rules! sim_outputs_tuple {
-    ($($name:ident),+) => {
+    ($(($name:ident, $idx:tt)),+) => {
         impl<$($name: SimOutputs),+> SimOutputs for ($($name,)+) {
             #[expect(non_snake_case, reason = "the type parameters double as binding names")]
             fn sink_all(self) {
                 let ($($name,)+) = self;
                 $($name.sink_all();)+
             }
+
+            #[expect(non_snake_case, reason = "the type parameters double as binding names")]
+            fn sink_named(self, name: &str, outputs: &mut OutputPorts) {
+                let ($($name,)+) = self;
+                $($name.sink_named(&format!("{name}.{}", $idx), outputs);)+
+            }
         }
     };
 }
 
-sim_outputs_tuple!(A);
-sim_outputs_tuple!(A, B);
-sim_outputs_tuple!(A, B, C);
-sim_outputs_tuple!(A, B, C, D);
-sim_outputs_tuple!(A, B, C, D, E);
-sim_outputs_tuple!(A, B, C, D, E, F);
-sim_outputs_tuple!(A, B, C, D, E, F, G);
-sim_outputs_tuple!(A, B, C, D, E, F, G, H);
+sim_outputs_tuple!((A, 0));
+sim_outputs_tuple!((A, 0), (B, 1));
+sim_outputs_tuple!((A, 0), (B, 1), (C, 2));
+sim_outputs_tuple!((A, 0), (B, 1), (C, 2), (D, 3));
+sim_outputs_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4));
+sim_outputs_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4), (F, 5));
+sim_outputs_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4), (F, 5), (G, 6));
+sim_outputs_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4), (F, 5), (G, 6), (H, 7));
 
 /// A generated amplification check that can be discovered by the checker command.
 #[doc(hidden)]
@@ -254,6 +365,8 @@ pub struct CheckResult {
     pub multiplier: String,
     /// The source location whose delayed input first exposed amplification.
     pub location: Option<String>,
+    /// The conservation table in one line (`conserved: a; amplified: b, c; level: d`), or empty.
+    pub conservation: String,
 }
 
 /// Runs registered checks whose function name contains `function_filter` and whose configuration
@@ -333,6 +446,9 @@ pub fn print_verdicts(results: &[CheckResult]) {
             "{label}  {}{configuration}  growth: {}  multiplier: {}  location: {location}",
             result.function, result.growth, result.multiplier
         );
+        if !result.conservation.is_empty() {
+            println!("    outputs: {}", result.conservation);
+        }
     }
 }
 
@@ -459,7 +575,7 @@ pub fn record(summary: &Summary<'_>) {
             summary.crate_name,
             summary.function,
             summary.configuration,
-            summary.workload.replace([' ', ','], "").replace('=', "-")
+            summary.workload.replace([' ', ','], "").replace(['=', '/'], "-")
         );
         fs::write(
             dir.join("reports").join(file),
@@ -472,6 +588,30 @@ pub fn record(summary: &Summary<'_>) {
                 summary.report
             ),
         )?;
+        // One row per output stream, for tools (Sedge) that read the classification back.
+        if !summary.report.conservation.rows.is_empty() {
+            let mut tsv = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("conservation.tsv"))?;
+            for r in &summary.report.conservation.rows {
+                writeln!(
+                    tsv,
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    summary.crate_name,
+                    summary.function,
+                    summary.configuration,
+                    r.name,
+                    r.kind.word(),
+                    r.numeric,
+                    r.unheld,
+                    r.finite.0,
+                    r.finite.1,
+                    r.stall.0,
+                    r.stall.1,
+                )?;
+            }
+        }
         Ok(())
     };
     if let Err(e) = write() {

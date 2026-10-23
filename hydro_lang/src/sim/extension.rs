@@ -88,6 +88,22 @@ pub fn bincode_serialize_fn<T: serde::Serialize + serde::de::DeserializeOwned>()
     crate::sim::codec::staged_serialize::<T, crate::sim::codec::BincodeCodec>().into()
 }
 
+/// The external output port a [`SimReceiver`] reads, so that a tool which only wants to count
+/// what a program's declared output produced can do so with [`drain_delivered`] without reading
+/// the items.
+pub fn receiver_port<T, O: crate::live_collections::stream::Ordering, R: crate::live_collections::stream::Retries>(
+    receiver: &SimReceiver<T, O, R>,
+) -> ExternalPortId {
+    receiver.0
+}
+
+/// The external output port a [`SimClusterReceiver`] reads; see [`receiver_port`].
+pub fn cluster_receiver_port<T, O: crate::live_collections::stream::Ordering, R: crate::live_collections::stream::Retries>(
+    receiver: &SimClusterReceiver<T, O, R>,
+) -> ExternalPortId {
+    receiver.0
+}
+
 /// Takes every item already delivered to the external output `port` (from a process when
 /// `member` is `None`, otherwise from that member of the sending cluster) and returns how many
 /// there were. Does not run the scheduler, so it must be called inside a simulation thunk after
