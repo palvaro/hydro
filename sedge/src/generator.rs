@@ -27,11 +27,9 @@ pub struct Driven {
 ///
 /// `send_round` is expected to resolve quickly (writing to a socket buffer); if it blocks because
 /// the program has stopped reading, arrivals fall behind and are counted in [`Driven::late`].
-/// Its second argument says whether to flush: `true` when the next arrival is not due yet (the
-/// generator is about to sleep) or this is the last one, `false` when the generator is behind and
-/// the next round follows at once. Writing a backlog of rounds and flushing once is what lets one
-/// connection offer tens of thousands of rounds per second; the records still leave in arrival
-/// order, and no later than the generator's next sleep.
+/// Its second argument is the round's scheduled arrival. The generated harness's `send_round` only
+/// queues the round's records on an unbounded channel (see `harness::feed`), so it never waits on
+/// the program and this loop keeps its schedule however the program behaves.
 pub async fn drive<F, E>(
     profile: Profile,
     seed: u64,
@@ -39,7 +37,7 @@ pub async fn drive<F, E>(
     mut send_round: F,
 ) -> Result<Driven, (E, Driven)>
 where
-    F: AsyncFnMut(u64, bool) -> Result<u64, E>,
+    F: AsyncFnMut(u64, Instant) -> Result<u64, E>,
 {
     let start: Instant = recorder.start();
     let late_threshold = std::time::Duration::from_millis(50);
@@ -48,8 +46,7 @@ where
         offered: 0,
         late: 0,
     };
-    let mut arrivals = Arrivals::new(profile, seed).enumerate().peekable();
-    while let Some((round, t)) = arrivals.next() {
+    for (round, t) in Arrivals::new(profile, seed).enumerate() {
         let due = start + t;
         let now = Instant::now();
         if now < due {
@@ -62,10 +59,7 @@ where
         // as it would be for a user who arrived on schedule (no coordinated omission).
         let at = due;
         let first = driven.offered;
-        let flush = arrivals
-            .peek()
-            .is_none_or(|(_, next)| start + *next > Instant::now());
-        match send_round(round as u64, flush).await {
+        match send_round(round as u64, due).await {
             Ok(n) => {
                 recorder.offered_round(at, first, n);
                 driven.offered += n;

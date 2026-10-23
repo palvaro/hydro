@@ -64,10 +64,14 @@
 //!   (and cached per limits and host); `mu` is used as μ itself only with `--no-calibrate` or
 //!   without a capacity backend. The command's `--mu` overrides both.
 //! * `cpus = expr`: the CPU quota, in cores, of every deployed node of the program, unless the
-//!   command's `--cpus` says otherwise (the default is 0.5). `cpus(Role = expr, ...)` gives a
-//!   per-role quota, by location marker type name (`cpus(Server = 0.1)`). The quota is set when
+//!   command's `--cpus` says otherwise. `cpus(Role = expr, ...)` gives a per-role quota, by
+//!   location marker type name (`cpus(Client = none, Server = 0.01)`); `none` means no quota. A
+//!   node no one caps runs with no quota: only the resource under test should get one, and
+//!   clients, which stand for the callers offering the load, should not. The quota is set when
 //!   a node's container starts and stays fixed for the run; only the command's opt-in
 //!   `--cpu-dip` changes it mid-run. The harness's relay process is never capped.
+//! * `cpu_period_us = expr`: the CFS period the quotas are enforced over (default 10 ms). The
+//!   kernel's smallest quota is 1 ms, so a cap below `1 ms / period` needs a longer period.
 //! * `ignore = "reason"`: omits this check from the command unless its `--include-ignored` option
 //!   is given.
 //! * `sedge = path`: the path to the `sedge` crate, `::sedge` by default.
@@ -332,6 +336,7 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
     let mut round_data: Option<Expr> = None;
     let mut mu: Option<Expr> = None;
     let mut cpus: Option<Expr> = None;
+    let mut cpu_period: Option<Expr> = None;
     let mut role_cpus: Vec<(Ident, Expr)> = Vec::new();
     let mut timers: Vec<(Ident, Expr)> = Vec::new();
     let mut generic_types: Vec<(String, Type)> = Vec::new();
@@ -355,7 +360,14 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
             ("load", Some(v), _) => load = Some(syn::parse2(v.clone())?),
             ("round_data", Some(v), _) => round_data = Some(syn::parse2(v.clone())?),
             ("mu", Some(v), _) => mu = Some(syn::parse2(v.clone())?),
-            ("cpus", Some(v), _) => cpus = Some(syn::parse2(v.clone())?),
+            ("cpus", Some(v), _) => {
+                cpus = Some(if v.to_string() == "none" {
+                    syn::parse_quote!(0.0)
+                } else {
+                    syn::parse2(v.clone())?
+                })
+            }
+            ("cpu_period_us", Some(v), _) => cpu_period = Some(syn::parse2(v.clone())?),
             ("cpus", None, Some(g)) => {
                 for t in g {
                     let Some(v) = &t.value else {
@@ -364,7 +376,13 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
                             "per-role caps look like `cpus(Server = 0.2)`",
                         ));
                     };
-                    role_cpus.push((t.key.clone(), syn::parse2(v.clone())?));
+                    // `none`: no quota for this role.
+                    let e: Expr = if v.to_string() == "none" {
+                        syn::parse_quote!(0.0)
+                    } else {
+                        syn::parse2(v.clone())?
+                    };
+                    role_cpus.push((t.key.clone(), e));
                 }
             }
             ("timers", None, Some(g)) => {
@@ -722,7 +740,12 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
         let pv = port_var(s);
         let sk = sink_var(s);
         if is_data(s) {
-            quote!(let mut #sk = __nodes.connect(#pv).await;)
+            // Data streams are written through a feed: the generator queues each record at its
+            // scheduled arrival and never waits on the socket (open loop).
+            quote!(
+                let (#sk, __writer) = #sedge::harness::feed(__nodes.connect(#pv).await, __feed_stats.clone());
+                __writers.push(__writer);
+            )
         } else {
             quote!(let #sk = match #pv {
                 ::std::option::Option::Some(__p) => ::std::option::Option::Some(__nodes.connect(__p).await),
@@ -758,37 +781,17 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
                 // One value per round to every member, as Cress feeds a cluster stream.
                 let n = size_var(s.loc);
                 quote!(
-                    let __send_round = async |__round: u64, __flush: bool| -> ::std::result::Result<u64, ::std::string::String> {
+                    let __send_round = async |__round: u64, __due: ::std::time::Instant| -> ::std::result::Result<u64, ::std::string::String> {
                         for __m in 0..#n {
-                            #sedge::__private::futures::SinkExt::feed(
-                                &mut #sk,
-                                (__m, <#item as #sedge::LoadItem>::from_id(__round)),
-                            )
-                            .await
-                            .map_err(|e| ::std::string::ToString::to_string(&e))?;
-                        }
-                        if __flush {
-                            #sedge::__private::futures::SinkExt::flush(&mut #sk)
-                                .await
-                                .map_err(|e| ::std::string::ToString::to_string(&e))?;
+                            #sk.send(__due, (__m, <#item as #sedge::LoadItem>::from_id(__round)))?;
                         }
                         ::std::result::Result::Ok(#n as u64)
                     };
                 )
             } else {
                 quote!(
-                    let __send_round = async |__round: u64, __flush: bool| -> ::std::result::Result<u64, ::std::string::String> {
-                        #sedge::__private::futures::SinkExt::feed(
-                            &mut #sk,
-                            <#item as #sedge::LoadItem>::from_id(__round),
-                        )
-                        .await
-                        .map_err(|e| ::std::string::ToString::to_string(&e))?;
-                        if __flush {
-                            #sedge::__private::futures::SinkExt::flush(&mut #sk)
-                                .await
-                                .map_err(|e| ::std::string::ToString::to_string(&e))?;
-                        }
+                    let __send_round = async |__round: u64, __due: ::std::time::Instant| -> ::std::result::Result<u64, ::std::string::String> {
+                        #sk.send(__due, <#item as #sedge::LoadItem>::from_id(__round))?;
                         ::std::result::Result::Ok(1)
                     };
                 )
@@ -826,15 +829,8 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
                 let sk = sink_var(s);
                 quote!(
                     for __item in __inputs.#n.take() {
-                        #sedge::__private::futures::SinkExt::feed(&mut #sk, __item)
-                            .await
-                            .map_err(|e| ::std::string::ToString::to_string(&e))?;
+                        #sk.send(__due, __item)?;
                         __n += 1;
-                    }
-                    if __flush {
-                        #sedge::__private::futures::SinkExt::flush(&mut #sk)
-                            .await
-                            .map_err(|e| ::std::string::ToString::to_string(&e))?;
                     }
                 )
             });
@@ -844,7 +840,7 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
                 fn __coerce<F: ::std::ops::FnMut(u64, &__Inputs)>(f: F) -> F { f }
                 let __inputs = __Inputs { #(#inits)* #(#member_inits)* };
                 let mut __user_round = __coerce(#closure);
-                let __send_round = async |__round: u64, __flush: bool| -> ::std::result::Result<u64, ::std::string::String> {
+                let __send_round = async |__round: u64, __due: ::std::time::Instant| -> ::std::result::Result<u64, ::std::string::String> {
                     __user_round(__round, &__inputs);
                     let mut __n = 0u64;
                     #(#flushes)*
@@ -891,6 +887,10 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
         .unwrap_or_else(|| quote!(::std::option::Option::None));
     let role_cpu_names = role_cpus.iter().map(|(n, _)| n);
     let role_cpu_values = role_cpus.iter().map(|(_, e)| e);
+    let cpu_period_value = cpu_period
+        .as_ref()
+        .map(|e| quote!(::std::option::Option::Some((#e) as u64)))
+        .unwrap_or_else(|| quote!(::std::option::Option::None));
     let cpus_value = cpus
         .as_ref()
         .map(|e| quote!(::std::option::Option::Some((#e) as f64)))
@@ -919,6 +919,7 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
                 configuration: #config_name,
                 mu: #mu_value,
                 cpus: #cpus_value,
+                cpu_period_us: #cpu_period_value,
                 role_cpus: ::std::vec![#((stringify!(#role_cpu_names), (#role_cpu_values) as f64)),*],
                 roles: &[#(#roles),*],
             };
@@ -940,6 +941,8 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
                     .with_external(&__external, __deployment.Localhost())
                     .deploy(&mut __deployment);
                 __deployment.deploy().await.expect("deployment failed");
+                let __feed_stats = #sedge::harness::FeedStats::default();
+                let mut __writers: ::std::vec::Vec<::std::pin::Pin<::std::boxed::Box<dyn ::std::future::Future<Output = ()>>>> = ::std::vec::Vec::new();
                 #(#connect_sinks)*
                 let mut __timers = ::std::vec::Vec::new();
                 #(#make_timers)*
@@ -948,6 +951,8 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
                     &mut __deployment,
                     &__nodes,
                     __send_round,
+                    __writers,
+                    __feed_stats,
                     __timers,
                     __observer,
                     &__meta,

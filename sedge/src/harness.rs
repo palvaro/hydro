@@ -48,6 +48,7 @@ use crate::capacity::{
     host_fingerprint,
 };
 use crate::generator::drive;
+use hydro_deploy_integration::SEND_BUFFER_ENV;
 use crate::profile::Profile;
 use crate::program::Observer;
 use crate::trace::{Recorder, Sample, Trace};
@@ -72,13 +73,15 @@ pub enum BackendChoice {
 #[derive(Debug, Clone)]
 pub struct CapacityConfig {
     pub backend: BackendChoice,
-    /// Cores' worth of CPU per node, overriding the check's `cpus`.
+    /// Cores' worth of CPU per node, overriding the check's `cpus`. `Some(0.0)` is `none`: no
+    /// quota.
     pub cpus: Option<f64>,
-    /// Per-role overrides of `cpus`, by the location's marker type name (case-insensitive).
+    /// Per-role overrides of `cpus`, by the location's marker type name (case-insensitive); `0.0`
+    /// is `none`.
     pub role_cpus: Vec<(String, f64)>,
     /// The CFS period. Short, so that a small quota is a slower node rather than one that stops
     /// for longer than a tick.
-    pub period_us: u64,
+    pub period_us: Option<u64>,
     /// The cores the nodes run on.
     pub node_cpuset: Option<String>,
     /// The cores the harness itself (generator, observer, relay) is pinned to.
@@ -89,8 +92,22 @@ pub struct CapacityConfig {
     pub memory: Option<u64>,
 }
 
-/// The cap a node gets when neither the command nor the check says.
-pub const DEFAULT_CPUS: f64 = 0.5;
+/// Parses a CPU cap: a positive number of cores, or `none` for no quota (stored as `0.0`).
+fn parse_cpus(v: &str) -> Result<f64, String> {
+    let v = v.trim();
+    if v.eq_ignore_ascii_case("none") {
+        return Ok(0.0);
+    }
+    v.parse::<f64>()
+        .ok()
+        .filter(|c| *c > 0.0)
+        .ok_or_else(|| format!("--cpus wants a positive number of cores or `none`, got `{v}`"))
+}
+
+/// The CFS period when neither the command nor the check says: short, so that a quota slows a
+/// node down rather than stopping it for longer than a tick. The kernel's smallest quota is
+/// 1 ms, so at this period no cap is below 0.1 cores; a tighter cap needs a longer period.
+pub const DEFAULT_PERIOD_US: u64 = 10_000;
 
 impl Default for CapacityConfig {
     fn default() -> Self {
@@ -115,7 +132,7 @@ impl Default for CapacityConfig {
             },
             cpus: None,
             role_cpus: Vec::new(),
-            period_us: 10_000,
+            period_us: None,
             node_cpuset,
             harness_cpuset,
             image: "public.ecr.aws/amazonlinux/amazonlinux:latest".to_owned(),
@@ -126,9 +143,11 @@ impl Default for CapacityConfig {
 
 impl CapacityConfig {
     /// The limits of a node with role `role` under check `meta`.
+    /// A node is capped only where a cap was asked for: the command's per-role cap, its cap for
+    /// every node, the check's per-role cap, the check's cap for every node, in that order. A
+    /// role no one caps (a client, a load-generating role) runs with no quota: only the resource
+    /// under test gets one. `none` (0.0) at any level means no quota.
     pub fn limits(&self, meta: &Meta, role: &str) -> Limits {
-        // The command's per-role cap, its cap for every node, the check's per-role cap, the
-        // check's cap for every node, the default.
         let cpus = self
             .role_cpus
             .iter()
@@ -142,12 +161,19 @@ impl CapacityConfig {
                     .map(|(_, c)| *c)
             })
             .or(meta.cpus)
-            .unwrap_or(DEFAULT_CPUS);
+            .unwrap_or(0.0);
         Limits {
-            cpu: (cpus > 0.0).then(|| CpuQuota::from_cores(cpus, self.period_us)),
+            cpu: (cpus > 0.0).then(|| CpuQuota::from_cores(cpus, self.period(meta))),
             cpuset: self.node_cpuset.clone(),
             memory: self.memory,
         }
+    }
+
+    /// The CFS period: the command's, the check's `cpu_period_us`, or [`DEFAULT_PERIOD_US`].
+    pub fn period(&self, meta: &Meta) -> u64 {
+        self.period_us
+            .or(meta.cpu_period_us)
+            .unwrap_or(DEFAULT_PERIOD_US)
     }
 
     /// A key for the calibration cache: everything about the limits that changes μ.
@@ -296,6 +322,10 @@ pub struct RunConfig {
     pub probe_start: Option<f64>,
     /// Only measure μ (or read it from the cache); run no trials.
     pub calibrate_only: bool,
+    /// Give the program's nodes unbounded send queues (`HYDRO_DEPLOY_SEND_BUFFER=unbounded`), so
+    /// that a slow peer never stalls a node: the default, since without it backpressure from the
+    /// first slow link reaches the generator and the workload is no longer open-loop.
+    pub unbounded_sends: bool,
 }
 
 impl Default for RunConfig {
@@ -322,6 +352,7 @@ impl Default for RunConfig {
             probe_step: Duration::from_secs(10),
             probe_start: None,
             calibrate_only: false,
+            unbounded_sends: true,
         }
     }
 }
@@ -441,19 +472,19 @@ impl RunConfig {
                         Some((role, c)) => cfg
                             .capacity
                             .role_cpus
-                            .push((role.trim().to_owned(), positive(c, "--cpus")?)),
-                        None => cfg.capacity.cpus = Some(positive(&v, "--cpus")?),
+                            .push((role.trim().to_owned(), parse_cpus(c)?)),
+                        None => cfg.capacity.cpus = Some(parse_cpus(&v)?),
                     }
                 }
                 "--cpu-period-us" => {
                     let v = value("--cpu-period-us")?;
-                    cfg.capacity.period_us = v
+                    cfg.capacity.period_us = Some(v
                         .parse()
                         .ok()
                         .filter(|p| (1000..=1_000_000).contains(p))
                         .ok_or_else(|| {
                             format!("--cpu-period-us wants 1000..=1000000, got `{v}`")
-                        })?;
+                        })?);
                 }
                 "--node-cpus" => {
                     let v = value("--node-cpus")?;
@@ -479,6 +510,17 @@ impl RunConfig {
                 "--recalibrate" => cfg.calibrate = Calibrate::Force,
                 "--no-calibrate" => cfg.calibrate = Calibrate::Off,
                 "--calibrate-only" => cfg.calibrate_only = true,
+                "--send-buffer" => {
+                    cfg.unbounded_sends = match value("--send-buffer")?.as_str() {
+                        "unbounded" => true,
+                        "bounded" => false,
+                        v => {
+                            return Err(format!(
+                                "--send-buffer wants unbounded or bounded, got `{v}`"
+                            ));
+                        }
+                    }
+                }
                 "--probe-step" => cfg.probe_step = secs(&value("--probe-step")?, "--probe-step")?,
                 "--probe-start" => {
                     cfg.probe_start = Some(positive(&value("--probe-start")?, "--probe-start")?)
@@ -535,13 +577,19 @@ usage: sedge [options] <crate> [function-substring]
  capacity (from outside the program; each node's quota is set once, when its container starts,
  and stays fixed for the whole run unless --cpu-dip asks otherwise):
   --backend docker|none    run each node in a CPU-capped container (default docker if available)
-  --cpus C                 cores' worth of CPU per node (default: the check's `cpus`, else 0.5)
-  --cpus ROLE=C            per-role override, by location marker name (repeatable)
-  --cpu-period-us P        CFS period in microseconds (default 10000)
+  --cpus C|none            cores' worth of CPU for every node (default: the check's `cpus`; a
+                           node no one caps runs with no quota)
+  --cpus ROLE=C|none       per-role override, by location marker name (repeatable)
+  --cpu-period-us P        CFS period in microseconds (default: the check's, else 10000; the
+                           smallest quota is 1 ms, so caps below 0.1 cpu need a longer period)
   --node-cpus LIST         cores the nodes run on (default: upper half; `none` for any)
   --harness-cpus LIST      cores the harness is pinned to (default: lower half; `none`)
   --image IMAGE            container image (default amazonlinux:latest)
   --memory-mb M            memory limit per node
+  --send-buffer unbounded|bounded
+                           nodes' outgoing connections queue sends in memory (default unbounded,
+                           so a slow peer never stalls a node and the workload stays open-loop),
+                           or push back on the sending dataflow (Hydro's own default)
  μ:
   --mu RPS                 take μ as given instead of measuring it
   --recalibrate            measure μ even if it is cached for these limits
@@ -581,6 +629,8 @@ pub struct Meta {
     pub cpus: Option<f64>,
     /// The check's `cpus(Role = C, ...)`: per-role caps, by location marker name.
     pub role_cpus: Vec<(&'static str, f64)>,
+    /// The check's `cpu_period_us`: the CFS period its caps are enforced over.
+    pub cpu_period_us: Option<u64>,
     /// The role (location marker name) of every location the check deploys, for the
     /// calibration key.
     pub roles: &'static [&'static str],
@@ -683,6 +733,12 @@ pub struct TrialResult {
     /// Arrivals the generator fell behind on; nonzero means the offered load was below the
     /// profile.
     pub late: u64,
+    /// Records that entered the program more than [`FEED_LATE`] after their scheduled arrival.
+    pub feed_late: u64,
+    /// The worst lag between a record's scheduled arrival and its write into the program.
+    pub feed_max_lag: Duration,
+    /// The largest value every level stream reached over the run.
+    pub max_levels: Vec<(String, f64)>,
     /// Per-node CPU usage, empty without a capacity backend.
     pub usage: Vec<NodeUsage>,
     /// The limits, in words.
@@ -872,6 +928,9 @@ impl TrialCapacity {
         let mut h = TrybuildHost::new(host)
             .rustflags("-C opt-level=3 -C codegen-units=1 -C strip=none -C debuginfo=2 -C lto=off")
             .feature("sedge");
+        if run.unbounded_sends {
+            h = h.env(SEND_BUFFER_ENV, "unbounded");
+        }
         for f in &run.features {
             h = h.feature(f.clone());
         }
@@ -895,6 +954,108 @@ pub fn host(deployment: &mut Deployment, run: &RunConfig) -> TrybuildHost {
         host = host.feature(f.clone());
     }
     host
+}
+
+/// How far behind schedule the harness wrote the workload into the program's input sockets.
+/// Shared by the [`feed`] writers of one deployment; [`execute`] sets the time origin.
+#[derive(Clone, Default)]
+pub struct FeedStats {
+    inner: Arc<Mutex<FeedInner>>,
+}
+
+#[derive(Default)]
+struct FeedInner {
+    start: Option<Instant>,
+    records: u64,
+    late: u64,
+    max_lag: Duration,
+    /// Worst lag of the records scheduled in each second.
+    per_second: Vec<Duration>,
+}
+
+/// A record written more than this long after its scheduled arrival counts as late.
+pub const FEED_LATE: Duration = Duration::from_millis(50);
+
+impl FeedStats {
+    fn set_start(&self, start: Instant) {
+        self.inner.lock().unwrap().start = Some(start);
+    }
+
+    fn record(&self, due: Instant, lag: Duration) {
+        let mut g = self.inner.lock().unwrap();
+        g.records += 1;
+        if lag > FEED_LATE {
+            g.late += 1;
+        }
+        g.max_lag = g.max_lag.max(lag);
+        if let Some(start) = g.start {
+            let s = due.saturating_duration_since(start).as_secs() as usize;
+            if g.per_second.len() <= s {
+                g.per_second.resize(s + 1, Duration::ZERO);
+            }
+            g.per_second[s] = g.per_second[s].max(lag);
+        }
+    }
+
+    /// `(records written, of which late, worst lag, worst lag per second)`.
+    pub fn summary(&self) -> (u64, u64, Duration, Vec<Duration>) {
+        let g = self.inner.lock().unwrap();
+        (g.records, g.late, g.max_lag, g.per_second.clone())
+    }
+}
+
+/// The sending half of a [`feed`]: queueing a record never waits.
+pub struct FeedSender<T> {
+    tx: futures::channel::mpsc::UnboundedSender<(Instant, T)>,
+}
+
+impl<T> FeedSender<T> {
+    /// Queues `item`, scheduled to arrive at `due`, for the writer. Never blocks; an error means
+    /// the writer has stopped (the program closed the connection).
+    pub fn send(&self, due: Instant, item: T) -> Result<(), String> {
+        self.tx
+            .unbounded_send((due, item))
+            .map_err(|_| "the program closed its input connection".to_owned())
+    }
+}
+
+/// Decouples the generator from one of the program's input sockets. The generator queues each
+/// record on an unbounded channel at its scheduled arrival and never waits; the returned writer
+/// drains the channel into `sink`, flushing whenever it has caught up, and records in `stats`
+/// how long after its scheduled arrival each record was written. If the program keeps reading
+/// its socket (with `HYDRO_DEPLOY_SEND_BUFFER=unbounded`, a node never stops reading because a
+/// peer is slow), the lag stays near zero and every request enters the program on schedule:
+/// open loop. A lag that grows says the program's input is not being read, and the run is
+/// reported as not open-loop.
+pub fn feed<T: 'static>(
+    sink: Pin<Box<dyn Sink<T, Error = std::io::Error>>>,
+    stats: FeedStats,
+) -> (FeedSender<T>, Pin<Box<dyn Future<Output = ()>>>) {
+    let (tx, mut rx) = futures::channel::mpsc::unbounded::<(Instant, T)>();
+    let writer = async move {
+        let mut sink = sink;
+        let mut dues: Vec<Instant> = Vec::new();
+        while let Some((due, item)) = rx.next().await {
+            dues.push(due);
+            if sink.feed(item).await.is_err() {
+                return;
+            }
+            while let Ok(Some((due, item))) = rx.try_next() {
+                dues.push(due);
+                if sink.feed(item).await.is_err() {
+                    return;
+                }
+            }
+            if sink.flush().await.is_err() {
+                return;
+            }
+            let now = Instant::now();
+            for d in dues.drain(..) {
+                stats.record(d, now.saturating_duration_since(d));
+            }
+        }
+    };
+    (FeedSender { tx }, Box::pin(writer))
 }
 
 /// One of the program's timers, driven by the harness over an external port: only for a timing
@@ -995,17 +1156,36 @@ pub struct Executed {
     pub by_id: bool,
     /// Rounds the generator offered.
     pub rounds: u64,
+    /// Arrivals the generator itself reached more than 50 ms late (its own scheduling).
     pub late: u64,
+    /// Records the feed writers wrote into the program's sockets.
+    pub feed_records: u64,
+    /// Of those, records written more than [`FEED_LATE`] after their scheduled arrival.
+    pub feed_late: u64,
+    /// The worst such lag.
+    pub feed_max_lag: Duration,
     pub usage: Vec<NodeUsage>,
     pub limits: String,
 }
 
+/// The largest fraction of records that may enter the program late for a run to count as open
+/// loop.
+pub const OPEN_LOOP_LATE: f64 = 0.001;
+
 impl Executed {
+    /// Whether every request entered the program on schedule: the generator kept its schedule
+    /// and the program kept reading its input (all but [`OPEN_LOOP_LATE`] of the records were
+    /// written within [`FEED_LATE`] of their scheduled arrival).
+    pub fn open_loop(&self) -> bool {
+        self.late == 0
+            && (self.feed_late as f64) <= OPEN_LOOP_LATE * self.feed_records.max(1) as f64
+    }
+
     /// Whether the harness, not the program, limited the run: the generator fell behind while no
     /// node was ever throttled. Only meaningful with a capacity backend.
     pub fn harness_bound(&self) -> bool {
         !self.usage.is_empty()
-            && self.late > 0
+            && (self.late > 0 || self.feed_late > 0)
             && self.usage.iter().all(|u| u.total.nr_throttled == 0)
     }
 }
@@ -1143,6 +1323,8 @@ pub async fn execute<'a, F, E>(
     deployment: &mut Deployment,
     nodes: &DeployResult<'a, HydroDeploy>,
     send_round: F,
+    writers: Vec<Pin<Box<dyn Future<Output = ()>>>>,
+    feed_stats: FeedStats,
     timers: Vec<TimerDrive>,
     observer: Observer<'a>,
     meta: &Meta,
@@ -1151,7 +1333,7 @@ pub async fn execute<'a, F, E>(
     capacity: TrialCapacity,
 ) -> Executed
 where
-    F: AsyncFnMut(u64, bool) -> Result<u64, E>,
+    F: AsyncFnMut(u64, Instant) -> Result<u64, E>,
     E: fmt::Display,
 {
     let profile = spec.profile;
@@ -1203,6 +1385,14 @@ where
 
     let recorder = Recorder::new();
     let start = recorder.start();
+    feed_stats.set_start(start);
+    // The writers finish once the generator is done and they have drained; the run goes on
+    // through the grace period regardless.
+    let writers = async move {
+        futures::future::join_all(writers).await;
+        futures::future::pending::<()>().await;
+    };
+    let mut writers = std::pin::pin!(writers);
     let capacity_tasks = capacity
         .nodes
         .as_ref()
@@ -1287,6 +1477,7 @@ where
         d = drive(profile, spec.seed, &recorder, send_round) => d,
         () = &mut readers => panic!("the program's output streams ended while the trial was running"),
         _ = &mut timers_running => panic!("a timer port closed while the trial was running"),
+        () = &mut writers => unreachable!(),
     };
     let driven = match driven {
         Ok(d) => d,
@@ -1302,6 +1493,7 @@ where
         () = tokio::time::sleep(run.grace) => {}
         () = &mut readers => panic!("the program's output streams ended while the trial was running"),
         _ = &mut timers_running => panic!("a timer port closed while the trial was running"),
+        () = &mut writers => unreachable!(),
     }
 
     // The id overlay: explicit completions, or else the one conserved stream whose records carry
@@ -1328,6 +1520,18 @@ where
         eprintln!("  reading goodput and latency from the ids in `{name}`");
     }
     let mut trace = recorder.trace(profile.total(), completion_stream.as_deref());
+    let (feed_records, feed_late, feed_max_lag, feed_per_second) = feed_stats.summary();
+    trace.extra.push((
+        "feed_lag_ms".to_owned(),
+        (0..trace.buckets.len())
+            .map(|i| {
+                feed_per_second
+                    .get(i)
+                    .map(|d| d.as_secs_f64() * 1e3)
+                    .unwrap_or(0.0)
+            })
+            .collect(),
+    ));
 
     // Stop sampling (the last sample is the end of the grace period) and read the nodes' usage.
     let mut usage = Vec::new();
@@ -1380,6 +1584,9 @@ where
         by_id,
         rounds: driven.rounds,
         late: driven.late,
+        feed_records,
+        feed_late,
+        feed_max_lag,
         usage,
         limits,
     }
@@ -1451,6 +1658,18 @@ where
             };
             let ex = once(&spec).await;
             let mut verdict = judge_with_kinds(&ex.trace, &profile, &ex.kinds, ex.by_id);
+            if !ex.open_loop() && !ex.harness_bound() {
+                verdict.reason = format!(
+                    "not open-loop: {} of {} records entered the program more than {} ms after their scheduled arrival (worst {:.0} ms), so the offered load was paced by the program (the program's own reading was {}: {})",
+                    ex.feed_late,
+                    ex.feed_records,
+                    FEED_LATE.as_millis(),
+                    ex.feed_max_lag.as_secs_f64() * 1e3,
+                    verdict.outcome,
+                    verdict.reason
+                );
+                verdict.outcome = Outcome::Invalid;
+            }
             if ex.harness_bound() {
                 verdict.reason = format!(
                     "the generator fell behind on {} arrivals while no node was ever throttled: the harness, not the program, was the bottleneck (the program's own reading was {}: {})",
@@ -1503,12 +1722,40 @@ where
                 trigger_text,
                 verdict,
                 late: ex.late,
+                feed_late: ex.feed_late,
+                feed_max_lag: ex.feed_max_lag,
+                max_levels: ex
+                    .kinds
+                    .iter()
+                    .filter(|(_, k)| **k == StreamKind::Level)
+                    .map(|(n, _)| {
+                        let max = ex
+                            .trace
+                            .buckets
+                            .iter()
+                            .filter_map(|b| b.stream_values.get(n).copied())
+                            .fold(0.0, f64::max);
+                        (n.clone(), max)
+                    })
+                    .collect(),
                 usage: ex.usage,
                 limits: ex.limits,
                 host: host.clone(),
                 trace_path,
             };
             eprintln!("  [{}] {}", result.trigger, result.verdict);
+            eprintln!(
+                "    open loop: {}; {} records entered late, worst lag {:.1} ms; max levels: {}",
+                if result.feed_late == 0 && result.late == 0 { "yes" } else { "NO" },
+                result.feed_late,
+                result.feed_max_lag.as_secs_f64() * 1e3,
+                result
+                    .max_levels
+                    .iter()
+                    .map(|(n, v)| format!("{n}={v:.0}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
             for u in &result.usage {
                 eprintln!(
                     "    {} ({}): {:.3} cores mean, throttled in {:.0}% of periods ({:.0} ms)",
@@ -1626,9 +1873,11 @@ where
         let ex = once(&spec).await;
         let p = judge_probe(&ex, &profile, rate, reference);
         eprintln!(
-            "    probe {rate:>9.1}/s: offered {:.1}/s ({} late), goodput {:.1}%, {}{}{} → {}",
+            "    probe {rate:>9.1}/s: offered {:.1}/s ({} late, {} entered late, worst {:.0} ms), goodput {:.1}%, {}{}{} → {}",
             p.offered_rate,
             ex.late,
+            ex.feed_late,
+            ex.feed_max_lag.as_secs_f64() * 1e3,
             p.goodput * 100.0,
             if p.rising.is_empty() {
                 "levels flat".to_owned()
@@ -1735,7 +1984,8 @@ fn judge_probe(ex: &Executed, profile: &Profile, rate: f64, reference: &mut Opti
     // Arrivals the generator could not write on time: either the program pushed back (a full
     // socket, so it is not keeping up) or the harness could not keep up; either way the rate was
     // not offered open-loop.
-    let late_fraction = ex.late as f64 / ex.rounds.max(1) as f64;
+    let late_fraction = ex.late as f64 / ex.rounds.max(1) as f64
+        + ex.feed_late as f64 / ex.feed_records.max(1) as f64;
     let throttled = if ex.usage.is_empty() {
         0.0
     } else {
@@ -1858,7 +2108,7 @@ fn record_probe(run: &RunConfig, meta: &Meta, ex: &Executed, p: &ProbePoint) {
 // ---------------------------------------------------------------------------------------------
 // Reporting
 
-const RESULTS_HEADER: &str = "function\tconfiguration\ttrigger\tfactor\ttrial\tseed\tmu\tmu_source\tlambda\toutcome\ttail_goodput\ttail_p50_ms\ttail_p99_ms\ttail_abandoned\toutstanding\tlate\tby_id\trelative_goodput\tamplified_stream\tamplification\tnode_cores\tmax_throttled_fraction\tlimits\thost\treason\ttrace";
+const RESULTS_HEADER: &str = "function\tconfiguration\ttrigger\tfactor\ttrial\tseed\tmu\tmu_source\tlambda\toutcome\ttail_goodput\ttail_p50_ms\ttail_p99_ms\ttail_abandoned\toutstanding\tlate\tfeed_late\tfeed_max_lag_ms\tmax_levels\tby_id\trelative_goodput\tamplified_stream\tamplification\tnode_cores\tmax_throttled_fraction\tlimits\thost\treason\ttrace";
 
 /// Appends one row for `result` to `results.tsv`. A table with another header (from an older
 /// Sedge) is moved aside first.
@@ -1884,7 +2134,7 @@ fn record(run: &RunConfig, r: &TrialResult) {
         }
         writeln!(
             f,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{:.2}\t{}\t{:.3}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.3}\t{}\t{:.2}\t{}\t{:.3}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{:.2}\t{}\t{:.3}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{}\t{:.3}\t{}\t{:.2}\t{}\t{:.3}\t{}\t{}\t{}\t{}",
             r.function,
             r.configuration,
             r.trigger,
@@ -1901,6 +2151,13 @@ fn record(run: &RunConfig, r: &TrialResult) {
             r.verdict.tail.abandoned,
             r.verdict.outstanding,
             r.late,
+            r.feed_late,
+            r.feed_max_lag.as_secs_f64() * 1e3,
+            r.max_levels
+                .iter()
+                .map(|(n, v)| format!("{n}={v:.0}"))
+                .collect::<Vec<_>>()
+                .join(","),
             r.verdict.by_id,
             r.verdict.relative_goodput,
             r.verdict.amplification.0,
@@ -2027,6 +2284,7 @@ mod tests {
             mu: None,
             cpus: Some(0.3),
             role_cpus: vec![("Server", 0.2)],
+            cpu_period_us: None,
             roles: &["Client", "Server"],
         }
     }
@@ -2042,12 +2300,19 @@ mod tests {
         let run = parse(&["--backend", "docker", "--cpus", "0.5", "--cpus", "server=0.25"]).unwrap();
         assert_eq!(run.capacity.limits(&m, "Server").cpu.unwrap().quota_us, 2500);
         assert_eq!(run.capacity.limits(&m, "Client").cpu.unwrap().quota_us, 5000);
-        let m2 = Meta { cpus: None, role_cpus: vec![], ..meta() };
+        // Nobody caps the client: no quota, but it still gets the nodes' cpuset.
+        let m2 = Meta { cpus: None, ..meta() };
         let run = parse(&["--backend", "docker"]).unwrap();
-        assert_eq!(
-            run.capacity.limits(&m2, "Client").cpu.unwrap().cores(),
-            DEFAULT_CPUS
-        );
+        assert_eq!(run.capacity.limits(&m2, "Client").cpu, None);
+        assert!(run.capacity.limits(&m2, "Client").cpuset.is_some() || run.capacity.node_cpuset.is_none());
+        assert_eq!(run.capacity.limits(&m2, "Server").cpu.unwrap().quota_us, 2000);
+        // `none` at any level means no quota.
+        let run = parse(&["--backend", "docker", "--cpus", "Server=none"]).unwrap();
+        assert_eq!(run.capacity.limits(&m, "Server").cpu, None);
+        let m3 = Meta { role_cpus: vec![("Client", 0.0)], ..meta() };
+        let run = parse(&["--backend", "docker"]).unwrap();
+        assert_eq!(run.capacity.limits(&m3, "Client").cpu, None);
+        assert!(parse(&["--cpus", "Client=0"]).is_err());
     }
 
     #[test]

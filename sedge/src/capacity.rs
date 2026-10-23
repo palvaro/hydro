@@ -350,7 +350,7 @@ IFS=: read -ra libs <<< "${{LD_LIBRARY_PATH:-}}"
 for d in "${{libs[@]}}"; do add "$d" ro; done
 exec docker run --rm -i --init --name {name} --network host --user {user} \
   {limits} \
-  -e LD_LIBRARY_PATH -e TMPDIR="$tmp" -e RUST_BACKTRACE -e RUST_LOG -e RUST_MIN_STACK \
+  -e LD_LIBRARY_PATH -e TMPDIR="$tmp" -e RUST_BACKTRACE -e RUST_LOG -e RUST_MIN_STACK -e HYDRO_DEPLOY_SEND_BUFFER \
   "${{mounts[@]}}" {image} "$real" "$@"
 "#,
             node = h.node,
