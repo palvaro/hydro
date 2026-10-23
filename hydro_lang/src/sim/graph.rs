@@ -567,6 +567,12 @@ pub(super) fn compile_sim(bin: String, trybuild: TrybuildConfig) -> Result<TempP
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The source of the last simulation this thread generated, for codegen tests.
+    pub(crate) static LAST_SIM_SOURCE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
 #[expect(clippy::too_many_arguments, reason = "necessary for code generation")]
 pub(super) fn create_sim_graph_trybuild(
     process_graphs: BTreeMap<LocationId, DfirGraph>,
@@ -577,6 +583,7 @@ pub(super) fn create_sim_graph_trybuild(
     cluster_tick_graphs: BTreeMap<LocationId, DfirGraph>,
     extra_stmts_global: Vec<syn::Stmt>,
     extra_stmts_cluster: BTreeMap<LocationId, Vec<syn::Stmt>>,
+    network_hooks: bool,
 ) -> (String, TrybuildConfig) {
     let source_dir = cargo::manifest_dir().unwrap();
     let source_manifest = dependencies::get_manifest(&source_dir).unwrap();
@@ -584,7 +591,7 @@ pub(super) fn create_sim_graph_trybuild(
 
     let is_test = IS_TEST.load(std::sync::atomic::Ordering::Relaxed);
 
-    let generated_code = {
+    let mut generated_code = {
         let _span = tracing::debug_span!(target: "hydro_build", "sim_codegen").entered();
         compile_sim_graph_trybuild(
             process_graphs,
@@ -598,11 +605,25 @@ pub(super) fn create_sim_graph_trybuild(
             &crate_name,
         )
     };
+    if network_hooks {
+        // Lets the host install its `SimNetworkHook` in the dylib's copy of the runtime.
+        let root = get_this_crate();
+        generated_code.items.push(syn::parse_quote! {
+            #[unsafe(no_mangle)]
+            unsafe extern "Rust" fn __hydro_set_network_hook(
+                hook: ::core::option::Option<::std::rc::Rc<dyn #root::sim::network_hook::SimNetworkHook>>,
+            ) {
+                #root::sim::network_hook::rt::install(hook)
+            }
+        });
+    }
 
     let source = {
         let _span = tracing::debug_span!(target: "hydro_build", "unparse_source").entered();
         prettyplease::unparse(&generated_code)
     };
+    #[cfg(test)]
+    LAST_SIM_SOURCE.with(|last| *last.borrow_mut() = Some(source.clone()));
 
     let hash = format!("{:X}", Sha256::digest(&source))
         .chars()

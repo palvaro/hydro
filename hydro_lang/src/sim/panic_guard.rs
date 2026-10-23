@@ -16,7 +16,8 @@
 //!   longer catching), and on into the host, where `catch_unwind` and `#[should_panic]` see it
 //!   like any other.
 //! - **Host panics inside dylib callbacks.** Host code the dylib calls back into while a tick
-//!   runs (the log handlers) is run under [`catch_host`], which catches a panic on the host side,
+//!   runs (the log handlers, and the installed network hook through [`GuardedNetworkHook`]) is
+//!   run under [`catch_host`], which catches a panic on the host side,
 //!   stashes its payload and returns a harmless default. The guard around the tick asks the
 //!   handler after every poll, and the handler re-raises the stashed payload, unchanged, as soon
 //!   as the tick returns control.
@@ -33,8 +34,11 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
+use std::rc::Rc;
 
 use dfir_rs::scheduled::context::Context;
+
+use super::network_hook::SimNetworkHook;
 
 /// The host function the dylib reports to, passed to the dylib's `__hydro_runtime`.
 ///
@@ -148,5 +152,39 @@ pub(crate) fn catch_host<R>(default: R, f: impl FnOnce() -> R) -> R {
             });
             default
         }
+    }
+}
+
+/// The installed network hook as the dylib sees it: the callbacks the dylib makes mid-tick run
+/// under [`catch_host`]. The host calls the others directly on the inner hook.
+pub(crate) struct GuardedNetworkHook(pub(crate) Rc<dyn SimNetworkHook>);
+
+impl SimNetworkHook for GuardedNetworkHook {
+    fn on_send(
+        &self,
+        channel: usize,
+        from_member: Option<u32>,
+        to_member: Option<u32>,
+        payload: &[u8],
+        meta: Option<Vec<u8>>,
+    ) -> Option<u64> {
+        catch_host(None, || {
+            self.0
+                .on_send(channel, from_member, to_member, payload, meta)
+        })
+    }
+
+    fn on_recv(&self, channel: usize, to_member: Option<u32>, tag: u64) {
+        catch_host((), || self.0.on_recv(channel, to_member, tag))
+    }
+
+    fn on_output(
+        &self,
+        port: usize,
+        member: Option<u32>,
+        payload: &[u8],
+        meta: Option<Vec<u8>>,
+    ) -> bool {
+        catch_host(false, || self.0.on_output(port, member, payload, meta))
     }
 }

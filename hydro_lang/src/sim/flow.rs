@@ -12,6 +12,7 @@ use slotmap::{SecondaryMap, SparseSecondaryMap};
 use super::builder::SimBuilder;
 use super::compiled::{CompiledSim, CompiledSimInstance};
 use super::graph::{SimDeploy, SimExternal, SimNode, compile_sim, create_sim_graph_trybuild};
+use super::network_hook::{IrPassStage, LocationInfo};
 use crate::compile::builder::StmtId;
 use crate::compile::ir::HydroRoot;
 use crate::location::LocationKey;
@@ -80,8 +81,20 @@ pub struct SimFlow<'a> {
     pub(crate) operational_ports:
         std::collections::BTreeSet<crate::compile::builder::ExternalPortId>,
 
+    /// IR passes registered with [`Self::with_ir_pass`], in registration order.
+    pub(crate) ir_passes: Vec<(IrPassStage, IrPass<'a>)>,
+
+    /// Emit network hook points (see [`Self::with_network_hook_points`]).
+    pub(crate) network_hooks: bool,
+
+    /// Each location's Rust type name, for [`CompiledSim::locations`].
+    pub(crate) location_names: SecondaryMap<LocationKey, String>,
+
     pub(crate) _phantom: Invariant<'a>,
 }
+
+/// An IR pass registered with [`SimFlow::with_ir_pass`].
+pub(crate) type IrPass<'a> = Box<dyn FnOnce(&mut Vec<HydroRoot>) + 'a>;
 
 impl<'a> SimFlow<'a> {
     /// Compiles the program with forward provenance tracking. Every item carries the set of
@@ -95,6 +108,28 @@ impl<'a> SimFlow<'a> {
     /// lineage is distinguished from application data.
     pub fn with_provenance(mut self) -> Self {
         self.provenance = true;
+        self
+    }
+
+    /// Registers an IR pass to run when the simulation is compiled, after the passes registered
+    /// before it at the same [`IrPassStage`]. A pass may edit roots in place and append new ones.
+    /// `PostNetwork` passes run after `with_provenance`'s rewrite.
+    #[cfg(feature = "hydrofrac")]
+    pub fn with_ir_pass(
+        mut self,
+        stage: IrPassStage,
+        pass: impl FnOnce(&mut Vec<HydroRoot>) + 'a,
+    ) -> Self {
+        self.ir_passes.push((stage, Box::new(pass)));
+        self
+    }
+
+    /// Emits network hook points, which call the hook installed with
+    /// [`CompiledSim::set_network_hook`] (see [`super::network_hook`]). Without this call, the
+    /// generated code has none.
+    #[cfg(feature = "hydrofrac")]
+    pub fn with_network_hook_points(mut self) -> Self {
+        self.network_hooks = true;
         self
     }
 
@@ -318,6 +353,10 @@ impl<'a> SimFlow<'a> {
             channel_tables: BTreeMap::new(),
             crashable: self.crashable.iter().map(|(k, v)| (*k, *v)).collect(),
             crash_channel_vecs: BTreeMap::new(),
+            network_hooks: self.network_hooks,
+            channels: vec![],
+            pending_network_meta: None,
+            pending_output_port: None,
         };
 
         // Ensure the default (0) external is always present.
@@ -327,6 +366,13 @@ impl<'a> SimFlow<'a> {
                 shared_inner: self.externals_port_registry.clone(),
             },
         );
+
+        let (pre_network, post_network): (Vec<_>, Vec<_>) = std::mem::take(&mut self.ir_passes)
+            .into_iter()
+            .partition(|(stage, _)| *stage == IrPassStage::PreNetwork);
+        for (_, pass) in pre_network {
+            pass(&mut self.ir);
+        }
 
         let mut seen_tees_instantiate: HashMap<_, _> = HashMap::new();
         let mut seen_cluster_members = HashSet::new();
@@ -377,6 +423,9 @@ impl<'a> SimFlow<'a> {
         if self.provenance {
             super::provenance_ir::apply_provenance(&mut self.ir, &self.operational_ports);
         }
+        for (_, pass) in post_network {
+            pass(&mut self.ir);
+        }
 
         let mut seen_tees = HashMap::new();
         let mut built_tees = HashMap::new();
@@ -412,6 +461,22 @@ impl<'a> SimFlow<'a> {
                 .collect()
         }
 
+        let name = |key: LocationKey| self.location_names.get(key).cloned().unwrap_or_default();
+        #[expect(clippy::disallowed_methods, reason = "sorted below")]
+        let mut locations: Vec<LocationInfo> = (self.processes.keys())
+            .map(|key| LocationInfo {
+                id: LocationId::Process(key),
+                name: name(key),
+                members: None,
+            })
+            .chain(self.clusters.keys().map(|key| LocationInfo {
+                id: LocationId::Cluster(key),
+                name: name(key),
+                members: cluster_member_ids.get(&LocationId::Cluster(key)).cloned(),
+            }))
+            .collect();
+        locations.sort_by(|a, b| a.id.cmp(&b.id));
+
         let process_graphs = build_graphs(sim_emit.process_graphs);
         let cluster_graphs = build_graphs(sim_emit.cluster_graphs);
         let process_tick_graphs = build_graphs(sim_emit.process_tick_dfirs);
@@ -428,6 +493,7 @@ impl<'a> SimFlow<'a> {
             cluster_tick_graphs,
             sim_emit.extra_stmts_global,
             sim_emit.extra_stmts_cluster,
+            self.network_hooks,
         );
 
         let out = compile_sim(bin, trybuild).unwrap();
@@ -442,6 +508,10 @@ impl<'a> SimFlow<'a> {
             lib,
             externals_port_registry: self.externals_port_registry.take(),
             unit_test_fuzz_iterations: self.unit_test_fuzz_iterations,
+            network_hooks: self.network_hooks,
+            network_hook: RefCell::new(None),
+            channels: sim_emit.channels,
+            locations,
         }
     }
 

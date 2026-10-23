@@ -45,7 +45,9 @@ fn track_membership<'a, C, L: Location<'a>>(
     )
 }
 
-fn serialize_bincode_with_type(is_demux: bool, t_type: &syn::Type) -> syn::Expr {
+/// Staged serializer expression for a network channel carrying `t_type`, for IR passes.
+#[doc(hidden)]
+pub fn serialize_bincode_with_type(is_demux: bool, t_type: &syn::Type) -> syn::Expr {
     let root = get_this_crate();
 
     if is_demux {

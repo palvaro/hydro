@@ -158,6 +158,19 @@ impl ClosureExpr {
         self.singleton_refs.iter().any(|(_, is_mut)| *is_mut)
     }
 
+    /// The singleton references the closure captures, as `(HydroNode::Reference, is_mut)`; the
+    /// index of each names its local via [`crate::handoff_ref::handoff_ref_ident`].
+    #[doc(hidden)]
+    pub fn singleton_refs(&self) -> &[(HydroNode, bool)] {
+        &self.singleton_refs
+    }
+
+    /// Splits the closure into its expression and its captured references.
+    #[doc(hidden)]
+    pub fn into_parts(self) -> (DebugExpr, Vec<(HydroNode, bool)>) {
+        (self.expr, self.singleton_refs)
+    }
+
     pub fn deep_clone(&self, seen_tees: &mut SeenSharedNodes) -> Self {
         Self {
             expr: self.expr.clone(),
@@ -564,6 +577,19 @@ pub trait DfirBuilder {
         op_meta: &HydroIrOpMetadata,
         operator_tag: Option<&str>,
     );
+
+    /// Called just before [`Self::create_network`] for the same `tag_id`, with the channel's
+    /// name and the receiving node's metadata. The default ignores it.
+    fn network_metadata(
+        &mut self,
+        _tag_id: StmtId,
+        _name: Option<&str>,
+        _metadata: &HydroIrMetadata,
+    ) {
+    }
+
+    /// Called just before [`Self::create_external_output`] for the same `tag_id`, with its port.
+    fn external_output_metadata(&mut self, _tag_id: StmtId, _port: ExternalPortId) {}
 
     #[expect(clippy::too_many_arguments, reason = "TODO")]
     fn create_network(
@@ -1684,6 +1710,7 @@ impl HydroRoot {
             }
 
             HydroRoot::SendExternal {
+                to_port_id,
                 serialize_fn,
                 instantiate_fn,
                 input,
@@ -1712,6 +1739,7 @@ impl HydroRoot {
                             }
                         };
 
+                        graph_builders.external_output_metadata(stmt_id, *to_port_id);
                         graph_builders.create_external_output(
                             &input.metadata().location_id,
                             sink_expr,
@@ -5349,12 +5377,13 @@ impl HydroNode {
                     }
 
                     HydroNode::Network {
+                        name,
                         networking_info,
                         serialize,
                         deserialize,
                         instantiate_fn,
                         input,
-                        ..
+                        metadata,
                     } => {
                         let input_ident = ident_stack.pop().unwrap();
 
@@ -5380,6 +5409,11 @@ impl HydroNode {
                                     }
                                 };
 
+                                graph_builders.network_metadata(
+                                    stmt_id,
+                                    name.as_deref(),
+                                    metadata,
+                                );
                                 graph_builders.create_network(
                                     &input.metadata().location_id,
                                     &out_location,

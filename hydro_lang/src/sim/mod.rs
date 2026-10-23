@@ -90,6 +90,9 @@ pub mod provenance;
 pub mod feedback_campaign;
 
 #[cfg(stageleft_runtime)]
+pub mod network_hook;
+
+#[cfg(stageleft_runtime)]
 #[doc(hidden)]
 pub mod panic_guard;
 
@@ -156,3 +159,8 @@ mod tests;
 #[cfg(test)]
 #[path = "tests/dylib_panic.rs"]
 mod dylib_panic_tests;
+
+#[cfg(test)]
+#[cfg(feature = "hydrofrac")]
+#[path = "tests/network_hook.rs"]
+mod network_hook_tests;

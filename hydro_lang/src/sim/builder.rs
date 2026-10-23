@@ -48,6 +48,14 @@ pub struct SimBuilder {
     /// Per crashable location: the ident of its staged-channel registry, emitted
     /// (along with its `CrashHook` registration) on first use.
     pub crash_channel_vecs: BTreeMap<LocationKey, syn::Ident>,
+    /// Emit network hook points (see [`super::network_hook`]).
+    pub network_hooks: bool,
+    /// The channel table, one entry per `Network` node, in emission order.
+    pub channels: Vec<super::network_hook::ChannelInfo>,
+    /// Set by `network_metadata`, consumed by the `create_network` that follows.
+    pub pending_network_meta: Option<(StmtId, Option<String>, HydroIrOpMetadata)>,
+    /// Set by `external_output_metadata`, consumed by the `create_external_output` that follows.
+    pub pending_output_port: Option<(StmtId, usize)>,
 }
 
 impl SimBuilder {
@@ -1611,6 +1619,23 @@ impl DfirBuilder for SimBuilder {
         }
     }
 
+    fn network_metadata(
+        &mut self,
+        tag_id: StmtId,
+        name: Option<&str>,
+        metadata: &crate::compile::ir::HydroIrMetadata,
+    ) {
+        self.pending_network_meta = Some((tag_id, name.map(str::to_owned), metadata.op.clone()));
+    }
+
+    fn external_output_metadata(
+        &mut self,
+        tag_id: StmtId,
+        port: crate::compile::builder::ExternalPortId,
+    ) {
+        self.pending_output_port = Some((tag_id, port.into_inner()));
+    }
+
     fn create_network(
         &mut self,
         from: &LocationId,
@@ -1691,11 +1716,34 @@ impl DfirBuilder for SimBuilder {
             ),
         };
 
-        // What the sender puts on the wire: cluster senders tag the payload with their member id.
-        let wire: syn::Type = if from_cluster {
+        let Some((meta_id, name, op)) = self.pending_network_meta.take() else {
+            panic!("SimBuilder: network_metadata was not called before create_network")
+        };
+        assert_eq!(meta_id, tag_id, "SimBuilder: network_metadata for another network");
+        // Hook points intercept bincode channels only: embedded channels carry typed values.
+        let intercepted = self.network_hooks && external_element_type.is_none();
+        let channel_id = tag_id.into_inner();
+        self.channels.push(super::network_hook::ChannelInfo {
+            id: channel_id,
+            name,
+            from: from.clone(),
+            to: to.clone(),
+            networking: networking_info.clone(),
+            intercepted,
+            op,
+        });
+
+        // What the sender puts on the wire: cluster senders tag the payload with their member id,
+        // and intercepted channels carry the hook's `u64` tag.
+        let elem: syn::Type = if from_cluster {
             parse_quote!((#root::__staged::location::TaglessMemberId, #payload))
         } else {
             payload
+        };
+        let wire: syn::Type = if intercepted {
+            parse_quote!((u64, #elem))
+        } else {
+            elem
         };
 
         // The channel itself: one queue for a process receiver, one per member for a cluster.
@@ -1754,10 +1802,15 @@ impl DfirBuilder for SimBuilder {
         } else {
             parse_quote!(0)
         };
-        let item: syn::Expr = if from_cluster {
+        let elem_expr: syn::Expr = if from_cluster {
             parse_quote!((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v))
         } else {
             parse_quote!(v)
+        };
+        let item: syn::Expr = if intercepted {
+            parse_quote!((__hydro_net_tag, #elem_expr))
+        } else {
+            elem_expr
         };
         let deliver = |sink: &syn::Expr, recipient: &syn::Expr, item: &syn::Expr| -> syn::Expr {
             if to_cluster {
@@ -1812,7 +1865,34 @@ impl DfirBuilder for SimBuilder {
         } else {
             deliver(&parse_quote!(#sink), &recipient, &item)
         };
-        let send_closure: syn::Expr = parse_quote!(|#send_pat| #send_stmt);
+        let send_closure: syn::Expr = if intercepted {
+            let member = |cluster: bool, id: syn::Expr| -> syn::Expr {
+                if cluster {
+                    parse_quote!(::core::option::Option::Some(#id))
+                } else {
+                    parse_quote!(::core::option::Option::None)
+                }
+            };
+            let from_member = member(from_cluster, parse_quote!(__current_cluster_id));
+            let to_member = member(
+                to_cluster,
+                parse_quote!(#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id)),
+            );
+            parse_quote! {
+                |#send_pat| {
+                    if let ::core::option::Option::Some(__hydro_net_tag) = #root::sim::network_hook::rt::on_send(
+                        #channel_id,
+                        #from_member,
+                        #to_member,
+                        ::core::convert::AsRef::<[u8]>::as_ref(&v),
+                    ) {
+                        #send_stmt;
+                    }
+                }
+            }
+        } else {
+            parse_quote!(|#send_pat| #send_stmt)
+        };
 
         if let Some(serialize_pipeline) = serialize {
             self.get_dfir_mut(from).add_dfir(
@@ -1832,10 +1912,27 @@ impl DfirBuilder for SimBuilder {
             );
         }
 
+        // Intercepted receives report to the hook (and expose the tag to a wrapped deserialize).
+        let recv_strip = if intercepted {
+            let to_member: syn::Expr = if to_cluster {
+                parse_quote!(::core::option::Option::Some(__current_cluster_id))
+            } else {
+                parse_quote!(::core::option::Option::None)
+            };
+            quote::quote! {
+                -> map(|(__hydro_net_tag, __hydro_net_item)| {
+                    #root::sim::network_hook::rt::on_recv(#channel_id, #to_member, __hydro_net_tag);
+                    __hydro_net_item
+                })
+            }
+        } else {
+            proc_macro2::TokenStream::new()
+        };
+
         if let Some(deserialize_pipeline) = deserialize {
             self.get_dfir_mut(to).add_dfir(
                 parse_quote! {
-                    #out_ident = source_stream(#source) #ok_wrap -> map(#deserialize_pipeline);
+                    #out_ident = source_stream(#source) #recv_strip #ok_wrap -> map(#deserialize_pipeline);
                 },
                 None,
                 Some(&format!("recv{}", tag_id)),
@@ -1843,7 +1940,7 @@ impl DfirBuilder for SimBuilder {
         } else {
             self.get_dfir_mut(to).add_dfir(
                 parse_quote! {
-                    #out_ident = source_stream(#source);
+                    #out_ident = source_stream(#source) #recv_strip;
                 },
                 None,
                 Some(&format!("recv{}", tag_id)),
@@ -1894,10 +1991,36 @@ impl DfirBuilder for SimBuilder {
             },
         );
 
+        let Some((port_id, port)) = self.pending_output_port.take() else {
+            panic!("SimBuilder: external_output_metadata was not called before create_external_output")
+        };
+        assert_eq!(port_id, tag_id, "SimBuilder: external_output_metadata for another output");
+        let send_closure: syn::Expr = if self.network_hooks {
+            let root = get_this_crate();
+            let member: syn::Expr = if matches!(on.root(), LocationId::Cluster(_)) {
+                parse_quote!(::core::option::Option::Some(__current_cluster_id))
+            } else {
+                parse_quote!(::core::option::Option::None)
+            };
+            parse_quote! {
+                |v| {
+                    if #root::sim::network_hook::rt::on_output(
+                        #port,
+                        #member,
+                        ::core::convert::AsRef::<[u8]>::as_ref(&v),
+                    ) {
+                        #grabbed_ident.try_send(v).unwrap();
+                    }
+                }
+            }
+        } else {
+            parse_quote!(|v| #grabbed_ident.try_send(v).unwrap())
+        };
+
         if let Some(serialize_pipeline) = serialize {
             self.get_dfir_mut(on).add_dfir(
                 parse_quote! {
-                    #input_ident -> map(#serialize_pipeline) -> for_each(|v| #grabbed_ident.try_send(v).unwrap());
+                    #input_ident -> map(#serialize_pipeline) -> for_each(#send_closure);
                 },
                 None,
                 Some(&format!("send{}", tag_id)),
@@ -1905,7 +2028,7 @@ impl DfirBuilder for SimBuilder {
         } else {
             self.get_dfir_mut(on).add_dfir(
                 parse_quote! {
-                    #input_ident -> for_each(|v| #grabbed_ident.try_send(v).unwrap());
+                    #input_ident -> for_each(#send_closure);
                 },
                 None,
                 Some(&format!("send{}", tag_id)),

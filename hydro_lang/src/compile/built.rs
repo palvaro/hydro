@@ -195,6 +195,9 @@ impl<'a> BuiltFlow<'a> {
             unit_test_fuzz_iterations: 8192,
             provenance: false,
             operational_ports: self.operational_sim_ports,
+            ir_passes: Vec::new(),
+            network_hooks: false,
+            location_names: self.location_names,
             _phantom: PhantomData,
         }
     }
