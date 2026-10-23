@@ -996,21 +996,49 @@ pub fn rewrite(ir: &mut [HydroRoot]) {
 
                 // Pair-producing operators: the operator yields `(Tagged<A>, Tagged<B>)`; a
                 // wrapper merges the two provenances.
-                HydroNode::CrossProduct { metadata, .. }
-                | HydroNode::CrossSingleton { metadata, .. } => {
+                HydroNode::CrossProduct {
+                    left,
+                    right,
+                    metadata,
+                }
+                | HydroNode::CrossSingleton {
+                    left,
+                    right,
+                    metadata,
+                } => {
                     assert_eq!(
                         out_rep,
                         Rep::Flat,
                         "provenance rewrite: keyed cross product"
                     );
+                    // An input may still be keyed (`(K, Tagged<V>)`): a keyed stream crossed
+                    // with a singleton lowers to a flat cross product of its entries. The merge
+                    // then re-keys that side as it unions the two provenances.
+                    let merge: syn::Expr = match (input_rep(left), input_rep(right)) {
+                        (Rep::Flat, Rep::Flat) => {
+                            parse_quote!(#root::sim::runtime::codegen::merge_pair)
+                        }
+                        (Rep::Keyed, Rep::Flat) => {
+                            parse_quote!(#root::sim::runtime::codegen::merge_pair_keyed_left)
+                        }
+                        (Rep::Flat, Rep::Keyed) => {
+                            parse_quote!(#root::sim::runtime::codegen::merge_pair_keyed_right)
+                        }
+                        (Rep::Keyed, Rep::Keyed) => {
+                            parse_quote!(#root::sim::runtime::codegen::merge_pair_keyed_both)
+                        }
+                    };
+                    let flat_inputs = input_rep(left) == Rep::Flat && input_rep(right) == Rep::Flat;
                     let mut tagged_meta = metadata.clone();
                     tag_kind(&mut tagged_meta.collection_kind);
-                    let pair = tag_pair_type(&element_type(&metadata.collection_kind), false);
+                    let pair = if flat_inputs {
+                        tag_pair_type(&element_type(&metadata.collection_kind), false)
+                    } else {
+                        let any: syn::Type = parse_quote!((_, _));
+                        DebugType::from(any)
+                    };
                     set_element_type(&mut metadata.collection_kind, pair);
-                    post = Some((
-                        parse_quote!(#root::sim::runtime::codegen::merge_pair),
-                        tagged_meta,
-                    ));
+                    post = Some((merge, tagged_meta));
                 }
                 HydroNode::Join {
                     left,
@@ -1049,21 +1077,21 @@ pub fn rewrite(ir: &mut [HydroRoot]) {
                     ));
                 }
                 HydroNode::AntiJoin { pos, neg, metadata } => {
-                    // `pos` is `(K, V)`, `neg` is `K`; the output is `(K, V)`.
-                    assert_eq!(
-                        input_rep(pos),
-                        Rep::Flat,
-                        "provenance rewrite: keyed anti_join input"
-                    );
-                    let mut pos_meta = pos.metadata().clone();
-                    let keyed = tag_value_type(&element_type(&pos.metadata().collection_kind));
-                    set_element_type(&mut pos_meta.collection_kind, keyed);
-                    let old = std::mem::replace(pos.as_mut(), HydroNode::Placeholder);
-                    **pos = map_node(
-                        parse_quote!(#root::sim::runtime::codegen::key_out),
-                        old,
-                        pos_meta,
-                    );
+                    // `pos` is `(K, V)`, `neg` is `K`; the output is `(K, V)`. The anti-join runs
+                    // on `(K, Tagged<V>)`: a flat `pos` (`Tagged<(K, V)>`) is keyed first, and a
+                    // keyed one (a `KeyedSingleton`/`KeyedStream`, as `filter_key_not_in`
+                    // produces) already has that shape.
+                    if input_rep(pos) == Rep::Flat {
+                        let mut pos_meta = pos.metadata().clone();
+                        let keyed = tag_value_type(&element_type(&pos.metadata().collection_kind));
+                        set_element_type(&mut pos_meta.collection_kind, keyed);
+                        let old = std::mem::replace(pos.as_mut(), HydroNode::Placeholder);
+                        **pos = map_node(
+                            parse_quote!(#root::sim::runtime::codegen::key_out),
+                            old,
+                            pos_meta,
+                        );
+                    }
                     let neg_meta = neg.metadata().clone();
                     let old = std::mem::replace(neg.as_mut(), HydroNode::Placeholder);
                     **neg = map_node(
@@ -1071,14 +1099,19 @@ pub fn rewrite(ir: &mut [HydroRoot]) {
                         old,
                         neg_meta,
                     );
-                    let mut tagged_meta = metadata.clone();
-                    tag_kind(&mut tagged_meta.collection_kind);
-                    let keyed = tag_value_type(&element_type(&metadata.collection_kind));
-                    set_element_type(&mut metadata.collection_kind, keyed);
-                    post = Some((
-                        parse_quote!(#root::sim::runtime::codegen::key_in),
-                        tagged_meta,
-                    ));
+                    if out_rep == Rep::Keyed {
+                        // A keyed output keeps `(K, Tagged<V>)`, its native tagged form.
+                        tag_kind(&mut metadata.collection_kind);
+                    } else {
+                        let mut tagged_meta = metadata.clone();
+                        tag_kind(&mut tagged_meta.collection_kind);
+                        let keyed = tag_value_type(&element_type(&metadata.collection_kind));
+                        set_element_type(&mut metadata.collection_kind, keyed);
+                        post = Some((
+                            parse_quote!(#root::sim::runtime::codegen::key_in),
+                            tagged_meta,
+                        ));
+                    }
                 }
 
                 HydroNode::PartitionSide { .. }

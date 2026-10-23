@@ -40,6 +40,9 @@ pub mod pure_heartbeat;
 pub mod raft;
 #[cfg(test)]
 mod raft_ldfi;
+pub mod relay_broadcast;
+#[cfg(test)]
+mod relay_broadcast_ldfi;
 pub mod reliable_broadcast;
 pub mod rpc_retry;
 #[cfg(feature = "cress")]

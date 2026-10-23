@@ -2716,9 +2716,11 @@ fn location_for_op(op_meta: &HydroIrOpMetadata) -> (String, String, String) {
         .user_location()
         .and_then(|u| Some((u.file?.to_owned(), u.line, u.column.saturating_sub(1))))
         .or_else(|| {
-            op_meta.backtrace.elements().next().and_then(|e| {
-                Some((e.filename.as_deref()?.to_owned(), e.lineno?, e.colno?))
-            })
+            op_meta
+                .backtrace
+                .elements()
+                .next()
+                .and_then(|e| Some((e.filename.as_deref()?.to_owned(), e.lineno?, e.colno?)))
         });
 
     position

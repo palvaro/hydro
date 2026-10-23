@@ -91,14 +91,22 @@ pub fn bincode_serialize_fn<T: serde::Serialize + serde::de::DeserializeOwned>()
 /// The external output port a [`SimReceiver`] reads, so that a tool which only wants to count
 /// what a program's declared output produced can do so with [`drain_delivered`] without reading
 /// the items.
-pub fn receiver_port<T, O: crate::live_collections::stream::Ordering, R: crate::live_collections::stream::Retries>(
+pub fn receiver_port<
+    T,
+    O: crate::live_collections::stream::Ordering,
+    R: crate::live_collections::stream::Retries,
+>(
     receiver: &SimReceiver<T, O, R>,
 ) -> ExternalPortId {
     receiver.0
 }
 
 /// The external output port a [`SimClusterReceiver`] reads; see [`receiver_port`].
-pub fn cluster_receiver_port<T, O: crate::live_collections::stream::Ordering, R: crate::live_collections::stream::Retries>(
+pub fn cluster_receiver_port<
+    T,
+    O: crate::live_collections::stream::Ordering,
+    R: crate::live_collections::stream::Retries,
+>(
     receiver: &SimClusterReceiver<T, O, R>,
 ) -> ExternalPortId {
     receiver.0
@@ -165,6 +173,10 @@ pub fn hook_control(hook_id: usize, member: Option<u32>) -> HookControl {
 /// never can. The blob must encode the decision type the hook expects (`BatchDecision<T>` for a
 /// batch of a stream of `T`, and so on); a unit-payload variant such as `BatchDecision::<()>::All`
 /// encodes identically for every `T`.
-pub fn install_decision(hook_id: usize, member: Option<u32>, decision_blob: Vec<u8>) -> DecisionFuture {
+pub fn install_decision(
+    hook_id: usize,
+    member: Option<u32>,
+    decision_blob: Vec<u8>,
+) -> DecisionFuture {
     DecisionFuture::from_blob(hook_id, member, decision_blob)
 }

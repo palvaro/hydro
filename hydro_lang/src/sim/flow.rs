@@ -180,7 +180,10 @@ impl<'a> SimFlow<'a> {
     /// is the stand-in for `deterministic()` described there, to be deleted once
     /// `deterministic()` can take its place.
     pub fn run_prompt(self, thunk: impl AsyncFnOnce() + RefUnwindSafe) {
-        self.run_with_driver(super::prompt_schedule::PromptScheduleDriver::default(), thunk)
+        self.run_with_driver(
+            super::prompt_schedule::PromptScheduleDriver::default(),
+            thunk,
+        )
     }
 
     /// Compiles the simulation into a dynamically loadable library, and returns a handle to it.

@@ -872,6 +872,30 @@ pub mod codegen {
         Tagged((a, b), pa.union(&pb))
     }
 
+    /// [`merge_pair`] whose left side is still keyed (`(K, Tagged<V>)`).
+    pub fn merge_pair_keyed_left<K, V, B>(
+        pair: ((K, Tagged<V>), Tagged<B>),
+    ) -> Tagged<((K, V), B)> {
+        let ((k, Tagged(v, pa)), Tagged(b, pb)) = pair;
+        Tagged(((k, v), b), pa.union(&pb))
+    }
+
+    /// [`merge_pair`] whose right side is still keyed (`(K, Tagged<V>)`).
+    pub fn merge_pair_keyed_right<A, K, V>(
+        pair: (Tagged<A>, (K, Tagged<V>)),
+    ) -> Tagged<(A, (K, V))> {
+        let (Tagged(a, pa), (k, Tagged(v, pb))) = pair;
+        Tagged((a, (k, v)), pa.union(&pb))
+    }
+
+    /// [`merge_pair`] whose two sides are still keyed.
+    pub fn merge_pair_keyed_both<K1, V1, K2, V2>(
+        pair: ((K1, Tagged<V1>), (K2, Tagged<V2>)),
+    ) -> Tagged<((K1, V1), (K2, V2))> {
+        let ((k1, Tagged(v1, pa)), (k2, Tagged(v2, pb))) = pair;
+        Tagged(((k1, v1), (k2, v2)), pa.union(&pb))
+    }
+
     /// `Tagged((k, v))` → `(k, Tagged(v))`, for operators that key on the first component.
     pub fn key_out<K, V>(item: Tagged<(K, V)>) -> (K, Tagged<V>) {
         let Tagged((k, v), p) = item;
