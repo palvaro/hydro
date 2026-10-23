@@ -1,0 +1,1748 @@
+From 2b63bb833930d0ccebbd943189d7fe6cde67cdb4 Mon Sep 17 00:00:00 2001
+From: Peter Alvaro <palvarox@amazon.com>
+Date: Fri, 23 Oct 2026 23:17:20 +0000
+Subject: [PATCH] WIP: lamport trims
+
+---
+ hydrofrac/src/check/engine.rs  |  26 +-
+ hydrofrac/src/lamport/dot.rs   | 925 +++++++--------------------------
+ hydrofrac/src/lamport/mod.rs   | 163 +++---
+ hydrofrac/src/lamport/out.rs   |  83 ++-
+ hydrofrac/src/lamport/tests.rs |  94 +---
+ 5 files changed, 305 insertions(+), 986 deletions(-)
+
+diff --git a/hydrofrac/src/check/engine.rs b/hydrofrac/src/check/engine.rs
+index d4a6c46e42..e3e129bd7b 100644
+--- a/hydrofrac/src/check/engine.rs
++++ b/hydrofrac/src/check/engine.rs
+@@ -851,22 +851,20 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
+                 &cex.faults,
+                 &lamport_labels,
+             );
+-            let opts = crate::lamport::Options {
+-                title: Some({
+-                    let facts = counterexample_facts(cex, labels);
+-                    let names = ReportNames::new(self.tables.names(), self.sim.channels())
+-                        .with_facts(facts.iter());
+-                    let line = verdict_line(&Verdict::Counterexample(cex.clone()), &names, |j| {
+-                        labels
+-                            .plans
+-                            .get(j)
+-                            .map_or_else(|| format!("label {j}"), label_name)
+-                    });
+-                    format!("{name}: {line}")
+-                }),
++            let title = {
++                let facts = counterexample_facts(cex, labels);
++                let names = ReportNames::new(self.tables.names(), self.sim.channels())
++                    .with_facts(facts.iter());
++                let line = verdict_line(&Verdict::Counterexample(cex.clone()), &names, |j| {
++                    labels
++                        .plans
++                        .get(j)
++                        .map_or_else(|| format!("label {j}"), label_name)
++                });
++                format!("{name}: {line}")
+             };
+             let dir = crate::lamport::claim(crate::lamport::default_dir(&test, &name));
+-            cex.diagram = crate::lamport::write(&dir, "counterexample", &trace, &opts)
++            cex.diagram = crate::lamport::write(&dir, "counterexample", &trace, &title)
+                 .ok()
+                 .map(|w| w.path().to_path_buf());
+         }
+diff --git a/hydrofrac/src/lamport/dot.rs b/hydrofrac/src/lamport/dot.rs
+index 3ecbda1af0..f30decc66e 100644
+--- a/hydrofrac/src/lamport/dot.rs
++++ b/hydrofrac/src/lamport/dot.rs
+@@ -1,83 +1,24 @@
+-//! The DOT backend: Molly's spacetime layout with every position pinned (`neato -n2`).
++//! The DOT backend: Molly's spacetime layout, one lane per node and time flowing down, with every
++//! position pinned (render with `neato -n2`).
+ 
+-use std::collections::HashSet;
+ use std::fmt::Write as _;
+ 
+-use super::{Trace, TraceEventKind, TraceMessage};
++use super::{Trace, TraceEventKind};
+ use crate::fault::Fate;
+ 
+ /// Labels longer than this many characters are cut; their full text goes to the legend.
+ const MAX_LABEL: usize = 40;
+-
+-/// How [`dot`] draws a [`Trace`].
+-#[derive(Clone, Debug, Default)]
+-pub struct Options {
+-    /// A title (for instance the label and the verdict).
+-    pub title: Option<String>,
+-}
+-
+-impl Options {
+-    /// Sets the title.
+-    #[must_use]
+-    pub fn title(mut self, title: impl Into<String>) -> Self {
+-        self.title = Some(title.into());
+-        self
+-    }
+-}
+-
+-/// Drops module paths from type names in a `Debug` rendering: `a::b::Name` becomes `Name`, and
+-/// `MemberId::<crate::m::Role>(1)` becomes `MemberId::<Role>(1)`.
+-pub(super) fn strip_paths(text: &str) -> String {
+-    let bytes = text.as_bytes();
+-    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+-    let mut out = String::with_capacity(text.len());
+-    let mut i = 0;
+-    while i < bytes.len() {
+-        if is_ident(bytes[i]) && (i == 0 || !is_ident(bytes[i - 1])) {
+-            let mut j = i;
+-            while j < bytes.len() && is_ident(bytes[j]) {
+-                j += 1;
+-            }
+-            if bytes.get(j) == Some(&b':')
+-                && bytes.get(j + 1) == Some(&b':')
+-                && bytes.get(j + 2).is_some_and(|b| is_ident(*b))
+-            {
+-                i = j + 2;
+-                continue;
+-            }
+-            out.push_str(&text[i..j]);
+-            i = j;
+-            continue;
+-        }
+-        let c = text[i..].chars().next().expect("in bounds");
+-        out.push(c);
+-        i += c.len_utf8();
+-    }
+-    out
+-}
+-
+-/// Breaks a long line into lines of about `width` characters at `, ` boundaries.
+-fn wrap(line: &str, width: usize) -> Vec<String> {
+-    let mut lines = vec![];
+-    let mut current = String::new();
+-    for (i, piece) in line.split(", ").enumerate() {
+-        if i > 0 {
+-            current.push_str(", ");
+-        }
+-        if current.chars().count() + piece.chars().count() > width && !current.trim().is_empty() {
+-            lines.push(current.trim_end().to_owned());
+-            current = String::new();
+-        }
+-        current.push_str(piece);
+-    }
+-    if !current.is_empty() {
+-        lines.push(current);
+-    }
+-    lines
+-}
++const LANE: &str = "gray55";
++const LOST: &str = "#c0392b";
++const CRASHED: &str = "gray50";
++const HEAL: &str = "#27ae60";
++/// Vertical distance between consecutive ranks, in points.
++const RANK_GAP: f64 = 16.0;
++/// Approximate advance of one character of 9pt Helvetica, in points.
++const CHAR_WIDTH: f64 = 5.3;
+ 
+ /// Escapes text for a double-quoted DOT string.
+-pub(super) fn escape_dot(text: &str) -> String {
++pub(super) fn escape(text: &str) -> String {
+     let mut out = String::with_capacity(text.len());
+     for c in text.chars() {
+         match c {
+@@ -90,752 +31,246 @@ pub(super) fn escape_dot(text: &str) -> String {
+     out
+ }
+ 
+-/// Escapes text for a Graphviz HTML-like label.
+-pub(super) fn escape_html(text: &str) -> String {
+-    let mut out = String::with_capacity(text.len());
+-    for c in text.chars() {
+-        match c {
+-            '&' => out.push_str("&amp;"),
+-            '<' => out.push_str("&lt;"),
+-            '>' => out.push_str("&gt;"),
+-            '"' => out.push_str("&quot;"),
+-            '\n' => out.push_str("<BR/>"),
+-            c => out.push(c),
+-        }
+-    }
+-    out
+-}
+-
+-const LANE: &str = "gray55";
+-const DEAD_LANE: &str = "gray80";
+-const LOST: &str = "#c0392b";
+-const CRASHED: &str = "gray50";
+-const HEAL: &str = "#27ae60";
+-const REPEAT: &str = "gray45";
+-
+-/// Vertical distance between consecutive ranks, in points.
+-const RANK_GAP: f64 = 16.0;
+-
+-/// Approximate advance of one character of 9pt Helvetica, in points (generous, so that a wider
+-/// substitute font still fits).
+-const CHAR_WIDTH: f64 = 5.3;
+-
+-/// Height of a one-line 9pt label box, in points.
+-const LABEL_HEIGHT: f64 = 11.0;
+-
+-/// The longest legend entry kept, in characters.
+-const MAX_LEGEND: usize = 240;
+-
+-/// An axis-aligned box (center and size, in points) that text occupies.
+-#[derive(Clone, Copy, Debug)]
+-struct Box {
+-    x: f64,
+-    y: f64,
+-    w: f64,
+-    h: f64,
+-}
+-
+-// Free functions rather than methods: the staged copy of this crate keeps no inherent impls of
+-// private types.
+-
+-/// The box `chars` characters of `pt`-point text centered at `(x, y)` occupy.
+-fn text_box(x: f64, y: f64, chars: usize, pt: f64) -> Box {
+-    Box {
+-        x,
+-        y,
+-        w: CHAR_WIDTH * (pt / 9.0) * chars as f64 + 6.0,
+-        h: LABEL_HEIGHT * (pt / 9.0),
+-    }
+-}
+-
+-fn overlaps(a: &Box, b: &Box) -> bool {
+-    (a.x - b.x).abs() * 2.0 < a.w + b.w && (a.y - b.y).abs() * 2.0 < a.h + b.h
+-}
+-
+-/// Whether the segment from `a` to `b` passes through `bx` (Liang–Barsky clipping).
+-fn crossed_by(bx: &Box, a: (f64, f64), b: (f64, f64)) -> bool {
+-    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+-    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+-    for (p, q) in [
+-        (-dx, a.0 - (bx.x - bx.w / 2.0)),
+-        (dx, (bx.x + bx.w / 2.0) - a.0),
+-        (-dy, a.1 - (bx.y - bx.h / 2.0)),
+-        (dy, (bx.y + bx.h / 2.0) - a.1),
+-    ] {
+-        if p == 0.0 {
+-            if q < 0.0 {
+-                return false;
+-            }
+-        } else {
+-            let t = q / p;
+-            if p < 0.0 {
+-                t0 = t0.max(t);
+-            } else {
+-                t1 = t1.min(t);
+-            }
+-        }
+-    }
+-    t0 < t1
+-}
+-
+-/// Picks where a message's label goes: on its straight edge, in one of the lane gaps it
+-/// crosses, at the first spot that overlaps no `taken` box, is crossed by none of the other
+-/// edges (`lines`) and keeps clear of both lanes of the gap. Tries spots just above and below
+-/// the edge next, and falls back to the middle of the first gap.
+-fn place_label(
+-    from: (f64, f64),
+-    to: (f64, f64),
+-    lane_gap: f64,
+-    width: f64,
+-    taken: &[Box],
+-    lines: &[((f64, f64), (f64, f64))],
+-) -> (f64, f64) {
+-    let (xa, ya) = from;
+-    let (xb, yb) = to;
+-    let lanes_crossed = ((xb - xa).abs() / lane_gap).round().max(1.0) as usize;
+-    let dir = if xb >= xa { 1.0 } else { -1.0 };
+-    let at_x = |x: f64| ya + (x - xa) / (xb - xa) * (yb - ya);
+-    let clearance = width / 2.0 + 4.0;
+-    let mut fallback = None;
+-    for dy in [0.0, -(LABEL_HEIGHT + 1.0), LABEL_HEIGHT + 1.0] {
+-        for gap in 0..lanes_crossed {
+-            let left = xa + dir * gap as f64 * lane_gap;
+-            for t in [0.5, 0.4, 0.6, 0.3, 0.7, 0.2, 0.8] {
+-                if t * lane_gap < clearance || (1.0 - t) * lane_gap < clearance {
+-                    continue;
+-                }
+-                let x = left + dir * t * lane_gap;
+-                let candidate = Box {
+-                    x,
+-                    y: at_x(x) + dy,
+-                    w: width,
+-                    h: LABEL_HEIGHT,
+-                };
+-                if fallback.is_none() {
+-                    fallback = Some((candidate.x, candidate.y));
+-                }
+-                if !taken.iter().any(|b| overlaps(b, &candidate))
+-                    && !lines.iter().any(|(a, b)| crossed_by(&candidate, *a, *b))
+-                {
+-                    return (candidate.x, candidate.y);
+-                }
+-            }
+-        }
+-    }
+-    fallback.unwrap_or_else(|| {
+-        let x = xa + dir * 0.5 * lane_gap;
+-        (x, at_x(x))
+-    })
+-}
+-
+-/// Cuts long labels, keeping their full text in a numbered legend.
+-struct Legend {
+-    entries: Vec<String>,
+-    max: usize,
+-}
+-
+-/// `text` with module paths stripped, cut to `legend.max` characters with a reference to its
+-/// legend entry when it is longer.
+-fn cut(legend: &mut Legend, text: &str) -> String {
+-    let text = strip_paths(text);
+-    if text.chars().count() <= legend.max {
+-        return text;
++/// `text`, or its first characters and `…‹k›` when longer than [`MAX_LABEL`], with its full text
++/// as entry `k` of `legend`.
++fn cut(legend: &mut Vec<String>, text: &str) -> String {
++    if text.chars().count() <= MAX_LABEL {
++        return text.to_owned();
+     }
+-    let k = if let Some(i) = legend.entries.iter().position(|e| *e == text) {
++    let k = if let Some(i) = legend.iter().position(|e| e == text) {
+         i + 1
+     } else {
+-        legend.entries.push(text.clone());
+-        legend.entries.len()
++        legend.push(text.to_owned());
++        legend.len()
+     };
+-    let prefix: String = text
+-        .chars()
+-        .take(legend.max.saturating_sub(4).max(1))
+-        .collect();
++    let prefix: String = text.chars().take(MAX_LABEL - 4).collect();
+     format!("{prefix}…‹{k}›")
+ }
+ 
+-/// What one drawable item of the run is, for finding repeated rounds.
+-#[derive(PartialEq, Eq)]
+-enum Sig<'a> {
+-    Message {
+-        from: usize,
+-        to: usize,
+-        channel: &'a str,
+-        display: &'a str,
+-        fate: Fate,
+-        received: bool,
+-    },
+-    Output {
+-        node: usize,
+-        port: usize,
+-        display: &'a str,
+-    },
+-    /// A crash or the heal: never part of a repeated round.
+-    Barrier(usize),
+-}
+-
+-/// A round drawn once for `times` consecutive identical ones: the events of the first.
+-struct Repeat {
+-    events: Vec<usize>,
+-    times: usize,
+-}
+-
+-/// The longest round looked for, in items.
+-const MAX_ROUND: usize = 64;
+-
+-/// Finds consecutive identical rounds among the drawable items: returns the events of every
+-/// round after the first of each run of repeats (to hide), and the repeats.
+-fn collapse(trace: &Trace) -> (HashSet<usize>, Vec<Repeat>) {
+-    let mut items: Vec<(Sig<'_>, Vec<usize>)> = vec![];
+-    for (index, event) in trace.events.iter().enumerate() {
+-        match &event.kind {
+-            TraceEventKind::Send(m) => {
+-                let msg = &trace.messages[*m];
+-                items.push((
+-                    Sig::Message {
+-                        from: msg.from,
+-                        to: msg.to,
+-                        channel: &msg.channel,
+-                        display: &msg.display,
+-                        fate: msg.fate,
+-                        received: msg.recv_event.is_some(),
+-                    },
+-                    std::iter::once(index).chain(msg.recv_event).collect(),
+-                ));
+-            }
+-            TraceEventKind::Output { port, display } => {
+-                let node = event.node.expect("an output has a node");
+-                items.push((
+-                    Sig::Output {
+-                        node,
+-                        port: *port,
+-                        display,
+-                    },
+-                    vec![index],
+-                ));
+-            }
+-            TraceEventKind::Crash | TraceEventKind::Heal => {
+-                items.push((Sig::Barrier(index), vec![]));
+-            }
+-            TraceEventKind::Exec | TraceEventKind::Recv(_) => {}
+-        }
+-    }
+-    let same = |a: usize, b: usize, len: usize| (0..len).all(|j| items[a + j].0 == items[b + j].0);
+-    let mut hidden = HashSet::new();
+-    let mut repeats = vec![];
+-    let mut i = 0;
+-    while i < items.len() {
+-        // The round starting here that hides the most items (the shortest among equals).
+-        let mut best: Option<(usize, usize)> = None;
+-        for len in 1..=MAX_ROUND.min((items.len() - i) / 2) {
+-            let mut times = 1;
+-            while i + (times + 1) * len <= items.len() && same(i, i + times * len, len) {
+-                times += 1;
+-            }
+-            if times >= 2 && best.is_none_or(|(l, t)| (times - 1) * len > (t - 1) * l) {
+-                best = Some((len, times));
+-            }
+-        }
+-        match best {
+-            Some((len, times)) => {
+-                for (_, events) in &items[i + len..i + times * len] {
+-                    hidden.extend(events.iter().copied());
+-                }
+-                repeats.push(Repeat {
+-                    events: items[i..i + len]
+-                        .iter()
+-                        .flat_map(|(_, e)| e.iter().copied())
+-                        .collect(),
+-                    times,
+-                });
+-                i += times * len;
+-            }
+-            None => i += 1,
+-        }
+-    }
+-    (hidden, repeats)
+-}
+-
+-/// One thing drawn on a lane at a rank: the DOT node's name and its attributes.
+-struct LaneItem {
+-    rank: usize,
+-    node: usize,
+-    name: String,
+-    attrs: String,
+-}
+-
+-/// Renders the trace as a Graphviz DOT spacetime diagram (render with `neato -n2`).
++/// Renders the trace as a Graphviz DOT spacetime diagram, titled `title`.
+ ///
+-/// A lane per node, grouped by location with members in order, and time flowing down with one
+-/// rank per drawn instant in program order. Every position is pinned (`pos="x,y!"`), so lanes are
+-/// exactly vertical and as far apart as the longest label needs; message labels are placed here
+-/// too, each on its edge in a lane gap where nothing else is drawn. Only the instants that matter
+-/// are drawn: sends, receives, outputs, crashes and the heal.
+-pub fn dot(trace: &Trace, opts: &Options) -> String {
+-    // One lane per node, in node order.
+-    let lanes = trace.nodes.len();
+-    let (hidden, repeats) = collapse(trace);
+-    let dead_at = |node: usize, event: usize| trace.nodes[node].crash.is_some_and(|c| event > c);
+-
+-    // Ranks, in time order; 0 is the header row. A lost send gets an extra rank right below it
+-    // for the `✗` on the receiver's lane.
+-    let mut ranks = 1usize;
+-    let mut next_rank = || {
+-        ranks += 1;
+-        ranks - 1
+-    };
++/// Each send, receive, output, crash and the heal gets its own rank, in program order (a lost
++/// send gets a second one, for the `✗` on the receiver's lane). Lanes are as far apart as the
++/// longest message label needs; a message's label sits on its edge, in the first lane gap it
++/// crosses, and an output's note just right of its lane.
++pub fn dot(trace: &Trace, title: &str) -> String {
++    let mut rank = 0usize;
+     let mut event_rank: Vec<Option<usize>> = vec![None; trace.events.len()];
+     let mut lost_rank: Vec<Option<usize>> = vec![None; trace.messages.len()];
+-    let mut crash_rank: Vec<Option<usize>> = vec![None; trace.nodes.len()];
+-    let mut heal_rank: Option<usize> = None;
+-    for (index, event) in trace.events.iter().enumerate() {
+-        let Some(node) = event.node else {
+-            if event.kind == TraceEventKind::Heal && heal_rank.is_none() {
+-                heal_rank = Some(next_rank());
+-            }
+-            continue;
+-        };
+-        let drawn = !hidden.contains(&index)
+-            && match &event.kind {
+-                TraceEventKind::Send(_) | TraceEventKind::Output { .. } => true,
+-                TraceEventKind::Recv(m) => trace.messages[*m].recv_event == Some(index),
+-                TraceEventKind::Exec | TraceEventKind::Crash | TraceEventKind::Heal => false,
+-            };
+-        if drawn {
+-            event_rank[index] = Some(next_rank());
+-        }
+-        if let TraceEventKind::Send(m) = &event.kind
+-            && drawn
+-            && trace.messages[*m].fate != Fate::Delivered
++    let mut legend = vec![];
++    let mut text: Vec<String> = vec![String::new(); trace.events.len()];
++    for (i, event) in trace.events.iter().enumerate() {
++        if event.kind == TraceEventKind::Crash
++            && event.node.is_some_and(|n| trace.nodes[n].crash != Some(i))
+         {
+-            lost_rank[*m] = Some(next_rank());
+-        }
+-        if event.kind == TraceEventKind::Crash && trace.nodes[node].crash == Some(index) {
+-            crash_rank[node] = Some(next_rank());
+-        }
+-    }
+-    let horizon = next_rank();
+-
+-    // Labels, in time order (so legend numbers follow the run).
+-    let mut legend = Legend {
+-        entries: vec![],
+-        max: MAX_LABEL,
+-    };
+-    let mut message_text: Vec<Option<String>> = vec![None; trace.messages.len()];
+-    let mut output_text: Vec<Option<String>> = vec![None; trace.events.len()];
+-    for (index, event) in trace.events.iter().enumerate() {
+-        if event_rank[index].is_none() {
+             continue;
+         }
++        rank += 1;
++        event_rank[i] = Some(rank);
+         match &event.kind {
+             TraceEventKind::Send(m) => {
+                 let msg = &trace.messages[*m];
+-                message_text[*m] = Some(format!(
+-                    "{}: {}",
+-                    msg.channel,
+-                    cut(&mut legend, &msg.display)
+-                ));
++                text[i] = format!("{}: {}", msg.channel, cut(&mut legend, &msg.display));
++                if msg.fate != Fate::Delivered {
++                    rank += 1;
++                    lost_rank[*m] = Some(rank);
++                }
+             }
+             TraceEventKind::Output { display, .. } => {
+-                output_text[index] = Some(format!("⇒ {}", cut(&mut legend, display)));
++                text[i] = format!("⇒ {}", cut(&mut legend, display));
+             }
+             _ => {}
+         }
+     }
++    let horizon = rank + 1;
+ 
+-    // What each lane shows.
+-    let mut items: Vec<LaneItem> = vec![];
+-    for (node, rank) in crash_rank.iter().enumerate() {
+-        if let Some(rank) = *rank {
+-            items.push(LaneItem {
+-                rank,
+-                node,
+-                name: format!("crash{node}"),
+-                attrs: "shape=plaintext, style=filled, fillcolor=white, label=\"☠ crashed\", fontsize=11, margin=\"0.04,0\", height=0.16".to_owned(),
+-            });
+-        }
+-    }
+-    for (index, event) in trace.events.iter().enumerate() {
+-        let (Some(rank), Some(node)) = (event_rank[index], event.node) else {
+-            continue;
+-        };
+-        let attrs = match &event.kind {
+-            TraceEventKind::Send(_) | TraceEventKind::Recv(_) => {
+-                let color = if dead_at(node, index) {
+-                    CRASHED
+-                } else {
+-                    "black"
+-                };
+-                format!("shape=point, width=0.08, color=\"{color}\"")
+-            }
+-            TraceEventKind::Output { .. } => "shape=point, width=0.06, color=\"gray40\"".to_owned(),
+-            TraceEventKind::Exec | TraceEventKind::Crash | TraceEventKind::Heal => {
+-                unreachable!("only sends, receives and outputs have event ranks")
+-            }
+-        };
+-        items.push(LaneItem {
+-            rank,
+-            node,
+-            name: format!("e{index}"),
+-            attrs,
+-        });
+-    }
+-    for (index, m) in trace.messages.iter().enumerate() {
+-        let Some(rank) = lost_rank[index] else {
+-            continue;
+-        };
+-        let color = if m.fate == Fate::Omitted {
+-            LOST
+-        } else {
+-            CRASHED
+-        };
+-        items.push(LaneItem {
+-            rank,
+-            node: m.to,
+-            name: format!("lost{index}"),
+-            attrs: format!(
+-                "shape=plaintext, label=\"✗\", fontcolor=\"{color}\", fontsize=13, width=0.2, height=0.2, fixedsize=true, margin=0"
+-            ),
+-        });
+-    }
+-    for node in 0..lanes {
+-        items.push(LaneItem {
+-            rank: horizon,
+-            node,
+-            name: format!("end{node}"),
+-            attrs: format!("shape=point, width=0.04, color=\"{LANE}\""),
+-        });
+-    }
+-    items.sort_by_key(|item| item.rank);
+-
+-    // Message labels decide how far apart the lanes are.
+-    let longest = message_text
++    let longest = trace
++        .events
+         .iter()
+-        .flatten()
+-        .map(|t| t.chars().count())
++        .enumerate()
++        .filter(|(_, e)| matches!(e.kind, TraceEventKind::Send(_)))
++        .map(|(i, _)| text[i].chars().count())
+         .chain(trace.nodes.iter().map(|n| n.label.chars().count()))
+         .max()
+         .unwrap_or(0);
+-    let lane_gap = (CHAR_WIDTH * longest as f64 + 66.0).clamp(96.0, 400.0);
+-    let x = |lane: usize| lane as f64 * lane_gap;
++    let gap = (CHAR_WIDTH * longest as f64 + 66.0).clamp(96.0, 400.0);
++    let x = |lane: usize| lane as f64 * gap;
+     // `0.0 - …` rather than a negation: rank 0 must print as `0.0`, not `-0.0`.
+     let y = |rank: usize| 0.0 - rank as f64 * RANK_GAP;
+-    let pos = |lane: usize, rank: usize| format!("pos=\"{:.1},{:.1}!\"", x(lane), y(rank));
+-    let last_x = x(lanes.saturating_sub(1));
++    let pos = |x: f64, y: f64| format!("pos=\"{x:.1},{y:.1}!\"");
++    let last_x = x(trace.nodes.len().saturating_sub(1));
+ 
+-    let mut out = String::new();
+-    out.push_str("digraph lamport {\n");
++    let mut out = String::from("digraph lamport {\n");
+     out.push_str("    layout=neato;\n    splines=false;\n    overlap=true;\n    outputorder=edgesfirst;\n    pad=\"0.3,0.2\";\n");
+-    out.push_str("    node [fontname=\"Helvetica\", fontsize=10];\n");
+-    out.push_str("    edge [fontname=\"Helvetica\", fontsize=9];\n");
+-    let mut heading = String::new();
+-    if let Some(title) = &opts.title {
+-        let lines: Vec<String> = wrap(&strip_paths(title), 100)
+-            .iter()
+-            .map(|l| escape_html(l))
+-            .collect();
+-        let _ = write!(
+-            heading,
+-            "<FONT POINT-SIZE=\"12\">{}</FONT><BR/>",
+-            lines.join("<BR/>")
+-        );
++    out.push_str("    node [fontname=\"Helvetica\", fontsize=9];\n    edge [arrowsize=0.7];\n");
++    let mut heading: Vec<String> = vec![];
++    if !title.is_empty() {
++        heading.push(title.to_owned());
+     }
+     for (what, list) in [("faults", &trace.faults), ("never fired", &trace.unfired)] {
+-        if list.is_empty() {
+-            continue;
++        if !list.is_empty() {
++            heading.push(format!("{what}: {}", list.join(", ")));
+         }
+-        let line = format!("{what}: {}", strip_paths(&list.join(", ")));
+-        let lines: Vec<String> = wrap(&line, 110).iter().map(|l| escape_html(l)).collect();
+-        let _ = write!(
+-            heading,
+-            "<FONT POINT-SIZE=\"9\">{}</FONT><BR/>",
+-            lines.join("<BR/>")
+-        );
+     }
+-    let key = "— delivered    ⋯ in flight    ╌ ✗ omitted (red) / lost to a crash (gray)";
++    heading.push("— delivered    ⋯ in flight    ╌ ✗ omitted (red) / lost to a crash (gray)".into());
+     let _ = writeln!(
+         out,
+-        "    labelloc=t;\n    fontname=\"Helvetica\";\n    label=<{heading}<FONT POINT-SIZE=\"8\" COLOR=\"gray40\">{}</FONT>>;",
+-        escape_html(key)
++        "    labelloc=t;\n    fontname=\"Helvetica\";\n    fontsize=10;\n    label=\"{}\";",
++        escape(&heading.join("\n"))
+     );
+ 
+-    // The heal: a dashed rule across the lanes, labelled at the right.
+-    if let Some(rank) = heal_rank {
+-        let left = -0.3 * lane_gap.min(90.0);
+-        let right = last_x + 0.4 * lane_gap.min(90.0);
+-        let _ = writeln!(
+-            out,
+-            "    // the heal\n    heal_l [shape=point, style=invis, width=0.01, pos=\"{left:.1},{:.1}!\"];",
+-            y(rank)
+-        );
+-        let _ = writeln!(
+-            out,
+-            "    heal_r [shape=point, style=invis, width=0.01, pos=\"{right:.1},{:.1}!\"];",
+-            y(rank)
+-        );
+-        let _ = writeln!(
+-            out,
+-            "    t_heal [label=\"heal\", shape=plaintext, fontcolor=\"{HEAL}\", fontsize=9, margin=\"0.04,0\", height=0.12, pos=\"{:.1},{:.1}!\"];",
+-            right + 14.0,
+-            y(rank)
+-        );
+-        let _ = writeln!(
+-            out,
+-            "    heal_l -> heal_r [style=dashed, color=\"{HEAL}\", arrowhead=none];"
+-        );
+-    }
+-
+-    // Lanes: a header, then each item top to bottom, chained; the chain is faint and dotted once
+-    // the node has died.
+-    out.push_str("    // lanes\n");
++    // Every lane's points, as (lane, rank, DOT node name), chained into the lane below.
++    let mut items: Vec<(usize, usize, String)> = vec![];
+     for (lane, node) in trace.nodes.iter().enumerate() {
+         let _ = writeln!(
+             out,
+-            "    h{lane} [shape=box, style=\"rounded,filled\", fillcolor=\"#eeeeee\", color=\"#bbbbbb\", height=0.3, label=\"{}\", {}];",
+-            escape_dot(&node.label),
+-            pos(lane, 0)
++            "    h{lane} [shape=box, style=\"rounded,filled\", fillcolor=\"#eeeeee\", color=\"#bbbbbb\", fontsize=10, height=0.3, label=\"{}\", {}];",
++            escape(&node.label),
++            pos(x(lane), y(0))
+         );
+-    }
+-    let mut taken: Vec<Box> = vec![];
+-    for item in &items {
+-        let lane = item.node;
+         let _ = writeln!(
+             out,
+-            "    {} [{}, {}];",
+-            item.name,
+-            item.attrs,
+-            pos(lane, item.rank)
++            "    end{lane} [shape=point, width=0.04, color=\"{LANE}\", {}];",
++            pos(x(lane), y(horizon))
+         );
+-        if item.name.starts_with("crash") {
+-            taken.push(text_box(x(lane), y(item.rank), 9, 11.0));
+-        }
++        items.push((lane, horizon, format!("end{lane}")));
+     }
+-    for node in 0..lanes {
+-        let mut prev = format!("h{node}");
+-        let mut dead = false;
+-        let crash = format!("crash{node}");
+-        for item in items.iter().filter(|item| item.node == node) {
+-            let style = if dead {
+-                format!("style=dotted, color=\"{DEAD_LANE}\"")
+-            } else {
+-                format!("color=\"{LANE}\"")
+-            };
++    for (i, event) in trace.events.iter().enumerate() {
++        let Some(r) = event_rank[i] else { continue };
++        let Some(lane) = event.node else {
++            // The heal: a dashed rule across the lanes, labelled at the right.
++            let (left, right) = (-0.3 * gap.min(90.0), last_x + 0.4 * gap.min(90.0));
+             let _ = writeln!(
+                 out,
+-                "    {prev} -> {} [arrowhead=none, {style}];",
+-                item.name
++                "    heal_l [shape=point, style=invis, width=0.01, {}];\n    heal_r [shape=point, style=invis, width=0.01, {}];\n    t_heal [label=\"heal\", shape=plaintext, fontcolor=\"{HEAL}\", {}];\n    heal_l -> heal_r [style=dashed, color=\"{HEAL}\", arrowhead=none];",
++                pos(left, y(r)),
++                pos(right, y(r)),
++                pos(right + 14.0, y(r))
+             );
+-            if item.name == crash {
+-                dead = true;
+-            }
+-            prev.clone_from(&item.name);
+-        }
+-    }
+-
+-    // Outputs: a note just right of the lane, level with its instant.
+-    let mut notes = String::new();
+-    let mut right_extent = last_x + 24.0;
+-    for (index, event) in trace.events.iter().enumerate() {
+-        let (Some(rank), Some(text), Some(node)) =
+-            (event_rank[index], &output_text[index], event.node)
+-        else {
+             continue;
+         };
+-        let lane = node;
+-        let chars = text.chars().count();
+-        let bx = text_box(
+-            x(lane) + 7.0 + (CHAR_WIDTH * chars as f64 + 10.0) / 2.0,
+-            y(rank),
+-            chars,
+-            9.0,
+-        );
+-        let _ = writeln!(
+-            notes,
+-            "    o{index} [shape=note, fontsize=9, style=filled, fillcolor=\"#fff7d6\", color=\"gray40\", margin=\"0.05,0.02\", height=0.2, label=\"{}\", pos=\"{:.1},{:.1}!\"];",
+-            escape_dot(text),
+-            bx.x,
+-            bx.y
+-        );
+-        right_extent = right_extent.max(bx.x + bx.w / 2.0 + 12.0);
+-        taken.push(bx);
+-    }
+-    if !notes.is_empty() {
+-        out.push_str("    // outputs\n");
+-        out.push_str(&notes);
++        let dead = trace.nodes[lane].crash.is_some_and(|c| i > c);
++        let (name, attrs) = match &event.kind {
++            TraceEventKind::Crash => (
++                format!("crash{lane}"),
++                "shape=plaintext, style=filled, fillcolor=white, label=\"☠ crashed\", fontsize=11, margin=\"0.04,0\", height=0.16".to_owned(),
++            ),
++            TraceEventKind::Output { .. } => {
++                let note_x = x(lane) + 22.0 + CHAR_WIDTH * text[i].chars().count() as f64 / 2.0;
++                let _ = writeln!(
++                    out,
++                    "    o{i} [shape=note, style=filled, fillcolor=\"#fff7d6\", color=\"gray40\", margin=\"0.05,0.02\", height=0.2, label=\"{}\", {}];",
++                    escape(&text[i]),
++                    pos(note_x, y(r))
++                );
++                (format!("e{i}"), "shape=point, width=0.06, color=\"gray40\"".to_owned())
++            }
++            _ => {
++                let color = if dead { CRASHED } else { "black" };
++                (format!("e{i}"), format!("shape=point, width=0.08, color=\"{color}\""))
++            }
++        };
++        let _ = writeln!(out, "    {name} [{attrs}, {}];", pos(x(lane), y(r)));
++        items.push((lane, r, name));
+     }
+ 
+-    // Repeated rounds: a bracket right of everything, spanning the round drawn, labelled `×k`.
+-    let mut brackets = String::new();
+-    for (i, repeat) in repeats.iter().enumerate() {
+-        let drawn: Vec<usize> = repeat
+-            .events
+-            .iter()
+-            .filter_map(|e| event_rank[*e])
+-            .collect();
+-        let (Some(top), Some(bottom)) = (drawn.iter().min(), drawn.iter().max()) else {
++    // Messages: a straight edge (a self-send bends out of its lane through `via`), labelled.
++    for (index, m) in trace.messages.iter().enumerate() {
++        let Some(send_rank) = event_rank[m.send_event] else {
+             continue;
+         };
+-        let (ya, yb) = (y(*top) + 5.0, y(*bottom) - 5.0);
+-        let _ = writeln!(
+-            brackets,
+-            "    rep{i}a [shape=point, style=invis, width=0.01, pos=\"{right_extent:.1},{ya:.1}!\"];\n    rep{i}b [shape=point, style=invis, width=0.01, pos=\"{right_extent:.1},{yb:.1}!\"];\n    rep{i}a -> rep{i}b [arrowhead=tee, arrowtail=tee, dir=both, arrowsize=0.5, color=\"{REPEAT}\"];\n    rep{i}l [shape=plaintext, label=\"×{}\", fontsize=10, fontcolor=\"{REPEAT}\", tooltip=\"this round repeated {} times; drawn once\", pos=\"{:.1},{:.1}!\"];",
+-            repeat.times,
+-            repeat.times,
+-            right_extent + 16.0,
+-            (ya + yb) / 2.0
+-        );
+-    }
+-    if !brackets.is_empty() {
+-        out.push_str("    // repeated rounds, drawn once\n");
+-        out.push_str(&brackets);
+-    }
+-
+-    // Messages: a straight edge, and its label placed on the edge in a lane gap it crosses. A
+-    // message a node sends itself bends out of its lane through `via`, so it is visible.
+-    struct Drawn<'a> {
+-        index: usize,
+-        msg: &'a TraceMessage,
+-        to: String,
+-        kind: &'static str,
+-        line: String,
+-        head: &'static str,
+-        a: (f64, f64),
+-        b: (f64, f64),
+-    }
+-    let drawn: Vec<Drawn<'_>> = trace
+-        .messages
+-        .iter()
+-        .enumerate()
+-        .filter(|(_, m)| event_rank[m.send_event].is_some())
+-        .map(|(index, m)| {
+-            let (to, to_rank, kind, line, head) = match (m.fate, m.recv_event) {
+-                (Fate::Delivered, Some(recv)) => (
+-                    format!("e{recv}"),
+-                    event_rank[recv].expect("the receive of a drawn message is drawn"),
+-                    "",
+-                    String::new(),
+-                    "arrowsize=0.7",
+-                ),
+-                (Fate::Delivered, None) => (
+-                    format!("end{}", m.to),
+-                    horizon,
+-                    " (in flight)",
+-                    "style=dotted, ".to_owned(),
+-                    "arrowhead=open, arrowsize=0.7",
+-                ),
+-                (Fate::Omitted, _) => (
+-                    format!("lost{index}"),
+-                    lost_rank[index].expect("a lost message has its mark"),
+-                    " (omitted)",
+-                    format!("style=dashed, color=\"{LOST}\", "),
+-                    "arrowhead=none",
+-                ),
+-                (Fate::SenderDead, _) => (
++        let (to, to_rank, kind, style) = match (m.fate, m.recv_event) {
++            (Fate::Delivered, Some(recv)) => (
++                format!("e{recv}"),
++                event_rank[recv].unwrap(),
++                "",
++                String::new(),
++            ),
++            (Fate::Delivered, None) => (
++                format!("end{}", m.to),
++                horizon,
++                " (in flight)",
++                "style=dotted, arrowhead=open".to_owned(),
++            ),
++            (fate, _) => {
++                let (kind, color) = if fate == Fate::Omitted {
++                    (" (omitted)", LOST)
++                } else {
++                    (" (sender crashed)", CRASHED)
++                };
++                let r = lost_rank[index].expect("a lost message has its mark");
++                let _ = writeln!(
++                    out,
++                    "    lost{index} [shape=plaintext, label=\"✗\", fontcolor=\"{color}\", fontsize=13, width=0.2, height=0.2, fixedsize=true, margin=0, {}];",
++                    pos(x(m.to), y(r))
++                );
++                items.push((m.to, r, format!("lost{index}")));
++                (
+                     format!("lost{index}"),
+-                    lost_rank[index].expect("a lost message has its mark"),
+-                    " (sender crashed)",
+-                    format!("style=dashed, color=\"{CRASHED}\", "),
+-                    "arrowhead=none",
+-                ),
+-            };
+-            Drawn {
+-                index,
+-                msg: m,
+-                to,
+-                kind,
+-                line,
+-                head,
+-                a: (x(m.from), y(event_rank[m.send_event].expect("drawn"))),
+-                b: (x(m.to), y(to_rank)),
++                    r,
++                    kind,
++                    format!("style=dashed, color=\"{color}\", arrowhead=none"),
++                )
+             }
+-        })
+-        .collect();
+-    out.push_str("    // messages\n");
+-    let mut labels = String::new();
+-    for (i, d) in drawn.iter().enumerate() {
+-        let (index, m) = (d.index, d.msg);
+-        let (kind, line, head, a, b) = (d.kind, &d.line, d.head, d.a, d.b);
+-        let (from, to) = (format!("e{}", m.send_event), &d.to);
+-        let text = message_text[index]
+-            .as_deref()
+-            .expect("a drawn message has a label");
+-        let label = escape_dot(text);
+-        let fontcolor = match m.fate {
+-            Fate::Omitted => LOST,
+-            Fate::SenderDead => CRASHED,
+-            Fate::Delivered => "black",
+         };
+-        let width = CHAR_WIDTH * text.chars().count() as f64 + 6.0;
+-        let (lx, ly) = if a.0 == b.0 {
+-            // Bend 14pt out of the lane (to the left on the last lane) and label beside it.
+-            let last = m.from == lanes - 1 && lanes > 1;
+-            let dir = if last { -1.0 } else { 1.0 };
+-            let vx = a.0 + dir * 14.0;
+-            let vy = (a.1 + b.1) / 2.0;
+-            let _ = writeln!(
+-                out,
+-                "    via{index} [shape=point, style=invis, width=0.01, pos=\"{vx:.1},{vy:.1}!\"];"
+-            );
+-            let _ = writeln!(
+-                out,
+-                "    {from} -> via{index} [tooltip=\"{label}{kind}\", {line}arrowhead=none];"
+-            );
++        let label = escape(&text[m.send_event]);
++        let mut attrs = format!("tooltip=\"{label}{kind}\"");
++        if !style.is_empty() {
++            attrs = format!("{attrs}, {style}");
++        }
++        let (a, b) = ((x(m.from), y(send_rank)), (x(m.to), y(to_rank)));
++        let from = format!("e{}", m.send_event);
++        let width = CHAR_WIDTH * text[m.send_event].chars().count() as f64 + 6.0;
++        let (lx, ly) = if m.from == m.to {
++            let (vx, vy) = (a.0 + 14.0, (a.1 + b.1) / 2.0);
+             let _ = writeln!(
+                 out,
+-                "    via{index} -> {to} [tooltip=\"{label}{kind}\", {line}{head}];"
++                "    via{index} [shape=point, style=invis, width=0.01, {}];\n    {from} -> via{index} [{attrs}, arrowhead=none];\n    via{index} -> {to} [{attrs}];",
++                pos(vx, vy)
+             );
+-            (vx + dir * (width / 2.0 + 2.0), vy)
++            (vx + width / 2.0 + 2.0, vy)
+         } else {
+-            let _ = writeln!(
+-                out,
+-                "    {from} -> {to} [tooltip=\"{label}{kind}\", {line}{head}];"
+-            );
+-            let others: Vec<_> = drawn
+-                .iter()
+-                .enumerate()
+-                .filter(|(j, _)| *j != i)
+-                .map(|(_, o)| (o.a, o.b))
+-                .collect();
+-            place_label(a, b, lane_gap, width, &taken, &others)
++            let _ = writeln!(out, "    {from} -> {to} [{attrs}];");
++            let lx = a.0 + (b.0 - a.0).signum() * gap / 2.0;
++            (lx, a.1 + (lx - a.0) / (b.0 - a.0) * (b.1 - a.1))
++        };
++        let color = match m.fate {
++            Fate::Omitted => LOST,
++            Fate::SenderDead => CRASHED,
++            Fate::Delivered => "black",
+         };
+-        taken.push(Box {
+-            x: lx,
+-            y: ly,
+-            w: width,
+-            h: LABEL_HEIGHT,
+-        });
+         let _ = writeln!(
+-            labels,
+-            "    l{index} [shape=plaintext, style=filled, fillcolor=white, fontsize=9, fontcolor=\"{fontcolor}\", margin=\"0.03,0\", height=0.14, label=\"{label}\", pos=\"{lx:.1},{ly:.1}!\"];"
++            out,
++            "    l{index} [shape=plaintext, style=filled, fillcolor=white, fontcolor=\"{color}\", margin=\"0.03,0\", height=0.14, label=\"{label}\", {}];",
++            pos(lx, ly)
+         );
+     }
+-    out.push_str("    // message labels\n");
+-    out.push_str(&labels);
+ 
+-    // The legend: the full text of every label that was cut, under the diagram.
+-    if !legend.entries.is_empty() {
++    // Lanes: header to end through every point, faint and dotted once the node has died.
++    items.sort_by_key(|(_, r, _)| *r);
++    for lane in 0..trace.nodes.len() {
++        let (mut prev, mut dead) = (format!("h{lane}"), false);
++        for (_, _, name) in items.iter().filter(|(l, _, _)| *l == lane) {
++            let style = if dead {
++                "style=dotted, color=\"gray80\""
++            } else {
++                "color=\"gray55\""
++            };
++            let _ = writeln!(out, "    {prev} -> {name} [arrowhead=none, {style}];");
++            dead |= name.starts_with("crash");
++            prev.clone_from(name);
++        }
++    }
++
++    if !legend.is_empty() {
+         let mut rows = String::new();
+-        let mut widest = 0usize;
+-        for (i, entry) in legend.entries.iter().enumerate() {
+-            let mut text: String = entry.chars().take(MAX_LEGEND).collect();
+-            if entry.chars().count() > MAX_LEGEND {
+-                text.push('…');
+-            }
+-            let tag = format!("‹{}›", i + 1);
+-            widest = widest.max(tag.chars().count() + 2 + text.chars().count());
+-            let _ = write!(
+-                rows,
+-                "<TR><TD ALIGN=\"LEFT\">{tag}</TD><TD ALIGN=\"LEFT\">{}</TD></TR>",
+-                escape_html(&text)
+-            );
++        for (i, entry) in legend.iter().enumerate() {
++            let _ = write!(rows, "‹{}› {}\\l", i + 1, escape(entry));
+         }
+-        let w = CHAR_WIDTH * widest as f64;
+-        let h = (LABEL_HEIGHT + 2.0) * legend.entries.len() as f64;
+         let _ = writeln!(
+             out,
+-            "    // legend: labels cut short\n    legend [shape=plaintext, fontsize=9, label=<<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"1\">{rows}</TABLE>>, pos=\"{:.1},{:.1}!\"];",
+-            -0.3 * lane_gap.min(90.0) + w / 2.0,
+-            y(horizon) - 24.0 - h / 2.0
++            "    legend [shape=plaintext, label=\"{rows}\", {}];",
++            pos(last_x / 2.0, y(horizon) - 16.0 - 7.0 * legend.len() as f64)
+         );
+     }
+     out.push_str("}\n");
+diff --git a/hydrofrac/src/lamport/mod.rs b/hydrofrac/src/lamport/mod.rs
+index 51c3886268..72c1a5ff38 100644
+--- a/hydrofrac/src/lamport/mod.rs
++++ b/hydrofrac/src/lamport/mod.rs
+@@ -1,31 +1,13 @@
+-//! Lamport (spacetime) diagrams of a run, as Graphviz DOT (docs/design/hydrofrac-lite.md §4.6).
++//! Lamport (spacetime) diagrams of a counterexample, as Graphviz DOT
++//! (docs/design/hydrofrac-lite.md §4.7).
+ //!
+-//! [`trace`] reduces one instance's [`EventLog`] to a [`Trace`]: the nodes, the events in program
+-//! order, and every message with its send, its [`Fate`] and, if it was received, its receive.
+-//! [`dot`] draws the trace with one lane per node and time flowing down. A message is an edge
+-//! from the instant it was sent to the instant it was received, so a message sent before its
+-//! sender crashed and received afterwards starts above the crash mark. That is the reason a
+-//! sequence diagram (Mermaid) was rejected: it draws a message as one horizontal arrow and so
+-//! shows such a message as if the dead node sent it. [`write()`] writes `<name>.dot`, plus
+-//! `<name>.svg` when Graphviz is installed; [`default_dir`] is the conventional
+-//! `target/hydrofrac/<test>/<label>/`.
+-//!
+-//! What the diagram shows:
+-//! - omitted messages as red dashed edges ending in `✗` on the receiver's lane, and sends lost
+-//!   because the sender had crashed as gray ones;
+-//! - messages still in flight when the run ended as dotted edges to the bottom of the lane;
+-//! - crashes as `☠ crashed` marks that end the lane, and the heal (§4.6) as a dashed rule across
+-//!   all lanes;
+-//! - external outputs (observations) as notes beside their lane;
+-//! - the faults of the hypothesis, and any crash that never fired, in the title.
+-//!
+-//! Three fixes for legibility (§4.6):
+-//! - payloads and outputs are rendered by caller-supplied decoders ([`Labels`]), with a short
+-//!   hex prefix as the fallback;
+-//! - a label longer than 40 characters is cut, and its full text goes to a numbered legend under
+-//!   the diagram;
+-//! - consecutive identical rounds (the same messages, with the same fates, again and again) are
+-//!   drawn once, with a `×k` bracket beside them.
++//! [`trace_with`] reduces one instance's [`EventLog`] to a [`Trace`]; [`dot`] draws it with one
++//! lane per node and time flowing down, a message as an edge from its send to its receive. So a
++//! message sent before its sender crashed and received afterwards starts above the crash mark,
++//! which a sequence diagram (Mermaid) cannot show. Omitted messages end in a red `✗`, sends lost
++//! to a crash in a gray one, crashes are `☠ crashed` marks and the heal a dashed rule across the
++//! lanes. Labels longer than 40 characters are cut, with their full text in a legend.
++//! [`write()`] writes `<name>.dot`, plus `<name>.svg` when Graphviz is installed.
+ 
+ mod dot;
+ mod out;
+@@ -37,89 +19,72 @@ use std::fmt::Write as _;
+ 
+ use hydro_lang::sim::network_hook::ChannelInfo;
+ 
+-pub use self::dot::{Options, dot};
+-pub use self::out::{Written, claim, default_dir, sanitize, target_dir, test_name, write};
++pub use self::dot::dot;
++pub use self::out::{Written, claim, default_dir, sanitize, test_name, write};
+ use crate::fault::{DeliveryId, Event, EventLog, Fate, MessageId, NodeId, NodeNames};
+ use crate::search::{CrashAt, Fault, FaultSet, Node};
+ 
+ /// One lane: a process, or one member of a cluster.
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub struct TraceNode {
+-    /// The node's name (`label` or `label@member`, as [`NodeNames`] assigns it).
++    /// The node's name, as [`NodeNames`] assigns it.
+     pub label: Node,
+-    /// The node.
+     pub id: NodeId,
+-    /// The index into [`Trace::events`] of the node's crash, if a crash of the plan fired.
++    /// The index into [`Trace::events`] of the node's crash, if one fired.
+     pub crash: Option<usize>,
+ }
+ 
+ /// What happened at one event.
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub enum TraceEventKind {
+-    /// An execution started at the node (not drawn; kept for reference).
+-    Exec,
+-    /// The node sent message `messages[i]`.
++    /// The node sent `messages[i]`.
+     Send(usize),
+-    /// The node received message `messages[i]`.
++    /// The node received `messages[i]`.
+     Recv(usize),
+-    /// The node emitted a value on an external output.
+-    Output {
+-        /// The external port.
+-        port: usize,
+-        /// The value, rendered by [`Labels`].
+-        display: String,
+-    },
+-    /// A crash of the plan fired at the node: it sends and emits nothing more.
++    /// The node emitted `display` on external output `port`.
++    Output { port: usize, display: String },
++    /// A crash of the plan fired at the node.
+     Crash,
+-    /// The network healed (no node): no omission applies and no crash fires from here on.
++    /// The network healed (no node).
+     Heal,
+ }
+ 
+-/// One event, in program order: `events[i]` happened before `events[j]` when `i < j`.
++/// One event; `events[i]` happened before `events[j]` when `i < j`.
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub struct TraceEvent {
+-    /// The index into [`Trace::nodes`] of where it happened (`None` for [`TraceEventKind::Heal`]).
++    /// The index into [`Trace::nodes`] of where it happened (`None` for the heal).
+     pub node: Option<usize>,
+-    /// What happened.
+     pub kind: TraceEventKind,
+ }
+ 
+-/// One message: its send and, if it was received before the run ended, its receive.
++/// One message: its send and, if it was received, its receive (indices into [`Trace::events`]).
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub struct TraceMessage {
+-    /// Its identity (the search's message type).
+     pub msg: MessageId,
+-    /// Its delivery id in this run.
+     pub id: DeliveryId,
+-    /// The channel's name, or `c<id>` when the program did not name it.
++    /// The channel's name, or `c<id>`.
+     pub channel: String,
+     /// The payload, rendered by [`Labels`].
+     pub display: String,
+-    /// The index into [`Trace::nodes`] of the sender.
++    /// Sender and destination, as indices into [`Trace::nodes`].
+     pub from: usize,
+-    /// The index into [`Trace::nodes`] of the destination.
+     pub to: usize,
+-    /// The index into [`Trace::events`] of the send.
+     pub send_event: usize,
+-    /// The index into [`Trace::events`] of the receive, if the destination received it.
+     pub recv_event: Option<usize>,
+-    /// What happened to the send.
+     pub fate: Fate,
+ }
+ 
+ /// One run, ready to draw.
+ #[derive(Clone, Debug, Default, PartialEq, Eq)]
+ pub struct Trace {
+-    /// The lanes: every node that appears in the run or that the plan crashes, in node order
+-    /// (location, then member).
++    /// Every node that appears in the run or that the plan crashes, in node order.
+     pub nodes: Vec<TraceNode>,
+-    /// Every event, in program order.
+     pub events: Vec<TraceEvent>,
+     /// Every message, in send order.
+     pub messages: Vec<TraceMessage>,
+     /// The faults of the plan, rendered.
+     pub faults: Vec<String>,
+-    /// The crashes of the plan that never fired (their crash point was never reached).
++    /// The crashes of the plan that never fired.
+     pub unfired: Vec<String>,
+ }
+ 
+@@ -128,26 +93,14 @@ impl Trace {
+     pub fn node(&self, label: &str) -> Option<usize> {
+         self.nodes.iter().position(|n| n.label == label)
+     }
+-
+-    /// The index into [`Self::events`] of the heal, if the run healed.
+-    pub fn heal_event(&self) -> Option<usize> {
+-        self.events
+-            .iter()
+-            .position(|e| e.kind == TraceEventKind::Heal)
+-    }
+-
+-    /// The index into [`Self::messages`] of the message with delivery id `id`.
+-    pub fn message(&self, id: DeliveryId) -> Option<usize> {
+-        self.messages.iter().position(|m| m.id == id)
+-    }
+ }
+ 
+ type ChannelName<'a> = dyn Fn(usize) -> Option<String> + 'a;
+ type Payload<'a> = dyn Fn(&MessageId) -> String + 'a;
+ type OutputValue<'a> = dyn Fn(usize, &[u8]) -> String + 'a;
+ 
+-/// How a [`Trace`] renders channels, payloads and outputs. By default channels are `c<id>` and
+-/// payloads and outputs are a short hex prefix of their bytes ([`short_hex`]).
++/// How a [`Trace`] renders channels, payloads and outputs: by default `c<id>` and
++/// [`short_hex`].
+ pub struct Labels<'a> {
+     channel: Box<ChannelName<'a>>,
+     payload: Box<Payload<'a>>,
+@@ -176,7 +129,7 @@ impl<'a> Labels<'a> {
+         self
+     }
+ 
+-    /// Renders message payloads with `f` (for instance, `Debug` of the decoded value).
++    /// Renders message payloads with `f`.
+     #[must_use]
+     pub fn payloads(mut self, f: impl Fn(&MessageId) -> String + 'a) -> Self {
+         self.payload = Box::new(f);
+@@ -195,7 +148,7 @@ impl<'a> Labels<'a> {
+     }
+ }
+ 
+-/// The first 8 bytes of `bytes` in hex, with `…` when there are more.
++/// The first 8 bytes of `bytes` in hex, with `…` when there are more; `()` for none.
+ pub fn short_hex(bytes: &[u8]) -> String {
+     let mut out = String::new();
+     for b in bytes.iter().take(8) {
+@@ -210,19 +163,22 @@ pub fn short_hex(bytes: &[u8]) -> String {
+     out
+ }
+ 
+-/// The trace of one run with default [`Labels`]; see [`trace_with`].
++/// [`trace_with`] default [`Labels`].
+ pub fn trace(log: &EventLog, names: &NodeNames, faults: &FaultSet<MessageId>) -> Trace {
+     trace_with(log, names, faults, &Labels::default())
+ }
+ 
+-/// The trace of the run `log` recorded, under the plan `faults`, rendered with `labels`.
++/// The trace of the run `log` recorded under the plan `faults`, rendered with `labels`.
+ pub fn trace_with(
+     log: &EventLog,
+     names: &NodeNames,
+     faults: &FaultSet<MessageId>,
+     labels: &Labels<'_>,
+ ) -> Trace {
+-    let mut ids: BTreeSet<NodeId> = BTreeSet::new();
++    let mut ids: BTreeSet<NodeId> = faults
++        .iter()
++        .filter_map(|f| f.crashed_node().and_then(|n| names.id(n)).cloned())
++        .collect();
+     for event in log.events() {
+         match event {
+             Event::Exec { node, .. } | Event::Output { node, .. } | Event::Halted { node } => {
+@@ -238,11 +194,6 @@ pub fn trace_with(
+             Event::ExecEnd { .. } | Event::Heal => {}
+         }
+     }
+-    for fault in faults {
+-        if let Some(id) = fault.crashed_node().and_then(|n| names.id(n)) {
+-            ids.insert(id.clone());
+-        }
+-    }
+     let mut nodes: Vec<TraceNode> = ids
+         .into_iter()
+         .map(|id| TraceNode {
+@@ -263,10 +214,9 @@ pub fn trace_with(
+     for event in log.events() {
+         let at = events.len();
+         let (node, kind) = match event {
+-            Event::Exec { node, .. } => (Some(lane[node]), TraceEventKind::Exec),
+-            Event::ExecEnd { .. } => continue,
++            Event::Exec { .. } | Event::ExecEnd { .. } => continue,
+             Event::Sent { id, msg, fate, .. } => {
+-                let m = messages.len();
++                by_id.insert(*id, messages.len());
+                 messages.push(TraceMessage {
+                     msg: msg.clone(),
+                     id: *id,
+@@ -278,8 +228,10 @@ pub fn trace_with(
+                     recv_event: None,
+                     fate: *fate,
+                 });
+-                by_id.insert(*id, m);
+-                (Some(lane[&msg.from]), TraceEventKind::Send(m))
++                (
++                    Some(lane[&msg.from]),
++                    TraceEventKind::Send(messages.len() - 1),
++                )
+             }
+             Event::Recv { id, to, .. } => {
+                 let Some(&m) = by_id.get(id) else {
+@@ -298,23 +250,29 @@ pub fn trace_with(
+                 },
+             ),
+             Event::Halted { node } => {
+-                let n = lane[node];
+-                nodes[n].crash.get_or_insert(at);
+-                (Some(n), TraceEventKind::Crash)
++                nodes[lane[node]].crash.get_or_insert(at);
++                (Some(lane[node]), TraceEventKind::Crash)
+             }
+             Event::Heal => (None, TraceEventKind::Heal),
+         };
+         events.push(TraceEvent { node, kind });
+     }
+ 
+-    let describe = |fault: &Fault<MessageId>| match fault {
+-        Fault::Omit(m) => format!(
+-            "omit({}: {}→{} {})",
++    let message = |m: &MessageId, from: bool| {
++        let from = if from {
++            names.name(&m.from)
++        } else {
++            String::new()
++        };
++        let to = names.name(&m.to);
++        format!(
++            "{}: {from}→{to} {}",
+             labels.channel(m.channel),
+-            names.name(&m.from),
+-            names.name(&m.to),
+             (labels.payload)(m)
+-        ),
++        )
++    };
++    let describe = |fault: &Fault<MessageId>| match fault {
++        Fault::Omit(m) => format!("omit({})", message(m, true)),
+         Fault::Crash {
+             node,
+             at: CrashAt::BeforeAnySend,
+@@ -322,12 +280,7 @@ pub fn trace_with(
+         Fault::Crash {
+             node,
+             at: CrashAt::After(m),
+-        } => format!(
+-            "crash({node} after {}: →{} {})",
+-            labels.channel(m.channel),
+-            names.name(&m.to),
+-            (labels.payload)(m)
+-        ),
++        } => format!("crash({node} after {})", message(m, false)),
+     };
+     let unfired = faults
+         .iter()
+diff --git a/hydrofrac/src/lamport/out.rs b/hydrofrac/src/lamport/out.rs
+index ce05d3035e..931392ded6 100644
+--- a/hydrofrac/src/lamport/out.rs
++++ b/hydrofrac/src/lamport/out.rs
+@@ -1,17 +1,15 @@
+-//! Writing diagrams: `<name>.dot` always, `<name>.svg` when Graphviz is installed, under the
+-//! conventional `target/hydrofrac/<test>/<label>/` (docs/design/hydrofrac-lite.md §2, §4.6).
++//! Writing diagrams under the conventional `target/hydrofrac/<test>/<label>/`.
+ 
+ use std::collections::HashSet;
+ use std::path::{Path, PathBuf};
+ use std::process::{Command, Stdio};
+ use std::sync::Mutex;
+ 
+-use super::{Options, Trace, dot};
++use super::{Trace, dot};
+ 
+ /// Where [`write()`] put a diagram.
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub struct Written {
+-    /// The Graphviz source.
+     pub dot: PathBuf,
+     /// The rendering, if Graphviz's `neato` is on the `PATH`.
+     pub svg: Option<PathBuf>,
+@@ -24,63 +22,50 @@ impl Written {
+     }
+ }
+ 
+-/// Writes the diagram of `trace` to `<dir>/<name>.dot` (creating `dir`), and renders
+-/// `<dir>/<name>.svg` beside it when Graphviz is installed. `name` is [`sanitize`]d. Rendering
+-/// is best effort: Graphviz is not a build dependency, and its absence or failure only leaves the
+-/// `.svg` out.
+-pub fn write(dir: &Path, name: &str, trace: &Trace, opts: &Options) -> std::io::Result<Written> {
++/// Writes the diagram of `trace` to `<dir>/<name>.dot` and, best effort (Graphviz is not a
++/// build dependency), renders `<dir>/<name>.svg` beside it with `neato -n2`.
++pub fn write(dir: &Path, name: &str, trace: &Trace, title: &str) -> std::io::Result<Written> {
+     std::fs::create_dir_all(dir)?;
+     let path = dir.join(format!("{}.dot", sanitize(name)));
+-    std::fs::write(&path, dot(trace, opts))?;
+-    let svg = render_svg(&path);
+-    Ok(Written { dot: path, svg })
+-}
+-
+-/// Renders a pinned-position DOT file to SVG beside it with `neato -n2`, if it is on the `PATH`.
+-fn render_svg(dot: &Path) -> Option<PathBuf> {
+-    let svg = dot.with_extension("svg");
+-    let status = Command::new("neato")
++    std::fs::write(&path, dot(trace, title))?;
++    let svg = path.with_extension("svg");
++    let rendered = Command::new("neato")
+         .args(["-n2", "-Tsvg"])
+-        .arg(dot)
++        .arg(&path)
+         .arg("-o")
+         .arg(&svg)
+         .stdin(Stdio::null())
+         .stdout(Stdio::null())
+         .stderr(Stdio::null())
+         .status()
+-        .ok()?;
+-    (status.success() && svg.exists()).then_some(svg)
++        .is_ok_and(|s| s.success());
++    Ok(Written {
++        dot: path,
++        svg: (rendered && svg.exists()).then_some(svg),
++    })
+ }
+ 
+-/// The Cargo target directory: `$CARGO_TARGET_DIR` if set, else the nearest ancestor of the
+-/// running executable that holds Cargo's `CACHEDIR.TAG` (a test binary runs from
+-/// `<target>/<profile>/deps/`), else `target` in the working directory.
+-pub fn target_dir() -> PathBuf {
+-    if let Some(dir) = std::env::var_os("CARGO_TARGET_DIR").filter(|d| !d.is_empty()) {
+-        return PathBuf::from(dir);
+-    }
+-    std::env::current_exe()
+-        .ok()
+-        .and_then(|exe| {
++/// `<target>/hydrofrac/<test>/<label>/`, where `<target>` is `$CARGO_TARGET_DIR`, else the
++/// ancestor of the running executable holding Cargo's `CACHEDIR.TAG`, else `target`.
++pub fn default_dir(test: &str, label: &str) -> PathBuf {
++    let target = std::env::var_os("CARGO_TARGET_DIR")
++        .filter(|d| !d.is_empty())
++        .map(PathBuf::from)
++        .or_else(|| {
++            let exe = std::env::current_exe().ok()?;
+             exe.ancestors()
+                 .skip(1)
+                 .find(|dir| dir.join("CACHEDIR.TAG").is_file())
+                 .map(Path::to_path_buf)
+         })
+-        .unwrap_or_else(|| PathBuf::from("target"))
+-}
+-
+-/// The conventional diagram directory of `label` in test `test`:
+-/// `<target>/hydrofrac/<test>/<label>/`, both [`sanitize`]d.
+-pub fn default_dir(test: &str, label: &str) -> PathBuf {
+-    target_dir()
++        .unwrap_or_else(|| PathBuf::from("target"));
++    target
+         .join("hydrofrac")
+         .join(sanitize(test))
+         .join(sanitize(label))
+ }
+ 
+-/// The current test's name: the last `::` segment of the thread name libtest gives it, or
+-/// `run` outside a test.
++/// The current test's name (the last `::` segment of libtest's thread name), or `run`.
+ pub fn test_name() -> String {
+     match std::thread::current().name() {
+         Some(name) if name != "main" => name.rsplit("::").next().unwrap_or(name).to_owned(),
+@@ -88,8 +73,8 @@ pub fn test_name() -> String {
+     }
+ }
+ 
+-/// `name` as one file-system path component: ASCII letters, digits, `-`, `_` and `.` are kept,
+-/// and each run of anything else becomes one `_`.
++/// `name` as one path component: ASCII letters, digits, `-`, `_` and `.` are kept, and each run
++/// of anything else becomes one `_`.
+ pub fn sanitize(name: &str) -> String {
+     let mut out = String::new();
+     for c in name.chars() {
+@@ -100,14 +85,9 @@ pub fn sanitize(name: &str) -> String {
+         }
+     }
+     let out = out.trim_matches(|c| c == '_' || c == '.');
+-    if out.is_empty() {
+-        "_".to_owned()
+-    } else {
+-        out.to_owned()
+-    }
++    if out.is_empty() { "_" } else { out }.to_owned()
+ }
+ 
+-/// Directories handed out by [`claim`] in this process.
+ static CLAIMED: Mutex<Option<HashSet<PathBuf>>> = Mutex::new(None);
+ 
+ /// `dir`, or `dir-2`, `dir-3`, … if this process already claimed it (two checks of the same
+@@ -116,9 +96,10 @@ pub fn claim(dir: PathBuf) -> PathBuf {
+     let mut claimed = CLAIMED.lock().unwrap_or_else(|e| e.into_inner());
+     let claimed = claimed.get_or_insert_with(HashSet::new);
+     let mut candidate = dir.clone();
+-    let mut n = 1;
+-    while claimed.contains(&candidate) {
+-        n += 1;
++    for n in 2.. {
++        if !claimed.contains(&candidate) {
++            break;
++        }
+         let mut name = dir.file_name().unwrap_or_default().to_owned();
+         name.push(format!("-{n}"));
+         candidate = dir.with_file_name(name);
+diff --git a/hydrofrac/src/lamport/tests.rs b/hydrofrac/src/lamport/tests.rs
+index afc7720f7c..0804635320 100644
+--- a/hydrofrac/src/lamport/tests.rs
++++ b/hydrofrac/src/lamport/tests.rs
+@@ -8,7 +8,7 @@ use hydro_lang::location::LocationKey;
+ use hydro_lang::location::dynamic::LocationId;
+ use hydro_lang::sim::network_hook::{ChannelInfo, ExecKind, LocationInfo, Transport};
+ 
+-use super::dot::{escape_dot, escape_html, strip_paths};
++use super::dot::escape;
+ use super::*;
+ use crate::search::Fault;
+ 
+@@ -145,9 +145,9 @@ fn labels() -> Labels<'static> {
+         .outputs(|_, bytes| String::from_utf8_lossy(bytes).into_owned())
+ }
+ 
+-fn render(log: &Log, faults: &FaultSet<MessageId>, opts: &Options) -> (Trace, String) {
++fn render(log: &Log, faults: &FaultSet<MessageId>) -> (Trace, String) {
+     let trace = trace_with(&log.log(), &names(), faults, &labels());
+-    let out = dot(&trace, opts);
++    let out = dot(&trace, "");
+     (trace, out)
+ }
+ 
+@@ -178,14 +178,14 @@ fn a_message_in_flight_across_a_crash_starts_above_the_crash() {
+     log.halt("A");
+     log.exec("B").recv(first, 0, "B").recv(second, 0, "B");
+     let faults = [Fault::crash_after("A", Some(m2))].into_iter().collect();
+-    let (trace, out) = render(&log, &faults, &Options::default());
++    let (trace, out) = render(&log, &faults);
+     well_formed(&out);
+ 
+     let a = trace.node("A").unwrap();
+     let b = trace.node("B").unwrap();
+     let crash = trace.nodes[a].crash.expect("A crashed");
+     assert_eq!(trace.events[crash].kind, TraceEventKind::Crash);
+-    let m = trace.message(second).unwrap();
++    let m = trace.messages.iter().position(|m| m.id == second).unwrap();
+     let (send, recv) = (
+         trace.messages[m].send_event,
+         trace.messages[m].recv_event.unwrap(),
+@@ -222,7 +222,7 @@ fn an_omitted_message_ends_in_a_cross_on_the_receivers_lane() {
+     let (id, _) = log.send(0, "A", "B", "kept", Fate::Delivered);
+     log.exec("B").recv(id, 0, "B");
+     let faults = [Fault::Omit(m)].into_iter().collect();
+-    let (trace, out) = render(&log, &faults, &Options::default());
++    let (trace, out) = render(&log, &faults);
+     well_formed(&out);
+     let lost = trace
+         .messages
+@@ -256,14 +256,14 @@ fn a_node_crashed_from_the_start_loses_its_sends() {
+     log.halt("A").exec("A");
+     log.send(0, "A", "B", "never", Fate::SenderDead);
+     let faults = [Fault::crash_after("A", None)].into_iter().collect();
+-    let (trace, out) = render(&log, &faults, &Options::default());
++    let (trace, out) = render(&log, &faults);
+     well_formed(&out);
+     let a = trace.node("A").unwrap();
+     assert_eq!(trace.nodes[a].crash, Some(0));
+     assert!(out.contains("(sender crashed)"), "{out}");
+     assert!(out.contains("color=\"gray50\""), "{out}");
+     // The lane is dead from the crash mark on, which comes before the lost send.
+-    assert!(pos_of(&out, &format!("crash{a}")).1 > pos_of(&out, "e2").1);
++    assert!(pos_of(&out, &format!("crash{a}")).1 > pos_of(&out, "e1").1);
+     assert!(out.contains("faults: crash(A)"), "{out}");
+ }
+ 
+@@ -278,7 +278,7 @@ fn a_crash_that_never_fired_is_named() {
+         bytes: Rc::from(&b"y"[..]),
+     };
+     let faults = [Fault::crash_after("C", Some(point))].into_iter().collect();
+-    let (trace, out) = render(&log, &faults, &Options::default());
++    let (trace, out) = render(&log, &faults);
+     assert_eq!(trace.unfired, ["crash(C after msg: →A y)"]);
+     assert!(
+         out.contains("never fired: crash(C after msg: →A y)"),
+@@ -290,59 +290,26 @@ fn a_crash_that_never_fired_is_named() {
+     assert!(!out.contains(&format!("crash{c} [")), "{out}");
+ }
+ 
+-#[test]
+-fn identical_rounds_are_drawn_once() {
+-    let mut log = Log::default();
+-    for _ in 0..5 {
+-        log.exec("A").round_trip(0, "A", "B", "ping");
+-        log.exec("B").round_trip(1, "B", "A", "pong");
+-    }
+-    log.exec("A").round_trip(0, "A", "B", "bye");
+-    let faults = FaultSet::new();
+-    let (_, out) = render(&log, &faults, &Options::default());
+-    well_formed(&out);
+-    assert_eq!(out.matches("label=\"msg: ping\"").count(), 1, "{out}");
+-    assert_eq!(out.matches("label=\"ack: pong\"").count(), 1, "{out}");
+-    assert_eq!(out.matches("label=\"msg: bye\"").count(), 1, "{out}");
+-    assert!(out.contains("label=\"×5\""), "{out}");
+-}
+-
+-#[test]
+-fn rounds_do_not_collapse_across_a_heal_or_a_crash() {
+-    let mut log = Log::default();
+-    for _ in 0..2 {
+-        log.exec("A").round_trip(0, "A", "B", "ping");
+-    }
+-    log.heal();
+-    for _ in 0..2 {
+-        log.exec("A").round_trip(0, "A", "B", "ping");
+-    }
+-    log.halt("B");
+-    for _ in 0..2 {
+-        log.exec("A").round_trip(0, "A", "C", "ping");
+-    }
+-    let (_, out) = render(&log, &FaultSet::new(), &Options::default());
+-    well_formed(&out);
+-    assert_eq!(out.matches("label=\"×2\"").count(), 3, "{out}");
+-    assert!(!out.contains("×4"), "{out}");
+-    assert!(out.contains("t_heal [label=\"heal\""), "{out}");
+-    assert!(out.contains("heal_l -> heal_r [style=dashed"), "{out}");
+-}
+-
+ #[test]
+ fn the_heal_is_drawn_where_it_happened() {
+     let mut log = Log::default();
+     log.exec("A").round_trip(0, "A", "B", "before");
+     log.heal();
+     log.exec("A").round_trip(0, "A", "B", "after");
+-    let (trace, out) = render(&log, &FaultSet::new(), &Options::default());
+-    let heal = trace.heal_event().unwrap();
++    let (trace, out) = render(&log, &FaultSet::new());
++    let heal = trace
++        .events
++        .iter()
++        .position(|e| e.kind == TraceEventKind::Heal)
++        .unwrap();
+     let before = trace.messages[0].send_event;
+     let after = trace.messages[1].send_event;
+     assert!(before < heal && heal < after);
+     let heal_y = pos_of(&out, "heal_l").1;
+     assert!(pos_of(&out, &format!("e{before}")).1 > heal_y);
+     assert!(heal_y > pos_of(&out, &format!("e{after}")).1);
++    assert!(out.contains("t_heal [label=\"heal\""), "{out}");
++    assert!(out.contains("heal_l -> heal_r [style=dashed"), "{out}");
+ }
+ 
+ #[test]
+@@ -351,7 +318,7 @@ fn long_labels_are_cut_and_listed_in_the_legend() {
+     let mut log = Log::default();
+     log.exec("A").round_trip(0, "A", "B", &long);
+     log.exec("B").output("B", &long).output("B", "short");
+-    let (_, out) = render(&log, &FaultSet::new(), &Options::default());
++    let (_, out) = render(&log, &FaultSet::new());
+     well_formed(&out);
+     // The message and the output share one legend entry.
+     assert!(out.contains("…‹1›\""), "{out}");
+@@ -361,14 +328,14 @@ fn long_labels_are_cut_and_listed_in_the_legend() {
+             .any(|l| l.trim_start().starts_with(prefix) && l.contains("…‹1›"))
+     };
+     assert!(tagged("l0 ["), "{out}");
+-    assert!(tagged("o4 ["), "{out}");
++    assert!(tagged("o2 ["), "{out}");
+     assert!(out.contains("label=\"⇒ short\""), "{out}");
+     let legend = out
+         .lines()
+         .find(|l| l.trim_start().starts_with("legend ["))
+         .expect("a legend");
+     assert!(legend.contains("‹1›"), "{legend}");
+-    assert!(legend.contains(&escape_html(&long)), "{legend}");
++    assert!(legend.contains(&escape(&long)), "{legend}");
+     // Lanes are only as far apart as the cut labels need.
+     assert!(pos_of(&out, "h1").0 < 400.0, "{out}");
+ }
+@@ -399,13 +366,7 @@ fn writes_dot_and_svg_when_graphviz_is_installed() {
+         .collect();
+     let trace = trace_with(&log.log(), &names(), &faults, &labels());
+     let dir = std::env::temp_dir().join(format!("hydrofrac-lamport-{}", std::process::id()));
+-    let written = write(
+-        &dir,
+-        "failing run",
+-        &trace,
+-        &Options::default().title("A/x: counterexample"),
+-    )
+-    .unwrap();
++    let written = write(&dir, "failing run", &trace, "A/x: counterexample").unwrap();
+     assert_eq!(written.dot, dir.join("failing_run.dot"));
+     assert!(written.dot.is_file());
+     let graphviz = Command::new("neato")
+@@ -447,15 +408,6 @@ fn directories() {
+ }
+ 
+ #[test]
+-fn text_helpers() {
+-    assert_eq!(
+-        strip_paths("Ballot { proposer_id: MemberId::<hydro_test::cluster::paxos::Proposer>(1) }"),
+-        "Ballot { proposer_id: MemberId::<Proposer>(1) }"
+-    );
+-    assert_eq!(strip_paths("x: 1, y: Some(\"x\")"), "x: 1, y: Some(\"x\")");
+-    assert_eq!(escape_dot("a\"b\\c\nd"), "a\\\"b\\\\c\\nd");
+-    assert_eq!(
+-        escape_html("a<b>&\"c\"\nd"),
+-        "a&lt;b&gt;&amp;&quot;c&quot;<BR/>d"
+-    );
++fn escaping() {
++    assert_eq!(escape("a\"b\\c\nd"), "a\\\"b\\\\c\\nd");
+ }
+-- 
+2.47.3
+
