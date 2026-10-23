@@ -577,6 +577,7 @@ pub(super) fn create_sim_graph_trybuild(
     cluster_tick_graphs: BTreeMap<LocationId, DfirGraph>,
     extra_stmts_global: Vec<syn::Stmt>,
     extra_stmts_cluster: BTreeMap<LocationId, Vec<syn::Stmt>>,
+    network_hooks: bool,
 ) -> (String, TrybuildConfig) {
     let source_dir = cargo::manifest_dir().unwrap();
     let source_manifest = dependencies::get_manifest(&source_dir).unwrap();
@@ -598,6 +599,20 @@ pub(super) fn create_sim_graph_trybuild(
             &crate_name,
         )
     };
+    let mut generated_code = generated_code;
+    if network_hooks {
+        // Lets the host install its `SimNetworkHook` in the dylib's copy of the runtime (see
+        // `sim::network_hook::rt`). Only emitted when the flow has hook points.
+        let root = get_this_crate();
+        generated_code.items.push(syn::parse_quote! {
+            #[unsafe(no_mangle)]
+            unsafe extern "Rust" fn __hydro_set_network_hook(
+                hook: ::core::option::Option<::std::rc::Rc<dyn #root::sim::network_hook::SimNetworkHook>>,
+            ) {
+                #root::sim::network_hook::rt::install(hook)
+            }
+        });
+    }
 
     let source = {
         let _span = tracing::debug_span!(target: "hydro_build", "unparse_source").entered();

@@ -1450,3 +1450,7 @@ fn sim_first_schedule_is_deterministic() {
     assert!(seen.iter().all(|s| s == &seen[0]), "{seen:?}");
     assert_eq!(seen[0].iter().sum::<usize>(), 3);
 }
+
+// Declared last so the line numbers in this file's trace snapshots do not move.
+#[cfg(feature = "hydrofrac")]
+mod network_hook;
