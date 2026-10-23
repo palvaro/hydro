@@ -12,11 +12,13 @@ use hydro_lang::sim::flow::SimFlow;
 use hydro_lang::sim::network_hook::IrPassStage;
 
 use super::results::{
-    Counterexample, LabelResult, Results, Stats, VacuousReason, Verdict, label_name,
+    Counterexample, LabelResult, Results, Stats, VacuousReason, Verdict, counterexample_facts,
+    label_name, verdict_line,
 };
 use crate::fault::{Event, Fate, FaultHook, FaultPlan, InstanceRecord, MessageId, NodeId};
 use crate::lineage::{Lineage, Tables};
 use crate::observe::{Fact, Labels, TapPass, decode_output, tap_pass};
+use crate::report::ReportNames;
 use crate::search::{
     CheckedCluster, Clause, CrashBounds, Derivation, Fault, FaultSet, Next, Sweep,
 };
@@ -562,6 +564,9 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
                 .collect(),
             names: self.tables.names().clone(),
             islands: self.islands.borrow().clone(),
+            channels: self.sim.channels().to_vec(),
+            taps: self.labels.clone(),
+            test: crate::lamport::test_name(),
         }
     }
 
@@ -588,7 +593,18 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
                 &lamport_labels,
             );
             let opts = crate::lamport::Options {
-                title: Some(format!("{name}: {}", Verdict::Counterexample(cex.clone()))),
+                title: Some({
+                    let facts = counterexample_facts(cex, labels);
+                    let names = ReportNames::new(self.tables.names(), self.sim.channels())
+                        .with_facts(facts.iter());
+                    let line = verdict_line(&Verdict::Counterexample(cex.clone()), &names, |j| {
+                        labels
+                            .plans
+                            .get(j)
+                            .map_or_else(|| format!("label {j}"), label_name)
+                    });
+                    format!("{name}: {line}")
+                }),
                 highlight: self.missing_support(index, cex),
                 ..crate::lamport::Options::default()
             };

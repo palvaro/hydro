@@ -361,3 +361,117 @@ fn counterexamples_write_their_lamport_diagram() {
     // The missing fact's support is highlighted, and the tap's fact is decoded.
     assert!(results.to_string().contains("diagram: "), "{results}");
 }
+
+/// The report names faults, payloads and facts in source terms: no raw bincode, channels by
+/// name, the sweep's verdict form, and the plain hops listed under the label they merge into.
+#[cfg(stageleft_runtime)]
+#[test]
+fn the_report_is_in_source_names() {
+    let results = echo_broadcast(EcCheck::new());
+    let report = results.to_string();
+    println!("{report}");
+    let delivered = results.label("delivered");
+    let line = report
+        .lines()
+        .find(|l| l.contains(&format!("[{}] delivered", delivered.index)))
+        .unwrap_or_else(|| panic!("a row for `delivered`:\n{report}"));
+    assert!(
+        line.contains("tolerates 1 crash, breaks at 2: {crash("),
+        "{report}"
+    );
+    // The broadcast value 7 is decoded through the tapped fact with the same bytes.
+    assert!(line.contains("]: 7"), "{report}");
+    assert!(!report.contains("07000000"), "raw bincode in the report:\n{report}");
+    assert!(report.contains("lacks 7"), "{report}");
+    // Channels are named by the program's names.
+    assert!(line.contains("initial[") || line.contains("echo["), "{report}");
+}
+
+/// The echo broadcast without `weaken_consistency`: the plain hops stay labelled and reach the
+/// outside only merged into `delivered`, so the report lists them under it.
+#[cfg(stageleft_runtime)]
+#[test]
+fn the_report_lists_merged_hops_under_the_label_they_merge_into() {
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let initial = input.broadcast_closed(&members, TCP.fail_stop().name("initial").bincode());
+    let echoed = initial
+        .clone()
+        .broadcast_closed(&members, TCP.fail_stop().name("echo").bincode())
+        .values();
+    let delivered = initial.weaken_ordering::<NoOrder>().merge_unordered(echoed);
+    let _out = delivered.sim_cluster_output();
+
+    let mut check = EcCheck::new();
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, MEMBERS))
+        .compiled();
+    let results = check.run(&sim, async || {
+        send.send(7);
+    });
+    let report = results.to_string();
+    println!("{report}");
+    let hops: Vec<_> = results
+        .results()
+        .iter()
+        .filter(|l| l.plan.merged_at.is_some())
+        .collect();
+    assert!(!hops.is_empty(), "the plain hops are merge-dominated:\n{report}");
+    let lines: Vec<&str> = report.lines().collect();
+    for hop in hops {
+        let at = hop.plan.merged_at.unwrap();
+        let row = lines
+            .iter()
+            .position(|l| l.contains(&format!("[{}] ", hop.index)))
+            .unwrap();
+        let merged = lines
+            .iter()
+            .position(|l| l.trim_start().starts_with(&format!("[{at}] ")))
+            .unwrap();
+        assert!(
+            lines[row].contains("↳") && lines[row].contains(&format!("a hop merged at [{at}]")),
+            "{report}"
+        );
+        // Under the label it merges into: after its row, before the next unindented label.
+        assert!(merged < row, "{report}");
+        assert!(
+            lines[merged + 1..row]
+                .iter()
+                .all(|l| !l.starts_with("  [")),
+            "{report}"
+        );
+    }
+}
+
+#[cfg(stageleft_runtime)]
+#[test]
+fn the_report_states_omission_only_counterexamples() {
+    let results = plain_broadcast(EcCheck::new(), true);
+    let report = results.to_string();
+    assert!(
+        report.contains("breaks under omissions alone: {omit("),
+        "{report}"
+    );
+    assert!(report.contains("[process→cluster@"), "{report}");
+}
+
+#[cfg(stageleft_runtime)]
+#[test]
+fn rows_carry_the_normalized_counterexample() {
+    let results = echo_broadcast(EcCheck::new());
+    let rows = results.rows();
+    assert_eq!(rows.len(), results.results().len());
+    let delivered = results.label("delivered");
+    let row = &rows[delivered.index];
+    assert_eq!(row.collection, "delivered");
+    assert_eq!(row.verdict, "counterexample");
+    assert_eq!(row.tolerates, "1");
+    assert!(row.cex.starts_with("{crash(") && !row.cex.contains("after"), "{row:?}");
+    assert_eq!(row.hypotheses, delivered.stats.hypotheses);
+    assert_eq!(row.test, "rows_carry_the_normalized_counterexample");
+    let capped = echo_broadcast(EcCheck::new().max_crashes(1)).rows();
+    assert_eq!(capped[delivered.index].verdict, "certificate");
+    assert_eq!(capped[delivered.index].tolerates, "1");
+}
