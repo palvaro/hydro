@@ -234,6 +234,29 @@ Every node is crashable, and the output for each label is a **crash sweep**, not
   same sweep only searches: "no counterexample with up to k crashes found, breaks at k+1", or `Exhausted` at the
   top. A counterexample found at bound k+1 has
   exactly k+1 crashes, because bound k was exhausted first.
+- **Exhausted over every fault set, not only the proposed ones.** The solver's universe holds each delivery's
+  *weakest* killers: its omission, and its sender's crash right after the send before it. That is enough to find
+  minimal sets, but not to conclude that none exists. A run seen later can name an earlier crash point of a node,
+  one that kills deliveries of several older clauses that no single weakest candidate kills together (two runs in
+  which `n` sends `a, b` and `b, a`, each deriving the fact from its second send: the crash after the first send
+  spares the other run's delivery, `crash(n)` kills both). With one crash per node, the only hitting set may then
+  go through that point, and the sweep would certify a bound it should have broken. So before concluding at a
+  bound, the sweep asks once more over a **completed universe** (`search::completion`):
+  - `crash(n)` for every sender `n` of a delivery. It kills every delivery of `n`, so it hits every clause any
+    crash of `n` hits through a delivery;
+  - where `crash(n)` is itself a clause's premise or in a vacuous set, replacing a crash by it is not neutral, so
+    there every crash point of `n` that kills some delivery is added instead;
+  - every fault in a premise or a vacuous set.
+
+  Then any fault set `H` that hits every clause maps to one `H*` in the completed universe that does too, with no
+  more crashes: drop the faults that kill nothing (an omission that kills a delivery names it, and is already a
+  candidate), and replace each remaining crash of `n` outside the universe by `crash(n)`. `H*` hits a superset of
+  what `H` hits (premises only go missing, never appear, since `crash(n)` is no premise), crashes a subset of
+  `H`'s nodes, and is a superset of a vacuous set only if `H` is. So "no admissible set at bound k" holds of every
+  positional fault set, which makes the certificate sound and the "exactly k+1" claim above true. The completion is
+  asked only when the weakest candidates admit nothing, so it costs a hypothesis only where it finds one.
+  `certificates_hold_over_every_positional_fault_set` checks this on random runs with reordered sends; without the
+  completion it finds false certificates.
 - **What replaces restricted crashable sets.** The research branch answered questions like "does 2PC commit if the
   coordinator stays up?" by making only some nodes crashable (2PC `…with_the_coordinator_correct`: two
   certificates, two vacuous). Under the sweep, the same question is answered by the bound at which 2PC's labels
@@ -399,6 +422,39 @@ classified explicitly (a new one does not compile until it is classified), and t
   counterexample with up to k crashes found, breaks at k+1" (`Counterexample::tolerance_certified` is false).
 - `Results::assert_holds` rejects `Exhausted`, with a message naming the label; `assert_no_counterexample` accepts
   it. `Results::rows` reports it as `exhausted` (the budget is now `budget`).
+- Before settling for `Exhausted`, a small enough fault-set space is **enumerated** for a bounded certificate
+  (d2, below).
+
+**Bounded certificates by enumeration (d2).** When a sensitive label's heuristic runs out of hypotheses, every
+schedule is explored (no `sample_schedules`), and the label's admissible fault sets fit within
+`ENUMERATION_LIMIT` (2000 sets, a constant, not a knob), the check runs every one of them over every schedule
+(`check/enumerate.rs`). No lineage is involved, so schedule sensitivity does not matter.
+- **The universe** is the fault model's, learned from the runs: `omit(m)` for every message sent on a lossy
+  channel before the heal; `crash(n)` for every crashable node, and `crash(n after m)` for every message `n` sent
+  before the heal. Every run harvests its candidates, so the search's runs seed it.
+- **The sets** are every admissible set (the sweep's bounds: one crash per node, Σ ≤ N−1, Σ ≤ |C|−2 in the
+  checked cluster, and the cap up to which the sweep searched) of at most `s` faults, for the largest `s` that fits
+  the limit; when no admissible set is larger, every admissible set. The enumeration repeats until no set's run
+  reveals a new candidate.
+- **Why the learned universe suffices.** Take an admissible set `H = H' ∪ {g}` of at most `s` faults with `g`
+  outside the final universe. `H'` is admissible and smaller, so it ran over every schedule. Under the same choices,
+  `H` and `H'` run identically until `g` first fires, and `g` fires only when its message is sent before the heal,
+  which `H'`'s run would then have shown, putting `g` in the universe. So `g` never fires, and `H` runs as `H'`
+  does; by induction every set within the bound behaves like one that ran. This needs every schedule, which is why
+  sampling disables it.
+- **The verdict** is `CertifiedByEnumeration { tolerates, max_faults, sets, sites }`: "holds under any crashes by
+  enumeration (4 fault sets over every schedule; schedule-sensitive: batch at …)". `max_faults` is `None` when every
+  admissible set was run, else the size bound ("… in every set of at most 3 faults"), and `tolerates` is then the
+  crash count covered in full (`s` minus the omission candidates). It is a certificate within those bounds:
+  `assert_holds` accepts it, and `rows` reports `enumerated`. If a set breaks the label, the verdict is that
+  counterexample instead (fewest crashes, then fewest faults), and its tolerance is certified when every set with
+  fewer crashes was covered.
+- **Where it applies.** It needs exhaustive exploration, and on the ported corpus every sensitive program is
+  sampled (their schedule spaces explode: the echoing broadcast's failure-free run alone passes 240k schedules,
+  2PC with cooperative termination 66k under one crash), so no corpus verdict changes. It certifies the batched
+  exchange in `hydrofrac`'s tests (4 sets) and is cross-checked against the brute force there. Where the heuristic
+  misses a counterexample (the failure sketch of (a) below), a feasible enumeration finds it, since it runs every
+  set; no corpus program or small construction has shown such a miss yet.
 
 **The candidates that were weighed:**
 - **(a) kill one schedule's derivations per earlier run.** Not sound in general: nothing relates the schedules of
@@ -412,7 +468,8 @@ classified explicitly (a new one does not compile until it is classified), and t
   change (`crash(n after m)` kills every send of `n` but `m` and its causal predecessors). Unmeasured.
 - **(d2) bounded enumeration:** enumerate every admissible set up to the sweep's bound, over every schedule, for a
   bounded certificate. About Σ_{j≤k} C(N, j)·(s+1)^j hypotheses for N nodes of s sends each: 2PC with three
-  participants at k ≤ 2 is about 770, feasible; multi-Paxos is not.
+  participants at k ≤ 2 is about 770 sets, but each needs every schedule, which 2PC's schedule space rules out;
+  multi-Paxos is out on both counts. **Adopted, when it fits** (above).
 - **(d3) `trust_order_insensitive(site)`:** a user assertion that a site is harmless. A knob, against the
   convention (§1).
 
@@ -443,10 +500,9 @@ broadcast, ABD, multi-Paxos, 2PC) are therefore **not ground truth**; only its c
 certificates on site-free labels, are. The research branch found the CTP bug only through a hand-written spec,
 whose PRE counted a dead node's commit.
 
-**Next.** First d2, bounded enumeration certificates ("certified up to k crashes by enumeration") for the small
-sensitive programs (2PC, gossip, the echoing broadcast, ABD), reusing the brute-force enumerator. Later (c),
-per-record taint with the conservative crash rule, measured first by how many first-observation derivations in
-the sensitive programs are untainted.
+**Next.** d2 is in, but the corpus's sensitive programs are too large to explore exhaustively, so the gap it
+closes there is the schedule space, not the fault-set space. Next is (c), per-record taint with the conservative
+crash rule, measured first by how many first-observation derivations in the sensitive programs are untainted.
 
 ## 5. Lineage level: record provenance stays (measured)
 
@@ -618,8 +674,9 @@ as is and that is recorded here.
    deltas), then 2PC rewritten without hooks. Compare each with the records as it lands, then run the brute-force
    cross-check. First benchmarks: "provenance without replay" against run P (count of opaque fallbacks, hypotheses,
    wall), and the sweep's cost against the records.
-5. Bounded certificates for small schedule-sensitive programs by enumeration (d2, §4.9), reusing the brute-force
-   enumerator; then per-record taint with a conservative crash rule (c), measured first.
+5. Done: the completed universe that makes certificates hold of every positional fault set (§4.5), and bounded
+   certificates for small schedule-sensitive programs by enumeration (d2, §4.9), sharing the brute-force
+   enumerator's universe. Next: per-record taint with a conservative crash rule (c), measured first.
 6. Phase 2, only when a program's schedule space demands it: open sent sets + the order check + one
    schedule per hypothesis, with the never-seen-send tripwire as a hard failure in reduced searches.
 
@@ -643,9 +700,15 @@ Settled:
     `.max_crashes(n)` caps the sweep (§4.5).
 12. **Verdict comparison:** keyed by (file, collection name, occurrence), with an operator fallback. ISR and
     restricted-crash rows are excluded (§7).
-13. **Schedule sensitivity:** only site-free labels are certified. A conservative static walk finds the sites
-    (choices, and anything it cannot see through, including send-order effects on senders); a sensitive label's
-    search uses the one-schedule-per-run heuristic and ends `Exhausted`, never certified (§4.9).
+13. **Schedule sensitivity:** only site-free labels are certified by lineage. A conservative static walk finds the
+    sites (choices, and anything it cannot see through, including send-order effects on senders); a sensitive
+    label's search uses the one-schedule-per-run heuristic and ends `Exhausted`, never certified by it (§4.9).
+14. **Completed universe:** before concluding at a bound, the sweep asks once more with `crash(n)` for every
+    sender (every crash point of `n`, where `crash(n)` is a premise or vacuous), so a certificate covers every
+    positional fault set, not only the weakest candidates (§4.5).
+15. **Bounded certificates by enumeration:** a sensitive label whose heuristic found nothing is enumerated outright
+    when every schedule is explored and its admissible sets fit within 2000 (a constant): every set run means a
+    certificate within the enumerated bounds, `CertifiedByEnumeration` (§4.9).
 
 Open:
 - **Replay:** stays out unless the "provenance without replay" benchmark shows the opaque fallback costing

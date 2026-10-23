@@ -13,7 +13,7 @@ pub mod sweep;
 
 pub use clause::{
     Clause, CrashAt, Dependency, Derivation, Fault, FaultSet, Node, PreHealSends, SendSequences,
-    crash_count, universe,
+    completion, crash_count, universe,
 };
 pub use ilp::{Backend, CheckedCluster, CrashBounds, hitting_set, hitting_set_any, weights};
 pub use sweep::{HYPOTHESIS_BUDGET, Next, Sweep, Tolerance};

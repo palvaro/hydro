@@ -102,6 +102,23 @@ pub enum Verdict {
         /// What makes the label schedule-sensitive.
         sites: Vec<NondetSite>,
     },
+    /// A schedule-sensitive label certified without lineage: every admissible fault set within
+    /// the bounds below was run over every schedule, and none breaks it
+    /// (docs/design/hydrofrac-lite.md §4.9, "Bounded certificates by enumeration"). A bounded
+    /// certificate, over the fault model's universe: omissions of messages sent before the heal
+    /// on lossy channels, and crashes before any send or right after one.
+    CertifiedByEnumeration {
+        /// The crashes covered: every admissible set with at most this many crashes (and, with
+        /// [`Tolerance::All`], any number up to the vacuity bounds), within `max_faults`.
+        tolerates: Tolerance,
+        /// The largest fault set covered, if the enumeration had to stop short of every
+        /// admissible set; `None` when it covers them all, whatever their size.
+        max_faults: Option<usize>,
+        /// The fault sets run, counting the failure-free one.
+        sets: usize,
+        /// What makes the label schedule-sensitive.
+        sites: Vec<NondetSite>,
+    },
     /// The generated specification does not apply to the collection.
     NotChecked(NotCheckedReason),
     /// A labelled scalar checked at the labelled stream it aggregates: the label with this
@@ -319,6 +336,9 @@ impl Results {
                     Verdict::Exhausted { tolerates, .. } => {
                         ("exhausted", "-".to_owned(), tolerance(Some(*tolerates)))
                     }
+                    Verdict::CertifiedByEnumeration { tolerates, .. } => {
+                        ("enumerated", "-".to_owned(), tolerance(Some(*tolerates)))
+                    }
                     Verdict::NotChecked(_) => ("not-checked", "-".to_owned(), "-".to_owned()),
                     Verdict::CoveredBy(_) => ("covered", "-".to_owned(), "-".to_owned()),
                 };
@@ -451,6 +471,26 @@ pub(crate) fn verdict_line(
             };
             format!(
                 "{searched}; not a certificate (schedule-sensitive: {})",
+                site_list(sites)
+            )
+        }
+        Verdict::CertifiedByEnumeration {
+            tolerates,
+            max_faults,
+            sets,
+            sites,
+        } => {
+            let scope = match tolerates {
+                Tolerance::All => "any crashes".to_owned(),
+                Tolerance::UpTo(k) => format!("up to {}", crashes(*k)),
+            };
+            let size = max_faults.map_or_else(String::new, |f| {
+                format!(" in every set of at most {}", plural(f, "fault", "faults"))
+            });
+            format!(
+                "holds under {scope}{size} by enumeration ({} over every schedule; \
+                 schedule-sensitive: {})",
+                plural(*sets, "fault set", "fault sets"),
                 site_list(sites)
             )
         }

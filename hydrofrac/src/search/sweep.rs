@@ -11,10 +11,20 @@
 //! most `k` crashes was already excluded at bound `k`, and constraints only accumulate. So a
 //! counterexample found at bound `k + 1` really needs `k + 1` crashes, given what the search
 //! has seen.
+//!
+//! "Excluded at bound `k`" has to cover every positional fault set, not only those built from
+//! the candidates the clauses propose at the time. Those are each delivery's weakest killers;
+//! a run seen later can name an earlier crash point, one that hits clauses that no single old
+//! candidate hits together. So before concluding at a bound, the sweep asks once more over the
+//! universe extended by [`completion`] (chiefly `crash(n)` for every sender `n`), which admits
+//! a hitting set whenever any fault set is one. This makes the certificate at `k` a statement
+//! about all fault sets with at most `k` crashes, and with it the "exactly `k + 1`" above: a set
+//! with at most `k` crashes that hits every clause seen later also hits the clauses seen by then,
+//! and the completed universe would have admitted one.
 
 use std::collections::BTreeSet;
 
-use super::clause::{Clause, Fault, FaultSet, universe};
+use super::clause::{Clause, Fault, FaultSet, completion, universe};
 use super::ilp::{Backend, CrashBounds, group_is_unkillable, hitting_set_any};
 
 /// The default hypothesis budget, counting the failure-free probe. Once it is spent the verdict
@@ -147,6 +157,8 @@ impl<M: Ord + Clone> Sweep<M> {
                 crash_nodes.len() - members + members.min(checked.cap)
             }
         };
+        // The completed universe, computed the first time the weakest candidates admit nothing.
+        let mut complete: Option<Option<Vec<Fault<M>>>> = None;
         loop {
             if self.tried.len() >= self.budget {
                 return Next::Budget;
@@ -160,6 +172,32 @@ impl<M: Ord + Clone> Sweep<M> {
                 &bounds,
                 self.backend,
             ) {
+                self.tried.insert(set.clone());
+                return Next::Try(set);
+            }
+            // Before concluding anything at this bound, ask again over the completed universe
+            // (see [`completion`]): only then is "no hitting set" true of every fault set.
+            let complete = complete.get_or_insert_with(|| {
+                let extra = completion(&clauses, &self.vacuous);
+                if extra.iter().all(|f| universe.contains(f)) {
+                    None
+                } else {
+                    Some(super::clause::universe(
+                        &clauses,
+                        self.extra.iter().chain(extra.iter()),
+                    ))
+                }
+            });
+            if let Some(complete) = complete
+                && let Some(set) = hitting_set_any(
+                    complete,
+                    groups,
+                    &self.tried,
+                    &self.vacuous,
+                    &bounds,
+                    self.backend,
+                )
+            {
                 self.tried.insert(set.clone());
                 return Next::Try(set);
             }

@@ -26,9 +26,11 @@ use crate::search::{
 };
 use crate::spec::{MemberView, Observation, evaluate, learn_domain};
 
-// A child of this module (it drives the engine), kept in its own file beside it.
+// Children of this module (they drive the engine), kept in their own files beside it.
 #[path = "brute_force.rs"]
 mod brute;
+#[path = "enumerate.rs"]
+mod enumerate;
 #[doc(hidden)]
 pub use brute::{BruteForce, BruteLabel, CrossCheck};
 
@@ -202,6 +204,8 @@ struct Run {
     domains: BTreeMap<usize, BTreeSet<Fact>>,
     /// The message of the panic that ended the run, if a schedule panicked.
     panic: Option<String>,
+    /// Every candidate fault its schedules revealed ([`enumerate::harvest`]).
+    faults: BTreeSet<Fault<MessageId>>,
 }
 
 /// A run being read one schedule at a time, as each finishes (see [`Engine::execute`]). What it
@@ -218,6 +222,7 @@ struct RunFold<'t> {
     /// derivations most schedules repeat without a linear scan.
     seen: BTreeMap<usize, HashMap<u64, Vec<usize>>>,
     domains: BTreeMap<usize, BTreeSet<Fact>>,
+    faults: BTreeSet<Fault<MessageId>>,
     schedules: usize,
     opaque_fallbacks: usize,
     /// The latest record, read when the next one arrives or at [`Self::finish`]: when a
@@ -249,6 +254,7 @@ impl<'t> RunFold<'t> {
                 .collect(),
             seen: BTreeMap::new(),
             domains: BTreeMap::new(),
+            faults: BTreeSet::new(),
             schedules: 0,
             opaque_fallbacks: 0,
             pending: None,
@@ -284,6 +290,7 @@ impl<'t> RunFold<'t> {
             opaque_fallbacks: self.opaque_fallbacks,
             domains: self.domains,
             panic,
+            faults: self.faults,
         }
     }
 
@@ -296,6 +303,7 @@ impl<'t> RunFold<'t> {
         panicked: Option<&str>,
     ) {
         self.schedules += 1;
+        enumerate::harvest(&record, tables, &mut self.faults);
         let record = Rc::new(record);
         if self.probe {
             for t in self.targets {
@@ -486,7 +494,10 @@ impl Learned {
             }
         } else {
             for clause in run_clauses {
-                if self.known.insert((clause_key(clause), clause.premises.clone())) {
+                if self
+                    .known
+                    .insert((clause_key(clause), clause.premises.clone()))
+                {
                     self.clauses.push(clause.clone());
                 }
             }
@@ -496,8 +507,7 @@ impl Learned {
     /// The sweep's next step given what was learned.
     fn next(&self, sweep: &mut Sweep<MessageId>) -> Next<MessageId> {
         if self.sensitive {
-            let groups: Vec<&[Clause<MessageId>]> =
-                self.groups.iter().map(Vec::as_slice).collect();
+            let groups: Vec<&[Clause<MessageId>]> = self.groups.iter().map(Vec::as_slice).collect();
             sweep.next_any(&groups)
         } else {
             sweep.next(&self.clauses)
@@ -689,6 +699,8 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
         let mut sweep: Sweep<MessageId> = Sweep::new(self.bounds(target));
         let mut learned = Learned::new(sensitive);
         learned.learn(&probe_run.clauses);
+        // Fault sets a bounded enumeration ran beyond the search's hypotheses.
+        let mut enumerated = 0;
         let verdict = loop {
             let next = learned.next(&mut sweep);
             match next {
@@ -715,10 +727,22 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
                     }
                 }
                 Next::Certified(tolerates) if sensitive => {
-                    break Verdict::Exhausted {
-                        tolerates,
-                        sites: target.sites.clone(),
-                    };
+                    // The heuristic found nothing. A small enough fault-set space is enumerated
+                    // outright instead, for a bounded certificate (or the counterexample the
+                    // heuristic missed).
+                    let tried = sweep.hypotheses();
+                    match self.enumerate(target, targets, tolerates, &mut stats, tried) {
+                        Some(e) => {
+                            enumerated = e.new_sets;
+                            break e.verdict;
+                        }
+                        None => {
+                            break Verdict::Exhausted {
+                                tolerates,
+                                sites: target.sites.clone(),
+                            };
+                        }
+                    }
                 }
                 Next::Certified(tolerates) => break Verdict::Certified { tolerates },
                 Next::Budget => {
@@ -728,7 +752,7 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
                 }
             }
         };
-        stats.hypotheses = sweep.hypotheses();
+        stats.hypotheses = sweep.hypotheses() + enumerated;
         stats.wall += start.elapsed();
         (verdict, stats)
     }
