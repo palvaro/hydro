@@ -136,6 +136,12 @@ pub fn weights(n: usize) -> impl Iterator<Item = f64> {
 /// - a no-good per tried set `T`: `Σ_{f ∈ T} x_f − Σ_{f ∉ T} x_f ≤ |T| − 1`, excluding exactly `T`.
 ///   A tried set with a fault outside the universe cannot be proposed, so it needs no row.
 ///
+/// Only the rows that can cut something off are written: a tried set gets a no-good only when no
+/// other row already excludes it (`already_excluded`), and implied cover rows are left out
+/// (`cover_rows`). Both are exact: the feasible region is that of the full program. No-good
+/// rows are dense (one nonzero per candidate) and were what made the program slow as tried sets
+/// accumulated; in a search where every run that holds yields a new derivation, none is needed.
+///
 /// The MIP gap is zero, so a returned set is proven optimal, and `None` is proven infeasible.
 pub fn hitting_set<M: Ord + Clone>(
     universe: &[Fault<M>],
@@ -144,6 +150,132 @@ pub fn hitting_set<M: Ord + Clone>(
     vacuous: &[FaultSet<M>],
     bounds: &CrashBounds,
     backend: Backend,
+) -> Option<FaultSet<M>> {
+    solve(
+        universe,
+        clauses,
+        tried,
+        vacuous,
+        bounds,
+        backend,
+        Model::Lean,
+    )
+}
+
+/// How much of the integer program is written out. Both have the same feasible region.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Model {
+    /// Only the rows that can cut something off: no-goods only for tried sets nothing else
+    /// excludes ([`already_excluded`]), and cover rows without the implied ones
+    /// ([`cover_rows`]). What [`hitting_set`] uses.
+    Lean,
+    /// Every row, as the model's definition reads. The reference the lean model is tested
+    /// against.
+    #[cfg_attr(not(test), expect(dead_code, reason = "test reference"))]
+    Full,
+}
+
+/// Whether the rows other than `tried`'s own no-good already exclude the tried set `tried`, so
+/// its no-good can be left out without changing the feasible set.
+///
+/// The no-good of `T` removes exactly one point, `x = T`, from the feasible region. If some other
+/// row already rejects `x = T`, then the region with and without the no-good is the same, so the
+/// optimum, and infeasibility, are unchanged: the omission is exact, not a relaxation. Two kinds
+/// of row reject `x = T` and are checked here, on the host, without the solver:
+/// - **a cover row** of a clause `D` with premises `P`, when no fault of `T` kills a delivery of
+///   `D` and `P ⊆ T`. Then the left-hand side at `x = T` is `0 − |P|`, below the bound `1 − |P|`.
+///   The row exists: `P ⊆ T` and `T` lies inside the universe (otherwise `T` needs no row
+///   anyway), so every premise is a candidate.
+/// - **a vacuous row** of a vacuous set `V ⊆ T`: at `x = T` it sums to `|V| > |V| − 1`. If `V`
+///   has a fault outside the universe then so does `T`, which then needs no row anyway.
+///
+/// This is the common case. Once a hypothesis `T` has run and the label held, the run's
+/// derivations are clauses, and `T` did not kill them (it ran and they were observed), so `T`
+/// fails to hit one of them. An explicit no-good is only needed for a `T` whose run taught the
+/// search nothing it did not already know.
+pub(crate) fn already_excluded<M: Ord + Clone>(
+    tried: &FaultSet<M>,
+    clauses: &[Clause<M>],
+    vacuous: &[FaultSet<M>],
+) -> bool {
+    vacuous.iter().any(|v| v.is_subset(tried))
+        || clauses.iter().any(|clause| {
+            clause.premises.is_subset(tried) && !tried.iter().any(|f| clause.hit_by(f))
+        })
+}
+
+/// One cover row: the positions of the candidates that kill a delivery of the clause, and the
+/// positions of its premises. Read as "some hit is selected, or some premise is not".
+pub(crate) type CoverRow = (BTreeSet<usize>, BTreeSet<usize>);
+
+/// The cover rows of `clauses` over `universe`, without the rows that cannot cut anything off.
+///
+/// Dropping a row that every point satisfying the kept rows also satisfies leaves the feasible
+/// region unchanged, so this is exact:
+/// - a clause with a premise outside the universe binds no hypothesis (the premise can never be
+///   selected);
+/// - a row with a premise that is also a hit is always satisfied: either it is selected, a hit,
+///   or not, a missing premise;
+/// - a row `(H, P)` is implied by any row `(H', P')` with `H' ⊆ H` and `P' ⊆ P`: a point that
+///   selects a hit of `H'` selects one of `H`, and a point missing a premise of `P'` misses one
+///   of `P`. In particular, duplicates collapse to one.
+///
+/// Clauses repeat a lot in practice: every run of a hypothesis that leaves a derivation intact
+/// observes it again.
+pub(crate) fn cover_rows<M: Ord + Clone>(
+    universe: &[Fault<M>],
+    clauses: &[Clause<M>],
+) -> Vec<CoverRow> {
+    let rows: BTreeSet<CoverRow> = all_cover_rows(universe, clauses)
+        .into_iter()
+        .filter(|(hits, premises)| hits.is_disjoint(premises))
+        .collect();
+    // Strongest first, so a row is only ever compared against rows that might imply it.
+    let mut rows: Vec<CoverRow> = rows.into_iter().collect();
+    rows.sort_by_key(|(h, p)| h.len() + p.len());
+    let mut kept: Vec<CoverRow> = vec![];
+    for row in rows {
+        let implied = kept
+            .iter()
+            .any(|(h, p)| h.is_subset(&row.0) && p.is_subset(&row.1));
+        if !implied {
+            kept.push(row);
+        }
+    }
+    kept
+}
+
+/// One cover row per clause whose premises are all candidates: the program as defined.
+pub(crate) fn all_cover_rows<M: Ord + Clone>(
+    universe: &[Fault<M>],
+    clauses: &[Clause<M>],
+) -> Vec<CoverRow> {
+    let index: BTreeMap<&Fault<M>, usize> =
+        universe.iter().enumerate().map(|(i, f)| (f, i)).collect();
+    clauses
+        .iter()
+        .filter_map(|clause| {
+            let premises: BTreeSet<usize> = clause
+                .premises
+                .iter()
+                .map(|p| index.get(p).copied())
+                .collect::<Option<_>>()?;
+            let hits: BTreeSet<usize> = (0..universe.len())
+                .filter(|&i| clause.hit_by(&universe[i]))
+                .collect();
+            Some((hits, premises))
+        })
+        .collect()
+}
+
+pub(crate) fn solve<M: Ord + Clone>(
+    universe: &[Fault<M>],
+    clauses: &[Clause<M>],
+    tried: &BTreeSet<FaultSet<M>>,
+    vacuous: &[FaultSet<M>],
+    bounds: &CrashBounds,
+    backend: Backend,
+    model: Model,
 ) -> Option<FaultSet<M>> {
     if clauses.iter().any(Clause::is_unkillable) {
         return None;
@@ -165,27 +297,20 @@ pub fn hitting_set<M: Ord + Clone>(
 
     let mut constraints = vec![];
 
-    for clause in clauses {
-        let mut covering: Expression = x
+    let rows = match model {
+        Model::Lean => cover_rows(universe, clauses),
+        Model::Full => all_cover_rows(universe, clauses),
+    };
+    for (hits, premises) in rows {
+        let covering: Expression = hits
             .iter()
-            .zip(universe)
-            .filter(|(_, f)| clause.hit_by(f))
-            .map(|(&v, _)| Expression::from(v))
-            .sum();
-        let mut bound = 1.0;
-        let mut applies = true;
-        for premise in &clause.premises {
-            match position(premise) {
-                Some(i) => {
-                    covering -= x[i];
-                    bound -= 1.0;
-                }
-                None => applies = false,
-            }
-        }
-        if applies {
-            constraints.push(covering.geq(bound));
-        }
+            .map(|&i| Expression::from(x[i]))
+            .sum::<Expression>()
+            - premises
+                .iter()
+                .map(|&i| Expression::from(x[i]))
+                .sum::<Expression>();
+        constraints.push(covering.geq(1.0 - premises.len() as f64));
     }
 
     let crashes: Vec<usize> = (0..universe.len())
@@ -222,6 +347,9 @@ pub fn hitting_set<M: Ord + Clone>(
         }
     }
     for set in tried {
+        if model == Model::Lean && already_excluded(set, clauses, vacuous) {
+            continue;
+        }
         if let Some(inside) = inside(set) {
             let inside: BTreeSet<usize> = inside.into_iter().collect();
             let mut no_good = Expression::from(0.0);
