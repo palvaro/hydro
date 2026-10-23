@@ -1,0 +1,135 @@
+hydro_test::cluster::rpc_retry rpc_with_retries (three_attempts) workload requests=2, client_clock=1, client_report_tick=1, server_report_tick=1, data in rounds 0..125
+
+cress amplification check: 1000 rounds of workload, every hold begins at round 1
+horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
+run time: 88.4 s including compilation
+input: data in rounds 0..125, timers only afterwards; finite holds that outlast the input: 128, 256, 512
+unheld run: 4500 records admitted at decision points, 500 network messages sent, 9 decision points had buffered input
+
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length: records admitted, messages from the busiest sender (what the verdict reads), and messages from all senders together (which stays flat when work only moved from one sender to another).
+
+hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
+hydro_test/src/cluster/rpc_retry.rs:302, batch of (usize, ()): no extra work at any hold length
+hydro_test/src/cluster/rpc_retry.rs:304, batch of (usize, u64): no extra work at any hold length
+hydro_test/src/cluster/rpc_retry.rs:305, batch of Response
+    extra records admitted                0      0      0      0      0      0    240   1360   2480   2480   1736
+    extra messages, busiest sender        0      0      0      0      0      0     48    272    496    496    496
+    extra messages, all senders           0      0      0      0      0      0     96    544    992    992    992
+    first reacted at a hold of 64 rounds with 240 extra; largest extra work 2480 in admitted records (held by parking the tick, which has no other input, at hold length 1)
+    beyond the input (holds 128, 256, 512): extra sends from Process(loc2v1) stops: ceiling 496 from a hold of 256 rounds, still rising before that (272 at 128) (rates per round of delay 1.750, 0.000)
+    beyond the input (holds 128, 256, 512): extra admitted records stops: ceiling 2480 from a hold of 256 rounds, still rising before that (1360 at 128) (rates per round of delay 8.750, 0.000)
+    multiplier: 2.98× the unheld run's 250 sends from Process(loc2v1) (+496 at a hold of 999 rounds)
+    under a hold that never ends: +1736 admitted records
+hydro_test/src/cluster/rpc_retry.rs:410, batch of Request<u64>
+    extra records admitted                0      0      0      0      0      0    250   1380   2480   2480    248
+    extra messages, busiest sender        0      0      0      0      0      0     50    276    496    496    496
+    extra messages, all senders           0      0      0      0      0      0    100    552    992    992    248
+    first reacted at a hold of 64 rounds with 250 extra; largest extra work 2480 in admitted records (held by parking the tick, which has no other input, at every hold length)
+    beyond the input (holds 128, 256, 512): extra sends from Process(loc2v1) stops: ceiling 496 from a hold of 256 rounds, still rising before that (276 at 128) (rates per round of delay 1.719, 0.000)
+    beyond the input (holds 128, 256, 512): extra admitted records stops: ceiling 2480 from a hold of 256 rounds, still rising before that (1380 at 128) (rates per round of delay 8.594, 0.000)
+    multiplier: 2.98× the unheld run's 250 sends from Process(loc2v1) (+496 at a hold of 512 rounds)
+    under a hold that never ends: +496 sends from Process(loc1v1)
+hydro_test/src/cluster/rpc_retry.rs:423, batch of (usize, ()): no extra work at any hold length
+hydro_test/src/cluster/rpc_retry.rs:424, batch of Request<u64>: no extra work at any hold length
+hydro_test/src/cluster/rpc_retry.rs:447, batch of (usize, ()): no extra work at any hold length
+hydro_test/src/cluster/rpc_retry.rs:448, batch of Completion: no extra work at any hold length (held by parking the tick, which has no other input, at hold length 1)
+hydro_test/src/cluster/rpc_retry.rs:449, batch of Request<u64>: no extra work at any hold length
+hydro_test/src/cluster/rpc_retry.rs:452: not holdable (snapshot of an optional; the simulator cannot script it, so it follows the prompt schedule in every run)
+
+output streams across the sweep: a stream is conserved when its count is the unheld run's under every finite hold (fixed by the input), amplified when some hold raised it, a level when it emits exactly one record per execution of a tick at its location, shed when holds only lowered it.
+stream                  kind         unheld  finite holds      hold to the end   largest at
+completed               shed            250  2..250            2..250            -
+abandoned               amplified         0  0..248            0..248            hydro_test/src/cluster/rpc_retry.rs:305, batch of Response at a hold of 256
+outgoing                amplified       250  250..746          2..746            hydro_test/src/cluster/rpc_retry.rs:305, batch of Response at a hold of 256
+processed               amplified       250  250..746          2..746            hydro_test/src/cluster/rpc_retry.rs:305, batch of Response at a hold of 256
+outstanding_trace       level          1125  737..1125         250..1125         one per execution of Tick(Some(ClockId(0)), Process(loc1v1))
+client_metrics          shed           1000  488..1000         1..1000           -
+server_metrics          shed           1000  488..1000         1..1000           -
+
+count by hold length (rounds)             1      2      4      8     16     32     64    128    256    512    999
+completed (shed, unheld 250)
+    hydro_test/src/cluster/rpc_retry.rs:302, batch of (usize, ())    250    250    250    250    250    250    250    250    250    250    250
+    hydro_test/src/cluster/rpc_retry.rs:304, batch of (usize, u64)    250    250    250    250    250    250    250    250    250    250      2
+    hydro_test/src/cluster/rpc_retry.rs:305, batch of Response    250    250    250    250    250    250    250    234      2      2      2
+    hydro_test/src/cluster/rpc_retry.rs:410, batch of Request<u64>    250    250    250    250    250    250    250    232      2      2      2
+    hydro_test/src/cluster/rpc_retry.rs:423, batch of (usize, ())    250    250    250    250    250    250    250    250    250    250    250
+    hydro_test/src/cluster/rpc_retry.rs:424, batch of Request<u64>    250    250    250    250    250    250    250    250    250    250    250
+    hydro_test/src/cluster/rpc_retry.rs:447, batch of (usize, ())    250    250    250    250    250    250    250    250    250    250    250
+    hydro_test/src/cluster/rpc_retry.rs:448, batch of Completion    250    250    250    250    250    250    250    250    250    250    250
+    hydro_test/src/cluster/rpc_retry.rs:449, batch of Request<u64>    250    250    250    250    250    250    250    250    250    250    250
+abandoned (amplified, unheld 0)
+    hydro_test/src/cluster/rpc_retry.rs:302, batch of (usize, ())      0      0      0      0      0      0      0      0      0      0      0
+    hydro_test/src/cluster/rpc_retry.rs:304, batch of (usize, u64)      0      0      0      0      0      0      0      0      0      0      0
+    hydro_test/src/cluster/rpc_retry.rs:305, batch of Response      0      0      0      0      0      0      0     16    248    248    248
+    hydro_test/src/cluster/rpc_retry.rs:410, batch of Request<u64>      0      0      0      0      0      0      0     18    248    248    248
+    hydro_test/src/cluster/rpc_retry.rs:423, batch of (usize, ())      0      0      0      0      0      0      0      0      0      0      0
+    hydro_test/src/cluster/rpc_retry.rs:424, batch of Request<u64>      0      0      0      0      0      0      0      0      0      0      0
+    hydro_test/src/cluster/rpc_retry.rs:447, batch of (usize, ())      0      0      0      0      0      0      0      0      0      0      0
+    hydro_test/src/cluster/rpc_retry.rs:448, batch of Completion      0      0      0      0      0      0      0      0      0      0      0
+    hydro_test/src/cluster/rpc_retry.rs:449, batch of Request<u64>      0      0      0      0      0      0      0      0      0      0      0
+outgoing (amplified, unheld 250)
+    hydro_test/src/cluster/rpc_retry.rs:302, batch of (usize, ())    250    250    250    250    250    250    250    250    250    250    250
+    hydro_test/src/cluster/rpc_retry.rs:304, batch of (usize, u64)    250    250    250    250    250    250    250    250    250    250      2
+    hydro_test/src/cluster/rpc_retry.rs:305, batch of Response    250    250    250    250    250    250    298    522    746    746    746
+    hydro_test/src/cluster/rpc_retry.rs:410, batch of Request<u64>    250    250    250    250    250    250    300    526    746    746    746
+    hydro_test/src/cluster/rpc_retry.rs:423, batch of (usize, ())    250    250    250    250    250    250    250    250    250    250    250
+    hydro_test/src/cluster/rpc_retry.rs:424, batch of Request<u64>    250    250    250    250    250    250    250    250    250    250    250
+    hydro_test/src/cluster/rpc_retry.rs:447, batch of (usize, ())    250    250    250    250    250    250    250    250    250    250    250
+    hydro_test/src/cluster/rpc_retry.rs:448, batch of Completion    250    250    250    250    250    250    250    250    250    250    250
+    hydro_test/src/cluster/rpc_retry.rs:449, batch of Request<u64>    250    250    250    250    250    250    250    250    250    250    250
+processed (amplified, unheld 250)
+    hydro_test/src/cluster/rpc_retry.rs:302, batch of (usize, ())    250    250    250    250    250    250    250    250    250    250    250
+    hydro_test/src/cluster/rpc_retry.rs:304, batch of (usize, u64)    250    250    250    250    250    250    250    250    250    250      2
+    hydro_test/src/cluster/rpc_retry.rs:305, batch of Response    250    250    250    250    250    250    298    522    746    746    746
+    hydro_test/src/cluster/rpc_retry.rs:410, batch of Request<u64>    250    250    250    250    250    250    300    526    746    746      2
+    hydro_test/src/cluster/rpc_retry.rs:423, batch of (usize, ())    250    250    250    250    250    250    250    250    250    250    250
+    hydro_test/src/cluster/rpc_retry.rs:424, batch of Request<u64>    250    250    250    250    250    250    250    250    250    250    250
+    hydro_test/src/cluster/rpc_retry.rs:447, batch of (usize, ())    250    250    250    250    250    250    250    250    250    250    250
+    hydro_test/src/cluster/rpc_retry.rs:448, batch of Completion    250    250    250    250    250    250    250    250    250    250    250
+    hydro_test/src/cluster/rpc_retry.rs:449, batch of Request<u64>    250    250    250    250    250    250    250    250    250    250    250
+outstanding_trace (level, unheld 1125)
+    hydro_test/src/cluster/rpc_retry.rs:302, batch of (usize, ())   1125   1125   1125   1125   1125   1125   1125   1121    993    737    250
+    hydro_test/src/cluster/rpc_retry.rs:304, batch of (usize, u64)   1124   1123   1121   1117   1109   1093   1061   1002   1002   1002   1001
+    hydro_test/src/cluster/rpc_retry.rs:305, batch of Response   1124   1123   1121   1117   1109   1093   1061   1001   1001   1001   1001
+    hydro_test/src/cluster/rpc_retry.rs:410, batch of Request<u64>   1124   1123   1121   1117   1109   1093   1061   1002   1002   1002   1001
+    hydro_test/src/cluster/rpc_retry.rs:423, batch of (usize, ())   1125   1125   1125   1125   1125   1125   1125   1125   1125   1125   1125
+    hydro_test/src/cluster/rpc_retry.rs:424, batch of Request<u64>   1125   1125   1125   1125   1125   1125   1125   1125   1125   1125   1125
+    hydro_test/src/cluster/rpc_retry.rs:447, batch of (usize, ())   1125   1125   1125   1125   1125   1125   1125   1125   1125   1125   1125
+    hydro_test/src/cluster/rpc_retry.rs:448, batch of Completion   1125   1125   1125   1125   1125   1125   1125   1125   1125   1125   1125
+    hydro_test/src/cluster/rpc_retry.rs:449, batch of Request<u64>   1125   1125   1125   1125   1125   1125   1125   1125   1125   1125   1125
+client_metrics (shed, unheld 1000)
+    hydro_test/src/cluster/rpc_retry.rs:302, batch of (usize, ())   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000
+    hydro_test/src/cluster/rpc_retry.rs:304, batch of (usize, u64)   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000
+    hydro_test/src/cluster/rpc_retry.rs:305, batch of Response   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000
+    hydro_test/src/cluster/rpc_retry.rs:410, batch of Request<u64>   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000
+    hydro_test/src/cluster/rpc_retry.rs:423, batch of (usize, ())   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000
+    hydro_test/src/cluster/rpc_retry.rs:424, batch of Request<u64>   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000
+    hydro_test/src/cluster/rpc_retry.rs:447, batch of (usize, ())    999    998    996    992    984    968    936    872    744    488      1
+    hydro_test/src/cluster/rpc_retry.rs:448, batch of Completion   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000
+    hydro_test/src/cluster/rpc_retry.rs:449, batch of Request<u64>   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000
+server_metrics (shed, unheld 1000)
+    hydro_test/src/cluster/rpc_retry.rs:302, batch of (usize, ())   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000
+    hydro_test/src/cluster/rpc_retry.rs:304, batch of (usize, u64)   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000
+    hydro_test/src/cluster/rpc_retry.rs:305, batch of Response   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000
+    hydro_test/src/cluster/rpc_retry.rs:410, batch of Request<u64>   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000
+    hydro_test/src/cluster/rpc_retry.rs:423, batch of (usize, ())    999    998    996    992    984    968    936    872    744    488      1
+    hydro_test/src/cluster/rpc_retry.rs:424, batch of Request<u64>   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000
+    hydro_test/src/cluster/rpc_retry.rs:447, batch of (usize, ())   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000
+    hydro_test/src/cluster/rpc_retry.rs:448, batch of Completion   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000
+    hydro_test/src/cluster/rpc_retry.rs:449, batch of Request<u64>   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000
+
+verdict: hazardous
+  decision point: hydro_test/src/cluster/rpc_retry.rs:410, batch of Request<u64>
+  first reacted at a hold of 64 rounds, with 250 extra admitted records there
+  largest extra work over the curve: 2480 in admitted records
+  decision points that admitted more records under that hold, at its peak:
+    hydro_test/src/cluster/rpc_retry.rs:305, batch of Response +496
+    hydro_test/src/cluster/rpc_retry.rs:410, batch of Request<u64> +496
+    hydro_test/src/cluster/rpc_retry.rs:424, batch of Request<u64> +496
+    hydro_test/src/cluster/rpc_retry.rs:449, batch of Request<u64> +496
+    hydro_test/src/cluster/rpc_retry.rs:450, batch of (u64, u32) +496
+    hydro_test/src/cluster/rpc_retry.rs:451, batch of u64 +248
+growth: stops. Once the hold outlasts the input, the extra work reaches a ceiling and a longer delay adds nothing.
+  worst shape, at hydro_test/src/cluster/rpc_retry.rs:410, batch of Request<u64> over holds 128, 256, 512: extra sends from Process(loc2v1) stops: ceiling 496 from a hold of 256 rounds, still rising before that (276 at 128) (rates per round of delay 1.719, 0.000)
+  largest multiplier, at hydro_test/src/cluster/rpc_retry.rs:410, batch of Request<u64>: 2.98× the unheld run's 250 sends from Process(loc2v1) (+496 at a hold of 512 rounds)
+  largest stall reaction, at hydro_test/src/cluster/rpc_retry.rs:305, batch of Response: +1736 admitted records under a hold that never ends

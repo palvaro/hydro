@@ -47,6 +47,8 @@ pub mod reliable_broadcast;
 pub mod rpc_retry;
 #[cfg(feature = "cress")]
 pub mod rpc_retry_check;
+#[cfg(test)]
+mod rpc_retry_ldfi;
 pub mod simple_cluster;
 #[cfg(feature = "tokio")]
 pub mod two_pc;
