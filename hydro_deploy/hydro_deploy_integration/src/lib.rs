@@ -556,12 +556,38 @@ impl ConnectedSink for ConnectedDirect {
     type Sink = DynSink<Bytes>;
 
     fn into_sink(mut self) -> DynSink<Self::Input> {
-        if let Some(s) = self.stream_sink.take() {
+        let sink: DynSink<Bytes> = if let Some(s) = self.stream_sink.take() {
             Box::pin(s)
         } else {
             self.sink_only.take().unwrap()
-        }
+        };
+        decouple_send(sink)
     }
+}
+
+/// The environment variable that selects how a deployed process's outgoing connections buffer.
+///
+/// Unset (the default), a connection's sink pushes back: when the peer stops reading and the
+/// socket fills, the sending dataflow waits for it, which stalls the whole process. Set to
+/// `unbounded`, every outgoing connection instead hands its messages to a background task over an
+/// unbounded in-memory queue, the way most RPC stacks buffer sends, so the sending process never
+/// waits on a slow peer and a backlog forms in the sender's queue instead. Overload harnesses
+/// (Sedge) set it, so that an open-loop workload stays open-loop past the first slow link.
+pub const SEND_BUFFER_ENV: &str = "HYDRO_DEPLOY_SEND_BUFFER";
+
+/// Applies [`SEND_BUFFER_ENV`] to one outgoing connection.
+fn decouple_send(sink: DynSink<Bytes>) -> DynSink<Bytes> {
+    if std::env::var(SEND_BUFFER_ENV).as_deref() != Ok("unbounded") {
+        return sink;
+    }
+    let (tx, rx) = futures::channel::mpsc::unbounded::<Bytes>();
+    // `forward` writes everything queued, and flushes whenever the queue is momentarily empty.
+    // A write error (the peer went away at teardown) ends the task; later sends are dropped.
+    tokio::spawn(async move {
+        let mut sink = sink;
+        let _ = rx.map(Ok).forward(&mut sink).await;
+    });
+    Box::pin(tx.sink_map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e)))
 }
 
 pub type BufferedDrain<S, I> = sinktools::demux_map::DemuxMap<u32, Pin<Box<Buffer<S, I>>>>;
