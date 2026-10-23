@@ -130,6 +130,11 @@ fn plain_two_pc_breaks_at_one_coordinator_crash() {
 /// crash for agreement: crashing a participant too leaves one correct participant, which
 /// agrees with itself (docs/design/hydrofrac-lite.md §4.5). The coordinator's own hops still
 /// break at its crash.
+///
+/// `committed` is schedule-sensitive (the participants batch their inputs, and whether a peer
+/// can answer a query depends on what it has decided when the query lands), so the search
+/// cannot certify it: it finds no counterexample, which is all it can say
+/// (docs/design/hydrofrac-lite.md §4.9).
 #[test]
 fn two_pc_with_cooperative_termination_survives_the_coordinators_crash() {
     let results = check(true, 2, 8);
@@ -138,10 +143,15 @@ fn two_pc_with_cooperative_termination_survives_the_coordinators_crash() {
     peers_are_vacuous(&results);
     let label = committed(&results);
     assert!(
+        label.plan.sites.iter().any(|s| s.op == "batch"),
+        "{results}"
+    );
+    assert!(
         matches!(
             label.verdict,
-            hydrofrac::Verdict::Certified {
-                tolerates: hydrofrac::search::Tolerance::All
+            hydrofrac::Verdict::Exhausted {
+                tolerates: hydrofrac::search::Tolerance::All,
+                ..
             }
         ),
         "{results}"
@@ -152,22 +162,35 @@ fn two_pc_with_cooperative_termination_survives_the_coordinators_crash() {
 /// dies after its `commit` to participant 0, and participant 0 dies after answering
 /// participant 1 but before answering participant 2, whose query reached participant 1
 /// before participant 1 had decided. Participant 1 commits; participant 2 never does.
-/// `probe_two_crashes_directly` shows the violation is reachable.
+/// `two_crashes_split_three_participant_cooperative_termination` shows the violation is
+/// reachable.
 ///
-/// The search currently certifies this label instead: it requires a hypothesis to kill every
+/// Molly's pruning rule certified this label: it requires a hypothesis to kill every
 /// derivation of every schedule of an earlier run, but which derivation a schedule takes
-/// (here, whether participant 1 relays the decision) depends on the schedule, so the
-/// breaking set is pruned by a derivation that does not occur in the schedules it breaks.
+/// (here, whether participant 1 relays the decision) depends on the schedule, so the breaking
+/// set was pruned by a derivation that does not occur in the schedules it breaks. The label is
+/// schedule-sensitive, so the search now uses its heuristic (a hypothesis need only kill one
+/// schedule's derivations per earlier run), which finds the two crashes; the one crash it did
+/// not break at is searched, not certified (docs/design/hydrofrac-lite.md §4.9).
 #[test]
-#[ignore = "unsound certificate, see lead: the search prunes schedule-dependent derivations"]
 fn two_pc_with_cooperative_termination_breaks_at_two_crashes_with_three_participants() {
     // About 20 s at 256 samples per hypothesis.
     let results = check(true, 3, 256);
-    let hydrofrac::Verdict::Counterexample(cex) = &committed(&results).verdict else {
+    let label = committed(&results);
+    assert!(!label.plan.sites.is_empty(), "{results}");
+    let hydrofrac::Verdict::Counterexample(cex) = &label.verdict else {
         panic!("expected a counterexample\n{results}");
     };
     assert_eq!(cex.tolerates, Some(1), "{results}");
+    assert!(!cex.tolerance_certified, "{results}");
     assert_eq!(cex.crashes(), 2, "{results}");
+    assert!(
+        cex.faults
+            .iter()
+            .filter_map(hydrofrac::search::Fault::crashed_node)
+            .any(|n| n.starts_with("Coordinator")),
+        "{results}"
+    );
 }
 
 /// Direct injection, bypassing the search: the coordinator dies right after its `commit` to

@@ -26,6 +26,13 @@
 //! So whenever the enumeration finds a breaking set with `c` crashes, the search must report a
 //! counterexample with at most `c` crashes (it tolerates fewer than `c`); and when the
 //! enumeration finds none, the search must not report one within the enumerated sizes.
+//!
+//! A schedule-sensitive label is never certified ([`Verdict::Exhausted`]), and its tolerances
+//! are only what its heuristic search found. The same comparison still applies to it, as a
+//! check of the heuristic rather than of a proof: `Exhausted` agrees only where the enumeration
+//! finds no breaking set within the bound the search swept, and a counterexample that
+//! "tolerated" `t` crashes must not have missed one with fewer. A disagreement there is a miss
+//! of the heuristic, not a false certificate, and the report says so.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Display};
@@ -410,6 +417,17 @@ fn disagreement(
             )
         })
     };
+    // The same, for a schedule-sensitive label's search, which proves nothing.
+    let missed = |k: usize, claim: &str| {
+        b.breaking_within(k).map(|set| {
+            format!(
+                "the search {claim}, but {} ({} crash(es)) breaks it (the label is \
+                 schedule-sensitive: a miss of the search heuristic, not a false certificate)",
+                show(set),
+                crash_count(set)
+            )
+        })
+    };
     match &label.verdict {
         Verdict::Certified {
             tolerates: Tolerance::All,
@@ -420,11 +438,24 @@ fn disagreement(
         Verdict::Budget { tolerates: Some(t) } => {
             refuted(*t, &format!("holds with up to {t} crash(es) (budget)"))
         }
+        Verdict::Exhausted {
+            tolerates: Tolerance::All,
+            ..
+        } => missed(usize::MAX, "found no counterexample"),
+        Verdict::Exhausted {
+            tolerates: Tolerance::UpTo(k),
+            ..
+        } => missed(*k, &format!("found no counterexample with up to {k} crash(es)")),
         Verdict::Counterexample(cex) => {
-            if let Some(t) = cex.tolerates
-                && let Some(problem) = refuted(t, &format!("tolerates {t} crash(es)"))
-            {
-                return Some(problem);
+            if let Some(t) = cex.tolerates {
+                let problem = if cex.tolerance_certified {
+                    refuted(t, &format!("tolerates {t} crash(es)"))
+                } else {
+                    missed(t, &format!("found no counterexample with up to {t} crash(es)"))
+                };
+                if let Some(problem) = problem {
+                    return Some(problem);
+                }
             }
             let expected = cex.tolerates.map_or(0, |t| t + 1);
             if cex.crashes() != expected {

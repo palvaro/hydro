@@ -162,6 +162,38 @@ pub fn hitting_set<M: Ord + Clone>(
     )
 }
 
+/// [`hitting_set`] with disjunctive clauses: each group is satisfied when the hypothesis kills
+/// *some* clause of it (or misses one of that clause's premises), rather than every one. A group
+/// of one clause is an ordinary cover row; a group with several gets a binary per clause,
+/// `y_c ≤ Σ { x_f : f kills some d ∈ c } + Σ_{p ∈ P_c} (1 − x_p)`, and the row `Σ_c y_c ≥ 1`.
+///
+/// This is the search heuristic for schedule-sensitive labels (docs/design/hydrofrac-lite.md
+/// §4.9): a run's group is the derivations its schedules observed, and a hypothesis need only
+/// kill one schedule's. It is not a pruning rule a certificate can rest on.
+pub fn hitting_set_any<M: Ord + Clone>(
+    universe: &[Fault<M>],
+    groups: &[&[Clause<M>]],
+    tried: &BTreeSet<FaultSet<M>>,
+    vacuous: &[FaultSet<M>],
+    bounds: &CrashBounds,
+    backend: Backend,
+) -> Option<FaultSet<M>> {
+    solve_groups(
+        universe,
+        groups,
+        tried,
+        vacuous,
+        bounds,
+        backend,
+        Model::Lean,
+    )
+}
+
+/// Whether no hypothesis can satisfy `group`: every clause of it is unkillable.
+pub(crate) fn group_is_unkillable<M: Ord + Clone>(group: &[Clause<M>]) -> bool {
+    !group.is_empty() && group.iter().all(Clause::is_unkillable)
+}
+
 /// How much of the integer program is written out. Both have the same feasible region.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Model {
@@ -193,15 +225,34 @@ pub(crate) enum Model {
 /// derivations are clauses, and `T` did not kill them (it ran and they were observed), so `T`
 /// fails to hit one of them. An explicit no-good is only needed for a `T` whose run taught the
 /// search nothing it did not already know.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the one-clause-per-group form, for the tests")
+)]
 pub(crate) fn already_excluded<M: Ord + Clone>(
     tried: &FaultSet<M>,
     clauses: &[Clause<M>],
     vacuous: &[FaultSet<M>],
 ) -> bool {
+    let groups: Vec<&[Clause<M>]> = clauses.iter().map(std::slice::from_ref).collect();
+    already_excluded_by_groups(tried, &groups, vacuous)
+}
+
+/// [`already_excluded`] with disjunctive groups: a group rejects `x = T` when it rejects it
+/// through every clause, each missed by `T` with all its premises in `T` (its `y` binaries are
+/// then all forced to 0, and its row `Σ y ≥ 1` fails).
+pub(crate) fn already_excluded_by_groups<M: Ord + Clone>(
+    tried: &FaultSet<M>,
+    groups: &[&[Clause<M>]],
+    vacuous: &[FaultSet<M>],
+) -> bool {
+    let rejects = |clause: &Clause<M>| {
+        clause.premises.is_subset(tried) && !tried.iter().any(|f| clause.hit_by(f))
+    };
     vacuous.iter().any(|v| v.is_subset(tried))
-        || clauses.iter().any(|clause| {
-            clause.premises.is_subset(tried) && !tried.iter().any(|f| clause.hit_by(f))
-        })
+        || groups
+            .iter()
+            .any(|group| !group.is_empty() && group.iter().all(&rejects))
 }
 
 /// One cover row: the positions of the candidates that kill a delivery of the clause, and the
@@ -277,9 +328,30 @@ pub(crate) fn solve<M: Ord + Clone>(
     backend: Backend,
     model: Model,
 ) -> Option<FaultSet<M>> {
-    if clauses.iter().any(Clause::is_unkillable) {
+    let groups: Vec<&[Clause<M>]> = clauses.iter().map(std::slice::from_ref).collect();
+    solve_groups(universe, &groups, tried, vacuous, bounds, backend, model)
+}
+
+pub(crate) fn solve_groups<M: Ord + Clone>(
+    universe: &[Fault<M>],
+    groups: &[&[Clause<M>]],
+    tried: &BTreeSet<FaultSet<M>>,
+    vacuous: &[FaultSet<M>],
+    bounds: &CrashBounds,
+    backend: Backend,
+    model: Model,
+) -> Option<FaultSet<M>> {
+    if groups.iter().any(|g| group_is_unkillable(g)) {
         return None;
     }
+    // The single-clause groups are ordinary cover rows; the others are disjunctions.
+    let clauses: Vec<Clause<M>> = groups
+        .iter()
+        .filter(|g| g.len() == 1)
+        .map(|g| g[0].clone())
+        .collect();
+    let disjunctions: Vec<&[Clause<M>]> =
+        groups.iter().filter(|g| g.len() > 1).copied().collect();
     let index: BTreeMap<&Fault<M>, usize> =
         universe.iter().enumerate().map(|(i, f)| (f, i)).collect();
     let position = |fault: &Fault<M>| index.get(fault).copied();
@@ -298,19 +370,68 @@ pub(crate) fn solve<M: Ord + Clone>(
     let mut constraints = vec![];
 
     let rows = match model {
-        Model::Lean => cover_rows(universe, clauses),
-        Model::Full => all_cover_rows(universe, clauses),
+        Model::Lean => cover_rows(universe, &clauses),
+        Model::Full => all_cover_rows(universe, &clauses),
     };
-    for (hits, premises) in rows {
-        let covering: Expression = hits
-            .iter()
+    let satisfied = |(hits, premises): &CoverRow| -> Expression {
+        hits.iter()
             .map(|&i| Expression::from(x[i]))
             .sum::<Expression>()
-            - premises
+            + premises
                 .iter()
-                .map(|&i| Expression::from(x[i]))
-                .sum::<Expression>();
-        constraints.push(covering.geq(1.0 - premises.len() as f64));
+                .map(|&i| 1.0 - Expression::from(x[i]))
+                .sum::<Expression>()
+    };
+    for row in rows {
+        constraints.push(satisfied(&row).geq(1.0));
+    }
+    // A disjunction: some clause of the group is satisfied. A clause whose row is always
+    // satisfied (a premise outside the universe, or a premise that is also a hit) satisfies
+    // the group outright, so the group needs no row.
+    let mut disjunction_rows: BTreeSet<Vec<CoverRow>> = BTreeSet::new();
+    for group in &disjunctions {
+        let index: BTreeMap<&Fault<M>, usize> =
+            universe.iter().enumerate().map(|(i, f)| (f, i)).collect();
+        let mut rows: Vec<CoverRow> = vec![];
+        let mut always = false;
+        for clause in group.iter() {
+            let Some(premises) = clause
+                .premises
+                .iter()
+                .map(|p| index.get(p).copied())
+                .collect::<Option<BTreeSet<usize>>>()
+            else {
+                always = true;
+                break;
+            };
+            let hits: BTreeSet<usize> = (0..universe.len())
+                .filter(|&i| clause.hit_by(&universe[i]))
+                .collect();
+            if !hits.is_disjoint(&premises) {
+                always = true;
+                break;
+            }
+            rows.push((hits, premises));
+        }
+        if always {
+            continue;
+        }
+        rows.sort();
+        rows.dedup();
+        disjunction_rows.insert(rows);
+    }
+    for rows in disjunction_rows {
+        if rows.len() == 1 {
+            constraints.push(satisfied(&rows[0]).geq(1.0));
+            continue;
+        }
+        let mut any = Expression::from(0.0);
+        for row in &rows {
+            let y = vars.add(variable().binary());
+            constraints.push(Expression::from(y).leq(satisfied(row)));
+            any += y;
+        }
+        constraints.push(any.geq(1.0));
     }
 
     let crashes: Vec<usize> = (0..universe.len())
@@ -347,7 +468,7 @@ pub(crate) fn solve<M: Ord + Clone>(
         }
     }
     for set in tried {
-        if model == Model::Lean && already_excluded(set, clauses, vacuous) {
+        if model == Model::Lean && already_excluded_by_groups(set, groups, vacuous) {
             continue;
         }
         if let Some(inside) = inside(set) {

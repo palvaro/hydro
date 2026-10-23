@@ -31,6 +31,14 @@
 //!    schedule that holds yields a clause: what the hypothesis after it must kill.
 //!
 //! Runs are shared: a fault set is run once, and every label reads its outcome.
+//!
+//! Only a label whose fault sets each have a single execution can be certified: lineage pruning
+//! assumes a derivation seen in one run recurs whenever its deliveries do, which a choice of the
+//! simulator's can break (docs/design/hydrofrac-lite.md §4.9). For a **schedule-sensitive**
+//! label ([`crate::observe::LabelPlan::sites`]) step 2 is a heuristic instead: a hypothesis
+//! need only kill the derivations of *one* schedule of each earlier run
+//! ([`crate::search::Sweep::next_any`]), and a search that runs out of hypotheses ends
+//! [`Verdict::Exhausted`], never certified. Counterexamples are counterexamples either way.
 
 #[cfg(stageleft_runtime)]
 mod engine;
@@ -43,7 +51,9 @@ pub use engine::EcCheck;
 #[doc(hidden)]
 pub use engine::{BruteForce, BruteLabel, CrossCheck};
 #[cfg(stageleft_runtime)]
-pub use results::{Counterexample, LabelResult, Results, Stats, VacuousReason, Verdict};
+pub use results::{
+    Counterexample, LabelResult, NondetSite, Results, Stats, VacuousReason, Verdict,
+};
 
 #[cfg(test)]
 mod tests;

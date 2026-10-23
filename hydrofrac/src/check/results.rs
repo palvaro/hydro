@@ -10,6 +10,7 @@ use hydro_lang::sim::network_hook::ChannelInfo;
 
 use crate::fault::{Event, InstanceRecord, MessageId, NodeNames};
 use crate::observe::{Fact, LabelPlan, Labels, NotCheckedReason, decode_output, kind_name};
+pub use crate::provenance::sensitivity::NondetSite;
 use crate::report::{ReportNames, ReportRow};
 use crate::search::{FaultSet, Tolerance, crash_count};
 
@@ -38,10 +39,15 @@ pub struct Counterexample {
     /// The fault set (the hypothesis) the run was under. Empty for a failure-free run that
     /// already breaks the label.
     pub faults: FaultSet<MessageId>,
-    /// The largest crash bound the label was certified for before this counterexample: it
-    /// tolerates every fault set with at most this many crashes. `None` when nothing was
-    /// certified, not even omissions alone.
+    /// The largest crash bound the sweep cleared before this counterexample: no fault set with
+    /// at most this many crashes broke the label. `None` when nothing was cleared, not even
+    /// omissions alone. A certificate when [`Self::tolerance_certified`], else only what the
+    /// search found.
     pub tolerates: Option<usize>,
+    /// Whether [`Self::tolerates`] is a certificate. It is for a label whose fault sets each
+    /// have one execution; for a schedule-sensitive label (docs/design/hydrofrac-lite.md §4.9)
+    /// it says only that the search found no counterexample with fewer crashes.
+    pub tolerance_certified: bool,
     /// The index of the hypothesis in the label's search (0 is the failure-free probe).
     pub hypothesis: usize,
     /// The `(correct member, fact)` pairs the run did not deliver.
@@ -81,8 +87,20 @@ pub enum Verdict {
     Vacuous(VacuousReason),
     /// The hypothesis budget ran out: not a certificate.
     Budget {
-        /// The largest crash bound certified before the budget ran out, if any.
+        /// The largest crash bound cleared before the budget ran out, if any (a certificate only
+        /// for a label that is not schedule-sensitive).
         tolerates: Option<usize>,
+    },
+    /// A schedule-sensitive label (docs/design/hydrofrac-lite.md §4.9) whose search ran out of
+    /// hypotheses without a counterexample: **not a certificate**. Lineage pruning is sound only
+    /// where each fault set has one execution; here a derivation seen in one schedule need not
+    /// recur in another, so the fault sets the search skipped were not ruled out.
+    Exhausted {
+        /// How far the search went: every crash bound up to the vacuity bounds
+        /// ([`Tolerance::All`]), or up to the `max_crashes` cap.
+        tolerates: Tolerance,
+        /// What makes the label schedule-sensitive.
+        sites: Vec<NondetSite>,
     },
     /// The generated specification does not apply to the collection.
     NotChecked(NotCheckedReason),
@@ -92,10 +110,20 @@ pub enum Verdict {
 }
 
 impl Verdict {
-    /// Whether the verdict is a counterexample or an exhausted budget (what
-    /// [`Results::assert_holds`] rejects).
+    /// Whether the verdict is not a certificate of a label that needs checking: a
+    /// counterexample, an exhausted budget, or an exhausted search of a schedule-sensitive label
+    /// (what [`Results::assert_holds`] rejects).
     pub fn fails(&self) -> bool {
-        matches!(self, Verdict::Counterexample(_) | Verdict::Budget { .. })
+        matches!(
+            self,
+            Verdict::Counterexample(_) | Verdict::Budget { .. } | Verdict::Exhausted { .. }
+        )
+    }
+
+    /// Whether the verdict is a counterexample (what [`Results::assert_no_counterexample`]
+    /// rejects).
+    pub fn is_counterexample(&self) -> bool {
+        matches!(self, Verdict::Counterexample(_))
     }
 
     /// The counterexample, if this is one.
@@ -205,15 +233,49 @@ impl Results {
         first
     }
 
-    /// Whether every label holds: no counterexample and no exhausted budget.
+    /// Whether every label is certified (or needs no check): no counterexample, no exhausted
+    /// budget, and no schedule-sensitive label whose search merely found nothing
+    /// ([`Verdict::Exhausted`]).
     pub fn holds(&self) -> bool {
         !self.labels.iter().any(|l| l.verdict.fails())
     }
 
-    /// Panics with the report unless every label holds (see [`Self::holds`]).
+    /// Panics with the report unless every label holds (see [`Self::holds`]). A
+    /// schedule-sensitive label can never be certified, so for a program with one use
+    /// [`Self::assert_no_counterexample`].
     #[track_caller]
     pub fn assert_holds(&self) {
+        if let Some(l) = self
+            .labels
+            .iter()
+            .find(|l| matches!(l.verdict, Verdict::Exhausted { .. }))
+            && !self.labels.iter().any(|l| l.verdict.is_counterexample())
+        {
+            panic!(
+                "hydrofrac: label `{}` is schedule-sensitive, so its search is not a certificate \
+                 (`assert_no_counterexample` accepts it)\n{self}",
+                l.name()
+            );
+        }
         assert!(self.holds(), "hydrofrac: a label does not hold\n{self}");
+    }
+
+    /// Whether no label has a counterexample (searches that found nothing count, certificates
+    /// or not).
+    pub fn no_counterexample(&self) -> bool {
+        !self.labels.iter().any(|l| l.verdict.is_counterexample())
+    }
+
+    /// Panics with the report if some label has a counterexample. Weaker than
+    /// [`Self::assert_holds`]: it also accepts a schedule-sensitive label whose search found
+    /// nothing ([`Verdict::Exhausted`]) and an exhausted budget, neither of which is a
+    /// certificate.
+    #[track_caller]
+    pub fn assert_no_counterexample(&self) {
+        assert!(
+            self.no_counterexample(),
+            "hydrofrac: a label has a counterexample\n{self}"
+        );
     }
 }
 
@@ -250,10 +312,13 @@ impl Results {
                     ),
                     Verdict::Vacuous(_) => ("vacuous", "-".to_owned(), "-".to_owned()),
                     Verdict::Budget { tolerates } => (
-                        "exhausted",
+                        "budget",
                         "-".to_owned(),
                         tolerance(tolerates.map(Tolerance::UpTo)),
                     ),
+                    Verdict::Exhausted { tolerates, .. } => {
+                        ("exhausted", "-".to_owned(), tolerance(Some(*tolerates)))
+                    }
                     Verdict::NotChecked(_) => ("not-checked", "-".to_owned(), "-".to_owned()),
                     Verdict::CoveredBy(_) => ("covered", "-".to_owned(), "-".to_owned()),
                 };
@@ -276,6 +341,25 @@ impl Results {
             })
             .collect()
     }
+}
+
+/// The first few sites of a schedule-sensitive label, for its verdict line.
+pub(crate) fn site_list(sites: &[NondetSite]) -> String {
+    const SHOWN: usize = 3;
+    // Sites that differ only in what the line does not show (their location, say) read once.
+    let mut distinct: Vec<String> = vec![];
+    for site in sites {
+        let shown = site.to_string();
+        if !distinct.contains(&shown) {
+            distinct.push(shown);
+        }
+    }
+    let more = distinct.len().saturating_sub(SHOWN);
+    distinct.truncate(SHOWN);
+    if more > 0 {
+        distinct.push(format!("{more} more"));
+    }
+    distinct.join(", ")
 }
 
 fn tolerance(t: Option<Tolerance>) -> String {
@@ -330,7 +414,14 @@ pub(crate) fn verdict_line(
             let n = c.crashes();
             let mut line = match c.tolerates {
                 _ if c.faults.is_empty() => "breaks without faults".to_owned(),
-                Some(k) => format!("tolerates {}, breaks at {n}", crashes(k)),
+                Some(k) if c.tolerance_certified => {
+                    format!("tolerates {}, breaks at {n}", crashes(k))
+                }
+                // Schedule-sensitive: fewer crashes were searched, not ruled out.
+                Some(k) => format!(
+                    "no counterexample with up to {} found, breaks at {n}",
+                    crashes(k)
+                ),
                 None if n == 0 => "breaks under omissions alone".to_owned(),
                 None => format!("breaks at {}", crashes(n)),
             };
@@ -350,6 +441,18 @@ pub(crate) fn verdict_line(
                 line.push_str(&format!(" (holds with up to {})", crashes(*k)));
             }
             line
+        }
+        Verdict::Exhausted { tolerates, sites } => {
+            let searched = match tolerates {
+                Tolerance::All => "no counterexample found".to_owned(),
+                Tolerance::UpTo(k) => {
+                    format!("no counterexample with up to {} found", crashes(*k))
+                }
+            };
+            format!(
+                "{searched}; not a certificate (schedule-sensitive: {})",
+                site_list(sites)
+            )
         }
         Verdict::NotChecked(reason) => format!("not checked: {reason}"),
         Verdict::CoveredBy(j) => format!("covered by [{j}] {}", label(*j)),

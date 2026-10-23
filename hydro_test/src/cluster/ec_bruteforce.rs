@@ -21,10 +21,11 @@
 //! second half of this file cross-checks such programs:
 //!
 //! - [`ask_once`], a miniature of cooperative termination's race, small enough to explore every
-//!   schedule of every fault set. The search certifies its claim (the members' known values),
-//!   but the enumeration finds a single crash that breaks it: the search prunes that crash with
-//!   derivations from schedules in which the peer had already learned the value when the query
-//!   arrived.
+//!   schedule of every fault set. The enumeration finds a single crash that breaks its claim
+//!   (the members' known values). Molly's pruning rule would prune that crash with derivations
+//!   from schedules in which the peer had already learned the value when the query arrived,
+//!   and certify the claim; the search no longer certifies schedule-sensitive labels, and its
+//!   heuristic for them finds the crash.
 //! - two-phase commit with cooperative termination and three participants (the program the
 //!   bug was found on), on sampled schedules: one coordinator crash alone takes more than
 //!   100,000 schedules to explore (see [`TWO_PC_SCHEDULES`]).
@@ -32,9 +33,10 @@
 //!   `filter_not_in` and a merge order but whose outcomes do not depend on the schedule, as
 //!   controls the search must keep agreeing on.
 //!
-//! The tests that disagree today are `#[ignore]`d until the schedule-sensitivity fix lands;
-//! run them with `--ignored` to see the disagreement. Each has a companion that asserts only
-//! the enumeration's side (that it finds the breaking set), so the oracle stays guarded.
+//! Each agreement test on an order-sensitive program has a companion that asserts only the
+//! enumeration's side (that it finds the breaking set), so the oracle stays guarded. For these
+//! labels, agreement means the search found every counterexample the enumeration did, within
+//! the crash bounds it swept, and certified none of them (docs/design/hydrofrac-lite.md §4.9).
 //!
 //! ABD (`hydro_std`'s `abd_register`, one client write, three replicas) is order-sensitive too,
 //! but too large to enumerate: its failure-free probe alone passed 21,000 schedules at about
@@ -275,7 +277,7 @@ fn ask_once_cross_check() -> CrossCheck {
 
 /// The enumeration finds the race: one crash of member 0, between its announcements to
 /// members 1 and 2, breaks the `known` claim in the schedules where member 2's query reaches
-/// member 1 first. This is the enumeration's side alone, so it guards the oracle the ignored
+/// member 1 first. This is the enumeration's side alone, so it guards the oracle the agreement
 /// test below relies on. About 0.2 s of enumeration (8 sets, 132 schedules).
 #[test]
 fn brute_force_finds_the_ask_once_race() {
@@ -306,14 +308,23 @@ fn brute_force_finds_the_ask_once_race() {
     );
 }
 
-/// The search agrees with the enumeration on [`ask_once`]. Today it does not: it certifies
-/// the claim after 2 hypotheses, pruning the breaking crash with a derivation (member 1
-/// answering member 2's query) that only occurs in the schedules where member 1 already knew
-/// the value.
+/// The search agrees with the enumeration on [`ask_once`]. Molly's rule certified the claim
+/// after 2 hypotheses, pruning the breaking crash with a derivation (member 1 answering member
+/// 2's query) that only occurs in the schedules where member 1 already knew the value. The
+/// claim is schedule-sensitive, so the search uses its heuristic (a hypothesis need only kill
+/// one schedule's derivations) and finds the crash at its first hypothesis.
 #[test]
-#[ignore = "fails until the schedule-sensitivity soundness fix lands"]
 fn brute_force_agrees_on_ask_once() {
-    ask_once_cross_check().assert_agrees();
+    let cross = ask_once_cross_check();
+    cross.assert_agrees();
+    let label = unbound_claim(&cross);
+    assert!(!label.plan.sites.is_empty(), "the claim is schedule-sensitive: {cross}");
+    let cex = label
+        .verdict
+        .counterexample()
+        .unwrap_or_else(|| panic!("the search finds the race: {cross}"));
+    assert_eq!(cex.crashes(), 1, "{cross}");
+    assert!(!cex.tolerance_certified, "{cross}");
 }
 
 /// Schedules sampled per fault set for two-phase commit with cooperative termination. Its
@@ -402,12 +413,17 @@ fn brute_force_finds_the_two_pc_cooperative_termination_violation() {
 }
 
 /// The search agrees with the enumeration on two-phase commit with cooperative termination
-/// and three participants. Today it certifies `committed` (after 12 hypotheses), which two
-/// crashes break.
+/// and three participants. Molly's rule certified `committed` (after 12 hypotheses), which two
+/// crashes break; the heuristic for schedule-sensitive labels finds the two crashes.
 #[test]
-#[ignore = "fails until the schedule-sensitivity soundness fix lands"]
 fn brute_force_agrees_on_two_pc_cooperative_termination() {
-    two_pc_cross_check(true, 3, Some(TWO_PC_SCHEDULES)).assert_agrees();
+    let cross = two_pc_cross_check(true, 3, Some(TWO_PC_SCHEDULES));
+    cross.assert_agrees();
+    let cex = unbound_claim(&cross)
+        .verdict
+        .counterexample()
+        .unwrap_or_else(|| panic!("the search finds the two-crash split: {cross}"));
+    assert_eq!(cex.crashes(), 2, "{cross}");
 }
 
 /// Plain two-phase commit over two participants, every schedule of every fault set: its

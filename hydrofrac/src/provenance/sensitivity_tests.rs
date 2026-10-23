@@ -201,3 +201,124 @@ fn a_site_free_program_has_one_schedule_and_its_positional_crash_is_found() {
     assert_eq!(cex.tolerates, Some(0), "{results}");
     assert_eq!(cex.hypothesis, 1, "{results}");
 }
+
+/// The walk's default is "sensitive": a node it does not know is opaque. Every IR node kind is
+/// classified explicitly (a new one does not compile until it is); `Placeholder`, the only node
+/// with no meaning, stands in for an unknown operator.
+#[cfg(stageleft_runtime)]
+#[test]
+fn an_unknown_operator_is_opaque() {
+    use hydro_lang::compile::ir::HydroNode;
+
+    use crate::provenance::sensitivity::{NodeClass, classify, nondet_op};
+
+    assert_eq!(
+        classify(&HydroNode::Placeholder),
+        NodeClass::Opaque("unknown_operator")
+    );
+    assert_eq!(
+        nondet_op(&HydroNode::Placeholder),
+        Some(("unknown_operator", true))
+    );
+}
+
+/// A captured reference the walk cannot resolve to its state cell (anything but a
+/// `HydroNode::Reference`) is reported as such, so the closure's node counts as opaque.
+#[cfg(stageleft_runtime)]
+#[test]
+fn an_unresolved_captured_reference_is_opaque() {
+    use hydro_lang::compile::ir::{ClosureExpr, DebugExpr, HydroNode};
+
+    use crate::provenance::sensitivity::captures;
+
+    let expr: syn::Expr = syn::parse_quote!(|x| x);
+    let f = ClosureExpr::new(
+        DebugExpr::from(expr),
+        vec![(HydroNode::Placeholder, true)],
+    );
+    assert_eq!(captures(&f), vec![None]);
+}
+
+/// A process broadcasts its input to a cluster (the label is what the members receive); the
+/// input's order is `O`.
+#[cfg(stageleft_runtime)]
+fn broadcast_input<O: hydro_lang::live_collections::stream::Ordering>() -> FlowBuilder<'static> {
+    use hydro_lang::live_collections::stream::ExactlyOnce;
+
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (_send, input) = source.sim_input::<u32, O, ExactlyOnce>();
+    let delivered = input.broadcast_closed(&members, TCP.fail_stop().name("to_members").bincode());
+    let _out = delivered.sim_cluster_output();
+    flow
+}
+
+/// An external input whose order the program leaves unspecified is something the walk cannot
+/// see through (in a deployment it arrives in any order): its label is sensitive. The same
+/// program over a totally ordered input is not.
+#[cfg(stageleft_runtime)]
+#[test]
+fn an_unordered_external_input_makes_its_label_sensitive() {
+    use hydro_lang::live_collections::stream::{NoOrder, TotalOrder};
+
+    let ordered = label_cones(broadcast_input::<TotalOrder>().finalize().ir());
+    assert!(!ordered.is_empty());
+    assert!(
+        ordered.iter().all(|c| !c.schedule_sensitive()),
+        "{ordered:?}"
+    );
+
+    let unordered = label_cones(broadcast_input::<NoOrder>().finalize().ir());
+    assert!(!unordered.is_empty());
+    for cone in &unordered {
+        assert!(
+            cone.sites
+                .iter()
+                .any(|s| s.op == "unordered_external_input" && s.opaque && !s.send_order),
+            "{cone:?}"
+        );
+    }
+}
+
+/// U2: a label whose own cone has no site, sent by a process that also batches something
+/// else. The batch can reorder the process's sends, and so move a positional crash point
+/// across the label's delivery, so the label is sensitive through the sender (`send_order`).
+#[cfg(stageleft_runtime)]
+#[test]
+fn a_choice_at_a_sender_reorders_its_sends() {
+    use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
+
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (_send_a, a) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let (_send_b, b) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let tick = source.tick();
+    let at_members = a
+        .broadcast_closed(&members, TCP.fail_stop().name("a").bincode())
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed */
+        ));
+    at_members.for_each(q!(|_| {}));
+    b.batch(&tick, nondet!(/** test */))
+        .all_ticks()
+        .broadcast_closed(&members, TCP.fail_stop().name("b").bincode())
+        .weaken_consistency()
+        .for_each(q!(|_| {}));
+
+    let cones = label_cones(flow.finalize().ir());
+    let label = cones
+        .iter()
+        .find(|c| c.collection.name.as_deref() == Some("at_members"))
+        .unwrap_or_else(|| panic!("the label: {cones:?}"));
+    assert!(label.schedule_sensitive(), "{label:?}");
+    assert!(
+        label.sites.iter().all(|s| s.send_order),
+        "only through the sender: {label:?}"
+    );
+    assert!(
+        label.sites.iter().any(|s| s.op == "batch"),
+        "the batch: {label:?}"
+    );
+}

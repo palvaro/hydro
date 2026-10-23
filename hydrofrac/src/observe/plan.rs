@@ -6,6 +6,7 @@ use hydro_lang::compile::ir::CollectionKind;
 use hydro_lang::location::dynamic::LocationId;
 
 use super::EcCollection;
+use crate::provenance::sensitivity::NondetSite;
 
 /// Why a labelled collection is not checked by the generated specification.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,6 +51,12 @@ pub struct LabelPlan {
     /// checked exit after the merge, whose verdict is authoritative. The hop is still tapped
     /// and searched; its verdict is informational.
     pub merged_at: Option<usize>,
+    /// What makes the label's search schedule-sensitive
+    /// ([`crate::provenance::sensitivity`]): the simulator's choices in its causal cone, those
+    /// that may reorder the sends of a node in it, and what the walk cannot see through. Empty
+    /// for a label whose fault sets each have one execution: only those can be certified
+    /// (docs/design/hydrofrac-lite.md §4.9). Filled by the tap pass; [`plan`] leaves it empty.
+    pub sites: Vec<NondetSite>,
 }
 
 impl LabelPlan {
@@ -100,6 +107,7 @@ pub fn plan(collections: Vec<EcCollection>) -> Vec<LabelPlan> {
             collection,
             covered_by: None,
             merged_at: None,
+            sites: vec![],
         })
         .collect();
     for i in 0..plans.len() {
