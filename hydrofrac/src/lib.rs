@@ -17,6 +17,7 @@ pub mod lamport;
 pub mod lineage;
 pub mod observe;
 pub mod provenance;
+#[cfg(stageleft_runtime)]
 pub mod report;
 #[cfg(stageleft_runtime)]
 pub mod search;
