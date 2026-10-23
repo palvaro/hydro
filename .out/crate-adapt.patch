@@ -1,0 +1,625 @@
+diff --git a/hydrofrac/src/check/engine.rs b/hydrofrac/src/check/engine.rs
+index 14edfe1713..4a27e623b2 100644
+--- a/hydrofrac/src/check/engine.rs
++++ b/hydrofrac/src/check/engine.rs
+@@ -651,7 +651,7 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
+         let names = self.tables.names();
+         CrashBounds {
+             cap: self.max_crashes,
+-            nodes: self.sim.node_count(),
++            nodes: names.crashable().len(),
+             checked: Some(CheckedCluster::new(
+                 target
+                     .members
+diff --git a/hydrofrac/src/fault/mod.rs b/hydrofrac/src/fault/mod.rs
+index 6bad0982c1..91395c97e9 100644
+--- a/hydrofrac/src/fault/mod.rs
++++ b/hydrofrac/src/fault/mod.rs
+@@ -9,8 +9,7 @@
+ //!   before its first send).
+ //!
+ //! Faults only happen before [`FaultHook::heal`]: after it, no omission applies and no crash
+-//! fires, but crashes that already fired persist (§4.6). Channels into an eager location (the
+-//! observer) are never faulty.
++//! fires, but crashes that already fired persist (§4.6).
+ //!
+ //! Every callback is appended to the instance's [`EventLog`] in program order.
+ 
+@@ -21,9 +20,8 @@ use std::rc::Rc;
+ 
+ use hydro_lang::location::dynamic::LocationId;
+ use hydro_lang::sim::compiled::CompiledSim;
+-use hydro_lang::sim::network_hook::{
+-    ChannelInfo, ExecKind, LocationInfo, OutputInfo, SimNetworkHook, Transport,
+-};
++use hydro_lang::networking::{NetworkingInfo, TcpFault};
++use hydro_lang::sim::network_hook::{ChannelInfo, LocationInfo, SimNetworkHook};
+ 
+ use crate::search::{CrashAt, Fault, FaultSet, Node};
+ 
+@@ -71,7 +69,7 @@ pub struct NodeNames {
+     by_id: BTreeMap<NodeId, Node>,
+     by_name: BTreeMap<Node, NodeId>,
+     labels: BTreeMap<LocationId, String>,
+-    /// Nodes that can fail, in location then member order: every node of a non-eager location.
++    /// Nodes that can fail, in location then member order: every node.
+     crashable: Vec<NodeId>,
+ }
+ 
+@@ -117,9 +115,7 @@ impl NodeNames {
+                     .collect(),
+             };
+             for (id, name) in nodes {
+-                if !l.eager {
+-                    names.crashable.push(id.clone());
+-                }
++                names.crashable.push(id.clone());
+                 names.by_name.insert(name.clone(), id.clone());
+                 names.by_id.insert(id, name);
+             }
+@@ -146,8 +142,7 @@ impl NodeNames {
+         self.labels.get(location.root()).map(String::as_str)
+     }
+ 
+-    /// Every node that can crash (all nodes outside eager locations), in location then member
+-    /// order. Its length is [`CompiledSim::node_count`].
++    /// Every node that can crash (every node of the program), in location then member order.
+     pub fn crashable(&self) -> &[NodeId] {
+         &self.crashable
+     }
+@@ -202,14 +197,9 @@ pub enum Event {
+     Exec {
+         /// Where it runs.
+         node: NodeId,
+-        /// An asynchronous run or a tick.
+-        kind: ExecKind,
+     },
+     /// The execution announced by the last [`Event::Exec`] finished.
+-    ExecEnd {
+-        /// `false` for an asynchronous run that found no work.
+-        progressed: bool,
+-    },
++    ExecEnd,
+     /// A send was attempted.
+     Sent {
+         /// Its tag.
+@@ -234,7 +224,7 @@ pub enum Event {
+     },
+     /// A value was emitted on an external output.
+     Output {
+-        /// The external port ([`OutputInfo::port`]).
++        /// The external port.
+         port: usize,
+         /// The emitting node.
+         node: NodeId,
+@@ -302,6 +292,8 @@ struct Instance {
+     dead: BTreeSet<NodeId>,
+     halts: Vec<(LocationId, Option<u32>)>,
+     healed: bool,
++    /// The node of the execution in progress (outputs are attributed to it).
++    exec: Option<NodeId>,
+ }
+ 
+ impl Instance {
+@@ -328,8 +320,6 @@ impl Instance {
+ /// from inside the instance, or all of them afterwards with [`Self::drain_instances`].
+ pub struct FaultHook {
+     channels: HashMap<usize, ChannelInfo>,
+-    outputs: HashMap<usize, OutputInfo>,
+-    eager: BTreeSet<LocationId>,
+     names: NodeNames,
+     omit: BTreeSet<MessageId>,
+     crashes: BTreeMap<NodeId, CrashAt<MessageId>>,
+@@ -344,16 +334,24 @@ impl FaultHook {
+     /// If a crash of the plan names a node `sim` does not have, or a crash point `After(m)` names
+     /// a message `m` its node does not send.
+     pub fn new(plan: &FaultPlan, sim: &CompiledSim) -> Self {
+-        Self::from_tables(plan, sim.channels(), sim.outputs(), sim.locations())
++        Self::from_tables(plan, sim.channels(), sim.locations())
+     }
+ 
+     /// [`Self::new`], from the simulation's tables.
++    ///
++    /// # Panics
++    /// Also if a lossy channel is not intercepted (its omissions could not be injected).
+     pub fn from_tables(
+         plan: &FaultPlan,
+         channels: &[ChannelInfo],
+-        outputs: &[OutputInfo],
+         locations: &[LocationInfo],
+     ) -> Self {
++        for c in channels {
++            assert!(
++                c.intercepted || !is_lossy(&c.networking),
++                "lossy channel {c:?} is not intercepted"
++            );
++        }
+         let names = NodeNames::new(locations);
+         let mut omit = BTreeSet::new();
+         let mut crashes = BTreeMap::new();
+@@ -380,12 +378,6 @@ impl FaultHook {
+         }
+         FaultHook {
+             channels: channels.iter().map(|c| (c.id, c.clone())).collect(),
+-            outputs: outputs.iter().map(|o| (o.port, o.clone())).collect(),
+-            eager: locations
+-                .iter()
+-                .filter(|l| l.eager)
+-                .map(|l| l.id.root().clone())
+-                .collect(),
+             names,
+             omit,
+             crashes,
+@@ -439,9 +431,17 @@ impl FaultHook {
+         finished
+     }
+ 
+-    fn faulty(&self, channel: &ChannelInfo) -> bool {
+-        channel.transport == Transport::Lossy && !self.eager.contains(channel.to.root())
+-    }
++}
++
++/// Whether a channel with this networking may lose messages (so omissions apply to it):
++/// everything but `fail_stop` TCP.
++pub fn is_lossy(networking: &NetworkingInfo) -> bool {
++    !matches!(
++        networking,
++        NetworkingInfo::Tcp {
++            fault: TcpFault::FailStop
++        }
++    )
+ }
+ 
+ impl SimNetworkHook for FaultHook {
+@@ -489,7 +489,7 @@ impl SimNetworkHook for FaultHook {
+         };
+         let fate = if cur.dead.contains(&msg.from) {
+             Fate::SenderDead
+-        } else if !cur.healed && self.faulty(info) && self.omit.contains(&msg) {
++        } else if !cur.healed && is_lossy(&info.networking) && self.omit.contains(&msg) {
+             Fate::Omitted
+         } else {
+             Fate::Delivered
+@@ -530,11 +530,13 @@ impl SimNetworkHook for FaultHook {
+         payload: &[u8],
+         meta: Option<Vec<u8>>,
+     ) -> bool {
+-        let node = match self.outputs.get(&port) {
+-            Some(info) => NodeId::new(&info.location, member),
+-            None => panic!("output on unknown port {port}"),
+-        };
+         let mut cur = self.current.borrow_mut();
++        // Only the scheduler's executions run dataflow, so every output belongs to one.
++        let node = cur
++            .exec
++            .clone()
++            .unwrap_or_else(|| panic!("output on port {port} outside an execution"));
++        assert_eq!(node.member, member, "output on port {port} from another member");
+         // A crashed node emits nothing, like it sends nothing (between its crash firing and the
+         // scheduler halting it, its current execution may still run).
+         if cur.dead.contains(&node) {
+@@ -549,18 +551,17 @@ impl SimNetworkHook for FaultHook {
+         true
+     }
+ 
+-    fn on_exec_begin(&self, location: &LocationId, member: Option<u32>, kind: ExecKind) {
+-        self.current.borrow_mut().log.push(Event::Exec {
+-            node: NodeId::new(location, member),
+-            kind,
+-        });
++    fn on_exec_begin(&self, location: &LocationId, member: Option<u32>) {
++        let node = NodeId::new(location, member);
++        let mut cur = self.current.borrow_mut();
++        cur.exec = Some(node.clone());
++        cur.log.push(Event::Exec { node });
+     }
+ 
+-    fn on_exec_end(&self, progressed: bool) {
+-        self.current
+-            .borrow_mut()
+-            .log
+-            .push(Event::ExecEnd { progressed });
++    fn on_exec_end(&self) {
++        let mut cur = self.current.borrow_mut();
++        cur.exec = None;
++        cur.log.push(Event::ExecEnd);
+     }
+ 
+     fn take_halts(&self) -> Vec<(LocationId, Option<u32>)> {
+diff --git a/hydrofrac/src/fault/tests.rs b/hydrofrac/src/fault/tests.rs
+index 3c5a75896d..7316431183 100644
+--- a/hydrofrac/src/fault/tests.rs
++++ b/hydrofrac/src/fault/tests.rs
+@@ -76,7 +76,10 @@ fn node_names_are_short_and_disambiguated() {
+         all,
+         vec!["cluster@0", "cluster@1", "process#0", "process#1"]
+     );
+-    assert_eq!(names.crashable().len(), sim.node_count());
++    let nodes: usize = (sim.locations().iter())
++        .map(|l| l.members.as_ref().map_or(1, Vec::len))
++        .sum();
++    assert_eq!(names.crashable().len(), nodes);
+     for n in names.crashable() {
+         assert_eq!(names.id(&names.name(n)), Some(n));
+         assert_eq!(n.node_name(sim.locations()), names.name(n));
+@@ -319,7 +322,7 @@ fn event_log_is_in_program_order_and_tags_round_trip() {
+                     assert!(open.is_none(), "nested execution");
+                     open = Some(node);
+                 }
+-                Event::ExecEnd { .. } => {
++                Event::ExecEnd => {
+                     assert!(open.take().is_some(), "end without begin");
+                 }
+                 Event::Sent { id, msg, fate, .. } => {
+diff --git a/hydrofrac/src/lamport/dot.rs b/hydrofrac/src/lamport/dot.rs
+index 1d8d198cf3..1ff0217c03 100644
+--- a/hydrofrac/src/lamport/dot.rs
++++ b/hydrofrac/src/lamport/dot.rs
+@@ -13,8 +13,6 @@ pub struct Options {
+     pub title: Option<String>,
+     /// Messages to emphasize, by delivery id (for instance the support of a fact).
+     pub highlight: BTreeSet<DeliveryId>,
+-    /// Whether to draw eager locations (observers) and the traffic into them.
+-    pub show_eager: bool,
+     /// Whether to draw external outputs as notes beside their lane.
+     pub show_outputs: bool,
+     /// Whether to draw consecutive identical rounds once, with a `×k` bracket.
+@@ -28,7 +26,6 @@ impl Default for Options {
+         Options {
+             title: None,
+             highlight: BTreeSet::new(),
+-            show_eager: false,
+             show_outputs: true,
+             collapse_rounds: true,
+             max_label: 40,
+@@ -407,7 +404,7 @@ struct LaneItem {
+ /// too, each on its edge in a lane gap where nothing else is drawn. Only the instants that matter
+ /// are drawn: sends, receives, outputs, crashes and the heal.
+ pub fn dot(trace: &Trace, opts: &Options) -> String {
+-    let node_shown = |n: usize| opts.show_eager || !trace.nodes[n].eager;
++    let node_shown = |_: usize| true;
+     let message_shown = |m: usize| {
+         let msg = &trace.messages[m];
+         node_shown(msg.from) && node_shown(msg.to)
+diff --git a/hydrofrac/src/lamport/mod.rs b/hydrofrac/src/lamport/mod.rs
+index 67447e7d0f..174d05ffb7 100644
+--- a/hydrofrac/src/lamport/mod.rs
++++ b/hydrofrac/src/lamport/mod.rs
+@@ -49,9 +49,6 @@ pub struct TraceNode {
+     pub label: Node,
+     /// The node.
+     pub id: NodeId,
+-    /// Whether the node belongs to an eager location (an observer), which is never faulty and
+-    /// is hidden by default.
+-    pub eager: bool,
+     /// The index into [`Trace::events`] of the node's crash, if a crash of the plan fired.
+     pub crash: Option<usize>,
+ }
+@@ -238,7 +235,6 @@ pub fn trace_with(
+     faults: &FaultSet<MessageId>,
+     labels: &Labels<'_>,
+ ) -> Trace {
+-    let crashable: BTreeSet<&NodeId> = names.crashable().iter().collect();
+     let mut ids: BTreeSet<NodeId> = BTreeSet::new();
+     for event in log.events() {
+         match event {
+@@ -252,7 +248,7 @@ pub fn trace_with(
+             Event::Recv { to, .. } => {
+                 ids.insert(to.clone());
+             }
+-            Event::ExecEnd { .. } | Event::Heal => {}
++            Event::ExecEnd | Event::Heal => {}
+         }
+     }
+     for fault in faults {
+@@ -264,7 +260,6 @@ pub fn trace_with(
+         .into_iter()
+         .map(|id| TraceNode {
+             label: names.name(&id),
+-            eager: !crashable.contains(&id),
+             crash: None,
+             id,
+         })
+@@ -282,7 +277,7 @@ pub fn trace_with(
+         let at = events.len();
+         let (node, kind) = match event {
+             Event::Exec { node, .. } => (Some(lane[node]), TraceEventKind::Exec),
+-            Event::ExecEnd { .. } => continue,
++            Event::ExecEnd => continue,
+             Event::Sent { id, msg, fate, .. } => {
+                 let m = messages.len();
+                 messages.push(TraceMessage {
+diff --git a/hydrofrac/src/lamport/tests.rs b/hydrofrac/src/lamport/tests.rs
+index b8fa2b540f..da9fae6df4 100644
+--- a/hydrofrac/src/lamport/tests.rs
++++ b/hydrofrac/src/lamport/tests.rs
+@@ -5,13 +5,13 @@ use std::rc::Rc;
+ 
+ use hydro_lang::location::LocationKey;
+ use hydro_lang::location::dynamic::LocationId;
+-use hydro_lang::sim::network_hook::{ExecKind, LocationInfo};
++use hydro_lang::sim::network_hook::LocationInfo;
+ 
+ use super::dot::{escape_dot, escape_html, strip_paths};
+ use super::*;
+ use crate::search::Fault;
+ 
+-/// Three processes `A`, `B` and `C`, plus an eager `Obs`.
++/// Four processes `A`, `B`, `C` and `Obs`.
+ fn locations() -> Vec<LocationInfo> {
+     ["A", "B", "C", "Obs"]
+         .iter()
+@@ -20,7 +20,6 @@ fn locations() -> Vec<LocationInfo> {
+             id: LocationId::Process(format!("loc{}v1", i + 1).parse::<LocationKey>().unwrap()),
+             name: format!("test::{name}"),
+             members: None,
+-            eager: *name == "Obs",
+         })
+         .collect()
+ }
+@@ -43,11 +42,8 @@ struct Log {
+ 
+ impl Log {
+     fn exec(&mut self, at: &str) -> &mut Self {
+-        self.events.push(Event::Exec {
+-            node: node(at),
+-            kind: ExecKind::Async,
+-        });
+-        self.events.push(Event::ExecEnd { progressed: true });
++        self.events.push(Event::Exec { node: node(at) });
++        self.events.push(Event::ExecEnd);
+         self
+     }
+ 
+@@ -370,26 +366,6 @@ fn long_labels_are_cut_and_listed_in_the_legend() {
+     assert!(pos_of(&out, "h1").0 < 400.0, "{out}");
+ }
+ 
+-#[test]
+-fn eager_locations_are_hidden_by_default() {
+-    let mut log = Log::default();
+-    log.exec("A").round_trip(0, "A", "Obs", "fact");
+-    log.round_trip(0, "A", "B", "msg");
+-    let (trace, out) = render(&log, &FaultSet::new(), &Options::default());
+-    let obs = trace.node("Obs").unwrap();
+-    assert!(trace.nodes[obs].eager);
+-    assert!(!out.contains("label=\"Obs\""), "{out}");
+-    assert!(!out.contains("msg: fact"), "{out}");
+-    assert!(out.contains("msg: msg"), "{out}");
+-    let opts = Options {
+-        show_eager: true,
+-        ..Options::default()
+-    };
+-    let (_, out) = render(&log, &FaultSet::new(), &opts);
+-    assert!(out.contains("label=\"Obs\""), "{out}");
+-    assert!(out.contains("msg: fact"), "{out}");
+-}
+-
+ #[test]
+ fn highlighted_messages_are_emphasized() {
+     let mut log = Log::default();
+diff --git a/hydrofrac/src/lineage/mod.rs b/hydrofrac/src/lineage/mod.rs
+index ffef086a79..de97982720 100644
+--- a/hydrofrac/src/lineage/mod.rs
++++ b/hydrofrac/src/lineage/mod.rs
+@@ -15,7 +15,7 @@
+ //! The two rules mix freely: the closure applies whichever rule each record on the way admits.
+ //!
+ //! A delivery in a support becomes a [`Dependency`]: it is omittable if its channel is faulty
+-//! (lossy, and not into an eager location) and it was sent before the network healed, and it is
++//! (lossy) and it was sent before the network healed, and it is
+ //! killed by a crash of its sender if the sender can crash. A delivery that neither kind of fault
+ //! can kill is dropped from the derivation, but the closure still runs through it. A
+ //! [`Clause`] pairs a derivation with the run's send sequences and pre-heal send counts, which
+@@ -28,7 +28,7 @@ use std::cell::RefCell;
+ use std::collections::{BTreeMap, BTreeSet, HashMap};
+ use std::rc::Rc;
+ 
+-use hydro_lang::sim::network_hook::{ChannelInfo, LocationInfo, Transport};
++use hydro_lang::sim::network_hook::{ChannelInfo, LocationInfo};
+ 
+ use crate::fault::{DeliveryId, Event, EventLog, Fate, MessageId, NodeId, NodeNames};
+ use crate::search::{Clause, Dependency, Derivation, PreHealSends, SendSequences};
+@@ -55,20 +55,15 @@ pub struct Tables {
+ 
+ impl Tables {
+     /// The tables of a compiled simulation ([`CompiledSim::channels`] and
+-    /// [`CompiledSim::locations`]). A channel is faulty if it is lossy and does not lead into an
+-    /// eager location, as [`crate::fault::FaultHook`] decides.
++    /// [`CompiledSim::locations`]). A channel is faulty if it is lossy, as
++    /// [`crate::fault::FaultHook`] decides.
+     ///
+     /// [`CompiledSim::channels`]: hydro_lang::sim::compiled::CompiledSim::channels
+     /// [`CompiledSim::locations`]: hydro_lang::sim::compiled::CompiledSim::locations
+     pub fn new(channels: &[ChannelInfo], locations: &[LocationInfo]) -> Self {
+-        let eager: BTreeSet<_> = locations
+-            .iter()
+-            .filter(|l| l.eager)
+-            .map(|l| l.id.root().clone())
+-            .collect();
+         let faulty: Vec<usize> = channels
+             .iter()
+-            .filter(|c| c.transport == Transport::Lossy && !eager.contains(c.to.root()))
++            .filter(|c| crate::fault::is_lossy(&c.networking))
+             .map(|c| c.id)
+             .collect();
+         Tables::from_parts(NodeNames::new(locations), faulty)
+@@ -171,7 +166,7 @@ impl<'a> Lineage<'a> {
+         for (i, event) in events.iter().enumerate() {
+             match event {
+                 Event::Exec { .. } => current = Some(i),
+-                Event::ExecEnd { .. } => {
++                Event::ExecEnd => {
+                     if let Some(start) = current.take() {
+                         for slot in &mut exec_end[start..i] {
+                             *slot = Some(i);
+diff --git a/hydrofrac/src/lineage/tests.rs b/hydrofrac/src/lineage/tests.rs
+index 23a63e0e22..c9cdd00c9a 100644
+--- a/hydrofrac/src/lineage/tests.rs
++++ b/hydrofrac/src/lineage/tests.rs
+@@ -3,12 +3,12 @@ use std::rc::Rc;
+ 
+ use hydro_lang::location::LocationKey;
+ use hydro_lang::location::dynamic::LocationId;
+-use hydro_lang::sim::network_hook::{ExecKind, LocationInfo};
++use hydro_lang::sim::network_hook::LocationInfo;
+ 
+ use super::*;
+ use crate::search::{Fault, FaultSet};
+ 
+-/// The three processes of the hand-built runs: `A`, `B` and `C`, plus an eager `Obs`.
++/// The processes of the hand-built runs: `A`, `B`, `C` and `Obs`.
+ fn locations() -> Vec<LocationInfo> {
+     ["A", "B", "C", "Obs"]
+         .iter()
+@@ -17,7 +17,6 @@ fn locations() -> Vec<LocationInfo> {
+             id: LocationId::Process(format!("loc{}v1", i + 1).parse::<LocationKey>().unwrap()),
+             name: format!("test::{name}"),
+             members: None,
+-            eager: *name == "Obs",
+         })
+         .collect()
+ }
+@@ -55,15 +54,12 @@ struct Log {
+ 
+ impl Log {
+     fn exec(&mut self, at: &str) -> &mut Self {
+-        self.events.push(Event::Exec {
+-            node: node(at),
+-            kind: ExecKind::Async,
+-        });
++        self.events.push(Event::Exec { node: node(at) });
+         self
+     }
+ 
+     fn end(&mut self) -> &mut Self {
+-        self.events.push(Event::ExecEnd { progressed: true });
++        self.events.push(Event::ExecEnd);
+         self
+     }
+ 
+@@ -404,30 +400,6 @@ fn sends_after_the_heal_are_not_omittable() {
+     assert!(!clause.hit_by(&Fault::crash_after("A", Some(second))));
+ }
+ 
+-/// Fail-stop deliveries are not omittable; deliveries from nodes that cannot crash (the eager
+-/// observer) on a fail-stop channel are not dependencies at all, but the closure runs through
+-/// them.
+-#[test]
+-fn unkillable_deliveries_are_dropped_but_followed() {
+-    let mut l = Log::default();
+-    l.exec("A");
+-    let a = l.send(LOSSY, "A", "Obs", 1, ids(&[]));
+-    l.end();
+-    l.exec("Obs").recv(a, LOSSY, "Obs");
+-    let obs = l.send(RELIABLE, "Obs", "C", 2, ids(&[a]));
+-    l.end();
+-    l.exec("C").recv(obs, RELIABLE, "C");
+-    let out = l.output("C", ids(&[obs]));
+-    l.end();
+-    let log = l.log();
+-    let lineage = derive(&log, &tables());
+-    assert_eq!(
+-        messages(&lineage.derivation(out)),
+-        [m(LOSSY, "A", "Obs", 1)].into()
+-    );
+-    assert!(!lineage.send_sequences().contains_key("Obs"));
+-}
+-
+ /// The clause's kill relation, through the search's `hit_by`, on a two-send run.
+ #[test]
+ fn clause_kill_relation_matches_the_run() {
+diff --git a/hydrofrac/src/observe/tap.rs b/hydrofrac/src/observe/tap.rs
+index 088d443476..d175c53037 100644
+--- a/hydrofrac/src/observe/tap.rs
++++ b/hydrofrac/src/observe/tap.rs
+@@ -197,7 +197,13 @@ fn walk_in_place(ir: &mut [HydroRoot], f: &mut impl FnMut(&mut HydroNode)) {
+     }
+     let mut seen = HashSet::new();
+     for root in ir.iter_mut() {
+-        walk(root.input_mut(), &mut seen, f);
++        let (HydroRoot::ForEach { input, .. }
++        | HydroRoot::SendExternal { input, .. }
++        | HydroRoot::DestSink { input, .. }
++        | HydroRoot::CycleSink { input, .. }
++        | HydroRoot::EmbeddedOutput { input, .. }
++        | HydroRoot::Null { input, .. }) = root;
++        walk(input, &mut seen, f);
+     }
+ }
+ 
+diff --git a/hydrofrac/src/provenance/rewrite.rs b/hydrofrac/src/provenance/rewrite.rs
+index 24397931ff..1b1eb4749f 100644
+--- a/hydrofrac/src/provenance/rewrite.rs
++++ b/hydrofrac/src/provenance/rewrite.rs
+@@ -422,7 +422,8 @@ struct Body {
+ /// inside `call`. Reference shadows, lineage absorption and write-back are spliced around it.
+ fn wrap_closure(f: &ClosureExpr, build: impl FnOnce(&RefShadow) -> Body) -> ClosureExpr {
+     let shadow = ref_shadow(f);
+-    let orig = &f.expr().0;
++    let (orig, refs) = f.clone().into_parts();
++    let orig = &orig.0;
+     let per_run = &shadow.per_run;
+     let per_item = &shadow.per_item;
+     let absorb = &shadow.absorb;
+@@ -470,7 +471,7 @@ fn wrap_closure(f: &ClosureExpr, build: impl FnOnce(&RefShadow) -> Body) -> Clos
+             }
+         })
+     };
+-    ClosureExpr::new(DebugExpr::from(expr), f.clone().into_parts().1)
++    ClosureExpr::new(DebugExpr::from(expr), refs)
+ }
+ 
+ fn wrap_map(f: &ClosureExpr, in_repr: Repr, in_ty: &syn::Type, out_repr: Repr) -> ClosureExpr {
+diff --git a/hydrofrac/src/provenance/sensitivity_tests.rs b/hydrofrac/src/provenance/sensitivity_tests.rs
+index b7cc6a29d9..04a6dd1abd 100644
+--- a/hydrofrac/src/provenance/sensitivity_tests.rs
++++ b/hydrofrac/src/provenance/sensitivity_tests.rs
+@@ -130,7 +130,7 @@ fn a_site_free_program_has_one_schedule_and_its_positional_crash_is_found() {
+     let server = sim
+         .locations()
+         .iter()
+-        .find(|l| l.members.is_none() && !l.eager)
++        .find(|l| l.members.is_none())
+         .expect("the server")
+         .id
+         .clone();
+diff --git a/hydrofrac/src/report/tests.rs b/hydrofrac/src/report/tests.rs
+index 15a5051504..3df0a5cac8 100644
+--- a/hydrofrac/src/report/tests.rs
++++ b/hydrofrac/src/report/tests.rs
+@@ -3,7 +3,8 @@ use std::rc::Rc;
+ use hydro_lang::compile::ir::HydroIrOpMetadata;
+ use hydro_lang::location::LocationKey;
+ use hydro_lang::location::dynamic::LocationId;
+-use hydro_lang::sim::network_hook::{ChannelInfo, LocationInfo, Transport};
++use hydro_lang::networking::{NetworkingInfo, TcpFault};
++use hydro_lang::sim::network_hook::{ChannelInfo, LocationInfo};
+ 
+ use super::*;
+ 
+@@ -14,13 +15,11 @@ fn locations() -> Vec<LocationInfo> {
+             id: LocationId::Process("loc1v1".parse::<LocationKey>().unwrap()),
+             name: "test::Source".to_owned(),
+             members: None,
+-            eager: false,
+         },
+         LocationInfo {
+             id: LocationId::Cluster("loc2v1".parse::<LocationKey>().unwrap()),
+             name: "test::Replica".to_owned(),
+             members: Some(vec![0, 1, 2]),
+-            eager: false,
+         },
+     ]
+ }
+@@ -32,7 +31,9 @@ fn channel(id: usize, name: Option<&str>) -> ChannelInfo {
+         name: name.map(str::to_owned),
+         from: l[0].id.clone(),
+         to: l[1].id.clone(),
+-        transport: Transport::Lossy,
++        networking: NetworkingInfo::Tcp {
++            fault: TcpFault::LossyDelayedForever,
++        },
+         intercepted: true,
+         op: HydroIrOpMetadata::new(),
+     }
