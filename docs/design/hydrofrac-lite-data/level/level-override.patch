@@ -1,0 +1,33 @@
+--- a/hydro_lang/src/sim/ldfi.rs
++++ b/hydro_lang/src/sim/ldfi.rs
+@@ -4347,7 +4347,7 @@
+             },
+             strategy: Strategy::Lineage,
+             exploration: Exploration::Exhaustive,
+-            level: Level::Precise,
++            level: env_level_override().unwrap_or(Level::Precise),
+             crash_budget: None,
+             max_hypotheses: 256,
+             log: true,
+@@ -4702,7 +4702,7 @@
+     /// Selects which lineage the backward closure follows (default [`Level::Precise`]).
+     #[must_use]
+     pub fn level(mut self, level: Level) -> Self {
+-        self.level = level;
++        self.level = env_level_override().unwrap_or(level);
+         self
+     }
+ 
+@@ -6690,3 +6690,12 @@
+         );
+     }
+ }
++
++/// Scratch patch: `LDFI_LEVEL` overrides every explicit `.level(..)`.
++fn env_level_override() -> Option<Level> {
++    match std::env::var("LDFI_LEVEL").as_deref() {
++        Ok("exec" | "execution") => Some(Level::Execution),
++        Ok("precise" | "record") => Some(Level::Precise),
++        _ => None,
++    }
++}

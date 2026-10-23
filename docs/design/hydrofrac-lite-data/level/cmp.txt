@@ -1,0 +1,58 @@
+rows 54 54 unpaired set()
+all_labels_checks_the_register_at_its_input|abd.rs:150|S|cx/2/16/0.16|cx/2/16/0.15
+all_labels_checks_the_register_at_its_input|abd.rs:161|S|cx/2/16/0.15|cx/2/16/0.15
+all_labels_checks_the_register_at_its_input|abd.rs:141|S|cx/2/16/0.13|cx/5/40/0.27
+all_labels_checks_the_register_at_its_input|abd.rs:314|S|cx/2/16/0.17|cx/2/16/0.15
+all_labels_reliable_phase2_certifies_the_registe|abd.rs:150|S|cert/19/152/1.25|cert/50/400/3.74
+all_labels_reliable_phase2_certifies_the_registe|abd.rs:161|S|cert/21/168/1.24|cert/50/400/3.62
+all_labels_reliable_phase2_certifies_the_registe|abd.rs:141|S|cx/2/16/0.15|cx/5/40/0.35
+all_labels_reliable_phase2_certifies_the_registe|reliable_broadcast.rs:269|S|cx/2/16/0.18|cx/2/16/0.19
+all_labels_reliable_phase2_certifies_the_registe|reliable_broadcast.rs:281|S|cx/9/72/0.53|cx/10/80/0.70
+ec_demo_broadcast_live_breaks_under_a_sender_cra|-||cx/5/5/0.05|cx/5/5/0.05
+ec_demo_g_set_gossip_all_labels|crdt_gossip.rs:37|S|cx/3/24/0.77|cx/3/24/0.81
+ec_demo_g_set_gossip_all_labels|crdt_gossip.rs:54|S|cert/13/104/2.52|cert/13/104/2.86
+all_labels_reports_a_label_inside_a_tick|ec_all_labels_classes.rs:31||cx/5/948/4.91|cx/5/948/4.72
+ec_demo_g_set_gossip_all_labels|crdt_gossip.rs:84|S|cert/13/104/2.57|cert/13/104/2.32
+all_labels_reports_a_label_inside_a_tick|ec_all_labels_classes.rs:41||cx/5/948/3.78|cx/5/948/3.98
+ec_demo_g_set_gossip_certifies|-|S|cert/13/104/4.78|cert/22/176/8.70
+ec_demo_leader_merge_breaks_under_a_leader_crash|-||cx/2/4/0.05|cx/2/4/0.03
+ec_demo_g_set_gossip_all_labels|fan_out.rs:235|S|cx/3/24/1.50|cx/3/24/1.44
+ec_demo_g_set_gossip_all_labels|crdt_gossip.rs:138|S|cert/13/104/4.80|cert/13/104/4.75
+ec_demo_g_set_gossip_certifies|-#1|S|cert/13/104/8.19|cert/22/176/13.70
+ec_demo_multi_paxos_all_labels|multi_paxos.rs:281|S|cx/5/40/0.66|cx/44/352/9.65
+ec_demo_multi_paxos_all_labels|multi_paxos.rs:286|S|cx/8/64/1.33|cx/38/304/9.05
+ec_demo_multi_paxos_all_labels|multi_paxos.rs:549|S|cx/8/64/1.67|cx/38/304/9.42
+ec_demo_multi_paxos_all_labels|multi_paxos.rs:569|S|cert/6/48/0.96|cert/28/224/5.85
+ec_demo_multi_paxos_all_labels|multi_paxos.rs:570|S|cert/6/48/0.90|cert/28/224/5.75
+ec_demo_multi_paxos_all_labels|multi_paxos.rs:582|S|cx/10/80/1.63|cx/31/248/6.22
+ec_demo_multi_paxos_learned_under_one_crash|-|S|cert/26/208/2.45|cert/35/280/4.00
+ec_demo_multi_paxos_all_labels|multi_paxos.rs:591|S|cx/10/80/1.92|cx/10/80/1.69
+ec_demo_multi_paxos_all_labels|multi_paxos.rs:588|S|cert/26/208/3.73|cert/46/368/10.20
+ec_demo_reliable_broadcast_all_labels|reliable_broadcast.rs:130||cx/5/5/0.08|cx/23/23/0.37
+ec_demo_reliable_broadcast_all_labels|reliable_broadcast.rs:156||cx/3/3/0.05|cx/3/3/0.04
+ec_demo_reliable_broadcast_all_labels|reliable_broadcast.rs:149||cert/49/49/0.70|cert/105/105/2.51
+ec_demo_multi_paxos_all_labels|multi_paxos.rs:608|S|cert/33/264/5.38|cert/46/368/10.18
+ec_demo_reliable_broadcast_certifies|-||cert/49/49/0.67|cert/78/78/1.29
+ec_demo_reliable_broadcast_certifies_in_one_sche|-||cert/77/77/1.40|cert/109/109/6.13
+ec_demo_reliable_broadcast_certifies|-#1||cert/36/36/0.44|cert/51/51/0.76
+ec_broadcast_closed_all_labels|ec_ldfi.rs:270||cx/5/5/0.06|cx/5/5/0.04
+ec_broadcast_closed_all_labels_writes_diagrams|ec_ldfi.rs:270||cx/5/5/0.04|cx/5/5/0.04
+ec_demo_uniform_broadcast|-|S|cert/105/840/5.55|cert/105/840/5.67
+ec_demo_uniform_broadcast|-#1|S|cert/105/840/5.20|cert/105/840/5.08
+ldfi_all_labels_break_under_a_sender_crash|isr_replication.rs:360|S|cx/8/64/1.85|cx/59/472/15.48 cxP={crash(zk)} cxE={crash(client), crash(zk)}
+ldfi_all_labels_with_the_harness_fault_model|isr_replication.rs:360|S|cert/7/56/1.60|cert/32/256/7.38
+ldfi_all_labels_break_under_a_sender_crash|isr_replication.rs:343|S|cx/2/16/0.63|cx/4/32/1.22
+ldfi_all_labels_with_the_harness_fault_model|isr_replication.rs:343|S|cert/4/32/0.97|cert/32/256/6.89
+ldfi_all_labels_break_under_a_sender_crash|isr_replication.rs:564|S|cx/8/64/2.03|cx/59/472/15.38 cxP={crash(zk)} cxE={crash(client), crash(zk)}
+ldfi_all_labels_with_the_harness_fault_model|isr_replication.rs:564|S|cert/7/56/1.83|cert/32/256/7.12
+ldfi_all_labels_with_the_coordinator_correct|two_pc_ldfi.rs:86||cert/1/16/0.13|cert/1/16/0.11
+ldfi_all_labels_with_the_coordinator_correct|two_pc_ldfi.rs:92||cert/1/16/0.11|cert/1/16/0.11
+ldfi_all_labels_with_the_coordinator_correct|two_pc_ldfi.rs:98||vacuous/0/0/0.05|vacuous/0/0/0.05
+ldfi_all_labels_with_the_coordinator_correct|two_pc_ldfi.rs:161||vacuous/0/0/0.05|vacuous/0/0/0.05
+ldfi_all_labels_with_the_harness_fault_model|two_pc_ldfi.rs:86||cx/2/20/0.12|cx/4/100/0.57
+ldfi_all_labels_with_the_harness_fault_model|two_pc_ldfi.rs:92||cx/2/64/0.39|cx/2/64/0.38
+ldfi_all_labels_with_the_harness_fault_model|two_pc_ldfi.rs:98||vacuous/0/0/0.05|vacuous/0/0/0.05
+ldfi_all_labels_with_the_harness_fault_model|two_pc_ldfi.rs:161||vacuous/0/0/0.05|vacuous/0/0/0.05
+agree 54 / 54
+all P hyp/sch/wall 768 6378 82.56 E 1393 10392 201.46
+det P hyp/sch/wall 252 2250 13.18 E 404 2480 21.33
