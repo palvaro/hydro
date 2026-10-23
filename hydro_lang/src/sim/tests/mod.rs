@@ -1454,3 +1454,5 @@ fn sim_first_schedule_is_deterministic() {
 // Declared last so the line numbers in this file's trace snapshots do not move.
 #[cfg(feature = "hydrofrac")]
 mod network_hook;
+
+mod dylib_panic;
