@@ -16,7 +16,7 @@
 //!   state has absorbed (a sound over-approximation).
 //! - Anything else the rewrite cannot see into is an *opaque island*: its inputs are stripped
 //!   of lineage and its outputs are [`RecordProv::Opaque`], for which lineage falls back to the
-//!   execution rule. See [`rewrite`] for the list of island operators.
+//!   execution rule. See [`rewrite()`] for the list of island operators.
 
 use std::collections::BTreeSet;
 

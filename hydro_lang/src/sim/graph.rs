@@ -567,6 +567,13 @@ pub(super) fn compile_sim(bin: String, trybuild: TrybuildConfig) -> Result<TempP
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The source of the last simulation this thread generated, so tests can check what codegen
+    /// emits (e.g. that hook points add nothing to a flow that did not opt in).
+    pub(crate) static LAST_SIM_SOURCE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
 #[expect(clippy::too_many_arguments, reason = "necessary for code generation")]
 pub(super) fn create_sim_graph_trybuild(
     process_graphs: BTreeMap<LocationId, DfirGraph>,
@@ -618,6 +625,8 @@ pub(super) fn create_sim_graph_trybuild(
         let _span = tracing::debug_span!(target: "hydro_build", "unparse_source").entered();
         prettyplease::unparse(&generated_code)
     };
+    #[cfg(test)]
+    LAST_SIM_SOURCE.with(|last| *last.borrow_mut() = Some(source.clone()));
 
     let hash = format!("{:X}", Sha256::digest(&source))
         .chars()
