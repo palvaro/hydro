@@ -35,6 +35,8 @@ pub mod two_pc_ctp;
 pub mod ec_hydrofrac;
 pub mod ec_hydrofrac_classes;
 #[cfg(test)]
+mod ec_two_pc_hydrofrac;
+#[cfg(test)]
 mod hydrofrac_provenance_tests;
 
 #[cfg(test)]

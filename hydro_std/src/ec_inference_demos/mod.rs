@@ -63,4 +63,6 @@ pub mod synod;
 pub mod uniform_broadcast;
 
 #[cfg(test)]
+mod ec_abd_hydrofrac;
+#[cfg(test)]
 mod hydrofrac_provenance_tests;
