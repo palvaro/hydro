@@ -1,0 +1,11 @@
+function	configuration	limits	rate	offered_rate	goodput	rising	abandoned	harness_bound	max_throttled_fraction	mean_cores	good
+rpc_with_retries	one_attempt	Client: uncapped on cpus 4-7; Server: 0.010 cpu (1000us/100000us) on cpus 4-7	1000.00	999.10	1.0000		0	false	0.986	Client=0.037,Server=0.008	true
+rpc_with_retries	one_attempt	Client: uncapped on cpus 4-7; Server: 0.010 cpu (1000us/100000us) on cpus 4-7	2000.00	2017.40	0.0693	outstanding	18776	false	1.000	Client=0.768,Server=0.010	false
+rpc_with_retries	one_attempt	Client: uncapped on cpus 4-7; Server: 0.010 cpu (1000us/100000us) on cpus 4-7	1414.21	1415.40	1.0000		0	false	0.972	Client=0.067,Server=0.008	true
+rpc_with_retries	one_attempt	Client: uncapped on cpus 4-7; Server: 0.010 cpu (1000us/100000us) on cpus 4-7	1681.79	1699.70	1.0000	outstanding	0	false	0.975	Client=0.504,Server=0.009	false
+rpc_with_retries	one_attempt	Client: uncapped on cpus 4-7; Server: 0.010 cpu (1000us/100000us) on cpus 4-7	1542.21	1551.40	1.0000		0	false	0.960	Client=0.208,Server=0.009	true
+rpc_with_retries	three_attempts	Client: uncapped on cpus 4-7; Server: 0.010 cpu (1000us/100000us) on cpus 4-7	1000.00	999.10	1.0000		0	false	0.972	Client=0.036,Server=0.008	true
+rpc_with_retries	three_attempts	Client: uncapped on cpus 4-7; Server: 0.010 cpu (1000us/100000us) on cpus 4-7	2000.00	2017.40	0.5566	outstanding	947	false	1.000	Client=0.819,Server=0.010	false
+rpc_with_retries	three_attempts	Client: uncapped on cpus 4-7; Server: 0.010 cpu (1000us/100000us) on cpus 4-7	1414.21	1415.40	1.0000		0	false	0.973	Client=0.076,Server=0.008	true
+rpc_with_retries	three_attempts	Client: uncapped on cpus 4-7; Server: 0.010 cpu (1000us/100000us) on cpus 4-7	1681.79	1699.70	1.0000	outstanding	0	false	0.981	Client=0.493,Server=0.009	false
+rpc_with_retries	three_attempts	Client: uncapped on cpus 4-7; Server: 0.010 cpu (1000us/100000us) on cpus 4-7	1542.21	1551.40	1.0000	outstanding	0	false	0.974	Client=0.352,Server=0.009	false

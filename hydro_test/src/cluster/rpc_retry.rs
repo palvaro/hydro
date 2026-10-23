@@ -223,8 +223,9 @@ where
 ///
 /// The two `overload_check` attributes deploy the same configurations under the Sedge overload
 /// harness, each process in its own CPU-capped container: `./scripts/sedge hydro_test
-/// rpc_with_retries --factors 1.5,2,4,8`. The server is capped tighter than the client so that
-/// it is the bottleneck; μ is measured, not declared (`mu` is only where the probe starts). A
+/// rpc_with_retries --factors 1.5,2,4,8`. The server, the resource under test, gets 1 % of a
+/// core (1 ms of CPU every 100 ms) and is the bottleneck; the client stands for the callers and
+/// gets no quota. μ is measured, not declared (`mu` is only where the probe starts). A
 /// 50 ms clock makes the 40-tick timeout 2 seconds. Cress's multiplier for three attempts is 3×,
 /// so the prediction is that factors below 3 collapse and factors above it recover, and that one
 /// attempt recovers everywhere.
@@ -247,7 +248,8 @@ where
     T = Payload<4096>,
     load = requests,
     mu = 1000,
-    cpus(Client = 0.5, Server = 0.1),
+    cpus(Client = none, Server = 0.01),
+    cpu_period_us = 100_000,
     timers(
         client_clock = Duration::from_millis(50),
         client_report_tick = Duration::from_secs(1),
@@ -260,7 +262,8 @@ where
     T = Payload<4096>,
     load = requests,
     mu = 1000,
-    cpus(Client = 0.5, Server = 0.1),
+    cpus(Client = none, Server = 0.01),
+    cpu_period_us = 100_000,
     timers(
         client_clock = Duration::from_millis(50),
         client_report_tick = Duration::from_secs(1),
