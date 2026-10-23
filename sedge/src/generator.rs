@@ -8,7 +8,9 @@ use crate::trace::Recorder;
 /// How a generator run ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Driven {
-    /// Requests offered.
+    /// Rounds offered.
+    pub rounds: u64,
+    /// Records offered over every round.
     pub offered: u64,
     /// Arrivals whose scheduled time had already passed by more than `late_threshold` when the
     /// generator reached them: the generator itself could not keep up, and the offered load was
@@ -16,28 +18,35 @@ pub struct Driven {
     pub late: u64,
 }
 
-/// Offers requests `0, 1, 2, …` at the arrival times of `profile` under `seed`, calling `send`
-/// for each and telling `recorder` just before. Never waits on the program: if `send` returns an
-/// error the run stops and the error is returned with what was offered so far.
+/// Offers rounds `0, 1, 2, …` at the arrival times of `profile` under `seed`, calling
+/// `send_round` for each and telling `recorder` which records (numbered from zero over the trial)
+/// the round carried, timestamped with the round's scheduled arrival; `send_round` returns how many records it wrote. A round is one unit of the
+/// program's workload as its Cress attribute describes it: one request for a `load = ...` check,
+/// one call of the `round_data` closure otherwise. Never waits on the program: if `send_round`
+/// returns an error the run stops and the error is returned with what was offered so far.
 ///
-/// `send` is expected to resolve quickly (writing to a socket buffer); if it blocks because the
-/// program has stopped reading, arrivals fall behind and are counted in [`Driven::late`].
+/// `send_round` is expected to resolve quickly (writing to a socket buffer); if it blocks because
+/// the program has stopped reading, arrivals fall behind and are counted in [`Driven::late`].
+/// Its second argument is the round's scheduled arrival. The generated harness's `send_round` only
+/// queues the round's records on an unbounded channel (see `harness::feed`), so it never waits on
+/// the program and this loop keeps its schedule however the program behaves.
 pub async fn drive<F, E>(
     profile: Profile,
     seed: u64,
     recorder: &Recorder,
-    mut send: F,
+    mut send_round: F,
 ) -> Result<Driven, (E, Driven)>
 where
-    F: AsyncFnMut(u64) -> Result<(), E>,
+    F: AsyncFnMut(u64, Instant) -> Result<u64, E>,
 {
     let start: Instant = recorder.start();
     let late_threshold = std::time::Duration::from_millis(50);
     let mut driven = Driven {
+        rounds: 0,
         offered: 0,
         late: 0,
     };
-    for (id, t) in Arrivals::new(profile, seed).enumerate() {
+    for (round, t) in Arrivals::new(profile, seed).enumerate() {
         let due = start + t;
         let now = Instant::now();
         if now < due {
@@ -45,11 +54,19 @@ where
         } else if now - due > late_threshold {
             driven.late += 1;
         }
-        recorder.offered(id as u64);
-        if let Err(e) = send(id as u64).await {
-            return Err((e, driven));
+        // A request counts as offered at its scheduled arrival, not when the write got through:
+        // if the program pushes back (a full socket), the wait is part of the request's latency,
+        // as it would be for a user who arrived on schedule (no coordinated omission).
+        let at = due;
+        let first = driven.offered;
+        match send_round(round as u64, due).await {
+            Ok(n) => {
+                recorder.offered_round(at, first, n);
+                driven.offered += n;
+                driven.rounds += 1;
+            }
+            Err(e) => return Err((e, driven)),
         }
-        driven.offered += 1;
     }
     // Let the tail run out: arrivals stop at `total`, but the last gap may end early.
     let end = start + profile.total();

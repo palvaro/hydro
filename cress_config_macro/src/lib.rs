@@ -54,6 +54,15 @@
 //!   `SimSender<T, O, R>` or `SimClusterSender<T, O, R>` (with `T = (K, V)` for a keyed stream),
 //!   and one field `<cluster>_members: u32`
 //!   per cluster parameter. This cannot be combined with `workload(...)`.
+//! * `round_data = |round, inputs| { ... }` with `timers(param = Duration-expr, ...)`: the split
+//!   form of `round`, shared with Sedge's `overload_check`. The streams named in `timers(...)`
+//!   are clocks: the harness feeds each one itself, with as many elements per round as its period
+//!   divides the longest period (so a round is one element of the slowest clock, and a 10 ms
+//!   clock beside a 50 ms one gets five). Every other stream is data, and `inputs` has one
+//!   `SimSender` (or `SimClusterSender`) field per data stream only; the closure is called for
+//!   rounds `0..workload_rounds` and not afterwards, so it need not stop itself. On a deployment
+//!   the same clocks are wall-clock timers with the given periods, which is why the data part is
+//!   kept apart from them.
 //! * `horizon = rounds`: passed to `CheckConfig::new`; the default is the checker's default.
 //! * `workload_rounds = rounds`: confines the data to the first `rounds` rounds of the run, so
 //!   that holds can outlast the input and the report's growth label can tell extra work that
@@ -126,7 +135,7 @@ impl Parse for Entry {
             // A closure's parameter list has top-level commas, so `round` is parsed as an
             // expression; every other value is the raw tokens up to the next comma, because a
             // type such as `Vec<(u32, u32)>` is not an expression.
-            let value = if key == "round" {
+            let value = if key == "round" || key == "round_data" {
                 input.parse::<Expr>()?.to_token_stream()
             } else {
                 tokens_until_comma(input)?
@@ -341,6 +350,8 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
     let mut hydro: syn::Path = syn::parse_quote!(::cress::__private::hydro_lang);
     let mut skip_consistency = false;
     let mut round_closure: Option<Expr> = None;
+    let mut round_data: Option<Expr> = None;
+    let mut timers: Vec<(Ident, Expr)> = Vec::new();
     let mut workload: Vec<(Ident, Expr)> = Vec::new();
     let mut generic_types: Vec<(String, Type)> = Vec::new();
     let mut values: Vec<(String, Expr, Span)> = Vec::new();
@@ -365,6 +376,15 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
             }
             ("skip_consistency_assertions", None, None) => skip_consistency = true,
             ("round", Some(v), _) => round_closure = Some(syn::parse2(v.clone())?),
+            ("round_data", Some(v), _) => round_data = Some(syn::parse2(v.clone())?),
+            ("timers", None, Some(g)) => {
+                for t in g {
+                    let Some(v) = &t.value else {
+                        return Err(syn::Error::new(t.key.span(), "timer entries look like `param = Duration::from_millis(50)`"));
+                    };
+                    timers.push((t.key.clone(), syn::parse2(v.clone())?));
+                }
+            }
             ("workload", None, Some(g)) => {
                 for w in g {
                     let Some(v) = &w.value else {
@@ -393,7 +413,19 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
             "`round = ...` replaces the generated workload, so `workload(...)` cannot be given with it",
         ));
     }
-    if workload_rounds.is_some() && round_closure.is_none() && workload.is_empty() {
+    if round_data.is_some() && (round_closure.is_some() || !workload.is_empty()) {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "`round_data = ...` describes the data part of a round and `timers(...)` the clocks; neither `round = ...` nor `workload(...)` can be given with it",
+        ));
+    }
+    if !timers.is_empty() && round_data.is_none() {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "`timers(...)` goes with `round_data = ...`; without it every stream not named in `workload(...)` is a timer fed one element per round",
+        ));
+    }
+    if workload_rounds.is_some() && round_closure.is_none() && round_data.is_none() && workload.is_empty() {
         return Err(syn::Error::new(
             Span::call_site(),
             "`workload_rounds = ...` confines the streams named in `workload(...)` to the first rounds, so `workload(...)` must name the data streams (the streams it does not name are timers, fed in every round)",
@@ -544,6 +576,15 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
             return Err(syn::Error::new(w.span(), format!("`{w}` is not a stream parameter of `{fn_name}`")));
         }
     }
+    for (t, _) in &timers {
+        let Some(s) = streams.iter().find(|s| s.name == *t) else {
+            return Err(syn::Error::new(t.span(), format!("`{t}` is not a stream parameter of `{fn_name}`")));
+        };
+        if !matches!(&s.item, Type::Tuple(tt) if tt.elems.is_empty()) {
+            return Err(syn::Error::new(t.span(), format!("timer `{t}` must be a stream of `()`")));
+        }
+    }
+    let is_timer = |s: &StreamParam| timers.iter().any(|(t, _)| *t == s.name);
 
     // ---- Code generation -----------------------------------------------------------------
 
@@ -608,10 +649,14 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
         }
     });
     let sink = match &f.sig.output {
-        ReturnType::Default => quote!(let _ = #fn_name(#(#call_args),*);),
+        ReturnType::Default => quote!(
+            let _ = #fn_name(#(#call_args),*);
+            let __output_ports = #amp::harness::OutputPorts::new();
+        ),
         ReturnType::Type(..) => quote!(
             let __outputs = #fn_name(#(#call_args),*);
-            #amp::SimOutputs::sink_all(__outputs);
+            let mut __output_ports = #amp::harness::OutputPorts::new();
+            #amp::SimOutputs::sink_named(__outputs, "", &mut __output_ports);
         ),
     };
 
@@ -662,6 +707,13 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
         }
         if round_closure.is_some() {
             parts.push("round closure".to_owned());
+        } else if round_data.is_some() {
+            parts.push("round_data closure".to_owned());
+            for s in streams.iter().filter(|s| is_timer(s)) {
+                parts.push(format!("{}={{}}/round", s.name));
+                let r = format_ident!("__ratio_{}", s.name);
+                fmt_args.push(quote!(#r));
+            }
         } else {
             for s in &streams {
                 parts.push(format!("{}={{}}", s.name));
@@ -677,8 +729,81 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
         quote!(::std::format!(#fmt, #(#fmt_args),*))
     };
 
-    let per_round = match &round_closure {
-        None => {
+    let per_round = match (&round_closure, &round_data) {
+        (None, Some(closure)) => {
+            // Clocks: one element per round for the slowest, its period ratio for the others.
+            let period_vars: Vec<(Ident, &Expr)> = streams
+                .iter()
+                .filter(|s| is_timer(s))
+                .map(|s| (format_ident!("__period_{}", s.name), &timers.iter().find(|(t, _)| *t == s.name).unwrap().1))
+                .collect();
+            let make_periods = period_vars.iter().map(|(v, e)| {
+                quote!(let #v: f64 = ::std::time::Duration::from(#e).as_secs_f64();)
+            });
+            let period_names = period_vars.iter().map(|(v, _)| v);
+            let make_ratios = streams.iter().filter(|s| is_timer(s)).map(|s| {
+                let r = format_ident!("__ratio_{}", s.name);
+                let p = format_ident!("__period_{}", s.name);
+                quote!(let #r: usize = if #p > 0.0 { (__longest / #p).round().max(1.0) as usize } else { 1 };)
+            });
+            let clock_sends = streams.iter().filter(|s| is_timer(s)).map(|s| {
+                let txv = tx(s);
+                let r = format_ident!("__ratio_{}", s.name);
+                match (locs[s.loc].kind, s.unordered) {
+                    (LocKind::Process, false) => quote!(for _ in 0..#r { #txv.send(()); }),
+                    (LocKind::Process, true) => quote!(for _ in 0..#r { #txv.send_many_unordered([()]); }),
+                    (LocKind::Cluster, false) => {
+                        let n = size_var(s.loc).unwrap();
+                        quote!(for __m in 0..(#n as u32) { for _ in 0..#r { #txv.send(__m, ()); } })
+                    }
+                    (LocKind::Cluster, true) => {
+                        let n = size_var(s.loc).unwrap();
+                        quote!(for __m in 0..(#n as u32) { for _ in 0..#r { #txv.send_many_unordered([(__m, ())]); } })
+                    }
+                }
+            });
+            let fields = streams.iter().filter(|s| !is_timer(s)).map(|s| {
+                let n = &s.name;
+                let (item, order, retries) = (&s.item, &s.order, &s.retries);
+                match locs[s.loc].kind {
+                    LocKind::Process => quote!(pub #n: #hydro::sim::SimSender<#item, #order, #retries>,),
+                    LocKind::Cluster => quote!(pub #n: #hydro::sim::SimClusterSender<#item, #order, #retries>,),
+                }
+            });
+            let member_fields = cluster_sizes.iter().map(|(i, _)| {
+                let n = format_ident!("{}_members", locs[*i].var);
+                quote!(pub #n: u32,)
+            });
+            let field_inits = streams.iter().filter(|s| !is_timer(s)).map(|s| {
+                let n = &s.name;
+                let txv = tx(s);
+                quote!(#n: #txv,)
+            });
+            let member_inits = cluster_sizes.iter().map(|(i, _)| {
+                let n = format_ident!("{}_members", locs[*i].var);
+                let v = size_var(*i).unwrap();
+                quote!(#n: #v as u32,)
+            });
+            let data_rounds = match &workload_rounds {
+                Some(wr) => quote!(if __round < (#wr) as usize { __user_round(__round, &__inputs); }),
+                None => quote!(__user_round(__round, &__inputs);),
+            };
+            quote!(
+                #(#make_periods)*
+                let __longest: f64 = [0.0f64 #(, #period_names)*].into_iter().fold(0.0, f64::max);
+                #(#make_ratios)*
+                #[allow(non_camel_case_types, dead_code)]
+                struct __Inputs { #(#fields)* #(#member_fields)* }
+                fn __coerce<F: ::std::ops::FnMut(usize, &__Inputs)>(f: F) -> F { f }
+                let __inputs = __Inputs { #(#field_inits)* #(#member_inits)* };
+                let mut __user_round = __coerce(#closure);
+                let __per_round = async |__round: usize| {
+                    #(#clock_sends)*
+                    #data_rounds
+                };
+            )
+        }
+        (None, None) => {
             let sends = streams.iter().map(|s| {
                 let txv = tx(s);
                 let r = rate_var(s);
@@ -714,7 +839,7 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
                 };
             )
         }
-        Some(closure) => {
+        (Some(closure), _) => {
             let fields = streams.iter().map(|s| {
                 let n = &s.name;
                 let (item, order, retries) = (&s.item, &s.order, &s.retries);
@@ -756,9 +881,9 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
         #sink
         let __sim = __flow.sim() #(#with_sizes)* #skip;
         let __cfg = (#cfg).quiet();
-        let __workload: ::std::string::String = #workload_fmt;
         #per_round
-        let __report = #amp::check(__sim, &__cfg, __per_round);
+        let __workload: ::std::string::String = #workload_fmt;
+        let __report = #amp::check_with_outputs(__sim, &__cfg, __per_round, &__output_ports);
         #amp::harness::record(&#amp::harness::Summary {
             crate_name: ::std::env!("CARGO_PKG_NAME"),
             manifest_dir: ::std::env!("CARGO_MANIFEST_DIR"),
@@ -787,10 +912,11 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
                 })
                 .unwrap_or_else(|| "-".to_owned()),
             location: __report.location.as_ref().map(|location| #amp::readable_hook_name(&location.hook, false)),
+            conservation: __report.conservation.summary(),
         });
     );
     let mut body = one_check;
-    if round_closure.is_none() {
+    if round_closure.is_none() && round_data.is_none() {
         for s in streams.iter().rev() {
             let r = rate_var(s);
             let rs = rates_var(s);
@@ -849,25 +975,32 @@ pub fn derive_sim_outputs(item: TokenStream) -> TokenStream {
             .to_compile_error()
             .into();
     };
-    let (accessors, types): (Vec<TokenStream2>, Vec<&Type>) = match &data.fields {
-        syn::Fields::Named(f) => f
-            .named
-            .iter()
-            .map(|fld| {
+    let (accessors, names, types): (Vec<TokenStream2>, Vec<String>, Vec<&Type>) = match &data.fields {
+        syn::Fields::Named(f) => {
+            let mut a = Vec::new();
+            let mut n = Vec::new();
+            let mut t = Vec::new();
+            for fld in &f.named {
                 let id = fld.ident.as_ref().unwrap();
-                (quote!(self.#id), &fld.ty)
-            })
-            .unzip(),
-        syn::Fields::Unnamed(f) => f
-            .unnamed
-            .iter()
-            .enumerate()
-            .map(|(i, fld)| {
+                a.push(quote!(self.#id));
+                n.push(id.to_string());
+                t.push(&fld.ty);
+            }
+            (a, n, t)
+        }
+        syn::Fields::Unnamed(f) => {
+            let mut a = Vec::new();
+            let mut n = Vec::new();
+            let mut t = Vec::new();
+            for (i, fld) in f.unnamed.iter().enumerate() {
                 let idx = syn::Index::from(i);
-                (quote!(self.#idx), &fld.ty)
-            })
-            .unzip(),
-        syn::Fields::Unit => (Vec::new(), Vec::new()),
+                a.push(quote!(self.#idx));
+                n.push(i.to_string());
+                t.push(&fld.ty);
+            }
+            (a, n, t)
+        }
+        syn::Fields::Unit => (Vec::new(), Vec::new(), Vec::new()),
     };
     let bounds: Vec<TokenStream2> = types
         .iter()
@@ -881,12 +1014,18 @@ pub fn derive_sim_outputs(item: TokenStream) -> TokenStream {
         None if !bounds.is_empty() => quote!(where #(#bounds,)*),
         None => quote!(),
     };
+    let accessors2 = accessors.clone();
 
     quote!(
         #[automatically_derived]
         impl #impl_generics #cress::SimOutputs for #name #ty_generics #where_tokens {
             fn sink_all(self) {
                 #(#cress::SimOutputs::sink_all(#accessors);)*
+            }
+
+            fn sink_named(self, __name: &str, __outputs: &mut #cress::harness::OutputPorts) {
+                let _ = __name;
+                #(#cress::SimOutputs::sink_named(#accessors2, #names, __outputs);)*
             }
         }
     )

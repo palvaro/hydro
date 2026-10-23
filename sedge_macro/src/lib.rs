@@ -14,32 +14,64 @@
 //! ## What the macro reads from the signature
 //!
 //! * `&Process<'a, X>` is a location. The harness deploys it as one process on localhost.
-//! * The `Stream<T, Process<'a, X>, Unbounded, O, R>` parameter named by `load = ...` is the
-//!   program's request input. The harness feeds it from an external port with values of `T` made
-//!   from the request's sequence number by `sedge::LoadItem`.
-//! * Every other `Stream<(), Process<'a, X>, Unbounded, ..>` parameter is a timer and needs a
-//!   period in `timers(...)`.
+//! * `&Cluster<'a, X>` is a location. The harness deploys it as a cluster of localhost processes
+//!   and needs its size from the attribute, as `x = <members>` where `x` is the parameter's name
+//!   (the same form Cress's `amplification_check` takes). Streams into and out of a cluster pass
+//!   through one extra relay process the harness deploys (`sedge::SedgeRelay`), because a
+//!   deployment has no channel between an external process and a cluster.
+//! * Every `Stream<(), Loc, Unbounded, O, R>` parameter named in `timers(...)` is a timer, bound
+//!   to an in-process `source_interval` of the given period on the parameter's location
+//!   (`sedge::timer`, `sedge::cluster_timer`). The timer is part of the deployed program's real
+//!   execution, so CPU starvation under its quota delays it as it would in production. On a
+//!   cluster, member `i`'s first tick is delayed by `i · period / members` (the deterministic
+//!   form of independent per-member clocks). Only when the command names the timer in a timing
+//!   fault (`--dip timer=K`) is it instead driven by the harness over an external port, so that
+//!   its period can be stretched during the trigger; such runs are reported as `TIMING_FAULT`.
+//! * Every other stream parameter is a data stream, fed from an external port. With
+//!   `load = param` there must be exactly one, and the generator sends it one value of `T` per
+//!   round (to every member, for a cluster), made from the round number by `sedge::LoadItem`.
+//!   With `round_data = |round, inputs| { ... }` there may be several, and the closure decides
+//!   what each round carries: `inputs` has one `sedge::RoundSender<T>` field per data stream on
+//!   a process, named after the parameter, with a `send(T)` method, one
+//!   `sedge::ClusterRoundSender<T>` field per data stream on a cluster, with a
+//!   `send(member, T)` method, and one `<cluster>_members: u32` field per cluster parameter.
+//!   This is the same shape as Cress's `round_data`, so one closure describes both tools'
+//!   workloads; the harness numbers the records of each stream from zero.
 //! * Anything else is a plain value that must be given in the attribute by the parameter's name,
 //!   for example `policy = RetryPolicy { timeout_ticks: 40, max_attempts: 3 }`.
 //!
 //! Every generic type parameter of the function must be given a concrete type, as `T = u64`.
-//! Cluster parameters, keyed streams, and data streams other than the load are not supported yet
-//! and are reported as errors.
+//! Keyed streams are not supported yet and are reported as errors.
 //!
 //! The function's return value is handed to `sedge::Observed::observe`, which the program's crate
-//! implements to name its completion, abandonment, gauge and counter outputs.
+//! implements to name its completion, abandonment, gauge and counter outputs, or derives with
+//! `#[derive(sedge::SedgeOutputs)]` to register every output stream whole (see
+//! [`SedgeOutputs`](macro@SedgeOutputs)).
 //!
 //! ## What the attribute accepts
 //!
 //! * `name = ident` or `name = "string"`: the configuration's name, shown with its verdict.
 //! * `T = Type`: the concrete type for generic parameter `T`.
-//! * `param = expr`: the value of a plain parameter.
-//! * `load = param`: which stream parameter the generator feeds. Required.
+//! * `param = expr`: the value of a plain parameter, or the size of a cluster parameter.
+//! * `load = param`: which stream parameter the generator feeds one value per round. Exactly one
+//!   of `load` and `round_data` is required.
+//! * `round_data = |round, inputs| { ... }`: what one round of workload sends on the data
+//!   streams (see above).
 //! * `timers(param = Duration-expr, ...)`: the period of each timer parameter. Required for
-//!   every `()` stream parameter other than the load.
-//! * `mu = expr`: the service capacity in requests per second, the `μ` that the command's
-//!   overprovisioning factors divide. The command's `--mu` overrides it; one or the other must
-//!   be given.
+//!   every `()` stream parameter that is not data.
+//! * `mu = expr`: where the capacity probe starts its search, in rounds of workload per second.
+//!   μ, which the command's overprovisioning factors divide, is measured under the nodes' limits
+//!   (and cached per limits and host); `mu` is used as μ itself only with `--no-calibrate` or
+//!   without a capacity backend. The command's `--mu` overrides both.
+//! * `cpus = expr`: the CPU quota, in cores, of every deployed node of the program, unless the
+//!   command's `--cpus` says otherwise. `cpus(Role = expr, ...)` gives a per-role quota, by
+//!   location marker type name (`cpus(Client = none, Server = 0.01)`); `none` means no quota. A
+//!   node no one caps runs with no quota: only the resource under test should get one, and
+//!   clients, which stand for the callers offering the load, should not. The quota is set when
+//!   a node's container starts and stays fixed for the run; only the command's opt-in
+//!   `--cpu-dip` changes it mid-run. The harness's relay process is never capped.
+//! * `cpu_period_us = expr`: the CFS period the quotas are enforced over (default 10 ms). The
+//!   kernel's smallest quota is 1 ms, so a cap below `1 ms / period` needs a longer period.
 //! * `ignore = "reason"`: omits this check from the command unless its `--include-ignored` option
 //!   is given.
 //! * `sedge = path`: the path to the `sedge` crate, `::sedge` by default.
@@ -91,9 +123,14 @@ impl Parse for Entry {
         let key: Ident = input.parse()?;
         if input.peek(Token![=]) {
             input.parse::<Token![=]>()?;
-            // Raw tokens up to the next comma, because a type such as `Vec<(u32, u32)>` is not
-            // an expression.
-            let value = tokens_until_comma(input)?;
+            // A closure's parameter list has top-level commas, so `round_data` is parsed as an
+            // expression; every other value is the raw tokens up to the next comma, because a
+            // type such as `Vec<(u32, u32)>` is not an expression.
+            let value = if key == "round_data" {
+                input.parse::<Expr>()?.to_token_stream()
+            } else {
+                tokens_until_comma(input)?
+            };
             if value.is_empty() {
                 return Err(syn::Error::new(key.span(), "expected a value after `=`"));
             }
@@ -139,8 +176,15 @@ impl Parse for Args {
 // ---------------------------------------------------------------------------------------------
 // Signature analysis
 
-/// A process the harness must create, identified by its marker type.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LocKind {
+    Process,
+    Cluster,
+}
+
+/// A process or cluster the harness must create, identified by its marker type.
 struct Loc {
+    kind: LocKind,
     marker: Type,
     /// The variable holding it in the generated code: the parameter's name when the location is
     /// a parameter, otherwise a synthesized one.
@@ -194,27 +238,25 @@ fn is_unit(ty: &Type) -> bool {
     matches!(ty, Type::Tuple(t) if t.elems.is_empty())
 }
 
-/// Classifies a `Process<'a, X>` type, if it is one; rejects clusters.
-fn as_process(ty: &Type) -> syn::Result<Option<Type>> {
+/// Classifies a `Process<'a, X>` or `Cluster<'a, X>` type, if it is one.
+fn as_location(ty: &Type) -> syn::Result<Option<(LocKind, Type)>> {
     let Some((ident, args)) = last_ident(ty) else {
         return Ok(None);
     };
-    match ident.to_string().as_str() {
-        "Process" => {}
-        "Cluster" => {
-            return Err(syn::Error::new(
-                ty.span(),
-                "#[overload_check] does not support cluster locations yet",
-            ));
-        }
+    let kind = match ident.to_string().as_str() {
+        "Process" => LocKind::Process,
+        "Cluster" => LocKind::Cluster,
         _ => return Ok(None),
+    };
+    let targs = type_args(args);
+    if kind == LocKind::Cluster && targs.len() > 1 {
+        return Err(syn::Error::new(
+            ty.span(),
+            "cluster locations with an explicit consistency type parameter are not supported by #[overload_check]",
+        ));
     }
-    let marker = type_args(args)
-        .first()
-        .copied()
-        .cloned()
-        .unwrap_or_else(unit_type);
-    Ok(Some(marker))
+    let marker = targs.first().copied().cloned().unwrap_or_else(unit_type);
+    Ok(Some((kind, marker)))
 }
 
 /// Replaces single-segment type paths naming a generic parameter with the concrete type.
@@ -291,7 +333,11 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
     let mut ignore: Option<LitStr> = None;
     let mut sedge: syn::Path = syn::parse_quote!(::sedge);
     let mut load: Option<Ident> = None;
+    let mut round_data: Option<Expr> = None;
     let mut mu: Option<Expr> = None;
+    let mut cpus: Option<Expr> = None;
+    let mut cpu_period: Option<Expr> = None;
+    let mut role_cpus: Vec<(Ident, Expr)> = Vec::new();
     let mut timers: Vec<(Ident, Expr)> = Vec::new();
     let mut generic_types: Vec<(String, Type)> = Vec::new();
     let mut values: Vec<(String, Expr, Span)> = Vec::new();
@@ -312,7 +358,33 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
             ("ignore", Some(v), _) => ignore = Some(syn::parse2(v.clone())?),
             ("sedge", Some(v), _) => sedge = syn::parse2(v.clone())?,
             ("load", Some(v), _) => load = Some(syn::parse2(v.clone())?),
+            ("round_data", Some(v), _) => round_data = Some(syn::parse2(v.clone())?),
             ("mu", Some(v), _) => mu = Some(syn::parse2(v.clone())?),
+            ("cpus", Some(v), _) => {
+                cpus = Some(if v.to_string() == "none" {
+                    syn::parse_quote!(0.0)
+                } else {
+                    syn::parse2(v.clone())?
+                })
+            }
+            ("cpu_period_us", Some(v), _) => cpu_period = Some(syn::parse2(v.clone())?),
+            ("cpus", None, Some(g)) => {
+                for t in g {
+                    let Some(v) = &t.value else {
+                        return Err(syn::Error::new(
+                            t.key.span(),
+                            "per-role caps look like `cpus(Server = 0.2)`",
+                        ));
+                    };
+                    // `none`: no quota for this role.
+                    let e: Expr = if v.to_string() == "none" {
+                        syn::parse_quote!(0.0)
+                    } else {
+                        syn::parse2(v.clone())?
+                    };
+                    role_cpus.push((t.key.clone(), e));
+                }
+            }
             ("timers", None, Some(g)) => {
                 for t in g {
                     let Some(v) = &t.value else {
@@ -350,12 +422,12 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
             ));
         }
     }
-    let Some(load) = load else {
+    if load.is_some() == round_data.is_some() {
         return Err(syn::Error::new(
             Span::call_site(),
-            "`load = <stream parameter>` names the request input the generator feeds; it is required",
+            "exactly one of `load = <stream parameter>` (one value per round) and `round_data = |round, inputs| { ... }` (what each round sends) is required",
         ));
-    };
+    }
     let hydro: syn::Path = syn::parse_quote!(#sedge::__private::hydro_lang);
     let mut subst = Substitute {
         map: &generic_types,
@@ -365,9 +437,9 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
     let mut locs: Vec<Loc> = Vec::new();
     let mut streams: Vec<StreamParam> = Vec::new();
     let mut params: Vec<Param> = Vec::new();
-    let find_or_add_loc = |marker: Type, param: Option<&Ident>, locs: &mut Vec<Loc>| -> usize {
+    let find_or_add_loc = |kind: LocKind, marker: Type, param: Option<&Ident>, locs: &mut Vec<Loc>| -> usize {
         let key = type_key(&marker);
-        if let Some(i) = locs.iter().position(|l| type_key(&l.marker) == key) {
+        if let Some(i) = locs.iter().position(|l| l.kind == kind && type_key(&l.marker) == key) {
             if let Some(p) = param
                 && !locs[i].is_param
             {
@@ -380,6 +452,7 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
             .cloned()
             .unwrap_or_else(|| format_ident!("__loc_{}", locs.len()));
         locs.push(Loc {
+            kind,
             marker,
             var,
             is_param: param.is_some(),
@@ -405,9 +478,9 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
         subst.visit_type_mut(&mut ty);
 
         if let Type::Reference(r) = &ty
-            && let Some(marker) = as_process(&r.elem)?
+            && let Some((kind, marker)) = as_location(&r.elem)?
         {
-            let i = find_or_add_loc(marker, Some(&pname), &mut locs);
+            let i = find_or_add_loc(kind, marker, Some(&pname), &mut locs);
             params.push(Param::Loc(i));
             continue;
         }
@@ -428,10 +501,10 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
                 ));
             }
             let item = targs[0].clone();
-            let Some(marker) = as_process(targs[1])? else {
+            let Some((kind, marker)) = as_location(targs[1])? else {
                 return Err(syn::Error::new(
                     targs[1].span(),
-                    "a stream parameter's location must be a Process",
+                    "a stream parameter's location must be a Process or a Cluster",
                 ));
             };
             if let Some(bound) = targs.get(2)
@@ -449,21 +522,21 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
             let retries = targs.get(4).copied().cloned().unwrap_or_else(
                 || syn::parse_quote!(#hydro::live_collections::stream::ExactlyOnce),
             );
-            let is_load = pname == load;
+            let is_load = load.as_ref().is_some_and(|l| *l == pname);
             let is_timer = timers.iter().any(|(t, _)| *t == pname);
-            if !is_load && !is_timer {
-                if is_unit(&item) {
-                    return Err(syn::Error::new(
-                        pname.span(),
-                        format!(
-                            "timer `{pname}` needs a period in the attribute, as `timers({pname} = Duration::from_millis(..))`"
-                        ),
-                    ));
-                }
+            if !is_timer && !is_load && is_unit(&item) {
                 return Err(syn::Error::new(
                     pname.span(),
                     format!(
-                        "stream `{pname}` is neither the load nor a timer; #[overload_check] feeds one data stream, named by `load = ...`"
+                        "timer `{pname}` needs a period in the attribute, as `timers({pname} = Duration::from_millis(..))`"
+                    ),
+                ));
+            }
+            if load.is_some() && !is_load && !is_timer {
+                return Err(syn::Error::new(
+                    pname.span(),
+                    format!(
+                        "stream `{pname}` is neither the load nor a timer; with `load = ...` #[overload_check] feeds one data stream (use `round_data = ...` for several)"
                     ),
                 ));
             }
@@ -479,7 +552,7 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
                     format!("timer `{pname}` must be a stream of `()`"),
                 ));
             }
-            let loc = find_or_add_loc(marker, None, &mut locs);
+            let loc = find_or_add_loc(kind, marker, None, &mut locs);
             streams.push(StreamParam {
                 name: pname,
                 item,
@@ -492,10 +565,19 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
         }
         params.push(Param::Plain(pname));
     }
-    if !streams.iter().any(|s| s.name == load) {
+    if let Some(load) = &load
+        && !streams.iter().any(|s| s.name == *load)
+    {
         return Err(syn::Error::new(
             load.span(),
             format!("`{load}` is not a stream parameter of `{fn_name}`"),
+        ));
+    }
+    let is_data = |s: &StreamParam| !timers.iter().any(|(t, _)| *t == s.name);
+    if round_data.is_some() && !streams.iter().any(is_data) {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "`round_data` needs at least one data stream (a stream parameter not named in `timers(...)`)",
         ));
     }
     for (t, _) in &timers {
@@ -523,12 +605,40 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
             }
         }
     }
+    // Every cluster needs its size from the attribute, under the parameter's name.
+    let mut cluster_sizes: Vec<(usize, Expr)> = Vec::new();
+    for (i, l) in locs.iter().enumerate() {
+        if l.kind == LocKind::Cluster {
+            if !l.is_param {
+                return Err(syn::Error::new(
+                    f.sig.span(),
+                    format!(
+                        "a stream lives on a cluster ({}) that is not a parameter, so the harness cannot learn its size",
+                        type_key(&l.marker)
+                    ),
+                ));
+            }
+            let key = l.var.to_string();
+            match values.iter().position(|(k, _, _)| *k == key) {
+                Some(j) => cluster_sizes.push((i, values.remove(j).1)),
+                None => {
+                    return Err(syn::Error::new(
+                        l.var.span(),
+                        format!(
+                            "cluster `{key}` needs its size in the attribute, as `{key} = <members>`"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
     if let Some((k, _, span)) = values.first() {
         return Err(syn::Error::new(
             *span,
             format!("`{k}` is not a parameter of `{fn_name}`"),
         ));
     }
+    let has_cluster = !cluster_sizes.is_empty();
 
     // ---- Code generation -----------------------------------------------------------------
 
@@ -542,25 +652,64 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
     let make_locs = locs.iter().map(|l| {
         let var = &l.var;
         let marker = &l.marker;
-        quote!(let #var = __flow.process::<#marker>();)
+        match l.kind {
+            LocKind::Process => quote!(let #var = __flow.process::<#marker>();),
+            LocKind::Cluster => quote!(let #var = __flow.cluster::<#marker>();),
+        }
     });
+    let size_var = |loc: usize| format_ident!("__members_{}", locs[loc].var);
+    let make_sizes = cluster_sizes.iter().map(|(i, e)| {
+        let v = size_var(*i);
+        quote!(let #v: u32 = (#e) as u32;)
+    });
+    let is_cluster = |s: &StreamParam| locs[s.loc].kind == LocKind::Cluster;
 
+    let port_var = |s: &StreamParam| format_ident!("__port_{}", s.name);
+    let sink_var = |s: &StreamParam| format_ident!("__sink_{}", s.name);
     let make_inputs = streams.iter().map(|s| {
         let sv = &s.name;
         let (item, order, retries) = (&s.item, &s.order, &s.retries);
         let locv = &locs[s.loc].var;
-        if s.name == load {
-            quote!(
-                let (__load, #sv) = #sedge::load_input::<_, #item>(&#locv, &__external);
-                let #sv = #sv.weaken_ordering::<#order>().weaken_retries::<#retries>();
-            )
-        } else {
+        let pv = port_var(s);
+        if !is_data(s) {
+            // A timer runs in-process, on the deployed node's own clock, unless the command
+            // names it in a timing fault (`--dip`), in which case the harness drives it over a
+            // port like a data stream's so that it can stretch its period.
+            let name = s.name.to_string();
             let period = &timers.iter().find(|(t, _)| *t == s.name).unwrap().1;
-            quote!(
-                let #sv = #sedge::timer(&#locv, (#period))
-                    .weaken_ordering::<#order>()
-                    .weaken_retries::<#retries>();
-            )
+            return match locs[s.loc].kind {
+                LocKind::Process => quote!(
+                    let (#pv, #sv) = if __spec.drives_timer(#name) {
+                        let (__p, __s) = #sedge::load_input::<_, ()>(&#locv, &__external);
+                        (::std::option::Option::Some(__p), __s)
+                    } else {
+                        (::std::option::Option::None, #sedge::timer(&#locv, ::std::time::Duration::from(#period)))
+                    };
+                    let #sv = #sv.weaken_ordering::<#order>().weaken_retries::<#retries>();
+                ),
+                LocKind::Cluster => {
+                    let n = size_var(s.loc);
+                    quote!(
+                        let (#pv, #sv) = if __spec.drives_timer(#name) {
+                            let (__p, __s) = #sedge::cluster_load_input::<_, ()>(&#locv, &__relay, &__external);
+                            (::std::option::Option::Some(__p), __s)
+                        } else {
+                            (::std::option::Option::None, #sedge::cluster_timer(&#locv, ::std::time::Duration::from(#period), #n))
+                        };
+                        let #sv = #sv.weaken_ordering::<#order>().weaken_retries::<#retries>();
+                    )
+                }
+            };
+        }
+        match locs[s.loc].kind {
+            LocKind::Process => quote!(
+                let (#pv, #sv) = #sedge::load_input::<_, #item>(&#locv, &__external);
+                let #sv = #sv.weaken_ordering::<#order>().weaken_retries::<#retries>();
+            ),
+            LocKind::Cluster => quote!(
+                let (#pv, #sv) = #sedge::cluster_load_input::<_, #item>(&#locv, &__relay, &__external);
+                let #sv = #sv.weaken_ordering::<#order>().weaken_retries::<#retries>();
+            ),
         }
     });
 
@@ -586,12 +735,163 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
         ),
     };
 
-    let with_processes = locs.iter().map(|l| {
-        let v = &l.var;
-        quote!(.with_process(&#v, #sedge::harness::host(&mut __deployment, __run)))
+    // Connecting the data and timer ports once deployed, and the round sender.
+    let connect_sinks = streams.iter().map(|s| {
+        let pv = port_var(s);
+        let sk = sink_var(s);
+        if is_data(s) {
+            // Data streams are written through a feed: the generator queues each record at its
+            // scheduled arrival and never waits on the socket (open loop).
+            quote!(
+                let (#sk, __writer) = #sedge::harness::feed(__nodes.connect(#pv).await, __feed_stats.clone());
+                __writers.push(__writer);
+            )
+        } else {
+            quote!(let #sk = match #pv {
+                ::std::option::Option::Some(__p) => ::std::option::Option::Some(__nodes.connect(__p).await),
+                ::std::option::Option::None => ::std::option::Option::None,
+            };)
+        }
     });
+    let make_timers = streams.iter().filter(|s| !is_data(s)).map(|s| {
+        let sk = sink_var(s);
+        let name = s.name.to_string();
+        let period = &timers.iter().find(|(t, _)| *t == s.name).unwrap().1;
+        let (sink, members) = if is_cluster(s) {
+            let n = size_var(s.loc);
+            (quote!(__sink), quote!(#n))
+        } else {
+            (quote!(#sedge::harness::process_timer_sink(__sink)), quote!(1u32))
+        };
+        quote!(if let ::std::option::Option::Some(__sink) = #sk {
+            __timers.push(#sedge::harness::TimerDrive {
+                name: #name.to_owned(),
+                period: ::std::time::Duration::from(#period),
+                sink: #sink,
+                members: #members,
+            });
+        })
+    });
+    let send_round = match (&load, &round_data) {
+        (Some(_), _) => {
+            let s = streams.iter().find(|s| is_data(s)).unwrap();
+            let sk = sink_var(s);
+            let item = &s.item;
+            if is_cluster(s) {
+                // One value per round to every member, as Cress feeds a cluster stream.
+                let n = size_var(s.loc);
+                quote!(
+                    let __send_round = async |__round: u64, __due: ::std::time::Instant| -> ::std::result::Result<u64, ::std::string::String> {
+                        for __m in 0..#n {
+                            #sk.send(__due, (__m, <#item as #sedge::LoadItem>::from_id(__round)))?;
+                        }
+                        ::std::result::Result::Ok(#n as u64)
+                    };
+                )
+            } else {
+                quote!(
+                    let __send_round = async |__round: u64, __due: ::std::time::Instant| -> ::std::result::Result<u64, ::std::string::String> {
+                        #sk.send(__due, <#item as #sedge::LoadItem>::from_id(__round))?;
+                        ::std::result::Result::Ok(1)
+                    };
+                )
+            }
+        }
+        (None, Some(closure)) => {
+            let fields = streams.iter().filter(|s| is_data(s)).map(|s| {
+                let n = &s.name;
+                let item = &s.item;
+                if is_cluster(s) {
+                    quote!(pub #n: #sedge::ClusterRoundSender<#item>,)
+                } else {
+                    quote!(pub #n: #sedge::RoundSender<#item>,)
+                }
+            });
+            let member_fields = cluster_sizes.iter().map(|(i, _)| {
+                let n = format_ident!("{}_members", locs[*i].var);
+                quote!(pub #n: u32,)
+            });
+            let inits = streams.iter().filter(|s| is_data(s)).map(|s| {
+                let n = &s.name;
+                if is_cluster(s) {
+                    quote!(#n: #sedge::ClusterRoundSender::new(),)
+                } else {
+                    quote!(#n: #sedge::RoundSender::new(),)
+                }
+            });
+            let member_inits = cluster_sizes.iter().map(|(i, _)| {
+                let n = format_ident!("{}_members", locs[*i].var);
+                let v = size_var(*i);
+                quote!(#n: #v,)
+            });
+            let flushes = streams.iter().filter(|s| is_data(s)).map(|s| {
+                let n = &s.name;
+                let sk = sink_var(s);
+                quote!(
+                    for __item in __inputs.#n.take() {
+                        #sk.send(__due, __item)?;
+                        __n += 1;
+                    }
+                )
+            });
+            quote!(
+                #[allow(non_camel_case_types, dead_code)]
+                struct __Inputs { #(#fields)* #(#member_fields)* }
+                fn __coerce<F: ::std::ops::FnMut(u64, &__Inputs)>(f: F) -> F { f }
+                let __inputs = __Inputs { #(#inits)* #(#member_inits)* };
+                let mut __user_round = __coerce(#closure);
+                let __send_round = async |__round: u64, __due: ::std::time::Instant| -> ::std::result::Result<u64, ::std::string::String> {
+                    __user_round(__round, &__inputs);
+                    let mut __n = 0u64;
+                    #(#flushes)*
+                    ::std::result::Result::Ok(__n)
+                };
+            )
+        }
+        (None, None) => unreachable!(),
+    };
+
+    let role = |l: &Loc| -> String {
+        last_ident(&l.marker)
+            .map(|(i, _)| i.to_string())
+            .unwrap_or_else(|| match l.kind {
+                LocKind::Process => "process".to_owned(),
+                LocKind::Cluster => "cluster".to_owned(),
+            })
+    };
+    let roles: Vec<String> = locs.iter().map(role).collect();
+    let with_processes = locs.iter().enumerate().map(|(i, l)| {
+        let v = &l.var;
+        let r = role(l);
+        match l.kind {
+            LocKind::Process => {
+                quote!(.with_process(&#v, __cap.host(&mut __deployment, __run, &__meta, #r, ::std::option::Option::None)))
+            }
+            LocKind::Cluster => {
+                let n = size_var(i);
+                quote!(.with_cluster(&#v, (0..#n).map(|__m| __cap.host(&mut __deployment, __run, &__meta, #r, ::std::option::Option::Some(__m))).collect::<::std::vec::Vec<_>>()))
+            }
+        }
+    });
+    // The relay is deployed only when some stream lives on a cluster; otherwise it is an unused
+    // location that the flow never sends to.
+    let with_relay = if has_cluster {
+        quote!(.with_process(&__relay, #sedge::harness::host(&mut __deployment, __run)))
+    } else {
+        quote!()
+    };
 
     let mu_value = mu
+        .as_ref()
+        .map(|e| quote!(::std::option::Option::Some((#e) as f64)))
+        .unwrap_or_else(|| quote!(::std::option::Option::None));
+    let role_cpu_names = role_cpus.iter().map(|(n, _)| n);
+    let role_cpu_values = role_cpus.iter().map(|(_, e)| e);
+    let cpu_period_value = cpu_period
+        .as_ref()
+        .map(|e| quote!(::std::option::Option::Some((#e) as u64)))
+        .unwrap_or_else(|| quote!(::std::option::Option::None));
+    let cpus_value = cpus
         .as_ref()
         .map(|e| quote!(::std::option::Option::Some((#e) as f64)))
         .unwrap_or_else(|| quote!(::std::option::Option::None));
@@ -607,7 +907,7 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
 
     Ok(quote!(
         #[doc = #doc]
-        #[allow(non_snake_case, unused_variables, clippy::all)]
+        #[allow(non_snake_case, unused_variables, unused_mut, clippy::all)]
         fn #entry_name(
             __run: &#sedge::harness::RunConfig,
         ) -> ::std::vec::Vec<#sedge::harness::TrialResult> {
@@ -618,37 +918,49 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
                 function: stringify!(#fn_name),
                 configuration: #config_name,
                 mu: #mu_value,
+                cpus: #cpus_value,
+                cpu_period_us: #cpu_period_value,
+                role_cpus: ::std::vec![#((stringify!(#role_cpu_names), (#role_cpu_values) as f64)),*],
+                roles: &[#(#roles),*],
             };
-            #sedge::harness::block_on(async {
-                let mut __results = ::std::vec::Vec::new();
-                for (__factor, __trial) in __run.schedule() {
-                    let mut __deployment = #sedge::__private::hydro_deploy::Deployment::new();
-                    let mut __flow = #hydro::compile::builder::FlowBuilder::new();
-                    let __external = __flow.external::<()>();
-                    let mut __observer = #sedge::Observer::new(&__external);
-                    #(#make_locs)*
-                    #(#make_inputs)*
-                    #observe
-                    let __nodes = __flow
-                        .with_default_optimize()
-                        #(#with_processes)*
-                        .with_external(&__external, __deployment.Localhost())
-                        .deploy(&mut __deployment);
-                    __results.push(
-                        #sedge::harness::run_trial(
-                            &mut __deployment,
-                            &__nodes,
-                            __load,
-                            __observer,
-                            &__meta,
-                            __run,
-                            __factor,
-                            __trial,
-                        )
-                        .await,
-                    );
-                }
-                __results
+            #sedge::harness::run_check(&__meta, __run, async |__spec: &#sedge::harness::Spec| -> #sedge::harness::Executed {
+                let __cap = #sedge::harness::TrialCapacity::new(__run);
+                let mut __deployment = #sedge::__private::hydro_deploy::Deployment::new();
+                let mut __flow = #hydro::compile::builder::FlowBuilder::new();
+                let __external = __flow.external::<()>();
+                let __relay = __flow.process::<#sedge::SedgeRelay>();
+                let mut __observer = #sedge::Observer::new(&__external, &__relay);
+                #(#make_locs)*
+                #(#make_sizes)*
+                #(#make_inputs)*
+                #observe
+                let __nodes = __flow
+                    .with_default_optimize()
+                    #(#with_processes)*
+                    #with_relay
+                    .with_external(&__external, __deployment.Localhost())
+                    .deploy(&mut __deployment);
+                __deployment.deploy().await.expect("deployment failed");
+                let __feed_stats = #sedge::harness::FeedStats::default();
+                let mut __writers: ::std::vec::Vec<::std::pin::Pin<::std::boxed::Box<dyn ::std::future::Future<Output = ()>>>> = ::std::vec::Vec::new();
+                #(#connect_sinks)*
+                let mut __timers = ::std::vec::Vec::new();
+                #(#make_timers)*
+                #send_round
+                #sedge::harness::execute(
+                    &mut __deployment,
+                    &__nodes,
+                    __send_round,
+                    __writers,
+                    __feed_stats,
+                    __timers,
+                    __observer,
+                    &__meta,
+                    __run,
+                    __spec,
+                    __cap,
+                )
+                .await
             })
         }
 
@@ -664,4 +976,88 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
             }
         }
     ))
+}
+
+// ---------------------------------------------------------------------------------------------
+// The derive
+
+/// Implements `sedge::Observed` for a struct whose fields are `Stream`s on `Process` or `Cluster`
+/// locations by registering every field whole with `sedge::Observer::stream`, under the field's
+/// name (a cluster stream's records are tagged with their member; its levels are summed). The
+/// harness then counts each stream's records per second, keeps the latest value of numeric
+/// streams, and reads ids from `u64` items or `id` fields; which of these the verdict uses is
+/// decided by the stream's kind, which comes from Cress's conservation table when one exists for
+/// the function and configuration (see `cress::Conservation`), and otherwise from the item type.
+/// No `q!` closure is needed in the program's crate. The struct must have exactly one lifetime
+/// parameter, the `'a` of its streams' locations. The derive always names the crate `::sedge`.
+#[proc_macro_derive(SedgeOutputs)]
+pub fn derive_sedge_outputs(item: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(item as syn::DeriveInput);
+    let name = &input.ident;
+    let sedge: syn::Path = syn::parse_quote!(::sedge);
+    let syn::Data::Struct(data) = &input.data else {
+        return syn::Error::new(input.span(), "#[derive(SedgeOutputs)] only supports structs")
+            .to_compile_error()
+            .into();
+    };
+    let lifetimes: Vec<&syn::Lifetime> = input
+        .generics
+        .params
+        .iter()
+        .filter_map(|p| match p {
+            GenericParam::Lifetime(l) => Some(&l.lifetime),
+            _ => None,
+        })
+        .collect();
+    let [lt] = lifetimes.as_slice() else {
+        return syn::Error::new(
+            input.generics.span(),
+            "#[derive(SedgeOutputs)] needs exactly one lifetime parameter, the `'a` of the streams' locations",
+        )
+        .to_compile_error()
+        .into();
+    };
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+    let (registrations, types): (Vec<TokenStream2>, Vec<&Type>) = match &data.fields {
+        syn::Fields::Named(f) => f
+            .named
+            .iter()
+            .map(|fld| {
+                let id = fld.ident.as_ref().unwrap();
+                let name = id.to_string();
+                (quote!(__observer.stream(#name, self.#id);), &fld.ty)
+            })
+            .unzip(),
+        syn::Fields::Unnamed(f) => f
+            .unnamed
+            .iter()
+            .enumerate()
+            .map(|(i, fld)| {
+                let idx = syn::Index::from(i);
+                let name = i.to_string();
+                (quote!(__observer.stream(#name, self.#idx);), &fld.ty)
+            })
+            .unzip(),
+        syn::Fields::Unit => (Vec::new(), Vec::new()),
+    };
+    // A generic output struct (Raft's `RaftOutputs<'a, T, ClusterTag>`) is observable whenever
+    // each of its fields is, which is what these bounds say; they put the `Serialize` requirement
+    // on the field types rather than on the struct's parameters.
+    let bounds = types.iter().map(|t| quote!(#t: #sedge::Observable<#lt>));
+    let where_tokens = match where_clause {
+        Some(w) => {
+            let preds = w.predicates.iter();
+            quote!(where #(#preds,)* #(#bounds,)*)
+        }
+        None => quote!(where #(#bounds,)*),
+    };
+    quote!(
+        #[automatically_derived]
+        impl #impl_generics #sedge::Observed<#lt> for #name #ty_generics #where_tokens {
+            fn observe(self, __observer: &mut #sedge::Observer<#lt>) {
+                #(#registrations)*
+            }
+        }
+    )
+    .into()
 }

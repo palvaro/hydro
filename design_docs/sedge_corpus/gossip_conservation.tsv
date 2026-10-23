@@ -1,0 +1,10 @@
+hydro_test	gossip_with_resend	resend_off	wire	conserved	false	2500	2500	2500	20	2500
+hydro_test	gossip_with_resend	resend_off	merged	conserved	false	2500	2500	2500	10	2500
+hydro_test	gossip_with_resend	resend_off	acks_sent	conserved	false	2500	2500	2500	10	2500
+hydro_test	gossip_with_resend	resend_off	inbox_depth	level	true	6250	5266	7224	1875	6250
+hydro_test	gossip_with_resend	resend_off	outstanding_depth	level	true	6250	5266	7224	1875	6250
+hydro_test	gossip_with_resend	resend_on	wire	amplified	false	2500	2500	18917	20	22430
+hydro_test	gossip_with_resend	resend_on	merged	amplified	false	2500	2500	12690	10	22420
+hydro_test	gossip_with_resend	resend_on	acks_sent	amplified	false	2500	2500	12690	10	22420
+hydro_test	gossip_with_resend	resend_on	inbox_depth	level	true	6250	6048	10130	1875	15000
+hydro_test	gossip_with_resend	resend_on	outstanding_depth	level	true	6250	6048	10130	1875	15000

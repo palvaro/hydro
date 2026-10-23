@@ -8,7 +8,7 @@ use syn::parse_quote;
 use crate::compile::builder::{HandoffId, StmtId};
 use crate::compile::ir::{
     CollectionKind, DebugExpr, DfirBuilder, HydroIrOpMetadata, KeyedSingletonBoundKind,
-    OptionalBoundKind, StreamOrder, StreamRetry,
+    StreamOrder, StreamRetry,
 };
 use crate::location::dynamic::LocationId;
 use crate::staging_util::get_this_crate;
@@ -38,6 +38,9 @@ pub struct SimBuilder {
     pub next_hoff_id: crate::Counter<HandoffId>,
     pub test_safety_only: bool,
     pub skip_consistency_assertions: bool,
+    /// The IR was rewritten with record-level provenance: network sends and external
+    /// outputs receive `(value, Vec<delivery id>)` and record the ids.
+    pub provenance: bool,
     pub channel_tables: BTreeMap<u32, syn::Ident>,
     /// Tracks which operators sim hook handles have been bound to, to report double-binds
     /// at flow build time with both operator locations.
@@ -869,15 +872,14 @@ impl DfirBuilder for SimBuilder {
                         None,
                     );
                 }
-                CollectionKind::Optional {
-                    bound: OptionalBoundKind::InitNone,
-                    element_type,
-                    ..
-                } => {
-                    // Only `InitNone` optionals (null prefix, then monotone presence) are
-                    // supported: their monotone presence is what `OptionalInitNoneHook` models. A general
-                    // `Unbounded` optional can return to null, which this hook does not represent,
-                    // so it stays rejected below.
+                CollectionKind::Optional { element_type, .. } => {
+                    // `InitNone` optionals (null prefix, then monotone presence) are exactly what
+                    // `OptionalInitNoneHook` models. A top-level `Unbounded` optional is a stream
+                    // of versions in the simulator (`singleton_intermediates`), which has no
+                    // representation of a return to null, so it is snapshotted the same way: the
+                    // snapshot is null until the first version and then some version. This is
+                    // what `Optional::or` / `unwrap_or` / `into_singleton` on a top-level
+                    // aggregate (`max`, `reduce`, `first`) need, whose presence is monotone.
                     debug_assert!(in_location.is_top_level());
 
                     let hoff_id = self.next_hoff_id.get_and_increment();
@@ -955,7 +957,9 @@ impl DfirBuilder for SimBuilder {
                             None,
                         );
                     } else {
-                        todo!("atomic yield to a different tick is not yet supported");
+                        todo!(
+                            "atomic yield to a different tick is not yet supported ({in_location:?} -> {out_location:?})"
+                        );
                     }
                 } else {
                     let hoff_id = self.next_hoff_id.get_and_increment();
@@ -998,7 +1002,9 @@ impl DfirBuilder for SimBuilder {
                             None,
                         );
                     } else {
-                        todo!("atomic yield to a different tick is not yet supported");
+                        todo!(
+                            "atomic yield to a different tick is not yet supported ({in_location:?} -> {out_location:?})"
+                        );
                     }
                 } else {
                     // NOTE: `Optional::latest()` is non-monotone (it reflects the latest tick's
@@ -1081,7 +1087,25 @@ impl DfirBuilder for SimBuilder {
         out_kind: &CollectionKind,
         op_meta: &HydroIrOpMetadata,
     ) {
-        if trusted {
+        // A retry cast alone (`AtLeastOnce` → `ExactlyOnce`, same order and boundedness, as
+        // `fold` with an idempotence proof performs on its input) is the identity in the
+        // simulator: the simulated network never duplicates a delivery, so there is no
+        // decision to explore. (Injecting duplicates to exercise idempotence proofs would be
+        // a hook of its own; none exists.)
+        let retry_cast_only = matches!(
+            (in_kind, out_kind),
+            (
+                CollectionKind::Stream { bound: b1, order: o1, retry: StreamRetry::AtLeastOnce, .. },
+                CollectionKind::Stream { bound: b2, order: o2, retry: StreamRetry::ExactlyOnce, .. },
+            ) if b1 == b2 && o1 == o2
+        ) || matches!(
+            (in_kind, out_kind),
+            (
+                CollectionKind::KeyedStream { bound: b1, value_order: o1, value_retry: StreamRetry::AtLeastOnce, .. },
+                CollectionKind::KeyedStream { bound: b2, value_order: o2, value_retry: StreamRetry::ExactlyOnce, .. },
+            ) if b1 == b2 && o1 == o2
+        );
+        if trusted || retry_cast_only {
             let builder = self.get_dfir_mut(location);
             builder.add_dfir(
                 parse_quote! {
@@ -1922,6 +1946,7 @@ impl DfirBuilder for SimBuilder {
         source: syn::Expr,
         deserialize: Option<&DebugExpr>,
         external_element_type: Option<&syn::Type>,
+        input_element_type: Option<&syn::Type>,
         tag_id: StmtId,
         networking_info: &crate::networking::NetworkingInfo,
     ) {
@@ -1957,22 +1982,192 @@ impl DfirBuilder for SimBuilder {
         }
 
         let root = get_this_crate();
+        let channel_id = tag_id.into_inner();
+        let provenance = self.provenance;
+        // Embedded (raw-element) channels carry no serialized payload: they are not fault
+        // points, carry no delivery id, and are not recorded.
+        let embedded = external_element_type.is_some();
 
-        // For embedded (external) serialization, the raw payload type flows across the in-memory
-        // channel instead of serialized `Bytes`.
+        // The wire format. A serialized channel carries `(delivery id, bytes)`: the id is
+        // minted by the filter at the send half (see `sim::runtime::lineage`) and recorded by
+        // the receive half, so a delivery is attributed to its send exactly.
         let payload: syn::Type = match external_element_type {
             Some(ty) => ty.clone(),
-            None => parse_quote!(__root_dfir_rs::bytes::Bytes),
+            None => parse_quote!((u64, __root_dfir_rs::bytes::Bytes)),
         };
 
         // Bincode channels wrap the received value in a transport `Result` (matching real
         // deployments) which the bincode deserialize expression then unwraps. Embedded channels
         // deliver the raw payload directly, so no such wrapper is inserted.
-        let ok_wrap: proc_macro2::TokenStream = if external_element_type.is_some() {
-            proc_macro2::TokenStream::new()
+        let from_ser = serde_json::to_string(from).unwrap();
+        let to_ser = serde_json::to_string(to).unwrap();
+
+        // The filter: every send is recorded against the execution that produced it and
+        // the fault state decides whether it reaches the wire (omission; the sender's crash).
+        let lineage_ident =
+            syn::Ident::new(&format!("__lineage_send_{}", tag_id), Span::call_site());
+        self.add_extra_stmt_internal(
+            from,
+            syn::parse_quote! {
+                let #lineage_ident = (
+                    __hydro_lineage.clone(),
+                    #root::sim::runtime::parse_location(#from_ser),
+                    #root::sim::runtime::parse_location(#to_ser),
+                );
+            },
+        );
+        // The receive half records every arrival (by delivery id, before deserialization)
+        // against the execution that took it off the channel.
+        let recv_ident = syn::Ident::new(&format!("__lineage_recv_{}", tag_id), Span::call_site());
+        self.add_extra_stmt_internal(
+            to,
+            syn::parse_quote! {
+                let #recv_ident = (
+                    __hydro_lineage.clone(),
+                    #root::sim::runtime::parse_location(#to_ser),
+                );
+            },
+        );
+        let to_member_recv: proc_macro2::TokenStream = if matches!(to, LocationId::Cluster(_)) {
+            quote::quote!(Some(__current_cluster_id))
         } else {
-            quote::quote!(-> map(|v| -> ::std::result::Result<_, ()> { Ok(v) }))
+            quote::quote!(None)
         };
+
+        // The payload's `Debug` rendering for reports, when its type has one. The IR names
+        // the element type of the input stream: `Tagged<T>` in provenance mode (the value in
+        // hand is the plain `T`), and `(MemberId, T)` for a cluster-targeted send (the value
+        // in hand is `T`).
+        let display_fn: Option<syn::Expr> = (!embedded)
+            .then_some(input_element_type)
+            .flatten()
+            .map(|ty| {
+                let ty = if provenance {
+                    super::provenance::plain_type(ty)
+                } else {
+                    ty.clone()
+                };
+                let ty = match (&ty, to) {
+                    (syn::Type::Tuple(tuple), LocationId::Cluster(_)) if tuple.elems.len() == 2 => {
+                        tuple.elems[1].clone()
+                    }
+                    _ => ty,
+                };
+                parse_quote!(#root::__maybe_debug__!(#ty))
+            });
+        let display_ident =
+            syn::Ident::new(&format!("__lineage_display_{}", tag_id), Span::call_site());
+        // The rendering is taken before serialization consumes the value (the element type
+        // need not be `Clone`), and travels alongside the bytes to the filter.
+        let targeted = matches!(to, LocationId::Cluster(_));
+        let render: proc_macro2::TokenStream = if let Some(f) = &display_fn {
+            self.add_extra_stmt_internal(
+                from,
+                syn::parse_quote! {
+                    let #display_ident = #f;
+                },
+            );
+            if targeted {
+                quote::quote!(#root::sim::runtime::codegen::display_payload(#display_ident, &__v))
+            } else {
+                quote::quote!(#display_ident(&__v))
+            }
+        } else {
+            quote::quote!(None)
+        };
+
+        // With record-level provenance the input items are `(payload, Vec<delivery id>)`
+        // (see `sim::provenance`): serialize the payload, record the ids with the send.
+        let send_guard = |from_member: proc_macro2::TokenStream,
+                          to_member: proc_macro2::TokenStream|
+         -> proc_macro2::TokenStream {
+            if provenance {
+                quote::quote!(#lineage_ident.0.record_sent_with(#channel_id, &#lineage_ident.1, #from_member, &#lineage_ident.2, #to_member, &v, __display, __prov))
+            } else {
+                quote::quote!(#lineage_ident.0.record_sent(#channel_id, &#lineage_ident.1, #from_member, &#lineage_ident.2, #to_member, &v, __display))
+            }
+        };
+        let ser_map: proc_macro2::TokenStream = match (serialize, provenance) {
+            (Some(serialize_pipeline), true) => {
+                quote::quote!(-> map(|(__v, __prov)| { let __display: Option<String> = #render; (#root::sim::runtime::codegen::apply(__v, #serialize_pipeline), __display, __prov) }))
+            }
+            (Some(serialize_pipeline), false) => {
+                quote::quote!(-> map(|__v| { let __display: Option<String> = #render; (#root::sim::runtime::codegen::apply(__v, #serialize_pipeline), __display) }))
+            }
+            (None, _) => proc_macro2::TokenStream::new(),
+        };
+        let pat_single: proc_macro2::TokenStream = if provenance {
+            quote::quote!((v, __display, __prov))
+        } else {
+            quote::quote!((v, __display))
+        };
+        let pat_targeted: proc_macro2::TokenStream = if provenance {
+            quote::quote!(((target_member_id, v), __display, __prov))
+        } else {
+            quote::quote!(((target_member_id, v), __display))
+        };
+        let send_p2p = send_guard(quote::quote!(None), quote::quote!(None));
+        let send_c2p = send_guard(
+            quote::quote!(Some(__current_cluster_id)),
+            quote::quote!(None),
+        );
+        let send_p2c = send_guard(
+            quote::quote!(None),
+            quote::quote!(Some(#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id))),
+        );
+        let send_c2c = send_guard(
+            quote::quote!(Some(__current_cluster_id)),
+            quote::quote!(Some(#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id))),
+        );
+
+        // The receive half: record the arrival, unwrap the wire format into what the
+        // deserializer expects (a transport `Result`), and in provenance mode tag the record
+        // with its delivery id.
+        let tag_recv: proc_macro2::TokenStream = if provenance {
+            quote::quote!(-> map(|(__id, __v)| #root::sim::runtime::codegen::tag_recv(__id, __v)))
+        } else {
+            quote::quote!(-> map(|(_, __v)| __v))
+        };
+        let recv_from_process: proc_macro2::TokenStream = quote::quote! {
+            -> map(|(__id, v)| {
+                #recv_ident.0.record_recv(#channel_id, &#recv_ident.1, #to_member_recv, __id);
+                (__id, ::std::result::Result::<_, ()>::Ok(v))
+            })
+        };
+        let recv_from_cluster: proc_macro2::TokenStream = quote::quote! {
+            -> map(|(__m, (__id, v))| {
+                #recv_ident.0.record_recv(#channel_id, &#recv_ident.1, #to_member_recv, __id);
+                (__id, ::std::result::Result::<_, ()>::Ok((__m, v)))
+            })
+        };
+        let deser: proc_macro2::TokenStream = match deserialize {
+            Some(deserialize_pipeline) => {
+                quote::quote!(-> map(|(__id, __v)| (__id, #root::sim::runtime::codegen::apply(__v, #deserialize_pipeline))))
+            }
+            None => proc_macro2::TokenStream::new(),
+        };
+        // The complete receive pipeline after `source_stream`.
+        let recv_pipeline = |from_cluster: bool| -> proc_macro2::TokenStream {
+            if embedded {
+                match deserialize {
+                    Some(deserialize_pipeline) => quote::quote!(-> map(#deserialize_pipeline)),
+                    None => proc_macro2::TokenStream::new(),
+                }
+            } else {
+                let tap = if from_cluster {
+                    &recv_from_cluster
+                } else {
+                    &recv_from_process
+                };
+                quote::quote!(#tap #deser #tag_recv)
+            }
+        };
+        if embedded {
+            assert!(
+                !provenance,
+                "record-level provenance does not support embedded network channels"
+            );
+        }
 
         match (from, to) {
             (LocationId::Process(_), LocationId::Process(_)) => {
@@ -1980,15 +2175,7 @@ impl DfirBuilder for SimBuilder {
                     let (#sink, #source) = __root_dfir_rs::util::unsync::mpsc::unbounded::<#payload>();
                 });
 
-                if let Some(serialize_pipeline) = serialize {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(|v| #sink.try_send(v).unwrap());
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                } else {
+                if embedded {
                     self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
                             #input_ident -> for_each(|v| #sink.try_send(v).unwrap());
@@ -1996,25 +2183,24 @@ impl DfirBuilder for SimBuilder {
                         None,
                         Some(&format!("send{}", tag_id)),
                     );
+                } else {
+                    self.get_dfir_mut(from).add_dfir(
+                        parse_quote! {
+                            #input_ident #ser_map -> for_each(|#pat_single| if let Some(__id) = #send_p2p { #sink.try_send((__id, v)).unwrap() });
+                        },
+                        None,
+                        Some(&format!("send{}", tag_id)),
+                    );
                 }
 
-                if let Some(deserialize_pipeline) = deserialize {
-                    self.get_dfir_mut(to).add_dfir(
-                        parse_quote! {
-                            #out_ident = source_stream(#source) #ok_wrap -> map(#deserialize_pipeline);
-                        },
-                        None,
-                        Some(&format!("recv{}", tag_id)),
-                    );
-                } else {
-                    self.get_dfir_mut(to).add_dfir(
-                        parse_quote! {
-                            #out_ident = source_stream(#source);
-                        },
-                        None,
-                        Some(&format!("recv{}", tag_id)),
-                    );
-                }
+                let pipeline = recv_pipeline(false);
+                self.get_dfir_mut(to).add_dfir(
+                    parse_quote! {
+                        #out_ident = source_stream(#source) #pipeline;
+                    },
+                    None,
+                    Some(&format!("recv{}", tag_id)),
+                );
             }
             (LocationId::Cluster(_), LocationId::Process(_)) => {
                 self.extra_stmts_global.push(syn::parse_quote! {
@@ -2028,15 +2214,7 @@ impl DfirBuilder for SimBuilder {
                         let #sink = #sink.clone();
                     });
 
-                if let Some(serialize_pipeline) = serialize {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(|v| #sink.try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap());
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                } else {
+                if embedded {
                     self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
                             #input_ident -> for_each(|v| #sink.try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap());
@@ -2044,25 +2222,24 @@ impl DfirBuilder for SimBuilder {
                         None,
                         Some(&format!("send{}", tag_id)),
                     );
+                } else {
+                    self.get_dfir_mut(from).add_dfir(
+                        parse_quote! {
+                            #input_ident #ser_map -> for_each(|#pat_single| if let Some(__id) = #send_c2p { #sink.try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), (__id, v))).unwrap() });
+                        },
+                        None,
+                        Some(&format!("send{}", tag_id)),
+                    );
                 }
 
-                if let Some(deserialize_pipeline) = deserialize {
-                    self.get_dfir_mut(to).add_dfir(
-                        parse_quote! {
-                            #out_ident = source_stream(#source) #ok_wrap -> map(#deserialize_pipeline);
-                        },
-                        None,
-                        Some(&format!("recv{}", tag_id)),
-                    );
-                } else {
-                    self.get_dfir_mut(to).add_dfir(
-                        parse_quote! {
-                            #out_ident = source_stream(#source);
-                        },
-                        None,
-                        Some(&format!("recv{}", tag_id)),
-                    );
-                }
+                let pipeline = recv_pipeline(true);
+                self.get_dfir_mut(to).add_dfir(
+                    parse_quote! {
+                        #out_ident = source_stream(#source) #pipeline;
+                    },
+                    None,
+                    Some(&format!("recv{}", tag_id)),
+                );
             }
             (LocationId::Process(_), LocationId::Cluster(_)) => {
                 let sink_writer = syn::Ident::new(
@@ -2088,15 +2265,7 @@ impl DfirBuilder for SimBuilder {
                         };
                     });
 
-                if let Some(serialize_pipeline) = serialize {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(|(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send(v).unwrap());
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                } else {
+                if embedded {
                     self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
                             #input_ident -> for_each(|(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send(v).unwrap());
@@ -2104,25 +2273,24 @@ impl DfirBuilder for SimBuilder {
                         None,
                         Some(&format!("send{}", tag_id)),
                     );
+                } else {
+                    self.get_dfir_mut(from).add_dfir(
+                        parse_quote! {
+                            #input_ident #ser_map -> for_each(|#pat_targeted| if let Some(__id) = #send_p2c { (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send((__id, v)).unwrap() });
+                        },
+                        None,
+                        Some(&format!("send{}", tag_id)),
+                    );
                 }
 
-                if let Some(deserialize_pipeline) = deserialize {
-                    self.get_dfir_mut(to).add_dfir(
-                        parse_quote! {
-                            #out_ident = source_stream(#source) #ok_wrap -> map(#deserialize_pipeline);
-                        },
-                        None,
-                        Some(&format!("recv{}", tag_id)),
-                    );
-                } else {
-                    self.get_dfir_mut(to).add_dfir(
-                        parse_quote! {
-                            #out_ident = source_stream(#source);
-                        },
-                        None,
-                        Some(&format!("recv{}", tag_id)),
-                    );
-                }
+                let pipeline = recv_pipeline(false);
+                self.get_dfir_mut(to).add_dfir(
+                    parse_quote! {
+                        #out_ident = source_stream(#source) #pipeline;
+                    },
+                    None,
+                    Some(&format!("recv{}", tag_id)),
+                );
             }
             (LocationId::Cluster(_), LocationId::Cluster(_)) => {
                 let sink_writer = syn::Ident::new(
@@ -2155,15 +2323,7 @@ impl DfirBuilder for SimBuilder {
                         };
                     });
 
-                if let Some(serialize_pipeline) = serialize {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(|(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap());
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                } else {
+                if embedded {
                     self.get_dfir_mut(from).add_dfir(
                         parse_quote! {
                             #input_ident -> for_each(|(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap());
@@ -2171,25 +2331,24 @@ impl DfirBuilder for SimBuilder {
                         None,
                         Some(&format!("send{}", tag_id)),
                     );
+                } else {
+                    self.get_dfir_mut(from).add_dfir(
+                        parse_quote! {
+                            #input_ident #ser_map -> for_each(|#pat_targeted| if let Some(__id) = #send_c2c { (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), (__id, v))).unwrap() });
+                        },
+                        None,
+                        Some(&format!("send{}", tag_id)),
+                    );
                 }
 
-                if let Some(deserialize_pipeline) = deserialize {
-                    self.get_dfir_mut(to).add_dfir(
-                        parse_quote! {
-                            #out_ident = source_stream(#source) #ok_wrap -> map(#deserialize_pipeline);
-                        },
-                        None,
-                        Some(&format!("recv{}", tag_id)),
-                    );
-                } else {
-                    self.get_dfir_mut(to).add_dfir(
-                        parse_quote! {
-                            #out_ident = source_stream(#source);
-                        },
-                        None,
-                        Some(&format!("recv{}", tag_id)),
-                    );
-                }
+                let pipeline = recv_pipeline(true);
+                self.get_dfir_mut(to).add_dfir(
+                    parse_quote! {
+                        #out_ident = source_stream(#source) #pipeline;
+                    },
+                    None,
+                    Some(&format!("recv{}", tag_id)),
+                );
             }
             _ => {
                 panic!(
@@ -2236,17 +2395,30 @@ impl DfirBuilder for SimBuilder {
         tag_id: StmtId,
     ) {
         let grabbed_ident = syn::Ident::new(&format!("__sink_{tag_id}"), Span::call_site());
+        // The sink is a `LineageOutputSender` (see `SimDeploy::o2e_sink` / `m2e_sink`); naming
+        // its node lets it honor that node's crash.
+        let root = get_this_crate();
+        let on_ser = serde_json::to_string(on).unwrap();
+        let sink_id = tag_id.into_inner();
         self.add_extra_stmt_internal(
             on,
             syn::parse_quote! {
-                let #grabbed_ident = #sink_expr;
+                let #grabbed_ident = #sink_expr.at(#root::sim::runtime::parse_location(#on_ser), #sink_id);
             },
         );
 
-        if let Some(serialize_pipeline) = serialize {
+        // With record-level provenance the input items are `(payload, Vec<delivery id>)`.
+        let ser_map: proc_macro2::TokenStream = match (serialize, self.provenance) {
+            (Some(serialize_pipeline), true) => {
+                quote::quote!(-> map(|(__v, __prov)| ((#serialize_pipeline)(__v), __prov)))
+            }
+            (Some(serialize_pipeline), false) => quote::quote!(-> map(#serialize_pipeline)),
+            (None, _) => proc_macro2::TokenStream::new(),
+        };
+        if self.provenance {
             self.get_dfir_mut(on).add_dfir(
                 parse_quote! {
-                    #input_ident -> map(#serialize_pipeline) -> for_each(|v| #grabbed_ident.try_send(v).unwrap());
+                    #input_ident #ser_map -> for_each(|(v, __prov)| #grabbed_ident.try_send_with(v, __prov).unwrap());
                 },
                 None,
                 Some(&format!("send{}", tag_id)),
@@ -2254,7 +2426,7 @@ impl DfirBuilder for SimBuilder {
         } else {
             self.get_dfir_mut(on).add_dfir(
                 parse_quote! {
-                    #input_ident -> for_each(|v| #grabbed_ident.try_send(v).unwrap());
+                    #input_ident #ser_map -> for_each(|v| #grabbed_ident.try_send(v).unwrap());
                 },
                 None,
                 Some(&format!("send{}", tag_id)),
@@ -2544,9 +2716,11 @@ fn location_for_op(op_meta: &HydroIrOpMetadata) -> (String, String, String) {
         .user_location()
         .and_then(|u| Some((u.file?.to_owned(), u.line, u.column.saturating_sub(1))))
         .or_else(|| {
-            op_meta.backtrace.elements().next().and_then(|e| {
-                Some((e.filename.as_deref()?.to_owned(), e.lineno?, e.colno?))
-            })
+            op_meta
+                .backtrace
+                .elements()
+                .next()
+                .and_then(|e| Some((e.filename.as_deref()?.to_owned(), e.lineno?, e.colno?)))
         });
 
     position

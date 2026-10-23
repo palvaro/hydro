@@ -1,10 +1,11 @@
 //! The amplification checker on [`super::rpc_retry`]: the primary acceptance test of the port.
 //!
 //! Configuration mirrors the `three_attempts` / `one_attempt` checks of the metastable-3 corpus:
-//! two requests per round for the first 125 rounds, a horizon of 1000 rounds, timeout 40,
-//! server capacity 5 per tick. Expected: the unheld run has the client send 250 messages; holding
-//! the server's request-arrival batch for 128 rounds or more raises that to 746 (two re-sends of
-//! each of the 248 requests stuck behind the hold); the first reaction is at a hold of 64, the
+//! two requests per round for the first 125 rounds, a horizon of 1000 rounds, timeout 40. The
+//! server has no capacity of its own (it answers every arrival in its tick). Expected: the unheld
+//! run has the client send 250 messages; holding the server's request-arrival batch for 128
+//! rounds raises that to 526, and for 256 rounds or more to 746 (two re-sends of each of the 248
+//! requests stuck behind the hold); the first reaction is at a hold of 64, the
 //! first doubling past the 40-tick timeout; one attempt never reacts.
 //!
 //! Runs with `cargo test -p hydro_test --features cress --lib rpc_retry_check`; the module is
@@ -12,8 +13,6 @@
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
     use hydro_lang::prelude::*;
     use cress::{CheckConfig, Report, Verdict, check};
@@ -56,16 +55,12 @@ mod tests {
             client_report_tick,
             server_report_tick,
             policy,
-            ServerConfig {
-                max_per_tick: 5,
-                service_time: Duration::ZERO,
-            },
         );
         outputs.completed.sim_output();
         outputs.abandoned.sim_output();
         outputs.outgoing.sim_output();
         outputs.processed.sim_output();
-        outputs.backlog_trace.sim_output();
+        outputs.outstanding_trace.sim_output();
         outputs.client_metrics.sim_output();
         outputs.server_metrics.sim_output();
 
@@ -113,7 +108,11 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(client_sends_at(0), 250);
-        assert_eq!(client_sends_at(128), 746);
+        // With no server capacity, a release answers the whole held backlog at once, so a hold
+        // of 128 re-sends only the requests held past two timeouts (276 extra); with the old
+        // 5-per-tick cap the backlog took long enough to serve that every one was re-sent twice
+        // (746).
+        assert_eq!(client_sends_at(128), 526);
         assert_eq!(client_sends_at(256), 746);
         assert_eq!(client_sends_at(512), 746);
         assert_eq!(client_sends_at(999), 746);

@@ -610,6 +610,9 @@ pub trait DfirBuilder {
         source: syn::Expr,
         deserialize: Option<&DebugExpr>,
         external_element_type: Option<&syn::Type>,
+        // The type of the elements the send half serializes, when the IR names it (a
+        // `Stream` input); backends that render payloads for diagnostics use it.
+        input_element_type: Option<&syn::Type>,
         tag_id: StmtId,
         networking_info: &crate::networking::NetworkingInfo,
     );
@@ -1068,6 +1071,7 @@ impl DfirBuilder for ProdDfirBuilder {
         source: syn::Expr,
         deserialize: Option<&DebugExpr>,
         _external_element_type: Option<&syn::Type>,
+        _input_element_type: Option<&syn::Type>,
         tag_id: StmtId,
         _networking_info: &crate::networking::NetworkingInfo,
     ) {
@@ -2109,6 +2113,17 @@ impl HydroRoot {
     }
 
     pub fn input(&self) -> &HydroNode {
+        match self {
+            HydroRoot::ForEach { input, .. }
+            | HydroRoot::SendExternal { input, .. }
+            | HydroRoot::DestSink { input, .. }
+            | HydroRoot::CycleSink { input, .. }
+            | HydroRoot::EmbeddedOutput { input, .. }
+            | HydroRoot::Null { input, .. } => input,
+        }
+    }
+
+    pub fn input_mut(&mut self) -> &mut HydroNode {
         match self {
             HydroRoot::ForEach { input, .. }
             | HydroRoot::SendExternal { input, .. }
@@ -5453,9 +5468,63 @@ impl HydroNode {
                                     && graph_builders.singleton_intermediates()
                                     && !node.metadata().collection_kind.is_bounded()
                                 {
-                                    todo!(
-                                        "Reduce with optional intermediates is not yet supported in simulator"
+                                    // As the top-level `Fold` above: a stream of versions of the
+                                    // accumulated value, one per (hooked batch of) input, none
+                                    // until the first input arrives.
+                                    let HydroNode::Reduce { input, .. } = &*node else { unreachable!() };
+                                    let hooked_input_ident = graph_builders.emit_fold_hook(
+                                        &input.metadata().location_id,
+                                        &input_ident,
+                                        &input.metadata().collection_kind,
+                                        &node.metadata().op,
                                     );
+
+                                    let (effective_input, wrapped_acc) = if let Some(ref hooked) = hooked_input_ident {
+                                        let acc: syn::Expr = parse_quote!({
+                                            let mut __inner = #f_tokens;
+                                            move |__state: &mut Option<_>, __batch: Vec<_>| {
+                                                if __batch.is_empty() {
+                                                    return None;
+                                                }
+                                                for __value in __batch {
+                                                    if let Some(__acc) = __state.as_mut() {
+                                                        __inner(__acc, __value);
+                                                    } else {
+                                                        *__state = Some(__value);
+                                                    }
+                                                }
+                                                __state.clone()
+                                            }
+                                        });
+                                        (hooked, acc)
+                                    } else {
+                                        let acc: syn::Expr = parse_quote!({
+                                            let mut __inner = #f_tokens;
+                                            move |__state: &mut Option<_>, __value| {
+                                                if let Some(__acc) = __state.as_mut() {
+                                                    __inner(__acc, __value);
+                                                } else {
+                                                    *__state = Some(__value);
+                                                }
+                                                __state.clone()
+                                            }
+                                        });
+                                        (&input_ident, acc)
+                                    };
+
+                                    graph_builders.add_dfir_at(
+                                        &out_location,
+                                        parse_quote! {
+                                            #reduce_ident = #effective_input -> scan::<#lifetime>(|| None, #wrapped_acc);
+                                        },
+                                        Some(&stmt_id.to_string()),
+                                    );
+
+                                    if hooked_input_ident.is_some()
+                                        && node.metadata().op.sim_hook_id.is_none()
+                                    {
+                                        fold_hooked_idents.insert(reduce_ident.to_string());
+                                    }
                                 } else if matches!(node, HydroNode::ReduceKeyed { .. })
                                     && node.metadata().location_id.is_root()
                                     && graph_builders.singleton_intermediates()
@@ -5625,6 +5694,21 @@ impl HydroNode {
                                     }
                                 };
 
+                                let input_element_type: Option<syn::Type> =
+                                    match &input.metadata().collection_kind {
+                                        CollectionKind::Stream { element_type, .. } => {
+                                            Some((*element_type.0).clone())
+                                        }
+                                        CollectionKind::KeyedStream {
+                                            key_type,
+                                            value_type,
+                                            ..
+                                        } => {
+                                            let (k, v) = (&*key_type.0, &*value_type.0);
+                                            Some(syn::parse_quote!((#k, #v)))
+                                        }
+                                        _ => None,
+                                    };
                                 graph_builders.create_network(
                                     &input.metadata().location_id,
                                     &out_location,
@@ -5635,6 +5719,7 @@ impl HydroNode {
                                     source_expr,
                                     deserialize_pipeline.as_ref(),
                                     serialize.external_element_type(),
+                                    input_element_type.as_ref(),
                                     stmt_id,
                                     networking_info,
                                 );
