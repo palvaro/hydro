@@ -5,9 +5,9 @@
 //! Every search uses the generated specification for every `EventualConsistency` label
 //! (`Spec::all_labels`). There are two labels, both on `Cluster<Member>`:
 //!
-//! - `initial`, the source's `broadcast_closed` over `fail_stop` (`relay_broadcast.rs:237`).
+//! - `initial`, the source's `broadcast_closed` over `fail_stop` (`relay_broadcast.rs:260`).
 //! - `delivered`, the merge of `initial` with the relays, labelled with a `manual_proof!`
-//!   (`relay_broadcast.rs:250`). This is the claim under test.
+//!   (`relay_broadcast.rs:273`). This is the claim under test.
 //!
 //! Setup: three members, two request ids, and the source and every member crashable. The body
 //! sends the requests and quiesces. Then it declares the end of finite failures (no new crash
@@ -57,9 +57,9 @@ mod tests {
 
     const MEMBERS: u32 = 3;
     /// Where `delivered` gets its label (the `assert_has_consistency_of`).
-    const DELIVERED: &str = "relay_broadcast.rs:250";
+    const DELIVERED: &str = "relay_broadcast.rs:273";
     /// Where `initial` gets its label (the source's `broadcast_closed`).
-    const INITIAL: &str = "relay_broadcast.rs:237";
+    const INITIAL: &str = "relay_broadcast.rs:260";
 
     /// Timer rounds after the cut: enough for the oldest echo to pass `ack_timeout_ticks`,
     /// be re-sent, and be merged and acknowledged.
@@ -84,13 +84,15 @@ mod tests {
         let members = flow.cluster::<Member>();
         let (request, requests) = source.sim_input::<u64, TotalOrder, ExactlyOnce>();
         let (timer, timers) = members.sim_input::<(), TotalOrder, ExactlyOnce>();
+        // Metrics windows are a deployment concern; this never fires.
+        let (_report, report_ticks) = members.sim_input::<(), TotalOrder, ExactlyOnce>();
         let outputs = relay_broadcast(
             &source,
             &members,
             requests,
             timers,
+            report_ticks,
             RelayConfig {
-                max_merges_per_tick: 7,
                 policy,
                 channel,
             },

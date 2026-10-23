@@ -72,7 +72,9 @@ pub use program::{
 };
 pub use program::{ClusterRoundSender, RoundSender, SedgeRelay};
 pub use trace::{Bucket, Recorder, Sample, Trace};
-pub use verdict::{Outcome, StreamKind, StreamKinds, Verdict, judge, judge_with_kinds};
+pub use verdict::{
+    Outcome, StreamKind, StreamKinds, Verdict, judge, judge_with_kinds, level_rising,
+};
 
 /// Paths the generated harness code reaches through this crate, so that a crate under check
 /// need not depend on `hydro_lang` or `hydro_deploy` itself.

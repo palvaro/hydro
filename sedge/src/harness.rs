@@ -50,10 +50,10 @@ use crate::capacity::{
 use crate::generator::drive;
 use hydro_deploy_integration::SEND_BUFFER_ENV;
 use crate::profile::Profile;
-use crate::program::Observer;
+use crate::program::{Observer, StreamMode};
 use crate::trace::{Recorder, Sample, Trace};
 use crate::verdict::{
-    Outcome, StreamKind, StreamKinds, Verdict, judge_with_kinds, window_stats,
+    Outcome, StreamKind, StreamKinds, Verdict, judge_with_kinds, level_rising, window_stats,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -1370,13 +1370,17 @@ where
     let from_cress = cress_kinds(run, meta, spec.probe);
     let mut streams = Vec::new();
     for s in observer.streams {
-        let kind = from_cress.get(&s.name).copied().unwrap_or(if s.numeric {
-            StreamKind::Level
-        } else {
-            StreamKind::Work
-        });
+        let kind = match s.mode {
+            StreamMode::Counter => StreamKind::Work,
+            StreamMode::Gauge => StreamKind::Level,
+            StreamMode::Whole => from_cress.get(&s.name).copied().unwrap_or(if s.numeric {
+                StreamKind::Level
+            } else {
+                StreamKind::Work
+            }),
+        };
         kinds.insert(s.name.clone(), kind);
-        streams.push((s.name, (s.connect)(nodes).await));
+        streams.push((s.name, s.mode, (s.connect)(nodes).await));
     }
     let explicit_ids = completions.is_some();
     deployment.start().await.expect("deployment did not start");
@@ -1447,10 +1451,15 @@ where
                     }
                 }
             }));
-            let read_streams = futures::future::join_all(streams.iter_mut().map(|(name, s)| {
+            let read_streams = futures::future::join_all(streams.iter_mut().map(|(name, mode, s)| {
                 let r = r.clone();
+                let mode = *mode;
                 async move {
                     while let Some(o) = s.next().await {
+                        if mode == StreamMode::Counter {
+                            r.counter(name, o.value.unwrap_or(0.0));
+                            continue;
+                        }
                         r.record(
                             name,
                             Sample {
@@ -1968,17 +1977,22 @@ fn judge_probe(ex: &Executed, profile: &Profile, rate: f64, reference: &mut Opti
             }
         }
     };
-    // A backlog that the program cannot keep up with grows by the excess of the offered rate over
-    // μ. Rising here means growing between the window's halves by more than 5 % of what was
-    // offered over half a window (and by more than 10 items), so that the noise of a small,
-    // healthy level is not read as falling behind.
-    let half = window.len() as f64 / 2.0;
-    let slack = (0.05 * rate * half).max(10.0);
-    let rising: Vec<String> = w
-        .gauge_halves()
-        .into_iter()
-        .filter(|(_, first, second)| *second > first + slack)
-        .map(|(n, _, _)| n)
+    // A backlog that the program cannot keep up with grows steadily, by the excess of the
+    // offered rate over μ: a sustained trend across the window, larger than the level's own
+    // size and than 5 % of what the window offered (and 10 items). See `level_rising`.
+    let floor = (0.05 * rate * window.len() as f64).max(10.0);
+    let rising: Vec<String> = ex
+        .kinds
+        .iter()
+        .filter(|(_, k)| **k == StreamKind::Level)
+        .filter(|(n, _)| {
+            let values: Vec<f64> = window
+                .iter()
+                .filter_map(|b| b.stream_values.get(*n).copied())
+                .collect();
+            level_rising(&values, floor)
+        })
+        .map(|(n, _)| n.clone())
         .collect();
     let harness_bound = ex.harness_bound();
     // Arrivals the generator could not write on time: either the program pushed back (a full
