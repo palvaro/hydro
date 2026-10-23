@@ -25,6 +25,10 @@ use serde::{Deserialize, Serialize};
 #[doc(hidden)]
 pub mod check;
 pub mod rewrite;
+/// A static diagnostic of which labels' derivations may depend on the schedule.
+#[cfg(stageleft_runtime)]
+#[doc(hidden)]
+pub mod sensitivity;
 
 pub use rewrite::{install, opaque_operators, rewrite};
 
@@ -64,5 +68,7 @@ pub fn decode(bytes: &[u8]) -> RecordProv {
     RecordProv::decode(bytes)
 }
 
+#[cfg(test)]
+mod sensitivity_tests;
 #[cfg(test)]
 mod tests;
