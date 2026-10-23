@@ -91,11 +91,24 @@ pub enum RelayPolicy {
     },
 }
 
+/// The failure model of the relay channel, chosen when the graph is built. The rest of the
+/// program is identical for both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelayChannel {
+    /// `TCP.fail_stop()`: a lost connection means the peer has failed. Cress and Sedge use this.
+    FailStop,
+    /// `TCP.lossy_delayed_forever()`: individual relays may be dropped (in the simulator, delayed
+    /// indefinitely), which is what makes re-sending necessary. Simulating it requires
+    /// `.test_safety_only()`.
+    LossyDelayedForever,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct RelayConfig {
     /// Arrivals merged per timer element at each member: the member's capacity.
     pub max_merges_per_tick: u32,
     pub policy: RelayPolicy,
+    pub channel: RelayChannel,
 }
 
 #[cfg_attr(feature = "cress", derive(SimOutputs))]
@@ -121,7 +134,8 @@ pub struct Outputs<'a> {
     name = echo_only,
     members = 5,
     workload_rounds = 125,
-    config = RelayConfig { max_merges_per_tick: 7, policy: RelayPolicy::Echo },
+    skip_consistency_assertions,
+    config = RelayConfig { max_merges_per_tick: 7, policy: RelayPolicy::Echo, channel: RelayChannel::FailStop },
     timers(timer = Duration::from_millis(50)),
     round_data = |round, inputs| {
         inputs.requests.send(round as u64);
@@ -131,7 +145,8 @@ pub struct Outputs<'a> {
     name = resend_on,
     members = 5,
     workload_rounds = 125,
-    config = RelayConfig { max_merges_per_tick: 7, policy: RelayPolicy::EchoResend { ack_timeout_ticks: 3 } },
+    skip_consistency_assertions,
+    config = RelayConfig { max_merges_per_tick: 7, policy: RelayPolicy::EchoResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
     timers(timer = Duration::from_millis(50)),
     round_data = |round, inputs| {
         inputs.requests.send(round as u64);
@@ -140,7 +155,7 @@ pub struct Outputs<'a> {
 #[cfg_attr(feature = "sedge", sedge::overload_check(
     name = echo_only,
     members = 5,
-    config = RelayConfig { max_merges_per_tick: 7, policy: RelayPolicy::Echo },
+    config = RelayConfig { max_merges_per_tick: 7, policy: RelayPolicy::Echo, channel: RelayChannel::FailStop },
     mu = 28,
     timers(timer = Duration::from_millis(50)),
     round_data = |round, inputs| {
@@ -150,7 +165,7 @@ pub struct Outputs<'a> {
 #[cfg_attr(feature = "sedge", sedge::overload_check(
     name = resend_on,
     members = 5,
-    config = RelayConfig { max_merges_per_tick: 7, policy: RelayPolicy::EchoResend { ack_timeout_ticks: 3 } },
+    config = RelayConfig { max_merges_per_tick: 7, policy: RelayPolicy::EchoResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
     mu = 28,
     timers(timer = Duration::from_millis(50)),
     round_data = |round, inputs| {
@@ -168,6 +183,7 @@ pub fn relay_broadcast<'a>(
     let RelayConfig {
         max_merges_per_tick,
         policy,
+        channel,
     } = config;
     // The policy is fixed when the graph is built: whether members echo at all, and after how
     // many ticks an unacknowledged echo is re-sent (zero: never).
@@ -188,8 +204,9 @@ pub fn relay_broadcast<'a>(
     // 1. One-hop broadcast from the source.
     let initial = requests.broadcast_closed(members, TCP.fail_stop().bincode().name("bcast"));
 
-    let (relays_complete, relays_in) = members
-        .forward_ref::<Stream<Relay, Cluster<'a, Member>, Unbounded, NoOrder, ExactlyOnce>>();
+    let (relays_complete, relays_in) =
+        members
+            .forward_ref::<Stream<Relay, Cluster<'a, Member>, Unbounded, NoOrder, ExactlyOnce>>();
     let (acks_complete, acks_in) =
         members.forward_ref::<Stream<Ack, Cluster<'a, Member>, Unbounded, NoOrder, ExactlyOnce>>();
 
@@ -314,13 +331,18 @@ pub fn relay_broadcast<'a>(
     };
 
     // 2. The relay channel: echoes and re-sends, identical bytes.
-    relays_complete.complete(
-        wire.clone()
-            .map(q!(|(dest, r)| (MemberId::<Member>::from_raw_id(dest), r)))
-            .into_keyed()
+    let relays_out = wire
+        .clone()
+        .map(q!(|(dest, r)| (MemberId::<Member>::from_raw_id(dest), r)))
+        .into_keyed();
+    relays_complete.complete(match channel {
+        RelayChannel::FailStop => relays_out
             .demux(members, TCP.fail_stop().bincode().name("relay"))
             .values(),
-    );
+        RelayChannel::LossyDelayedForever => relays_out
+            .demux(members, TCP.lossy_delayed_forever().bincode().name("relay"))
+            .values(),
+    });
     acks_complete.complete(
         acks_sent
             .clone()

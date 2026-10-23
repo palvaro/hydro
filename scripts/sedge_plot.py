@@ -7,7 +7,11 @@ No third-party dependencies. Columns understood:
   <stream>_v   latest value of a level (gauge) stream
 Any other numeric column is ignored.
 
-    sedge_plot.py TRACE.tsv OUT.svg "title" [--trigger 10,15] [--dip]
+    sedge_plot.py TRACE.tsv OUT.svg "title" [--trigger 10,15] [--tail-window 37,60] [--rates a,b] [--dip]
+
+--tail-window: the tail verdict window to shade (default [37,60); with `--tail 60` it is [45,75)).
+--rates: streams that carry `_v` columns but are not levels (for example a stream of `u64` ids
+that Cress classified as conserved); they are drawn with the record rates instead.
 Convert to PNG with ImageMagick: convert -density 110 OUT.svg OUT.png
 """
 import csv
@@ -55,8 +59,8 @@ def panel(out, y0, xs, series, title, ylabel, log=False, shade=None):
     out.append(f'<text x="{PAD_L}" y="{y0 - 8}" font-size="14" font-weight="bold">{title}</text>')
     if shade:
         out.append(f'<rect x="{sx(shade[0]):.1f}" y="{y0}" width="{sx(shade[1]) - sx(shade[0]):.1f}" height="{ph}" fill="#f4c7c3" opacity="0.5"/>')
-    # verdict windows: baseline [5,10), tail [37,60)
-    for a, b in ((5, 10), (37, 60)):
+    # verdict windows: baseline [5,10) and the tail window
+    for a, b in ((5, 10), TAIL_WINDOW):
         if a >= x_lo and b <= x_hi + 1:
             out.append(f'<rect x="{sx(a):.1f}" y="{y0}" width="{sx(min(b, x_hi)) - sx(a):.1f}" height="{ph}" fill="#cfe8cf" opacity="0.35"/>')
     out.append(f'<rect x="{PAD_L}" y="{y0}" width="{pw}" height="{ph}" fill="none" stroke="#888"/>')
@@ -99,15 +103,25 @@ def panel(out, y0, xs, series, title, ylabel, log=False, shade=None):
         out.append(f'<text x="{lx + 28}" y="{ly + 4}" font-size="12">{name}</text>')
 
 
+TAIL_WINDOW = (37, 60)
+
+
 def main(argv):
+    global TAIL_WINDOW
     path, out_path, title = argv[1], argv[2], argv[3]
     trigger = (10, 15)
     if "--trigger" in argv:
         a, b = argv[argv.index("--trigger") + 1].split(",")
         trigger = (float(a), float(b))
+    if "--tail-window" in argv:
+        a, b = argv[argv.index("--tail-window") + 1].split(",")
+        TAIL_WINDOW = (float(a), float(b))
+    not_levels = set()
+    if "--rates" in argv:
+        not_levels = set(argv[argv.index("--rates") + 1].split(","))
     d = load(path)
     xs = d["second"]
-    level_cols = sorted(k for k in d if k.endswith("_v"))
+    level_cols = sorted(k for k in d if k.endswith("_v") and k[:-2] not in not_levels)
     level_names = {k[:-2] for k in level_cols}
     # a level stream's _n column is just its sample rate (one per tick); not work
     rate_cols = sorted(k for k in d if k.endswith("_n") and k[:-2] not in level_names)
@@ -133,7 +147,7 @@ def main(argv):
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{height}" font-family="Helvetica, Arial, sans-serif">',
            f'<rect width="{W}" height="{height}" fill="white"/>',
            f'<text x="{PAD_L}" y="24" font-size="16" font-weight="bold">{title}</text>',
-           f'<text x="{W - PAD_R}" y="24" font-size="11" text-anchor="end" fill="#555">pink = trigger window; green = baseline [5,10) and tail [37,60) verdict windows</text>']
+           f'<text x="{W - PAD_R}" y="24" font-size="11" text-anchor="end" fill="#555">pink = trigger window; green = baseline [5,10) and tail [{TAIL_WINDOW[0]:g},{TAIL_WINDOW[1]:g}) verdict windows</text>']
     y = PAD_T + 12
     for series, ptitle, ylabel, log in panels:
         panel(out, y, xs, series, ptitle, ylabel, log=log, shade=trigger)
