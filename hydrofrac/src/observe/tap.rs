@@ -228,9 +228,11 @@ fn element_type(kind: &CollectionKind) -> Option<syn::Type> {
     }
 }
 
-/// The closure a tap maps each element through: `(bincode(x), Debug of x if T: Debug)`. The
-/// `Debug` rendering is chosen by autoref specialization on the concrete element type, so an
-/// element type without `Debug` still compiles (and renders as bytes).
+/// The closure a tap maps each element through: `(identity of x, Debug of x if T: Debug)`. The
+/// identity is `bincode(x)` when the element type is `Serialize`, else the `Debug` rendering,
+/// else a `Hash` digest (a labelled type need not be `Serialize`: `hydro_std`'s quorum
+/// certificate `Durable` is deliberately not). Both are chosen by autoref specialization on the
+/// concrete element type, so any element type compiles.
 fn tap_closure(element_type: &syn::Type) -> syn::Expr {
     // The generated dylib depends on `hydro_lang` under its own name, as every IR expression
     // `hydro_lang` itself builds assumes.
@@ -254,10 +256,49 @@ fn tap_closure(element_type: &syn::Type) -> syn::Expr {
                 }
             }
             let __debug = (&__HydrofracWrap(&__hydrofrac_x)).__hydrofrac_debug();
-            (
-                hydro_lang::runtime_support::bincode::serialize(&__hydrofrac_x).unwrap(),
-                __debug,
-            )
+            // The fact's identity: its bincode if the element type is `Serialize`, else its
+            // `Debug` rendering, else a `Hash` digest. Deref-based autoref specialization: the
+            // receiver `&&&&_` matches the most specific applicable impl first. Elements of one
+            // label share a type, so they all take the same branch.
+            trait __HydrofracViaSerialize {
+                fn __hydrofrac_id(&self) -> ::std::vec::Vec<u8>;
+            }
+            impl<__T: hydro_lang::__staged::__deps::serde::Serialize> __HydrofracViaSerialize for &&&__HydrofracWrap<'_, __T> {
+                fn __hydrofrac_id(&self) -> ::std::vec::Vec<u8> {
+                    hydro_lang::runtime_support::bincode::serialize(self.0).unwrap()
+                }
+            }
+            trait __HydrofracIdViaDebug {
+                fn __hydrofrac_id(&self) -> ::std::vec::Vec<u8>;
+            }
+            impl<__T: ::core::fmt::Debug> __HydrofracIdViaDebug for &&__HydrofracWrap<'_, __T> {
+                fn __hydrofrac_id(&self) -> ::std::vec::Vec<u8> {
+                    ::std::format!("{:?}", self.0).into_bytes()
+                }
+            }
+            trait __HydrofracIdViaHash {
+                fn __hydrofrac_id(&self) -> ::std::vec::Vec<u8>;
+            }
+            impl<__T: ::core::hash::Hash> __HydrofracIdViaHash for &__HydrofracWrap<'_, __T> {
+                fn __hydrofrac_id(&self) -> ::std::vec::Vec<u8> {
+                    let mut __h = ::std::hash::DefaultHasher::new();
+                    ::core::hash::Hash::hash(self.0, &mut __h);
+                    ::core::hash::Hasher::finish(&__h).to_le_bytes().to_vec()
+                }
+            }
+            trait __HydrofracNoId {
+                fn __hydrofrac_id(&self) -> ::std::vec::Vec<u8>;
+            }
+            impl<__T> __HydrofracNoId for __HydrofracWrap<'_, __T> {
+                fn __hydrofrac_id(&self) -> ::std::vec::Vec<u8> {
+                    ::core::panic!(
+                        "hydrofrac: a labelled collection's element type ({}) is neither `Serialize`, `Debug` nor `Hash`, so its facts have no identity to compare",
+                        ::core::any::type_name::<__T>()
+                    )
+                }
+            }
+            let __id = (&&&&__HydrofracWrap(&__hydrofrac_x)).__hydrofrac_id();
+            (__id, __debug)
         }
     )
 }

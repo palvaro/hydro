@@ -148,6 +148,32 @@ fn a_label_with_local_inputs_only_is_not_checked() {
     assert_eq!(plan.not_checked, Some(NotCheckedReason::LocalInputsOnly));
 }
 
+/// Uniform reliable broadcast delivers through a closure that reads the quorum's state by
+/// reference (`HydroNode::Reference`s in the closure's `singleton_refs`, which
+/// `HydroNode::input` does not list). The delivered set is fed by the echo network through those
+/// references, so it is checked, not "local inputs only".
+#[cfg(stageleft_runtime)]
+#[test]
+fn a_label_fed_through_closure_references_is_checked() {
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (_send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let delivered =
+        hydro_std::ec_inference_demos::uniform_broadcast::uniform_reliable_broadcast_closed(
+            input, &members, 2,
+        );
+    let _out = delivered.sim_cluster_output();
+
+    let plans = plans_of(flow);
+    let delivered: Vec<_> = plans
+        .iter()
+        .filter(|p| p.collection.file.as_deref() == Some("uniform_broadcast.rs"))
+        .collect();
+    assert_eq!(delivered.len(), 1, "{plans:?}");
+    assert!(delivered[0].is_searched(), "{:?}", delivered[0]);
+}
+
 #[cfg(stageleft_runtime)]
 #[test]
 fn gossip_state_is_checked_at_the_stream_it_folds() {
