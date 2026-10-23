@@ -275,6 +275,25 @@ mod tests {
     /// Every label of a plain `broadcast_closed`, with nothing named by the test: the one
     /// labelled collection is violated by the source's crash between two of its fan-out sends,
     /// and it is the only label.
+    /// The echoing broadcast explored exhaustively. While the check kept every schedule's record
+    /// until a run ended, this ran out of memory: about 37 KiB per schedule, 6.4 GiB after
+    /// 150,000 schedules. Folding each schedule as it finishes keeps it flat at about 215 MiB.
+    /// It is still too large to finish: its failure-free probe alone passes 240,000 schedules
+    /// (about 400 per second, debug build) and keeps going. Run by hand:
+    /// `cargo test -p hydro_test --lib ec_echo_broadcast_exhaustively -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "exhaustive: the probe alone passes 240,000 schedules"]
+    fn ec_echo_broadcast_exhaustively() {
+        let start = std::time::Instant::now();
+        let results = echo_broadcast(true, EcCheck::new());
+        let schedules: usize = results.results().iter().map(|l| l.stats.schedules).sum();
+        eprintln!(
+            "{results}\n{schedules} schedules in {:?} ({:.0}/s)",
+            start.elapsed(),
+            schedules as f64 / start.elapsed().as_secs_f64()
+        );
+    }
+
     #[test]
     fn ec_broadcast_closed_all_labels() {
         let results = process_to_cluster(Transport::FailStop);
