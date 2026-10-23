@@ -640,7 +640,10 @@ fn time_sweep(
     (sizes, start.elapsed())
 }
 
-/// `cargo test -p hydrofrac --release -- --ignored --nocapture bench_`
+/// The worst case: the clauses never grow, so every tried set needs an explicit no-good. A real
+/// search does not look like this (see [`bench_lean_vs_full_model`]).
+///
+/// `cargo test -p hydrofrac --release -- --ignored --nocapture --test-threads 1 bench_`
 #[test]
 #[ignore = "benchmark"]
 fn bench_microlp() {
@@ -681,5 +684,281 @@ fn bench_microlp_vs_highs() {
             micro.len()
         );
         assert_eq!(micro, highs);
+    }
+}
+
+// Lazy no-goods.
+
+/// The cost of `set` under the solver's weights for `universe`.
+fn cost(universe: &[Fault<M>], set: &FaultSet<M>) -> f64 {
+    let weights: Vec<f64> = weights(universe.len()).collect();
+    set.iter()
+        .map(|f| weights[universe.iter().position(|u| u == f).expect("a candidate")])
+        .sum()
+}
+
+/// A derivation the run of `tried` could have observed: deliveries that no fault of `tried`
+/// kills, chosen by `rng`, observed under `tried`'s crashes. `None` when the pool has nothing
+/// `tried` spares.
+fn surviving_clause(
+    pool: &[Dependency<M>],
+    sends: &Rc<SendSequences<M>>,
+    tried: &FaultSet<M>,
+    rng: &mut Rng,
+) -> Option<Clause<M>> {
+    let pre_heal: PreHealSends = sends.iter().map(|(n, s)| (n.clone(), s.len())).collect();
+    let spared: Vec<&Dependency<M>> = pool
+        .iter()
+        .filter(|d| !tried.iter().any(|f| d.killed_by(f, sends, &pre_heal)))
+        .collect();
+    if spared.is_empty() {
+        return None;
+    }
+    let deps = (0..1 + rng.below(3)).map(|_| spared[rng.below(spared.len())].clone());
+    let mut clause = Clause::new(deps, sends.clone());
+    clause.premises = tried
+        .iter()
+        .filter(|f| f.crashed_node().is_some())
+        .cloned()
+        .collect();
+    Some(clause)
+}
+
+/// A random program: `nodes` senders with `sends` messages each, half of them lossy.
+fn random_pool(
+    rng: &mut Rng,
+    nodes: usize,
+    sends: usize,
+) -> (Vec<Dependency<M>>, Rc<SendSequences<M>>) {
+    let names: Vec<String> = (0..nodes).map(|n| format!("n@{n}")).collect();
+    let sequences: Rc<SendSequences<M>> = Rc::new(
+        names
+            .iter()
+            .enumerate()
+            .map(|(n, name)| {
+                (
+                    name.clone(),
+                    (0..sends).map(|i| ("m", (n * sends + i) as u32)).collect(),
+                )
+            })
+            .collect(),
+    );
+    let pool = (0..nodes * sends)
+        .map(|k| {
+            let (n, i) = (k / sends, k % sends);
+            Dependency {
+                message: ("m", k as u32),
+                sender: Some((names[n].clone(), i as u64)),
+                lossy: rng.below(2) == 0,
+            }
+        })
+        .collect();
+    (pool, sequences)
+}
+
+/// The lean and the full model have the same feasible region, so at every step of a search they
+/// agree on feasibility and on the optimal cost, and the lean solver never re-proposes a tried
+/// set. The search is driven in lockstep by the full model's choice, on many small random
+/// instances where runs sometimes teach nothing new (no clause), sometimes are vacuous,
+/// sometimes yield a derivation under premises that are also hits (a row that always holds), and
+/// otherwise yield a derivation the hypothesis does not kill (often a repeat of an earlier one).
+#[test]
+fn the_lean_model_is_exact() {
+    for seed in 1..=80u64 {
+        let mut rng = Rng(0x2545_f491_4f6c_dd1d ^ seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        let nodes = 2 + rng.below(3);
+        let per_node = 2 + rng.below(3);
+        let (pool, sends) = random_pool(&mut rng, nodes, per_node);
+        let bounds = CrashBounds {
+            cap: Some(1 + rng.below(2)),
+            nodes: nodes + 1,
+            checked: None,
+        };
+        let mut clauses: Vec<Clause<M>> = (0..1 + rng.below(3))
+            .filter_map(|_| surviving_clause(&pool, &sends, &FaultSet::new(), &mut rng))
+            .collect();
+        let mut tried = BTreeSet::from([FaultSet::new()]);
+        let mut vacuous = vec![];
+        for step in 0..40 {
+            let universe = universe(&clauses, []);
+            let solve = |model| {
+                ilp::solve(
+                    &universe,
+                    &clauses,
+                    &tried,
+                    &vacuous,
+                    &bounds,
+                    Backend::Microlp,
+                    model,
+                )
+            };
+            let (full, lean) = (solve(ilp::Model::Full), solve(ilp::Model::Lean));
+            match (&full, &lean) {
+                (None, None) => break,
+                (Some(f), Some(l)) => {
+                    assert!(
+                        !tried.contains(l),
+                        "seed {seed} step {step}: re-proposed {l:?}"
+                    );
+                    let (cf, cl) = (cost(&universe, f), cost(&universe, l));
+                    assert!(
+                        (cf - cl).abs() < 1e-9,
+                        "seed {seed} step {step}: costs {cf} vs {cl}"
+                    );
+                }
+                _ => panic!("seed {seed} step {step}: full {full:?}, lean {lean:?}"),
+            }
+            let chosen = full.unwrap();
+            tried.insert(chosen.clone());
+            match rng.below(6) {
+                0 => {}
+                1 => vacuous.push(chosen),
+                2 => {
+                    // A derivation observed under a crash that also kills one of its deliveries.
+                    if let Some(mut clause) =
+                        surviving_clause(&pool, &sends, &FaultSet::new(), &mut rng)
+                    {
+                        let dep = clause.deps.first().unwrap();
+                        if let Some((node, _)) = &dep.sender {
+                            clause.premises = set([crash(node)]);
+                            clauses.push(clause);
+                        }
+                    }
+                }
+                _ => clauses.extend(surviving_clause(&pool, &sends, &chosen, &mut rng)),
+            }
+        }
+    }
+}
+
+#[test]
+fn implied_and_always_satisfied_cover_rows_are_dropped() {
+    let sends: Rc<SendSequences<M>> =
+        Rc::new(SendSequences::from([("n".to_owned(), vec![("r", 1)])]));
+    let a = lossy("a", 1);
+    let b = lossy("b", 2);
+    let r = reliable("r", 1, "n", 0);
+    let narrow = Clause::new([a.clone()], sends.clone());
+    let wide = Clause::new([a.clone(), b.clone()], sends.clone());
+    let mut under_crash = Clause::new([a.clone()], sends.clone());
+    under_crash.premises = set([crash("n")]);
+    let mut always = Clause::new([r], sends.clone());
+    always.premises = set([crash("n")]);
+    let clauses = [
+        wide.clone(),
+        narrow.clone(),
+        narrow.clone(),
+        under_crash,
+        always,
+    ];
+    let universe = universe(&clauses, []);
+    assert_eq!(ilp::all_cover_rows(&universe, &clauses).len(), 5);
+    // `narrow` implies `wide`, its copy and `under_crash`; `always` always holds.
+    let lean = ilp::cover_rows(&universe, &clauses);
+    assert_eq!(lean, ilp::cover_rows(&universe, &[narrow]));
+}
+
+#[test]
+fn a_tried_set_that_a_clause_excludes_needs_no_no_good() {
+    let sends = no_sends();
+    let a = lossy("a", 1);
+    let b = lossy("b", 2);
+    let tried = set([Fault::Omit(a.message)]);
+    // The run under `tried` observed a derivation through `b`, which `tried` does not kill.
+    let clause = Clause::new([b], sends.clone());
+    assert!(ilp::already_excluded(
+        &tried,
+        std::slice::from_ref(&clause),
+        &[]
+    ));
+    // A derivation `tried` kills does not exclude it.
+    let killed = Clause::new([a], sends.clone());
+    assert!(!ilp::already_excluded(&tried, &[killed], &[]));
+    // Nor does one observed under a crash `tried` lacks.
+    let mut under_crash = clause;
+    under_crash.premises = set([crash("n")]);
+    assert!(!ilp::already_excluded(&tried, &[under_crash], &[]));
+    // A vacuous subset does.
+    assert!(ilp::already_excluded(
+        &tried,
+        &[],
+        std::slice::from_ref(&tried)
+    ));
+}
+
+/// A search shaped like a real one: every hypothesis's run yields a derivation it does not kill
+/// (so explicit no-goods are rarely needed, and derivations repeat). Returns the proposals'
+/// sizes, the time spent, and the final model's rows as (cover rows, no-goods).
+fn time_learning_search(
+    nodes: usize,
+    sends: usize,
+    hypotheses: usize,
+    model: ilp::Model,
+) -> (Vec<usize>, Duration, (usize, usize)) {
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    let (pool, sequences) = random_pool(&mut rng, nodes, sends);
+    let bounds = CrashBounds {
+        cap: Some(2),
+        nodes,
+        checked: None,
+    };
+    let mut clauses: Vec<Clause<M>> = (0..3)
+        .filter_map(|_| surviving_clause(&pool, &sequences, &FaultSet::new(), &mut rng))
+        .collect();
+    let mut tried = BTreeSet::from([FaultSet::new()]);
+    let mut sizes = vec![];
+    let start = Instant::now();
+    while sizes.len() < hypotheses {
+        let universe = universe(&clauses, []);
+        let Some(h) = ilp::solve(
+            &universe,
+            &clauses,
+            &tried,
+            &[],
+            &bounds,
+            Backend::Microlp,
+            model,
+        ) else {
+            break;
+        };
+        sizes.push(h.len());
+        clauses.extend(surviving_clause(&pool, &sequences, &h, &mut rng));
+        tried.insert(h);
+    }
+    let took = start.elapsed();
+    let universe = universe(&clauses, []);
+    let rows = match model {
+        ilp::Model::Full => (ilp::all_cover_rows(&universe, &clauses).len(), tried.len()),
+        ilp::Model::Lean => (
+            ilp::cover_rows(&universe, &clauses).len(),
+            tried
+                .iter()
+                .filter(|t| !ilp::already_excluded(t, &clauses, &[]))
+                .count(),
+        ),
+    };
+    (sizes, took, rows)
+}
+
+/// `cargo test -p hydrofrac --release -- --ignored --nocapture --test-threads 1 bench_`
+#[test]
+#[ignore = "benchmark"]
+fn bench_lean_vs_full_model() {
+    for hypotheses in [100, 200, 300] {
+        let (full, full_took, full_rows) =
+            time_learning_search(6, 20, hypotheses, ilp::Model::Full);
+        let (lean, lean_took, lean_rows) =
+            time_learning_search(6, 20, hypotheses, ilp::Model::Lean);
+        println!(
+            "learning, {} hypotheses: full {full_took:?} ({:?}/h; {} covers, {} no-goods), \
+             lean {lean_took:?} ({:?}/h; {} covers, {} no-goods)",
+            lean.len(),
+            full_took / full.len().max(1) as u32,
+            full_rows.0,
+            full_rows.1,
+            lean_took / lean.len().max(1) as u32,
+            lean_rows.0,
+            lean_rows.1,
+        );
     }
 }
