@@ -1,0 +1,39 @@
+---
+source: hydro_test/src/cluster/ldfi_viz.rs
+expression: dot
+---
+digraph provenance {
+    rankdir=TB;
+    compound=true;
+    node [fontname="Helvetica", fontsize=10];
+    edge [fontname="Helvetica", fontsize=8];
+    subgraph cluster_0 {
+        label="observer"; style="rounded"; color="#999999";
+        n1 [label="observer output@7\n0102000000000000…\n(exec #89)", shape=box, style="rounded,filled", fillcolor="#e8f0fe"];
+    }
+    n0 [label="goal: POST", shape=doubleoctagon, style="filled,bold", fillcolor="#fff2b2"];
+    n2 [label="observed[1→]:Txn(1) from participant@1 through send #1←participant@1#1\n(observation)", shape=note, style="filled,dashed", fillcolor="#f0e6ff"];
+    n3 [label="commit[→1]:Txn(1)←coordinator#3", shape=note, style=filled, fillcolor="#dff5dd"];
+    n4 [label="vote[1→]:Txn(1)←participant@1#0", shape=note, style=filled, fillcolor="#dff5dd"];
+    n5 [label="prepare[→1]:Txn(1)←coordinator#1", shape=note, style=filled, fillcolor="#dff5dd"];
+    n6 [label="local input\n(constant, timer, or external input)", shape=plaintext];
+    n7 [label="vote[0→]:Txn(1)←participant@0#0", shape=note, style=filled, fillcolor="#dff5dd"];
+    n8 [label="prepare[→0]:Txn(1)←coordinator#0", shape=note, style=filled, fillcolor="#dff5dd"];
+    n9 [label="observed[0→]:Txn(1) from participant@0 through send #1←participant@0#1\n(observation)", shape=note, style="filled,dashed", fillcolor="#f0e6ff"];
+    n10 [label="commit[→0]:Txn(1)←coordinator#2", shape=note, style=filled, fillcolor="#dff5dd"];
+    n0 -> n1 [penwidth=2];
+    n1 -> n2 [color="#1a56db", label="record", fontcolor="#888888"];
+    n1 -> n2 [color="#0b7a3b", penwidth=2, label="replay", fontcolor="#888888"];
+    n1 -> n9 [color="#1a56db", label="record", fontcolor="#888888"];
+    n1 -> n9 [color="#0b7a3b", penwidth=2, label="replay", fontcolor="#888888"];
+    n2 -> n3 [color="#1a56db", label="record", fontcolor="#888888"];
+    n3 -> n4 [color="#1a56db", label="record", fontcolor="#888888"];
+    n3 -> n7 [color="#1a56db", label="record", fontcolor="#888888"];
+    n4 -> n5 [color="#1a56db", label="record", fontcolor="#888888"];
+    n5 -> n6 [color="#1a56db", label="record", fontcolor="#888888"];
+    n7 -> n8 [color="#1a56db", label="record", fontcolor="#888888"];
+    n8 -> n6 [color="#1a56db", label="record", fontcolor="#888888"];
+    n9 -> n10 [color="#1a56db", label="record", fontcolor="#888888"];
+    n10 -> n4 [color="#1a56db", label="record", fontcolor="#888888"];
+    n10 -> n7 [color="#1a56db", label="record", fontcolor="#888888"];
+}

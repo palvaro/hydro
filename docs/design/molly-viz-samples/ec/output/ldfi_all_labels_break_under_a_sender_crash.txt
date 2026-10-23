@@ -1,0 +1,98 @@
+# cargo test -p hydro_test --lib cluster::isr_replication::tests::ldfi_all_labels_break_under_a_sender_crash -- --nocapture --test-threads=1 --exact
+
+hydrofrac: searching EventualConsistency at isr_replication.rs:360 (Cluster(loc3v1))
+ldfi: fact domain learned from the failure-free run: 1 fact(s)
+ldfi: channels:
+  channel#68 "write": Process(loc1v1) → Cluster(loc3v1), reliable
+  channel#194 "repl": Cluster(loc3v1) → Cluster(loc3v1), lossy
+  channel#203 "ack": Cluster(loc3v1) → Cluster(loc3v1), reliable
+  channel#248 "shrink": Cluster(loc3v1) → Process(loc2v1), reliable
+  channel#292 "hb": Cluster(loc3v1) → Process(loc2v1), reliable
+  channel#345 "view": Process(loc2v1) → Cluster(loc3v1), reliable
+  channel#351 "client-ack": Cluster(loc3v1) → Process(loc1v1), reliable
+  channel#399 "observe#399": Cluster(loc3v1) → Process(loc4v1), reliable
+  channel#403 "observe#403": Cluster(loc3v1) → Process(loc4v1), reliable
+  channel#408 "observe#408": Cluster(loc3v1) → Process(loc4v1), reliable
+ldfi: crash bounds: crashes unbounded; not all 5 nodes at once; at most 1 of the checked cluster's 3 crashable member(s)
+ldfi: specification is generated (EventualConsistency)
+ldfi: run #1 {}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, view[→0]:View { leader: Some(0), isr: [0, 1, 2] }←zk#0, view[→1]:View { leader: Some(0), isr: [0, 1, 2] }←zk#1, view[→2]:View { leader: Some(0), isr: [0, 1, 2] }←zk#2, observed[0→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@0 through send #4←replica@0#4, observed[1→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@1 through send #2←replica@1#2, observed[2→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@2 through send #2←replica@2#2}}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1)), crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk after view[→0]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk before any send)}; preserve points {}; requirements {}
+ldfi: run #2 {crash(replica@0 after hb[0→]:())}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, view[→1]:View { leader: Some(0), isr: [0, 1, 2] }←zk#1, view[→2]:View { leader: Some(0), isr: [0, 1, 2] }←zk#2, observed[1→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@1 through send #2←replica@1#2, observed[2→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@2 through send #2←replica@2#2}}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1)), crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk after view[→0]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk before any send)}; preserve points {}; requirements {}
+ldfi: run #3 {crash(replica@0 after client-ack[0→]:Write(1))}: 8 schedule(s), goal held; derivations {}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1)), crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk after view[→0]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk before any send)}; preserve points {}; requirements {}
+ldfi: run #4 {crash(replica@1 after hb[1→]:())}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, view[→0]:View { leader: Some(0), isr: [0, 1, 2] }←zk#0, view[→2]:View { leader: Some(0), isr: [0, 1, 2] }←zk#2, observed[0→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@0 through send #4←replica@0#4, observed[2→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@2 through send #2←replica@2#2}}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1)), crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk after view[→0]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk before any send)}; preserve points {}; requirements {}
+ldfi: run #5 {crash(replica@1 after ack[1→0]:Write(1))}: 8 schedule(s), goal held; derivations {}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1)), crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk after view[→0]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk before any send)}; preserve points {}; requirements {}
+ldfi: run #6 {crash(replica@2 after hb[2→]:())}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, view[→0]:View { leader: Some(0), isr: [0, 1, 2] }←zk#0, view[→1]:View { leader: Some(0), isr: [0, 1, 2] }←zk#1, observed[0→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@0 through send #4←replica@0#4, observed[1→]:(0, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@1 through send #2←replica@1#2}}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1)), crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk after view[→0]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk before any send)}; preserve points {}; requirements {}
+ldfi: run #7 {crash(replica@2 after ack[2→0]:Write(1))}: 8 schedule(s), goal held; derivations {}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1)), crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk after view[→0]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk before any send)}; preserve points {}; requirements {}
+ldfi: run #8 {crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] })}: 8 schedule(s), goal VIOLATED; derivations {}
+LDFI: goal violated after 8 hypothesis run(s) by {crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] })}
+  delivered in the failing schedule: {write[→0]:Write(1), write[→1]:Write(1), write[→2]:Write(1), repl[0→1]:Write(1), repl[0→2]:Write(1), ack[1→0]:Write(1), ack[2→0]:Write(1), client-ack[0→]:Write(1), hb[0→]:(), hb[1→]:(), hb[2→]:(), view[→0]:View { leader: Some(0), isr: [0, 1, 2] }, view[→1]:View { leader: Some(0), isr: [0, 1, 2] }, hb[0→]:(), hb[2→]:(), hb[1→]:(), hb[0→]:(), hb[1→]:(), hb[2→]:(), hb[1→]:(), hb[0→]:(), hb[2→]:()}
+  sends lost to crashes: {zk#2, zk#3, zk#4, zk#5, zk#6, zk#7, zk#8, zk#9, zk#10, zk#11}
+
+EventualConsistency at isr_replication.rs:360 (Cluster(loc3v1), CycleSource, delivered): VIOLATED by {crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] })}, 8 hypotheses
+hydrofrac: searching EventualConsistency at isr_replication.rs:343 (Cluster(loc3v1))
+ldfi: fact domain learned from the failure-free run: 1 fact(s)
+ldfi: channels:
+  channel#68 "write": Process(loc1v1) → Cluster(loc3v1), reliable
+  channel#194 "repl": Cluster(loc3v1) → Cluster(loc3v1), lossy
+  channel#203 "ack": Cluster(loc3v1) → Cluster(loc3v1), reliable
+  channel#248 "shrink": Cluster(loc3v1) → Process(loc2v1), reliable
+  channel#292 "hb": Cluster(loc3v1) → Process(loc2v1), reliable
+  channel#345 "view": Process(loc2v1) → Cluster(loc3v1), reliable
+  channel#351 "client-ack": Cluster(loc3v1) → Process(loc1v1), reliable
+  channel#399 "observe#399": Cluster(loc3v1) → Process(loc4v1), reliable
+  channel#403 "observe#403": Cluster(loc3v1) → Process(loc4v1), reliable
+  channel#408 "observe#408": Cluster(loc3v1) → Process(loc4v1), reliable
+ldfi: crash bounds: crashes unbounded; not all 5 nodes at once; at most 1 of the checked cluster's 3 crashable member(s)
+ldfi: specification is generated (EventualConsistency)
+ldfi: run #1 {}: 8 schedule(s), goal held; derivations {{write[→0]:Write(1)←client#0, write[→1]:Write(1)←client#1, write[→2]:Write(1)←client#2, observed[0→]:(1, [1, 0, 0, 0]) from replica@0 through send #0←replica@0#0, observed[1→]:(1, [1, 0, 0, 0]) from replica@1 through send #0←replica@1#0, observed[2→]:(1, [1, 0, 0, 0]) from replica@2 through send #0←replica@2#0}}
+ldfi: universe {crash(client after write[→1]:Write(1)), crash(client after write[→0]:Write(1)), crash(client before any send), crash(replica@0 before any send), crash(replica@1 before any send), crash(replica@2 before any send)}; preserve points {}; requirements {}
+ldfi: run #2 {crash(client after write[→1]:Write(1))}: 8 schedule(s), goal VIOLATED; derivations {}
+LDFI: goal violated after 2 hypothesis run(s) by {crash(client after write[→1]:Write(1))}
+  delivered in the failing schedule: {write[→0]:Write(1), write[→1]:Write(1), repl[0→1]:Write(1), repl[0→2]:Write(1), ack[2→0]:Write(1), ack[1→0]:Write(1), client-ack[0→]:Write(1), hb[1→]:(), hb[2→]:(), hb[0→]:(), view[→0]:View { leader: Some(0), isr: [0, 1, 2] }, view[→1]:View { leader: Some(0), isr: [0, 1, 2] }, view[→2]:View { leader: Some(0), isr: [0, 1, 2] }, hb[1→]:(), hb[2→]:(), hb[0→]:(), view[→0]:View { leader: Some(0), isr: [0, 1, 2] }, view[→1]:View { leader: Some(0), isr: [0, 1, 2] }, view[→2]:View { leader: Some(0), isr: [0, 1, 2] }, hb[2→]:(), hb[1→]:(), hb[0→]:(), view[→0]:View { leader: Some(0), isr: [0, 1, 2] }, view[→1]:View { leader: Some(0), isr: [0, 1, 2] }, view[→2]:View { leader: Some(0), isr: [0, 1, 2] }, hb[2→]:(), hb[0→]:(), hb[1→]:(), view[→0]:View { leader: Some(0), isr: [0, 1, 2] }, view[→1]:View { leader: Some(0), isr: [0, 1, 2] }, view[→2]:View { leader: Some(0), isr: [0, 1, 2] }}
+  sends lost to crashes: {client#2}
+
+EventualConsistency at isr_replication.rs:343 (Cluster(loc3v1), AssertIsConsistent, minted and delivered): VIOLATED by {crash(client after write[→1]:Write(1))}, 2 hypotheses
+hydrofrac: searching EventualConsistency at isr_replication.rs:564 (Cluster(loc3v1))
+ldfi: fact domain learned from the failure-free run: 1 fact(s)
+ldfi: channels:
+  channel#68 "write": Process(loc1v1) → Cluster(loc3v1), reliable
+  channel#194 "repl": Cluster(loc3v1) → Cluster(loc3v1), lossy
+  channel#203 "ack": Cluster(loc3v1) → Cluster(loc3v1), reliable
+  channel#248 "shrink": Cluster(loc3v1) → Process(loc2v1), reliable
+  channel#292 "hb": Cluster(loc3v1) → Process(loc2v1), reliable
+  channel#345 "view": Process(loc2v1) → Cluster(loc3v1), reliable
+  channel#351 "client-ack": Cluster(loc3v1) → Process(loc1v1), reliable
+  channel#399 "observe#399": Cluster(loc3v1) → Process(loc4v1), reliable
+  channel#403 "observe#403": Cluster(loc3v1) → Process(loc4v1), reliable
+  channel#408 "observe#408": Cluster(loc3v1) → Process(loc4v1), reliable
+ldfi: crash bounds: crashes unbounded; not all 5 nodes at once; at most 1 of the checked cluster's 3 crashable member(s)
+ldfi: specification is generated (EventualConsistency)
+ldfi: run #1 {}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, view[→0]:View { leader: Some(0), isr: [0, 1, 2] }←zk#0, view[→1]:View { leader: Some(0), isr: [0, 1, 2] }←zk#1, view[→2]:View { leader: Some(0), isr: [0, 1, 2] }←zk#2, observed[0→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@0 through send #4←replica@0#4, observed[1→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@1 through send #2←replica@1#2, observed[2→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@2 through send #2←replica@2#2}}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1)), crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk after view[→0]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk before any send)}; preserve points {}; requirements {}
+ldfi: run #2 {crash(replica@0 after hb[0→]:())}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, view[→1]:View { leader: Some(0), isr: [0, 1, 2] }←zk#1, view[→2]:View { leader: Some(0), isr: [0, 1, 2] }←zk#2, observed[1→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@1 through send #2←replica@1#2, observed[2→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@2 through send #2←replica@2#2}}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1)), crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk after view[→0]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk before any send)}; preserve points {}; requirements {}
+ldfi: run #3 {crash(replica@0 after client-ack[0→]:Write(1))}: 8 schedule(s), goal held; derivations {}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1)), crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk after view[→0]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk before any send)}; preserve points {}; requirements {}
+ldfi: run #4 {crash(replica@1 after hb[1→]:())}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, view[→0]:View { leader: Some(0), isr: [0, 1, 2] }←zk#0, view[→2]:View { leader: Some(0), isr: [0, 1, 2] }←zk#2, observed[0→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@0 through send #4←replica@0#4, observed[2→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@2 through send #2←replica@2#2}}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1)), crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk after view[→0]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk before any send)}; preserve points {}; requirements {}
+ldfi: run #5 {crash(replica@1 after ack[1→0]:Write(1))}: 8 schedule(s), goal held; derivations {}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1)), crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk after view[→0]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk before any send)}; preserve points {}; requirements {}
+ldfi: run #6 {crash(replica@2 after hb[2→]:())}: 8 schedule(s), goal held; derivations {{hb[0→]:()←replica@0#3, hb[1→]:()←replica@1#1, hb[2→]:()←replica@2#1, view[→0]:View { leader: Some(0), isr: [0, 1, 2] }←zk#0, view[→1]:View { leader: Some(0), isr: [0, 1, 2] }←zk#1, observed[0→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@0 through send #4←replica@0#4, observed[1→]:(2, [1, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]) from replica@1 through send #2←replica@1#2}}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1)), crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk after view[→0]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk before any send)}; preserve points {}; requirements {}
+ldfi: run #7 {crash(replica@2 after ack[2→0]:Write(1))}: 8 schedule(s), goal held; derivations {}
+ldfi: universe {crash(replica@0 after hb[0→]:()), crash(replica@0 after client-ack[0→]:Write(1)), crash(replica@1 after hb[1→]:()), crash(replica@1 after ack[1→0]:Write(1)), crash(replica@2 after hb[2→]:()), crash(replica@2 after ack[2→0]:Write(1)), crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk after view[→0]:View { leader: Some(0), isr: [0, 1, 2] }), crash(zk before any send)}; preserve points {}; requirements {}
+ldfi: run #8 {crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] })}: 8 schedule(s), goal VIOLATED; derivations {}
+LDFI: goal violated after 8 hypothesis run(s) by {crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] })}
+  delivered in the failing schedule: {write[→0]:Write(1), write[→1]:Write(1), write[→2]:Write(1), repl[0→1]:Write(1), repl[0→2]:Write(1), ack[2→0]:Write(1), ack[1→0]:Write(1), client-ack[0→]:Write(1), hb[1→]:(), hb[0→]:(), hb[2→]:(), view[→0]:View { leader: Some(0), isr: [0, 1, 2] }, view[→1]:View { leader: Some(0), isr: [0, 1, 2] }, hb[0→]:(), hb[1→]:(), hb[2→]:(), hb[1→]:(), hb[2→]:(), hb[0→]:(), hb[0→]:(), hb[2→]:(), hb[1→]:()}
+  sends lost to crashes: {zk#2, zk#3, zk#4, zk#5, zk#6, zk#7, zk#8, zk#9, zk#10, zk#11}
+
+EventualConsistency at isr_replication.rs:564 (Cluster(loc3v1), AssertIsConsistent, minted): VIOLATED by {crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] })}, 8 hypotheses
+EventualConsistency at isr_replication.rs:360 (Cluster(loc3v1), CycleSource, delivered): VIOLATED by {crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] })}, 8 hypotheses
+EventualConsistency at isr_replication.rs:343 (Cluster(loc3v1), AssertIsConsistent, minted and delivered): VIOLATED by {crash(client after write[→1]:Write(1))}, 2 hypotheses
+EventualConsistency at isr_replication.rs:564 (Cluster(loc3v1), AssertIsConsistent, minted): VIOLATED by {crash(zk after view[→1]:View { leader: Some(0), isr: [0, 1, 2] })}, 8 hypotheses

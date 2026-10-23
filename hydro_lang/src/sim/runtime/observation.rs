@@ -15,7 +15,7 @@ use dfir_rs::rustc_hash::FxHashMap;
 use dfir_rs::util::unsync::mpsc::Sender;
 
 use super::{
-    HookLocationMeta, ObservationHook, RuntimeHook, ScriptDecision, ScriptableHook,
+    HookLocationMeta, NoPolicy, ObservationHook, RuntimeHook, ScriptDecision, ScriptableHook,
     ScriptableObservationHook, TruncatedLabeledVecDebug, TruncatedVecDebug, abort,
     describe_keyed_pending, keyed_buffer_len, log_release,
 };
@@ -137,6 +137,7 @@ where
 {
     type Decision = TopLevelOrderingDecision<T>;
     type Status = OrderingStatus;
+    type Policy = NoPolicy;
 
     fn is_honorable(&self, decision: &Self::Decision) -> Result<bool, String> {
         let TopLevelOrderingDecision::Next(expected) = decision;
@@ -291,6 +292,7 @@ where
 {
     type Decision = TopLevelOrderingDecision<T>;
     type Status = OrderingStatus;
+    type Policy = NoPolicy;
 
     fn is_honorable(&self, decision: &Self::Decision) -> Result<bool, String> {
         let TopLevelOrderingDecision::Next(expected) = decision;
@@ -439,6 +441,7 @@ where
 {
     type Decision = TopLevelOrderingDecision<(K, V)>;
     type Status = OrderingStatus;
+    type Policy = NoPolicy;
 
     fn is_honorable(&self, decision: &Self::Decision) -> Result<bool, String> {
         let TopLevelOrderingDecision::Next((key, expected)) = decision;
@@ -588,6 +591,7 @@ where
 {
     type Decision = TopLevelOrderingDecision<(K, V)>;
     type Status = OrderingStatus;
+    type Policy = NoPolicy;
 
     fn is_honorable(&self, decision: &Self::Decision) -> Result<bool, String> {
         let TopLevelOrderingDecision::Next((key, expected)) = decision;
@@ -780,6 +784,7 @@ where
 {
     type Decision = MergeDecision<T>;
     type Status = MergeStatus;
+    type Policy = NoPolicy;
 
     fn is_honorable(&self, decision: &MergeDecision<T>) -> Result<bool, String> {
         let (buffer, expected) = match decision {
@@ -992,6 +997,7 @@ where
 {
     type Decision = MergeDecision<(K, V), K>;
     type Status = MergeStatus;
+    type Policy = NoPolicy;
 
     fn is_honorable(&self, decision: &MergeDecision<(K, V), K>) -> Result<bool, String> {
         let (buffer, key, expected) = match decision {

@@ -1,0 +1,20 @@
+Checking retry_service (hybrid_budget)…
+Checking retry_service (no_governance)…
+Checking retry_service (no_retries)…
+Checking retry_service (success_budget)…
+Checking retry_service (time_budget)…
+Checking retry_service (unbounded)…
+! HAZARDOUS  retry_service (circuit_breaker)  growth: stops  multiplier: 1.12x  location: hydro_test/src/cluster/witnesses/blind_budget/service.rs:657, batch of Request
+    outputs: amplified: sent, served, replies, dropped; level: pending, backlog; shed: completed
+! HAZARDOUS  retry_service (hybrid_budget)  growth: stops  multiplier: 1.56x  location: hydro_test/src/cluster/witnesses/blind_budget/service.rs:657, batch of Request
+    outputs: amplified: sent, served, replies, dropped; level: pending, backlog; shed: completed
+! HAZARDOUS  retry_service (no_governance)  growth: stops  multiplier: 2.98x  location: hydro_test/src/cluster/witnesses/blind_budget/service.rs:657, batch of Request
+    outputs: amplified: sent, served, replies, dropped; level: pending, backlog; shed: completed
+✓ BENIGN  retry_service (no_retries)  growth: -  multiplier: -  location: -
+    outputs: conserved: sent, served, replies; amplified: dropped; level: pending, backlog; shed: completed
+! HAZARDOUS  retry_service (success_budget)  growth: stops  multiplier: 1.12x  location: hydro_test/src/cluster/witnesses/blind_budget/service.rs:657, batch of Request
+    outputs: amplified: sent, served, replies, dropped; level: pending, backlog; shed: completed
+! HAZARDOUS  retry_service (time_budget)  growth: stops  multiplier: 1.56x  location: hydro_test/src/cluster/witnesses/blind_budget/service.rs:657, batch of Request
+    outputs: amplified: sent, served, replies, dropped; level: pending, backlog; shed: completed
+! HAZARDOUS  retry_service (unbounded)  growth: grows  multiplier: 155.42x  location: hydro_test/src/cluster/witnesses/blind_budget/service.rs:657, batch of Request
+    outputs: amplified: sent, served, replies; level: pending, backlog; shed: completed; silent: dropped

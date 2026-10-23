@@ -1,0 +1,121 @@
+hydro_test::cluster::witnesses::cache_thundering_herd cache_with_expiry (request_dated_no_coalesce) workload round_data closure, cache_clock=1/round, origin_clock=1/round, data in rounds 0..125
+
+cress amplification check: 1000 rounds of workload, every hold begins at round 1
+horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
+run time: 19.7 s including compilation
+input: data in rounds 0..125, timers only afterwards; finite holds that outlast the input: 128, 256, 512
+unheld run: 3196 records admitted at decision points, 196 network messages sent, 5 decision points had buffered input
+
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length: records admitted, messages from the busiest sender (what the verdict reads), and messages from all senders together (which stays flat when work only moved from one sender to another).
+
+hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
+hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:280, batch of (usize, ()): no extra work at any hold length
+hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:281, batch of (usize, u32)
+    extra records admitted              -28    -24    -24     -8     68   1516   1512   1804   1804   1804  -1172
+    extra messages, busiest sender      -14    -12    -12     -4     34    758    756    902    902    902    -90
+    extra messages, all senders         -28    -24    -24     -8     68   1516   1512   1804   1804   1804   -180
+    first reacted at a hold of 16 rounds with 68 extra; largest extra work 1804 in admitted records
+    beyond the input (holds 128, 256, 512): extra sends from Process(loc2v1) stops: ceiling 902 (rates per round of delay 0.000, 0.000)
+    beyond the input (holds 128, 256, 512): extra admitted records stops: ceiling 1804 (rates per round of delay 0.000, 0.000)
+    multiplier: 10.20× the unheld run's 98 sends from Process(loc2v1) (+902 at a hold of 512 rounds)
+    under a hold that never ends: -90 sends from Process(loc2v1)
+hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:282, batch of Fill
+    extra records admitted                0      4     28     64    112    424   1684   1684   1684   1684    748
+    extra messages, busiest sender        0      2     14     32     56    212    842    842    842    842    842
+    extra messages, all senders           0      4     28     64    112    424   1684   1684   1684   1684   1684
+    first reacted at a hold of 2 rounds with 4 extra; largest extra work 1684 in admitted records (held by parking the tick, which has no other input, at hold length 1)
+    beyond the input (holds 128, 256, 512): extra sends from Process(loc2v1) stops: ceiling 842 (rates per round of delay 0.000, 0.000)
+    beyond the input (holds 128, 256, 512): extra admitted records stops: ceiling 1684 (rates per round of delay 0.000, 0.000)
+    multiplier: 9.59× the unheld run's 98 sends from Process(loc2v1) (+842 at a hold of 999 rounds)
+    under a hold that never ends: +842 sends from Process(loc2v1)
+hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:397, batch of ()
+    extra records admitted                4     16     36     76    116    524   1684   1684   1684   1684   -251
+    extra messages, busiest sender        2      8     18     38     58    262    842    842    842    842    842
+    extra messages, all senders           4     16     36     76    116    524   1684   1684   1684   1684    748
+    first reacted at a hold of 1 rounds with 4 extra; largest extra work 1684 in admitted records
+    beyond the input (holds 128, 256, 512): extra sends from Process(loc2v1) stops: ceiling 842 (rates per round of delay 0.000, 0.000)
+    beyond the input (holds 128, 256, 512): extra admitted records stops: ceiling 1684 (rates per round of delay 0.000, 0.000)
+    multiplier: 9.59× the unheld run's 98 sends from Process(loc2v1) (+842 at a hold of 512 rounds)
+    under a hold that never ends: +842 sends from Process(loc1v1)
+hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:398, batch of Fetch
+    extra records admitted                0      4      8     24     96   1568   1568   1568   1568   1568   -180
+    extra messages, busiest sender        0      2      4     12     48    784    784    784    784    784    784
+    extra messages, all senders           0      4      8     24     96   1568   1568   1568   1568   1568    694
+    first reacted at a hold of 2 rounds with 4 extra; largest extra work 1568 in admitted records
+    beyond the input (holds 128, 256, 512): extra sends from Process(loc2v1) stops: ceiling 784 (rates per round of delay 0.000, 0.000)
+    beyond the input (holds 128, 256, 512): extra admitted records stops: ceiling 1568 (rates per round of delay 0.000, 0.000)
+    multiplier: 9.00× the unheld run's 98 sends from Process(loc2v1) (+784 at a hold of 512 rounds)
+    under a hold that never ends: +784 sends from Process(loc1v1)
+
+output streams across the sweep: a stream is conserved when its count is the unheld run's under every finite hold (fixed by the input), amplified when some hold raised it, a level when it emits exactly one record per execution of a tick at its location, shed when holds only lowered it.
+stream                  kind         unheld  finite holds      hold to the end   largest at
+completed               conserved      1000  1000              8..1000           -
+fetches                 amplified        98  14..1000          8..940            hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:281, batch of (usize, u32) at a hold of 128
+fills_applied           amplified        70  4..166            4..10             hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:397, batch of () at a hold of 32
+fills_redundant         amplified        28  0..126            0..4              hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:397, batch of () at a hold of 32
+fills_stale             amplified         0  0..936            0                 hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:282, batch of Fill at a hold of 64
+waiting_trace           level          1028  616..1250         129..1002         one per execution of Tick(Some(ClockId(0)), Process(loc1v1))
+processed               amplified        98  14..1000          4..940            hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:281, batch of (usize, u32) at a hold of 128
+origin_backlog_trace    level          1000  612..1000         125..1000         one per execution of Tick(Some(ClockId(1)), Process(loc2v1))
+
+count by hold length (rounds)             1      2      4      8     16     32     64    128    256    512    999
+completed (conserved, unheld 1000)
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:280, batch of (usize, ())   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:281, batch of (usize, u32)   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000      8
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:282, batch of Fill   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000     64
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:397, batch of ()   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000     64
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:398, batch of Fetch   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000    128
+fetches (amplified, unheld 98)
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:280, batch of (usize, ())     98     98     98     98     98     84     56     14     14     14     14
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:281, batch of (usize, u32)     84     86     86     94    132    856    854   1000   1000   1000      8
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:282, batch of Fill     98    100    112    130    154    310    940    940    940    940    940
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:397, batch of ()    100    106    116    136    156    360    940    940    940    940    940
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:398, batch of Fetch     98    100    102    110    146    882    882    882    882    882    882
+fills_applied (amplified, unheld 70)
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:280, batch of (usize, ())     70     70     70     70     70     60     40     10     10     10     10
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:281, batch of (usize, u32)     72     72     70     70     70     18     18     18     18     18      8
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:282, batch of Fill     70     72     80     96    128    144      4      4      4      4      4
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:397, batch of ()     72     76     84    100    132    166      4      4      4      4      4
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:398, batch of Fetch     70     70     70     70     72      8      8      8      8      8      8
+fills_redundant (amplified, unheld 28)
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:280, batch of (usize, ())     28     28     28     28     28     24     16      4      4      4      4
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:281, batch of (usize, u32)     12     14     16     24     62     70     70     70     70     70      0
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:282, batch of Fill     28     28     32     34     26    100      0      0      0      0      0
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:397, batch of ()     28     30     32     36     24    126      0      0      0      0      0
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:398, batch of Fetch     28     30     32     40     74      0      0      0      0      0      0
+fills_stale (amplified, unheld 0)
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:280, batch of (usize, ())      0      0      0      0      0      0      0      0      0      0      0
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:281, batch of (usize, u32)      0      0      0      0      0    768    766    912    912    912      0
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:282, batch of Fill      0      0      0      0      0     66    936    936    936    936      0
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:397, batch of ()      0      0      0      0      0     68    936    936    936    936      0
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:398, batch of Fetch      0      0      0      0      0    874    874    874    874    874      0
+waiting_trace (level, unheld 1028)
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:280, batch of (usize, ())   1028   1028   1028   1028   1028   1024   1016   1000    872    616    129
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:281, batch of (usize, u32)   1021   1028   1027   1029   1038   1214   1214   1250   1250   1250   1002
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:282, batch of Fill   1027   1026   1027   1028   1025   1047   1171   1107   1001   1001   1001
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:397, batch of ()   1027   1028   1028   1029   1026   1061   1171   1107   1002   1002   1001
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:398, batch of Fetch   1028   1028   1029   1031   1041   1221   1221   1221   1221   1221   1002
+processed (amplified, unheld 98)
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:280, batch of (usize, ())     98     98     98     98     98     84     56     14     14     14     14
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:281, batch of (usize, u32)     84     86     86     94    132    856    854   1000   1000   1000      8
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:282, batch of Fill     98    100    112    130    154    310    940    940    940    940    940
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:397, batch of ()    100    106    116    136    156    360    940    940    940    940      4
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:398, batch of Fetch     98    100    102    110    146    882    882    882    882    882      8
+origin_backlog_trace (level, unheld 1000)
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:280, batch of (usize, ())   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:281, batch of (usize, u32)   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:282, batch of Fill   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:397, batch of ()   1000   1000   1000   1000   1000   1000   1000    996    868    612    125
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:398, batch of Fetch   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000
+
+verdict: hazardous
+  decision point: hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:397, batch of ()
+  first reacted at a hold of 1 rounds, with 4 extra admitted records there
+  largest extra work over the curve: 1684 in admitted records
+  decision points that admitted more records under that hold, at its peak:
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:282, batch of Fill +842
+    hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:398, batch of Fetch +842
+growth: stops. Once the hold outlasts the input, the extra work reaches a ceiling and a longer delay adds nothing.
+  worst shape, at hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:281, batch of (usize, u32) over holds 128, 256, 512: extra sends from Process(loc2v1) stops: ceiling 902 (rates per round of delay 0.000, 0.000)
+  largest multiplier, at hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:281, batch of (usize, u32): 10.20× the unheld run's 98 sends from Process(loc2v1) (+902 at a hold of 512 rounds)
+  largest stall reaction, at hydro_test/src/cluster/witnesses/cache_thundering_herd.rs:397, batch of (): +842 sends from Process(loc1v1) under a hold that never ends

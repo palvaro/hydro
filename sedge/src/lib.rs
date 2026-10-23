@@ -17,10 +17,12 @@
 //!
 //! The attribute [`overload_check`] on a Hydro function generates the harness from the
 //! function's signature, the same way `cress::amplification_check` does for the simulator:
-//! `Process` parameters become deployed processes, the stream named `load = ...` becomes an
+//! `Process` parameters become deployed processes, `Cluster` parameters become deployed clusters
+//! of the size the attribute gives (`cluster = 5`), the stream named `load = ...` becomes an
 //! external port the generator feeds with sequence numbers (see [`LoadItem`]), `()` streams
 //! become timers with the periods given in `timers(...)`, plain parameters take the values in
-//! the attribute. The function's return value is handed to [`Observed::observe`], a trait the
+//! the attribute. Streams on clusters pass through one extra relay process (see [`SedgeRelay`]),
+//! since a deployment has no channel between an external process and a cluster. The function's return value is handed to [`Observed::observe`], a trait the
 //! program's crate implements by hand to say which output carries completions, which carries
 //! abandonments, and which levels and counters to watch. `./scripts/sedge <crate>` at the
 //! repository root builds a runner that links the crate, deploys every annotated function on
@@ -63,14 +65,18 @@ pub use generator::drive;
 pub use profile::{Arrivals, Profile};
 pub use program::timer;
 #[cfg(stageleft_runtime)]
-pub use program::{LoadItem, Observed, Observer, load_input};
-pub use trace::{Bucket, Recorder, Trace};
-pub use verdict::{Outcome, Verdict, judge};
+pub use program::{
+    LoadItem, Observable, Observation, Observed, Observer, cluster_load_input, load_input,
+};
+pub use program::{ClusterRoundSender, RoundSender, SedgeRelay};
+pub use trace::{Bucket, Recorder, Sample, Trace};
+pub use verdict::{Outcome, StreamKind, StreamKinds, Verdict, judge, judge_with_kinds};
 
 /// Paths the generated harness code reaches through this crate, so that a crate under check
 /// need not depend on `hydro_lang` or `hydro_deploy` itself.
 #[doc(hidden)]
 pub mod __private {
+    pub use futures;
     pub use hydro_deploy;
     pub use hydro_lang;
 }
@@ -78,3 +84,6 @@ pub mod __private {
 /// Registers a Hydro function with the `sedge` command. See the
 /// [macro's documentation](sedge_macro::overload_check).
 pub use sedge_macro::overload_check;
+/// Implements [`Observed`] for a struct of output streams by registering every field whole with
+/// [`Observer::stream`]. See the [macro's documentation](sedge_macro::SedgeOutputs).
+pub use sedge_macro::SedgeOutputs;

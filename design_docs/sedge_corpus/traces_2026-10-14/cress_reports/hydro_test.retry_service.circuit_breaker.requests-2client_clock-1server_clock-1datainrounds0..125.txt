@@ -1,0 +1,114 @@
+hydro_test::cluster::witnesses::blind_budget::service retry_service (circuit_breaker) workload requests=2, client_clock=1, server_clock=1, data in rounds 0..125
+
+cress amplification check: 1000 rounds of workload, every hold begins at round 1
+horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
+run time: 16.7 s including compilation
+input: data in rounds 0..125, timers only afterwards; finite holds that outlast the input: 128, 256, 512
+unheld run: 2750 records admitted at decision points, 500 network messages sent, 5 decision points had buffered input
+
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length: records admitted, messages from the busiest sender (what the verdict reads), and messages from all senders together (which stays flat when work only moved from one sender to another).
+
+hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
+hydro_test/src/cluster/witnesses/blind_budget/service.rs:621, batch of (usize, ()): no extra work at any hold length
+hydro_test/src/cluster/witnesses/blind_budget/service.rs:622, batch of (usize, u64)
+    extra records admitted                0      0      0      0     10    -34    -66     62     62     62   -744
+    extra messages, busiest sender        0      0      0      0      5    -17    -33     31     31     31   -248
+    extra messages, all senders           0      0      0      0     10    -34    -66     62     62     62   -496
+    first reacted at a hold of 16 rounds with 10 extra; largest extra work 62 in admitted records
+    beyond the input (holds 128, 256, 512): extra sends from Process(loc2v1) stops: ceiling 31 (rates per round of delay 0.000, 0.000)
+    beyond the input (holds 128, 256, 512): extra admitted records stops: ceiling 62 (rates per round of delay 0.000, 0.000)
+    multiplier: 1.12× the unheld run's 250 sends from Process(loc2v1) (+31 at a hold of 512 rounds)
+    under a hold that never ends: -248 sends from Process(loc2v1)
+hydro_test/src/cluster/witnesses/blind_budget/service.rs:623, batch of Reply
+    extra records admitted                0      0      0      8    -34   -104   -244   -430   -414   -386   -437
+    extra messages, busiest sender        0      0      0      4    -17    -52   -122   -215   -207   -193   -189
+    extra messages, all senders           0      0      0      8    -34   -104   -244   -430   -414   -386   -378
+    first reacted at a hold of 8 rounds with 8 extra; largest extra work 8 in admitted records (held by parking the tick, which has no other input, at hold length 1)
+    beyond the input (holds 128, 256, 512): extra sends from Process(loc2v1) stops and stays at or below the unheld run (-215..-193): shedding, not amplifying
+    beyond the input (holds 128, 256, 512): extra admitted records stops and stays at or below the unheld run (-430..-386): shedding, not amplifying
+    multiplier: 1.02× the unheld run's 250 sends from Process(loc2v1) (+4 at a hold of 8 rounds)
+    under a hold that never ends: -189 sends from Process(loc2v1)
+hydro_test/src/cluster/witnesses/blind_budget/service.rs:656, batch of ()
+    extra records admitted                0      0      0     12    -34   -104   -244   -430   -414   -386  -1436
+    extra messages, busiest sender        0      0      0      6    -17    -52   -122   -215   -207   -193   -189
+    extra messages, all senders           0      0      0     12    -34   -104   -244   -430   -414   -386   -437
+    first reacted at a hold of 8 rounds with 12 extra; largest extra work 12 in admitted records
+    beyond the input (holds 128, 256, 512): extra sends from Process(loc2v1) stops and stays at or below the unheld run (-215..-193): shedding, not amplifying
+    beyond the input (holds 128, 256, 512): extra admitted records stops and stays at or below the unheld run (-430..-386): shedding, not amplifying
+    multiplier: 1.02× the unheld run's 250 sends from Process(loc2v1) (+6 at a hold of 8 rounds)
+    under a hold that never ends: -189 sends from Process(loc1v1)
+hydro_test/src/cluster/witnesses/blind_budget/service.rs:657, batch of Request
+    extra records admitted                0      0      0     16    -32   -104   -244   -414   -402   -386   -496
+    extra messages, busiest sender        0      0      0      8    -16    -52   -122   -207   -201   -193   -189
+    extra messages, all senders           0      0      0     16    -32   -104   -244   -414   -402   -386   -437
+    first reacted at a hold of 8 rounds with 16 extra; largest extra work 16 in admitted records
+    beyond the input (holds 128, 256, 512): extra sends from Process(loc2v1) stops and stays at or below the unheld run (-207..-193): shedding, not amplifying
+    beyond the input (holds 128, 256, 512): extra admitted records stops and stays at or below the unheld run (-414..-386): shedding, not amplifying
+    multiplier: 1.03× the unheld run's 250 sends from Process(loc2v1) (+8 at a hold of 8 rounds)
+    under a hold that never ends: -189 sends from Process(loc1v1)
+
+output streams across the sweep: a stream is conserved when its count is the unheld run's under every finite hold (fixed by the input), amplified when some hold raised it, a level when it emits exactly one record per execution of a tick at its location, shed when holds only lowered it.
+stream                  kind         unheld  finite holds      hold to the end   largest at
+sent                    amplified       250  35..281           2..250            hydro_test/src/cluster/witnesses/blind_budget/service.rs:622, batch of (usize, u64) at a hold of 128
+served                  amplified       250  35..281           2..250            hydro_test/src/cluster/witnesses/blind_budget/service.rs:622, batch of (usize, u64) at a hold of 128
+replies                 amplified       250  35..281           2..250            hydro_test/src/cluster/witnesses/blind_budget/service.rs:622, batch of (usize, u64) at a hold of 128
+completed               shed            250  22..250           2..250            -
+dropped                 amplified         0  0..230            0..249            hydro_test/src/cluster/witnesses/blind_budget/service.rs:657, batch of Request at a hold of 128
+pending                 level          1125  737..1125         250..1001         one per execution of Tick(Some(ClockId(0)), Process(loc1v1))
+backlog                 level          1000  526..1003         43..1000          one per execution of Tick(Some(ClockId(1)), Process(loc2v1))
+
+count by hold length (rounds)             1      2      4      8     16     32     64    128    256    512    999
+sent (amplified, unheld 250)
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:621, batch of (usize, ())    250    250    250    250    250    250    250    250    250    250    250
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:622, batch of (usize, u64)    250    250    250    250    255    233    217    281    281    281      2
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:623, batch of Reply    250    250    250    254    233    198    128     35     43     57     61
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:656, batch of ()    250    250    250    256    233    198    128     35     43     57     61
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:657, batch of Request    250    250    250    258    234    198    128     43     49     57     61
+served (amplified, unheld 250)
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:621, batch of (usize, ())    250    250    250    250    250    250    250    250    250    250    250
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:622, batch of (usize, u64)    250    250    250    250    255    233    217    281    281    281      2
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:623, batch of Reply    250    250    250    254    233    198    128     35     43     57     61
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:656, batch of ()    250    250    250    256    233    198    128     35     43     57      2
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:657, batch of Request    250    250    250    258    234    198    128     43     49     57      2
+replies (amplified, unheld 250)
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:621, batch of (usize, ())    250    250    250    250    250    250    250    250    250    250    250
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:622, batch of (usize, u64)    250    250    250    250    255    233    217    281    281    281      2
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:623, batch of Reply    250    250    250    254    233    198    128     35     43     57     61
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:656, batch of ()    250    250    250    256    233    198    128     35     43     57      2
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:657, batch of Request    250    250    250    258    234    198    128     43     49     57      2
+completed (shed, unheld 250)
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:621, batch of (usize, ())    250    250    250    250    250    250    250    250    250    250    250
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:622, batch of (usize, u64)    250    250    250    250    250    226    202    250    250    250      2
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:623, batch of Reply    250    250    250    250    226    190    118     22     22     22      2
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:656, batch of ()    250    250    250    250    226    190    118     22     22     22      2
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:657, batch of Request    250    250    250    250    226    190    118     22     22     22      2
+dropped (amplified, unheld 0)
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:621, batch of (usize, ())      0      0      0      0      0      0      0      0      0      0      0
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:622, batch of (usize, u64)      0      0      0      0      0     25     50      4      4      4      0
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:623, batch of Reply      0      0      0      0     25     61    133    229    229    229    249
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:656, batch of ()      0      0      0      0     25     61    133    229    229    229    249
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:657, batch of Request      0      0      0      0     25     61    133    230    229    229    249
+pending (level, unheld 1125)
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:621, batch of (usize, ())   1125   1125   1125   1125   1125   1125   1125   1121    993    737    250
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:622, batch of (usize, u64)   1124   1123   1121   1117   1109   1091   1061   1057   1057   1057   1001
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:623, batch of Reply   1124   1123   1121   1117   1103   1085   1049   1001   1001   1001   1001
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:656, batch of ()   1124   1123   1121   1117   1104   1086   1050   1002   1002   1002   1001
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:657, batch of Request   1124   1123   1121   1117   1109   1091   1055   1010   1011   1012   1001
+backlog (level, unheld 1000)
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:621, batch of (usize, ())   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:622, batch of (usize, u64)   1000   1000   1000   1000   1000   1000   1001   1003   1003   1003   1000
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:623, batch of Reply   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000   1000
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:656, batch of ()   1000   1000   1000   1000    994    979    949    888    768    526     43
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:657, batch of Request   1000   1000   1000   1000   1000   1000   1000   1001   1001   1000   1000
+
+verdict: hazardous
+  decision point: hydro_test/src/cluster/witnesses/blind_budget/service.rs:657, batch of Request
+  first reacted at a hold of 8 rounds, with 16 extra admitted records there
+  largest extra work over the curve: 16 in admitted records
+  decision points that admitted more records under that hold, at its peak:
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:623, batch of Reply +8
+    hydro_test/src/cluster/witnesses/blind_budget/service.rs:657, batch of Request +8
+growth: stops. Once the hold outlasts the input, the extra work reaches a ceiling and a longer delay adds nothing.
+  worst shape, at hydro_test/src/cluster/witnesses/blind_budget/service.rs:622, batch of (usize, u64) over holds 128, 256, 512: extra sends from Process(loc2v1) stops: ceiling 31 (rates per round of delay 0.000, 0.000)
+  largest multiplier, at hydro_test/src/cluster/witnesses/blind_budget/service.rs:622, batch of (usize, u64): 1.12× the unheld run's 250 sends from Process(loc2v1) (+31 at a hold of 512 rounds)
+  largest stall reaction, at hydro_test/src/cluster/witnesses/blind_budget/service.rs:657, batch of Request: -189 sends from Process(loc1v1) under a hold that never ends

@@ -1,0 +1,401 @@
+//! Lineage-driven fault injection on every operator in `hydro_lang` that *produces* a
+//! collection labelled `EventualConsistency`, under the specification the label stands for
+//! (`Spec::eventual_consistency`; `docs/design/hydrofrac.md`): every correct member holds
+//! every fact of the collection that some correct member holds, by the end of the run, over
+//! the facts of the failure-free run.
+//!
+//! The label promises that replicas compute the same contents given the same inputs. These
+//! tests ask whether the fault model the transport declares can withhold inputs from some
+//! replicas: the premise the label leaves to the program. The producers:
+//!
+//! - [`Stream::broadcast_closed`] from a process to a cluster, over `fail_stop` (the
+//!   transport's `ConsistencyGuarantee` is `EventualConsistency`, justified in
+//!   `hydro_lang::networking` by "a failed connection models the *recipient* as having
+//!   failed"). The sender is not considered; a crash of the sender between two sends of one
+//!   fan-out leaves two members with different sets.
+//! - The same over `lossy_delayed_forever` (also `EventualConsistency`, justified by "dropped
+//!   messages are modeled as indefinitely delayed, so the output is a lower bound that is
+//!   eventually delivered in full"). The closed broadcast sends once and nothing retransmits,
+//!   so a message delayed forever is a message a member never gets. One omission.
+//! - [`Stream::broadcast_closed`] from a cluster to a cluster (every source member to every
+//!   destination member), over `fail_stop`. A source member crashing mid-fan-out.
+//! - The echoing reliable broadcast of [`super::reliable_broadcast`], as the control: the
+//!   same specification, generated rather than written, certifies it.
+//!
+//! Every search runs under the default crash bounds: any combination of crashes of the
+//! registered nodes (source and members), minus the vacuous ones (see the crash bounds in
+//! `hydro_lang::sim::ldfi`).
+//!
+//! The other producers of the label, for the record: `source_interval*` on a cluster asserts
+//! it on a stream of `()` (trivially the same contents at every member); keyed `fold` /
+//! `reduce` with algebraic proofs preserve it (same inputs, same result; not a fault
+//! question); `hydro_std::quorum::collect_quorum*` assert it with a proof that reads `TODO`;
+//! Raft asserts it on its `committed` output, which the durability specification of
+//! [`super::raft_ldfi`] is the generated shape of.
+
+#[cfg(test)]
+mod tests {
+    use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
+    use hydro_lang::prelude::*;
+    use hydro_lang::sim::compiled::CompiledSim;
+    use hydro_lang::sim::ldfi::{Fault, LabelResults, Ldfi, Level, Outcome};
+    use hydro_lang::sim::spec::Spec;
+    use serde::{Deserialize, Serialize};
+
+    use crate::cluster::reliable_broadcast::{
+        Broadcaster, EchoHook, InitialHook, Member, Payload, broadcast,
+    };
+
+    pub struct Source;
+
+    const MEMBERS: u32 = 3;
+    const SOURCES: u32 = 2;
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+    struct Item(u32);
+
+    /// Which transport the closed broadcast declares.
+    #[derive(Clone, Copy, Debug)]
+    enum Transport {
+        FailStop,
+        LossyDelayedForever,
+    }
+
+    /// `broadcast_closed` from one process to a cluster of three, under the generated
+    /// specification. The body sends two items and quiesces; there is nothing to converge
+    /// beyond delivery, so quiescence is the convergence witness.
+    fn process_to_cluster(transport: Transport) -> Outcome {
+        let mut flow = FlowBuilder::new();
+        let source = flow.process::<Source>();
+        let members = flow.cluster::<Member>();
+        let (send, items) = source.sim_input::<Item, TotalOrder, ExactlyOnce>();
+
+        // The collection the label is on. Batching drops the label, so it is observed through
+        // a hook-free path straight off the channel; the observer's accumulation is the view.
+        let mut spec = Spec::new(&mut flow);
+        let correct = spec.correct_members(&members, 0..MEMBERS);
+        match transport {
+            Transport::FailStop => {
+                let at_members =
+                    items.broadcast_closed(&members, TCP.fail_stop().name("bcast").bincode());
+                let observed = spec.observe_cluster(at_members.weaken_consistency());
+                spec.eventual_consistency(observed, correct);
+            }
+            Transport::LossyDelayedForever => {
+                let at_members = items.broadcast_closed(
+                    &members,
+                    TCP.lossy_delayed_forever().name("bcast").bincode(),
+                );
+                let observed = spec.observe_cluster(at_members.weaken_consistency());
+                spec.eventual_consistency(observed, correct);
+            }
+        }
+
+        let mut sim = flow
+            .sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&members, MEMBERS as usize)
+            .with_provenance();
+        if matches!(transport, Transport::LossyDelayedForever) {
+            // The simulator's own model of this transport is "a dropped message arrives at the
+            // end"; the search's omission is the drop itself.
+            sim = sim.test_safety_only();
+        }
+        let compiled = sim.compiled();
+
+        Ldfi::new()
+            .level(Level::Precise)
+            .crashable("source", &source)
+            .crashable_cluster("member", &members, 0..MEMBERS)
+            .spec(&spec)
+            .search(&compiled, async |_run| {
+                send.send(Item(1));
+                send.send(Item(2));
+                hydro_lang::sim::quiesce().await;
+            })
+    }
+
+    /// `broadcast_closed` from a cluster of two sources to a cluster of three members over
+    /// `fail_stop`, each source broadcasting its own item.
+    fn cluster_to_cluster() -> Outcome {
+        let mut flow = FlowBuilder::new();
+        let sources = flow.cluster::<Source>();
+        let members = flow.cluster::<Member>();
+        let (send, items) = sources.sim_input::<Item, TotalOrder, ExactlyOnce>();
+
+        let at_members = items
+            .broadcast_closed(&members, TCP.fail_stop().name("bcast").bincode())
+            .values();
+
+        let mut spec = Spec::new(&mut flow);
+        let correct = spec.correct_members(&members, 0..MEMBERS);
+        let observed = spec.observe_cluster(at_members.weaken_consistency());
+        spec.eventual_consistency(observed, correct);
+
+        let compiled = flow
+            .sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&sources, SOURCES as usize)
+            .with_cluster_size(&members, MEMBERS as usize)
+            .with_provenance()
+            .compiled();
+
+        Ldfi::new()
+            .level(Level::Precise)
+            .crashable_cluster("source", &sources, 0..SOURCES)
+            .crashable_cluster("member", &members, 0..MEMBERS)
+            .spec(&spec)
+            .search(&compiled, async |_run| {
+                send.send(0, Item(10));
+                send.send(1, Item(20));
+                hydro_lang::sim::quiesce().await;
+            })
+    }
+
+    /// The reliable broadcast of [`super::super::reliable_broadcast`] (every member re-broadcasts
+    /// what it first sees) under the generated specification, with or without the echo.
+    fn echo_broadcast(echo: bool) -> Outcome {
+        let mut flow = FlowBuilder::new();
+        let broadcaster = flow.process::<Broadcaster>();
+        let members = flow.cluster::<Member>();
+        let initial_hook: InitialHook = flow.sim_hook();
+        let echo_hook: EchoHook = flow.sim_hook();
+        let (source_send, source) = broadcaster.sim_input::<Payload, TotalOrder, ExactlyOnce>();
+        let deliveries = broadcast(
+            &members,
+            source,
+            echo,
+            nondet!(/** traced by the search */ hook = initial_hook),
+            nondet!(/** traced by the search */ hook = echo_hook),
+        );
+
+        let mut spec = Spec::new(&mut flow);
+        let correct = spec.correct_members(&members, 0..MEMBERS);
+        let observed = spec.observe_cluster(deliveries);
+        spec.eventual_consistency(observed, correct);
+
+        let compiled = flow
+            .sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&members, MEMBERS as usize)
+            .with_provenance()
+            .compiled();
+
+        Ldfi::new()
+            .level(Level::Precise)
+            .crashable("broadcaster", &broadcaster)
+            .crashable_cluster("member", &members, 0..MEMBERS)
+            .spec(&spec)
+            .search(&compiled, async |_run| {
+                source_send.send(Payload(42));
+                hydro_lang::sim::quiesce().await;
+            })
+    }
+
+    fn expect_counterexample(outcome: Outcome, what: &str) -> Vec<Fault> {
+        eprintln!("{outcome}");
+        let Outcome::Counterexample { faults, .. } = outcome else {
+            panic!("{what}: expected a counterexample, got {outcome}");
+        };
+        faults.iter().cloned().collect()
+    }
+
+    /// Process → cluster over `fail_stop`: the label is `EventualConsistency`; one crash of the
+    /// sender between two fan-out sends refutes its premise.
+    #[test]
+    fn ec_broadcast_closed_fail_stop_breaks_under_a_sender_crash() {
+        let faults = expect_counterexample(
+            process_to_cluster(Transport::FailStop),
+            "broadcast_closed over fail_stop",
+        );
+        assert!(
+            faults
+                .iter()
+                .any(|f| matches!(f, Fault::Crash { node, .. } if node == "source")),
+            "the counterexample should be the sender's crash: {faults:?}"
+        );
+    }
+
+    /// Process → cluster over `lossy_delayed_forever`: the label is `EventualConsistency` too,
+    /// on the reading that a dropped message is only delayed. Nothing retransmits a closed
+    /// broadcast, so one omission (the weakest fault, tried before any crash) refutes the
+    /// premise.
+    #[test]
+    fn ec_broadcast_closed_lossy_delayed_forever_breaks_under_one_omission() {
+        let faults = expect_counterexample(
+            process_to_cluster(Transport::LossyDelayedForever),
+            "broadcast_closed over lossy_delayed_forever",
+        );
+        assert_eq!(faults.len(), 1, "one omission suffices: {faults:?}");
+        assert!(matches!(faults[0], Fault::Omit(_)), "{faults:?}");
+    }
+
+    /// Cluster → cluster over `fail_stop`: a source member crashing mid-fan-out.
+    #[test]
+    fn ec_broadcast_closed_cluster_to_cluster_breaks_under_a_source_crash() {
+        let faults = expect_counterexample(cluster_to_cluster(), "cluster broadcast_closed");
+        assert!(
+            faults
+                .iter()
+                .any(|f| matches!(f, Fault::Crash { node, .. } if node.starts_with("source"))),
+            "the counterexample should be a source member's crash: {faults:?}"
+        );
+    }
+
+    /// Control: the generated specification separates the protocols the way the hand-written
+    /// one did. Plain broadcast breaks; the echoing broadcast certifies under every
+    /// combination of crashes that leaves two members correct.
+    #[test]
+    fn ec_generated_spec_separates_plain_from_reliable_broadcast() {
+        expect_counterexample(echo_broadcast(false), "plain broadcast");
+        let outcome = echo_broadcast(true);
+        eprintln!("{outcome}");
+        assert!(
+            matches!(outcome, Outcome::Certificate { .. }),
+            "reliable broadcast: expected a certificate, got {outcome}"
+        );
+    }
+
+    /// Plain `broadcast_closed` from one process to a cluster of three over `fail_stop`, with
+    /// nothing named by the test: [`Spec::all_labels`] finds the collection the transport
+    /// labels `EventualConsistency` and [`Ldfi::search_all_labels`] searches it. `configure`
+    /// adjusts the search.
+    fn broadcast_closed_all_labels(configure: impl FnOnce(Ldfi) -> Ldfi) -> LabelResults {
+        let mut flow = FlowBuilder::new();
+        let source = flow.process::<Source>();
+        let members = flow.cluster::<Member>();
+        let (send, items) = source.sim_input::<Item, TotalOrder, ExactlyOnce>();
+
+        // This collection is labelled EventualConsistency by the transport.
+        let at_members = items.broadcast_closed(&members, TCP.fail_stop().name("bcast").bincode());
+        let _out = at_members.weaken_consistency().sim_cluster_output();
+
+        let spec = Spec::all_labels(&mut flow); // Names no collection.
+
+        let compiled: CompiledSim = flow
+            .sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&members, MEMBERS as usize)
+            .with_provenance()
+            .compiled();
+
+        configure(
+            Ldfi::new()
+                .level(Level::Precise)
+                .crashable("source", &source)
+                .crashable_cluster("member", &members, 0..MEMBERS)
+                .spec(&spec),
+        )
+        .search_all_labels(&compiled, async |_run| {
+            send.send(Item(1));
+            send.send(Item(2));
+            hydro_lang::sim::quiesce().await;
+        })
+    }
+
+    /// Every label of a plain `broadcast_closed`, automatically: the one labelled collection is
+    /// violated by the source's crash between two of its fan-out sends.
+    #[test]
+    fn ec_broadcast_closed_all_labels() {
+        let results = broadcast_closed_all_labels(|ldfi| ldfi);
+        let mut counterexamples = results.counterexamples();
+        let Some((_, faults)) = counterexamples.next() else {
+            panic!("the single-hop broadcast should be violated: {results}");
+        };
+        assert!(
+            faults
+                .iter()
+                .any(|f| matches!(f, Fault::Crash { node, .. } if node == "source")),
+            "the counterexample should be the source's crash: {results}"
+        );
+    }
+
+    /// Under `Ldfi::viz_out`, `search_all_labels` writes every counterexample's pictures at
+    /// `<dir>/<cluster>/<collection>/`, with nothing else asked of the test: the failing run
+    /// (`failing.dot`), a run in which the goal held with its support highlighted
+    /// (`witness.dot`), the provenance graph behind it (`provenance.dot`), a PNG of each when
+    /// Graphviz is available, and `report.md`; and the report names them under the row.
+    #[test]
+    fn ec_broadcast_closed_all_labels_writes_diagrams() {
+        let dir = std::env::temp_dir().join(format!("hydrofrac-viz-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let results = broadcast_closed_all_labels(|ldfi| ldfi.viz_out(&dir));
+        let diagrams: Vec<_> = results.diagrams().collect();
+        assert_eq!(
+            diagrams.len(),
+            results.counterexamples().count(),
+            "one set of pictures per counterexample: {results}"
+        );
+        let (result, diagram) = diagrams[0];
+        assert!(diagram.dir.starts_with(&dir), "{}", diagram.dir.display());
+        assert_eq!(
+            diagram.dir.components().count(),
+            dir.components().count() + 2,
+            "<dir>/<cluster>/<collection>"
+        );
+        let failing = &diagram.failing;
+        assert_eq!(failing.dot, diagram.dir.join("failing.dot"));
+        let dot = std::fs::read_to_string(&failing.dot).unwrap();
+        assert!(dot.contains("layout=neato"), "{dot}");
+        assert!(
+            dot.contains("crashed"),
+            "the source's crash is drawn: {dot}"
+        );
+
+        // The witness and its provenance come without `with_traces`/`with_provenance_graphs`.
+        let witness = diagram.witness.as_ref().expect("a witness run is drawn");
+        assert_eq!(witness.dot, diagram.dir.join("witness.dot"));
+        let dot = std::fs::read_to_string(&witness.dot).unwrap();
+        assert!(dot.contains("layout=neato"), "{dot}");
+        let provenance = diagram
+            .provenance
+            .as_ref()
+            .expect("the witness's provenance graph is drawn");
+        assert_eq!(provenance.dot, diagram.dir.join("provenance.dot"));
+        let dot = std::fs::read_to_string(&provenance.dot).unwrap();
+        assert!(dot.starts_with("digraph"), "{dot}");
+        assert!(
+            dot.contains("precise-level lineage"),
+            "titled with the level: {dot}"
+        );
+        let report = diagram.report.as_ref().expect("report.md");
+        assert!(
+            std::fs::read_to_string(report)
+                .unwrap()
+                .contains("```mermaid")
+        );
+
+        let neato = std::process::Command::new("neato")
+            .arg("-V")
+            .output()
+            .is_ok_and(|o| o.status.success());
+        for picture in diagram.pictures() {
+            if let Some(png) = &picture.png {
+                assert!(png.is_file(), "{}", png.display());
+            } else {
+                assert!(
+                    !neato,
+                    "Graphviz is installed but {} was not rendered",
+                    picture.dot.display()
+                );
+            }
+        }
+        let report = results.to_string();
+        let names = |p: &hydro_lang::sim::viz::out::Picture| {
+            p.path().file_name().unwrap().to_string_lossy().into_owned()
+        };
+        let line = format!(
+            "diagrams: {}, {}, {} in {}",
+            names(failing),
+            names(witness),
+            names(provenance),
+            diagram.dir.display()
+        );
+        assert!(
+            report.contains(&line),
+            "the report names the pictures under {}: {report}",
+            result.label()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

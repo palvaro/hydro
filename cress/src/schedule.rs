@@ -526,11 +526,21 @@ pub struct Counts {
     pub admitted: BTreeMap<HookInstance, u64>,
     /// Network messages sent by each `(location, member)`.
     pub sent: BTreeMap<(LocationId, Option<u32>), u64>,
+    /// Tick executions the schedule caused, by `(root location, member, tick)`. Under this
+    /// schedule a tick runs only when a decision is installed at one of its hooks, so this is the
+    /// number of times each tick ran; an output that emits exactly one record per tick execution
+    /// (a level sampled per tick) has the same count.
+    pub ticks: BTreeMap<(LocationId, Option<u32>, LocationId), u64>,
+    /// Records delivered to each of the program's named output streams, by `(name, member)`.
+    /// Filled by [`Schedule::drain_outputs`].
+    pub outputs: BTreeMap<(String, Option<u32>), u64>,
 }
 
 /// One tick's hooks (on one member), in the order the pass found them.
 #[derive(Debug, Clone)]
 struct TickHooks {
+    /// `(root location, member, tick)`.
+    key: (LocationId, Option<u32>, LocationId),
     hooks: Vec<(HookInstance, HookKind)>,
 }
 
@@ -577,7 +587,10 @@ impl<'i> Schedule<'i> {
                     .or_insert_with(|| line_of(control.location().location).to_owned());
                 by_tick
                     .entry((hook.root.clone(), member, hook.tick.clone()))
-                    .or_insert_with(|| TickHooks { hooks: Vec::new() })
+                    .or_insert_with(|| TickHooks {
+                        key: (hook.root.clone(), member, hook.tick.clone()),
+                        hooks: Vec::new(),
+                    })
                     .hooks
                     .push((
                         HookInstance {
@@ -717,6 +730,7 @@ impl<'i> Schedule<'i> {
                     }
                     install_decision(hook.id, hook.member, kind.advance_blob()).await;
                 }
+                *self.counts.ticks.entry(tick.key.clone()).or_default() += 1;
                 ran = true;
                 iterations += 1;
                 if iterations > SETTLE_ITERATION_CAP {
@@ -734,6 +748,21 @@ impl<'i> Schedule<'i> {
             }
         }
         self.drain_sends();
+    }
+
+    /// Counts the records delivered so far to each of the program's named output streams. Called
+    /// after the simulation has quiesced (after [`Schedule::settle`]), so nothing is in flight.
+    pub fn drain_outputs(&mut self, outputs: &crate::harness::OutputPorts) {
+        for output in &outputs.outputs {
+            for member in self.instrumented.members(&output.root) {
+                let n = drain_delivered(output.port, member);
+                *self
+                    .counts
+                    .outputs
+                    .entry((output.name.clone(), member))
+                    .or_default() += n as u64;
+            }
+        }
     }
 
     /// Counts the messages sent since the last drain. Called after the simulation has quiesced,

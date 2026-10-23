@@ -16,9 +16,9 @@ use dfir_rs::rustc_hash::{FxHashMap, FxHashSet};
 use dfir_rs::util::unsync::mpsc::Sender;
 
 use super::{
-    HookLocationMeta, ManualDebug, RuntimeHook, ScriptDecision, ScriptableHook,
-    ScriptableTickInputHook, TickInputHook, TruncatedVecDebug, abort, describe_keyed_pending,
-    keyed_buffer_len, log_release,
+    HookLocationMeta, ManualDebug, NoPolicy, PolicyTrace, RuntimeHook, ScriptDecision,
+    ScriptableHook, ScriptableTickInputHook, TickInputHook, TruncatedVecDebug, abort,
+    describe_keyed_pending, keyed_buffer_len, log_release,
 };
 use crate::live_collections::stream::{NoOrder, Ordering, TotalOrder};
 
@@ -239,6 +239,122 @@ where
     }
 }
 
+/// A standing policy for an unordered batch hook (see [`ScriptableHook::Policy`]): deliver
+/// every buffered element except those equal to one of `omit`, which are **discarded**
+/// (not held). Every occurrence of an omitted value is discarded for as long as the policy
+/// is installed, so a retransmission of a byte-identical payload is omitted too; replace
+/// the policy (e.g. with an empty `omit`) to let later copies through.
+///
+/// Under this policy the hook behaves like a lossy channel's receive half with a fixed
+/// loss pattern: no entropy is spent, no per-execution decision is needed, and the tick
+/// runs whenever something deliverable has arrived.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct OmissionPolicy<T> {
+    /// Values to discard on arrival.
+    pub omit: Vec<T>,
+    /// When set, the hook replays this script instead of delivering what arrives.
+    pub replay: Option<ReplayScript<T>>,
+}
+
+impl<T> ScriptDecision for OmissionPolicy<T>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    fn describe(&self) -> String {
+        if let Some(replay) = &self.replay {
+            replay.describe()
+        } else if self.omit.is_empty() {
+            "deliver_all()".to_owned()
+        } else {
+            format!("omit({} value(s))", self.omit.len())
+        }
+    }
+}
+
+/// A standing policy for a totally ordered batch hook (see [`ScriptableHook::Policy`]):
+/// deliver everything as it arrives, tracing every delivery. A reliable (`fail_stop`)
+/// channel admits no omission, so this is the only policy an ordered hook offers; it exists
+/// so a hooked batch can be a lineage-traced delivery point for fault injection.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PassthroughPolicy<T> {
+    /// When set, the hook replays this script instead of delivering what arrives.
+    pub replay: Option<ReplayScript<T>>,
+}
+
+impl<T> Default for PassthroughPolicy<T> {
+    fn default() -> Self {
+        PassthroughPolicy { replay: None }
+    }
+}
+
+impl<T> ScriptDecision for PassthroughPolicy<T>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    fn describe(&self) -> String {
+        match &self.replay {
+            Some(replay) => replay.describe(),
+            None => "deliver_all()".to_owned(),
+        }
+    }
+}
+
+/// A **replay script** for a batch hook under a standing policy: what the hook releases
+/// into each successive execution of its tick, regardless of what arrives in its buffer
+/// (arrivals are discarded unrecorded). The tick is runnable on this hook's account while
+/// the script has executions left, including executions that release nothing, so a replay
+/// reproduces the recorded execution count of the tick. This is the counterfactual replay
+/// of lineage-driven fault injection (`hydro_lang::sim::ldfi`): a node re-executes alone,
+/// with its recorded inputs held fixed except for the deliveries the lineage query removed.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ReplayScript<T> {
+    /// The releases of each remaining tick execution, front first.
+    pub execs: VecDeque<Vec<T>>,
+}
+
+impl<T> ReplayScript<T> {
+    fn describe(&self) -> String {
+        format!("replay({} execution(s) left)", self.execs.len())
+    }
+
+    /// Decodes a script from bincode-serialized items per execution (as a policy trace
+    /// records them); `None` if an item does not decode as `T`.
+    fn decode(execs: Vec<Vec<Vec<u8>>>) -> Option<Self>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let execs = execs
+            .into_iter()
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| bincode::deserialize(item).ok())
+                    .collect::<Option<Vec<T>>>()
+            })
+            .collect::<Option<VecDeque<Vec<T>>>>()?;
+        Some(ReplayScript { execs })
+    }
+
+    /// Discards everything buffered; the tick is runnable while executions remain.
+    fn sweep(&self, input: &RefCell<VecDeque<T>>) -> bool {
+        input.borrow_mut().clear();
+        !self.execs.is_empty()
+    }
+
+    /// Stages the next execution's releases (nothing once the script is exhausted).
+    fn apply(&mut self, input: &RefCell<VecDeque<T>>, trace: &mut PolicyTrace) -> Vec<T>
+    where
+        T: serde::Serialize,
+    {
+        input.borrow_mut().clear();
+        let delivered = self.execs.pop_front().unwrap_or_default();
+        for item in &delivered {
+            trace.delivered.push(bincode::serialize(item).unwrap());
+        }
+        delivered
+    }
+}
+
 /// The pending-input view a batch hook reports to its test-side handle (see
 /// [`ScriptableHook::status`]), used by `pause_until_*` predicates.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -253,6 +369,39 @@ where
 {
     type Decision = BatchDecision<T>;
     type Status = BatchStatus;
+    // Omission on a totally ordered stream would violate the order guarantee the consumer
+    // relies on (only `fail_stop` transports yield such streams), so the only standing
+    // policy is the traced pass-through.
+    type Policy = PassthroughPolicy<T>;
+
+    fn passthrough_policy() -> Option<PassthroughPolicy<T>> {
+        Some(PassthroughPolicy::default())
+    }
+
+    fn replay_policy(execs: Vec<Vec<Vec<u8>>>) -> Option<PassthroughPolicy<T>> {
+        Some(PassthroughPolicy {
+            replay: Some(ReplayScript::decode(execs)?),
+        })
+    }
+
+    fn policy_sweep(&self, policy: &PassthroughPolicy<T>, _trace: &mut PolicyTrace) -> bool {
+        if let Some(replay) = &policy.replay {
+            return replay.sweep(&self.input);
+        }
+        !self.input.borrow().is_empty()
+    }
+
+    fn apply_policy(&mut self, policy: &mut PassthroughPolicy<T>, trace: &mut PolicyTrace) {
+        if let Some(replay) = &mut policy.replay {
+            self.to_release = Some(replay.apply(&self.input, trace));
+            return;
+        }
+        let delivered: Vec<T> = self.input.borrow_mut().drain(..).collect();
+        for item in &delivered {
+            trace.delivered.push(bincode::serialize(item).unwrap());
+        }
+        self.to_release = Some(delivered);
+    }
 
     fn is_honorable(&self, decision: &BatchDecision<T>) -> Result<bool, String> {
         let input = self.input.borrow();
@@ -328,6 +477,54 @@ where
 {
     type Decision = UnorderedBatchDecision<T>;
     type Status = BatchStatus;
+    type Policy = OmissionPolicy<T>;
+
+    fn passthrough_policy() -> Option<OmissionPolicy<T>> {
+        Some(OmissionPolicy {
+            omit: vec![],
+            replay: None,
+        })
+    }
+
+    fn replay_policy(execs: Vec<Vec<Vec<u8>>>) -> Option<OmissionPolicy<T>> {
+        Some(OmissionPolicy {
+            omit: vec![],
+            replay: Some(ReplayScript::decode(execs)?),
+        })
+    }
+
+    fn policy_sweep(&self, policy: &OmissionPolicy<T>, trace: &mut PolicyTrace) -> bool {
+        if let Some(replay) = &policy.replay {
+            return replay.sweep(&self.input);
+        }
+        let mut input = self.input.borrow_mut();
+        if !policy.omit.is_empty() {
+            let (kept, dropped): (Vec<T>, Vec<T>) = input
+                .drain(..)
+                .partition(|buffered| !policy.omit.contains(buffered));
+            for item in &dropped {
+                trace.dropped.push(bincode::serialize(item).unwrap());
+            }
+            *input = kept.into();
+        }
+        !input.is_empty()
+    }
+
+    fn apply_policy(&mut self, policy: &mut OmissionPolicy<T>, trace: &mut PolicyTrace) {
+        if let Some(replay) = &mut policy.replay {
+            self.to_release = Some(replay.apply(&self.input, trace));
+            return;
+        }
+        // Anything omitted was already swept at the scheduling query that made the tick
+        // runnable, but input may have arrived since; sweep again so a release never
+        // contains an omitted element.
+        self.policy_sweep(policy, trace);
+        let delivered: Vec<T> = self.input.borrow_mut().drain(..).collect();
+        for item in &delivered {
+            trace.delivered.push(bincode::serialize(item).unwrap());
+        }
+        self.to_release = Some(delivered);
+    }
 
     fn is_honorable(&self, decision: &UnorderedBatchDecision<T>) -> Result<bool, String> {
         Ok(match decision {
@@ -691,6 +888,7 @@ where
 {
     type Decision = KeyedBatchDecision<K, V>;
     type Status = BatchStatus;
+    type Policy = NoPolicy;
 
     fn is_honorable(&self, decision: &KeyedBatchDecision<K, V>) -> Result<bool, String> {
         let input = self.input.borrow();
@@ -799,6 +997,7 @@ where
 {
     type Decision = UnorderedKeyedBatchDecision<K, V>;
     type Status = BatchStatus;
+    type Policy = NoPolicy;
 
     fn is_honorable(&self, decision: &UnorderedKeyedBatchDecision<K, V>) -> Result<bool, String> {
         Ok(match decision {
@@ -1216,6 +1415,7 @@ impl<T: Clone + PartialEq + serde::Serialize + serde::de::DeserializeOwned> Scri
 {
     type Decision = SnapshotDecision<T>;
     type Status = SnapshotStatus;
+    type Policy = NoPolicy;
 
     fn is_honorable(&self, decision: &SnapshotDecision<T>) -> Result<bool, String> {
         let input = self.input.borrow();
@@ -1625,6 +1825,7 @@ where
 {
     type Decision = KeyedSnapshotDecision<K, V>;
     type Status = KeyedSnapshotStatus;
+    type Policy = NoPolicy;
 
     fn is_honorable(&self, decision: &KeyedSnapshotDecision<K, V>) -> Result<bool, String> {
         let input = self.input.borrow();
