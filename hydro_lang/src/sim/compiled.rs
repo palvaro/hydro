@@ -60,9 +60,9 @@
 //! swallows panics. Internal invariant checks should use `abort_assert!`
 //! rather than `panic!`/`assert!`.
 //!
-//! TODO(mingwei): Panics inside the tick DFIR (generated code in the dylib) are
-//! also caught by bolero's `catch_unwind`. Consider a mechanism to detect and
-//! propagate those as well.
+//! Panics inside the tick DFIR (generated code in the dylib) are caught in the dylib and raised
+//! again on the host as ordinary panics (see `sim::panic_guard`), so they reach bolero's
+//! `catch_unwind` like panics in the test body.
 
 /// Like `assert!`, but calls `std::process::abort()` instead of `panic!()`.
 /// Use for internal invariants that must not be silently caught by bolero.
@@ -575,6 +575,7 @@ type SimLoaded<'a> = libloading::Symbol<
         cluster_external_in: &mut HashMap<usize, HashMap<u32, UnsyncSender<Bytes>>>,
         println_handler: fn(fmt::Arguments<'_>),
         eprintln_handler: fn(fmt::Arguments<'_>),
+        panic_handler: super::panic_guard::PanicHandler,
     ) -> (
         Vec<(&'static str, Option<u32>, DfirErased)>,
         Vec<(&'static str, Option<u32>, DfirErased)>,
@@ -1032,12 +1033,20 @@ impl<'a> CompiledSimInstance<'a> {
             unsafe { reset() };
         }
 
+        // A host panic stashed by a previous instance (which then panicked itself) is stale.
+        super::panic_guard::clear_pending();
+
         // Hand this instance's network hook (if any) to the dylib before any dataflow exists.
+        // The dylib's copy is guarded so a panic in the hook's callbacks stays on the host side
+        // of the dylib boundary (see `sim::panic_guard`).
         if let Some(set_network_hook) = self.set_network_hook {
             if let Some(hook) = &self.network_hook {
                 hook.on_instance_begin();
             }
-            unsafe { set_network_hook(self.network_hook.clone()) };
+            let guarded = self.network_hook.clone().map(|hook| {
+                Rc::new(super::panic_guard::GuardedNetworkHook(hook)) as Rc<dyn SimNetworkHook>
+            });
+            unsafe { set_network_hook(guarded) };
         }
 
         let dylib_result = unsafe {
@@ -1057,6 +1066,7 @@ impl<'a> CompiledSimInstance<'a> {
                 } else {
                     null_handler
                 },
+                super::panic_guard::host_handler,
             )
         };
 
