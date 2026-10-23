@@ -268,6 +268,86 @@ impl<M: Ord + Clone> Clause<M> {
     pub fn is_unkillable(&self) -> bool {
         self.deps.is_empty() && self.premises.is_empty()
     }
+
+    /// Every crash of `node` that kills some delivery of this clause: the crash before any send,
+    /// and the crash right after each pre-heal send of `node` that precedes one of its deliveries
+    /// here. [`Self::candidate_faults`] proposes only the weakest of these per delivery.
+    pub fn crash_killers<'a>(&'a self, node: &'a Node) -> impl Iterator<Item = Fault<M>> + 'a {
+        let fires = self.pre_heal_sends.get(node).copied().unwrap_or(0);
+        let last = self
+            .deps
+            .iter()
+            .filter_map(|d| d.sender.as_ref())
+            .filter(|(sender, _)| sender == node)
+            .map(|(_, ordinal)| *ordinal as usize)
+            .max();
+        let seq = self.sends.get(node);
+        last.into_iter().flat_map(move |last| {
+            std::iter::once(Fault::crash_after(node.clone(), None)).chain(
+                seq.into_iter()
+                    .flat_map(move |seq| seq.iter().take(fires.min(last)))
+                    .map(move |m| Fault::crash_after(node.clone(), Some(m.clone()))),
+            )
+        })
+    }
+}
+
+/// The faults to add to [`universe`] so that "no admissible hitting set" is a statement about
+/// every positional fault set, not only about the weakest candidates the clauses propose.
+///
+/// [`universe`] holds, per delivery, only its weakest killers (its omission, and the crash of
+/// its sender right after the send before it). A crash point that first appears in a later run
+/// can be earlier than the weakest killer of a delivery in an older clause, and so kill
+/// deliveries of several clauses that no single weakest killer kills together: with one crash
+/// per node, a hitting set may then exist only through it. This completion closes that gap:
+///
+/// 1. `crash(n)`, the crash before any send, for every sender `n` of a delivery. It kills every
+///    delivery of `n`, so it hits every clause any crash of `n` hits through a delivery.
+/// 2. Where `crash(n)` itself appears in a clause's premises or a vacuous set, replacing a crash
+///    of `n` by it is not neutral (it may make a hypothesis include those premises, or a vacuous
+///    set). There every crash point of `n` that kills some delivery is added instead.
+/// 3. Every fault that appears in a premise or a vacuous set.
+///
+/// **Why that suffices.** Let `H` be any admissible fault set that hits every clause, with `k`
+/// crashes. Build `H*`: drop every fault that kills no delivery of any clause (an omission
+/// kills a delivery only if it names it, and then [`universe`] already holds it; a crash kills
+/// one only if it names a send before it in that clause's run); replace each remaining crash of
+/// a node `n` that is not in the completed universe by `crash(n)` (rule 1; by rule 2 this only
+/// happens when `crash(n)` appears in no premise and no vacuous set). Then:
+/// - `H*` hits every clause `H` hits. A clause is hit by killing a delivery, or by `H` lacking
+///   one of its premises. Dropped faults killed nothing; a replacement kills a superset of what
+///   it replaces. Removing a fault can only make a premise missing, and the replacement `crash(n)`
+///   is no premise, so no premise that `H` lacked appears in `H*`.
+/// - `H*` has at most `k` crashes, at most one per node and no more in the checked cluster:
+///   it crashes a subset of `H`'s nodes.
+/// - `H*` is no superset of a vacuous set unless `H` is (dropped faults only shrink it, and the
+///   replacement is in no vacuous set).
+///
+/// So if the completed universe admits no hitting set at a bound, no fault set at all does.
+pub fn completion<M: Ord + Clone>(
+    clauses: &[Clause<M>],
+    vacuous: &[FaultSet<M>],
+) -> BTreeSet<Fault<M>> {
+    let mentioned: BTreeSet<&Fault<M>> = clauses
+        .iter()
+        .flat_map(|c| c.premises.iter())
+        .chain(vacuous.iter().flatten())
+        .collect();
+    let senders: BTreeSet<&Node> = clauses
+        .iter()
+        .flat_map(|c| c.deps.iter())
+        .filter_map(|d| d.sender.as_ref().map(|(n, _)| n))
+        .collect();
+    let mut out: BTreeSet<Fault<M>> = mentioned.iter().map(|f| (*f).clone()).collect();
+    for node in senders {
+        let before_any = Fault::crash_after(node.clone(), None);
+        if mentioned.contains(&before_any) {
+            out.extend(clauses.iter().flat_map(|c| c.crash_killers(node)));
+        } else {
+            out.insert(before_any);
+        }
+    }
+    out
 }
 
 /// The candidate faults of one hypothesis, weakest first: the weakest faults that kill some

@@ -479,7 +479,9 @@ fn rows_carry_the_normalized_counterexample() {
 /// The two-member exchange, but each member batches what it collected before it reports it:
 /// the label still holds under every admissible fault set (a batch only delays), but its
 /// search can no longer certify it, since its fault sets now have several executions
-/// (docs/design/hydrofrac-lite.md §4.9).
+/// (docs/design/hydrofrac-lite.md §4.9). Explored exhaustively, its few fault sets are
+/// enumerated instead ([`Verdict::CertifiedByEnumeration`]); sampled, the search ends
+/// [`Verdict::Exhausted`].
 #[cfg(stageleft_runtime)]
 fn batched_exchange(check: EcCheck) -> Results {
     let mut flow = FlowBuilder::new();
@@ -517,7 +519,8 @@ fn batched_exchange(check: EcCheck) -> Results {
 #[cfg(stageleft_runtime)]
 #[test]
 fn a_schedule_sensitive_label_is_exhausted_not_certified() {
-    let results = batched_exchange(EcCheck::new());
+    // Sampled schedules: no bounded enumeration either.
+    let results = batched_exchange(EcCheck::new().sample_schedules(16));
     let label = results.label("delivered");
     assert!(
         label.plan.sites.iter().any(|s| s.op == "batch"),
@@ -551,12 +554,12 @@ fn a_schedule_sensitive_label_is_exhausted_not_certified() {
 /// `assert_holds` rejects an exhausted search, and says why; `assert_no_counterexample` accepts
 /// it. Capped at zero crashes, the exchange has no counterexample: the plain `initial` hop
 /// (site-free) is certified for omissions alone, which `fail_stop` admits none of, and the
-/// batched label's search ends exhausted.
+/// batched label's (sampled) search ends exhausted.
 #[cfg(stageleft_runtime)]
 #[test]
 #[should_panic(expected = "is schedule-sensitive, so its search is not a certificate")]
 fn assert_holds_rejects_an_exhausted_search() {
-    let results = batched_exchange(EcCheck::new().max_crashes(0));
+    let results = batched_exchange(EcCheck::new().max_crashes(0).sample_schedules(16));
     assert!(
         matches!(
             results.label("initial").verdict,
@@ -578,4 +581,60 @@ fn assert_holds_rejects_an_exhausted_search() {
     );
     results.assert_no_counterexample();
     results.assert_holds();
+}
+
+/// Explored exhaustively, the batched exchange has a handful of admissible fault sets (neither
+/// member may crash, since one correct member would be left: |C| − 2 = 0; the source may crash
+/// before any send or right after one), so the sensitive label's search ends in a bounded
+/// certificate by enumeration: every admissible set, over every schedule, holds.
+#[cfg(stageleft_runtime)]
+#[test]
+fn a_small_schedule_sensitive_label_is_certified_by_enumeration() {
+    let results = batched_exchange(EcCheck::new());
+    let label = results.label("delivered");
+    let Verdict::CertifiedByEnumeration {
+        tolerates,
+        max_faults,
+        sets,
+        sites,
+    } = &label.verdict
+    else {
+        panic!("expected a certificate by enumeration:\n{results}");
+    };
+    assert_eq!(*tolerates, Tolerance::All, "{results}");
+    assert_eq!(*max_faults, None, "every admissible set, whatever its size:\n{results}");
+    // The failure-free set, and the source's crash before any send and right after each of its
+    // two sends.
+    assert_eq!(*sets, 4, "{results}");
+    assert!(sites.iter().any(|s| s.op == "batch"), "{results}");
+    assert!(
+        results
+            .to_string()
+            .contains("holds under any crashes by enumeration (4 fault sets over every schedule; schedule-sensitive: batch at"),
+        "{results}"
+    );
+    // A certificate, so `assert_holds` accepts it.
+    assert!(!label.verdict.fails(), "{results}");
+    let row = results
+        .rows()
+        .into_iter()
+        .find(|r| r.collection == "delivered")
+        .unwrap();
+    assert_eq!(row.verdict, "enumerated");
+    assert_eq!(row.tolerates, "all");
+    // Capped at zero crashes, `fail_stop` admits no fault: the failure-free run is all there is.
+    let capped = batched_exchange(EcCheck::new().max_crashes(0));
+    assert!(
+        matches!(
+            capped.label("delivered").verdict,
+            Verdict::CertifiedByEnumeration {
+                tolerates: Tolerance::UpTo(0),
+                max_faults: None,
+                sets: 1,
+                ..
+            }
+        ),
+        "{capped}"
+    );
+    capped.assert_holds();
 }

@@ -171,6 +171,103 @@ fn brute_force_agrees_on_an_echo_over_a_lossy_first_hop() {
     agree("echo broadcast (lossy first hop)", &cross);
 }
 
+/// [`echo_broadcast`], but each member batches what it collected before it reports it: the
+/// label `delivered` is schedule-sensitive (its batch is a choice of the simulator's), so its
+/// search is a heuristic, and its certificate, if any, comes from enumerating its fault sets
+/// (docs/design/hydrofrac-lite.md §4.9).
+#[cfg(stageleft_runtime)]
+fn batched_echo(n: usize, initial_lossy: bool) -> CrossCheck {
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let tick = members.tick();
+    macro_rules! echo_from {
+        ($initial:expr) => {{
+            let initial = $initial.weaken_consistency();
+            let echoed = initial
+                .clone()
+                .broadcast_closed(&members, TCP.fail_stop().name("echo").bincode())
+                .values()
+                .weaken_consistency();
+            let delivered = initial
+                .weaken_ordering::<NoOrder>()
+                .merge_unordered(echoed)
+                .batch(&tick, nondet!(/** which tick a delivery lands in */))
+                .all_ticks()
+                .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+                    /** claimed: one correct recipient of the broadcast echoes it to everyone */
+                ));
+            let _out = delivered.sim_cluster_output();
+        }};
+    }
+    if initial_lossy {
+        echo_from!(input.broadcast_closed(
+            &members,
+            TCP.lossy_delayed_forever().name("initial").bincode(),
+        ));
+    } else {
+        echo_from!(input.broadcast_closed(&members, TCP.fail_stop().name("initial").bincode()));
+    }
+
+    let mut check = EcCheck::new();
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, n))
+        .compiled();
+    check.cross_check(
+        &sim,
+        async || {
+            send.send(7);
+        },
+        MAX_FAULTS,
+    )
+}
+
+/// The batched two-member exchange holds under every admissible fault set: the search's
+/// enumeration certifies it, and the brute force agrees.
+#[cfg(stageleft_runtime)]
+#[test]
+fn brute_force_agrees_with_a_certificate_by_enumeration() {
+    let cross = batched_echo(2, false);
+    agree("batched echo (2 members)", &cross);
+    let label = cross.results.label("delivered");
+    assert!(
+        matches!(
+            label.verdict,
+            Verdict::CertifiedByEnumeration {
+                tolerates: Tolerance::All,
+                max_faults: None,
+                ..
+            }
+        ),
+        "{cross}"
+    );
+    let b = cross.brute.label(label.index).expect("searched");
+    assert!(b.breaking.is_empty(), "{cross}");
+}
+
+/// Two members and a lossy first hop: the omission of either member's copy is masked by the
+/// other's echo, and omitting both leaves no correct member holding anything (vacuous). The
+/// enumeration runs every admissible set, omissions included, and the brute force agrees.
+#[cfg(stageleft_runtime)]
+#[test]
+fn brute_force_agrees_on_a_batched_echo_over_a_lossy_first_hop() {
+    let cross = batched_echo(2, true);
+    agree("batched echo (lossy first hop)", &cross);
+    let label = cross.results.label("delivered");
+    assert!(
+        matches!(
+            label.verdict,
+            Verdict::CertifiedByEnumeration {
+                tolerates: Tolerance::All,
+                max_faults: None,
+                ..
+            }
+        ),
+        "{cross}"
+    );
+}
+
 /// A relay chain with no retries: a source sends two inputs over a lossy channel to a relay
 /// process, which broadcasts them to three members over `fail_stop` (label `relayed`).
 #[cfg(stageleft_runtime)]
