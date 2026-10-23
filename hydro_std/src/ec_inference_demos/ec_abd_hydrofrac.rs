@@ -108,13 +108,18 @@ fn breaks_at_one_crash_of(
     assert!(crashed.starts_with(node), "{}\n{results}", label.name());
 }
 
+/// No counterexample under any admissible crash set. ABD's replicas batch (its quorums), so
+/// its labels are schedule-sensitive and the search, which finds none, cannot certify them
+/// (docs/design/hydrofrac-lite.md §4.9).
 #[cfg(stageleft_runtime)]
-fn certified(results: &hydrofrac::Results, label: &hydrofrac::check::LabelResult) {
+fn no_counterexample(results: &hydrofrac::Results, label: &hydrofrac::check::LabelResult) {
+    assert!(!label.plan.sites.is_empty(), "{}\n{results}", label.name());
     assert!(
         matches!(
             label.verdict,
-            hydrofrac::Verdict::Certified {
-                tolerates: hydrofrac::search::Tolerance::All
+            hydrofrac::Verdict::Exhausted {
+                tolerates: hydrofrac::search::Tolerance::All,
+                ..
             }
         ),
         "{}\n{results}",
@@ -142,15 +147,16 @@ fn the_register_breaks_when_the_client_crashes_mid_phase_two() {
 }
 
 /// With phase 2 over reliable broadcast, every replica that stores a write echoes it, so the
-/// client's crash no longer splits the replicas: the register (through its input) holds under
-/// every admissible crash set. The phase-1 query broadcast and reliable broadcast's own hops
+/// client's crash no longer splits the replicas: the register (through its input) has no
+/// counterexample under any admissible crash set (searched, not certified: see
+/// [`no_counterexample`]). The phase-1 query broadcast and reliable broadcast's own hops
 /// are still single hops and still break: a lost query only delays the write, and a hop's
 /// verdict is informational once the hops merge.
 #[test]
 fn reliable_phase_two_certifies_the_register() {
     let results = check(true, 8);
-    certified(&results, register(&results));
-    certified(&results, searched(&results, "phase2_fwd"));
+    no_counterexample(&results, register(&results));
+    no_counterexample(&results, searched(&results, "phase2_fwd"));
     breaks_at_one_crash_of(&results, searched(&results, "queries"), "Client");
     breaks_at_one_crash_of(&results, searched(&results, "initial"), "Client");
     breaks_at_one_crash_of(&results, searched(&results, "echo"), "Replica");

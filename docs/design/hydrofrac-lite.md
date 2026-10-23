@@ -112,6 +112,7 @@ on the research branch at `0d801bbafc`:
 | Crash sweep: bound 0, 1, 2, …, keeping learned clauses | **in**, as the default output | derivations don't depend on the bound, so raising it is cheap. It replaces restricted crashable sets and `crash_budget` (§4.5) |
 | Restricted crashable sets (`.crashable(..)` on a subset) | **out** | every node is crashable; the sweep reports what a restriction used to assume (§4.5) |
 | PRE, preserve points, `required` | **out** | the generated EC spec has no PRE; `required` is always empty on the EC path |
+| Certificates only for site-free labels; a schedule-sensitive label's search is a heuristic ending `Exhausted` | **in** | Molly's pruning assumes one execution per fault set, which a `nondet!` site breaks: the 2PC-with-CTP false certificate (§4.9) |
 | Lineage: record provenance only, no `Level` | **in** | run C: Execution alone is 2.4× the wall time on EC, up to 14.6× on multi-Paxos, with less minimal counterexamples (§5) |
 | Counterfactual replay, standing hook policies, `BatchHook`, `flow.sim_hook()` | **out** | replay only served opaque records and programs compiled without provenance; lite always compiles with provenance and falls back to the sound execution rule (§5). The hooks exist only on the research branch ("nothing exotic", §1) |
 | Disjunctive provenance, aggregate witnesses, witness caps | **out** | no reduction on any protocol, and +10–40% hypotheses on broadcast; aggregate witnesses are draw-dominated (retrospective, "Disjunction", "Aggregate-local witnesses") |
@@ -186,6 +187,8 @@ The execution rule is sound for every program; it only costs precision. The rese
    clause, and continue at step 2 (§4.5).
 5. Stop at a counterexample, at the top of the sweep (a certificate for the largest bound reached), or when the
    hypothesis budget runs out (`Budget`).
+6. For a schedule-sensitive label (§4.9) steps 2 and 4 use the heuristic instead (a hypothesis need only kill one
+   schedule's derivations per earlier run), and the top of the sweep is `Exhausted`, not a certificate.
 
 ### 4.4 Hitting sets: the research branch's ILP, on a pure-Rust solver
 
@@ -194,6 +197,9 @@ The EC path has no PRE, so the model is the research branch's `solve_hypothesis`
 - cover constraints, each conditional on its crash premises;
 - at most one crash per node and the crash bounds;
 - no superset of a vacuous set, and an exact no-good for each tried set.
+- for a schedule-sensitive label (§4.9), disjunctive groups: one group per earlier run, satisfied when *some*
+  clause of it is (a binary `y_c ≤ hits(c) + missing premises(c)` per clause, and `Σ y_c ≥ 1`). A group of one
+  clause is the ordinary cover row. `hitting_set_any` / `Sweep::next_any`.
 
 Writing it as an ILP keeps it short; the model is about 150 lines.
 - **Solver:** `good_lp` with the `microlp` backend (pure Rust, branch-and-bound) instead of HiGHS:
@@ -224,7 +230,9 @@ Every node is crashable, and the output for each label is a **crash sweep**, not
     itself (both from `1538508755`);
   - the `.max_crashes(n)` cap, when given (the only override).
 - **The verdict** per label is "tolerates k crashes; breaks at k+1 with ⟨counterexample⟩", or "tolerates every
-  admissible number of crashes" (a certificate at the top), or `Budget`. A counterexample found at bound k+1 has
+  admissible number of crashes" (a certificate at the top), or `Budget`. For a schedule-sensitive label (§4.9) the
+  same sweep only searches: "no counterexample with up to k crashes found, breaks at k+1", or `Exhausted` at the
+  top. A counterexample found at bound k+1 has
   exactly k+1 crashes, because bound k was exhausted first.
 - **What replaces restricted crashable sets.** The research branch answered questions like "does 2PC commit if the
   coordinator stays up?" by making only some nodes crashable (2PC `…with_the_coordinator_correct`: two
@@ -336,6 +344,109 @@ limit. Order is the subject of the phase-2 order check (§3).
     branch's ISR diagram was 51 lines, mostly identical heartbeat/view rounds). Collapse consecutive identical
     rounds into one with a `×k` note.
   - **Wide protocols:** payloads set the lane width. Abbreviate long payloads to a legend.
+
+### 4.9 Schedule sensitivity: which labels can be certified
+
+**The finding.** The search prunes a hypothesis when a derivation seen in an earlier run survives it: the
+derivation's deliveries all still happen, so the fact is still derived. Molly's runs are deterministic, so this
+is sound there. The simulator's are not. It runs top-level (async) dataflow deterministically, but branches
+wherever the program took a `nondet!` guard: a `batch` (which tick an element lands in), an atomic section's
+entry, an untrusted `observe_nondet`, `merge_ordered`, a fold over an unordered input, timers. A derivation
+through such a site is a derivation *under the schedule that produced it*, and the rule "a hypothesis must kill
+every derivation seen in every schedule" then prunes fault sets that break the label in other schedules. Two
+ways:
+- **U1, existence.** Whether a record exists depends on the choice. 2PC with cooperative termination, three
+  participants (`committed`): under `{crash(coordinator after commit→P0), crash(P0 after Decided→P1)}`, P1
+  commits, and P2 commits only if its query reaches P1 *after* P1 decided; in the other order P1 has nothing to
+  answer, and P2 never commits. The run under the single coordinator crash had a schedule in which P2 learned
+  the decision through P1. That derivation survives the two-crash set, so the set was never proposed, and the
+  label was certified after 12 hypotheses, while 40% of the set's schedules split the participants (found while
+  porting 2PC, confirmed by direct injection and by the brute-force enumeration, §7). `ask_once` in
+  `hydro_test/src/cluster/ec_bruteforce.rs` is the three-member miniature: one crash, exhaustively enumerable.
+- **U2, send order.** `crash(n after m)` cuts `n`'s sends at `m`, and which sends precede `m` depends on the order
+  `n` sent them in. A site anywhere upstream of what `n` receives can reorder `n`'s sends, so the positional kill
+  relation computed in one schedule's order is wrong in another, even for a derivation that passes no site.
+
+**Which labels are safe.** A label is **site-free** when neither its causal cone nor the cone of any node that
+sends a delivery in it contains a site. Every fault set then has exactly one execution: nothing the label
+depends on, and nothing that orders its senders' sends, is chosen. That is Molly's setting, and the strong rule
+and its certificates stand. Every other label is **schedule-sensitive**.
+
+**The walk** (`hydrofrac::provenance::sensitivity`, run by the tap pass; its result is `LabelPlan::sites`) follows
+the research branch's order check (`order.rs`, `Cones::nondet_upstream`): upstream through operators, networks
+back to their senders, cycles back to their sinks, and captured state back to its producer and every closure that
+writes it. For U2 it walks, for each location that sends a delivery in the label's cone, the cone of everything
+at that location. It is **conservative**: what it cannot see through counts as a site too. Every IR node kind is
+classified explicitly (a new one does not compile until it is classified), and these are sites:
+- an unknown operator (`Placeholder`);
+- a captured reference it cannot resolve to its state cell, or a `for_each` writing through one;
+- a cycle whose sink it cannot find, or a labelled node it cannot find again;
+- an external input whose order is unspecified (`sim_input::<_, NoOrder, _>`: the simulator delivers it in send
+  order, but nothing in the program says a deployment will);
+- an arbitrary `source_stream`, embedded sources, futures (`resolve_futures*`), async streams and scans, and
+  multi-version networks;
+- every operator the provenance rewrite left as an opaque island (§5).
+
+**What the check does with it.**
+- A site-free label is searched as before; its certificates are certificates.
+- A schedule-sensitive label is **never certified**. Its search is a heuristic for finding counterexamples: each
+  earlier run is one disjunctive group of the distinct derivations its schedules observed, and a hypothesis need
+  only kill one schedule's (rule (a) below; an indicator binary per derivation in the ILP, §4.4). Clauses are
+  deduplicated by their kill relation, the derivation plus each sender's send order up to it, so schedules that
+  order a sender's sends differently each contribute their own crash points (U2). When the heuristic runs out of
+  hypotheses the verdict is **`Exhausted`**: "no counterexample (with up to k crashes) found; not a certificate
+  (schedule-sensitive: batch at two_pc_ctp.rs:105, …)". A counterexample's tolerance is likewise phrased "no
+  counterexample with up to k crashes found, breaks at k+1" (`Counterexample::tolerance_certified` is false).
+- `Results::assert_holds` rejects `Exhausted`, with a message naming the label; `assert_no_counterexample` accepts
+  it. `Results::rows` reports it as `exhausted` (the budget is now `budget`).
+
+**The candidates that were weighed:**
+- **(a) kill one schedule's derivations per earlier run.** Not sound in general: nothing relates the schedules of
+  one fault set to those of another, so a fault can remove a message that made the favourable schedule reachable.
+  Good at finding counterexamples, though, and used here only as the search heuristic for sensitive labels. It
+  finds the CTP-3 split at hypothesis 13 and `ask_once`'s crash at hypothesis 1.
+- **(b) no lineage certificate for a sensitive label.** Sound if the walk is complete, which conservatism buys.
+  **Adopted, with (a) as the heuristic.**
+- **(c) per-record taint:** records that pass a site carry a flag, and only tainted derivations lose their pruning
+  power. Handles U1 only; sound only together with a conservative crash rule for senders whose order a site can
+  change (`crash(n after m)` kills every send of `n` but `m` and its causal predecessors). Unmeasured.
+- **(d2) bounded enumeration:** enumerate every admissible set up to the sweep's bound, over every schedule, for a
+  bounded certificate. About Σ_{j≤k} C(N, j)·(s+1)^j hypotheses for N nodes of s sends each: 2PC with three
+  participants at k ≤ 2 is about 770, feasible; multi-Paxos is not.
+- **(d3) `trust_order_insensitive(site)`:** a user assertion that a site is harmless. A knob, against the
+  convention (§1).
+
+**What it costs.** On the corpus, most top-level outputs are sensitive: gossip (all but `initial`), uniform
+broadcast's deliveries, `leader_merge`, multi-Paxos `learned`, ABD, the echoing broadcast and 2PC `committed`.
+Their certificates become `Exhausted`; counterexamples are unaffected. The plain broadcasts,
+`broadcast_live_from_process` and `hydro_std`'s reliable broadcast (closed and live) stay site-free and keep their
+certificates. The static table (`hydro_test/tests/ec_schedule_sensitivity.rs`) counts 49 of 59 corpus labels, in 11
+of 14 programs, as schedule-sensitive. Verdict changes on the ported corpus (every other label is unchanged; a
+counterexample on a sensitive label keeps its fault set, but its tolerance now reads "no counterexample with up to
+k crashes found"):
+
+| program, label | before | after |
+|---|---|---|
+| 2PC with cooperative termination, 3 participants, `committed` | certified (false) | **breaks at 2**: crash(coordinator after commit→P0), crash(P0 after Decided→P1); hypothesis 13 |
+| `ask_once` (the miniature), the known values | certified (false) | **breaks at 1**: crash(member 0 after its announcement to member 1); hypothesis 1 |
+| 2PC with cooperative termination, 2 participants, `committed` | certified | `Exhausted` (no counterexample under any crash bound) |
+| hydro_test's echoing reliable broadcast, deliveries | certified | `Exhausted` |
+| uniform broadcast (thresholds 1, 2), delivered set and quorum certificates | certified | `Exhausted` |
+| G-Set gossip (closed, live), `all_elements` / the G-Set | certified | `Exhausted` |
+| multi-Paxos `learned`, `facts` (cap 1) | certified up to 1 crash | `Exhausted` up to 1 crash |
+| ABD with reliable phase 2, `phase2_fwd`, the register | certified | `Exhausted` |
+| `hydro_std` reliable broadcast closed/live `new_messages`, plain broadcasts, `broadcast_live` | certified / counterexample | unchanged (site-free) |
+
+**The research branch has the same hole.** Its `HypothesisFold` adds every schedule's clause independently, which
+is the strong rule. Its certificates in `rec-positional.tsv` for labels with a sensitive cone (gossip, uniform
+broadcast, ABD, multi-Paxos, 2PC) are therefore **not ground truth**; only its counterexamples, and its
+certificates on site-free labels, are. The research branch found the CTP bug only through a hand-written spec,
+whose PRE counted a dead node's commit.
+
+**Next.** First d2, bounded enumeration certificates ("certified up to k crashes by enumeration") for the small
+sensitive programs (2PC, gossip, the echoing broadcast, ABD), reusing the brute-force enumerator. Later (c),
+per-record taint with the conservative crash rule, measured first by how many first-observation derivations in
+the sensitive programs are untainted.
 
 ## 5. Lineage level: record provenance stays (measured)
 
@@ -475,7 +586,13 @@ as is and that is recorded here.
 - **Opaque check:** `leader_merge`'s keyed `entries_partially_ordered` is reported opaque, not miscompiled, and
   its verdict matches its record (§4.2).
 - **Honesty check, test-only:** a brute-force enumerator over every admissible fault set up to size 2, run on the small EC
-  demos. Agreement with lite's verdicts tests the lineage pruning without a `Strategy::Blind` in the API.
+  demos. Agreement with lite's verdicts tests the lineage pruning without a `Strategy::Blind` in the API. It includes
+  order-sensitive programs (`ask_once`, 2PC with cooperative termination and three participants, plain 2PC,
+  `leader_merge`): there `Exhausted` agrees only if the enumeration finds no breaking set within the bound the search
+  swept, which tests the heuristic (§4.9). Before the fix, `ask_once` and CTP-3 disagreed (false certificates).
+- **Records and schedule sensitivity:** research certificates on schedule-sensitive labels are not ground truth
+  (§4.9). Lite reports them `Exhausted`; the comparison treats a research certificate there as "no counterexample
+  found" on both sides.
 - **Solver check:** on every ported search, the `microlp` and HiGHS backends return sets of the same size,
   checked once in CI against HiGHS behind its opt-in feature.
 - **Performance budget:** total EC-corpus search time no worse than the positional records' EC rows. The sweep tries
@@ -501,7 +618,9 @@ as is and that is recorded here.
    deltas), then 2PC rewritten without hooks. Compare each with the records as it lands, then run the brute-force
    cross-check. First benchmarks: "provenance without replay" against run P (count of opaque fallbacks, hypotheses,
    wall), and the sweep's cost against the records.
-5. Phase 2, only when a program's schedule space demands it: open sent sets + the order check + one
+5. Bounded certificates for small schedule-sensitive programs by enumeration (d2, §4.9), reusing the brute-force
+   enumerator; then per-record taint with a conservative crash rule (c), measured first.
+6. Phase 2, only when a program's schedule space demands it: open sent sets + the order check + one
    schedule per hypothesis, with the never-seen-send tripwire as a hard failure in reduced searches.
 
 ## 9. Decisions
@@ -524,6 +643,9 @@ Settled:
     `.max_crashes(n)` caps the sweep (§4.5).
 12. **Verdict comparison:** keyed by (file, collection name, occurrence), with an operator fallback. ISR and
     restricted-crash rows are excluded (§7).
+13. **Schedule sensitivity:** only site-free labels are certified. A conservative static walk finds the sites
+    (choices, and anything it cannot see through, including send-order effects on senders); a sensitive label's
+    search uses the one-schedule-per-run heuristic and ends `Exhausted`, never certified (§4.9).
 
 Open:
 - **Replay:** stays out unless the "provenance without replay" benchmark shows the opaque fallback costing
@@ -532,7 +654,3 @@ Open:
   network (§4.6).
 - **All minimal counterexamples at the breaking bound:** an extension of the sweep, if one witness per label
   proves too little (§4.5).
-
-Open:
-- **Replay:** stays out unless the "provenance without replay" benchmark shows the opaque fallback costing
-  much on the EC corpus.

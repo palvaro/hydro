@@ -273,6 +273,14 @@ fn certified_all(verdict: &Verdict) -> bool {
     )
 }
 
+/// A schedule-sensitive label whose search found no counterexample under `tolerates`: all the
+/// check can say for it, since only labels whose fault sets have one execution each can be
+/// certified (docs/design/hydrofrac-lite.md §4.9).
+#[cfg(stageleft_runtime)]
+fn exhausted(verdict: &Verdict, tolerates: Tolerance) -> bool {
+    matches!(verdict, Verdict::Exhausted { tolerates: t, .. } if *t == tolerates)
+}
+
 #[cfg(stageleft_runtime)]
 fn crashes_node(verdict: &Verdict, prefix: &str) -> bool {
     verdict.counterexample().is_some_and(|c| {
@@ -352,8 +360,10 @@ fn ec_demo_reliable_broadcast_all_labels() {
 }
 
 /// Uniform reliable broadcast delivers after `threshold` echoes. Its delivered set (the `map`
-/// out of the quorum, and the quorum's certificates before it) holds under every admissible
-/// crash set for thresholds 1 and 2; the single hops into the echo cycle break on their own.
+/// out of the quorum, and the quorum's certificates before it) has no counterexample under
+/// any admissible crash set for thresholds 1 and 2; the single hops into the echo cycle break
+/// on their own. The quorum batches its acks, so the delivered set is schedule-sensitive:
+/// searched, not certified.
 #[test]
 fn ec_demo_uniform_broadcast() {
     for threshold in [1, 2] {
@@ -361,7 +371,7 @@ fn ec_demo_uniform_broadcast() {
         let delivered: Vec<_> = labels_in(&results, "uniform_broadcast.rs").collect();
         assert_eq!(delivered.len(), 1, "uniform({threshold})\n{results}");
         assert!(
-            certified_all(effective(&results, delivered[0])),
+            exhausted(effective(&results, delivered[0]), Tolerance::All),
             "uniform({threshold})\n{results}"
         );
         for l in results.results() {
@@ -374,8 +384,9 @@ fn ec_demo_uniform_broadcast() {
     }
 }
 
-/// State-based G-Set gossip converges under every admissible crash set, closed and live: the
-/// G-Set, checked at the stream it folds, certifies.
+/// State-based G-Set gossip, closed and live: the G-Set, checked at the stream it folds, has
+/// no counterexample under any admissible crash set. Gossip rounds are batched, so it is
+/// schedule-sensitive: searched, not certified.
 #[test]
 fn ec_demo_g_set_gossip_certifies() {
     for live in [false, true] {
@@ -385,14 +396,14 @@ fn ec_demo_g_set_gossip_certifies() {
             .collect();
         assert_eq!(set.len(), 1, "live: {live}\n{results}");
         assert!(
-            certified_all(effective(&results, set[0])),
+            exhausted(effective(&results, set[0]), Tolerance::All),
             "live: {live}\n{results}"
         );
     }
 }
 
-/// Every label of G-Set gossip, closed and live: the G-Set certifies (above); no label runs
-/// out of budget, and the report names every single hop into the merge.
+/// Every label of G-Set gossip, closed and live: the G-Set has no counterexample (above); no
+/// label runs out of budget, and the report names every single hop into the merge.
 #[test]
 fn ec_demo_g_set_gossip_all_labels() {
     for live in [false, true] {
@@ -407,7 +418,7 @@ fn ec_demo_g_set_gossip_all_labels() {
         assert!(
             labels_in(&results, "crdt_gossip.rs")
                 .filter(|l| matches!(l.verdict, Verdict::CoveredBy(_)))
-                .all(|l| certified_all(effective(&results, l))),
+                .all(|l| exhausted(effective(&results, l), Tolerance::All)),
             "live: {live}\n{results}"
         );
     }
@@ -430,7 +441,8 @@ fn ec_demo_leader_merge_breaks_under_a_leader_crash() {
 
 /// `multi_paxos.learned` is labelled EC with the argument that the learner-side echo makes
 /// dissemination all-or-nothing among live learners even if the proposer crashes
-/// mid-broadcast. Under one crash anywhere that is what the check reports.
+/// mid-broadcast. Under one crash anywhere the check finds no counterexample; Paxos batches
+/// throughout, so that is a search, not a certificate.
 #[test]
 fn ec_demo_multi_paxos_learned_under_one_crash() {
     let results = multi_paxos_check();
@@ -439,12 +451,10 @@ fn ec_demo_multi_paxos_learned_under_one_crash() {
         .collect();
     assert!(!learned.is_empty(), "{results}");
     assert!(
-        learned.iter().any(|l| matches!(
-            effective(&results, l),
-            Verdict::Certified {
-                tolerates: Tolerance::UpTo(1) | Tolerance::All
-            }
-        )),
+        learned.iter().any(|l| {
+            let v = effective(&results, l);
+            exhausted(v, Tolerance::UpTo(1)) || exhausted(v, Tolerance::All)
+        }),
         "{results}"
     );
 }

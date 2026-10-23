@@ -239,8 +239,8 @@ fn members_that_disagree_without_faults_break_at_the_probe() {
 }
 
 /// A body that panics (a harness assertion failing under injected faults) is a
-/// counterexample. A panic inside the program's own dataflow cannot be caught: it unwinds out
-/// of the simulation dylib as a foreign exception and aborts the process.
+/// counterexample. (So is a panic inside the program's own dataflow: the simulation dylib
+/// catches it and raises it again on the host, `hydro_lang::sim::panic_guard`.)
 #[cfg(stageleft_runtime)]
 #[test]
 fn a_body_that_panics_is_a_counterexample() {
@@ -474,4 +474,108 @@ fn rows_carry_the_normalized_counterexample() {
     let capped = echo_broadcast(EcCheck::new().max_crashes(1)).rows();
     assert_eq!(capped[delivered.index].verdict, "certificate");
     assert_eq!(capped[delivered.index].tolerates, "1");
+}
+
+/// The two-member exchange, but each member batches what it collected before it reports it:
+/// the label still holds under every admissible fault set (a batch only delays), but its
+/// search can no longer certify it, since its fault sets now have several executions
+/// (docs/design/hydrofrac-lite.md §4.9).
+#[cfg(stageleft_runtime)]
+fn batched_exchange(check: EcCheck) -> Results {
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let initial = input
+        .broadcast_closed(&members, TCP.fail_stop().name("initial").bincode())
+        .weaken_consistency();
+    let echoed = initial
+        .clone()
+        .broadcast_closed(&members, TCP.fail_stop().name("echo").bincode())
+        .values()
+        .weaken_consistency();
+    let tick = members.tick();
+    let delivered = initial
+        .weaken_ordering::<NoOrder>()
+        .merge_unordered(echoed)
+        .batch(&tick, nondet!(/** which tick a delivery lands in */))
+        .all_ticks()
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed: one correct recipient echoes to the other */
+        ));
+    let _out = delivered.sim_cluster_output();
+
+    let mut check = check;
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 2))
+        .compiled();
+    check.run(&sim, async || {
+        send.send(5);
+    })
+}
+
+#[cfg(stageleft_runtime)]
+#[test]
+fn a_schedule_sensitive_label_is_exhausted_not_certified() {
+    let results = batched_exchange(EcCheck::new());
+    let label = results.label("delivered");
+    assert!(
+        label.plan.sites.iter().any(|s| s.op == "batch"),
+        "{results}"
+    );
+    let Verdict::Exhausted { tolerates, sites } = &label.verdict else {
+        panic!("expected an exhausted search:\n{results}");
+    };
+    assert_eq!(*tolerates, Tolerance::All, "{results}");
+    assert_eq!(sites, &label.plan.sites, "{results}");
+    assert!(
+        results.to_string().contains("not a certificate (schedule-sensitive: batch at"),
+        "{results}"
+    );
+    assert!(!results.holds(), "{results}");
+    // The plain `initial` hop, which nothing batches, still breaks at one crash: its cone and
+    // its sender have no site, so its verdict is a certificate-backed counterexample.
+    let initial = results.label("initial");
+    assert!(initial.plan.sites.is_empty(), "{results}");
+    let cex = initial.verdict.counterexample().expect("the hop breaks");
+    assert!(cex.tolerance_certified, "{results}");
+    assert_eq!(cex.tolerates, Some(0), "{results}");
+    let row = results
+        .rows()
+        .into_iter()
+        .find(|r| r.collection == "delivered")
+        .unwrap();
+    assert_eq!(row.verdict, "exhausted");
+}
+
+/// `assert_holds` rejects an exhausted search, and says why; `assert_no_counterexample` accepts
+/// it. Capped at zero crashes, the exchange has no counterexample: the plain `initial` hop
+/// (site-free) is certified for omissions alone, which `fail_stop` admits none of, and the
+/// batched label's search ends exhausted.
+#[cfg(stageleft_runtime)]
+#[test]
+#[should_panic(expected = "is schedule-sensitive, so its search is not a certificate")]
+fn assert_holds_rejects_an_exhausted_search() {
+    let results = batched_exchange(EcCheck::new().max_crashes(0));
+    assert!(
+        matches!(
+            results.label("initial").verdict,
+            Verdict::Certified {
+                tolerates: Tolerance::UpTo(0)
+            }
+        ),
+        "{results}"
+    );
+    assert!(
+        matches!(
+            results.label("delivered").verdict,
+            Verdict::Exhausted {
+                tolerates: Tolerance::UpTo(0),
+                ..
+            }
+        ),
+        "{results}"
+    );
+    results.assert_no_counterexample();
+    results.assert_holds();
 }

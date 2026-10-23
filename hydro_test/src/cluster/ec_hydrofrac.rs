@@ -258,17 +258,26 @@ mod tests {
         let (node, _) = the_crash(&plain, deliveries);
         assert!(node.starts_with("Broadcaster"), "{plain}");
 
+        // The echoing broadcast's members batch what they receive (`reliable_broadcast.rs`'s
+        // tick), so its deliveries are schedule-sensitive: the search finds no counterexample
+        // under any admissible crash set, but cannot certify it (docs/design/hydrofrac-lite.md
+        // §4.9).
         let reliable = echo_broadcast(true, EcCheck::new().sample_schedules(ECHO_SCHEDULES));
         eprintln!("{reliable}");
         let deliveries = label(&reliable, "reliable_broadcast.rs", "AssertIsConsistent", 0);
         assert!(
+            deliveries.plan.sites.iter().any(|s| s.op == "batch"),
+            "{reliable}"
+        );
+        assert!(
             matches!(
                 deliveries.verdict,
-                Verdict::Certified {
-                    tolerates: Tolerance::All
+                Verdict::Exhausted {
+                    tolerates: Tolerance::All,
+                    ..
                 }
             ),
-            "reliable broadcast: expected a certificate under every admissible crash set:\n{reliable}"
+            "reliable broadcast: expected no counterexample under any admissible crash set:\n{reliable}"
         );
     }
 
