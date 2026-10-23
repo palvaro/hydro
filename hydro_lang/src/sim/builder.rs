@@ -662,6 +662,63 @@ impl DfirBuilder for SimBuilder {
                         None,
                     );
                 }
+                CollectionKind::Optional {
+                    bound: crate::compile::ir::BoundKind::Unbounded,
+                    element_type,
+                } => {
+                    // A top-level unbounded optional (such as a `reduce` or `max`) is a stream
+                    // of versions in the simulator; its snapshot is null until the first
+                    // version, then some version. Its presence is monotone: the simulator has
+                    // no representation of a return to null.
+                    debug_assert!(in_location.is_top_level());
+
+                    let hoff_id = self.next_hoff_id.get_and_increment();
+
+                    let buffered_ident =
+                        syn::Ident::new(&format!("__buffered_{hoff_id}"), Span::call_site());
+                    let hoff_send_ident =
+                        syn::Ident::new(&format!("__hoff_send_{hoff_id}"), Span::call_site());
+                    let hoff_recv_ident =
+                        syn::Ident::new(&format!("__hoff_recv_{hoff_id}"), Span::call_site());
+
+                    let passthrough = fold_hooked_idents.contains(&in_ident.to_string());
+
+                    self.add_extra_stmt_internal(in_location, syn::parse_quote! {
+                        let (#hoff_send_ident, #hoff_recv_ident) = __root_dfir_rs::util::unsync::mpsc::unbounded();
+                    });
+                    self.add_extra_stmt_internal(in_location, syn::parse_quote! {
+                        let #buffered_ident = ::std::rc::Rc::new(::std::cell::RefCell::new(::std::collections::VecDeque::new()));
+                    });
+                    self.add_hook(
+                        in_location,
+                        out_location,
+                        syn::parse_quote!(
+                            Box::new(#root::sim::runtime::OptionalHook::<_>::new(
+                                #buffered_ident.clone(),
+                                #hoff_send_ident,
+                                #passthrough,
+                                (#batch_location, #line, #caret),
+                                #root::__maybe_debug__!(#element_type),
+                            ))
+                        ),
+                    );
+
+                    self.get_dfir_mut(in_location).add_dfir(
+                        parse_quote! {
+                            #in_ident -> for_each(|v| #buffered_ident.borrow_mut().push_back(v));
+                        },
+                        None,
+                        None,
+                    );
+
+                    self.get_dfir_mut(out_location).add_dfir(
+                        parse_quote! {
+                            #out_ident = source_stream(#hoff_recv_ident);
+                        },
+                        None,
+                        None,
+                    );
+                }
                 _ => {
                     eprintln!("{:?}", op_meta.backtrace.elements().collect::<Vec<_>>());
                     todo!("batch not implemented for kind {:?}", in_kind)
@@ -693,7 +750,9 @@ impl DfirBuilder for SimBuilder {
                             None,
                         );
                     } else {
-                        todo!("atomic yield to a different tick is not yet supported");
+                        todo!(
+                            "atomic yield to a different tick is not yet supported ({in_location:?} -> {out_location:?})"
+                        );
                     }
                 } else {
                     let hoff_id = self.next_hoff_id.get_and_increment();
@@ -736,7 +795,9 @@ impl DfirBuilder for SimBuilder {
                             None,
                         );
                     } else {
-                        todo!("atomic yield to a different tick is not yet supported");
+                        todo!(
+                            "atomic yield to a different tick is not yet supported ({in_location:?} -> {out_location:?})"
+                        );
                     }
                 } else {
                     todo!("Non-atomic yield of an Optional is not yet supported");
@@ -793,7 +854,24 @@ impl DfirBuilder for SimBuilder {
         out_kind: &CollectionKind,
         op_meta: &HydroIrOpMetadata,
     ) {
-        if trusted {
+        // A retry cast alone (`AtLeastOnce` → `ExactlyOnce`, same order and boundedness, as
+        // `fold` with an idempotence proof performs on its input) is the identity in the
+        // simulator: the simulated network never duplicates a delivery, so there is no
+        // decision to explore.
+        let retry_cast_only = matches!(
+            (in_kind, out_kind),
+            (
+                CollectionKind::Stream { bound: b1, order: o1, retry: StreamRetry::AtLeastOnce, .. },
+                CollectionKind::Stream { bound: b2, order: o2, retry: StreamRetry::ExactlyOnce, .. },
+            ) if b1 == b2 && o1 == o2
+        ) || matches!(
+            (in_kind, out_kind),
+            (
+                CollectionKind::KeyedStream { bound: b1, value_order: o1, value_retry: StreamRetry::AtLeastOnce, .. },
+                CollectionKind::KeyedStream { bound: b2, value_order: o2, value_retry: StreamRetry::ExactlyOnce, .. },
+            ) if b1 == b2 && o1 == o2
+        );
+        if trusted || retry_cast_only {
             let builder = self.get_dfir_mut(location);
             builder.add_dfir(
                 parse_quote! {

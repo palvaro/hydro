@@ -746,7 +746,24 @@ impl CompiledSim {
     /// Because no fuzzer is involved, you can run exhaustive tests with `cargo test`.
     ///
     /// Returns the number of distinct executions explored.
-    pub fn exhaustive(&self, mut thunk: impl AsyncFnMut() + RefUnwindSafe) -> usize {
+    pub fn exhaustive(&self, thunk: impl AsyncFnMut() + RefUnwindSafe) -> usize {
+        self.exhaustive_then(thunk, || {})
+    }
+
+    /// [`Self::exhaustive`], calling `after` once each execution has finished, outside the
+    /// instance.
+    ///
+    /// This lets a caller fold each execution's results into a summary between executions
+    /// (rather than accumulating them across the whole exploration), and run instances of its
+    /// own from `after`. A panic in `after` ends the exploration like a panic in `thunk` does.
+    ///
+    /// Returns the number of distinct executions explored.
+    pub fn exhaustive_then(
+        &self,
+        mut thunk: impl AsyncFnMut() + RefUnwindSafe,
+        after: impl FnMut(),
+    ) -> usize {
+        let mut after = std::panic::AssertUnwindSafe(after);
         if std::env::var("BOLERO_FUZZER").is_ok() {
             eprintln!(
                 "Cannot run exhaustive tests with a fuzzer. Please use `cargo test` instead of `cargo sim`."
@@ -792,13 +809,91 @@ impl CompiledSim {
                     tokio::runtime::Builder::new_current_thread()
                         .build()
                         .unwrap()
-                        .block_on(async { instance.run(&mut thunk).await })
+                        .block_on(async { instance.run(&mut thunk).await });
+                    (*after)();
                 })
             },
             false,
         );
 
         count
+    }
+
+    /// Explores exactly `iterations` randomly scheduled executions of the simulation, with no
+    /// fuzzer, no reproducer lookup and no failure output.
+    ///
+    /// This is a bounded random sample of the schedule space, for callers that run many such
+    /// samples under their own control and need each one to terminate. Prefer [`Self::fuzz`]
+    /// for tests.
+    pub fn fuzz_bounded(&self, iterations: usize, thunk: impl AsyncFnMut() + RefUnwindSafe) {
+        self.fuzz_bounded_then(iterations, thunk, || {});
+    }
+
+    /// [`Self::fuzz_bounded`], calling `after` once each execution has finished, outside the
+    /// instance (see [`Self::exhaustive_then`]).
+    pub fn fuzz_bounded_then(
+        &self,
+        iterations: usize,
+        mut thunk: impl AsyncFnMut() + RefUnwindSafe,
+        after: impl FnMut(),
+    ) {
+        let mut after = std::panic::AssertUnwindSafe(after);
+        self.with_instantiator(
+            |instantiator| {
+                bolero::test(bolero::TargetLocation {
+                    package_name: "",
+                    manifest_dir: "",
+                    module_path: "",
+                    file: ".",
+                    line: 0,
+                    item_path: "<unknown>::__bolero_item_path__",
+                    test_name: None,
+                })
+                .with_iterations(iterations)
+                .run_with_replay(move |is_replay| {
+                    let mut instance = instantiator();
+                    if is_replay {
+                        instance.log = true;
+                    }
+                    tokio::runtime::Builder::new_current_thread()
+                        .build()
+                        .unwrap()
+                        .block_on(async { instance.run(&mut thunk).await });
+                    (*after)();
+                })
+            },
+            false,
+        );
+    }
+
+    /// Runs exactly one execution: the first schedule [`Self::exhaustive`] explores, with every
+    /// scheduling and batching choice resolved to its first alternative by an all-zero entropy
+    /// source.
+    ///
+    /// Deterministic: the same program and body always run the same schedule, which makes
+    /// this useful for debugging a single run.
+    pub fn first_schedule(&self, mut thunk: impl AsyncFnMut() + RefUnwindSafe) {
+        self.with_instantiator(
+            |instantiator| {
+                let mut instance = instantiator();
+                instance.exhaustive = true;
+                bolero::bolero_engine::any::scope::with(
+                    Box::new(bolero::bolero_engine::driver::object::Object(
+                        bolero::bolero_engine::driver::bytes::Driver::new(
+                            vec![0u8; 1 << 20],
+                            &Default::default(),
+                        ),
+                    )),
+                    || {
+                        tokio::runtime::Builder::new_current_thread()
+                            .build()
+                            .unwrap()
+                            .block_on(instance.run(&mut thunk));
+                    },
+                );
+            },
+            false,
+        );
     }
 }
 
