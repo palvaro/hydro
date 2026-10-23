@@ -845,6 +845,9 @@ fn pure_closure(f: &ClosureExpr) -> bool {
         return false;
     }
     let text = f.expr().to_string();
+    if std::env::var_os("HYDROFRAC_DUMP_CLOSURES").is_some() {
+        eprintln!("CLOSURE\t{text}");
+    }
     !IMPURE.iter().any(|w| text.contains(w))
 }
 
