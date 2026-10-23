@@ -1,7 +1,9 @@
 //! The loop behind [`EcCheck::run`] (see the [module docs](super)).
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::hash::{Hash, Hasher};
 use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -153,6 +155,252 @@ struct Run {
     schedules: usize,
     wall: Duration,
     opaque_fallbacks: usize,
+    /// The probe only: each target's fact domain, by label index.
+    domains: BTreeMap<usize, BTreeSet<Fact>>,
+    /// The message of the panic that ended the run, if a schedule panicked.
+    panic: Option<String>,
+}
+
+/// A run being read one schedule at a time, as each finishes (see [`Engine::execute`]). What it
+/// keeps is bounded by what the run taught (distinct clauses, the first failure per label), not
+/// by its number of schedules: each record is dropped once read, unless it is a failure's.
+struct RunFold<'t> {
+    targets: &'t [Target],
+    /// The run's crashes: the premises of its clauses.
+    premises: FaultSet<MessageId>,
+    /// Whether this is the failure-free probe, which learns each target's domain as it reads.
+    probe: bool,
+    labels: BTreeMap<usize, LabelRun>,
+    /// Per label, its clauses' indices by the hash of their derivation, to drop the duplicate
+    /// derivations most schedules repeat without a linear scan.
+    seen: BTreeMap<usize, HashMap<u64, Vec<usize>>>,
+    domains: BTreeMap<usize, BTreeSet<Fact>>,
+    schedules: usize,
+    opaque_fallbacks: usize,
+    /// The latest record, read when the next one arrives or at [`Self::finish`]: when a
+    /// schedule panics, the run's last record is the panicking one.
+    pending: Option<InstanceRecord>,
+}
+
+impl<'t> RunFold<'t> {
+    fn new(faults: &FaultSet<MessageId>, targets: &'t [Target], probe: bool) -> Self {
+        RunFold {
+            targets,
+            premises: faults
+                .iter()
+                .filter(|f| matches!(f, Fault::Crash { .. }))
+                .cloned()
+                .collect(),
+            probe,
+            labels: targets
+                .iter()
+                .map(|t| {
+                    (
+                        t.label,
+                        LabelRun {
+                            all_vacuous: true,
+                            ..LabelRun::default()
+                        },
+                    )
+                })
+                .collect(),
+            seen: BTreeMap::new(),
+            domains: BTreeMap::new(),
+            schedules: 0,
+            opaque_fallbacks: 0,
+            pending: None,
+        }
+    }
+
+    /// Takes the next schedule's record (reading the one before it).
+    fn push(&mut self, labels: &Labels, tables: &Tables, record: InstanceRecord) {
+        if let Some(previous) = self.pending.replace(record) {
+            self.read(labels, tables, previous, None);
+        }
+    }
+
+    /// Reads the last record (the panicking schedule's, if `panic`) and ends the run.
+    fn finish(
+        mut self,
+        labels: &Labels,
+        tables: &Tables,
+        panic: Option<String>,
+        wall: Duration,
+    ) -> Run {
+        if let Some(last) = self.pending.take() {
+            self.read(labels, tables, last, panic.as_deref());
+        }
+        let schedules = self.schedules;
+        for lr in self.labels.values_mut() {
+            lr.all_vacuous &= schedules > 0;
+        }
+        Run {
+            labels: self.labels,
+            schedules,
+            wall,
+            opaque_fallbacks: self.opaque_fallbacks,
+            domains: self.domains,
+            panic,
+        }
+    }
+
+    /// Reads one schedule's record for every target.
+    fn read(
+        &mut self,
+        labels: &Labels,
+        tables: &Tables,
+        record: InstanceRecord,
+        panicked: Option<&str>,
+    ) {
+        self.schedules += 1;
+        let record = Rc::new(record);
+        if self.probe {
+            for t in self.targets {
+                let domain = record_domain(labels, t, &record);
+                self.domains.entry(t.label).or_default().extend(domain);
+            }
+        }
+        if let Some(panic) = panicked {
+            // A program that panics under injected faults breaks every label.
+            for t in self.targets {
+                let lr = self.labels.get_mut(&t.label).unwrap();
+                lr.all_vacuous = false;
+                lr.failure.get_or_insert_with(|| {
+                    Rc::new(Failure {
+                        missing: vec![],
+                        divergent: vec![],
+                        panic: Some(panic.to_owned()),
+                        record: record.clone(),
+                    })
+                });
+            }
+            return;
+        }
+        let lineage = Lineage::new(&record.log, tables);
+        for t in self.targets {
+            // The probe reads each schedule against the facts its own correct members hold.
+            // That is the same reading as against the whole domain, which is only known once
+            // every schedule is in: a schedule's facts are a subset of the domain (the union of
+            // every schedule's), so in both readings what is required is exactly what the
+            // schedule's correct members hold, and nothing is outside the domain.
+            let probe_domain;
+            let domain = if self.probe {
+                probe_domain = record_domain(labels, t, &record);
+                &probe_domain
+            } else {
+                &t.domain
+            };
+            let outcome = outcome(labels, t, domain, &record, &lineage);
+            let lr = self.labels.get_mut(&t.label).unwrap();
+            match outcome {
+                ScheduleOutcome::Holds(deps) => {
+                    lr.all_vacuous = false;
+                    let mut hasher = DefaultHasher::new();
+                    deps.hash(&mut hasher);
+                    let same = self
+                        .seen
+                        .entry(t.label)
+                        .or_default()
+                        .entry(hasher.finish())
+                        .or_default();
+                    if !same.iter().any(|&i| lr.clauses[i].deps == deps) {
+                        same.push(lr.clauses.len());
+                        lr.clauses.push(Clause {
+                            deps,
+                            sends: lineage.send_sequences().clone(),
+                            pre_heal_sends: lineage.pre_heal_sends().clone(),
+                            premises: self.premises.clone(),
+                        });
+                    }
+                }
+                ScheduleOutcome::Vacuous => {}
+                ScheduleOutcome::Fails { missing, divergent } => {
+                    lr.all_vacuous = false;
+                    lr.failure.get_or_insert_with(|| {
+                        Rc::new(Failure {
+                            missing,
+                            divergent,
+                            panic: None,
+                            record: record.clone(),
+                        })
+                    });
+                }
+            }
+        }
+        self.opaque_fallbacks += lineage.opaque_fallbacks();
+    }
+}
+
+/// The facts `target`'s correct members hold in `record`: what the probe learns as its domain.
+fn record_domain(labels: &Labels, target: &Target, record: &InstanceRecord) -> BTreeSet<Fact> {
+    let observations: Vec<Observation<()>> = record
+        .log
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            Event::Output {
+                port, node, bytes, ..
+            } if labels.label_of_port(*port) == Some(target.label) => Some(Observation {
+                label: target.label,
+                member: node.member.unwrap_or(0),
+                fact: decode_output(bytes),
+                support: (),
+            }),
+            _ => None,
+        })
+        .collect();
+    let view = MemberView::of(target.label, &observations);
+    learn_domain(&view, &correct_members(target, record))
+}
+
+/// What one schedule says about `target`, against `domain`.
+fn outcome(
+    labels: &Labels,
+    target: &Target,
+    domain: &BTreeSet<Fact>,
+    record: &InstanceRecord,
+    lineage: &Lineage<'_>,
+) -> ScheduleOutcome {
+    let observations: Vec<Observation<usize>> = lineage
+        .observations()
+        .filter(|o| labels.label_of_port(o.port) == Some(target.label))
+        .map(|o| Observation {
+            label: target.label,
+            member: o.node.member.unwrap_or(0),
+            fact: decode_output(o.bytes),
+            support: o.event,
+        })
+        .collect();
+    let view = MemberView::of(target.label, &observations);
+    let correct = correct_members(target, record);
+    let evaluation = evaluate(&view, domain, &correct);
+    // Facts outside the domain that only some correct members hold: a fault made members
+    // derive something new (e.g. through an `anti_join`), and they disagree on it.
+    let divergent: Vec<Fact> = evaluation
+        .outside_domain
+        .iter()
+        .filter(|fact| !correct.iter().all(|m| view.holds(*m, fact)))
+        .cloned()
+        .collect();
+    if !evaluation.holds() || !divergent.is_empty() {
+        return ScheduleOutcome::Fails {
+            missing: evaluation.missing,
+            divergent,
+        };
+    }
+    if evaluation.required.is_empty() {
+        return ScheduleOutcome::Vacuous;
+    }
+    // `POST` needs every required `(member, fact)` pair. A hypothesis breaks it only by
+    // removing every observation of some pair, and so in particular that pair's first
+    // observation: it must kill a delivery of that observation's derivation. The union of
+    // the first observations' derivations is therefore a sound clause, and tighter than the
+    // union of every observation's.
+    let mut deps = Derivation::new();
+    for pair in &evaluation.held {
+        deps.extend(lineage.derivation(pair.supports[0]).iter().cloned());
+    }
+    ScheduleOutcome::Holds(deps)
 }
 
 struct Engine<'c, B> {
@@ -203,12 +451,17 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
             .map(|m| m.iter().copied().collect())
     }
 
-    /// Runs `faults` over every schedule (or the sample): each schedule's record, the panic
-    /// message if a schedule panicked (its record is the last), and the wall time.
+    /// Runs `faults` over every schedule (or the sample), folding each schedule's record into a
+    /// [`Run`] as soon as it finishes, so a run's memory is bounded by what it learned (distinct
+    /// clauses, the first failure per label) rather than by its number of schedules. `seen` gets
+    /// every record before it is folded. The probe (`probe`) also learns each target's domain.
     fn execute(
         &mut self,
         faults: &FaultSet<MessageId>,
-    ) -> (Vec<InstanceRecord>, Option<String>, Duration) {
+        targets: &[Target],
+        probe: bool,
+        seen: impl FnMut(&Tables, &InstanceRecord),
+    ) -> Run {
         let start = Instant::now();
         let hook = Rc::new(FaultHook::new(
             &FaultPlan {
@@ -217,7 +470,16 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
             self.sim,
         ));
         self.sim.set_network_hook(hook.clone());
-        let records: RefCell<Vec<InstanceRecord>> = RefCell::new(vec![]);
+        let fold = RefCell::new(RunFold::new(faults, targets, probe));
+        let seen = RefCell::new(seen);
+        let labels = self.labels;
+        let tables = &self.tables;
+        let absorb = |records: Vec<InstanceRecord>| {
+            for record in records {
+                (seen.borrow_mut())(tables, &record);
+                fold.borrow_mut().push(labels, tables, record);
+            }
+        };
         let outcome = {
             let healer = AssertUnwindSafe(hook.clone());
             let mut body = AssertUnwindSafe(&mut *self.body);
@@ -231,7 +493,7 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
                 healer.heal();
                 quiesce().await;
             };
-            let after = || records.borrow_mut().extend(hook.drain_instances());
+            let after = || absorb(hook.drain_instances());
             let sim = self.sim;
             let sample = self.sample_schedules;
             std::panic::catch_unwind(AssertUnwindSafe(move || match sample {
@@ -242,60 +504,11 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
             }))
         };
         self.sim.clear_network_hook();
-        let mut records = records.into_inner();
         // The schedule that panicked (and any replay of it) never reached `after`.
-        records.extend(hook.drain_instances());
+        absorb(hook.drain_instances());
         let panic = outcome.err().map(|p| panic_message(&*p));
-        (records, panic, start.elapsed())
-    }
-
-    /// What one schedule says about `target`.
-    fn outcome(
-        &self,
-        target: &Target,
-        record: &InstanceRecord,
-        lineage: &Lineage<'_>,
-    ) -> ScheduleOutcome {
-        let observations: Vec<Observation<usize>> = lineage
-            .observations()
-            .filter(|o| self.labels.label_of_port(o.port) == Some(target.label))
-            .map(|o| Observation {
-                label: target.label,
-                member: o.node.member.unwrap_or(0),
-                fact: decode_output(o.bytes),
-                support: o.event,
-            })
-            .collect();
-        let view = MemberView::of(target.label, &observations);
-        let correct = correct_members(target, record);
-        let evaluation = evaluate(&view, &target.domain, &correct);
-        // Facts outside the domain that only some correct members hold: a fault made members
-        // derive something new (e.g. through an `anti_join`), and they disagree on it.
-        let divergent: Vec<Fact> = evaluation
-            .outside_domain
-            .iter()
-            .filter(|fact| !correct.iter().all(|m| view.holds(*m, fact)))
-            .cloned()
-            .collect();
-        if !evaluation.holds() || !divergent.is_empty() {
-            return ScheduleOutcome::Fails {
-                missing: evaluation.missing,
-                divergent,
-            };
-        }
-        if evaluation.required.is_empty() {
-            return ScheduleOutcome::Vacuous;
-        }
-        // `POST` needs every required `(member, fact)` pair. A hypothesis breaks it only by
-        // removing every observation of some pair, and so in particular that pair's first
-        // observation: it must kill a delivery of that observation's derivation. The union of
-        // the first observations' derivations is therefore a sound clause, and tighter than the
-        // union of every observation's.
-        let mut deps = Derivation::new();
-        for pair in &evaluation.held {
-            deps.extend(lineage.derivation(pair.supports[0]).iter().cloned());
-        }
-        ScheduleOutcome::Holds(deps)
+        fold.into_inner()
+            .finish(labels, tables, panic, start.elapsed())
     }
 
     /// Runs `faults` (once; later calls reuse the run) and reads every target's outcome.
@@ -303,98 +516,9 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
         if let Some(run) = self.runs.get(faults) {
             return run.clone();
         }
-        let (records, panic, wall) = self.execute(faults);
-        let run = Rc::new(self.read(faults, records, panic, wall, targets));
+        let run = Rc::new(self.execute(faults, targets, false, |_, _| {}));
         self.runs.insert(faults.clone(), run.clone());
         run
-    }
-
-    /// Reads a run's records for every target.
-    fn read(
-        &self,
-        faults: &FaultSet<MessageId>,
-        records: Vec<InstanceRecord>,
-        panic: Option<String>,
-        wall: Duration,
-        targets: &[Target],
-    ) -> Run {
-        let premises: FaultSet<MessageId> = faults
-            .iter()
-            .filter(|f| matches!(f, Fault::Crash { .. }))
-            .cloned()
-            .collect();
-        let schedules = records.len();
-        let mut labels: BTreeMap<usize, LabelRun> = targets
-            .iter()
-            .map(|t| {
-                (
-                    t.label,
-                    LabelRun {
-                        all_vacuous: schedules > 0,
-                        ..LabelRun::default()
-                    },
-                )
-            })
-            .collect();
-        let mut opaque_fallbacks = 0;
-        let panicked = panic.is_some().then(|| records.len().saturating_sub(1));
-        for (i, record) in records.into_iter().enumerate() {
-            let record = Rc::new(record);
-            if panicked == Some(i) {
-                // A program that panics under injected faults breaks every label.
-                for t in targets {
-                    let lr = labels.get_mut(&t.label).unwrap();
-                    lr.all_vacuous = false;
-                    lr.failure.get_or_insert_with(|| {
-                        Rc::new(Failure {
-                            missing: vec![],
-                            divergent: vec![],
-                            panic: panic.clone(),
-                            record: record.clone(),
-                        })
-                    });
-                }
-                continue;
-            }
-            let lineage = Lineage::new(&record.log, &self.tables);
-            for t in targets {
-                let outcome = self.outcome(t, &record, &lineage);
-                let lr = labels.get_mut(&t.label).unwrap();
-                match outcome {
-                    ScheduleOutcome::Holds(deps) => {
-                        lr.all_vacuous = false;
-                        let duplicate = lr.clauses.iter().any(|c| c.deps == deps);
-                        if !duplicate {
-                            lr.clauses.push(Clause {
-                                deps,
-                                sends: lineage.send_sequences().clone(),
-                                pre_heal_sends: lineage.pre_heal_sends().clone(),
-                                premises: premises.clone(),
-                            });
-                        }
-                    }
-                    ScheduleOutcome::Vacuous => {}
-                    ScheduleOutcome::Fails { missing, divergent } => {
-                        lr.all_vacuous = false;
-                        lr.failure.get_or_insert_with(|| {
-                            Rc::new(Failure {
-                                missing,
-                                divergent,
-                                panic: None,
-                                record: record.clone(),
-                            })
-                        });
-                    }
-                }
-            }
-            opaque_fallbacks += lineage.opaque_fallbacks();
-        }
-        Run {
-            labels,
-            schedules,
-            wall,
-            opaque_fallbacks,
-        }
     }
 
     /// The crash bounds of `target`'s search.
@@ -471,7 +595,7 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
     }
 
     fn check(&mut self) -> Results {
-        let (mut verdicts, targets, probe) = self.prepare(|_| {});
+        let (mut verdicts, targets, probe) = self.prepare(|_, _| {});
         for t in &targets {
             let result = self.search(t, &probe, &targets);
             verdicts[t.label] = Some(result);
@@ -503,10 +627,10 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
 
     /// Decides the labels that need no search, and runs the failure-free probe: the verdicts
     /// decided so far (by label index), the labels left to search (with their fact domains),
-    /// and the probe's run. `seen` gets the probe's records before they are read.
+    /// and the probe's run. `seen` gets each of the probe's records before it is read.
     fn prepare(
         &mut self,
-        seen: impl FnOnce(&[InstanceRecord]),
+        seen: impl FnMut(&Tables, &InstanceRecord),
     ) -> (Vec<Option<(Verdict, Stats)>>, Vec<Target>, Rc<Run>) {
         let plans = &self.labels.plans;
         let mut verdicts: Vec<Option<(Verdict, Stats)>> = vec![None; plans.len()];
@@ -535,55 +659,32 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
             }
         }
 
-        // Hypothesis 0: the failure-free probe learns every label's fact domain, then is read
-        // like any other run.
-        let (records, panic, wall) = self.execute(&FaultSet::new());
-        seen(&records);
+        // Hypothesis 0: the failure-free probe learns every label's fact domain as it reads
+        // each schedule (see `RunFold::read`).
+        let mut probe = self.execute(&FaultSet::new(), &targets, true, seen);
         for t in &mut targets {
-            let mut domain = BTreeSet::new();
-            for record in &records {
-                let observations: Vec<Observation<()>> = record
-                    .log
-                    .events()
-                    .iter()
-                    .filter_map(|e| match e {
-                        Event::Output {
-                            port, node, bytes, ..
-                        } if self.labels.label_of_port(*port) == Some(t.label) => {
-                            Some(Observation {
-                                label: t.label,
-                                member: node.member.unwrap_or(0),
-                                fact: decode_output(bytes),
-                                support: (),
-                            })
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                let view = MemberView::of(t.label, &observations);
-                domain.extend(learn_domain(&view, &correct_members(t, record)));
-            }
-            t.domain = domain;
+            t.domain = probe.domains.remove(&t.label).unwrap_or_default();
         }
         let (empty, targets): (Vec<Target>, Vec<Target>) =
             targets.into_iter().partition(|t| t.domain.is_empty());
         for t in empty {
-            if panic.is_some() {
+            let lr = probe.labels.remove(&t.label).unwrap_or_default();
+            if probe.panic.is_some() {
                 // The probe panicked before the label saw anything: still a counterexample.
-                targets_panicked(&mut verdicts, &t, &records, &panic, wall);
+                targets_panicked(&mut verdicts, &t, lr.failure.as_deref(), &probe);
             } else {
                 verdicts[t.label] = Some((
                     Verdict::Vacuous(VacuousReason::EmptyDomain),
                     Stats {
                         hypotheses: 1,
-                        schedules: records.len(),
-                        wall,
+                        schedules: probe.schedules,
+                        wall: probe.wall,
                         opaque_fallbacks: 0,
                     },
                 ));
             }
         }
-        let probe = Rc::new(self.read(&FaultSet::new(), records, panic, wall, &targets));
+        let probe = Rc::new(probe);
         self.runs.insert(FaultSet::new(), probe.clone());
         (verdicts, targets, probe)
     }
@@ -703,15 +804,15 @@ fn counterexample(
     }))
 }
 
-/// A label whose probe panicked before it observed anything.
+/// A label whose probe panicked before it observed anything; `failure` is the panic the probe's
+/// read recorded for it, if the panicking schedule left a record.
 fn targets_panicked(
     verdicts: &mut [Option<(Verdict, Stats)>],
     target: &Target,
-    records: &[InstanceRecord],
-    panic: &Option<String>,
-    wall: Duration,
+    failure: Option<&Failure>,
+    probe: &Run,
 ) {
-    let record = Rc::new(records.last().cloned().unwrap_or_default());
+    let record = failure.map_or_else(|| Rc::new(InstanceRecord::default()), |f| f.record.clone());
     verdicts[target.label] = Some((
         counterexample(
             FaultSet::new(),
@@ -720,14 +821,14 @@ fn targets_panicked(
             &Failure {
                 missing: vec![],
                 divergent: vec![],
-                panic: panic.clone(),
+                panic: probe.panic.clone(),
                 record,
             },
         ),
         Stats {
             hypotheses: 1,
-            schedules: records.len(),
-            wall,
+            schedules: probe.schedules,
+            wall: probe.wall,
             opaque_fallbacks: 0,
         },
     ));
