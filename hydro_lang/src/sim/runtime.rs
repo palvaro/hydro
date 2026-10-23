@@ -769,6 +769,136 @@ impl<T> SimHook for PassthroughSingletonHook<T> {
     }
 }
 
+/// A snapshot hook for a top-level unbounded `Optional`, which the simulator represents as a
+/// stream of versions (`singleton_intermediates`): null until the first version arrives, then
+/// some version.
+///
+/// Like [`SingletonHook`], each snapshot either keeps the last released state (which may be
+/// null) or moves forward to one of the versions produced since. With `passthrough`, used when
+/// a `TopLevelFoldHook` already chose which inputs the aggregate saw, the snapshot always moves
+/// to the latest version and makes no decision of its own.
+pub struct OptionalHook<T> {
+    input: Rc<RefCell<VecDeque<T>>>,
+    /// The decision made: the state to release (`None` is a null snapshot) and whether it is
+    /// new.
+    decision: Option<(Option<T>, bool)>,
+    last_released: Option<T>,
+    skipped_states: Vec<T>,
+    passthrough: bool,
+    output: Sender<T>,
+    batch_location: HookLocationMeta,
+    format_item_debug: fn(&T) -> Option<String>,
+}
+
+impl<T: Clone> OptionalHook<T> {
+    pub fn new(
+        input: Rc<RefCell<VecDeque<T>>>,
+        output: Sender<T>,
+        passthrough: bool,
+        batch_location: HookLocationMeta,
+        format_item_debug: fn(&T) -> Option<String>,
+    ) -> Self {
+        Self {
+            input,
+            decision: None,
+            last_released: None,
+            skipped_states: vec![],
+            passthrough,
+            output,
+            batch_location,
+            format_item_debug,
+        }
+    }
+}
+
+impl<T: Clone> SimHook for OptionalHook<T> {
+    fn current_decision(&self) -> Option<bool> {
+        self.decision.as_ref().map(|d| d.1)
+    }
+
+    fn can_make_nontrivial_decision(&self) -> bool {
+        !self.input.borrow().is_empty()
+    }
+
+    fn autonomous_decision<'a>(
+        &mut self,
+        driver: &mut Borrowed<'a>,
+        force_nontrivial: bool,
+    ) -> bool {
+        let mut current_input = self.input.borrow_mut();
+        if current_input.is_empty() {
+            if force_nontrivial {
+                panic!("Cannot make nontrivial decision when there is no input");
+            }
+            // Re-release the last state, which is null before the first version.
+            self.decision = Some((self.last_released.clone(), false));
+            false
+        } else if self.passthrough {
+            // Always the latest version; earlier ones are intermediates.
+            let item = current_input.pop_back().unwrap();
+            self.skipped_states.clear();
+            current_input.clear();
+            self.decision = Some((Some(item), true));
+            true
+        } else if !force_nontrivial && produce().generate(driver).unwrap() {
+            // Keep the last state (possibly null): the snapshot lags.
+            self.decision = Some((self.last_released.clone(), false));
+            false
+        } else {
+            let idx_to_release = (0..current_input.len()).generate(driver).unwrap();
+            self.skipped_states = current_input.drain(0..idx_to_release).collect();
+            let item = current_input.pop_front().unwrap();
+            self.decision = Some((Some(item), true));
+            true
+        }
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        let Some((to_release, is_new)) = self.decision.take() else {
+            panic!("No decision to release");
+        };
+
+        if let Some(log_writer) = log_writer {
+            let (batch_location, line, caret_indent) = self.batch_location;
+            let state = to_release
+                .as_ref()
+                .map(|t| format!("{:?}", ManualDebug(t, self.format_item_debug)))
+                .unwrap_or_else(|| "null".to_owned());
+            let note_str = match (is_new, self.skipped_states.is_empty()) {
+                (false, _) => format!("^ releasing unchanged snapshot: {state}"),
+                (true, true) => format!("^ releasing snapshot: {state}"),
+                (true, false) => format!(
+                    "^ releasing snapshot: {state} (skipping earlier states: {:?})",
+                    self.skipped_states
+                        .iter()
+                        .map(|s| ManualDebug(s, self.format_item_debug))
+                        .collect::<Vec<_>>()
+                ),
+            };
+
+            let _ = writeln!(
+                log_writer,
+                "{} {}",
+                "-->".color(colored::Color::Blue),
+                batch_location
+            );
+            let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+            let _ = writeln!(
+                log_writer,
+                " {}{}{}",
+                "|".color(colored::Color::Blue),
+                caret_indent,
+                note_str.color(colored::Color::Green)
+            );
+        }
+
+        if let Some(item) = to_release {
+            self.last_released = Some(item.clone());
+            self.output.try_send(item).unwrap();
+        }
+    }
+}
+
 pub struct KeyedSingletonHook<K: Hash + Eq + Clone, V: Clone> {
     input: Rc<RefCell<FxHashMap<K, VecDeque<V>>>>, // FxHasher is deterministic
     to_release: Option<Vec<(K, V, bool)>>,         // (key, data, is new)

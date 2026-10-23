@@ -1280,3 +1280,173 @@ fn sim_continue_if_failure_in_fuzz_repro_is_reported() {
                 .await;
         });
 }
+
+/// A top-level `reduce` on an unbounded stream is a stream of versions in the simulator, like
+/// a top-level `fold`, and its snapshot is null until the first input, then some prefix
+/// reduction.
+#[test]
+fn sim_top_level_reduce_unbounded() {
+    use std::collections::HashSet;
+
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+
+    let (in_send, input) = node.sim_input::<i32, TotalOrder, ExactlyOnce>();
+    let reduced = input.reduce(q!(|acc, v| *acc += v));
+    let out_recv = sliced! {
+        let snapshot = use::snapshot(reduced, nondet!(/** test */));
+        snapshot.into_stream()
+    }
+    .sim_output();
+
+    let mut observed = HashSet::new();
+    flow.sim().exhaustive(async || {
+        in_send.send_many([1, 2, 3]);
+        let all: Vec<i32> = out_recv.collect().await;
+        // Every snapshot is a prefix sum, and the last one sees every input.
+        assert!(all.iter().all(|v| [1, 3, 6].contains(v)), "{all:?}");
+        assert_eq!(all.last(), Some(&6));
+        observed.extend(all);
+    });
+    assert_eq!(observed, HashSet::from([1, 3, 6]));
+}
+
+/// The same with a commutative `reduce` on an unordered stream, whose fold hook already
+/// chooses which inputs the reduction sees.
+#[test]
+fn sim_top_level_reduce_commutative() {
+    use std::collections::HashSet;
+
+    use crate::live_collections::stream::NoOrder;
+    use crate::properties::manual_proof;
+
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+
+    let (in_send, input) = node.sim_input::<i32, NoOrder, ExactlyOnce>();
+    let reduced = input.reduce(q!(
+        |acc, v| *acc += v,
+        commutative = manual_proof!(/** addition is commutative */)
+    ));
+    let out_recv = sliced! {
+        let snapshot = use::snapshot(reduced, nondet!(/** test */));
+        snapshot.into_stream()
+    }
+    .sim_output();
+
+    let mut observed = HashSet::new();
+    flow.sim().exhaustive(async || {
+        in_send.send_many_unordered([1, 2, 4]);
+        let all: Vec<i32> = out_recv.collect().await;
+        assert_eq!(all.last(), Some(&7));
+        observed.extend(all);
+    });
+    // Every non-empty subset sum of {1, 2, 4} is reachable.
+    assert_eq!(observed, (1..=7).collect::<HashSet<_>>());
+}
+
+/// A retry cast alone (`AtLeastOnce` → `ExactlyOnce`, same order) is the identity in the
+/// simulator, which never duplicates a delivery.
+#[test]
+fn sim_retry_cast_is_identity() {
+    use crate::live_collections::stream::AtLeastOnce;
+
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+
+    let (in_send, input) = node.sim_input::<i32, TotalOrder, ExactlyOnce>();
+    let out_recv = input
+        .weaken_retries::<AtLeastOnce>()
+        .assume_retries::<ExactlyOnce>(nondet!(/** test */))
+        .sim_output();
+
+    let count = flow.sim().exhaustive(async || {
+        in_send.send_many([1, 2, 3]);
+        let all: Vec<i32> = out_recv.collect().await;
+        assert_eq!(all, vec![1, 2, 3]);
+    });
+    assert_eq!(count, 1, "a retry cast introduces no schedule choice");
+}
+
+/// `exhaustive_then` calls `after` once per explored execution, after it has finished.
+#[test]
+fn sim_exhaustive_then_calls_after_each_execution() {
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+    let tick = node.tick();
+    let (in_send, input) = node.sim_input::<i32, TotalOrder, ExactlyOnce>();
+    let out_recv = input
+        .batch(&tick, nondet!(/** test */))
+        .count()
+        .all_ticks()
+        .sim_output();
+
+    let mut runs = 0usize;
+    let mut afters = 0usize;
+    let count = flow.sim().compiled().exhaustive_then(
+        async || {
+            runs += 1;
+            in_send.send_many([1, 2]);
+            let _: Vec<usize> = out_recv.collect().await;
+        },
+        || afters += 1,
+    );
+    assert!(count > 1, "batching should give several executions");
+    assert_eq!(runs, count);
+    assert_eq!(afters, count);
+}
+
+/// `fuzz_bounded_then` runs exactly the requested number of executions.
+#[test]
+fn sim_fuzz_bounded_then_runs_exactly_n() {
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+    let tick = node.tick();
+    let (in_send, input) = node.sim_input::<i32, TotalOrder, ExactlyOnce>();
+    let out_recv = input
+        .batch(&tick, nondet!(/** test */))
+        .all_ticks()
+        .sim_output();
+
+    let mut afters = 0usize;
+    flow.sim().compiled().fuzz_bounded_then(
+        5,
+        async || {
+            in_send.send_many([1, 2, 3]);
+            let all: Vec<i32> = out_recv.collect().await;
+            assert_eq!(all, vec![1, 2, 3]);
+        },
+        || afters += 1,
+    );
+    assert_eq!(afters, 5);
+}
+
+/// `first_schedule` runs one execution, and always the same one.
+#[test]
+fn sim_first_schedule_is_deterministic() {
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+    let tick = node.tick();
+    let (in_send, input) = node.sim_input::<i32, TotalOrder, ExactlyOnce>();
+    let out_recv = input
+        .batch(&tick, nondet!(/** test */))
+        .count()
+        .all_ticks()
+        .sim_output();
+
+    let sim = flow.sim().compiled();
+    let mut seen: Vec<Vec<usize>> = Vec::new();
+    for _ in 0..3 {
+        let mut runs = 0usize;
+        let mut this_run = Vec::new();
+        sim.first_schedule(async || {
+            runs += 1;
+            in_send.send_many([1, 2, 3]);
+            this_run = out_recv.collect().await;
+        });
+        assert_eq!(runs, 1);
+        seen.push(this_run);
+    }
+    assert!(seen.iter().all(|s| s == &seen[0]), "{seen:?}");
+    assert_eq!(seen[0].iter().sum::<usize>(), 3);
+}

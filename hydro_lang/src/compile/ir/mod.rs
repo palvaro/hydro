@@ -5160,9 +5160,65 @@ impl HydroNode {
                                     && graph_builders.singleton_intermediates()
                                     && !node.metadata().collection_kind.is_bounded()
                                 {
-                                    todo!(
-                                        "Reduce with optional intermediates is not yet supported in simulator"
+                                    // As the top-level `Fold` above: a stream of versions of the
+                                    // accumulated value, one per (hooked batch of) input, none
+                                    // until the first input arrives.
+                                    let HydroNode::Reduce { input, .. } = &*node else { unreachable!() };
+                                    let hooked_input_ident = graph_builders.emit_fold_hook(
+                                        &input.metadata().location_id,
+                                        &input_ident,
+                                        &input.metadata().collection_kind,
+                                        &node.metadata().op,
                                     );
+
+                                    let (effective_input, wrapped_acc) = if let Some(ref hooked) = hooked_input_ident {
+                                        let acc: syn::Expr = parse_quote!({
+                                            let mut __inner = #f_tokens;
+                                            move |__state: &mut Option<_>, __batch: Vec<_>| {
+                                                // `None` would terminate the scan, as for the
+                                                // top-level `Fold` above.
+                                                if __batch.is_empty() {
+                                                    panic!("sim: TopLevelFoldHook released an empty batch; this would terminate the reduce's scan state");
+                                                }
+                                                for __value in __batch {
+                                                    if let Some(__acc) = __state.as_mut() {
+                                                        __inner(__acc, __value);
+                                                    } else {
+                                                        *__state = Some(__value);
+                                                    }
+                                                }
+                                                // Always `Some`: the state holds a value.
+                                                ::std::clone::Clone::clone(&*__state)
+                                            }
+                                        });
+                                        (hooked, acc)
+                                    } else {
+                                        let acc: syn::Expr = parse_quote!({
+                                            let mut __inner = #f_tokens;
+                                            move |__state: &mut Option<_>, __value| {
+                                                if let Some(__acc) = __state.as_mut() {
+                                                    __inner(__acc, __value);
+                                                } else {
+                                                    *__state = Some(__value);
+                                                }
+                                                // Always `Some`: the state holds a value.
+                                                ::std::clone::Clone::clone(&*__state)
+                                            }
+                                        });
+                                        (&input_ident, acc)
+                                    };
+
+                                    graph_builders.add_dfir_at(
+                                        &out_location,
+                                        parse_quote! {
+                                            #reduce_ident = #effective_input -> scan::<#lifetime>(|| None, #wrapped_acc);
+                                        },
+                                        Some(&stmt_id.to_string()),
+                                    );
+
+                                    if hooked_input_ident.is_some() {
+                                        fold_hooked_idents.insert(reduce_ident.to_string());
+                                    }
                                 } else if matches!(node, HydroNode::ReduceKeyed { .. })
                                     && node.metadata().location_id.is_top_level()
                                     && !(matches!(node.metadata().location_id, LocationId::Atomic(_)))
