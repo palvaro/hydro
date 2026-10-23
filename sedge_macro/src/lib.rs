@@ -758,27 +758,37 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
                 // One value per round to every member, as Cress feeds a cluster stream.
                 let n = size_var(s.loc);
                 quote!(
-                    let __send_round = async |__round: u64| -> ::std::result::Result<u64, ::std::string::String> {
+                    let __send_round = async |__round: u64, __flush: bool| -> ::std::result::Result<u64, ::std::string::String> {
                         for __m in 0..#n {
-                            #sedge::__private::futures::SinkExt::send(
+                            #sedge::__private::futures::SinkExt::feed(
                                 &mut #sk,
                                 (__m, <#item as #sedge::LoadItem>::from_id(__round)),
                             )
                             .await
                             .map_err(|e| ::std::string::ToString::to_string(&e))?;
                         }
+                        if __flush {
+                            #sedge::__private::futures::SinkExt::flush(&mut #sk)
+                                .await
+                                .map_err(|e| ::std::string::ToString::to_string(&e))?;
+                        }
                         ::std::result::Result::Ok(#n as u64)
                     };
                 )
             } else {
                 quote!(
-                    let __send_round = async |__round: u64| -> ::std::result::Result<u64, ::std::string::String> {
-                        #sedge::__private::futures::SinkExt::send(
+                    let __send_round = async |__round: u64, __flush: bool| -> ::std::result::Result<u64, ::std::string::String> {
+                        #sedge::__private::futures::SinkExt::feed(
                             &mut #sk,
                             <#item as #sedge::LoadItem>::from_id(__round),
                         )
                         .await
                         .map_err(|e| ::std::string::ToString::to_string(&e))?;
+                        if __flush {
+                            #sedge::__private::futures::SinkExt::flush(&mut #sk)
+                                .await
+                                .map_err(|e| ::std::string::ToString::to_string(&e))?;
+                        }
                         ::std::result::Result::Ok(1)
                     };
                 )
@@ -816,10 +826,15 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
                 let sk = sink_var(s);
                 quote!(
                     for __item in __inputs.#n.take() {
-                        #sedge::__private::futures::SinkExt::send(&mut #sk, __item)
+                        #sedge::__private::futures::SinkExt::feed(&mut #sk, __item)
                             .await
                             .map_err(|e| ::std::string::ToString::to_string(&e))?;
                         __n += 1;
+                    }
+                    if __flush {
+                        #sedge::__private::futures::SinkExt::flush(&mut #sk)
+                            .await
+                            .map_err(|e| ::std::string::ToString::to_string(&e))?;
                     }
                 )
             });
@@ -829,7 +844,7 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
                 fn __coerce<F: ::std::ops::FnMut(u64, &__Inputs)>(f: F) -> F { f }
                 let __inputs = __Inputs { #(#inits)* #(#member_inits)* };
                 let mut __user_round = __coerce(#closure);
-                let __send_round = async |__round: u64| -> ::std::result::Result<u64, ::std::string::String> {
+                let __send_round = async |__round: u64, __flush: bool| -> ::std::result::Result<u64, ::std::string::String> {
                     __user_round(__round, &__inputs);
                     let mut __n = 0u64;
                     #(#flushes)*

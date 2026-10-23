@@ -1151,7 +1151,7 @@ pub async fn execute<'a, F, E>(
     capacity: TrialCapacity,
 ) -> Executed
 where
-    F: AsyncFnMut(u64) -> Result<u64, E>,
+    F: AsyncFnMut(u64, bool) -> Result<u64, E>,
     E: fmt::Display,
 {
     let profile = spec.profile;
@@ -1582,8 +1582,13 @@ pub struct ProbePoint {
 /// The fraction of offered work a probe must complete to count as keeping up.
 pub const PROBE_GOODPUT: f64 = 0.95;
 
+/// The largest fraction of a probe's arrivals the generator may write late (more than 50 ms after
+/// their scheduled time) for the probe to count as keeping up.
+pub const PROBE_LATE: f64 = 0.01;
+
 /// Measures μ: the highest constant offered rate (rounds per second) at which goodput is at least
-/// [`PROBE_GOODPUT`] of what was offered and no level rises. Each rate is a fresh deployment,
+/// [`PROBE_GOODPUT`] of what was offered, no level rises, and the generator could write all but
+/// [`PROBE_LATE`] of the arrivals on time. Each rate is a fresh deployment,
 /// offered for `probe_step` after a warm-up of a third of that, so an overloaded probe cannot
 /// leave a backlog for the next. The search doubles (or halves) from the starting rate until it
 /// brackets μ, then bisects geometrically until the bracket is within 10 %.
@@ -1621,8 +1626,9 @@ where
         let ex = once(&spec).await;
         let p = judge_probe(&ex, &profile, rate, reference);
         eprintln!(
-            "    probe {rate:>9.1}/s: offered {:.1}/s, goodput {:.1}%, {}{}{} → {}",
+            "    probe {rate:>9.1}/s: offered {:.1}/s ({} late), goodput {:.1}%, {}{}{} → {}",
             p.offered_rate,
+            ex.late,
             p.goodput * 100.0,
             if p.rising.is_empty() {
                 "levels flat".to_owned()
@@ -1713,13 +1719,23 @@ fn judge_probe(ex: &Executed, profile: &Profile, rate: f64, reference: &mut Opti
             }
         }
     };
+    // A backlog that the program cannot keep up with grows by the excess of the offered rate over
+    // μ. Rising here means growing between the window's halves by more than 5 % of what was
+    // offered over half a window (and by more than 10 items), so that the noise of a small,
+    // healthy level is not read as falling behind.
+    let half = window.len() as f64 / 2.0;
+    let slack = (0.05 * rate * half).max(10.0);
     let rising: Vec<String> = w
         .gauge_halves()
         .into_iter()
-        .filter(|(_, first, second)| *second > first * 1.10 + 2.0)
+        .filter(|(_, first, second)| *second > first + slack)
         .map(|(n, _, _)| n)
         .collect();
     let harness_bound = ex.harness_bound();
+    // Arrivals the generator could not write on time: either the program pushed back (a full
+    // socket, so it is not keeping up) or the harness could not keep up; either way the rate was
+    // not offered open-loop.
+    let late_fraction = ex.late as f64 / ex.rounds.max(1) as f64;
     let throttled = if ex.usage.is_empty() {
         0.0
     } else {
@@ -1729,6 +1745,8 @@ fn judge_probe(ex: &Executed, profile: &Profile, rate: f64, reference: &mut Opti
         && rising.is_empty()
         && w.abandoned == 0
         && offered_rate >= 0.8 * rate
+        && offered_rate <= 1.25 * rate
+        && late_fraction <= PROBE_LATE
         && !harness_bound;
     if good && reference.is_none() && !ex.by_id {
         *reference = w
