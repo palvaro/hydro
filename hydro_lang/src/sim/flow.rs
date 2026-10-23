@@ -99,7 +99,7 @@ pub struct SimFlow<'a> {
 }
 
 /// An IR pass registered with [`SimFlow::with_ir_pass`].
-pub(crate) type IrPass<'a> = Box<dyn FnOnce(&mut [HydroRoot]) + 'a>;
+pub(crate) type IrPass<'a> = Box<dyn FnOnce(&mut Vec<HydroRoot>) + 'a>;
 
 impl<'a> SimFlow<'a> {
     /// Compiles the program with forward provenance tracking. Every item carries the set of
@@ -130,13 +130,16 @@ impl<'a> SimFlow<'a> {
     /// - [`IrPassStage::PostNetwork`] passes run on the final IR just before codegen (after
     ///   multi-version networks are spliced and dynamic membership is applied).
     ///
+    /// A pass may edit roots in place and append new ones (an observation tap's external
+    /// output is a root of its own).
+    ///
     /// For simulator-only instrumentation (observation taps, lineage rewrites, test oracles).
     #[cfg(feature = "hydrofrac")]
     #[cfg_attr(docsrs, doc(cfg(feature = "hydrofrac")))]
     pub fn with_ir_pass(
         mut self,
         stage: IrPassStage,
-        pass: impl FnOnce(&mut [HydroRoot]) + 'a,
+        pass: impl FnOnce(&mut Vec<HydroRoot>) + 'a,
     ) -> Self {
         self.ir_passes.push((stage, Box::new(pass)));
         self

@@ -39,7 +39,7 @@ Design rules:
 ```rust
 let mut flow = FlowBuilder::new();
 // ... program, with its `EventualConsistency` labels ...
-let check = hydrofrac::EcCheck::new(&mut flow);          // taps every label, adds the observer
+let check = hydrofrac::EcCheck::new(&mut flow);          // taps every label; the host checks them
 let sim = flow.sim().with_cluster_size(&members, 3).compiled();
 check.run(&sim, async || {                               // faults may strike while this drives inputs;
     send.send(Item(1));                                  // on return the network heals and the run quiesces
@@ -100,7 +100,7 @@ on the research branch at `0d801bbafc`:
 | Omission identity `(channel, sender, destination, wire bytes)` | **in** | settled (retrospective) |
 | Crash model: **positional only**, `crash(node after m)` | **in** | one fault names one message (O(1)), against a whole sent set (O(n)). Sent sets only pay where they enable schedule reduction, and in this corpus that saved ~1% of search time: B, 22 reduced searches, 977 schedules, ~5 s, almost all from one test (948 → 5). Where reduction doesn't apply, sent sets only add hypotheses (+47% overall with reduction off) |
 | Static order check (`order.rs`) + one schedule per hypothesis, with open sent sets | **phase 2, out of v1** | Sound as measured: all 125 B verdicts agree, and no reduced search saw a never-seen send. It's the remedy if a program's schedule space explodes (uniform broadcast's probe: >359k schedules), so it's documented and measured but not built until a real program needs it |
-| Generated EC spec: observer process, fixed fact domain from the failure-free probe, POST as a count over (correct member, fact) | **in**; the observer batches with a plain `batch` on its eager location (E3), not the research `Spec::accumulate`'s `BatchHook` / `NonDet::hooked` | the view is monotone by construction; this is what makes the inference sound (retrospective, wall 2; `spec_views.rs:63-95`) |
+| Generated EC spec: fixed fact domain from the failure-free probe, POST as "every correct member holds every domain fact some correct member holds" | **in**, evaluated **on the host** from per-member tap outputs: no observer process, no staged views, no `BatchHook` | the view is monotone by construction; this is what makes the inference sound (retrospective, wall 2; `spec_views.rs:63-95`). Why the host's view is as sound as the observer's: §4.7 |
 | Scalar labels checked at their input stream (`covered_by`) | **in** | already implemented in the research branch (`observe.rs:144-170`) |
 | Vacuity: empty fact domain is `Vacuous`; empty derivation is a vacuous run; crash-all and crash-all-but-one-of-the-checked-cluster are excluded | **in** | settled (`1538508755`; ablation doc on crash bounds) |
 | Heal at the end of the run closure (Molly's EFF, renamed) | **in**, as a convention | without it every retrying protocol has a meaningless omit-every-retry counterexample (§4.6) |
@@ -121,17 +121,17 @@ on the research branch at `0d801bbafc`:
 
 ### 4.1 Crate layout
 
-A new crate, `hydrofrac`, depending on `hydro_lang` with its `hydrofrac` feature (which implies `sim`; §6). It holds staged code (`q!`)
-the same way `hydro_std` does, so the generated-spec views (`spec_views.rs` today) move into it
-and stop being an ungated public module of `hydro_lang`. All hydrofrac logic lives in this crate;
-`hydro_lang` only gains the extension points in §6.
+A new crate, `hydrofrac`, depending on `hydro_lang` with its `hydrofrac` feature (which implies `sim`; §6). It is set up for staged
+code (`q!`) the same way `hydro_std` is. The generated-spec views (`spec_views.rs`, an ungated public module of
+`hydro_lang` on the research branch) are not carried over: the specification is evaluated on the host (§4.7).
+All hydrofrac logic lives in this crate; `hydro_lang` only gains the extension points in §6.
 
 Modules, with rough sizes ported or rewritten from the research branch:
 
 | module | content | ~lines |
 |---|---|---|
 | `observe` | label enumeration (`ec_collections`), `LabelPlan` / `NotChecked` / `covered_by`, the tap pass | 600 |
-| `spec` | observer, correct-member and fact feeds, the generated POST view (staged) | 350 |
+| `spec` | the generated POST, evaluated on the host over the taps' observations (§4.7) | 350 |
 | `fault` | `FaultState`: the per-send filter, positional crash points | 250 |
 | `lineage` | derivations from the event log: record provenance, with the execution rule as the fallback for opaque records | 700 |
 | `provenance` | the record-provenance IR rewrite (via E2) and its runtime tags | 1600 |
@@ -170,8 +170,9 @@ The execution rule is sound for every program; it only costs precision. The rese
 
 1. Run the failure-free probe; it learns the fact domain. An empty domain gives `Vacuous`. The probe
    is reused as hypothesis 0, so the failure-free run executes once, not twice as in the research branch.
-   - The probe's POST holds trivially, because the domain is empty while the probe runs. So its clauses come
-     from the records on the held-facts port, not from POST.
+   - The probe's POST is evaluated against the domain it has just learned, so a program whose members disagree
+     with no fault at all is a counterexample at hypothesis 0. Its clauses come from the same tap observations as
+     every other run's (§4.7).
 2. For each label, starting at crash bound 0: propose the minimal admissible fault set that kills every
    derivation seen so far. Run it over all schedules, or over `sample_schedules(n)` of them.
 3. If a correct member lacks a fact, report a counterexample. Otherwise the run's derivations become new
@@ -260,7 +261,53 @@ recovery has to deliver. The research branch called the end of that window `end_
 - **Every other harness.** Every other EC harness already ran with EFF at the end of the run (the default), and
   every body ends with a `quiesce().await`. So heal at the end of the closure reproduces what they measured.
 
-### 4.7 Output
+### 4.7 The specification is checked on the host
+
+The research branch evaluated the generated specification inside the program: taps sent every labelled element
+over a `fail_stop` channel to an **observer** process, and a staged view there (`spec_views::eventual_consistency`)
+computed `POST`. Lite computes the same `POST` on the host, from the taps' outputs:
+- **Taps:** a `PreNetwork` pass tees each checked collection, at every member, into an external output of its own
+  (the IR `sim_cluster_output` builds). Each element arrives through `SimNetworkHook::on_output` as
+  `(bincode, Debug)`, with the provenance rewrite's meta.
+- **The view:** for each member, the union of the facts its taps emitted (`spec::MemberView`).
+- **`POST`:** every correct member holds every domain fact that some correct member holds (`spec::evaluate`). The
+  domain is what correct members held in the failure-free probe (`spec::learn_domain`). This is the research
+  formula, unchanged.
+
+No observer process, no staged views, no `BatchHook`, and no eager location: an external output adds no schedule
+choice. E3 stays in core as a generic extension point, but lite does not use it.
+
+**Why this is as sound as the observer.** What makes the hitting-set inference sound is that a run's derivation of
+`POST` implies `POST`: a fault set that leaves every delivery of the derivation intact can't break it. The research
+branch got that from two facts: the domain is fixed, and the view only grows. With the domain and the correct
+members fixed, the derivation of `POST` is the deliveries behind every required `(member, fact)` pair, and a run
+that recomputes all of them satisfies `POST` again. Both facts carry over to the host unchanged, so what has to
+be checked is that the host sees the same `(member, fact)` pairs the observer would have:
+
+| concern | observer (research) | host (lite) |
+|---|---|---|
+| **The view only grows** | `Spec::accumulate`: facts so far, accumulated across the observer's ticks | a union of tap outputs, never retracted. A tap emits an element once it exists, and a stream's elements are never withdrawn |
+| **Facts in flight** | taps crossed a network channel the fault filter bypassed; quiescence delivered them before `POST` was read | taps are synchronous outputs of the execution that derived the element, so nothing is ever in flight between a member and the host. Network messages in flight at heal are still delivered: heal stops omissions and new crashes, and the check quiesces before reading the view |
+| **Facts from a member that crashes mid-run** | the member's later sends stop; its earlier taps arrive | the halted member emits nothing more; what it emitted before it crashed stays in the view, but the member is not correct, so it owes nothing, and `required` ranges over facts held by *correct* members, so its facts make nothing required. A domain fact only crashed members held is required of nobody, as in Molly: the correct members agree that nobody has it |
+| **The domain** | fed from the probe | the same: the facts correct members held in the probe, where every member is correct. Facts a faulty run produces outside the domain are reported (`outside_domain`), not required, which keeps the view a fixed function of its derivation (research `Spec::eventual_consistency`, "Why the domain is fixed") |
+| **Who is correct** | fed before the run from the hypothesis' planned crashes | decided **at the end of the run**: the members not halted. A crash point that never fires (its node never sends the message it names) leaves the member correct, and so obliged. This is stricter than the planned set, never weaker: excluding a member that never crashed could hide its disagreement. The run's clauses are conditional on the crashes that did fire (§4.4) |
+
+**What a fact is, and which labels are not checked.** A fact is an element of a labelled `Stream`, or an entry
+`(key, value)` of a labelled `KeyedStream`. Both only grow, so a union of what was emitted is the collection's
+contents. A `Singleton`, `Optional` or `KeyedSingleton` changes value, and a union of its versions is not its
+value: member A going `1 → 2` and member B going `2 → 1` have the same versions but disagree at the end. A union
+view would certify that run. So a scalar label is **not checked** (`NotCheckedReason::NotAStream`) unless it is
+**covered**: it is a `fold` / `reduce` (or keyed form) of a checked labelled stream, so the type system vouches
+that it is a deterministic function of that stream's contents (`commutative = ..` on an unordered input). Then the
+stream is checked instead. The test `an_overwritten_singleton_is_not_tapped` builds the `1 → 2` case under a
+deliberately wrong `manual_proof!` and fails if such a label is ever tapped or classified as checked.
+
+**A limitation inherited, not introduced.** The specification is set-based: it checks that members agree on a
+labelled stream's *contents*, not on its *order*. A `TotalOrder` labelled stream whose members see the same
+elements in different orders passes, and so does a covered `fold` over it. The research observer had the same
+limit. Order is the subject of the phase-2 order check (§3).
+
+### 4.8 Output
 
 - **The report:** one block per cluster, one row per label, with the sweep verdict (§4.5), hypotheses and the
   counterexample in source names.
@@ -274,8 +321,9 @@ recovery has to deliver. The research branch called the end of that window `end_
     so Mermaid misleads where it matters. A second "preview" backend is also against the one-convention rule.
   - Real samples of the research emitter's Mermaid output are in `docs/design/hydrofrac-lite-data/level/mermaid/`.
 - **Legibility fixes**, from the research branch's output, apply to the DOT backend:
-  - **Facts render as raw bincode** (`⇒ 01000000`). The observation taps ship `(index, bincode)`, and the
-    tap pass knows each label's element type, so the report decodes them with `Debug`.
+  - **Facts render as raw bincode** (`⇒ 01000000`). Each tap ships `(bincode, Debug)`: its closure is generated
+    for the concrete element type and picks the `Debug` rendering by autoref specialization, so reports print facts
+    as the program's values, and fall back to hex for types without `Debug`.
   - **Recovery repeats itself.** Heartbeat and retry rounds after a fault are mostly identical (the research
     branch's ISR diagram was 51 lines, mostly identical heartbeat/view rounds). Collapse consecutive identical
     rounds into one with a `×k` note.
@@ -342,7 +390,7 @@ Two principles:
 | id | extension point | size | justification |
 |---|---|---|---|
 | E1 | **Network hook:** the simulator calls an installed `dyn SimNetworkHook` on every `Network` send (it may drop the send, or deliver it with a `u64` tag), on every receive, at execution begin, at each tick boundary with **release attribution** (`on_release`: which received deliveries the tick consumed, needed by the execution rule, §4.2), and on external outputs (it may drop output from a dead node). It is `None` by default. | ~300 (builder.rs, graph.rs, compiled.rs, runtime.rs) | the single seam for any fault injection or network tracing in the simulator; zero cost when absent; replaces the research branch's hard-wired `record_sent`/`LineageOutputSender` and its `Released` events from hook policies |
-| E2 | **IR pass hook** on `SimFlow`: `with_ir_pass(stage, f)` with two stages that run in a declared order, plus `HydroRoot::input_mut`. `PreNetwork` runs before network compilation (observation taps add `Network` nodes); `PostNetwork` runs after it (the provenance rewrite has to see the compiled sends). The original plan's single pre-network stage was wrong for the rewrite (research `flow.rs:200` vs `:230`) | ~60 | lets external crates add sim-only instrumentation without core knowing about it; also useful for test oracles. Precedent on `90d9`'s line: `extension.rs::ir_mut` @ `4de7c45e41` |
+| E2 | **IR pass hook** on `SimFlow`: `with_ir_pass(stage, f)` with two stages that run in a declared order, plus `HydroRoot::input_mut`. A pass gets `&mut Vec<HydroRoot>`, so it can add roots (each tap is an external output of its own, §4.7). `PreNetwork` runs before network compilation (observation taps add `Network` nodes); `PostNetwork` runs after it (the provenance rewrite has to see the compiled sends). The original plan's single pre-network stage was wrong for the rewrite (research `flow.rs:200` vs `:230`) | ~60 | lets external crates add sim-only instrumentation without core knowing about it; also useful for test oracles. Precedent on `90d9`'s line: `extension.rs::ir_mut` @ `4de7c45e41` |
 | E3 | **Eager locations:** `SimFlow::with_eager_location(&Process)`, a location whose ticks run outside the schedule choice and that is excluded from the process count | ~40 | an observation-only location must not multiply schedules (64× more schedules on broadcast when the observer was explored). Replaces the research branch's match on `type_name::<Observer>()` (`built.rs:174-190`) |
 | E4 | **Read access to channel metadata:** a channel table recorded by `SimBuilder::create_network` (id, name, endpoints, transport kind: lossy or `fail_stop`) and exposed on `CompiledSim`; read accessors for location names, cluster members and node count (these back the crash bounds); `(de)serialize_bincode_with_type` exposed `pub(crate)` → `#[doc(hidden)] pub` | ~40 | the channel table and the tap serialization live in the hydrofrac crate rather than in core. Recording at `create_network` replaces the research `slice::compute`, which mirrors the emitter's statement counter |
 | E5 | **Send metadata on the simulator's wire:** with a hook installed, the wire is `(u64, Bytes)`, where the `u64` is the tag E1's `on_send` returned. A `PostNetwork` pass may make a `Network` or `SendExternal` input `(T, Meta)`; core peels the opaque `Meta` before serialising and hands it to `on_send`, and re-attaches the `u64` after deserialising (`(u64, T)`) for the pass's own map | ~100 (estimate) | record provenance has to cross the network; an opaque tag and an opaque side value keep provenance itself out of core |
@@ -371,7 +419,7 @@ as is and that is recorded here.
 
 | change | why it isn't needed |
 |---|---|
-| `create_network(.., input_element_type)` | breaks the public `DfirBuilder` trait only to print payloads; lite renders payloads from the observer side and abbreviates them |
+| `create_network(.., input_element_type)` | breaks the public `DfirBuilder` trait only to print payloads; lite renders facts from the taps (§4.8) and abbreviates payloads |
 | `broadcast_closed` rewrite (`flat_map_ordered` over `ClusterIds`) | changes codegen for every cluster→cluster broadcast only to hide the member-id list from the observation pass. In lite that list is checked like any other labelled collection. If such rows become noise, a suppression list in lite's own observation pass is the place to filter them, with no core change |
 | `pub mod spec_views` (ungated) | moves into the hydrofrac crate as staged code |
 | `Dfir::map_tick_closure` / `erase_guarded` | guards counterfactual replays that panic; lite doesn't replay. A program panicking under injected faults is reported as a counterexample |
@@ -438,7 +486,7 @@ as is and that is recorded here.
 3. The rest of the `hydrofrac` crate, in dependency order:
    - `fault` (on E1/E4) and `provenance` (on E2/E5, with the `leader_merge` opaque detection);
    - then `lineage`;
-   - then `observe`, then `spec` (eager observer, plain `batch`);
+   - then `observe`, then `spec` (host-side, §4.7);
    - then the `EcCheck` loop with heal and the sweep;
    - then `report` and `lamport`.
 4. The ported corpus, in order: `ec_ldfi.rs`, `ec_all_labels_classes.rs`, `ec_demos_ldfi.rs`, ABD (after its demo
@@ -452,7 +500,7 @@ as is and that is recorded here.
 
 Settled:
 1. **Crash model:** positional only; sent sets and schedule reduction are phase 2 (§3).
-2. **Lamport backend:** DOT only; Mermaid rejected because it can't draw messages in flight across a fault (§4.7).
+2. **Lamport backend:** DOT only; Mermaid rejected because it can't draw messages in flight across a fault (§4.8).
 3. **`trust_order_insensitive(site)`:** not in v1 (moot until phase 2).
 4. **Crate placement:** a separate `hydrofrac` crate; core only gets §6.2.
 5. **`broadcast_closed`:** not changed; any later noise is filtered in lite's observation pass.
