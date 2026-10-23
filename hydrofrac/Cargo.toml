@@ -19,10 +19,10 @@ highs = ["good_lp/highs"]
 workspace = true
 
 [dependencies]
-# TODO(hydrofrac-lite): also enable hydro_lang's `hydrofrac` feature once the core extension
-# points (E1–E5, docs/design/hydrofrac-lite.md §6.2) land.
+# `hydrofrac` enables the simulator extension points (E1–E5, docs/design/hydrofrac-lite.md §6.2);
+# it implies `sim`.
 hydro_lang = { path = "../hydro_lang", version = "^0.17.0-alpha.4", default-features = false, features = [
-    "sim",
+    "hydrofrac",
 ] }
 stageleft.workspace = true
 good_lp = { version = "1.15", default-features = false, features = ["microlp"] }
