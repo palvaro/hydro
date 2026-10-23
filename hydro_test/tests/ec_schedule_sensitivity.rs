@@ -1,9 +1,13 @@
 //! Which EC labels of the corpus have a schedule-sensitive causal cone: the static diagnostic
 //! `hydrofrac::provenance::sensitivity::label_cones`, over every corpus program (doc
-//! docs/design/hydrofrac-lite.md §7).
+//! docs/design/hydrofrac-lite.md §4.9, §7).
 //!
-//! No simulation: each program is built and its IR walked. Run with `--nocapture` for the
-//! table (tab-separated: program, label, operator, kind, sensitive?, summary, sites).
+//! No simulation: each program is built and its IR walked, by the order-insensitivity analysis
+//! (`Analysis::Calm`, what the check uses) and by the conservative walk it refines
+//! (`Analysis::Conservative`), which every program checks it against: the sharper analysis may
+//! only drop sites. Run with `--nocapture` for the tables (tab-separated: program, label,
+//! operator, kind, sensitive?, sensitive through its own cone?, summary, sites, discharged
+//! choices; the conservative walk's lines start with `OLD`).
 
 use std::collections::BTreeSet;
 
@@ -12,13 +16,60 @@ use hydro_lang::location::Location;
 use hydro_lang::networking::TCP;
 use hydro_lang::nondet::nondet;
 use hydro_lang::prelude::FlowBuilder;
-use hydrofrac::provenance::sensitivity::{LabelCone, label_cones, table};
+use hydrofrac::provenance::sensitivity::{
+    LabelCone, NondetSite, label_cones, label_cones_conservative, table,
+};
+
+/// Whether two sites are the same site (whatever the path that reached them).
+fn same_site(a: &NondetSite, b: &NondetSite) -> bool {
+    a.site == b.site && a.op == b.op && a.location == b.location
+}
+
+/// Checks that `calm` refines `old`, label by label: every site it reports, the conservative
+/// walk reports too, so every label it calls sensitive is sensitive there.
+fn assert_refines(program: &str, calm: &[LabelCone], old: &[LabelCone]) {
+    assert_eq!(calm.len(), old.len(), "{program}");
+    for (c, o) in calm.iter().zip(old) {
+        assert_eq!(
+            (c.collection.display_name(), &c.collection.op),
+            (o.collection.display_name(), &o.collection.op),
+            "{program}"
+        );
+        for site in &c.sites {
+            assert!(
+                o.sites.iter().any(|s| same_site(s, site)),
+                "{program} `{}`: {site} is not among the conservative walk's sites {:?}",
+                c.collection.display_name(),
+                o.sites
+            );
+        }
+        if c.schedule_sensitive() {
+            assert!(o.schedule_sensitive(), "{program}");
+        }
+    }
+}
+
+/// Both analyses of `flow`'s labels, printed; the conservative one must be refined.
+fn both(program: &str, flow: FlowBuilder<'_>) -> (Vec<LabelCone>, Vec<LabelCone>) {
+    let built = flow.finalize();
+    let calm = label_cones(built.ir());
+    let old = label_cones_conservative(built.ir());
+    print!("{}", table(program, &calm));
+    for line in table(program, &old).lines() {
+        println!("OLD\t{line}");
+    }
+    assert_refines(program, &calm, &old);
+    OLD.with(|o| o.borrow_mut().push(old.clone()));
+    (calm, old)
+}
+
+thread_local! {
+    /// The conservative cones of every program [`both`] analysed on this thread, in order.
+    static OLD: std::cell::RefCell<Vec<Vec<LabelCone>>> = const { std::cell::RefCell::new(vec![]) };
+}
 
 fn cones(program: &str, flow: FlowBuilder<'_>) -> Vec<LabelCone> {
-    let built = flow.finalize();
-    let cones = label_cones(built.ir());
-    print!("{}", table(program, &cones));
-    cones
+    both(program, flow).0
 }
 
 fn find<'c>(cones: &'c [LabelCone], name: &str) -> &'c LabelCone {
@@ -250,7 +301,40 @@ fn two_pc_committed_is_schedule_sensitive() {
     }
 }
 
-/// The whole corpus, for the table. Asserts only that every program's labels are found.
+/// Cooperative termination's race (docs §4.9, U1) is in `committed`'s own cone, not only in a
+/// sender's send order: a participant answers a query with what it has decided *in the tick
+/// the query arrives* (a join inside the tick), so the order-insensitivity analysis keeps the
+/// batches, naming the join. The cone is the same for any number of participants (the
+/// three-participant program is the one the false certificate was found on).
+#[test]
+fn two_pc_ctp_committed_is_sensitive_in_its_own_cone() {
+    let cones = two_pc(true);
+    let committed = cones
+        .iter()
+        .find(|c| c.collection.name.as_deref() == Some("committed"))
+        .expect("committed");
+    assert!(committed.existence_sensitive(), "{committed:?}");
+    assert!(
+        committed.sites.iter().any(|s| s.op == "batch"
+            && !s.send_order
+            && s.via.as_deref().is_some_and(|v| v.contains("Join"))),
+        "a batch, through the answers' join: {committed:?}"
+    );
+}
+
+/// The echoing broadcast's deliveries go through `filter_not_in` against the member's own
+/// history, which the order-insensitivity analysis discharges: its batch matters only for the
+/// order of the members' echoes (U2), so the label stays sensitive, through its senders only.
+#[test]
+fn the_echoing_broadcast_is_sensitive_only_through_its_senders() {
+    let cones = test_broadcast(true);
+    let deliveries = find(&cones, "deliveries");
+    assert!(deliveries.schedule_sensitive(), "{deliveries:?}");
+    assert!(!deliveries.existence_sensitive(), "{deliveries:?}");
+}
+
+/// The whole corpus, for the table. Asserts that every program's labels are found and prints
+/// the totals of both analyses (`SUMMARY`; docs §4.9).
 #[test]
 fn corpus_table() {
     let mut all: Vec<(String, Vec<LabelCone>)> = vec![];
@@ -272,23 +356,43 @@ fn corpus_table() {
     all.push(("broadcast (echo)".into(), test_broadcast(true)));
     all.push(("two_pc".into(), two_pc(false)));
     all.push(("two_pc (ctp)".into(), two_pc(true)));
-    let mut labels = 0;
-    let mut sensitive = 0;
-    let mut programs_sensitive: BTreeSet<String> = BTreeSet::new();
-    for (program, cones) in &all {
-        assert!(!cones.is_empty(), "{program}: no labels");
-        labels += cones.len();
-        for c in cones {
-            if c.schedule_sensitive() {
-                sensitive += 1;
-                programs_sensitive.insert(program.clone());
+    let old: Vec<Vec<LabelCone>> = OLD.with(|o| o.borrow().clone());
+    assert_eq!(old.len(), all.len());
+    let count = |which: &str,
+                 cones: &[(String, &Vec<LabelCone>)],
+                 f: &dyn Fn(&LabelCone) -> bool| {
+        let mut labels = 0;
+        let mut sensitive = 0;
+        let mut programs: BTreeSet<String> = BTreeSet::new();
+        for (program, cones) in cones {
+            assert!(!cones.is_empty(), "{program}: no labels");
+            labels += cones.len();
+            for c in cones.iter() {
+                if f(c) {
+                    sensitive += 1;
+                    programs.insert(program.clone());
+                }
             }
         }
-    }
-    println!(
-        "SUMMARY\t{labels} labels\t{sensitive} with a schedule-sensitive cone\t{} of {} programs: {programs_sensitive:?}",
-        programs_sensitive.len(),
-        all.len()
-    );
+        println!(
+            "SUMMARY\t{which}\t{labels} labels\t{sensitive} sensitive\t{} of {} programs: {programs:?}",
+            programs.len(),
+            cones.len()
+        );
+        sensitive
+    };
+    let calm: Vec<(String, &Vec<LabelCone>)> = all.iter().map(|(p, c)| (p.clone(), c)).collect();
+    let conservative: Vec<(String, &Vec<LabelCone>)> = all
+        .iter()
+        .zip(&old)
+        .map(|((p, _), c)| (p.clone(), c))
+        .collect();
+    let old_total = count("conservative", &conservative, &|c| c.schedule_sensitive());
+    let old_u1 = count("conservative, own cone (U1)", &conservative, &|c| {
+        c.existence_sensitive()
+    });
+    let new_total = count("calm", &calm, &|c| c.schedule_sensitive());
+    let new_u1 = count("calm, own cone (U1)", &calm, &|c| c.existence_sensitive());
+    assert!(new_total <= old_total && new_u1 <= old_u1);
     let _ = find(&all[0].1, all[0].1[0].collection.display_name());
 }

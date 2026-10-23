@@ -476,14 +476,22 @@ fn rows_carry_the_normalized_counterexample() {
     assert_eq!(capped[delivered.index].tolerates, "1");
 }
 
-/// The two-member exchange, but each member batches what it collected before it reports it:
-/// the label still holds under every admissible fault set (a batch only delays), but its
-/// search can no longer certify it, since its fault sets now have several executions
-/// (docs/design/hydrofrac-lite.md §4.9). Explored exhaustively, its few fault sets are
-/// enumerated instead ([`Verdict::CertifiedByEnumeration`]); sampled, the search ends
-/// [`Verdict::Exhausted`].
+/// The two-member exchange, but each member batches what it collected before it reports it,
+/// and reports a tick's batch only if the tick's count of it is positive (a `filter_if` that
+/// never filters anything out, but reads the tick): the label still holds under every
+/// admissible fault set (a batch only delays), but its search can no longer certify it, since
+/// its fault sets now have several executions and the order-insensitivity analysis cannot see
+/// that the snapshot is harmless (docs/design/hydrofrac-lite.md §4.9). Explored exhaustively,
+/// its few fault sets are enumerated instead ([`Verdict::CertifiedByEnumeration`]); sampled,
+/// the search ends [`Verdict::Exhausted`]. Without the snapshot (`batched_exchange_with(..,
+/// false)`) the batch is discharged and the label is certified by its search.
 #[cfg(stageleft_runtime)]
 fn batched_exchange(check: EcCheck) -> Results {
+    batched_exchange_with(check, true)
+}
+
+#[cfg(stageleft_runtime)]
+fn batched_exchange_with(check: EcCheck, snapshot: bool) -> Results {
     let mut flow = FlowBuilder::new();
     let source = flow.process::<()>();
     let members = flow.cluster::<()>();
@@ -497,10 +505,17 @@ fn batched_exchange(check: EcCheck) -> Results {
         .values()
         .weaken_consistency();
     let tick = members.tick();
-    let delivered = initial
+    let batch = initial
         .weaken_ordering::<NoOrder>()
         .merge_unordered(echoed)
-        .batch(&tick, nondet!(/** which tick a delivery lands in */))
+        .batch(&tick, nondet!(/** which tick a delivery lands in */));
+    let batch = if snapshot {
+        let arrived = batch.clone().count().map(q!(|n| n > 0));
+        batch.filter_if(arrived)
+    } else {
+        batch
+    };
+    let delivered = batch
         .all_ticks()
         .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
             /** claimed: one correct recipient echoes to the other */
@@ -549,6 +564,27 @@ fn a_schedule_sensitive_label_is_exhausted_not_certified() {
         .find(|r| r.collection == "delivered")
         .unwrap();
     assert_eq!(row.verdict, "exhausted");
+}
+
+/// The batched exchange without the snapshot: its batch reaches the label through `all_ticks`
+/// only, so the order-insensitivity analysis discharges it (§4.9), the label has no site, and
+/// its search certifies it, on sampled schedules too (the brute force agrees:
+/// `brute_force_agrees_on_a_monotone_batched_echo`).
+#[cfg(stageleft_runtime)]
+#[test]
+fn a_batch_with_a_monotone_downstream_is_certified_by_the_search() {
+    let results = batched_exchange_with(EcCheck::new().sample_schedules(16), false);
+    let label = results.label("delivered");
+    assert!(label.plan.sites.is_empty(), "{results}");
+    assert!(
+        matches!(
+            label.verdict,
+            Verdict::Certified {
+                tolerates: Tolerance::All
+            }
+        ),
+        "{results}"
+    );
 }
 
 /// `assert_holds` rejects an exhausted search, and says why; `assert_no_counterexample` accepts
