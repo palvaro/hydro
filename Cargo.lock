@@ -2924,10 +2924,14 @@ dependencies = [
 name = "hydrofrac"
 version = "0.0.0"
 dependencies = [
+ "bincode",
  "good_lp",
  "hydro_lang",
+ "hydro_std",
+ "serde",
  "stageleft",
  "stageleft_tool",
+ "syn 2.0.111",
 ]
 
 [[package]]
