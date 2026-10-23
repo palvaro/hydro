@@ -1,6 +1,7 @@
 # hydrofrac-lite: design plan
 
-Status: proposal, revised after review. A fresh branch that shares no files with the research line
+Status: implemented on branch `hydrofrac-lite`; this document is the plan revised to match what was built. A fresh
+branch that shares no files with the research line
 (`hydrofrac-input-coverage` @ `0d801bbafc`, "the research branch" below), which stays as the
 record of every optimization that was explored.
 
@@ -80,8 +81,9 @@ Conventions that replace the research branch's per-harness calls:
   restriction used to express ("holds if the coordinator stays up"), the crash sweep now reports (§4.5);
 - **the fault model is the transport type** (lossy channels admit omission, `fail_stop` channels only
   their sender's crash);
-- **heal when the run closure returns** (§4.6): omissions are admitted only while the closure runs, and
-  crashes persist;
+- **heal at the end of the run** (§4.6): faults are admitted while the closure drives inputs and while the work it
+  caused settles; then the network heals (no more omissions or new crashes; crashes that happened persist) and the
+  run quiesces again;
 - **the crash sweep is the output**: for each label, the largest number of crashes it tolerates and a
   counterexample one crash beyond that (§4.5);
 - the program's own consistency assertions are skipped automatically under the check;
@@ -104,11 +106,12 @@ on the research branch at `0d801bbafc`:
 | Sender-side filter on every `Network` send, transport type as fault model | **in** | the redesign that made every channel a fault point by construction; the consumer-side seam was closed (retrospective, "Fault point and fault model") |
 | Omission identity `(channel, sender, destination, wire bytes)` | **in** | settled (retrospective) |
 | Crash model: **positional only**, `crash(node after m)` | **in** | one fault names one message (O(1)), against a whole sent set (O(n)). Sent sets only pay where they enable schedule reduction, and in this corpus that saved ~1% of search time: B, 22 reduced searches, 977 schedules, ~5 s, almost all from one test (948 → 5). Where reduction doesn't apply, sent sets only add hypotheses (+47% overall with reduction off) |
-| Static order check (`order.rs`) + one schedule per hypothesis, with open sent sets | **phase 2, out of v1** | Sound as measured: all 125 B verdicts agree, and no reduced search saw a never-seen send. It's the remedy if a program's schedule space explodes (uniform broadcast's probe: >359k schedules), so it's documented and measured but not built until a real program needs it |
+| Static order check (`order.rs`): its cone walk | **in**, for certification only | ported as the conservative schedule-sensitivity walk that decides which labels can be certified at all (§4.9) |
+| One schedule per hypothesis, with open sent sets (schedule reduction) | **phase 2, out of v1** | All 125 B verdicts agree with A, and no reduced search saw a never-seen send; but A's certificates on schedule-sensitive labels are not ground truth (§4.9), so that agreement says less than it seemed to. It's the remedy if a program's schedule space explodes (uniform broadcast's probe: >359k schedules), so it's documented and measured but not built until a real program needs it |
 | Generated EC spec: fixed fact domain from the failure-free probe, POST as "every correct member holds every domain fact some correct member holds" | **in**, evaluated **on the host** from per-member tap outputs: no observer process, no staged views, no `BatchHook` | the view is monotone by construction; this is what makes the inference sound (retrospective, wall 2; `spec_views.rs:63-95`). Why the host's view is as sound as the observer's: §4.7 |
 | Scalar labels checked at their input stream (`covered_by`) | **in** | already implemented in the research branch (`observe.rs:144-170`) |
 | Vacuity: empty fact domain is `Vacuous`; empty derivation is a vacuous run; crash-all and crash-all-but-one-of-the-checked-cluster are excluded | **in** | settled (`1538508755`; ablation doc on crash bounds) |
-| Heal at the end of the run closure (Molly's EFF, renamed) | **in**, as a convention | without it every retrying protocol has a meaningless omit-every-retry counterexample (§4.6) |
+| Heal at the end of the run (Molly's EFF, renamed) | **in**, as a convention | without it every retrying protocol has a meaningless omit-every-retry counterexample (§4.6) |
 | Crash sweep: bound 0, 1, 2, …, keeping learned clauses | **in**, as the default output | derivations don't depend on the bound, so raising it is cheap. It replaces restricted crashable sets and `crash_budget` (§4.5) |
 | Restricted crashable sets (`.crashable(..)` on a subset) | **out** | every node is crashable; the sweep reports what a restriction used to assume (§4.5) |
 | PRE, preserve points, `required` | **out** | the generated EC spec has no PRE; `required` is always empty on the EC path |
@@ -132,19 +135,23 @@ code (`q!`) the same way `hydro_std` is. The generated-spec views (`spec_views.r
 `hydro_lang` on the research branch) are not carried over: the specification is evaluated on the host (§4.7).
 All hydrofrac logic lives in this crate; `hydro_lang` only gains the extension points in §6.
 
-Modules, with rough sizes ported or rewritten from the research branch:
+Modules, with the planned size and the size as built (lines of non-test source files, doc comments included):
 
-| module | content | ~lines |
-|---|---|---|
-| `observe` | label enumeration (`ec_collections`), `LabelPlan` / `NotChecked` / `covered_by`, the tap pass | 600 |
-| `spec` | the generated POST, evaluated on the host over the taps' observations (§4.7) | 350 |
-| `fault` | `FaultState`: the per-send filter, positional crash points | 250 |
-| `lineage` | derivations from the event log: record provenance, with the execution rule as the fallback for opaque records | 700 |
-| `provenance` | the record-provenance IR rewrite (via E2) and its runtime tags | 1600 |
-| `search` | the Molly loop, crash bounds, vacuity, the hitting-set ILP | 650 |
-| `report` | per-label report, names | 600 |
-| `lamport` | trace extraction + one diagram backend | 450 |
-| **total** | | **≈5.1k**, against ≈12.7k of logic in the research branch |
+| module | content | planned | built |
+|---|---|---|---|
+| `observe` | label enumeration (`ec_collections`), `LabelPlan` / `NotChecked` / `covered_by`, the tap pass, source names | 600 | 1,945 |
+| `spec` | the generated POST, evaluated on the host over the taps' observations (§4.7) | 350 | 296 |
+| `fault` | `FaultHook` (a `SimNetworkHook`): the per-send filter, positional crash points, heal, the event log | 250 | 573 |
+| `lineage` | derivations from the event log: record provenance, with the execution rule as the fallback for opaque records | 700 | 459 |
+| `provenance` | the record-provenance IR rewrite (via E2) and its runtime tags; the schedule-sensitivity walk (§4.9) | 1600 | 2,287 |
+| `search` | crash bounds, vacuity, the hitting-set ILP, the crash sweep | 650 | 1,167 |
+| `check` | `EcCheck`: the loop, heal, verdicts and results, the enumeration (§4.9) and the test-only brute-force cross-check | (in `search`) | 2,588 |
+| `report` | per-label report, names | 600 | 275 |
+| `lamport` | trace extraction + the DOT backend | 450 | 1,407 |
+| **total** | | **≈5.1k** | **≈11.0k**, against ≈12.7k of logic in the research branch |
+
+The overrun is mostly in what the plan didn't foresee: the schedule-sensitivity walk and the enumeration (§4.9), the
+source-name and fact rendering for readable reports, and the DOT layout carried over whole. Tests are another ≈5.3k.
 
 ### 4.2 Lineage
 
@@ -154,23 +161,25 @@ provenance rewrite tags records as they flow through operators, and sends carry 
 network. The support of an observation is the deliveries its record's tags name, closed backwards
 through the sends that carried them.
 
-Where the rewrite can't see into a record (a closure that takes state by `&`/`&mut`), the record is
-opaque and its support falls back to the **execution rule**:
-- a tick execution depends on the arrivals released into it and on earlier executions at its node;
-- an async run depends on what it received.
+Where the rewrite can't see into a record (an operator it leaves as an island, such as `ResolveFutures*` or
+a multi-version network, or a receive with no tag), the record is opaque and its support falls back to the
+**execution rule**: a record produced in execution X at node n depends on every delivery n received before X
+ended, in program order.
 
 The execution rule is sound for every program; it only costs precision. The research branch's
 `record_closure` and `closure` (`ldfi.rs:3370`, `:3966`) are these two rules.
-- **What "released into it" needs:** on the research branch, a tick's arrivals came from the hook policies'
-  `Released` events, which lite drops. So E1 reports release attribution at each tick boundary
-  (`on_release`: which received deliveries the tick consumed), and `closure` loses its hook-release arm.
-- **Known opaque case, `leader_merge`:** the research rewrite mishandles `entries_partially_ordered` on a keyed
-  stream, so `leader_merge` was compiled without provenance there (`ec_demos_ldfi.rs:216-225`). Lite always
-  rewrites, so the rewrite detects this operator shape and marks its records opaque rather than emitting wrong code,
-  with a test.
-  - The consequence is precision only: those records take the execution rule. Run C measured `leader_merge` at
-    the same cost under Execution as under Precise (§5), so on this corpus the fallback should cost nothing.
-  - A proper rewrite for the operator can come later if the fallback turns out to cost much.
+- **No release attribution needed:** on the research branch, a tick's arrivals came from the hook policies'
+  `Released` events, which lite drops. The plan was an `on_release` callback in E1; it was dropped as too
+  invasive (it would thread item identity through every hook buffer). E1's callbacks arrive in strict program
+  order instead (receives interleaved with execution begin and end), so "every receive at the node before the
+  execution ended" is directly computable. It is coarser than "what the tick consumed", and still sound.
+- **State read by reference** (`by_ref` / `by_mut` closures) is a sound over-approximation: the record names
+  every delivery the state was built from, so it stays `Ids`, not opaque.
+- **`leader_merge` is precise, not opaque.** The research rewrite mishandled `entries_partially_ordered` on a keyed
+  stream, so `leader_merge` was compiled without provenance there (`ec_demos_ldfi.rs:216-225`). The cause was a
+  keyed→flat `ObserveNonDet` whose metadata had the wrong shape. Lite keeps the node's metadata honest
+  (`(K, Tagged<V>)`) and converts after it; a test checks that every replica record names the right writer's
+  delivery. Every corpus program runs instrumented with 0 opaque records and no islands.
 
 ### 4.3 The loop
 
@@ -209,9 +218,15 @@ Writing it as an ILP keeps it short; the model is about 150 lines.
   certificates stay certificates.
 - **Why not HiGHS:** HiGHS is the reason `cargo test` on `hydro_std`/`hydro_test` currently needs cmake ≥ 3.15,
   libclang and a C++ toolchain, and it is used nowhere else.
-- **Risk, speed:** `microlp` has no presolve or cuts, and the dense no-good rows are its worst case. Benchmark
-  against HiGHS on the largest EC search before committing, and set `opt-level = 3` for `microlp` in dev
-  builds. If it's too slow, HiGHS stays available behind an opt-in feature.
+- **Speed, measured:** `microlp` has no presolve or cuts, and dense no-good rows are its worst case. The model
+  therefore writes only rows that can cut something off (`ilp::Model::Lean`): a tried set gets an explicit
+  no-good only when no cover or vacuous row already excludes it, which in a learning search is almost never.
+  On a synthetic learning search (6 nodes × 20 sends, cap 2) that is 6 / 16 / 25 ms per hypothesis at
+  100 / 200 / 300 hypotheses, against 15 / 29 / 84 ms with every row; 80 random instances check that both
+  models agree on feasibility and optimal cost. `opt-level = 3` is set for `microlp` in dev builds.
+- **HiGHS:** available behind the opt-in `highs` feature of `hydrofrac`, with a cross-check and a benchmark
+  written but `#[ignore]`d. Neither has been run: HiGHS needs cmake ≥ 3.15 and libclang, which the
+  development machine lacks.
 - **Fix to carry over:** the research branch's tie-break weight `0.5/n` can add up to more than one fault,
   so for sets of size ≥ 3 a k-set can cost more than a (k+1)-set. Use `0.5/(n·n)`.
 
@@ -260,8 +275,10 @@ Every node is crashable, and the output for each label is a **crash sweep**, not
 - **What replaces restricted crashable sets.** The research branch answered questions like "does 2PC commit if the
   coordinator stays up?" by making only some nodes crashable (2PC `…with_the_coordinator_correct`: two
   certificates, two vacuous). Under the sweep, the same question is answered by the bound at which 2PC's labels
-  break and the counterexample that breaks them: expected to be one crash, naming the coordinator (to be confirmed
-  when 2PC is ported, §7). The sweep gives one witness per label, not a
+  break and the counterexample that breaks them. Measured (§7): plain 2PC's `committed`, `prepares` and `commits`
+  tolerate 0 crashes and break at 1 with the coordinator's crash; with cooperative termination, `prepares` and
+  `commits` do the same and `committed` finds no counterexample with 2 participants, and breaks at 2 crashes with
+  3. The sweep gives one witness per label, not a
   characterisation of which nodes must stay up. Enumerating every minimal (k+1)-crash counterexample (a no-good
   per counterexample, then continue) is a natural extension, but not in v1.
 
@@ -296,7 +313,8 @@ recovery has to deliver. The research branch called the end of that window `end_
 - **Gossip.** Its sibling harness `ec_demo_g_set_gossip_certifies` drives the same rounds without EFF and
   certifies with the same counts (13 hypotheses, 104 schedules, `rec-positional.tsv`), because gossip's channels are
   `fail_stop` and admit no omission. Heal at the end should therefore keep gossip's certificates (`crdt_gossip.rs`
-  `:54`, `:84`, `:138`). Confirm this when gossip is ported (§7).
+  `:54`, `:84`, `:138`). Confirmed for `all_elements` and the G-Set when gossip was ported; the `echo` hop now
+  breaks at 1 crash, since a member may crash mid-round (§7).
 - **Every other harness.** Every other EC harness already ran with EFF at the end of the run (the default), and
   every body ends with a `quiesce().await`. So heal at the end of the closure reproduces what they measured.
 
@@ -307,7 +325,9 @@ over a `fail_stop` channel to an **observer** process, and a staged view there (
 computed `POST`. Lite computes the same `POST` on the host, from the taps' outputs:
 - **Taps:** a `PreNetwork` pass tees each checked collection, at every member, into an external output of its own
   (the IR `sim_cluster_output` builds). Each element arrives through `SimNetworkHook::on_output` as
-  `(bincode, Debug)`, with the provenance rewrite's meta.
+  `(identity, Debug)`, with the provenance rewrite's meta. The identity is the element's bincode if its type is
+  `Serialize`, else its `Debug` string, else a `Hash` digest (chosen by autoref specialization; `hydro_std`'s
+  `Durable<T>` is deliberately not `Serialize`). A `Debug` identity is only as good as `Debug` is injective.
 - **The view:** for each member, the union of the facts its taps emitted (`spec::MemberView`).
 - **`POST`:** every correct member holds every domain fact that some correct member holds (`spec::evaluate`). The
   domain is what correct members held in the failure-free probe (`spec::learn_domain`). This is the research
@@ -352,17 +372,18 @@ limit. Order is the subject of the phase-2 order check (§3).
   counterexample in source names.
 - **The diagram:** a Lamport diagram for each counterexample, from the failing schedule's trace (always
   kept). The heal point is marked on every lane.
-- **Backend: DOT only** (the research branch's Lamport layout, ~430 lines). Always write the `.dot`;
-  also write an `.svg` when Graphviz's `dot` is on `PATH`, so no new build dependency.
+- **Backend: DOT only** (the research branch's Lamport layout, with fixed positions). Always write the `.dot`;
+  also write an `.svg` (rendered with `neato -n2`) when Graphviz is on `PATH`, so no new build dependency.
   - **Why not Mermaid:** a `sequenceDiagram` draws every message as one horizontal arrow, so a message sent
     before a crash and delivered after it is drawn as if the dead node sent it (see the broadcast render in
     `docs/design/hydrofrac-lite-img/broadcast_live_sender_crash.png`). In-flight messages across a fault are exactly what counterexamples are about,
     so Mermaid misleads where it matters. A second "preview" backend is also against the one-convention rule.
   - Real samples of the research emitter's Mermaid output are in `docs/design/hydrofrac-lite-data/level/mermaid/`.
 - **Legibility fixes**, from the research branch's output, apply to the DOT backend:
-  - **Facts render as raw bincode** (`⇒ 01000000`). Each tap ships `(bincode, Debug)`: its closure is generated
+  - **Facts render as raw bincode** (`⇒ 01000000`). Each tap ships `(identity, Debug)`: its closure is generated
     for the concrete element type and picks the `Debug` rendering by autoref specialization, so reports print facts
-    as the program's values, and fall back to hex for types without `Debug`.
+    as the program's values (staged module paths shortened, `MemberId::<Client>(0)` as `Client@0`), and fall back
+    to hex for types without `Debug`.
   - **Message payloads render as raw bincode** (`peer[..]: 0100000001000000`). The host sees only a message's
     bytes, so the provenance rewrite renders the payload with `Debug` at the send, where the channel's element
     type is known (the same autoref specialization), and appends it to the send's metadata after the lineage
@@ -531,17 +552,23 @@ are run P (Precise, `rec-ec-precise.tsv`) and run E (Execution, `rec-ec-exec.tsv
   enabling provenance stops being a user call. (`90d9` has its own, unrelated `SimFlow::with_provenance`; see §6.2
   for how it is folded.)
 - **Opaque records fall back to the execution rule.** Counterfactual replay stays out. Replay only ever served
-  records the rewrite can't see into (closures taking `&`/`&mut` state, `provenance.rs:520`) and programs
-  compiled without provenance, which lite rules out by construction. The execution rule is sound, so the
-  fallback costs precision only where records are opaque.
-- **Unmeasured:** that "provenance without replay" variant. It's the first benchmark of step 4 in §8: count
-  the opaque fallbacks in the EC corpus (the research branch logs `replays` / `replay_fallbacks` per schedule)
-  and compare with run P.
+  records the rewrite can't see into (on the research branch, closures taking `&`/`&mut` state,
+  `provenance.rs:520`) and programs compiled without provenance, which lite rules out by construction. Lite's
+  rewrite tracks state read by reference as a sound over-approximation instead (§4.2). The execution rule is
+  sound, so the fallback costs precision only where records are opaque.
+- **Measured: "provenance without replay" costs nothing on this corpus.** Every corpus program runs instrumented
+  with 0 opaque records and no islands, so the execution-rule fallback never fires there. Against the research
+  records (run P's harnesses), lite needs fewer hypotheses on most ported main labels (reliable broadcast
+  49 → 25, uniform 105 → 38–84, gossip 13 → 10, ABD reliable 24 → about 21) and somewhat more on multi-Paxos
+  `learned` (26 → about 30, once the completed universe and the sensitive-label heuristic are in). The sampled
+  searches vary from run to run.
 - **What this costs lite:**
-  - the provenance rewrite (`sim/provenance.rs`, ~900 lines of logic) and its runtime
-    (`runtime/provenance.rs`, ~700) move into the `hydrofrac` crate, entering through E2;
+  - the provenance rewrite lives in the `hydrofrac` crate (`provenance/`), entering through E2. Its generated
+    code may name only `hydro_lang` and std (a simulation dylib cannot link `hydrofrac`), so it reuses `90d9`'s
+    existing `hydro_lang::sim::provenance::{Tagged, Tag, TagSet, apply1}` as its runtime;
   - core gains E5 (§6.2): sends carry an opaque tag on the simulator's wire.
-  - What stays out: replay, the hook policies, `erase_guarded` and `map_tick_closure`.
+  - What stays out: replay, the hook policies and `erase_guarded`. (`map_tick_closure` came back, doc-hidden,
+    for the panic guard, E6.)
   - The one known opaque operator shape, keyed `entries_partially_ordered` (`leader_merge`), is detected and
     marked opaque (§4.2).
 
@@ -550,8 +577,10 @@ are run P (Precise, `rec-ec-precise.tsv`) and run E (Execution, `rec-ec-exec.tsv
 Two principles:
 - **Nothing changes for anyone who does not enable `hydrofrac`.** Today the research branch's send filter,
   event log and provenance modules are gated only by `sim`, so every simulator user pays for an unbounded
-  log and cloned send bytes. Lite gates all of it behind a `hydrofrac` feature of `hydro_lang`, so
-  nothing runs when the feature is off.
+  log and cloned send bytes. Lite gates all of it behind a `hydrofrac` feature of `hydro_lang`, and even with
+  the feature on, codegen changes only for a flow that opts in (`with_network_hook_points()`). The one exception
+  is the panic guard (E6), which every simulator user gets: one handler call per tick poll, and no change in
+  behaviour unless the program panics.
 - **Extension points, not hydrofrac logic.** Each one is generic, small and testable without hydrofrac.
 
 ### 6.1 Independent fixes (land first, separate PRs, valuable on their own)
@@ -560,49 +589,52 @@ Two principles:
 |---|---|---|
 | F1 | `hydro_std::quorum::collect_quorum_with_response`: result no longer depends on batching | correctness bug; changes Paxos snapshots |
 | F2 | Maelstrom many-to-many: `"port"` in the body, demux by port | wire-format bug for any cluster with several intra-cluster channels |
-| F3 | sim gaps: top-level `Reduce` (replaces `todo!`), `AtLeastOnce → ExactlyOnce` retry cast, clearer `todo!` messages | simulator coverage for ordinary programs. The research branch's other two F3 items, the unbounded top-level `Optional` snapshot and `collapse_ticks_around_atomic`, depend on upstream #3146/#3162/#3155, which `90d9` lacks, so they are dropped (on `90d9` every tick has a `ClockId`, so the second bug may not exist) |
+| F3 | sim gaps: top-level `Reduce` (replaces `todo!`), a snapshot of an unbounded top-level `Optional` (`sim::runtime::OptionalHook`), `AtLeastOnce → ExactlyOnce` retry cast, clearer `todo!` messages | simulator coverage for ordinary programs. The `Optional` snapshot was planned as dropped, but on `90d9` nothing could consume a top-level unbounded `Optional`, so top-level `Reduce` was unusable without it; it was re-derived for `90d9` (about 190 lines, no existing code touched). `collapse_ticks_around_atomic` is dropped: it depends on upstream #3155, which `90d9` lacks, and on `90d9` every tick has a `ClockId`, so the bug may not exist |
 | F4 | `CompiledSim::first_schedule`, and `exhaustive_then` / `fuzz_bounded_then` with a callback between executions, all public | a deterministic single run for debugging; bounded memory for long explorations (the research branch measured 10 GB → 241 MB from folding results between executions). `first_schedule` is hand-ported, since the research version sits on `deterministic()`, which `90d9` lacks |
 | F5 | `ClusterIds: Copy`, `Counter::next_count` | trivial, additive |
 
-### 6.2 Extension points lite needs (one PR, all behind `hydrofrac`)
+### 6.2 Extension points lite needs (one PR; E1–E5 behind `hydrofrac`, E6 for every simulator user)
 
 | id | extension point | size | justification |
 |---|---|---|---|
-| E1 | **Network hook:** the simulator calls an installed `dyn SimNetworkHook` on every `Network` send (it may drop the send, or deliver it with a `u64` tag), on every receive, at execution begin, at each tick boundary with **release attribution** (`on_release`: which received deliveries the tick consumed, needed by the execution rule, §4.2), and on external outputs (it may drop output from a dead node). It is `None` by default. | ~300 (builder.rs, graph.rs, compiled.rs, runtime.rs) | the single seam for any fault injection or network tracing in the simulator; zero cost when absent; replaces the research branch's hard-wired `record_sent`/`LineageOutputSender` and its `Released` events from hook policies |
-| E2 | **IR pass hook** on `SimFlow`: `with_ir_pass(stage, f)` with two stages that run in a declared order, plus `HydroRoot::input_mut`. A pass gets `&mut Vec<HydroRoot>`, so it can add roots (each tap is an external output of its own, §4.7). `PreNetwork` runs before network compilation (observation taps add `Network` nodes); `PostNetwork` runs after it (the provenance rewrite has to see the compiled sends). The original plan's single pre-network stage was wrong for the rewrite (research `flow.rs:200` vs `:230`) | ~60 | lets external crates add sim-only instrumentation without core knowing about it; also useful for test oracles. Precedent on `90d9`'s line: `extension.rs::ir_mut` @ `4de7c45e41` |
-| E3 | **Eager locations:** `SimFlow::with_eager_location(&Process)`, a location whose ticks run outside the schedule choice and that is excluded from the process count | ~40 | an observation-only location must not multiply schedules (64× more schedules on broadcast when the observer was explored). Replaces the research branch's match on `type_name::<Observer>()` (`built.rs:174-190`) |
-| E4 | **Read access to channel metadata:** a channel table recorded by `SimBuilder::create_network` (id, name, endpoints, transport kind: lossy or `fail_stop`) and exposed on `CompiledSim`; read accessors for location names, cluster members and node count (these back the crash bounds); `(de)serialize_bincode_with_type` exposed `pub(crate)` → `#[doc(hidden)] pub` | ~40 | the channel table and the tap serialization live in the hydrofrac crate rather than in core. Recording at `create_network` replaces the research `slice::compute`, which mirrors the emitter's statement counter |
-| E5 | **Send metadata on the simulator's wire:** with a hook installed, the wire is `(u64, Bytes)`, where the `u64` is the tag E1's `on_send` returned. A `PostNetwork` pass may make a `Network` or `SendExternal` input `(T, Meta)`; core peels the opaque `Meta` before serialising and hands it to `on_send`, and re-attaches the `u64` after deserialising (`(u64, T)`) for the pass's own map | ~100 (estimate) | record provenance has to cross the network; an opaque tag and an opaque side value keep provenance itself out of core |
+| E1 | **Network hook:** a flow opts in with `SimFlow::with_network_hook_points()`; without it, codegen is unchanged. `CompiledSim::set_network_hook(Rc<dyn SimNetworkHook>)` installs a hook that is called on every `Network` send (`on_send` returns `None` to drop it, or `Some(tag)` to deliver it carrying the tag), on every receive (`on_recv`), on external outputs (`on_output`, may drop), at execution begin and end (`on_exec_begin` / `on_exec_end`) and at instance start; `take_halts` lets it halt a node, through the same halting path crash injection uses. Callbacks arrive in strict program order, which replaces the planned `on_release` (§4.2) | ~600 (`network_hook.rs`, builder.rs, compiled.rs, graph.rs, runtime.rs), net of `create_network`'s four send arms rewritten into one emitter | the single seam for any fault injection or network tracing in the simulator; replaces the research branch's hard-wired `record_sent`/`LineageOutputSender` and its `Released` events from hook policies |
+| E2 | **IR pass hook** on `SimFlow`: `with_ir_pass(stage, f)` with two stages that run in a declared order, plus `HydroRoot::input_mut`. A pass gets `&mut Vec<HydroRoot>`, so it can add roots (each tap is an external output of its own, §4.7). `PreNetwork` runs before network compilation (the taps); `PostNetwork` runs after it (the provenance rewrite has to see the compiled sends). The original plan's single pre-network stage was wrong for the rewrite (research `flow.rs:200` vs `:230`). Doc-hidden accessors the rewrite needs: `ClosureExpr::{expr, singleton_refs, into_parts}`, `handoff_ref_ident` | ~100 | lets external crates add sim-only instrumentation without core knowing about it; also useful for test oracles. Precedent on `90d9`'s line: `extension.rs::ir_mut` @ `4de7c45e41` |
+| E3 | **Eager locations:** `SimFlow::with_eager_location(&Process)`, a location whose ticks run outside the schedule choice and that is excluded from the process count | ~40 | built for an observer process, which lite no longer has (§4.7); kept as a generic extension point (an observation-only location must not multiply schedules: 64× more on broadcast when the observer was explored) |
+| E4 | **Read access to simulation metadata:** a provided `DfirBuilder::network_metadata(..)` hook, called just before `create_network`, through which `SimBuilder` records the channel table (id, name, endpoints, transport: `FailStop` or `Lossy`, whether intercepted); `CompiledSim::{channels, outputs, locations, node_count}`; `(de)serialize_bincode_with_type` exposed `#[doc(hidden)] pub` | ~80 | the channel table and the tap serialization live in the hydrofrac crate rather than in core. Recording at `create_network` replaces the research `slice::compute`, which mirrors the emitter's statement counter; the provided method keeps `DfirBuilder` non-breaking |
+| E5 | **Send metadata on the simulator's wire:** with hook points on, the wire is `(u64, X)`, where the `u64` is the tag `on_send` returned. A `PostNetwork` pass's wrapped serialize calls `sim::network_hook::rt::set_send_meta(bytes)`, and the send that follows hands those bytes to `on_send` (or `on_output`); a wrapped deserialize reads its receive's tag with `rt::recv_tag()`. Serialize and send are fused per item, and a second `set_send_meta` before a send is a debug panic | ~100 | record provenance has to cross the network; an opaque tag and an opaque side value keep provenance itself out of core, and core never sees the pass's types (the planned `(T, Meta)` peeling would have) |
+| E6 | **Panic guard** (`sim/panic_guard.rs`, `sim` feature, not only `hydrofrac`): generated code wraps each DFIR tick (through a new doc-hidden `dfir_rs::Dfir::map_tick_closure`) and instantiation in `catch_unwind` inside the simulation dylib and hands the message to the host, which re-raises it with `resume_unwind`; a host hook that panics inside a dylib callback is caught, stashed and re-raised after the tick | ~250 | the dylib has its own std, so its panics are foreign exceptions to the host and aborted the whole process. A program that panics under injected faults has to be a counterexample, not a crash of the test run |
 
-Total about 540 lines in core, against about 1,680 in the research branch. Phase 2 (schedule
-reduction) would add doc-hidden read access to the nondeterministic-operator markers for the order check.
+Not intercepted: embedded (non-bincode) channels, used only by `hydro_test`'s `echo_network_embedded` example, and
+multi-version networks, which the provenance rewrite leaves as islands.
 
-**Folding `90d9`'s own sim work.** `90d9` already has two mechanisms that overlap E1 and E5. Lite re-expresses them
-on the extension points instead of adding parallel paths:
-- **Crash injection**
-  - What `90d9` has: `with_crashable_process` / `with_crashable_cluster` (`flow.rs:211`), `CrashHook`
-    (`runtime.rs:1768`), `crash_channels_ident` (`builder.rs:146`, used in every `create_network` arm).
-  - What lite does: it becomes an in-tree `SimNetworkHook` implementation (E1), keeping its user-facing API and
-    tests.
-- **Forward provenance**
-  - What `90d9` has: `SimFlow::with_provenance` (`flow.rs:96`), `sim/provenance.rs` + `provenance_ir.rs`, tags in a
-    network "side frame".
-  - What lite does: its side frame becomes E5's tag and side value, and its IR rewrite a `PostNetwork` E2 pass. The
-    `with_provenance` name stays with this existing feature; lite's rewrite is internal to `EcCheck`.
+In total, core gains about 1.7k inserted lines outside tests (about 0.4k removed): E1–E6 about 1.2k, the F fixes
+about 0.4k. The plan's estimate of 540 lines for E1–E5 was low, mostly because `create_network`'s send arms had to
+be reworked to share one emitter with crash injection. The research branch's core delta was about 1,680. Phase 2
+(schedule reduction) would add doc-hidden read access to the nondeterministic-operator markers.
 
-Before each fold, the users of each mechanism are inventoried (`feedback_campaign.rs`, `hydro_test`,
-`consensus_gauntlet`) and their tests must keep passing. If folding one of them costs more than it saves, it stays
-as is and that is recorded here.
+**Folding `90d9`'s own sim work.** `90d9` already has two mechanisms that overlap E1 and E5:
+- **Crash injection** (`with_crashable_process` / `with_crashable_cluster`, `CrashHook`, `crash_channels_ident`;
+  used by about 10 `hydro_std` `ec_inference_demos` and by `hydro_test`).
+  - `CrashHook` is a *nondeterminism* hook: crash timing and the per-recipient prefix are search choices drawn
+    from the driver. Re-expressing that as a host-side deterministic interceptor would cost more than it saves, so
+    it stays a `SimHook`.
+  - What is shared instead: one send-site emitter composes interception (when on) and crash staging, and E1's
+    halts go through the same `halt_location`. The `ec_inference_demos` tests, its users, pass unchanged.
+- **Forward provenance** (`SimFlow::with_provenance`, `sim/provenance.rs` + `provenance_ir.rs`, tags framed inside
+  the bytes): it keeps its public API and now registers its IR rewrite as a `PostNetwork` E2 pass. Lite's
+  rewrite is separate and internal to `EcCheck`, but its generated code reuses this module's `Tagged`, `Tag`,
+  `TagSet` and `apply1`: simulation dylibs can only name `hydro_lang` and std, never `hydrofrac`, so
+  generated code cannot call into the hydrofrac crate.
 
 ### 6.3 Research-branch core changes lite deliberately avoids
 
 | change | why it isn't needed |
 |---|---|
 | `create_network(.., input_element_type)` | breaks the public `DfirBuilder` trait only to print payloads; lite renders facts from the taps (§4.8) and abbreviates payloads |
-| `broadcast_closed` rewrite (`flat_map_ordered` over `ClusterIds`) | changes codegen for every cluster→cluster broadcast only to hide the member-id list from the observation pass. In lite that list is checked like any other labelled collection. If such rows become noise, a suppression list in lite's own observation pass is the place to filter them, with no core change |
-| `pub mod spec_views` (ungated) | moves into the hydrofrac crate as staged code |
-| `Dfir::map_tick_closure` / `erase_guarded` | guards counterfactual replays that panic; lite doesn't replay. A program panicking under injected faults is reported as a counterexample |
-| standing hook policies (`scripted.rs`, `tick_input.rs`, `observation.rs`), `BatchHook::{deliver_all, replay, omit, ..}`, `flow.sim_hook()`, `NonDet::hooked` | replay and traced pass-through only. The `BatchHook` method additions have no callers; `BatchHook` itself and `flow.sim_hook()` are research-only and are used by 2PC, ISR and the research `Spec::accumulate`. The execution rule is sound without them, and release attribution comes from E1's `on_release`. Those users are rewritten on plain `main` features or dropped (§7) |
+| `broadcast_closed` rewrite (`flat_map_ordered` over `ClusterIds`) | changes codegen for every cluster→cluster broadcast only to hide the member-id list from the observation pass. Lite's observation pass drops instead every labelled collection whose only sources are cluster membership (a `ClusterMembers` source, or `source_iter` over `ClusterIds`), with no core change |
+| `pub mod spec_views` (ungated) | not carried over: the specification is evaluated on the host (§4.7) |
+| `erase_guarded`, and `map_tick_closure` for replay | guards counterfactual replays that panic; lite doesn't replay. (A doc-hidden `Dfir::map_tick_closure` does come back, for a different job: the panic guard, E6, which is what lets a program panicking under injected faults be reported as a counterexample) |
+| standing hook policies (`scripted.rs`, `tick_input.rs`, `observation.rs`), `BatchHook::{deliver_all, replay, omit, ..}`, `flow.sim_hook()`, `NonDet::hooked` | replay and traced pass-through only. The `BatchHook` method additions have no callers; `BatchHook` itself and `flow.sim_hook()` are research-only and are used by 2PC, ISR and the research `Spec::accumulate`. The execution rule is sound without them, using E1's program-order callbacks (§4.2). Those users are rewritten on plain `main` features or dropped (§7) |
 | the research branch's `with_provenance` as a core `SimFlow` API, and its provenance branches in `builder.rs` | the rewrite enters through E2 and its tags through E5's opaque `u64`, so core knows nothing about lite's provenance. (`90d9`'s own `with_provenance` is a different, existing feature, folded onto E2/E5 in §6.2) |
 | fine-grained sink slices in `slice.rs` | leftovers of the removed `Level::Slice` (about 300 lines unused) |
 | `location_names`, `keyed_singleton.rs` formatting | cosmetic |
@@ -639,12 +671,16 @@ as is and that is recorded here.
     - the counterexample sets are expected to match, and any difference is explained in the comparison output (the
       sweep finds the fewest crashes first, the research search the fewest faults);
     - multi-Paxos compares at `.max_crashes(1)`, its research `crash_budget(1)`.
-  - The ported tests write the same 13 columns from their results, test-side, with no env knob in the API.
-    `compare.py` is reused with the new key function.
+  - `Results::rows()` (doc-hidden) gives the same columns from a run, test-side, with no env knob in the API
+    (`ReportRow::to_tsv`). The comparison so far was done per ported file, by hand, against the records. Node names
+    differ (lite names nodes after their location types, `Source`, `Member@0`, where the records use the research
+    harnesses' registered names), so `compare.py` needs a name mapping before it can be reused.
 - **Heal check:** gossip's three certificates (`crdt_gossip.rs` `:54`, `:84`, `:138`) must survive heal at the
-  end of the run closure (§4.6).
-- **Opaque check:** `leader_merge`'s keyed `entries_partially_ordered` is reported opaque, not miscompiled, and
-  its verdict matches its record (§4.2).
+  end of the run closure (§4.6). Measured: `all_elements` and the G-Set it covers find no counterexample under any
+  crash set (now `Exhausted`, since gossip is schedule-sensitive, §4.9); the `echo` hop breaks at 1 crash, because
+  a member may now crash mid-round, which the research harness's early EFF ruled out.
+- **Provenance check:** `leader_merge`'s keyed `entries_partially_ordered` is tracked precisely, not miscompiled
+  (§4.2), and its verdict matches its record. Every corpus program runs instrumented with 0 opaque records.
 - **Honesty check, test-only:** a brute-force enumerator over every admissible fault set up to size 2, run on the small EC
   demos. Agreement with lite's verdicts tests the lineage pruning without a `Strategy::Blind` in the API. It includes
   order-sensitive programs (`ask_once`, 2PC with cooperative termination and three participants, plain 2PC,
@@ -654,22 +690,23 @@ as is and that is recorded here.
   (§4.9). Lite reports them `Exhausted`; the comparison treats a research certificate there as "no counterexample
   found" on both sides.
 - **Solver check:** on every ported search, the `microlp` and HiGHS backends return sets of the same size,
-  checked once in CI against HiGHS behind its opt-in feature.
+  checked once in CI against HiGHS behind its opt-in feature. Not yet run: the test exists (`#[ignore]`), but
+  HiGHS could not be built on the development machine (§4.4).
 - **Performance budget:** total EC-corpus search time no worse than the positional records' EC rows. The sweep tries
   the low-bound hypotheses first, and those are admissible at higher bounds too. So it should cost about the same
   as one search at the top bound, but this is measured, not assumed.
 
 ## 8. Plan of work
 
-1. F1, F2, F3 (minus the two upstream-dependent items), F4 and F5 as independent PRs on `90d9`, each with a new
-   test (the research branch has no core tests for F3/F4).
+1. F1, F2, F3 (minus `collapse_ticks_around_atomic`), F4 and F5 as independent PRs on `90d9`, each with a new
+   test (the research branch has no core tests for F3/F4; F2 has none, since it needs a Maelstrom run).
 2. E1–E5 in one core PR, behind `hydrofrac`, with unit tests that don't use hydrofrac. Each point gets a
    small in-tree test hook, for example a test interceptor that drops every message on one channel. The same PR
    folds `90d9`'s crash injection and forward provenance onto E1/E5/E2 (§6.2). In parallel with it: the
    `hydrofrac` crate skeleton and `search` (the ILP with the `0.5/(n·n)` tie-break, and the crash sweep as pure
    logic), which need no simulator. Benchmark `microlp` against HiGHS here, early.
 3. The rest of the `hydrofrac` crate, in dependency order:
-   - `fault` (on E1/E4) and `provenance` (on E2/E5, with the `leader_merge` opaque detection);
+   - `fault` (on E1/E4) and `provenance` (on E2/E5; `leader_merge` turned out precise, §4.2);
    - then `lineage`;
    - then `observe`, then `spec` (host-side, §4.7);
    - then the `EcCheck` loop with heal and the sweep;
@@ -689,17 +726,20 @@ as is and that is recorded here.
 Settled:
 1. **Crash model:** positional only; sent sets and schedule reduction are phase 2 (§3).
 2. **Lamport backend:** DOT only; Mermaid rejected because it can't draw messages in flight across a fault (§4.8).
-3. **`trust_order_insensitive(site)`:** not in v1 (moot until phase 2).
+3. **`trust_order_insensitive(site)`:** not in v1. It would win back certificates on schedule-sensitive labels
+   (§4.9), but it is a per-site knob, against convention over configuration.
 4. **Crate placement:** a separate `hydrofrac` crate; core only gets §6.2.
 5. **`broadcast_closed`:** not changed; any later noise is filtered in lite's observation pass.
-6. **Solver:** the `good_lp` ILP on `microlp`, pending a benchmark against HiGHS.
+6. **Solver:** the `good_lp` ILP on `microlp` (§4.4). The comparison against HiGHS is still to be run, on a
+   machine that can build it.
 7. **Lineage:** record provenance only, with the execution rule as the opaque-record fallback and no replay
-   (§5, run C). Keyed `entries_partially_ordered` is detected and treated as opaque (§4.2).
-8. **Base:** `origin/main` @ `90d9d26736` as is, with no rebase onto upstream. `90d9`'s crash injection and forward
-   provenance are folded onto the extension points (§6.2).
+   (§5, run C). Keyed `entries_partially_ordered` turned out to be rewritable precisely (§4.2).
+8. **Base:** `origin/main` @ `90d9d26736` as is, with no rebase onto upstream. `90d9`'s forward provenance is
+   folded onto E2; its crash injection stays a search-driven `SimHook` that shares E1's send-site emitter and
+   halting path (§6.2).
 9. **Scope:** ISR is out. 2PC stays, rewritten on plain `main` features. Nothing exotic: no research-only hooks (§1).
-10. **Heal:** EFF is renamed and becomes a convention. Faults are admitted while the run closure executes; the
-    network heals when it returns; crashes persist; no public knob (§4.6).
+10. **Heal:** EFF is renamed and becomes a convention. Faults are admitted while the run closure executes and
+    while the work it caused settles; then the network heals; crashes persist; no public knob (§4.6).
 11. **Crash sweep:** the default output. Every node is crashable, with no restricted crashable sets, and
     `.max_crashes(n)` caps the sweep (§4.5).
 12. **Verdict comparison:** keyed by (file, collection name, occurrence), with an operator fallback. ISR and
@@ -715,8 +755,6 @@ Settled:
     certificate within the enumerated bounds, `CertifiedByEnumeration` (§4.9).
 
 Open:
-- **Replay:** stays out unless the "provenance without replay" benchmark shows the opaque fallback costing
-  much on the EC corpus.
 - **A fault-free recovery phase** (`then_heal(recovery)`): only if a program's recovery works only on a healed
   network (§4.6).
 - **All minimal counterexamples at the breaking bound:** an extension of the sweep, if one witness per label

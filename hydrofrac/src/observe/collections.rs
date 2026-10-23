@@ -160,7 +160,7 @@ pub fn kind_name(kind: &CollectionKind) -> &'static str {
 ///
 /// A labelled collection computed from nothing but a cluster's membership is not listed: it is
 /// the member-id list a cluster-to-cluster `broadcast_closed` joins its payload with, not a
-/// collection of the program (see [`membership_only`]).
+/// collection of the program (see `membership_only`).
 pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
     // Raw pointers: cycle sinks are followed from `CycleSource`s to find network ancestors;
     // nothing in `ir` moves during this walk.

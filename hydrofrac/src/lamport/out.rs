@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use super::{Options, Trace, dot};
 
-/// Where [`write`] put a diagram.
+/// Where [`write()`] put a diagram.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Written {
     /// The Graphviz source.

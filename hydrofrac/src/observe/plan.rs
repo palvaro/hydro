@@ -96,7 +96,7 @@ fn classify(collection: &EcCollection) -> Option<NotCheckedReason> {
     None
 }
 
-/// The plan for every collection of the enumeration: [`classify`], then a scalar whose input
+/// The plan for every collection of the enumeration: `classify`, then a scalar whose input
 /// stream is checked is covered by it, and a merge-dominated hop is attributed to the nearest
 /// checked exit after its merge.
 pub fn plan(collections: Vec<EcCollection>) -> Vec<LabelPlan> {

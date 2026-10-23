@@ -12,7 +12,7 @@
 //!   `m` depends on the order in which `n` sent them. A choice anywhere upstream of what `n`
 //!   receives can reorder `n`'s sends, even when the derivation itself passes no site.
 //!
-//! [`label_cones`] lists, for every labelled collection of a program, the **sites** that make its
+//! [`label_cones`](crate::provenance::sensitivity::label_cones) lists, for every labelled collection of a program, the **sites** that make its
 //! search schedule-sensitive. It walks the label's **causal cone**: everything upstream of it,
 //! across locations (a network back to its sender), through cycles (a `forward_ref` back to its
 //! sink) and through captured state (a `by_ref`/`by_mut` cell back to its producer and to every
@@ -22,7 +22,7 @@
 //! location: a site there may reorder that location's sends.
 //!
 //! The walk is conservative. A site is either a place where the simulator makes a choice
-//! ([`NondetSite::opaque`] false: `batch`, an atomic section's entry, an untrusted
+//! ([`NondetSite::opaque`](crate::provenance::sensitivity::NondetSite::opaque) false: `batch`, an atomic section's entry, an untrusted
 //! `observe_nondet` or the one a `by_mut` closure over an unordered input implies, `merge_ordered`,
 //! a fold over an unordered input, timers), or a place the walk cannot see through (`opaque`
 //! true): an operator it does not know (every IR node kind is classified explicitly, and a new
