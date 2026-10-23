@@ -10,6 +10,7 @@ use hydro_lang::sim::compiled::CompiledSim;
 use hydro_lang::sim::flow::SimFlow;
 use hydro_lang::sim::prompt_schedule::PromptScheduleDriver;
 
+use crate::harness::OutputPorts;
 use crate::schedule::{Counts, Instrumented, Schedule, instrument};
 pub use crate::schedule::NotScriptable;
 
@@ -29,6 +30,13 @@ pub struct WorkCounts {
     pub network_messages: BTreeMap<String, u64>,
     /// The same, keyed by sending location and member.
     pub network_messages_by_member: BTreeMap<(String, Option<u32>), u64>,
+    /// Records each of the program's declared output streams produced (those the harness sunk
+    /// with [`crate::SimOutputs::sink_named`]), keyed by the stream's name, summed over members.
+    pub outputs: BTreeMap<String, u64>,
+    /// The same, keyed by stream name and member.
+    pub outputs_by_member: BTreeMap<(String, Option<u32>), u64>,
+    /// Tick executions, keyed by `(root location, member, tick)` rendered as strings.
+    pub ticks_by_member: BTreeMap<(String, Option<u32>, String), u64>,
 }
 
 impl WorkCounts {
@@ -80,6 +88,14 @@ impl WorkCounts {
                 .network_messages_by_member
                 .entry((loc, *member))
                 .or_default() += n;
+        }
+        for ((root, member, tick), n) in &counts.ticks {
+            out.ticks_by_member
+                .insert((format!("{root:?}"), *member, format!("{tick:?}")), *n);
+        }
+        for ((name, member), n) in &counts.outputs {
+            *out.outputs.entry(name.clone()).or_default() += n;
+            out.outputs_by_member.insert((name.clone(), *member), *n);
         }
         out
     }
@@ -817,8 +833,270 @@ pub struct Report {
     /// Present when the verdict is hazardous: the growth label, a guess separate from the
     /// verdict.
     pub growth: Option<GrowthLabel>,
+    /// How each of the program's declared output streams behaved across the hold sweep. Empty
+    /// when the harness sunk the outputs without names.
+    pub conservation: Conservation,
     /// Wall clock for the whole check, including compilation.
     pub seconds: f64,
+}
+
+/// How one of the program's output streams behaved across every hold of every decision point,
+/// read from its record count in each run against the unheld run. The classification is what a
+/// deployment-side harness needs to read the same stream in wall-clock time: a conserved stream's
+/// rate is the program's goodput, an amplified stream's rate is its cost, a level's value is its
+/// backlog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputKind {
+    /// The count is the same under every finite hold as in the unheld run: it is fixed by the
+    /// input (every lookup completes once, whatever the schedule).
+    Conserved,
+    /// The count rises above the unheld run's under some finite hold: the stream carries work the
+    /// program derived from being delayed.
+    Amplified,
+    /// The count equals the number of executions of one tick at the stream's location in every
+    /// run: the stream emits one record per tick, which is what a sampled level does.
+    Level,
+    /// The count never rises above the unheld run's and falls below it under some finite hold.
+    Shed,
+    /// The stream produced nothing in any run.
+    Silent,
+}
+
+impl OutputKind {
+    /// One word for the table.
+    pub fn word(&self) -> &'static str {
+        match self {
+            OutputKind::Conserved => "conserved",
+            OutputKind::Amplified => "amplified",
+            OutputKind::Level => "level",
+            OutputKind::Shed => "shed",
+            OutputKind::Silent => "silent",
+        }
+    }
+}
+
+/// One output stream's row of the conservation table.
+#[derive(Debug, Clone)]
+pub struct OutputRow {
+    /// The stream's name (the field it was returned under).
+    pub name: String,
+    /// Whether its items are plain numbers.
+    pub numeric: bool,
+    pub kind: OutputKind,
+    /// Its count in the unheld run.
+    pub unheld: u64,
+    /// Its smallest and largest count over every finite hold of every decision point.
+    pub finite: (u64, u64),
+    /// Its smallest and largest count under the hold that never ends, over every decision point.
+    pub stall: (u64, u64),
+    /// The decision point and hold length at which its count was largest, when that exceeded
+    /// the unheld run.
+    pub worst: Option<(String, usize)>,
+    /// For a level: the tick whose execution count it matched in every run.
+    pub tick: Option<String>,
+    /// Its count at each hold length under each decision point: `(hook, [(k, count)])`.
+    pub curves: Vec<(String, Vec<(usize, u64)>)>,
+}
+
+/// The conservation table: one [`OutputRow`] per declared output stream.
+#[derive(Debug, Clone, Default)]
+pub struct Conservation {
+    pub rows: Vec<OutputRow>,
+}
+
+impl Conservation {
+    /// `conserved: a, b; amplified: c; level: d`, or empty when there are no rows.
+    pub fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        for kind in [
+            OutputKind::Conserved,
+            OutputKind::Amplified,
+            OutputKind::Level,
+            OutputKind::Shed,
+            OutputKind::Silent,
+        ] {
+            let names: Vec<&str> = self
+                .rows
+                .iter()
+                .filter(|r| r.kind == kind)
+                .map(|r| r.name.as_str())
+                .collect();
+            if !names.is_empty() {
+                parts.push(format!("{}: {}", kind.word(), names.join(", ")));
+            }
+        }
+        parts.join("; ")
+    }
+
+    /// The names of the streams of `kind`.
+    pub fn of_kind(&self, kind: OutputKind) -> Vec<&str> {
+        self.rows
+            .iter()
+            .filter(|r| r.kind == kind)
+            .map(|r| r.name.as_str())
+            .collect()
+    }
+
+    fn lines(&self, hold_lengths: &[usize], show_index: &dyn Fn(&str) -> bool) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.rows.is_empty() {
+            return out;
+        }
+        out.push(
+            "output streams across the sweep: a stream is conserved when its count is the unheld run's under every finite hold (fixed by the input), amplified when some hold raised it, a level when it emits exactly one record per execution of a tick at its location, shed when holds only lowered it."
+                .to_owned(),
+        );
+        out.push(format!(
+            "{:<24}{:<11}{:>8}  {:<16}  {:<16}  {}",
+            "stream", "kind", "unheld", "finite holds", "hold to the end", "largest at"
+        ));
+        for r in &self.rows {
+            let range = |(lo, hi): (u64, u64)| {
+                if lo == hi {
+                    lo.to_string()
+                } else {
+                    format!("{lo}..{hi}")
+                }
+            };
+            let worst = match (&r.worst, &r.tick) {
+                (Some((hook, k)), _) => {
+                    format!("{} at a hold of {k}", readable_hook_name(hook, show_index(hook)))
+                }
+                (None, Some(tick)) => format!("one per execution of {tick}"),
+                (None, None) => "-".to_owned(),
+            };
+            out.push(format!(
+                "{:<24}{:<11}{:>8}  {:<16}  {:<16}  {}",
+                r.name,
+                r.kind.word(),
+                r.unheld,
+                range(r.finite),
+                range(r.stall),
+                worst
+            ));
+        }
+        out.push(String::new());
+        out.push(format!(
+            "{:<width$}{}",
+            "count by hold length (rounds)",
+            row_usize(hold_lengths),
+            width = LABEL_WIDTH
+        ));
+        for r in &self.rows {
+            if r.kind == OutputKind::Silent {
+                continue;
+            }
+            out.push(format!("{} ({}, unheld {})", r.name, r.kind.word(), r.unheld));
+            for (hook, curve) in &r.curves {
+                let values: Vec<i64> = curve.iter().map(|(_, c)| *c as i64).collect();
+                out.push(format!(
+                    "{:<width$}{}",
+                    format!("    {}", readable_hook_name(hook, show_index(hook))),
+                    row(&values),
+                    width = LABEL_WIDTH
+                ));
+            }
+        }
+        out
+    }
+}
+
+/// Classifies every named output from the counts of the unheld run and of every hold.
+fn conservation(
+    outputs: &OutputPorts,
+    baseline: &WorkCounts,
+    curves: &[HookCurve],
+    horizon: usize,
+) -> Conservation {
+    let mut rows = Vec::new();
+    for output in &outputs.outputs {
+        let name = &output.name;
+        let root = format!("{:?}", output.root);
+        let unheld = baseline.outputs.get(name).copied().unwrap_or(0);
+        // The ticks at this stream's location whose per-member execution count equals the
+        // stream's per-member count, in one run.
+        let matching_ticks = |c: &WorkCounts| -> BTreeSet<String> {
+            let mut ticks: BTreeSet<String> = c
+                .ticks_by_member
+                .keys()
+                .filter(|(r, _, _)| *r == root)
+                .map(|(_, _, t)| t.clone())
+                .collect();
+            ticks.retain(|t| {
+                let members: BTreeSet<Option<u32>> = c
+                    .ticks_by_member
+                    .keys()
+                    .filter(|(r, _, tt)| *r == root && tt == t)
+                    .map(|(_, m, _)| *m)
+                    .collect();
+                members.iter().all(|m| {
+                    c.ticks_by_member.get(&(root.clone(), *m, t.clone())).copied()
+                        == c.outputs_by_member.get(&(name.clone(), *m)).copied()
+                })
+            });
+            ticks
+        };
+        let mut level_ticks = matching_ticks(baseline);
+        let mut finite = (u64::MAX, 0u64);
+        let mut stall = (u64::MAX, 0u64);
+        let mut worst: Option<(String, usize, u64)> = None;
+        let mut any = unheld > 0;
+        let mut hook_curves = Vec::new();
+        for curve in curves {
+            let mut points = Vec::new();
+            for (k, c) in &curve.counts {
+                if *k == 0 {
+                    continue;
+                }
+                let n = c.outputs.get(name).copied().unwrap_or(0);
+                any |= n > 0;
+                points.push((*k, n));
+                level_ticks = level_ticks.intersection(&matching_ticks(c)).cloned().collect();
+                if *k >= horizon {
+                    stall = (stall.0.min(n), stall.1.max(n));
+                } else {
+                    finite = (finite.0.min(n), finite.1.max(n));
+                    if n > unheld && worst.as_ref().is_none_or(|(_, _, w)| n > *w) {
+                        worst = Some((curve.hook.clone(), *k, n));
+                    }
+                }
+            }
+            hook_curves.push((curve.hook.clone(), points));
+        }
+        if finite.0 == u64::MAX {
+            finite = (unheld, unheld);
+        }
+        if stall.0 == u64::MAX {
+            stall = (unheld, unheld);
+        }
+        let kind = if !any {
+            OutputKind::Silent
+        } else if !level_ticks.is_empty() && unheld > 0 {
+            OutputKind::Level
+        } else if finite.1 > unheld {
+            OutputKind::Amplified
+        } else if finite.0 < unheld {
+            OutputKind::Shed
+        } else {
+            OutputKind::Conserved
+        };
+        rows.push(OutputRow {
+            name: name.clone(),
+            numeric: output.numeric,
+            kind,
+            unheld,
+            finite,
+            stall,
+            worst: if kind == OutputKind::Level {
+                None
+            } else {
+                worst.map(|(h, k, _)| (h, k))
+            },
+            tick: (kind == OutputKind::Level).then(|| level_ticks.iter().next().cloned().unwrap_or_default()),
+            curves: hook_curves,
+        });
+    }
+    Conservation { rows }
 }
 
 /// The width of the label column in the printed report, so that every curve's numbers line up
@@ -890,6 +1168,12 @@ impl fmt::Display for Report {
             )?;
         }
         writeln!(f)?;
+        if !self.conservation.rows.is_empty() {
+            for line in self.conservation.lines(&self.hold_lengths, &show_index) {
+                writeln!(f, "{line}")?;
+            }
+            writeln!(f)?;
+        }
         if let Verdict::NotExplored { reason } = &self.verdict {
             writeln!(f, "verdict: not explored")?;
             writeln!(f, "  {reason}")?;
@@ -1121,14 +1405,27 @@ fn list(values: &[usize]) -> String {
 pub fn check(
     flow: SimFlow<'_>,
     config: &CheckConfig,
+    round: impl AsyncFnMut(usize) + RefUnwindSafe,
+) -> Report {
+    check_with_outputs(flow, config, round, &OutputPorts::new())
+}
+
+/// [`check`], also counting the program's declared output streams, which the harness sunk with
+/// [`crate::SimOutputs::sink_named`] into `outputs`, in every run; the report then carries a
+/// [`Conservation`] table classifying each one.
+pub fn check_with_outputs(
+    flow: SimFlow<'_>,
+    config: &CheckConfig,
     mut round: impl AsyncFnMut(usize) + RefUnwindSafe,
+    outputs: &OutputPorts,
 ) -> Report {
     let started = Instant::now();
     let mut flow = flow;
     let instrumented = instrument(&mut flow);
     let compiled = flow.compiled();
     let hold_lengths = config.hold_lengths();
-    let (baseline, seen, _) = run_once(&compiled, &instrumented, config, &mut round, None, 0);
+    let (baseline, seen, _) =
+        run_once(&compiled, &instrumented, config, &mut round, outputs, None, 0);
     // Hooks that had something waiting in the unheld run, in identity order.
     let hooks: Vec<(usize, String)> = {
         let mut v: Vec<(usize, String)> = seen.into_iter().collect();
@@ -1150,8 +1447,15 @@ pub fn check(
         let mut first_reaction_at = None;
         let mut extra_work_at_first_reaction = 0i64;
         for &k in &hold_lengths {
-            let (c, _, applied) =
-                run_once(&compiled, &instrumented, config, &mut round, Some(*hook_id), k);
+            let (c, _, applied) = run_once(
+                &compiled,
+                &instrumented,
+                config,
+                &mut round,
+                outputs,
+                Some(*hook_id),
+                k,
+            );
             holds_applied.push((k, applied));
             let d_admitted = c.admitted() as i64 - base_admitted;
             let mut d_sends = BTreeMap::new();
@@ -1239,6 +1543,7 @@ pub fn check(
     let growth = location
         .as_ref()
         .and_then(|_| growth_label(&curves, &config.holds_beyond_input(), config.horizon()));
+    let conservation = conservation(outputs, &baseline, &curves, config.horizon());
     Report {
         verdict: verdict_of(&baseline, &curves, location.is_some()),
         rounds: config.rounds,
@@ -1251,6 +1556,7 @@ pub fn check(
         not_holdable: instrumented.not_scriptable.clone(),
         location,
         growth,
+        conservation,
         seconds: started.elapsed().as_secs_f64(),
     }
 }
@@ -1407,6 +1713,7 @@ fn run_once(
     instrumented: &Instrumented,
     config: &CheckConfig,
     round: &mut (impl AsyncFnMut(usize) + RefUnwindSafe),
+    outputs: &OutputPorts,
     target: Option<usize>,
     k: usize,
 ) -> (WorkCounts, BTreeMap<usize, String>, u64) {
@@ -1428,6 +1735,7 @@ fn run_once(
                     round(r).await;
                     schedule.settle().await;
                 }
+                schedule.drain_outputs(outputs);
                 let counts = WorkCounts::from_schedule(&schedule.counts, &schedule);
                 let seen = schedule
                     .seen

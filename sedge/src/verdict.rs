@@ -1,10 +1,70 @@
 //! Reading a verdict from a bucketed trace.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
 use crate::profile::Profile;
 use crate::trace::{Bucket, Trace, quantile};
+
+/// How the verdict reads an observed output stream. The kinds come from Cress's conservation
+/// table (`conserved`, `amplified`, `level`), from an explicit registration (`gauge` is a level,
+/// `counter` is work), or, failing both, from the item type (a numeric stream is a level,
+/// anything else is work).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamKind {
+    /// The count is fixed by the input: its rate is goodput, and a tail rate below the
+    /// baseline's is lost work.
+    Conserved,
+    /// The count rises under delay: its rate is the program's cost, and a tail rate above the
+    /// baseline's is amplification.
+    Amplified,
+    /// One sample per tick: its value is a backlog, read for rising and falling.
+    Level,
+    /// Not classified: read like an amplified stream (its tail rate must return to baseline),
+    /// but never counted as goodput.
+    Work,
+}
+
+impl StreamKind {
+    /// Parses Cress's word.
+    pub fn parse(word: &str) -> Option<Self> {
+        match word {
+            "conserved" => Some(StreamKind::Conserved),
+            "amplified" => Some(StreamKind::Amplified),
+            "level" => Some(StreamKind::Level),
+            "shed" | "silent" | "work" => Some(StreamKind::Work),
+            _ => None,
+        }
+    }
+
+    pub fn word(&self) -> &'static str {
+        match self {
+            StreamKind::Conserved => "conserved",
+            StreamKind::Amplified => "amplified",
+            StreamKind::Level => "level",
+            StreamKind::Work => "work",
+        }
+    }
+}
+
+/// The kind of every observed stream, by name.
+pub type StreamKinds = BTreeMap<String, StreamKind>;
+
+/// One observed stream over a window.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamWindow {
+    pub name: String,
+    pub kind: StreamKind,
+    /// Mean records per second over the window.
+    pub rate: f64,
+    /// Records per round the generator offered in the window, when it offered any: for a
+    /// conserved stream this is fixed by the workload, so comparing it between windows reads
+    /// goodput without the Poisson noise of a short window's arrival count.
+    pub per_round: Option<f64>,
+    /// For a level: its mean value over the first and the second half of the window.
+    pub halves: Option<(f64, f64)>,
+}
 
 /// What the tail of a trial looked like against its pre-trigger baseline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,12 +111,27 @@ pub struct WindowStats {
     pub p50: Option<Duration>,
     /// 99th percentile of the same.
     pub p99: Option<Duration>,
-    /// For each gauge, its mean over the first and over the second half of the window.
-    pub gauge_halves: Vec<(String, f64, f64)>,
+    /// Every observed stream over the window.
+    pub streams: Vec<StreamWindow>,
 }
 
-fn stats(buckets: &[Bucket], gauge_names: &[String]) -> WindowStats {
+impl WindowStats {
+    /// For each level, `(name, first-half mean, second-half mean)`.
+    pub fn gauge_halves(&self) -> Vec<(String, f64, f64)> {
+        self.streams
+            .iter()
+            .filter_map(|s| s.halves.map(|(a, b)| (s.name.clone(), a, b)))
+            .collect()
+    }
+
+    fn stream(&self, name: &str) -> Option<&StreamWindow> {
+        self.streams.iter().find(|s| s.name == name)
+    }
+}
+
+fn stats(buckets: &[Bucket], kinds: &StreamKinds) -> WindowStats {
     let offered = buckets.iter().map(|b| b.offered).sum();
+    let rounds: u64 = buckets.iter().map(|b| b.rounds).sum();
     let completed = buckets.iter().map(|b| b.offered_completed).sum();
     let abandoned = buckets.iter().map(|b| b.offered_abandoned).sum();
     let outstanding = buckets.iter().map(|b| b.offered_outstanding).sum();
@@ -73,15 +148,35 @@ fn stats(buckets: &[Bucket], gauge_names: &[String]) -> WindowStats {
         }
     };
     let (first, second) = buckets.split_at(buckets.len() / 2);
-    let gauge_halves = gauge_names
+    let streams = kinds
         .iter()
-        .filter_map(|name| {
+        .map(|(name, kind)| {
+            let records: u64 = buckets
+                .iter()
+                .map(|b| b.stream_records.get(name).copied().unwrap_or(0))
+                .sum();
+            let rate = if buckets.is_empty() {
+                0.0
+            } else {
+                records as f64 / buckets.len() as f64
+            };
             let values = |bs: &[Bucket]| -> Vec<f64> {
                 bs.iter()
-                    .filter_map(|b| b.gauges.get(name).copied())
+                    .filter_map(|b| b.stream_values.get(name).copied())
                     .collect()
             };
-            Some((name.clone(), mean(&values(first))?, mean(&values(second))?))
+            let halves = if *kind == StreamKind::Level {
+                mean(&values(first)).zip(mean(&values(second)))
+            } else {
+                None
+            };
+            StreamWindow {
+                name: name.clone(),
+                kind: *kind,
+                rate,
+                per_round: (rounds > 0).then(|| records as f64 / rounds as f64),
+                halves,
+            }
         })
         .collect();
     WindowStats {
@@ -98,7 +193,7 @@ fn stats(buckets: &[Bucket], gauge_names: &[String]) -> WindowStats {
         },
         p50: quantile(&latencies, 0.5),
         p99: quantile(&latencies, 0.99),
-        gauge_halves,
+        streams,
     }
 }
 
@@ -112,6 +207,16 @@ pub struct Verdict {
     pub tail: WindowStats,
     /// Requests offered at any time and never answered by the end of the run.
     pub outstanding: u64,
+    /// Whether goodput and latency were read from ids (a completion stream), or only from
+    /// stream rates.
+    pub by_id: bool,
+    /// Tail goodput as a fraction of the baseline's: completion fractions when `by_id`, else the
+    /// smallest tail/baseline ratio of records per offered round over the conserved streams (1
+    /// when there are none).
+    pub relative_goodput: f64,
+    /// The largest tail/baseline rate ratio over the amplified and unclassified streams, with the
+    /// stream's name; 1 when there are none.
+    pub amplification: (String, f64),
 }
 
 impl fmt::Display for Verdict {
@@ -122,24 +227,42 @@ impl fmt::Display for Verdict {
         };
         writeln!(f, "{}: {}", self.outcome, self.reason)?;
         for (label, w) in [("baseline", &self.baseline), ("tail", &self.tail)] {
-            writeln!(
-                f,
-                "  {label} [{}s, {}s): offered {} completed {} ({:.1}%) abandoned {} outstanding {} p50 {} p99 {}",
-                w.from,
-                w.to,
-                w.offered,
-                w.completed,
-                w.completion_fraction * 100.0,
-                w.abandoned,
-                w.outstanding,
-                ms(w.p50),
-                ms(w.p99)
-            )?;
-            for (name, first, second) in &w.gauge_halves {
+            if self.by_id {
                 writeln!(
                     f,
-                    "    {name}: mean {first:.0} in the first half, {second:.0} in the second"
+                    "  {label} [{}s, {}s): offered {} completed {} ({:.1}%) abandoned {} outstanding {} p50 {} p99 {}",
+                    w.from,
+                    w.to,
+                    w.offered,
+                    w.completed,
+                    w.completion_fraction * 100.0,
+                    w.abandoned,
+                    w.outstanding,
+                    ms(w.p50),
+                    ms(w.p99)
                 )?;
+            } else {
+                writeln!(f, "  {label} [{}s, {}s): offered {}", w.from, w.to, w.offered)?;
+            }
+            for s in &w.streams {
+                match s.halves {
+                    Some((first, second)) => writeln!(
+                        f,
+                        "    {} ({}): mean {first:.0} in the first half, {second:.0} in the second",
+                        s.name,
+                        s.kind.word()
+                    )?,
+                    None => match (s.kind, s.per_round) {
+                        (StreamKind::Conserved, Some(pr)) => writeln!(
+                            f,
+                            "    {} ({}): {:.1}/s, {pr:.2} per round",
+                            s.name,
+                            s.kind.word(),
+                            s.rate
+                        )?,
+                        _ => writeln!(f, "    {} ({}): {:.1}/s", s.name, s.kind.word(), s.rate)?,
+                    },
+                }
             }
         }
         write!(f, "  outstanding at end: {}", self.outstanding)
@@ -171,34 +294,120 @@ const LATENCY_SLACK_FLOOR: Duration = Duration::from_millis(20);
 /// Levels are judged by comparing the mean over the second half of the window with the mean
 /// over the first: rising if up by more than 5% and one unit, falling if down by as much.
 pub fn judge(trace: &Trace, profile: &Profile) -> Verdict {
-    let baseline_from = profile.before / 2;
-    let baseline = stats(
-        trace.window(baseline_from, profile.trigger_start()),
-        &trace.gauge_names,
-    );
-    let tail_from = profile.trigger_end() + profile.tail / 2;
-    let tail = stats(trace.window(tail_from, profile.total()), &trace.gauge_names);
+    let kinds: StreamKinds = trace
+        .stream_names
+        .iter()
+        .map(|n| {
+            let kind = if trace.valued_names.contains(n) {
+                StreamKind::Level
+            } else {
+                StreamKind::Work
+            };
+            (n.clone(), kind)
+        })
+        .collect();
+    judge_with_kinds(trace, profile, &kinds, true)
+}
 
-    let relative_goodput = if baseline.completion_fraction > 0.0 {
-        tail.completion_fraction / baseline.completion_fraction
+/// An amplified stream's tail rate is read as the ratio `tail / (baseline + floor)`, the floor
+/// in records per second so that a stream quiet in both windows is not read as infinite; it has
+/// returned to baseline when the ratio is within the slack factor, and collapsed from the
+/// collapse factor on.
+const AMPLIFICATION_SLACK_FACTOR: f64 = 1.5;
+const AMPLIFICATION_SLACK_FLOOR: f64 = 2.0;
+const AMPLIFICATION_COLLAPSE_FACTOR: f64 = 3.0;
+
+/// [`judge`] with every observed stream's kind given, and whether ids were recorded (so that
+/// completion fractions and latencies mean something). Without ids, goodput is the smallest
+/// tail/baseline rate ratio over the conserved streams, and latency is not read.
+///
+/// The generalized rule, in order:
+///
+/// - **Recovered** if goodput is at least 95% of the baseline's, nothing was abandoned, latency
+///   is within slack (when read), no level is rising, and every amplified or unclassified stream's
+///   tail rate is within [`AMPLIFICATION_SLACK_FACTOR`]× its baseline rate.
+/// - **Draining** if some level is falling and none is rising.
+/// - **Collapsed** if goodput is at most half the baseline's, or some amplified stream's tail rate
+///   is at least [`AMPLIFICATION_COLLAPSE_FACTOR`]× its baseline rate, or a level is rising while
+///   goodput, latency or amplification is degraded.
+/// - **Draining** otherwise.
+pub fn judge_with_kinds(
+    trace: &Trace,
+    profile: &Profile,
+    kinds: &StreamKinds,
+    by_id: bool,
+) -> Verdict {
+    let baseline_from = profile.before / 2;
+    let baseline = stats(trace.window(baseline_from, profile.trigger_start()), kinds);
+    let tail_from = profile.trigger_end() + profile.tail / 2;
+    let tail = stats(trace.window(tail_from, profile.total()), kinds);
+
+    // A conserved stream's tail against its baseline, per offered round when both windows
+    // offered rounds (the workload fixes a conserved stream's records per round, so the ratio is
+    // not disturbed by how many arrivals the Poisson process happened to put in a short window),
+    // per second otherwise.
+    let rate_ratio = |name: &str| -> Option<f64> {
+        let bs = baseline.stream(name)?;
+        let ts = tail.stream(name)?;
+        let (b, t) = match (bs.per_round, ts.per_round) {
+            (Some(b), Some(t)) => (b, t),
+            _ => (bs.rate, ts.rate),
+        };
+        Some(if b > 0.0 { t / b } else if t > 0.0 { f64::INFINITY } else { 1.0 })
+    };
+    let relative_goodput = if by_id {
+        if baseline.completion_fraction > 0.0 {
+            tail.completion_fraction / baseline.completion_fraction
+        } else {
+            tail.completion_fraction
+        }
     } else {
-        tail.completion_fraction
+        kinds
+            .iter()
+            .filter(|(_, k)| **k == StreamKind::Conserved)
+            .filter_map(|(n, _)| rate_ratio(n))
+            .fold(1.0, f64::min)
     };
-    let latency_ok = match (baseline.p50, tail.p50) {
-        (Some(b), Some(t)) => t <= b.mul_f64(LATENCY_SLACK_FACTOR) + LATENCY_SLACK_FLOOR,
-        (None, Some(t)) => t <= LATENCY_SLACK_FLOOR,
-        (_, None) => false,
+    let latency_ok = if by_id {
+        match (baseline.p50, tail.p50) {
+            (Some(b), Some(t)) => t <= b.mul_f64(LATENCY_SLACK_FACTOR) + LATENCY_SLACK_FLOOR,
+            (None, Some(t)) => t <= LATENCY_SLACK_FLOOR,
+            (_, None) => false,
+        }
+    } else {
+        true
     };
+    // Amplified (and unclassified) streams: the tail rate against the baseline rate, with a
+    // floor so that a stream quiet in both windows is not read as infinite.
+    let amplification = kinds
+        .iter()
+        .filter(|(_, k)| matches!(k, StreamKind::Amplified | StreamKind::Work))
+        .filter_map(|(n, _)| {
+            let b = baseline.stream(n)?.rate;
+            let t = tail.stream(n)?.rate;
+            let ratio = t / (b + AMPLIFICATION_SLACK_FLOOR);
+            Some((n.clone(), ratio, b, t))
+        })
+        .max_by(|x, y| x.1.partial_cmp(&y.1).unwrap_or(std::cmp::Ordering::Equal));
+    let amplification_ok = amplification
+        .as_ref()
+        .is_none_or(|(_, r, _, _)| *r <= AMPLIFICATION_SLACK_FACTOR);
+    let amplification_collapsed = amplification
+        .as_ref()
+        .is_some_and(|(_, r, _, _)| *r >= AMPLIFICATION_COLLAPSE_FACTOR);
+    let amplification_text = amplification
+        .as_ref()
+        .map(|(n, _, b, t)| format!("{n} at {t:.1}/s against {b:.1}/s"))
+        .unwrap_or_else(|| "no amplified stream".to_owned());
     // A level is rising if its second-half mean exceeds its first-half mean by more than 5% and
     // at least one unit, so jitter around a small steady value is not read as growth.
-    let rising: Vec<&str> = tail
-        .gauge_halves
+    let halves = tail.gauge_halves();
+    let rising: Vec<&str> = halves
         .iter()
         .filter(|(_, first, second)| *second > first * 1.05 + 1.0)
         .map(|(n, _, _)| n.as_str())
         .collect();
-    let falling: Vec<&str> = tail
-        .gauge_halves
+    let falling: Vec<&str> = halves
         .iter()
         .filter(|(_, first, second)| *second < first * 0.95 - 1.0)
         .map(|(n, _, _)| n.as_str())
@@ -207,25 +416,30 @@ pub fn judge(trace: &Trace, profile: &Profile) -> Verdict {
         d.map(|d| format!("{:.0}ms", d.as_secs_f64() * 1e3))
             .unwrap_or_else(|| "-".to_owned())
     };
+    let latency_text = if by_id {
+        format!(", median latency {} against {}", ms(tail.p50), ms(baseline.p50))
+    } else {
+        String::new()
+    };
 
-    let healthy =
-        relative_goodput >= 0.95 && tail.abandoned == 0 && latency_ok && rising.is_empty();
-    let degraded = relative_goodput < 0.9 || !latency_ok;
+    let healthy = relative_goodput >= 0.95
+        && tail.abandoned == 0
+        && latency_ok
+        && rising.is_empty()
+        && amplification_ok;
+    let degraded = relative_goodput < 0.9 || !latency_ok || !amplification_ok;
     let (outcome, reason) = if healthy {
         (
             Outcome::Recovered,
             format!(
-                "tail goodput is {:.0}% of baseline, median latency {} against {}, no abandonments",
+                "tail goodput is {:.0}% of baseline{latency_text}, no abandonments, {amplification_text}",
                 relative_goodput * 100.0,
-                ms(tail.p50),
-                ms(baseline.p50)
             ),
         )
     } else if rising.is_empty() && !falling.is_empty() {
         // Whatever the goodput, a level that is steadily falling means the program is working
         // off what the trigger left behind; the run was too short to see it finish.
-        let eta: Vec<String> = tail
-            .gauge_halves
+        let eta: Vec<String> = halves
             .iter()
             .filter(|(n, _, _)| falling.contains(&n.as_str()))
             .map(|(n, first, second)| {
@@ -240,9 +454,22 @@ pub fn judge(trace: &Trace, profile: &Profile) -> Verdict {
         (
             Outcome::Draining,
             format!(
-                "goodput at {:.0}% of baseline; {}",
+                "goodput at {:.0}% of baseline; {}; {amplification_text}",
                 relative_goodput * 100.0,
                 eta.join(", ")
+            ),
+        )
+    } else if amplification_collapsed {
+        (
+            Outcome::Collapsed,
+            format!(
+                "{amplification_text} through the tail, goodput at {:.0}% of baseline{latency_text}{}",
+                relative_goodput * 100.0,
+                if rising.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {} still rising", rising.join(", "))
+                }
             ),
         )
     } else if relative_goodput <= 0.5 {
@@ -262,11 +489,9 @@ pub fn judge(trace: &Trace, profile: &Profile) -> Verdict {
         (
             Outcome::Collapsed,
             format!(
-                "{} still rising through the tail with goodput at {:.0}% of baseline and median latency {} against {}",
+                "{} still rising through the tail with goodput at {:.0}% of baseline{latency_text}, {amplification_text}",
                 rising.join(", "),
                 relative_goodput * 100.0,
-                ms(tail.p50),
-                ms(baseline.p50)
             ),
         )
     } else {
@@ -280,6 +505,9 @@ pub fn judge(trace: &Trace, profile: &Profile) -> Verdict {
                 ms(tail.p50),
                 ms(baseline.p50)
             ));
+        }
+        if !amplification_ok {
+            why.push(amplification_text.clone());
         }
         if tail.abandoned > 0 {
             why.push(format!("{} abandoned", tail.abandoned));
@@ -296,6 +524,11 @@ pub fn judge(trace: &Trace, profile: &Profile) -> Verdict {
         baseline,
         tail,
         outstanding: trace.outstanding,
+        by_id,
+        relative_goodput,
+        amplification: amplification
+            .map(|(n, r, _, _)| (n, r))
+            .unwrap_or_else(|| (String::new(), 1.0)),
     }
 }
 
@@ -341,8 +574,11 @@ mod tests {
                 };
                 let mut gauges = std::collections::BTreeMap::new();
                 gauges.insert("backlog".to_owned(), backlog(s));
+                let mut records = std::collections::BTreeMap::new();
+                records.insert("backlog".to_owned(), 1);
                 Bucket {
                     second: s,
+                    rounds: offered,
                     offered,
                     offered_completed: completed,
                     offered_abandoned: abandoned,
@@ -351,16 +587,16 @@ mod tests {
                     completed,
                     abandoned,
                     latencies: vec![latency; completed as usize],
-                    gauges,
-                    counters: Default::default(),
+                    stream_records: records,
+                    stream_values: gauges,
                 }
             })
             .collect();
         Trace {
             buckets,
             outstanding: 0,
-            gauge_names: vec!["backlog".to_owned()],
-            counter_names: vec![],
+            stream_names: vec!["backlog".to_owned()],
+            valued_names: vec!["backlog".to_owned()],
         }
     }
 
@@ -397,6 +633,42 @@ mod tests {
             &profile(),
         );
         assert_eq!(v.outcome, Outcome::Collapsed, "{v}");
+    }
+
+    /// A conserved stream read by rate alone would be at the mercy of how many rounds the Poisson
+    /// process put in a short baseline window; per round it is exact.
+    #[test]
+    fn conserved_goodput_is_read_per_round() {
+        let p = profile();
+        let n = p.total().as_secs();
+        let buckets: Vec<Bucket> = (0..n)
+            .map(|s| {
+                let in_tail = s >= p.trigger_end().as_secs();
+                // Baseline seconds happen to carry 13 rounds, tail seconds 7; the program emits
+                // exactly 4 records per round in both.
+                let rounds = if in_tail { 7 } else { 13 };
+                let mut records = std::collections::BTreeMap::new();
+                records.insert("sent".to_owned(), rounds * 4);
+                Bucket {
+                    second: s,
+                    rounds,
+                    offered: rounds,
+                    stream_records: records,
+                    ..Bucket::default()
+                }
+            })
+            .collect();
+        let trace = Trace {
+            buckets,
+            outstanding: 0,
+            stream_names: vec!["sent".to_owned()],
+            valued_names: vec![],
+        };
+        let mut kinds = StreamKinds::new();
+        kinds.insert("sent".to_owned(), StreamKind::Conserved);
+        let v = judge_with_kinds(&trace, &p, &kinds, false);
+        assert_eq!(v.outcome, Outcome::Recovered, "{v}");
+        assert!((v.relative_goodput - 1.0).abs() < 1e-9, "{v}");
     }
 
     #[test]
