@@ -1,6 +1,7 @@
 //! What [`super::EcCheck::run`] found: one verdict per label, and a readable report.
 
 use std::fmt::{self, Display};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -51,6 +52,10 @@ pub struct Counterexample {
     pub panic: Option<String>,
     /// The failing schedule: its event log and crashed nodes (for the Lamport diagram).
     pub record: Rc<InstanceRecord>,
+    /// Where the failing schedule's Lamport diagram was written (the `.svg` if Graphviz
+    /// rendered it, else the `.dot`), under `target/hydrofrac/<test>/<label>/`. `None` if
+    /// writing it failed.
+    pub diagram: Option<PathBuf>,
 }
 
 impl Counterexample {
@@ -131,17 +136,23 @@ pub struct LabelResult {
 impl LabelResult {
     /// The label's display name: its binding (or operator), file and occurrence.
     pub fn name(&self) -> String {
-        let c = &self.plan.collection;
-        let mut name = c.display_name().to_owned();
-        if let Some(file) = &c.file {
-            name.push_str(&format!(" ({file}"));
-            if c.occurrence > 0 {
-                name.push_str(&format!(" #{}", c.occurrence));
-            }
-            name.push(')');
-        }
-        name
+        label_name(&self.plan)
     }
+}
+
+/// The display name of the label `plan` checks: its binding (or operator), file and
+/// occurrence.
+pub(crate) fn label_name(plan: &LabelPlan) -> String {
+    let c = &plan.collection;
+    let mut name = c.display_name().to_owned();
+    if let Some(file) = &c.file {
+        name.push_str(&format!(" ({file}"));
+        if c.occurrence > 0 {
+            name.push_str(&format!(" #{}", c.occurrence));
+        }
+        name.push(')');
+    }
+    name
 }
 
 /// The verdicts on every label of the program.
@@ -151,6 +162,10 @@ pub struct Results {
     pub labels: Vec<LabelResult>,
     /// The program's node names (counterexamples name nodes by them).
     pub names: NodeNames,
+    /// The operators the provenance rewrite could not see into (opaque islands), by IR node
+    /// name. Records computed through them use the execution rule: sound, but coarser.
+    /// Empty when the whole program is tracked precisely.
+    pub islands: Vec<String>,
 }
 
 impl Results {
@@ -295,8 +310,18 @@ impl Display for Results {
                             "      correct members disagree on {fact} (outside the fact domain)"
                         )?;
                     }
+                    if let Some(diagram) = &c.diagram {
+                        writeln!(f, "      diagram: {}", diagram.display())?;
+                    }
                 }
             }
+        }
+        if !self.islands.is_empty() {
+            writeln!(
+                f,
+                "opaque to provenance (execution rule): {}",
+                self.islands.join(", ")
+            )?;
         }
         Ok(())
     }

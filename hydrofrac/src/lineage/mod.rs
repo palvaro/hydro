@@ -33,64 +33,23 @@ use hydro_lang::sim::network_hook::{ChannelInfo, LocationInfo, Transport};
 use crate::fault::{DeliveryId, Event, EventLog, Fate, MessageId, NodeId, NodeNames};
 use crate::search::{Clause, Dependency, Derivation, PreHealSends, SendSequences};
 
-/// The provenance a record carries, decoded from its metadata.
-///
-/// The metadata is the bincode (1.x, default options) encoding of the provenance rewrite's
-/// `RecordProv`: `enum RecordProv { Ids(BTreeSet<u64>), Opaque }`.
-// TODO(lead): switch to `crate::provenance::RecordProv::decode` once the provenance module lands.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum RecordProv {
-    /// Computed from exactly these deliveries.
-    Ids(BTreeSet<DeliveryId>),
-    /// The rewrite could not see into the record; the execution rule applies.
-    Opaque,
-}
+pub use crate::provenance::RecordProv;
 
-impl RecordProv {
-    /// Decodes a record's metadata. Missing or malformed metadata is [`RecordProv::Opaque`]:
-    /// the execution rule is sound for any record.
-    pub fn decode(meta: Option<&[u8]>) -> Self {
-        let Some(bytes) = meta else {
-            return RecordProv::Opaque;
-        };
-        let u32_at = |at: usize| -> Option<u32> {
-            Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
-        };
-        let u64_at = |at: usize| -> Option<u64> {
-            Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
-        };
-        let decoded = (|| match u32_at(0)? {
-            0 => {
-                let len = usize::try_from(u64_at(4)?).ok()?;
-                if bytes.len() != 12 + len.checked_mul(8)? {
-                    return None;
-                }
-                (0..len)
-                    .map(|i| u64_at(12 + 8 * i))
-                    .collect::<Option<BTreeSet<_>>>()
-                    .map(RecordProv::Ids)
-            }
-            1 if bytes.len() == 4 => Some(RecordProv::Opaque),
-            _ => None,
-        })();
-        decoded.unwrap_or(RecordProv::Opaque)
-    }
-
-    /// The bincode encoding [`Self::decode`] reads (for tests and hand-built logs).
-    pub fn encode(&self) -> Vec<u8> {
-        match self {
-            RecordProv::Ids(ids) => {
-                let mut out = Vec::with_capacity(12 + 8 * ids.len());
-                out.extend_from_slice(&0u32.to_le_bytes());
-                out.extend_from_slice(&(ids.len() as u64).to_le_bytes());
-                for id in ids {
-                    out.extend_from_slice(&id.to_le_bytes());
-                }
-                out
-            }
-            RecordProv::Opaque => 1u32.to_le_bytes().to_vec(),
-        }
-    }
+/// Decodes a record's metadata ([`RecordProv`], as the provenance rewrite encodes it).
+/// Missing or malformed metadata is [`RecordProv::Opaque`]: the execution rule is sound for
+/// any record.
+pub fn decode_meta(meta: Option<&[u8]>) -> RecordProv {
+    use bincode::Options;
+    meta.and_then(|bytes| {
+        // The rewrite's encoding is bincode 1.x with its default (legacy) options; trailing
+        // bytes mean the metadata is not a `RecordProv`.
+        bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .reject_trailing_bytes()
+            .deserialize(bytes)
+            .ok()
+    })
+    .unwrap_or(RecordProv::Opaque)
 }
 
 /// What the lineage needs to know about the simulation besides the log: node names, which nodes
@@ -276,7 +235,7 @@ impl<'a> Lineage<'a> {
                     sends.push(SendRecord {
                         from: msg.from.clone(),
                         fate: *fate,
-                        prov: RecordProv::decode(meta.as_deref()),
+                        prov: decode_meta(meta.as_deref()),
                         bound: bound(i),
                         dependency,
                     });
@@ -287,7 +246,7 @@ impl<'a> Lineage<'a> {
                         i,
                         OutputRecord {
                             node: node.clone(),
-                            prov: RecordProv::decode(meta.as_deref()),
+                            prov: decode_meta(meta.as_deref()),
                             bound: bound(i),
                         },
                     );
