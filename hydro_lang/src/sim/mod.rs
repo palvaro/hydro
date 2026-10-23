@@ -90,6 +90,10 @@ pub mod provenance;
 pub mod feedback_campaign;
 
 #[cfg(stageleft_runtime)]
+#[doc(hidden)]
+pub mod panic_guard;
+
+#[cfg(stageleft_runtime)]
 mod provenance_ir;
 
 #[cfg(stageleft_runtime)]
@@ -146,3 +150,9 @@ pub use crate::continue_if;
 
 #[cfg(test)]
 mod tests;
+
+// Declared here rather than in `tests/mod.rs`, so the line numbers in that file's trace snapshots
+// do not move.
+#[cfg(test)]
+#[path = "tests/dylib_panic.rs"]
+mod dylib_panic_tests;

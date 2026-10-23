@@ -60,9 +60,9 @@
 //! swallows panics. Internal invariant checks should use `abort_assert!`
 //! rather than `panic!`/`assert!`.
 //!
-//! TODO(mingwei): Panics inside the tick DFIR (generated code in the dylib) are
-//! also caught by bolero's `catch_unwind`. Consider a mechanism to detect and
-//! propagate those as well.
+//! Panics inside the tick DFIR (generated code in the dylib) are caught in the dylib and raised
+//! again on the host as ordinary panics (see `sim::panic_guard`), so they reach bolero's
+//! `catch_unwind` like panics in the test body.
 
 /// Like `assert!`, but calls `std::process::abort()` instead of `panic!()`.
 /// Use for internal invariants that must not be silently caught by bolero.
@@ -482,12 +482,13 @@ impl<'a, T: RefUnwindSafe + Fn() -> CompiledSimInstance<'a>> Instantiator<'a> fo
 
 fn null_handler(_args: fmt::Arguments<'_>) {}
 
+// The dylib calls these mid-tick, so a panic in them (e.g. a closed stdout) stays host-side.
 fn println_handler(args: fmt::Arguments<'_>) {
-    println!("{}", args);
+    super::panic_guard::catch_host((), || println!("{}", args));
 }
 
 fn eprintln_handler(args: fmt::Arguments<'_>) {
-    eprintln!("{}", args);
+    super::panic_guard::catch_host((), || eprintln!("{}", args));
 }
 
 /// Creates a simulation instance, returning:
@@ -505,6 +506,7 @@ type SimLoaded<'a> = libloading::Symbol<
         cluster_external_in: &mut HashMap<usize, HashMap<u32, UnsyncSender<Bytes>>>,
         println_handler: fn(fmt::Arguments<'_>),
         eprintln_handler: fn(fmt::Arguments<'_>),
+        panic_handler: super::panic_guard::PanicHandler,
     ) -> (
         Vec<(&'static str, Option<u32>, DfirErased)>,
         Vec<(&'static str, Option<u32>, DfirErased)>,
@@ -942,6 +944,9 @@ impl<'a> CompiledSimInstance<'a> {
             unsafe { reset() };
         }
 
+        // A host panic stashed by a previous instance (which then panicked itself) is stale.
+        super::panic_guard::clear_pending();
+
         let dylib_result = unsafe {
             (self.func)(
                 colored::control::SHOULD_COLORIZE.should_colorize(),
@@ -959,6 +964,7 @@ impl<'a> CompiledSimInstance<'a> {
                 } else {
                     null_handler
                 },
+                super::panic_guard::host_handler,
             )
         };
 
