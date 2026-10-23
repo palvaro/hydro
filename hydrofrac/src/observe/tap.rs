@@ -35,7 +35,9 @@ use crate::provenance::sensitivity::cones_of;
 pub struct Fact {
     /// `bincode` of the element.
     pub bytes: Vec<u8>,
-    /// `format!("{:?}", element)`, if the element type implements `Debug`.
+    /// `format!("{:?}", element)`, if the element type implements `Debug`, shortened for
+    /// reports by [`super::source_names::short_debug`] (module paths dropped, member ids as
+    /// `Client@0`). Not part of the fact's identity.
     pub debug: Option<String>,
 }
 
@@ -91,11 +93,16 @@ impl Fact {
 /// The wire type of a tap output: `(bincode(element), Debug of the element)`.
 type TapWire = (Vec<u8>, Option<String>);
 
-/// Decodes the payload of a tap output (as `SimNetworkHook::on_output` sees it).
+/// Decodes the payload of a tap output (as `SimNetworkHook::on_output` sees it). The `Debug`
+/// rendering is shortened for reports ([`super::source_names::short_debug`]); the identity (the
+/// bytes) is as the tap shipped it.
 pub fn decode_output(payload: &[u8]) -> Fact {
     let (bytes, debug): TapWire =
         bincode::deserialize(payload).expect("a tap output is `(bincode, Option<Debug>)`");
-    Fact { bytes, debug }
+    Fact {
+        bytes,
+        debug: debug.map(|d| super::source_names::short_debug(&d)),
+    }
 }
 
 /// The labelled collections of a compiled program and the external output ports their taps

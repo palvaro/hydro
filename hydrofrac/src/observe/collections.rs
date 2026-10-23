@@ -60,9 +60,10 @@ pub struct EcCollection {
     /// combined with another labelled stream before anything leaves the labelled region, so
     /// agreement is owed at the combination, which the exits check.
     pub merged_into: Vec<usize>,
-    /// A name for reports: the node's tag, else the variable the user's statement binds (or
-    /// the function whose tail expression it is), read back from the source (see
-    /// [`super::source_names`]). `None` when neither is available.
+    /// A name for reports: the node's tag, else the variable the user's statement binds, else
+    /// the receiver of an unbound `<name>.assert_has_consistency_of(..)`, else the function
+    /// whose tail expression it is, read back from the source (see
+    /// [`super::source_names::site_name`]). `None` when none is available.
     pub name: Option<String>,
     /// The file name (no directories) of the user's call that labelled the collection, when
     /// the backtrace has one.

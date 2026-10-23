@@ -57,11 +57,13 @@ fn check(ctp: bool, participants_count: u32, samples: usize) -> hydrofrac::Resul
 }
 
 /// The label of the participants' committed transactions (the agreement claim). It is the
-/// function's return value, so it has no binding name; its operator names it.
+/// function's return value, `committed.assert_has_consistency_of(..)`, so the report names it
+/// by its receiver, `committed`.
 #[cfg(stageleft_runtime)]
 fn committed(results: &hydrofrac::Results) -> &hydrofrac::check::LabelResult {
     let mut found = results.results().iter().filter(|l| {
-        l.plan.collection.name.is_none() && l.plan.collection.op == "AssertIsConsistent"
+        l.plan.collection.display_name() == "committed"
+            && l.plan.collection.op == "AssertIsConsistent"
     });
     let label = found
         .next()

@@ -124,9 +124,9 @@ mod tests {
     }
 
     /// The broadcast of `reliable_broadcast`, with or without the echo (every member
-    /// re-broadcasts what it first sees before delivering it). Its output is labelled by an
-    /// `assert_has_consistency_of` with no binding, so the label is named by its operator,
-    /// `AssertIsConsistent`.
+    /// re-broadcasts what it first sees before delivering it). Its output is labelled by the
+    /// `deliveries.assert_has_consistency_of(..)` the function returns, so the label is named
+    /// by its receiver, `deliveries`.
     #[cfg(stageleft_runtime)]
     fn echo_broadcast(echo: bool, check: EcCheck) -> Results {
         let mut flow = FlowBuilder::new();
@@ -252,7 +252,7 @@ mod tests {
     fn ec_generated_spec_separates_plain_from_reliable_broadcast() {
         let plain = echo_broadcast(false, EcCheck::new());
         eprintln!("{plain}");
-        let deliveries = label(&plain, "reliable_broadcast.rs", "AssertIsConsistent", 0);
+        let deliveries = label(&plain, "reliable_broadcast.rs", "deliveries", 0);
         let cex = deliveries.verdict.counterexample().expect("plain breaks");
         assert_eq!(cex.tolerates, Some(0), "{plain}");
         let (node, _) = the_crash(&plain, deliveries);
@@ -264,7 +264,7 @@ mod tests {
         // §4.9).
         let reliable = echo_broadcast(true, EcCheck::new().sample_schedules(ECHO_SCHEDULES));
         eprintln!("{reliable}");
-        let deliveries = label(&reliable, "reliable_broadcast.rs", "AssertIsConsistent", 0);
+        let deliveries = label(&reliable, "reliable_broadcast.rs", "deliveries", 0);
         assert!(
             deliveries.plan.sites.iter().any(|s| s.op == "batch"),
             "{reliable}"

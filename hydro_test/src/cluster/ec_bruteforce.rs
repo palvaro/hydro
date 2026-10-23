@@ -228,15 +228,15 @@ fn ask_once<'a>(
     ))
 }
 
-/// The label of a program's output that has no binding name (an `assert_has_consistency_of`
-/// returned from the function that builds it).
-fn unbound_claim(cross: &CrossCheck) -> &hydrofrac::check::LabelResult {
+/// The label of a program's output claim: the `<name>.assert_has_consistency_of(..)` the
+/// function that builds the program returns (the report names it by its receiver, `name`).
+fn claim<'c>(cross: &'c CrossCheck, name: &str) -> &'c hydrofrac::check::LabelResult {
     let mut found = cross.results.results().iter().filter(|l| {
-        l.plan.collection.name.is_none() && l.plan.collection.op == "AssertIsConsistent"
+        l.plan.collection.display_name() == name && l.plan.collection.op == "AssertIsConsistent"
     });
     let label = found
         .next()
-        .unwrap_or_else(|| panic!("no unbound claim label in\n{cross}"));
+        .unwrap_or_else(|| panic!("no claim `{name}` in\n{cross}"));
     assert!(found.next().is_none(), "{cross}");
     label
 }
@@ -284,7 +284,7 @@ fn brute_force_finds_the_ask_once_race() {
     use hydrofrac::search::{CrashAt, Fault};
 
     let cross = ask_once_cross_check();
-    let label = unbound_claim(&cross);
+    let label = claim(&cross, "known");
     let b = cross
         .brute
         .label(label.index)
@@ -317,8 +317,11 @@ fn brute_force_finds_the_ask_once_race() {
 fn brute_force_agrees_on_ask_once() {
     let cross = ask_once_cross_check();
     cross.assert_agrees();
-    let label = unbound_claim(&cross);
-    assert!(!label.plan.sites.is_empty(), "the claim is schedule-sensitive: {cross}");
+    let label = claim(&cross, "known");
+    assert!(
+        !label.plan.sites.is_empty(),
+        "the claim is schedule-sensitive: {cross}"
+    );
     let cex = label
         .verdict
         .counterexample()
@@ -395,7 +398,7 @@ fn two_pc_cross_check(ctp: bool, participants_count: u32, samples: Option<usize>
 #[test]
 fn brute_force_finds_the_two_pc_cooperative_termination_violation() {
     let cross = two_pc_cross_check(true, 3, Some(TWO_PC_SCHEDULES));
-    let label = unbound_claim(&cross);
+    let label = claim(&cross, "committed");
     let b = cross
         .brute
         .label(label.index)
@@ -419,7 +422,7 @@ fn brute_force_finds_the_two_pc_cooperative_termination_violation() {
 fn brute_force_agrees_on_two_pc_cooperative_termination() {
     let cross = two_pc_cross_check(true, 3, Some(TWO_PC_SCHEDULES));
     cross.assert_agrees();
-    let cex = unbound_claim(&cross)
+    let cex = claim(&cross, "committed")
         .verdict
         .counterexample()
         .unwrap_or_else(|| panic!("the search finds the two-crash split: {cross}"));
@@ -434,7 +437,7 @@ fn brute_force_agrees_on_plain_two_pc() {
     let cross = two_pc_cross_check(false, 2, None);
     cross.assert_agrees();
     // The coordinator's crash between its two `commit`s splits the participants.
-    let b = cross.brute.label(unbound_claim(&cross).index).unwrap();
+    let b = cross.brute.label(claim(&cross, "committed").index).unwrap();
     assert_eq!(b.min_crashes(), Some(1), "{cross}");
 }
 

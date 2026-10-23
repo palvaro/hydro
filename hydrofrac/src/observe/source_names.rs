@@ -3,10 +3,14 @@
 //! A labelled collection or a network channel is identified by the `file:line` of the user's
 //! call that built it (see [`super::collections`]). For reports, a name the user would recognize is
 //! better: the variable the statement binds (`let learned = initial.merge_unordered(..)` names
-//! `learned`), else the function whose tail expression the call is (`splice_epoch_log`). The
+//! `learned`), else the receiver of an unbound `committed.assert_has_consistency_of(..)`
+//! (`committed`), else the function whose tail expression the call is (`splice_epoch_log`). The
 //! name is recovered by reading the source file at the recorded line and walking back to the
 //! start of the statement. Everything here is best-effort: when the file cannot be read or the
 //! statement binds nothing nameable, the caller falls back to the operator or the site.
+//!
+//! [`short_debug`] does the same for the `Debug` renderings of facts: it drops module paths
+//! and renders member ids the way node names are (`Client@0`).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -77,19 +81,38 @@ fn with_source<R>(file: &str, f: impl FnOnce(&[String]) -> Option<R>) -> Option<
 /// The name of the site at `frame`: the variable its statement binds, else the enclosing
 /// function when the call is that function's tail expression. `None` when neither applies or
 /// the source is unavailable.
+///
+/// A statement that binds nothing is named, in order of preference:
+/// - by its receiver, when it is `<name>.assert_has_consistency_of(..)`: the assertion labels
+///   `<name>` itself, so that is the collection's name (`committed.assert_has_consistency_of(..)`
+///   as a function's tail names the label `committed`);
+/// - by the enclosing function, when it is the first statement of its block or the block's tail
+///   expression (the collection is what the function returns: `splice_epoch_log`).
 pub fn site_name(frame: &UserFrame) -> Option<String> {
-    let statement_start = with_source(&frame.file, |lines| binding_at(lines, frame.line as usize))?;
-    match statement_start {
+    let line = frame.line as usize;
+    let function = || frame.function.as_deref().and_then(function_name);
+    with_source(&frame.file, |lines| match binding_at(lines, line)? {
         Binding::Let(name) => Some(name),
-        Binding::BlockStart => frame.function.as_deref().and_then(function_name),
-    }
+        Binding::Statement {
+            start,
+            first_in_block,
+        } => {
+            let target = line - 1;
+            asserted_receiver(&lines[start..=target]).or_else(|| {
+                (first_in_block || is_tail(lines, start))
+                    .then(function)
+                    .flatten()
+            })
+        }
+    })
 }
 
 enum Binding {
-    /// The statement is `let <name> = ..`.
+    /// The statement is `let <name> = ..`, or closes the `forward_ref` cycle of `<name>`.
     Let(String),
-    /// The statement is the first of a block (likely a function's tail expression).
-    BlockStart,
+    /// The statement binds nothing. It starts at 0-based line `start`, and `first_in_block`
+    /// when it is the first statement of a block.
+    Statement { start: usize, first_in_block: bool },
 }
 
 /// Walks back from `line` (1-based) to the start of its statement and reads its binding.
@@ -104,16 +127,118 @@ fn binding_at(lines: &[String], line: usize) -> Option<Binding> {
         let code = strip_comment(&lines[i]);
         let trimmed = code.trim();
         if i < target && (trimmed.ends_with(';') || trimmed.ends_with('}')) {
-            return completed_cycle(&lines[i + 1..=target]).map(Binding::Let);
+            return Some(match completed_cycle(&lines[i + 1..=target]) {
+                Some(name) => Binding::Let(name),
+                None => Binding::Statement {
+                    start: first_code_line(lines, i + 1, target),
+                    first_in_block: false,
+                },
+            });
         }
         if let Some(name) = let_name(trimmed) {
             return Some(Binding::Let(name));
         }
         if i < target && trimmed.ends_with('{') {
-            return Some(Binding::BlockStart);
+            return Some(Binding::Statement {
+                start: first_code_line(lines, i + 1, target),
+                first_in_block: true,
+            });
         }
     }
     None
+}
+
+/// The first line in `from..=to` with code on it (`to` if none).
+fn first_code_line(lines: &[String], from: usize, to: usize) -> usize {
+    (from..=to)
+        .find(|&i| !strip_comment(&lines[i]).trim().is_empty())
+        .unwrap_or(to)
+}
+
+/// For a statement `<name>.assert_has_consistency_of(..)` (its code lines up to the call),
+/// `<name>`.
+fn asserted_receiver(statement: &[String]) -> Option<String> {
+    let code: String = statement
+        .iter()
+        .map(|line| strip_comment(line))
+        .collect::<String>()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let (receiver, _) = code.split_once(".assert_has_consistency_of")?;
+    if receiver.is_empty() || !receiver.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+    simple_name(receiver)
+}
+
+/// Whether the statement starting at 0-based line `start` is its block's tail expression: it
+/// ends at the block's closing `}` rather than at a `;`. Comments, strings and character
+/// literals are skipped; lifetimes (`'a`) are not mistaken for character literals.
+fn is_tail(lines: &[String], start: usize) -> bool {
+    // A statement spans at most this many lines forward, for the scan.
+    const MAX_LINES: usize = 200;
+    let mut depth: i64 = 0;
+    let mut block_comment = 0usize;
+    for line in lines.iter().skip(start).take(MAX_LINES) {
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            let next = chars.get(i + 1).copied();
+            if block_comment > 0 {
+                if c == '*' && next == Some('/') {
+                    block_comment -= 1;
+                    i += 2;
+                } else if c == '/' && next == Some('*') {
+                    block_comment += 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            match c {
+                '/' if next == Some('/') => break,
+                '/' if next == Some('*') => {
+                    block_comment += 1;
+                    i += 2;
+                    continue;
+                }
+                '"' => {
+                    // Skip to the closing quote (a string spanning lines is rare enough in a
+                    // dataflow chain to ignore).
+                    i += 1;
+                    while i < chars.len() && chars[i] != '"' {
+                        i += if chars[i] == '\\' { 2 } else { 1 };
+                    }
+                }
+                '\'' => {
+                    // `'x'` or `'\n'` is a character literal; `'a` is a lifetime.
+                    if chars.get(i + 1) == Some(&'\\') {
+                        i += 2;
+                        while i < chars.len() && chars[i] != '\'' {
+                            i += 1;
+                        }
+                    } else if chars.get(i + 2) == Some(&'\'') {
+                        i += 2;
+                    }
+                }
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' => depth -= 1,
+                '}' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        return true;
+                    }
+                }
+                ';' if depth == 0 => return false,
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+    false
 }
 
 /// For a statement `<name>_handle.complete(..)` (closing a `forward_ref` cycle) whose first
@@ -186,6 +311,137 @@ pub fn short_type_name(type_name: &str) -> String {
     base.rsplit("::").next().unwrap_or(base).to_owned()
 }
 
+/// A `Debug` rendering made readable for reports and diagrams: module paths dropped from every
+/// path (`hydro_std_hydro_trybuild::__staged::abd::Client` → `Client`, keeping everything from
+/// the first capitalized segment, so `Kind::A` stays), and a member id
+/// (`MemberId::<…::Client>(0)`) rendered as `Client@0`, the way node names are. String and
+/// character literals are left alone. Only for display: a fact's identity is its bytes.
+pub fn short_debug(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '"' || (c == '\'' && is_char_literal(&chars, i)) {
+            let end = literal_end(&chars, i);
+            out.extend(&chars[i..end]);
+            i = end;
+            continue;
+        }
+        let at_word_start = i == 0 || !is_ident_char(chars[i - 1]);
+        if at_word_start && (c.is_alphabetic() || c == '_') {
+            let (segments, end) = read_path(&chars, i);
+            let kept = short_path(&segments);
+            let member_id = if kept.last().is_some_and(|s| s == "MemberId") {
+                member_id_parts(&chars, end)
+            } else {
+                None
+            };
+            if let Some((tag, member, after)) = member_id {
+                out.push_str(&member_label(&tag));
+                out.push('@');
+                out.push_str(&member);
+                i = after;
+                continue;
+            }
+            out.push_str(&kept.join("::"));
+            i = end;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Whether the `'` at `i` opens a character literal (`'x'`, `'\n'`) rather than a lifetime.
+fn is_char_literal(chars: &[char], i: usize) -> bool {
+    chars.get(i + 1) == Some(&'\\') || chars.get(i + 2) == Some(&'\'')
+}
+
+/// The index just past the string or character literal opening at `i`.
+fn literal_end(chars: &[char], i: usize) -> usize {
+    let quote = chars[i];
+    let mut j = i + 1;
+    while j < chars.len() && chars[j] != quote {
+        j += if chars[j] == '\\' { 2 } else { 1 };
+    }
+    (j + 1).min(chars.len())
+}
+
+/// The path `seg::seg::…` starting at `i` (stopping before a `::<`), and the index past it.
+fn read_path(chars: &[char], mut i: usize) -> (Vec<String>, usize) {
+    let mut segments = vec![];
+    loop {
+        let start = i;
+        while i < chars.len() && is_ident_char(chars[i]) {
+            i += 1;
+        }
+        segments.push(chars[start..i].iter().collect());
+        let continues = chars.get(i) == Some(&':')
+            && chars.get(i + 1) == Some(&':')
+            && chars
+                .get(i + 2)
+                .is_some_and(|&c| c.is_alphabetic() || c == '_');
+        if !continues {
+            return (segments, i);
+        }
+        i += 2;
+    }
+}
+
+/// `segments` without their leading module segments: everything from the first capitalized
+/// segment, else the last segment.
+fn short_path(segments: &[String]) -> Vec<String> {
+    let first_type = segments
+        .iter()
+        .position(|s| s.starts_with(|c: char| c.is_uppercase()))
+        .unwrap_or(segments.len() - 1);
+    segments[first_type..].to_vec()
+}
+
+/// For `::<Tag>(member)` at `i` (what follows `MemberId` in its `Debug`): the tag, the member,
+/// and the index past the `)`.
+fn member_id_parts(chars: &[char], i: usize) -> Option<(String, String, usize)> {
+    if chars.get(i..i + 3)? != [':', ':', '<'] {
+        return None;
+    }
+    let mut depth = 1;
+    let mut j = i + 3;
+    while depth > 0 {
+        match chars.get(j)? {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            _ => {}
+        }
+        j += 1;
+    }
+    let tag: String = chars[i + 3..j - 1].iter().collect();
+    if chars.get(j) != Some(&'(') {
+        return None;
+    }
+    let close = j + chars[j..].iter().position(|&c| c == ')')?;
+    let member: String = chars[j + 1..close].iter().collect();
+    member
+        .chars()
+        .all(|c| c.is_ascii_digit())
+        .then_some((tag, member, close + 1))
+}
+
+/// The node label of a member id's tag type, as [`crate::fault::NodeNames`] labels clusters:
+/// its short type name, or `cluster` for `()`.
+fn member_label(tag: &str) -> String {
+    let tag = tag.trim();
+    if tag == "()" || tag.is_empty() {
+        return "cluster".to_owned();
+    }
+    short_type_name(tag)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,8 +453,115 @@ mod tests {
     fn name(text: &str, line: usize) -> Option<String> {
         match binding_at(&lines(text), line)? {
             Binding::Let(name) => Some(name),
-            Binding::BlockStart => Some("<block>".to_owned()),
+            Binding::Statement {
+                first_in_block: true,
+                ..
+            } => Some("<block>".to_owned()),
+            Binding::Statement {
+                first_in_block: false,
+                ..
+            } => Some("<statement>".to_owned()),
         }
+    }
+
+    /// `site_name` on `text` written to a scratch file, at 1-based `line`, inside `function`.
+    fn site(text: &str, line: u32, function: &str) -> Option<String> {
+        let dir =
+            std::env::temp_dir().join(format!("hydrofrac-source-names-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(format!("{function}_{line}.rs"));
+        std::fs::write(&file, text).unwrap();
+        site_name(&UserFrame {
+            file: file.to_string_lossy().into_owned(),
+            line,
+            function: Some(format!("my_crate::protocols::{function}")),
+        })
+    }
+
+    /// A labelling assertion that is a function's tail expression is named by its receiver; any
+    /// other tail expression by the function; a statement in the middle of a block by nothing.
+    #[test]
+    fn unbound_statements() {
+        let src = "\
+pub fn two_pc<'a>(coordinator: &Process<'a, Coordinator>) -> Stream<u32> {
+    let committed = coordinator.source_iter(q!([1, 2]));
+    decisions_handle.complete(committed.clone());
+
+    committed.assert_has_consistency_of::<Cluster<'a, Participant, EventualConsistency>>(
+        manual_proof!(
+            /** claimed, not proven: it can't hold (a `{` or `;` in here is not code) */
+        ),
+    )
+}
+
+fn deliveries<'a>(members: &Cluster<'a, Member>) -> Stream<u32> {
+    let x = members.source_iter(q!([0]));
+    x.map(q!(|v| v + 1))
+        .filter(q!(|v: &u32| *v > 0))
+}
+
+fn middle<'a>(members: &Cluster<'a, Member>) {
+    let x = members.source_iter(q!([0]));
+    x.map(q!(|v| v + 1)).for_each(q!(|_| ()));
+    let y = 1;
+}
+
+fn receiver_on_its_own_line<'a>(s: Stream<u32>) -> Stream<u32> {
+    s
+        .assert_has_consistency_of::<Cluster<'a, Member, EventualConsistency>>(
+            manual_proof!(/** ok */),
+        )
+}";
+        assert_eq!(site(src, 5, "two_pc").as_deref(), Some("committed"));
+        assert_eq!(site(src, 14, "deliveries").as_deref(), Some("deliveries"));
+        assert_eq!(site(src, 15, "deliveries").as_deref(), Some("deliveries"));
+        assert_eq!(site(src, 20, "middle"), None);
+        assert_eq!(
+            site(src, 26, "receiver_on_its_own_line").as_deref(),
+            Some("s")
+        );
+    }
+
+    #[test]
+    fn tails() {
+        let src = lines(
+            "\
+fn f() -> u32 {
+    a.b(q!(|x: &'a u8| { x; '}' }));
+    c.d(\"};\")
+        /* ; */ .e() // ;
+}",
+        );
+        assert!(!is_tail(&src, 1));
+        assert!(is_tail(&src, 2));
+    }
+
+    #[test]
+    fn short_debugs() {
+        assert_eq!(
+            short_debug(
+                "(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::abd::Client>(0), 7)"
+            ),
+            "(Client@0, 7)"
+        );
+        assert_eq!(short_debug("Some(MemberId::<()>(2))"), "Some(cluster@2)");
+        assert_eq!(
+            short_debug("MemberId::<a::Proposer<a::b::X>>(1)"),
+            "Proposer@1"
+        );
+        assert_eq!(
+            short_debug("Payload { kind: Kind::Decided, txn: my_crate::two_pc::Txn(1) }"),
+            "Payload { kind: Kind::Decided, txn: Txn(1) }"
+        );
+        assert_eq!(
+            short_debug("core::option::Option::Some(1)"),
+            "Option::Some(1)"
+        );
+        assert_eq!(short_debug("a::b::c"), "c");
+        // Literals are left alone; a non-numeric member id is not rewritten.
+        assert_eq!(short_debug(r#"("a::b::C", 'x')"#), r#"("a::b::C", 'x')"#);
+        assert_eq!(short_debug("MemberId::<T>(x)"), "MemberId::<T>(x)");
+        assert_eq!(short_debug("[1, 2]"), "[1, 2]");
     }
 
     #[test]
