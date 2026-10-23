@@ -497,3 +497,83 @@ fn a_choice_at_a_sender_that_feeds_no_send_does_not_reorder_it() {
         "{old:?}"
     );
 }
+
+/// Faults that *create* a record (docs/design/hydrofrac-lite.md §4.9, "Established vs not").
+/// A source sends `100, 1, 2` over an ordered lossy channel (`TCP.lossy`, which keeps
+/// `TotalOrder`), and each member reports every `x < 100` that is not at position `x` of what it
+/// received (none, without faults), next to a constant `5`. Omitting the filler `100` to one
+/// member shifts `1` and `2` and makes that member report them: a divergent fact, created by an
+/// omission, with no crash. The constant's derivation has no delivery, so lineage gives the
+/// search nothing to kill and the strong rule would certify the label. Nothing else in the cone
+/// is a site (the channel's `nondet!` is the omission itself), so the walk counts the channel.
+///
+/// The simulator rejects `TCP.lossy` today; the second half of the test pins that, so that
+/// support for it is noticed and this program is cross-checked against the brute force.
+#[cfg(stageleft_runtime)]
+#[test]
+fn an_ordered_lossy_channel_is_opaque() {
+    use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
+
+    use crate::provenance::sensitivity::label_cones_conservative;
+
+    let program = || {
+        let mut flow = FlowBuilder::new();
+        let source = flow.process::<()>();
+        let members = flow.cluster::<()>();
+        let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+        let shifted = input
+            .broadcast_closed(
+                &members,
+                TCP.lossy(nondet!(/** omissions, which the check injects */))
+                    .name("ordered")
+                    .bincode(),
+            )
+            .weaken_consistency()
+            .enumerate()
+            .filter_map(q!(|(i, x)| (x < 100 && i != x as usize).then_some(x)))
+            .weaken_ordering::<NoOrder>();
+        let constant = members
+            .source_iter(q!([5u32]))
+            .weaken_consistency()
+            .weaken_ordering::<NoOrder>();
+        let _out = shifted
+            .merge_unordered(constant.into())
+            .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+                /** claimed (wrongly, under omissions): every member sees the same positions */
+            ))
+            .sim_cluster_output();
+        (flow, members, send)
+    };
+
+    let (flow, _, _) = program();
+    let built = flow.finalize();
+    for cones in [label_cones(built.ir()), label_cones_conservative(built.ir())] {
+        let label = the_claim(&cones, "out");
+        assert!(
+            label
+                .sites
+                .iter()
+                .all(|s| s.op == "ordered_lossy_network" && s.opaque),
+            "only the channel: {label:?}"
+        );
+        assert!(label.existence_sensitive(), "{label:?}");
+    }
+
+    let (flow, members, _send) = program();
+    let rejected = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let _ = flow.sim().with_cluster_size(&members, 2).compiled();
+    }));
+    let message = rejected
+        .err()
+        .and_then(|e| {
+            e.downcast_ref::<String>()
+                .cloned()
+                .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+        })
+        .unwrap_or_default();
+    assert!(
+        message.contains("only supports fail-stop and lossy-delayed-forever"),
+        "the simulator now runs `TCP.lossy`: cross-check this program against the brute force \
+         (`EcCheck::cross_check`) and revisit the walk's `ordered_lossy_network` ({message:?})"
+    );
+}
