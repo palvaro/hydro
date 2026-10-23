@@ -1,0 +1,31 @@
+[package]
+name = "hydrofrac"
+publish = false
+version = "0.0.0"
+description = "Lineage-driven fault injection for Hydro programs in the simulator: checks every `EventualConsistency` label under the fault model its transports declare"
+edition = { workspace = true }
+repository = { workspace = true }
+license = { workspace = true }
+
+[features]
+default = ["tokio"]
+tokio = ["hydro_lang/tokio"]
+stageleft_macro_entrypoint = ["hydro_lang/stageleft_macro_entrypoint"]
+# Solve the hitting-set ILP with HiGHS instead of the pure-Rust `microlp`. Needs cmake, libclang
+# and a C++ toolchain; used to cross-check `microlp` (docs/design/hydrofrac-lite.md §4.4, §7).
+highs = ["good_lp/highs"]
+
+[lints]
+workspace = true
+
+[dependencies]
+# TODO(hydrofrac-lite): also enable hydro_lang's `hydrofrac` feature once the core extension
+# points (E1–E5, docs/design/hydrofrac-lite.md §6.2) land.
+hydro_lang = { path = "../hydro_lang", version = "^0.17.0-alpha.4", default-features = false, features = [
+    "sim",
+] }
+stageleft.workspace = true
+good_lp = { version = "1.15", default-features = false, features = ["microlp"] }
+
+[build-dependencies]
+stageleft_tool.workspace = true
