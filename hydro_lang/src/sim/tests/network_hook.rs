@@ -588,3 +588,54 @@ fn with_provenance_composes_with_hook_points() {
     assert!(!hook.sent.borrow().is_empty());
     assert_eq!(hook.sent.borrow().len(), hook.received.borrow().len());
 }
+
+/// Hook points are opt-in at codegen: a flow that does not call `with_network_hook_points()`
+/// generates no call into the network-hook runtime (so, since `network_hooks` is the only codegen
+/// switch, its simulation is generated exactly as with the `hydrofrac` feature off), and one that
+/// does gets the send, receive and output interception plus the dylib's hook installer.
+#[cfg(stageleft_runtime)]
+#[test]
+fn hook_points_are_opt_in_at_codegen() {
+    fn source(hooks: bool) -> String {
+        let mut flow = FlowBuilder::new();
+        let p1 = flow.process::<()>();
+        let p2 = flow.process::<()>();
+        let (in_send, input) = p1.sim_input::<i32, _, _>();
+        let out = input
+            .send(&p2, TCP.fail_stop().bincode().name("ch"))
+            .sim_output();
+        let sim = flow.sim();
+        let sim = if hooks {
+            sim.with_network_hook_points()
+        } else {
+            sim
+        };
+        let compiled = sim.compiled();
+        let source = crate::sim::graph::LAST_SIM_SOURCE
+            .with(|last| last.borrow_mut().take())
+            .expect("compiling a simulation records its source");
+        compiled.exhaustive(async || {
+            in_send.send(1);
+            assert_eq!(out.next().await, 1);
+        });
+        source
+    }
+
+    let plain = source(false);
+    assert!(
+        !plain.contains("network_hook"),
+        "a flow without hook points must not call into the network-hook runtime"
+    );
+    assert!(!plain.contains("__hydro_set_network_hook"));
+    assert_eq!(plain, source(false), "codegen is deterministic");
+
+    let hooked = source(true);
+    for call in [
+        "network_hook::rt::on_send",
+        "network_hook::rt::on_recv",
+        "network_hook::rt::on_output",
+        "__hydro_set_network_hook",
+    ] {
+        assert!(hooked.contains(call), "hook points must emit `{call}`");
+    }
+}

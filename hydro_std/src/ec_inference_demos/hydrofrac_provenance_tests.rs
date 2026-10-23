@@ -19,8 +19,6 @@ use support::*;
 
 #[cfg(stageleft_runtime)]
 mod support {
-    pub(super) use hydro_lang::sim::flow::SimFlow;
-
     pub(super) use hydrofrac::provenance::check::run_checked as run_corpus;
 }
 

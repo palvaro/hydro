@@ -6,7 +6,7 @@
 //! from the instant it was sent to the instant it was received, so a message sent before its
 //! sender crashed and received afterwards starts above the crash mark. That is the reason a
 //! sequence diagram (Mermaid) was rejected: it draws a message as one horizontal arrow and so
-//! shows such a message as if the dead node sent it. [`write`] writes `<name>.dot`, plus
+//! shows such a message as if the dead node sent it. [`write()`] writes `<name>.dot`, plus
 //! `<name>.svg` when Graphviz is installed; [`default_dir`] is the conventional
 //! `target/hydrofrac/<test>/<label>/`.
 //!

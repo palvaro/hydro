@@ -1,7 +1,7 @@
 //! Human names for program sites in hydrofrac reports, read back from the user's source.
 //!
 //! A labelled collection or a network channel is identified by the `file:line` of the user's
-//! call that built it (see [`super::collections`]). For reports, a name the user would recognize is
+//! call that built it (see the `collections` module). For reports, a name the user would recognize is
 //! better: the variable the statement binds (`let learned = initial.merge_unordered(..)` names
 //! `learned`), else the receiver of an unbound `committed.assert_has_consistency_of(..)`
 //! (`committed`), else the function whose tail expression the call is (`splice_epoch_log`). The

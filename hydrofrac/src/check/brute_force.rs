@@ -45,6 +45,7 @@ use super::enumerate::{admissible, harvest};
 use super::{EcCheck, Engine, Run};
 use crate::check::results::{LabelResult, Results, Verdict, label_name};
 use crate::fault::MessageId;
+use crate::report::ReportNames;
 use crate::search::{CrashBounds, Fault, FaultSet, Tolerance, crash_count};
 
 /// The outcome of [`EcCheck::cross_check`]: the search's results, the enumeration's, and every
@@ -76,14 +77,18 @@ impl CrossCheck {
             "hydrofrac: the search and the brute-force enumeration disagree:\n- {}\n\nsearch:\n{}\nenumeration:\n{}",
             self.disagreements.join("\n- "),
             self.results,
-            self.brute,
+            self.brute.rendered(Some(&self.results.report_names())),
         );
     }
 }
 
 impl Display for CrossCheck {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "{}", self.brute)?;
+        writeln!(
+            f,
+            "{}",
+            self.brute.rendered(Some(&self.results.report_names()))
+        )?;
         if self.disagreements.is_empty() {
             writeln!(f, "the search agrees with the enumeration on every label")
         } else {
@@ -152,14 +157,36 @@ impl BruteLabel {
     }
 }
 
-/// `{f1, f2}` in the faults' own rendering.
-fn show(set: &FaultSet<MessageId>) -> String {
-    let faults: Vec<String> = set.iter().map(|f| f.to_string()).collect();
-    format!("{{{}}}", faults.join(", "))
+/// `{f1, f2}` in the report's names (source names for channels and nodes, decoded payloads),
+/// or in the faults' own rendering when no names are at hand.
+fn show(names: Option<&ReportNames<'_>>, set: &FaultSet<MessageId>) -> String {
+    if let Some(names) = names {
+        names.fault_set(set)
+    } else {
+        let faults: Vec<String> = set.iter().map(|f| f.to_string()).collect();
+        format!("{{{}}}", faults.join(", "))
+    }
 }
 
 impl Display for BruteForce {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.render(f, None)
+    }
+}
+
+impl BruteForce {
+    /// The enumeration's report, naming faults the way `names` does (raw without it).
+    pub fn rendered(&self, names: Option<&ReportNames<'_>>) -> String {
+        struct Rendered<'a, 'n>(&'a BruteForce, Option<&'a ReportNames<'n>>);
+        impl Display for Rendered<'_, '_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.render(f, self.1)
+            }
+        }
+        Rendered(self, names).to_string()
+    }
+
+    fn render(&self, f: &mut fmt::Formatter<'_>, names: Option<&ReportNames<'_>>) -> fmt::Result {
         writeln!(
             f,
             "brute force up to {} fault(s): {} candidate faults, {} sets, {} schedules, {} pass(es), {:.2?}",
@@ -171,8 +198,8 @@ impl Display for BruteForce {
                 None => write!(f, "no admissible set breaks it")?,
                 Some(set) if set.is_empty() => write!(f, "the failure-free run breaks it")?,
                 Some(set) => match crash_count(set) {
-                    0 => write!(f, "omissions alone break it: {}", show(set))?,
-                    c => write!(f, "breaks with {c} crash(es): {}", show(set))?,
+                    0 => write!(f, "omissions alone break it: {}", show(names, set))?,
+                    c => write!(f, "breaks with {c} crash(es): {}", show(names, set))?,
                 },
             }
             writeln!(
@@ -342,12 +369,19 @@ fn disagreements(
     brute: &BruteForce,
     confirmed: &BTreeMap<usize, bool>,
 ) -> Vec<String> {
+    let names = results.report_names();
     let mut out = vec![];
     for label in results.results() {
         let Some(b) = brute.label(label.index) else {
             continue;
         };
-        if let Some(problem) = disagreement(label, b, brute, confirmed.get(&label.index).copied()) {
+        if let Some(problem) = disagreement(
+            label,
+            b,
+            brute,
+            confirmed.get(&label.index).copied(),
+            &names,
+        ) {
             out.push(format!("{}: {problem}", b.name));
         }
     }
@@ -360,7 +394,9 @@ fn disagreement(
     b: &BruteLabel,
     brute: &BruteForce,
     confirmed: Option<bool>,
+    names: &ReportNames<'_>,
 ) -> Option<String> {
+    let show = |set: &FaultSet<MessageId>| show(Some(names), set);
     let refuted = |k: usize, claim: &str| {
         b.breaking_within(k).map(|set| {
             format!(
