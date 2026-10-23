@@ -15,7 +15,7 @@
 use std::collections::BTreeSet;
 
 use super::clause::{Clause, Fault, FaultSet, universe};
-use super::ilp::{Backend, CrashBounds, hitting_set};
+use super::ilp::{Backend, CrashBounds, group_is_unkillable, hitting_set_any};
 
 /// The default hypothesis budget, counting the failure-free probe. Once it is spent the verdict
 /// is [`Next::Budget`], not a certificate (docs/design/hydrofrac-lite.md §2).
@@ -119,10 +119,21 @@ impl<M: Ord + Clone> Sweep<M> {
 
     /// The next step given every clause learned so far. A proposed set counts as tried.
     pub fn next(&mut self, clauses: &[Clause<M>]) -> Next<M> {
-        if clauses.iter().any(Clause::is_unkillable) {
+        let groups: Vec<&[Clause<M>]> = clauses.iter().map(std::slice::from_ref).collect();
+        self.next_any(&groups)
+    }
+
+    /// [`Self::next`] with disjunctive clauses (see [`super::hitting_set_any`]): a hypothesis
+    /// must satisfy some clause of every group. With one clause per group this is [`Self::next`].
+    ///
+    /// Used as a heuristic for schedule-sensitive labels, whose "certificates" are not proofs:
+    /// the caller decides what [`Next::Certified`] means.
+    pub fn next_any(&mut self, groups: &[&[Clause<M>]]) -> Next<M> {
+        if groups.iter().any(|g| group_is_unkillable(g)) {
             return Next::Certified(Tolerance::All);
         }
-        let universe = universe(clauses, &self.extra);
+        let clauses: Vec<Clause<M>> = groups.iter().flat_map(|g| g.iter().cloned()).collect();
+        let universe = universe(&clauses, &self.extra);
         // The most crashes any admissible set over this universe can hold: one per node, and
         // at most the checked cluster's cap among its members.
         let crash_nodes: BTreeSet<_> = universe.iter().filter_map(Fault::crashed_node).collect();
@@ -141,9 +152,9 @@ impl<M: Ord + Clone> Sweep<M> {
                 return Next::Budget;
             }
             let bounds = self.bounds.capped_at(self.bound);
-            if let Some(set) = hitting_set(
+            if let Some(set) = hitting_set_any(
                 &universe,
-                clauses,
+                groups,
                 &self.tried,
                 &self.vacuous,
                 &bounds,

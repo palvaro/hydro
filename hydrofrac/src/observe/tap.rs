@@ -26,6 +26,7 @@ use syn::parse_quote;
 
 use super::collections::{EcKey, ec_key, is_ec};
 use super::{LabelPlan, ec_collections, plan};
+use crate::provenance::sensitivity::cones_of;
 
 /// One observed element of a labelled collection, as the host receives it: its bincode (the
 /// fact's identity) and, when the element type implements `Debug`, its `Debug` rendering for
@@ -306,7 +307,14 @@ fn tap_closure(element_type: &syn::Type) -> syn::Expr {
 /// Enumerates the labels of `ir`, plans them, and taps every searched one (see the module
 /// docs).
 pub fn tap(ir: &mut Vec<HydroRoot>) -> Labels {
-    let plans = plan(ec_collections(ir));
+    let collections = ec_collections(ir);
+    // Each label's schedule sensitivity, on the IR as the program built it (before the taps).
+    let cones = cones_of(ir, collections.clone());
+    let mut plans = plan(collections);
+    for (plan, cone) in plans.iter_mut().zip(cones) {
+        debug_assert_eq!(plan.collection.key(), cone.collection.key());
+        plan.sites = cone.sites;
+    }
     let index_of: HashMap<EcKey, usize> = plans
         .iter()
         .enumerate()

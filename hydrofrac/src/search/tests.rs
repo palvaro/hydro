@@ -962,3 +962,84 @@ fn bench_lean_vs_full_model() {
         );
     }
 }
+
+/// A disjunctive group (one run's schedules) is satisfied by killing *one* of its clauses;
+/// Molly's rule asks for every clause. The lossy deliveries `a` and `b` stand for two
+/// schedules' derivations of the same run.
+#[test]
+fn a_group_needs_only_one_of_its_clauses_killed() {
+    let a = Clause::new([lossy("a", 1)], no_sends());
+    let b = Clause::new([lossy("b", 1)], no_sends());
+    let clauses = [a.clone(), b.clone()];
+    let universe = universe(&clauses, []);
+    let tried = BTreeSet::from([FaultSet::new()]);
+    // Every clause must be hit: one omission per schedule's derivation.
+    let strong = hitting_set(
+        &universe,
+        &clauses,
+        &tried,
+        &[],
+        &CrashBounds::cap(0),
+        Backend::Microlp,
+    )
+    .unwrap();
+    assert_eq!(strong.len(), 2, "{strong:?}");
+    // Some clause of the group: one omission is enough, and the other one is proposed too.
+    let group: [&[Clause<M>]; 1] = [&clauses];
+    let mut tried = tried;
+    let mut proposed = vec![];
+    while let Some(h) = hitting_set_any(
+        &universe,
+        &group,
+        &tried,
+        &[],
+        &CrashBounds::cap(0),
+        Backend::Microlp,
+    ) {
+        assert!(tried.insert(h.clone()), "a hypothesis is proposed once");
+        proposed.push(h);
+    }
+    assert_eq!(proposed[0].len(), 1, "{proposed:?}");
+    assert_eq!(proposed[1].len(), 1, "{proposed:?}");
+    assert_eq!(proposed.len(), 3, "both singletons, then the pair: {proposed:?}");
+    // Two groups: each must be satisfied.
+    let c = Clause::new([lossy("c", 1)], no_sends());
+    let universe = super::universe(&[a.clone(), b.clone(), c.clone()], []);
+    let groups: [&[Clause<M>]; 2] = [&clauses, std::slice::from_ref(&c)];
+    let h = hitting_set_any(
+        &universe,
+        &groups,
+        &BTreeSet::from([FaultSet::new()]),
+        &[],
+        &CrashBounds::cap(0),
+        Backend::Microlp,
+    )
+    .unwrap();
+    assert_eq!(h.len(), 2, "{h:?}");
+    assert!(h.contains(&Fault::Omit(("c", 1))), "{h:?}");
+}
+
+/// A group is unsatisfiable only if every clause in it is unkillable; one killable clause is
+/// enough to propose a hypothesis. A group with one clause is Molly's cover row.
+#[test]
+fn a_group_is_unkillable_only_if_every_clause_is() {
+    let dead = Clause::new([], no_sends());
+    let live = Clause::new([lossy("a", 1)], no_sends());
+    let mixed = [dead.clone(), live.clone()];
+    let mut sweep: Sweep<M> = Sweep::new(CrashBounds::cap(0));
+    let groups: [&[Clause<M>]; 1] = [&mixed];
+    assert_eq!(
+        sweep.next_any(&groups),
+        Next::Try(set([Fault::Omit(("a", 1))]))
+    );
+    let mut sweep: Sweep<M> = Sweep::new(CrashBounds::cap(0));
+    let both_dead = [dead.clone(), dead.clone()];
+    let groups: [&[Clause<M>]; 1] = [&both_dead];
+    assert_eq!(sweep.next_any(&groups), Next::Certified(Tolerance::All));
+    // One clause per group is `next`.
+    let mut by_next: Sweep<M> = Sweep::new(CrashBounds::cap(0));
+    let mut by_groups: Sweep<M> = Sweep::new(CrashBounds::cap(0));
+    let clauses = [live.clone(), Clause::new([lossy("b", 1)], no_sends())];
+    let singletons: Vec<&[Clause<M>]> = clauses.iter().map(std::slice::from_ref).collect();
+    assert_eq!(by_next.next(&clauses), by_groups.next_any(&singletons));
+}

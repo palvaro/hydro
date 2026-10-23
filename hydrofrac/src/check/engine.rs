@@ -2,7 +2,7 @@
 
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
@@ -14,8 +14,8 @@ use hydro_lang::sim::flow::SimFlow;
 use hydro_lang::sim::network_hook::IrPassStage;
 
 use super::results::{
-    Counterexample, LabelResult, Results, Stats, VacuousReason, Verdict, counterexample_facts,
-    label_name, verdict_line,
+    Counterexample, LabelResult, NondetSite, Results, Stats, VacuousReason, Verdict,
+    counterexample_facts, label_name, verdict_line,
 };
 use crate::fault::{Event, Fate, FaultHook, FaultPlan, InstanceRecord, MessageId, NodeId};
 use crate::lineage::{Lineage, Tables};
@@ -116,6 +116,49 @@ struct Target {
     cluster: LocationId,
     /// Its fact domain (from the probe).
     domain: BTreeSet<Fact>,
+    /// What makes it schedule-sensitive (empty if nothing does): then its search is a heuristic
+    /// and cannot certify it (docs/design/hydrofrac-lite.md §4.9).
+    sites: Vec<NondetSite>,
+}
+
+impl Target {
+    fn sensitive(&self) -> bool {
+        !self.sites.is_empty()
+    }
+}
+
+/// What decides how a clause hits faults: its derivation, and for each sender of one of its
+/// deliveries, that sender's sends up to the last one the clause depends on (cut at the heal),
+/// which give its positional crash points their meaning. Two clauses with the same key are hit
+/// by the same faults and propose the same candidates.
+type ClauseKey = (Derivation<MessageId>, Vec<(String, Vec<MessageId>)>);
+
+fn clause_key(clause: &Clause<MessageId>) -> ClauseKey {
+    let mut last: BTreeMap<&String, u64> = BTreeMap::new();
+    for dep in &clause.deps {
+        if let Some((sender, ordinal)) = &dep.sender {
+            let e = last.entry(sender).or_default();
+            *e = (*e).max(*ordinal);
+        }
+    }
+    let prefixes = last
+        .into_iter()
+        .map(|(sender, ordinal)| {
+            let cut = clause
+                .pre_heal_sends
+                .get(sender)
+                .copied()
+                .unwrap_or(0)
+                .min(ordinal as usize);
+            let prefix = clause
+                .sends
+                .get(sender)
+                .map(|seq| seq.iter().take(cut).cloned().collect())
+                .unwrap_or_default();
+            (sender.clone(), prefix)
+        })
+        .collect();
+    (clause.deps.clone(), prefixes)
 }
 
 /// What one schedule of a run says about one label.
@@ -295,22 +338,26 @@ impl<'t> RunFold<'t> {
             match outcome {
                 ScheduleOutcome::Holds(deps) => {
                     lr.all_vacuous = false;
+                    let clause = Clause {
+                        deps,
+                        sends: lineage.send_sequences().clone(),
+                        pre_heal_sends: lineage.pre_heal_sends().clone(),
+                        premises: self.premises.clone(),
+                    };
+                    // Schedules repeat derivations; keep one clause per kill relation (the send
+                    // order matters to positional crashes, so it is part of the identity).
+                    let key = clause_key(&clause);
                     let mut hasher = DefaultHasher::new();
-                    deps.hash(&mut hasher);
+                    key.hash(&mut hasher);
                     let same = self
                         .seen
                         .entry(t.label)
                         .or_default()
                         .entry(hasher.finish())
                         .or_default();
-                    if !same.iter().any(|&i| lr.clauses[i].deps == deps) {
+                    if !same.iter().any(|&i| clause_key(&lr.clauses[i]) == key) {
                         same.push(lr.clauses.len());
-                        lr.clauses.push(Clause {
-                            deps,
-                            sends: lineage.send_sequences().clone(),
-                            pre_heal_sends: lineage.pre_heal_sends().clone(),
-                            premises: self.premises.clone(),
-                        });
+                        lr.clauses.push(clause);
                     }
                 }
                 ScheduleOutcome::Vacuous => {}
@@ -403,6 +450,61 @@ fn outcome(
     ScheduleOutcome::Holds(deps)
 }
 
+/// What one label's search has learned from its runs.
+struct Learned {
+    /// Whether the label is schedule-sensitive (see [`Engine::search`]).
+    sensitive: bool,
+    /// Not schedule-sensitive: every clause must be hit.
+    clauses: Vec<Clause<MessageId>>,
+    known: HashSet<(ClauseKey, FaultSet<MessageId>)>,
+    /// Schedule-sensitive: some clause of every group (one group per run).
+    groups: Vec<Vec<Clause<MessageId>>>,
+    known_groups: HashSet<Vec<ClauseKey>>,
+}
+
+impl Learned {
+    fn new(sensitive: bool) -> Self {
+        Learned {
+            sensitive,
+            clauses: vec![],
+            known: HashSet::new(),
+            groups: vec![],
+            known_groups: HashSet::new(),
+        }
+    }
+
+    /// Learns the clauses of one run (its schedules' distinct derivations).
+    fn learn(&mut self, run_clauses: &[Clause<MessageId>]) {
+        if self.sensitive {
+            if run_clauses.is_empty() {
+                return;
+            }
+            let mut keys: Vec<ClauseKey> = run_clauses.iter().map(clause_key).collect();
+            keys.sort();
+            if self.known_groups.insert(keys) {
+                self.groups.push(run_clauses.to_vec());
+            }
+        } else {
+            for clause in run_clauses {
+                if self.known.insert((clause_key(clause), clause.premises.clone())) {
+                    self.clauses.push(clause.clone());
+                }
+            }
+        }
+    }
+
+    /// The sweep's next step given what was learned.
+    fn next(&self, sweep: &mut Sweep<MessageId>) -> Next<MessageId> {
+        if self.sensitive {
+            let groups: Vec<&[Clause<MessageId>]> =
+                self.groups.iter().map(Vec::as_slice).collect();
+            sweep.next_any(&groups)
+        } else {
+            sweep.next(&self.clauses)
+        }
+    }
+}
+
 struct Engine<'c, B> {
     sim: &'c CompiledSim,
     /// The provenance rewrite's opaque islands.
@@ -439,6 +541,29 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
             sample_schedules: check.sample_schedules,
             runs: BTreeMap::new(),
         }
+    }
+
+    /// What makes the label `plan` schedule-sensitive: the static walk's sites, and, to be
+    /// conservative, every operator the provenance rewrite could not see into (an opaque
+    /// island's records fall back to the execution rule, and the walk cannot tell what flows
+    /// through it).
+    fn sites_of(&self, plan: &crate::observe::LabelPlan) -> Vec<NondetSite> {
+        let mut sites = plan.sites.clone();
+        for island in self.islands.borrow().iter() {
+            let site = NondetSite {
+                site: island.clone(),
+                op: "provenance_island",
+                kind: "-",
+                location: plan.cluster().root().clone(),
+                local: true,
+                opaque: true,
+                send_order: false,
+            };
+            if !sites.contains(&site) {
+                sites.push(site);
+            }
+        }
+        sites
     }
 
     /// The members of `cluster` (`None` for a process).
@@ -537,8 +662,17 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
     }
 
     /// One label's sweep, from the probe's run.
+    ///
+    /// For a label that is not schedule-sensitive each fault set has one execution, and a
+    /// hypothesis must kill every derivation seen so far (Molly's rule): running out of
+    /// hypotheses certifies the label. For a schedule-sensitive one that rule is unsound (a
+    /// derivation seen in one schedule need not recur in another), so the search is a heuristic
+    /// instead: each earlier run is one disjunctive group, and a hypothesis need only kill the
+    /// derivations of one of its schedules ([`Sweep::next_any`]). Running out of hypotheses then
+    /// ends [`Verdict::Exhausted`], not a certificate (docs/design/hydrofrac-lite.md §4.9).
     fn search(&mut self, target: &Target, probe: &Run, targets: &[Target]) -> (Verdict, Stats) {
         let start = Instant::now();
+        let sensitive = target.sensitive();
         let mut stats = Stats {
             hypotheses: 1,
             schedules: probe.schedules,
@@ -547,12 +681,17 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
         };
         let probe_run = &probe.labels[&target.label];
         if let Some(failure) = &probe_run.failure {
-            return (counterexample(FaultSet::new(), None, 0, failure), stats);
+            return (
+                counterexample(FaultSet::new(), None, !sensitive, 0, failure),
+                stats,
+            );
         }
         let mut sweep: Sweep<MessageId> = Sweep::new(self.bounds(target));
-        let mut clauses: Vec<Clause<MessageId>> = probe_run.clauses.clone();
+        let mut learned = Learned::new(sensitive);
+        learned.learn(&probe_run.clauses);
         let verdict = loop {
-            match sweep.next(&clauses) {
+            let next = learned.next(&mut sweep);
+            match next {
                 Next::Try(set) => {
                     let cached = self.runs.contains_key(&set);
                     let run = self.run(&set, targets);
@@ -565,21 +704,21 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
                         break counterexample(
                             set,
                             sweep.tolerated(),
+                            !sensitive,
                             sweep.hypotheses() - 1,
                             failure,
                         );
                     }
-                    for clause in &lr.clauses {
-                        let known = clauses
-                            .iter()
-                            .any(|c| c.deps == clause.deps && c.premises == clause.premises);
-                        if !known {
-                            clauses.push(clause.clone());
-                        }
-                    }
+                    learned.learn(&lr.clauses);
                     if lr.all_vacuous {
                         sweep.mark_vacuous(set);
                     }
+                }
+                Next::Certified(tolerates) if sensitive => {
+                    break Verdict::Exhausted {
+                        tolerates,
+                        sites: target.sites.clone(),
+                    };
                 }
                 Next::Certified(tolerates) => break Verdict::Certified { tolerates },
                 Next::Budget => {
@@ -648,6 +787,7 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
                         members,
                         cluster: plan.cluster().clone(),
                         domain: BTreeSet::new(),
+                        sites: self.sites_of(plan),
                     }),
                     _ => {
                         verdicts[i] = Some((
@@ -789,12 +929,14 @@ fn correct_members(target: &Target, record: &InstanceRecord) -> BTreeSet<u32> {
 fn counterexample(
     faults: FaultSet<MessageId>,
     tolerates: Option<usize>,
+    tolerance_certified: bool,
     hypothesis: usize,
     failure: &Failure,
 ) -> Verdict {
     Verdict::Counterexample(Box::new(Counterexample {
         faults,
         tolerates,
+        tolerance_certified,
         hypothesis,
         missing: failure.missing.clone(),
         divergent: failure.divergent.clone(),
@@ -817,6 +959,7 @@ fn targets_panicked(
         counterexample(
             FaultSet::new(),
             None,
+            target.sites.is_empty(),
             0,
             &Failure {
                 missing: vec![],
