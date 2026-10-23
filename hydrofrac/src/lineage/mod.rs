@@ -39,17 +39,10 @@ pub use crate::provenance::RecordProv;
 /// Missing or malformed metadata is [`RecordProv::Opaque`]: the execution rule is sound for
 /// any record.
 pub fn decode_meta(meta: Option<&[u8]>) -> RecordProv {
-    use bincode::Options;
-    meta.and_then(|bytes| {
-        // The rewrite's encoding is bincode 1.x with its default (legacy) options; trailing
-        // bytes mean the metadata is not a `RecordProv`.
-        bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .reject_trailing_bytes()
-            .deserialize(bytes)
-            .ok()
-    })
-    .unwrap_or(RecordProv::Opaque)
+    // The rewrite's encoding (`provenance::split_meta`): a `RecordProv`, optionally followed by
+    // the payload's `Debug` rendering; anything else means the metadata is not the rewrite's.
+    meta.and_then(crate::provenance::split_meta)
+        .map_or(RecordProv::Opaque, |(prov, _)| prov)
 }
 
 /// What the lineage needs to know about the simulation besides the log: node names, which nodes

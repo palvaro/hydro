@@ -192,6 +192,14 @@ fn record_prov_encoding_is_bincode() {
     trailing.push(0);
     assert_eq!(decode_meta(Some(&trailing)), RecordProv::Opaque);
     assert_eq!(decode_meta(Some(&[7, 0, 0, 0])), RecordProv::Opaque);
+    // A payload rendering after the lineage does not change it
+    // (`provenance::split_meta`), but a malformed one makes the metadata opaque.
+    let rendered = crate::provenance::with_payload_debug(expected.clone(), "Item(7)");
+    assert_eq!(decode_meta(Some(&rendered)), ids);
+    assert_eq!(
+        decode_meta(Some(&rendered[..rendered.len() - 1])),
+        RecordProv::Opaque
+    );
 }
 
 /// A → B → C, with an unrelated delivery A → B that B received first.

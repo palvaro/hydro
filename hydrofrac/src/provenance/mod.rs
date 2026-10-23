@@ -4,7 +4,8 @@
 //! set of network deliveries it was computed from. Deliveries are named by the E5 wire tag the
 //! network hook assigns to each send (a `DeliveryId`). Each record that leaves a node, on a
 //! `Network` channel or an external output, hands its lineage to the hook as metadata: the bincode
-//! of a [`RecordProv`]. Lineage closes that backwards: a delivery's own support is the
+//! of a [`RecordProv`], which a `Network` send follows with its payload's `Debug` rendering for
+//! reports ([`split_meta`]). Lineage closes that backwards: a delivery's own support is the
 //! [`RecordProv`] its send carried.
 //!
 //! What the rewrite tracks:
@@ -54,18 +55,59 @@ impl RecordProv {
         bincode::serialize(self).expect("RecordProv serializes")
     }
 
-    /// Decodes message metadata produced by the rewrite.
+    /// Decodes message metadata produced by the rewrite (the [`RecordProv`] part; see
+    /// [`split_meta`] for the format).
     ///
     /// # Panics
-    /// If `bytes` is not the encoding of a [`RecordProv`].
+    /// If `bytes` is not well-formed metadata.
     pub fn decode(bytes: &[u8]) -> Self {
-        bincode::deserialize(bytes).expect("message metadata is not a RecordProv")
+        split_meta(bytes)
+            .expect("message metadata is not a RecordProv")
+            .0
     }
 }
 
 /// Decodes message metadata produced by the rewrite (see [`RecordProv::decode`]).
 pub fn decode(bytes: &[u8]) -> RecordProv {
     RecordProv::decode(bytes)
+}
+
+/// Splits message metadata into its lineage and the `Debug` rendering of the message's payload.
+///
+/// The metadata of a `Network` send is the bincode (1.x, default options) of a [`RecordProv`],
+/// followed, when the channel's element type implements `Debug`, by the bincode of a `String`:
+/// the payload's `Debug` rendering, computed in the simulation where the type is known (the
+/// host only sees bytes). External outputs carry the [`RecordProv`] alone.
+///
+/// Strict: `None` unless `bytes` is exactly a [`RecordProv`] optionally followed by exactly one
+/// `String`, so malformed metadata never passes for lineage.
+pub fn split_meta(bytes: &[u8]) -> Option<(RecordProv, Option<String>)> {
+    use bincode::Options;
+    let options = || {
+        bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .allow_trailing_bytes()
+    };
+    let mut rest = bytes;
+    let prov: RecordProv = options().deserialize_from(&mut rest).ok()?;
+    if rest.is_empty() {
+        return Some((prov, None));
+    }
+    let debug: String = options().reject_trailing_bytes().deserialize(rest).ok()?;
+    Some((prov, Some(debug)))
+}
+
+/// The `Debug` rendering of a message's payload carried in its metadata, if any (see
+/// [`split_meta`]).
+pub fn payload_debug(meta: Option<&[u8]>) -> Option<String> {
+    meta.and_then(split_meta).and_then(|(_, debug)| debug)
+}
+
+/// Appends a payload's `Debug` rendering to metadata (the format of [`split_meta`]); what the
+/// rewrite's generated code does, for tests and hand-built logs.
+pub fn with_payload_debug(mut meta: Vec<u8>, debug: &str) -> Vec<u8> {
+    meta.extend(bincode::serialize(debug).expect("a string serializes"));
+    meta
 }
 
 #[cfg(test)]

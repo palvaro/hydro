@@ -301,12 +301,16 @@ impl Results {
     /// payloads that carry them.
     pub fn report_names(&self) -> ReportNames<'_> {
         let mut facts = vec![];
+        let mut messages = vec![];
         for l in &self.labels {
             if let Verdict::Counterexample(c) = &l.verdict {
                 facts.extend(counterexample_facts(c, &self.taps));
+                messages.extend(crate::report::payload_renderings(&c.record.log));
             }
         }
-        ReportNames::new(&self.names, &self.channels).with_facts(facts.iter())
+        ReportNames::new(&self.names, &self.channels)
+            .with_facts(facts.iter())
+            .with_messages(messages)
     }
 
     /// One flat row per label, for comparing verdicts with the research records

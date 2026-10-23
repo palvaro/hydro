@@ -74,6 +74,33 @@ fn payloads_decode_through_facts_with_the_same_bytes() {
     );
 }
 
+/// A rendering the send carried names the payload on its channel, before facts and hex.
+#[test]
+fn payloads_decode_through_the_rendering_their_send_carried() {
+    let nodes = NodeNames::new(&locations());
+    let names = ReportNames::new(
+        &nodes,
+        &[channel(3, Some("bcast")), channel(4, Some("ack"))],
+    )
+    .with_facts([&fact(&[7, 0, 0, 0], "Item(7)")])
+    .with_messages([((3, vec![7, 0, 0, 0]), "Order { id: 7 }".to_owned())]);
+    let on_bcast = message(&nodes, 3, "Source", "Replica@1", &[7, 0, 0, 0]);
+    assert_eq!(
+        names.message(&on_bcast),
+        "bcast[Source→Replica@1]: Order { id: 7 }"
+    );
+    // Same bytes on another channel: the rendering belongs to its channel; the fact applies.
+    let on_ack = message(&nodes, 4, "Source", "Replica@1", &[7, 0, 0, 0]);
+    assert_eq!(names.message(&on_ack), "ack[Source→Replica@1]: Item(7)");
+    // Long renderings go to the legend like any other.
+    let long = "Order { id: 7, note: \"a long, long note\" }";
+    let names = ReportNames::new(&nodes, &[channel(3, Some("bcast"))])
+        .with_messages([((3, vec![7]), long.to_owned())]);
+    let m = message(&nodes, 3, "Source", "Replica@1", &[7]);
+    assert_eq!(names.message(&m), "bcast[Source→Replica@1]: ‹1›");
+    assert_eq!(names.legend(), vec![(1, long.to_owned())]);
+}
+
 #[test]
 fn unnamed_channels_fall_back_to_their_site_then_their_id() {
     let nodes = NodeNames::new(&locations());

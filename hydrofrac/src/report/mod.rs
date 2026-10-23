@@ -7,23 +7,25 @@
 //! - **channels** by the name the program gave them, else the variable the sending statement
 //!   binds (read back from the source, [`crate::observe::source_names`]), else its `file:line`,
 //!   else `c<id>`;
-//! - **payloads** by the `Debug` rendering of a fact with the same bytes when one is known (a
-//!   message carrying an element of a labelled collection has the bytes of the fact the tap
-//!   shipped for it), else short hex. Renderings longer than [`MAX_INLINE`] characters become
-//!   `‹k›` and are listed in a legend under the report.
+//! - **payloads** by their `Debug` rendering: the one the provenance rewrite made where the
+//!   channel's element type is known and carried in the send's metadata
+//!   ([`crate::provenance::split_meta`], collected by [`payload_renderings`]), else that of a fact
+//!   with the same bytes (a message carrying an element of a labelled collection has the bytes of
+//!   the fact the tap shipped for it), else short hex. Renderings longer than [`MAX_INLINE`]
+//!   characters become `‹k›` and are listed in a legend under the report.
 //!
 //! It also produces the rows for comparing verdicts with the research records ([`ReportRow`]),
 //! with counterexamples in the records' normalized form ([`ReportNames::normalized`]).
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 
 use hydro_lang::sim::network_hook::ChannelInfo;
 
-use crate::fault::{MessageId, NodeId, NodeNames};
+use crate::fault::{Event, EventLog, MessageId, NodeId, NodeNames};
 use crate::observe::Fact;
-use crate::observe::source_names::{site_name, user_frame};
+use crate::observe::source_names::{short_debug, site_name, user_frame};
 use crate::search::{CrashAt, Fault, FaultSet};
 
 #[cfg(test)]
@@ -37,6 +39,7 @@ pub struct ReportNames<'a> {
     nodes: &'a NodeNames,
     channels: HashMap<usize, String>,
     payloads: HashMap<Vec<u8>, String>,
+    messages: HashMap<(usize, Vec<u8>), String>,
     legend: RefCell<Vec<String>>,
 }
 
@@ -48,8 +51,29 @@ impl<'a> ReportNames<'a> {
             nodes,
             channels: channels.iter().map(|c| (c.id, channel_name(c))).collect(),
             payloads: HashMap::new(),
+            messages: HashMap::new(),
             legend: RefCell::new(vec![]),
         }
+    }
+
+    /// Renders the payloads of messages on `(channel, bytes)` by these `Debug` renderings (as
+    /// [`payload_renderings`] collects them from a run). They take precedence over facts.
+    #[must_use]
+    pub fn with_messages(
+        mut self,
+        renderings: impl IntoIterator<Item = ((usize, Vec<u8>), String)>,
+    ) -> Self {
+        for (key, debug) in renderings {
+            self.messages.entry(key).or_insert(debug);
+        }
+        self
+    }
+
+    /// Renders the payloads of the messages `log` sent by the `Debug` renderings their
+    /// metadata carries ([`Self::with_messages`] of [`payload_renderings`]).
+    #[must_use]
+    pub fn with_log(self, log: &EventLog) -> Self {
+        self.with_messages(payload_renderings(log))
     }
 
     /// Renders payloads whose bytes are those of one of `facts` as that fact's `Debug`.
@@ -93,6 +117,15 @@ impl<'a> ReportNames<'a> {
         self.abbreviate(self.payload_full(bytes))
     }
 
+    /// The full rendering of the payload of a message on `channel`: the `Debug` rendering its
+    /// send carried, else [`Self::payload_full`].
+    pub fn message_payload_full(&self, channel: usize, bytes: &[u8]) -> String {
+        match self.messages.get(&(channel, bytes.to_vec())) {
+            Some(debug) => debug.clone(),
+            None => self.payload_full(bytes),
+        }
+    }
+
     /// `text`, or `‹k›` with a legend entry when it is longer than [`MAX_INLINE`] characters.
     pub fn abbreviate(&self, text: String) -> String {
         if text.chars().count() <= MAX_INLINE {
@@ -115,7 +148,7 @@ impl<'a> ReportNames<'a> {
             self.channel(m.channel),
             self.node(&m.from),
             self.node(&m.to),
-            self.payload(&m.bytes)
+            self.abbreviate(self.message_payload_full(m.channel, &m.bytes))
         )
     }
 
@@ -161,7 +194,7 @@ impl<'a> ReportNames<'a> {
                     self.channel(m.channel),
                     member_index(&m.from),
                     member_index(&m.to),
-                    self.payload_full(&m.bytes)
+                    self.message_payload_full(m.channel, &m.bytes)
                 ),
             })
             .collect();
@@ -177,6 +210,22 @@ impl<'a> ReportNames<'a> {
             .map(|(i, t)| (i + 1, t.clone()))
             .collect()
     }
+}
+
+/// The `Debug` renderings of the payloads `log` sent, by `(channel, wire bytes)`, as their
+/// metadata carries them ([`crate::provenance::payload_debug`]), shortened like facts
+/// ([`short_debug`]).
+pub fn payload_renderings(log: &EventLog) -> BTreeMap<(usize, Vec<u8>), String> {
+    let mut out = BTreeMap::new();
+    for event in log.events() {
+        if let Event::Sent { msg, meta, .. } = event
+            && let Some(debug) = crate::provenance::payload_debug(meta.as_deref())
+        {
+            out.entry((msg.channel, msg.bytes.to_vec()))
+                .or_insert_with(|| short_debug(&debug));
+        }
+    }
+    out
 }
 
 fn member_index(node: &NodeId) -> String {

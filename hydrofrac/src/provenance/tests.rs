@@ -525,3 +525,46 @@ fn inline_metadata_encoding_matches_record_prov() {
         RecordProv::Ids(ids)
     );
 }
+
+/// Send metadata is a [`RecordProv`], optionally followed by the payload's `Debug` rendering;
+/// anything else is not metadata (`split_meta` is strict, so lineage never misreads it).
+#[cfg(stageleft_runtime)]
+#[test]
+fn send_metadata_carries_an_optional_payload_rendering() {
+    use super::{payload_debug, split_meta, with_payload_debug};
+    let ids = RecordProv::Ids(BTreeSet::from([3u64, 9]));
+    let plain = ids.encode();
+    assert_eq!(split_meta(&plain), Some((ids.clone(), None)));
+    assert_eq!(payload_debug(Some(&plain)), None);
+
+    let rendered = with_payload_debug(plain.clone(), "Order { id: 1 }");
+    assert_eq!(
+        split_meta(&rendered),
+        Some((ids.clone(), Some("Order { id: 1 }".to_owned())))
+    );
+    assert_eq!(RecordProv::decode(&rendered), ids);
+    assert_eq!(
+        payload_debug(Some(&rendered)).as_deref(),
+        Some("Order { id: 1 }")
+    );
+    // What the generated code appends: the bincode of a `String`.
+    let mut generated = plain.clone();
+    generated.extend(bincode::serialize(&"x".to_owned()).unwrap());
+    assert_eq!(generated, with_payload_debug(plain.clone(), "x"));
+    // The opaque marker takes a rendering too.
+    let opaque = with_payload_debug(RecordProv::Opaque.encode(), "x");
+    assert_eq!(
+        split_meta(&opaque),
+        Some((RecordProv::Opaque, Some("x".to_owned())))
+    );
+
+    // A truncated or over-long trailer is not metadata.
+    assert_eq!(split_meta(&rendered[..rendered.len() - 1]), None);
+    let mut extra = rendered;
+    extra.push(0);
+    assert_eq!(split_meta(&extra), None);
+    let mut stray = plain;
+    stray.push(0);
+    assert_eq!(split_meta(&stray), None);
+    assert_eq!(payload_debug(None), None);
+}

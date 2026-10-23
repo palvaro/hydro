@@ -638,3 +638,106 @@ fn a_small_schedule_sensitive_label_is_certified_by_enumeration() {
     );
     capped.assert_holds();
 }
+
+/// A message type with `Debug`: the report and the diagram render its payloads by it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct Order {
+    /// The order's id.
+    pub id: u32,
+}
+
+/// A message type without `Debug`: its payloads stay short hex.
+#[derive(Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct Sealed(
+    /// The sealed value.
+    pub u32,
+);
+
+/// A process broadcasts one `Order { id: 1 }` to a cluster over a lossy channel (label
+/// `orders`); one omission breaks it.
+#[cfg(stageleft_runtime)]
+fn lossy_orders() -> Results {
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send, input) = source.sim_input::<Order, TotalOrder, ExactlyOnce>();
+    let orders = input.broadcast_closed(&members, TCP.lossy_delayed_forever().bincode());
+    let _out = orders.sim_cluster_output();
+
+    let mut check = EcCheck::new();
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, MEMBERS))
+        .compiled();
+    check.run(&sim, async || {
+        send.send(Order { id: 1 });
+    })
+}
+
+/// [`lossy_orders`] with a payload type that has no `Debug`.
+#[cfg(stageleft_runtime)]
+fn lossy_sealed() -> Results {
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send, input) = source.sim_input::<Sealed, TotalOrder, ExactlyOnce>();
+    let sealed = input.broadcast_closed(&members, TCP.lossy_delayed_forever().bincode());
+    let _out = sealed.sim_cluster_output();
+
+    let mut check = EcCheck::new();
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, MEMBERS))
+        .compiled();
+    check.run(&sim, async || {
+        send.send(Sealed(1));
+    })
+}
+
+/// A message's payload renders by its type's `Debug`: the rewrite renders it at the send, where
+/// the type is known, and carries it in the send's metadata.
+#[cfg(stageleft_runtime)]
+#[test]
+fn message_payloads_render_by_their_debug() {
+    let results = lossy_orders();
+    let label = results.label("orders");
+    let cex = label.verdict.counterexample().expect("an omission breaks it");
+    // The rendering comes from the send's metadata, not from a fact with the same bytes.
+    let renderings = crate::report::payload_renderings(&cex.record.log);
+    assert!(
+        renderings.values().any(|d| d == "Order { id: 1 }"),
+        "{renderings:?}"
+    );
+    let report = results.to_string();
+    assert!(
+        report.contains("breaks under omissions alone: {omit(") && report.contains("]: Order { id: 1 })}"),
+        "{report}"
+    );
+    // `Order { id: 1 }` as bincode: a little-endian u32.
+    assert!(!report.contains("01000000"), "raw bincode in the report:\n{report}");
+    // The diagram labels the message by it too.
+    let dot = std::fs::read_to_string(
+        cex.diagram
+            .as_ref()
+            .expect("the diagram was written")
+            .with_extension("dot"),
+    )
+    .unwrap();
+    assert!(dot.contains("Order { id: 1 }"), "{dot}");
+    // Provenance stays precise with the rendering appended to the metadata.
+    assert_eq!(label.stats.opaque_fallbacks, 0, "{results}");
+}
+
+/// A payload type without `Debug` falls back to short hex.
+#[cfg(stageleft_runtime)]
+#[test]
+fn payloads_without_debug_stay_hex() {
+    let results = lossy_sealed();
+    let label = results.label("sealed");
+    let cex = label.verdict.counterexample().expect("an omission breaks it");
+    assert!(
+        crate::report::payload_renderings(&cex.record.log).is_empty(),
+        "no rendering without `Debug`"
+    );
+    let report = results.to_string();
+    assert!(report.contains("]: 01000000)}"), "{report}");
+    assert_eq!(label.stats.opaque_fallbacks, 0, "{results}");
+}

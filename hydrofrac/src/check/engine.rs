@@ -857,17 +857,25 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
     /// (docs/design/hydrofrac-lite.md §4.8) and records where it went.
     fn write_diagrams(&self, verdicts: &mut [Option<(Verdict, Stats)>]) {
         let labels = self.labels;
-        let lamport_labels = crate::lamport::Labels::default()
-            .with_channels(self.sim.channels())
-            .outputs(move |port, bytes| match labels.label_of_port(port) {
-                Some(_) => decode_output(bytes).to_string(),
-                None => crate::lamport::short_hex(bytes),
-            });
         let test = crate::lamport::test_name();
         for (index, slot) in verdicts.iter_mut().enumerate() {
             let Some((Verdict::Counterexample(cex), _)) = slot else {
                 continue;
             };
+            // Payloads by the `Debug` renderings their sends carried (`provenance::split_meta`).
+            let payloads = crate::report::payload_renderings(&cex.record.log);
+            let lamport_labels = crate::lamport::Labels::default()
+                .with_channels(self.sim.channels())
+                .payloads(move |m| {
+                    payloads
+                        .get(&(m.channel, m.bytes.to_vec()))
+                        .cloned()
+                        .unwrap_or_else(|| crate::lamport::short_hex(&m.bytes))
+                })
+                .outputs(move |port, bytes| match labels.label_of_port(port) {
+                    Some(_) => decode_output(bytes).to_string(),
+                    None => crate::lamport::short_hex(bytes),
+                });
             let name = label_name(&labels.plans[index]);
             let trace = crate::lamport::trace_with(
                 &cex.record.log,
@@ -879,7 +887,8 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
                 title: Some({
                     let facts = counterexample_facts(cex, labels);
                     let names = ReportNames::new(self.tables.names(), self.sim.channels())
-                        .with_facts(facts.iter());
+                        .with_facts(facts.iter())
+                        .with_log(&cex.record.log);
                     let line = verdict_line(&Verdict::Counterexample(cex.clone()), &names, |j| {
                         labels
                             .plans
