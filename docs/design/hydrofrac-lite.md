@@ -418,13 +418,16 @@ ways:
 **Which labels are safe.** A label is **site-free** when neither its causal cone nor the cone of any node that
 sends a delivery in it contains a site. Every fault set then has exactly one execution: nothing the label
 depends on, and nothing that orders its senders' sends, is chosen. That is Molly's setting, and the strong rule
-and its certificates stand. Every other label is **schedule-sensitive**.
+and its certificates stand. Every other label is **schedule-sensitive**. A site that cannot change what the label
+holds, nor any sender's send order, does not count: which ones those are is the order-insensitivity analysis
+below ("Which choices matter").
 
 **The walk** (`hydrofrac::provenance::sensitivity`, run by the tap pass; its result is `LabelPlan::sites`) follows
 the research branch's order check (`order.rs`, `Cones::nondet_upstream`): upstream through operators, networks
 back to their senders, cycles back to their sinks, and captured state back to its producer and every closure that
-writes it. For U2 it walks, for each location that sends a delivery in the label's cone, the cone of everything
-at that location. It is **conservative**: what it cannot see through counts as a site too. Every IR node kind is
+writes it. For U2 the first version walked, for each location that sends a delivery in the label's cone, the cone
+of everything at that location; it is kept as `Analysis::Conservative`, the oracle the check's
+`Analysis::Calm` must refine. It is **conservative**: what it cannot see through counts as a site too. Every IR node kind is
 classified explicitly (a new one does not compile until it is classified), and these are sites:
 - an unknown operator (`Placeholder`);
 - a captured reference it cannot resolve to its state cell, or a `for_each` writing through one;
@@ -502,8 +505,9 @@ schedule is explored (no `sample_schedules`), and the label's admissible fault s
 broadcast's deliveries, `leader_merge`, multi-Paxos `learned`, ABD, the echoing broadcast and 2PC `committed`.
 Their certificates become `Exhausted`; counterexamples are unaffected. The plain broadcasts,
 `broadcast_live_from_process` and `hydro_std`'s reliable broadcast (closed and live) stay site-free and keep their
-certificates. The static table (`hydro_test/tests/ec_schedule_sensitivity.rs`) counts 49 of 59 corpus labels, in 11
-of 14 programs, as schedule-sensitive. Verdict changes on the ported corpus (every other label is unchanged; a
+certificates. The static table (`hydro_test/tests/ec_schedule_sensitivity.rs`) counted 49 of 59 corpus labels, in 11
+of 14 programs, as schedule-sensitive under the conservative walk; the order-insensitivity analysis counts 47 (below,
+"Which choices matter"). Verdict changes on the ported corpus (every other label is unchanged; a
 counterexample on a sensitive label keeps its fault set, but its tolerance now reads "no counterexample with up to
 k crashes found"):
 
@@ -528,6 +532,122 @@ whose PRE counted a dead node's commit.
 **Next.** d2 is in, but the corpus's sensitive programs are too large to explore exhaustively, so the gap it
 closes there is the schedule space, not the fault-set space. Next is (c), per-record taint with the conservative
 crash rule, measured first by how many first-observation derivations in the sensitive programs are untainted.
+
+#### Which choices matter: an order-insensitivity analysis (`Analysis::Calm`)
+
+**The hypothesis.** A site matters for a label only if something between the site and the label observes what the
+site chooses: the order of records, or how they are split into ticks. This is the CALM intuition: a monotone
+computation's outcome does not depend on the order of its inputs. If every operator from a `batch` to the label only maps, filters,
+unions and accumulates, the batch decides *when* records arrive, not *which*, and the label holds the same set in
+every schedule. The analysis makes that precise per path, and keeps everything it cannot classify conservative.
+
+**The analysis** (`Cones::walk_calm`). It walks the cone upstream as before, in one of two modes per node:
+*tolerant* (only the set of records the node emits over the whole run reaches the label) or *strict* (some operator
+in between observes order, batching or state). A label starts tolerant if it is a stream outside any tick (its
+facts are its records, §4.7), else strict. Each operator sends each input on as tolerant (set-preserving) or strict:
+- **Set-preserving:** `map`, `filter`, `flat_map`, `filter_map`, `inspect`, `partition` with a pure closure;
+  casts and order-only `observe_nondet`; `batch` and atomic sections; `all_ticks`; `chain` and `merge_ordered`;
+  `unique`; `sort`; `defer_tick`; networks; consistency assertions; `join` and `cross_product` when both inputs are
+  persisted (outside any tick, where every pair is produced once both records have arrived, in either order).
+- **`filter_not_in` against its own history**, the `use::state` idiom (`fresh = arrived.filter_not_in(seen)`,
+  `seen = seen.chain(fresh)`, recognized structurally: the negative side is a `defer_tick` cycle whose sink is the
+  union of itself and the difference). Over the run, `fresh` is every arrived record not in the initial state,
+  whatever ticks they arrive in: at the tick t a record first arrives, `seen` holds only the initial state and
+  output before t, so the record is either emitted at t or was already emitted. So `arrived` is set-preserving; the initial state is strict.
+- **Strict:** everything else, in particular `cross_singleton` (so `filter_if`), `join` inside a tick (a record
+  meets only what the other side holds in the same tick), `anti_join`, other `difference`s, `first`, `enumerate`,
+  every `fold`/`reduce`/`scan`/`count`, watermarks, futures, singletons made unbounded, and any closure that
+  captures state or looks impure. Crossing from a stream into a singleton or optional input is strict too (a
+  snapshot of a changing value), as is any state a closure reads.
+
+A site reached tolerant is **discharged** when its choice only orders or batches records it passes through
+unchanged: `batch`, an atomic section's entry, `merge_ordered`, an order-only `observe_nondet` (the simulator's
+untrusted observations are order hooks), an unordered external input. Every other site counts on any path: a fold
+over an unordered input and a closure with a mutable reference compute on the order; timers and spins decide how
+many records exist; a watermark decides what is collected; opaque sites are opaque. A site reached strict counts,
+and names the operator that made the path strict (`batch at two_pc_ctp.rs:105 via JoinHalf at two_pc_ctp.rs:156`,
+`NondetSite::via`).
+
+**U2 stays conservative, but only through sends.** A set-preserving path from a site to a send still reorders the
+sends, and positional crashes are defined by send order, so a discharged site at (or upstream of) a sender still
+counts as a send-order site. The walk for a sender now covers the cone of the inputs of its networks rather than of
+everything at it: a choice at the sender that feeds none of its sends, directly or through state, cannot change
+their order. No fault identity removes U2 here; the candidate is (c)'s conservative crash rule (a positional crash
+spares only sends that causally precede it through a message chain, which every schedule orders the same way),
+unimplemented.
+
+**Why it is sound (the argument).** Fix a fault set `H`. For a node reached only tolerant, write `cum(n)` for the
+set of records it emits over the run, up to quiescence after heal.
+1. *Strict regions have no choice in them.* A node reached strict has every node upstream of it reached strict
+   (strictness is inherited upstream), and every site reached strict counts. So a label with no counted site has
+   strict regions whose cones contain no site: they run as in one schedule, given their inputs, exactly the
+   site-free argument above. In particular no discharged site lies upstream of any strict operator.
+2. *Tolerant operators are monotone set functions.* For each set-preserving edge, `cum(out)` is a monotone function
+   of `cum(in)` that ignores order and tick boundaries: images for pure closures, unions, identity for `unique`,
+   `sort`, `defer_tick` and casts, every pair for a persisted join, `cum(pos) − init` for `filter_not_in` against its
+   own history. For `batch` and `defer_tick` this needs every buffered record released and every deferred tick run
+   before quiescence, which is what quiescence means in the simulator (no work can progress). For a network it needs
+   message identity by content (`MessageId` is channel, endpoints and payload bytes), so an omission or a whole-node
+   crash removes the same messages in every schedule.
+3. *So the label's set, and each derivation, are schedule-independent.* By induction along a derivation `D` seen
+   under `(F, σ)`: each record of `D` is computed from records that, if `D`'s deliveries happen under `H`, exist in
+   `cum` of the inputs under every schedule of `H` (strict inputs by 1, tolerant by 2 and monotonicity), so it is in
+   `cum` of the output. The fact is derived under every schedule of `H`: the strong rule's premise.
+4. *Positional crashes are the exception*, which is U2: "`D`'s deliveries happen under `H`" is schedule-independent
+   for omissions and whole crashes, but `crash(n after m)` cuts `n`'s sends at a point whose meaning depends on
+   `n`'s send order. That is why every site in a sender's send cone still counts. The send cone suffices because a
+   site affects only what is downstream of it (the walk follows dataflow, cycles and state), the same premise the
+   conservative walk rests on.
+
+**Established vs not.**
+- Established by the argument above: discharging a set-preserving choice on an all-tolerant path, given the
+  premises below. Checked: on every corpus program the analysis reports a subset of the conservative walk's sites
+  (`assert_refines` in `ec_schedule_sensitivity.rs`), still keeps `ask_once` and 2PC with cooperative termination
+  sensitive in their own cones (the reads that race are a `filter_if` and a join inside a tick), and the brute force
+  agrees with the search's certificates on the batched echo now discharged
+  (`brute_force_agrees_on_a_monotone_batched_echo`, `fail_stop` and lossy first hop, every admissible set of up to
+  2 faults over every schedule).
+- Premises, not proven: closure purity is a heuristic (no captured state cell, and no `let mut`, `static`,
+  `Cell`, `unsafe`, `Mutex`, `Atomic`, clocks or `rand` in its text); a closure that reaches mutable state another
+  way is misclassified. A site's choice affects only what is downstream of it, and the number of ticks a location
+  runs is observable only through its sites (both shared with the conservative walk).
+- Not attempted: lattice folds (a G-Set `fold` with a commutative, idempotent merge is monotone, but the closure's
+  algebra is not visible), threshold quorums written with mutable state (`quorum`, whose nondet comment argues
+  exactly this confluence), and the stronger U2 rule for a sender whose send *sequence* is deterministic (one
+  totally ordered send stream through order-preserving operators).
+- Observed, not established: provenance is positive (an `anti_join`'s negative side carries no lineage), so the
+  strong rule also needs the cone to be monotone where faults can change what is negated, even for a site-free
+  label. Hydro's types make that nearly automatic, since a non-monotone operator needs a tick and network data
+  enters a tick through a `batch` or a snapshot, which are sites; the tolerant operators above are monotone by
+  construction. A site-free cone with a non-monotone operator over network data has not been seen in the corpus.
+
+**What it changes on the corpus** (`ec_schedule_sensitivity.rs`, 59 labels in 14 programs):
+
+| | sensitive | through its own cone (U1) |
+|---|---|---|
+| conservative walk | 49 labels, 11 programs | 42 labels, 11 programs |
+| order-insensitivity analysis | 47 labels, 11 programs | 34 labels, 8 programs |
+
+- **U1 discharged, U2 binding** (8 labels): the echoing and plain broadcasts' `deliveries`, `echo`, `echoes`
+  (`filter_not_in` against the member's own history), `leader_merge_broadcast` (its `observe_nondet` only orders
+  the merge), G-Set gossip's `initial` (the unordered input feeds a broadcast). Each stays sensitive because the
+  members (the leader, for `leader_merge`) send what the discharged site feeds.
+- **No longer sensitive** (2 labels): uniform broadcast's `echo` and `distinct_acks`. Their senders' echoes come
+  from `hydro_std`'s site-free reliable broadcast; the quorum's batch at the same members feeds no send. That is the
+  U2 refinement alone. Verdict change (`ec_demo_uniform_broadcast`, thresholds 1 and 2): both still break at one
+  crash, with the same set (`crash(Member@0 after echo→Member@1)`), but the tolerance is certified again: "tolerates
+  0 crashes, breaks at 1" instead of "no counterexample with up to 0 crashes found, breaks at 1". No other corpus
+  verdict changes, and every brute-force cross-check (`ec_bruteforce.rs`, `check::brute_tests`) still agrees.
+- **Still sensitive in their own cone** (34): every label whose cone runs through a fold (quorums, 2PC's vote count,
+  G-Set and Paxos state), a `filter_if` or join inside a tick (2PC's queries and answers, `ask_once`), or state read
+  by reference (ABD, Paxos, the quorum mint).
+
+The per-label table, with the first site each label still counts and the operator that keeps it, is in
+`docs/design/hydrofrac-lite-data/sensitivity-calm.md`.
+
+So the hypothesis holds for U1 (8 of the 42 own-cone sensitivities were order-insensitive in fact, and the rest
+mostly run through state the analysis cannot see into), but U2 binds: almost every discharged site feeds a send.
+The remaining obstruction on the corpus is the positional crash identity, not the derivation.
 
 ## 5. Lineage level: record provenance stays (measured)
 

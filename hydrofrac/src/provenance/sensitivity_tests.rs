@@ -232,10 +232,7 @@ fn an_unresolved_captured_reference_is_opaque() {
     use crate::provenance::sensitivity::captures;
 
     let expr: syn::Expr = syn::parse_quote!(|x| x);
-    let f = ClosureExpr::new(
-        DebugExpr::from(expr),
-        vec![(HydroNode::Placeholder, true)],
-    );
+    let f = ClosureExpr::new(DebugExpr::from(expr), vec![(HydroNode::Placeholder, true)]);
     assert_eq!(captures(&f), vec![None]);
 }
 
@@ -256,7 +253,9 @@ fn broadcast_input<O: hydro_lang::live_collections::stream::Ordering>() -> FlowB
 
 /// An external input whose order the program leaves unspecified is something the walk cannot
 /// see through (in a deployment it arrives in any order): its label is sensitive. The same
-/// program over a totally ordered input is not.
+/// program over a totally ordered input is not. The broadcast is insensitive to the order of
+/// what it carries, so under the order-insensitivity analysis the input counts only for the
+/// order of the process's sends (U2); the conservative walk counts it in the cone.
 #[cfg(stageleft_runtime)]
 #[test]
 fn an_unordered_external_input_makes_its_label_sensitive() {
@@ -269,9 +268,19 @@ fn an_unordered_external_input_makes_its_label_sensitive() {
         "{ordered:?}"
     );
 
-    let unordered = label_cones(broadcast_input::<NoOrder>().finalize().ir());
+    let built = broadcast_input::<NoOrder>().finalize();
+    let unordered = label_cones(built.ir());
     assert!(!unordered.is_empty());
     for cone in &unordered {
+        assert!(
+            cone.sites
+                .iter()
+                .any(|s| s.op == "unordered_external_input" && s.opaque && s.send_order),
+            "{cone:?}"
+        );
+    }
+    let conservative = crate::provenance::sensitivity::label_cones_conservative(built.ir());
+    for cone in &conservative {
         assert!(
             cone.sites
                 .iter()
@@ -320,5 +329,171 @@ fn a_choice_at_a_sender_reorders_its_sends() {
     assert!(
         label.sites.iter().any(|s| s.op == "batch"),
         "the batch: {label:?}"
+    );
+}
+
+/// A process broadcasts its input to a cluster; each member batches what it receives, and the
+/// label is what comes out of the batches: mapped (`snapshot` false), or kept only in a tick
+/// in which more than one record arrived (`snapshot` true, a `filter_if` on the tick's count).
+#[cfg(stageleft_runtime)]
+fn batched_at_members(snapshot: bool) -> FlowBuilder<'static> {
+    use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
+
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (_send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let at_members = input.broadcast_closed(&members, TCP.fail_stop().name("to_members").bincode());
+    let tick = members.tick();
+    let batch = at_members.batch(&tick, nondet!(/** test */));
+    let out = if snapshot {
+        let crowded = batch.clone().count().map(q!(|n| n > 1));
+        batch.filter_if(crowded).all_ticks()
+    } else {
+        batch.map(q!(|x| x + 1)).all_ticks()
+    };
+    let _out = out
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed */
+        ))
+        .sim_cluster_output();
+    flow
+}
+
+/// The claim `name` the test program makes (named after the binding of its `assert_has_consistency_of`;
+/// `broadcast_closed` makes one of its own on what it delivers).
+#[cfg(stageleft_runtime)]
+fn the_claim<'c>(
+    cones: &'c [crate::provenance::sensitivity::LabelCone],
+    name: &str,
+) -> &'c crate::provenance::sensitivity::LabelCone {
+    cones
+        .iter()
+        .find(|c| {
+            c.collection.op == "AssertIsConsistent" && c.collection.name.as_deref() == Some(name)
+        })
+        .unwrap_or_else(|| panic!("no claim `{name}` among {cones:?}"))
+}
+
+/// A batch whose every path to the label is order- and batch-insensitive (a `map`, then
+/// `all_ticks`) cannot change what the label holds: the order-insensitivity analysis discharges
+/// it, where the conservative walk counts it. The members send nothing, so no send order runs
+/// through it either.
+#[cfg(stageleft_runtime)]
+#[test]
+fn a_batch_with_a_monotone_downstream_is_discharged() {
+    use crate::provenance::sensitivity::label_cones_conservative;
+
+    let built = batched_at_members(false).finalize();
+    let calm = label_cones(built.ir());
+    let label = the_claim(&calm, "out");
+    assert!(!label.schedule_sensitive(), "{label:?}");
+    assert!(
+        label.harmless.iter().any(|s| s.op == "batch"),
+        "the batch is discharged, not missed: {label:?}"
+    );
+    let old = label_cones_conservative(built.ir());
+    let old = the_claim(&old, "out");
+    assert!(
+        old.sites.iter().any(|s| s.op == "batch" && !s.send_order),
+        "the conservative walk counts it: {old:?}"
+    );
+}
+
+/// The same batch read through a snapshot of the tick (`filter_if` on its count): which
+/// records pass depends on how the schedule splits them into ticks, so the batch counts, and
+/// the site names the operator that observes the tick.
+#[cfg(stageleft_runtime)]
+#[test]
+fn a_batch_read_through_a_snapshot_counts() {
+    let built = batched_at_members(true).finalize();
+    let calm = label_cones(built.ir());
+    let label = the_claim(&calm, "out");
+    assert!(label.existence_sensitive(), "{label:?}");
+    let batch = label
+        .sites
+        .iter()
+        .find(|s| s.op == "batch")
+        .unwrap_or_else(|| panic!("the batch: {label:?}"));
+    assert!(!batch.send_order, "{label:?}");
+    let via = batch.via.as_deref().unwrap_or_else(|| panic!("{label:?}"));
+    assert!(
+        via.contains("CrossSingleton") || via.contains("Fold"),
+        "the snapshot (`filter_if` is a `cross_singleton` with the tick's count): {via}"
+    );
+}
+
+/// `filter_not_in` against its own history (the `use::state` idiom of
+/// `hydro_test::cluster::reliable_broadcast`): over the run, the output is every record that
+/// arrived, whatever ticks they arrived in, so the batch before it is discharged.
+#[cfg(stageleft_runtime)]
+#[test]
+fn filter_not_in_against_its_own_history_is_discharged() {
+    use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
+
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (_send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let at_members = input.broadcast_closed(&members, TCP.fail_stop().name("to_members").bincode());
+    let fresh: Stream<u32, Cluster<'_, ()>, Unbounded, NoOrder> = sliced! {
+        let arrived = use::batch(at_members, nondet!(/** test */));
+        let mut seen = use::state(|l| {
+            l.source_iter(q!(Vec::<u32>::new())).weaken_ordering::<NoOrder>()
+        });
+        let fresh = arrived
+            .weaken_ordering::<NoOrder>()
+            .unique()
+            .filter_not_in(seen.clone());
+        seen = seen.chain(fresh.clone());
+        fresh
+    };
+    let _out = fresh
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed */
+        ))
+        .sim_cluster_output();
+    let cones = label_cones(flow.finalize().ir());
+    let label = the_claim(&cones, "out");
+    assert!(!label.schedule_sensitive(), "{label:?}");
+    assert!(label.harmless.iter().any(|s| s.op == "batch"), "{label:?}");
+}
+
+/// U2 under the order-insensitivity analysis: a choice at a sender counts only if it feeds
+/// what the sender sends. Here the process batches its second input into a local `for_each`
+/// only, so its sends to the members are in input order in every schedule; the conservative
+/// walk, which takes everything at the sender, counts the batch.
+#[cfg(stageleft_runtime)]
+#[test]
+fn a_choice_at_a_sender_that_feeds_no_send_does_not_reorder_it() {
+    use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
+
+    use crate::provenance::sensitivity::label_cones_conservative;
+
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (_send_a, a) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let (_send_b, b) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let tick = source.tick();
+    let at_members = a
+        .broadcast_closed(&members, TCP.fail_stop().name("a").bincode())
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed */
+        ));
+    at_members.for_each(q!(|_| {}));
+    b.batch(&tick, nondet!(/** test */))
+        .all_ticks()
+        .for_each(q!(|_| {}));
+
+    let built = flow.finalize();
+    let calm = label_cones(built.ir());
+    assert!(!calm.is_empty());
+    assert!(calm.iter().all(|c| !c.schedule_sensitive()), "{calm:?}");
+    let old = label_cones_conservative(built.ir());
+    assert!(
+        old.iter()
+            .any(|c| c.sites.iter().any(|s| s.op == "batch" && s.send_order)),
+        "{old:?}"
     );
 }

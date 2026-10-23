@@ -30,6 +30,21 @@
 //! external input whose order is unspecified, an opaque stream source, futures and async streams,
 //! multi-version networks. Either kind makes the label schedule-sensitive. A label with no site
 //! is one whose fault sets each have one execution, for which lineage pruning is Molly's.
+//!
+//! That is [`Analysis::Conservative`]. What the check uses is sharper, [`Analysis::Calm`]
+//! (docs/design/hydrofrac-lite.md §4.9, "Which choices matter"):
+//! - **U1.** A choice that only decides the order or the batching of records it passes through
+//!   unchanged (`batch`, an atomic section's entry, `merge_ordered`, an order-only
+//!   `observe_nondet`, an unordered external input) is discharged when every path from it to
+//!   the label goes through operators whose output over the run is a monotone function of the
+//!   *set* of their inputs' records over the run (pure `map`/`filter`/`flat_map`, unions,
+//!   dedup, sorts, deferral, networks, `all_ticks`, joins of two persisted inputs, and
+//!   `filter_not_in` against its own history). Anything that observes a tick (a snapshot, a
+//!   per-tick aggregate or join, an anti-join), state read by reference, an impure closure or an
+//!   unclassified operator on the path keeps it, and names that operator
+//!   ([`NondetSite::via`]). Every other kind of site counts on any path.
+//! - **U2** stays conservative, but only what a sender sends can reorder its sends: the walk
+//!   takes the cone of the inputs of the location's networks, not of everything at it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{self, Display};
@@ -65,6 +80,12 @@ pub struct NondetSite {
     /// sends a delivery in the cone: it may reorder that location's sends (U2), not the
     /// derivation itself.
     pub send_order: bool,
+    /// For a site in the label's own cone reached on an order- or batch-sensitive path (under
+    /// [`Analysis::Calm`]): the operator that made the path sensitive, the one nearest the site
+    /// the walk found (`JoinHalf at two_pc_ctp.rs:156`). `None` for a site that counts by itself
+    /// on an order-insensitive path (a fold over an unordered input, a timer, something opaque),
+    /// for a send-order site, and under [`Analysis::Conservative`].
+    pub via: Option<String>,
 }
 
 impl Display for NondetSite {
@@ -73,6 +94,9 @@ impl Display for NondetSite {
             write!(f, "cannot see through ")?;
         }
         write!(f, "{} at {}", self.op, self.site)?;
+        if let Some(via) = &self.via {
+            write!(f, " via {via}")?;
+        }
         if self.send_order {
             write!(f, " (reorders a sender)")
         } else if !self.local {
@@ -92,6 +116,11 @@ pub struct LabelCone {
     /// reorder the sends of a location that sends a delivery in the cone. Deduplicated by site,
     /// in discovery order.
     pub sites: Vec<NondetSite>,
+    /// Choices in the cone that [`Analysis::Calm`] discharged: every path from them to the
+    /// label is order- and batch-insensitive, and no sender's send order runs through them (else
+    /// they are in [`sites`](Self::sites), as send-order sites). Empty under
+    /// [`Analysis::Conservative`].
+    pub harmless: Vec<NondetSite>,
     /// The IR operators in the cone (for scale: how much of the program feeds the label).
     pub cone_nodes: usize,
 }
@@ -101,6 +130,12 @@ impl LabelCone {
     /// depend on the schedule (see the [module docs](self)).
     pub fn schedule_sensitive(&self) -> bool {
         !self.sites.is_empty()
+    }
+
+    /// Whether a site in the label's own cone may change which records exist (U1), as opposed
+    /// to only the order of a sender's sends (U2).
+    pub fn existence_sensitive(&self) -> bool {
+        self.sites.iter().any(|s| !s.send_order)
     }
 
     /// The sites grouped by operator, for a one-line summary: `batch×3, observe_nondet×1`.
@@ -498,8 +533,11 @@ struct Cones {
     writers: HashMap<*const HydroNode, Vec<*const HydroNode>>,
     /// Every labelled node, by its identity.
     labelled: HashMap<(String, String, &'static str, LocationId), Vec<*const HydroNode>>,
-    /// Every node, by the root of its location (for the send-order walk, U2).
+    /// Every node, by the root of its location (for the conservative send-order walk, U2).
     by_location: HashMap<LocationId, Vec<*const HydroNode>>,
+    /// Per location, what it sends: the input of every network it sends on (and every
+    /// multi-version network fork at it). Only these decide the order of its sends (U2).
+    sends_by_location: HashMap<LocationId, Vec<*const HydroNode>>,
     /// `for_each` roots whose closures capture a reference the walk cannot resolve, by the
     /// location they run at: what they write is unknown.
     unresolved_writes: Vec<LocationId>,
@@ -520,12 +558,30 @@ impl Cones {
             writers: HashMap::new(),
             labelled: HashMap::new(),
             by_location: HashMap::new(),
+            sends_by_location: HashMap::new(),
             unresolved_writes: vec![],
         };
         let mut seen: HashSet<*const HydroNode> = HashSet::new();
         fn index(node: &HydroNode, seen: &mut HashSet<*const HydroNode>, cones: &mut Cones) {
             if !seen.insert(std::ptr::from_ref(node)) {
                 return;
+            }
+            match node {
+                HydroNode::Network { input, .. } => cones
+                    .sends_by_location
+                    .entry(input.metadata().location_id.root().clone())
+                    .or_default()
+                    .push(std::ptr::from_ref(&**input)),
+                HydroNode::VersionedNetworkFork { senders, .. } => {
+                    for (_, sender, _) in senders {
+                        cones
+                            .sends_by_location
+                            .entry(sender.metadata().location_id.root().clone())
+                            .or_default()
+                            .push(std::ptr::from_ref(node));
+                    }
+                }
+                _ => {}
             }
             if !matches!(node, HydroNode::Placeholder) {
                 cones
@@ -607,6 +663,7 @@ impl Cones {
                     location,
                     opaque,
                     send_order: false,
+                    via: None,
                 };
                 if !sites.contains(&site) {
                     sites.push(site);
@@ -629,6 +686,7 @@ impl Cones {
                     local: true,
                     opaque: true,
                     send_order: false,
+                    via: None,
                 });
                 continue;
             }
@@ -671,21 +729,452 @@ impl Cones {
                 local: true,
                 opaque: true,
                 send_order: false,
+                via: None,
+            });
+        }
+        sites
+    }
+
+    /// The sites that may reorder the sends of `location` (U2), for [`Analysis::Calm`]: those
+    /// in the cone of what it sends (the inputs of its networks), and an unresolved write there.
+    /// A choice at the location that feeds none of its sends, directly or through state, cannot
+    /// change their order.
+    fn send_sites(&self, location: &LocationId) -> Vec<NondetSite> {
+        let starts = self
+            .sends_by_location
+            .get(location)
+            .cloned()
+            .unwrap_or_default();
+        let mut sites = self.walk(&starts, location).sites;
+        if self.unresolved_writes.contains(location) {
+            sites.push(NondetSite {
+                site: "for_each".to_owned(),
+                op: "unresolved_state",
+                kind: "-",
+                location: location.clone(),
+                local: true,
+                opaque: true,
+                send_order: false,
+                via: None,
             });
         }
         sites
     }
 }
 
+/// Which analysis decides whether a site in a label's cone makes it schedule-sensitive
+/// (docs/design/hydrofrac-lite.md §4.9, "Which choices matter").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Analysis {
+    /// Every site in the label's cone (U1), and every site in the cone of anything at a location
+    /// that sends a delivery in it (U2). The first version of the walk; kept as the oracle the
+    /// sharper analysis must refine (it may only drop sites this one reports).
+    Conservative,
+    /// U1: a choice whose every path to the label is insensitive to the order and batching of
+    /// what it carries is discharged (an order-insensitivity analysis in the spirit of CALM).
+    /// U2: every site in the cone of what a location that sends a delivery in the cone sends.
+    Calm,
+}
+
+/// How the path from a node to the label treats the node's output (for [`Analysis::Calm`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Mode {
+    /// Only the set of records the node emits over the whole run reaches the label: every
+    /// operator in between is insensitive to their order and to how they are split into ticks.
+    Tolerant,
+    /// Some operator in between (the reason, by index) observes order, batching or a
+    /// snapshot of state.
+    Strict(usize),
+}
+
+/// How an operator treats one of its inputs (for [`Analysis::Calm`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Edge {
+    /// The set of the operator's output records over the run is a function of the set of the
+    /// input's records over the run, and each output record exists as soon as the input
+    /// records it is computed from exist (it is monotone): order and tick boundaries do not
+    /// matter.
+    SetPreserving,
+    /// Anything else (a snapshot, a per-tick aggregate, a non-monotone or order-dependent
+    /// operator, state, something unclassified).
+    OrderSensitive,
+}
+
+/// The choices that only decide the order or the batching of records whose set they pass
+/// through unchanged: under a [`Mode::Tolerant`] path they cannot change what the label holds.
+/// Every other choice (a fold over an unordered input or a closure with a mutable reference,
+/// which compute on the order; timers and spins, which decide how many records exist; garbage
+/// collection by watermark) and everything opaque counts in any mode.
+fn set_choice(op: &str) -> bool {
+    matches!(
+        op,
+        "batch" | "begin_atomic" | "merge_ordered" | "observe_nondet" | "unordered_external_input"
+    )
+}
+
+/// Whether a collection's contents are a set of records that only grows (a stream), as
+/// opposed to a value that changes (a singleton, an optional).
+fn stream_like(kind: &CollectionKind) -> bool {
+    matches!(
+        kind,
+        CollectionKind::Stream { .. } | CollectionKind::KeyedStream { .. }
+    )
+}
+
+/// Words that betray a closure with state of its own, or one that reads something other than
+/// its argument (a cell, a global, the clock).
+const IMPURE: &[&str] = &[
+    "let mut",
+    "static",
+    "thread_local",
+    "Cell",
+    "unsafe",
+    "Mutex",
+    "Atomic",
+    "Instant",
+    "SystemTime",
+    "rand",
+];
+
+/// Whether a closure is (taken to be) a function of its argument: it captures no state cell,
+/// and its text has none of [`IMPURE`]. A heuristic: a closure literal that mutates a
+/// variable it owns needs a `let mut` around it, which this catches; one that reaches state
+/// some other way does not (docs §4.9).
+fn pure_closure(f: &ClosureExpr) -> bool {
+    if !f.singleton_refs().is_empty() {
+        return false;
+    }
+    let text = f.expr().to_string();
+    !IMPURE.iter().any(|w| text.contains(w))
+}
+
+/// Follows `Tee`s to the node they share.
+fn strip(mut ptr: *const HydroNode) -> *const HydroNode {
+    loop {
+        // SAFETY: `ptr` points into the IR the walker was built from (see `Cones`).
+        match unsafe { &*ptr } {
+            HydroNode::Tee { inner, .. } => ptr = std::ptr::from_ref(&*inner.0.borrow()),
+            _ => return ptr,
+        }
+    }
+}
+
+/// One [`Analysis::Calm`] walk's findings.
+struct CalmWalk {
+    /// Sites that count: reached on an order-sensitive path, or harmful in any mode.
+    harmful: Vec<NondetSite>,
+    /// Choices reached only on order-insensitive paths.
+    harmless: Vec<NondetSite>,
+    /// Every node reached.
+    seen: HashSet<*const HydroNode>,
+}
+
+impl Cones {
+    /// Whether `node` is `filter_not_in` against its own history: a `Difference` whose `neg` is
+    /// a state that starts with some initial contents and then accumulates the `Difference`'s
+    /// own output (`seen = seen.chain(fresh)` with `fresh = arrived.filter_not_in(seen)`, the
+    /// idiom of `use::state`). Its output over the run is then every record of `pos` not in the
+    /// initial contents, whatever ticks they arrive in. Returns the initial contents' node.
+    fn self_difference(&self, node: &HydroNode) -> Option<*const HydroNode> {
+        let HydroNode::Difference { neg, .. } = node else {
+            return None;
+        };
+        let me = std::ptr::from_ref(node);
+        let state = strip(std::ptr::from_ref(&**neg));
+        // SAFETY: as in `strip`.
+        let HydroNode::Chain { first, second, .. } = (unsafe { &*state }) else {
+            return None;
+        };
+        let carried = |side: &HydroNode| -> Option<CycleId> {
+            // SAFETY: as in `strip`.
+            let HydroNode::DeferTick { input, .. } = (unsafe { &*strip(std::ptr::from_ref(side)) })
+            else {
+                return None;
+            };
+            // SAFETY: as in `strip`.
+            match unsafe { &*strip(std::ptr::from_ref(&**input)) } {
+                HydroNode::CycleSource { cycle_id, .. } => Some(*cycle_id),
+                _ => None,
+            }
+        };
+        let (cycle, init) = if let Some(c) = carried(first) {
+            (c, std::ptr::from_ref(&**second))
+        } else {
+            (carried(second)?, std::ptr::from_ref(&**first))
+        };
+        let sink = strip(*self.cycle_sinks.get(&cycle)?);
+        // SAFETY: as in `strip`.
+        let HydroNode::Chain { first, second, .. } = (unsafe { &*sink }) else {
+            return None;
+        };
+        let parts = (
+            strip(std::ptr::from_ref(&**first)),
+            strip(std::ptr::from_ref(&**second)),
+        );
+        (parts == (state, me) || parts == (me, state)).then_some(init)
+    }
+
+    /// The inputs of `node` and how it treats each (see [`Edge`]); not its cycle's sink, nor
+    /// the state its closures capture, which the walk adds itself.
+    fn edges(&self, node: &HydroNode) -> Vec<(*const HydroNode, Edge)> {
+        use Edge::{OrderSensitive, SetPreserving};
+        let all = |edge: Edge| -> Vec<(*const HydroNode, Edge)> {
+            shared_inputs(node).into_iter().map(|i| (i, edge)).collect()
+        };
+        let top = |n: &HydroNode| n.metadata().location_id.is_top_level();
+        match node {
+            HydroNode::Tee { .. }
+            | HydroNode::Reference { .. }
+            | HydroNode::PartitionSide { .. } => all(SetPreserving),
+            HydroNode::Map { f, .. }
+            | HydroNode::FlatMap { f, .. }
+            | HydroNode::Filter { f, .. }
+            | HydroNode::FilterMap { f, .. }
+            | HydroNode::Inspect { f, .. }
+            | HydroNode::PartitionShared { f, .. } => all(if pure_closure(f) {
+                SetPreserving
+            } else {
+                OrderSensitive
+            }),
+            // Order, boundedness or retries change; the records do not. A network carries a
+            // set of content-addressed messages; a batch splits its input into ticks; a union,
+            // a dedup or a sort within a tick keeps the set; a deferral moves it a tick later.
+            HydroNode::Cast { .. }
+            | HydroNode::ObserveNonDet { .. }
+            | HydroNode::BeginAtomic { .. }
+            | HydroNode::EndAtomic { .. }
+            | HydroNode::Batch { .. }
+            | HydroNode::YieldConcat { .. }
+            | HydroNode::Chain { .. }
+            | HydroNode::MergeOrdered { .. }
+            | HydroNode::Unique { .. }
+            | HydroNode::Sort { .. }
+            | HydroNode::DeferTick { .. }
+            | HydroNode::Network { .. }
+            | HydroNode::AssertIsConsistent { .. } => all(SetPreserving),
+            // Both sides persisted across ticks (outside any tick): every pair is produced
+            // once both of its records have arrived, in any order. Inside a tick, a record
+            // meets only what the other side holds in the same tick.
+            HydroNode::Join { left, right, .. } | HydroNode::CrossProduct { left, right, .. } => {
+                all(if top(left) && top(right) {
+                    SetPreserving
+                } else {
+                    OrderSensitive
+                })
+            }
+            // The probe side streams against a bounded build side: the build side is read
+            // whole, as of when the probe runs.
+            HydroNode::JoinHalf { left, right, .. } => vec![
+                (
+                    std::ptr::from_ref(&**left),
+                    if top(left) && top(right) {
+                        SetPreserving
+                    } else {
+                        OrderSensitive
+                    },
+                ),
+                (std::ptr::from_ref(&**right), OrderSensitive),
+            ],
+            HydroNode::Difference { pos, .. } => match self.self_difference(node) {
+                Some(init) => vec![
+                    (std::ptr::from_ref(&**pos), SetPreserving),
+                    (init, OrderSensitive),
+                ],
+                None => all(OrderSensitive),
+            },
+            // Snapshots (`cross_singleton`, so `filter_if`), anti-joins, `first`, positions,
+            // aggregates (`fold`, `count`, `reduce`, `scan`), watermarks, futures, async streams,
+            // multi-version networks, singletons made unbounded, counters, sources.
+            HydroNode::Placeholder
+            | HydroNode::Source { .. }
+            | HydroNode::SingletonSource { .. }
+            | HydroNode::CycleSource { .. }
+            | HydroNode::ChainFirst { .. }
+            | HydroNode::CrossSingleton { .. }
+            | HydroNode::AntiJoin { .. }
+            | HydroNode::ResolveFutures { .. }
+            | HydroNode::ResolveFuturesBlocking { .. }
+            | HydroNode::ResolveFuturesOrdered { .. }
+            | HydroNode::FlatMapStreamBlocking { .. }
+            | HydroNode::Enumerate { .. }
+            | HydroNode::Fold { .. }
+            | HydroNode::Scan { .. }
+            | HydroNode::ScanAsyncBlocking { .. }
+            | HydroNode::FoldKeyed { .. }
+            | HydroNode::Reduce { .. }
+            | HydroNode::ReduceKeyed { .. }
+            | HydroNode::ReduceKeyedWatermark { .. }
+            | HydroNode::VersionedNetworkFork { .. }
+            | HydroNode::VersionedNetwork { .. }
+            | HydroNode::ExternalInput { .. }
+            | HydroNode::Counter { .. }
+            | HydroNode::UnboundSingleton { .. } => all(OrderSensitive),
+        }
+    }
+
+    /// The [`Analysis::Calm`] walk of the cone of `starts`, labelled relative to the location
+    /// `at`. `tolerant` says whether the label itself is only its set of records (a stream
+    /// outside any tick), else the walk starts strict.
+    fn walk_calm(&self, starts: &[*const HydroNode], at: &LocationId, tolerant: bool) -> CalmWalk {
+        let mut reasons: Vec<String> = vec!["the label (not a stream outside a tick)".to_owned()];
+        let start = if tolerant {
+            Mode::Tolerant
+        } else {
+            Mode::Strict(0)
+        };
+        let mut stack: Vec<(*const HydroNode, Mode)> = starts.iter().map(|&p| (p, start)).collect();
+        let mut tolerant_seen: HashSet<*const HydroNode> = HashSet::new();
+        let mut strict_seen: HashSet<*const HydroNode> = HashSet::new();
+        let mut walk = CalmWalk {
+            harmful: vec![],
+            harmless: vec![],
+            seen: HashSet::new(),
+        };
+        let same = |a: &NondetSite, b: &NondetSite| {
+            a.site == b.site && a.op == b.op && a.location == b.location
+        };
+        let found = |list: &mut Vec<NondetSite>,
+                     node: &HydroNode,
+                     op: &'static str,
+                     opaque: bool,
+                     via: Option<String>| {
+            let location = node.metadata().location_id.root().clone();
+            let site = NondetSite {
+                site: site_of(node),
+                op,
+                kind: kind_name(&node.metadata().collection_kind),
+                local: &location == at,
+                location,
+                opaque,
+                send_order: false,
+                via,
+            };
+            if !list.iter().any(|s| same(s, &site)) {
+                list.push(site);
+            }
+        };
+        while let Some((ptr, mode)) = stack.pop() {
+            if strict_seen.contains(&ptr) {
+                continue;
+            }
+            match mode {
+                Mode::Tolerant => {
+                    if !tolerant_seen.insert(ptr) {
+                        continue;
+                    }
+                }
+                Mode::Strict(_) => {
+                    strict_seen.insert(ptr);
+                }
+            }
+            walk.seen.insert(ptr);
+            let via = |reasons: &[String]| match mode {
+                Mode::Tolerant => None,
+                Mode::Strict(r) => Some(reasons[r].clone()),
+            };
+            // SAFETY: as in `Cones::walk`.
+            let node = unsafe { &*ptr };
+            if let HydroNode::Placeholder = node {
+                walk.harmful.push(NondetSite {
+                    site: "Placeholder".to_owned(),
+                    op: "unknown_operator",
+                    kind: "?",
+                    location: at.clone(),
+                    local: true,
+                    opaque: true,
+                    send_order: false,
+                    via: None,
+                });
+                continue;
+            }
+            if let Some((op, opaque)) = nondet_op(node) {
+                if mode == Mode::Tolerant && set_choice(op) {
+                    found(&mut walk.harmless, node, op, opaque, None);
+                } else {
+                    found(&mut walk.harmful, node, op, opaque, via(&reasons));
+                }
+            }
+            // The mode of an input reached through an edge of this node.
+            let here = |reasons: &mut Vec<String>, what: &str| -> usize {
+                reasons.push(format!("{what} at {}", site_of(node)));
+                reasons.len() - 1
+            };
+            let next = |reasons: &mut Vec<String>, child: *const HydroNode, edge: Edge| -> Mode {
+                // SAFETY: as above.
+                let child_node = unsafe { &*child };
+                let child_stream = !matches!(child_node, HydroNode::Placeholder)
+                    && stream_like(&child_node.metadata().collection_kind);
+                match (mode, edge) {
+                    (Mode::Tolerant, Edge::SetPreserving) if child_stream => Mode::Tolerant,
+                    (Mode::Tolerant, Edge::SetPreserving) => Mode::Strict(here(
+                        reasons,
+                        &format!(
+                            "{} of a {}",
+                            op_name(node),
+                            kind_name(&child_node.metadata().collection_kind)
+                        ),
+                    )),
+                    (_, Edge::OrderSensitive) => Mode::Strict(here(reasons, &op_name(node))),
+                    (Mode::Strict(r), Edge::SetPreserving) => Mode::Strict(r),
+                }
+            };
+            for (child, edge) in self.edges(node) {
+                let m = next(&mut reasons, child, edge);
+                stack.push((child, m));
+            }
+            if let HydroNode::CycleSource { cycle_id, .. } = node {
+                match self.cycle_sinks.get(cycle_id) {
+                    Some(&sink) => {
+                        let m = next(&mut reasons, sink, Edge::SetPreserving);
+                        stack.push((sink, m));
+                    }
+                    None => found(&mut walk.harmful, node, "unresolved_cycle", true, None),
+                }
+            }
+            for closure in closures(node) {
+                for capture in captures(closure) {
+                    match capture {
+                        Some((cell, _)) => {
+                            let r = here(&mut reasons, &format!("{} reading state", op_name(node)));
+                            stack.push((cell, Mode::Strict(r)));
+                            for &writer in self.writers.get(&cell).into_iter().flatten() {
+                                stack.push((writer, Mode::Strict(r)));
+                            }
+                        }
+                        None => found(&mut walk.harmful, node, "unresolved_state", true, None),
+                    }
+                }
+            }
+        }
+        walk.harmless
+            .retain(|h| !walk.harmful.iter().any(|s| same(s, h)));
+        walk
+    }
+}
+
 /// For every collection `ir` labels `EventualConsistency` (as [`ec_collections`] lists them),
-/// its causal cone and the sites that make its search schedule-sensitive (see the
-/// [module docs](self)).
+/// its causal cone and the sites that make its search schedule-sensitive, by
+/// [`Analysis::Calm`] (see the [module docs](self)).
 pub fn label_cones(ir: &[HydroRoot]) -> Vec<LabelCone> {
     cones_of(ir, ec_collections(ir))
 }
 
+/// [`label_cones`] by [`Analysis::Conservative`]: the oracle [`Analysis::Calm`] refines.
+pub fn label_cones_conservative(ir: &[HydroRoot]) -> Vec<LabelCone> {
+    cones_with(ir, ec_collections(ir), Analysis::Conservative)
+}
+
 /// [`label_cones`] for `collections`, which must be [`ec_collections`] of `ir`.
 pub fn cones_of(ir: &[HydroRoot], collections: Vec<EcCollection>) -> Vec<LabelCone> {
+    cones_with(ir, collections, Analysis::Calm)
+}
+
+/// The cones of `collections` (which must be [`ec_collections`] of `ir`) by `analysis`.
+pub fn cones_with(
+    ir: &[HydroRoot],
+    collections: Vec<EcCollection>,
+    analysis: Analysis,
+) -> Vec<LabelCone> {
     let cones = Cones::new(ir);
     let mut by_location: HashMap<LocationId, Vec<NondetSite>> = HashMap::new();
     collections
@@ -698,10 +1187,10 @@ pub fn cones_of(ir: &[HydroRoot], collections: Vec<EcCollection>) -> Vec<LabelCo
                 collection.location.clone(),
             );
             let starts = cones.labelled.get(&key).cloned().unwrap_or_default();
-            let Walk { mut sites, seen } = if starts.is_empty() {
+            let (mut sites, harmless, seen) = if starts.is_empty() {
                 // The labelled node cannot be found again: the walk cannot see its cone.
-                Walk {
-                    sites: vec![NondetSite {
+                (
+                    vec![NondetSite {
                         site: collection.label.clone(),
                         op: "unlocated_label",
                         kind: kind_name(&collection.collection_kind),
@@ -709,11 +1198,30 @@ pub fn cones_of(ir: &[HydroRoot], collections: Vec<EcCollection>) -> Vec<LabelCo
                         local: true,
                         opaque: true,
                         send_order: false,
+                        via: None,
                     }],
-                    seen: HashSet::new(),
-                }
+                    vec![],
+                    HashSet::new(),
+                )
             } else {
-                cones.walk(&starts, &collection.location)
+                match analysis {
+                    Analysis::Conservative => {
+                        let Walk { sites, seen } = cones.walk(&starts, &collection.location);
+                        (sites, vec![], seen)
+                    }
+                    Analysis::Calm => {
+                        // SAFETY: as in `Cones::walk`.
+                        let label = unsafe { &*starts[0] };
+                        let tolerant = stream_like(&collection.collection_kind)
+                            && label.metadata().location_id.is_top_level();
+                        let CalmWalk {
+                            harmful,
+                            harmless,
+                            seen,
+                        } = cones.walk_calm(&starts, &collection.location, tolerant);
+                        (harmful, harmless, seen)
+                    }
+                }
             };
             // U2: a site that may reorder the sends of a node whose deliveries are in the cone
             // (the sender of each network in it), and so move its positional crash points.
@@ -735,7 +1243,10 @@ pub fn cones_of(ir: &[HydroRoot], collections: Vec<EcCollection>) -> Vec<LabelCo
             for location in locations {
                 let found = by_location
                     .entry(location.clone())
-                    .or_insert_with(|| cones.location_sites(&location));
+                    .or_insert_with(|| match analysis {
+                        Analysis::Conservative => cones.location_sites(&location),
+                        Analysis::Calm => cones.send_sites(&location),
+                    });
                 for site in found.iter() {
                     let mut site = site.clone();
                     site.local = site.location == collection.location;
@@ -748,36 +1259,49 @@ pub fn cones_of(ir: &[HydroRoot], collections: Vec<EcCollection>) -> Vec<LabelCo
                     sites.push(site);
                 }
             }
+            let harmless = harmless
+                .into_iter()
+                .filter(|h| {
+                    !sites
+                        .iter()
+                        .any(|s| s.site == h.site && s.op == h.op && s.location == h.location)
+                })
+                .collect();
             LabelCone {
                 collection,
                 sites,
+                harmless,
                 cone_nodes: seen.len(),
             }
         })
         .collect()
 }
 
-/// A table of [`label_cones`] for a report: one line per label.
+/// A table of [`label_cones`] for a report: one line per label (tab-separated: program,
+/// label, operator, kind, sensitive?, sensitive through its own cone (U1)?, summary, sites,
+/// discharged choices).
 pub fn table(program: &str, cones: &[LabelCone]) -> String {
+    let yes_no = |b: bool| if b { "yes" } else { "no" };
+    let list = |sites: &[NondetSite]| {
+        sites
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
     let mut out = String::new();
     for cone in cones {
         let c = &cone.collection;
         out.push_str(&format!(
-            "{program}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "{program}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             c.display_name(),
             c.op,
             kind_name(&c.collection_kind),
-            if cone.schedule_sensitive() {
-                "yes"
-            } else {
-                "no"
-            },
+            yes_no(cone.schedule_sensitive()),
+            yes_no(cone.existence_sensitive()),
             cone.summary(),
-            cone.sites
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("; "),
+            list(&cone.sites),
+            list(&cone.harmless),
         ));
     }
     out
