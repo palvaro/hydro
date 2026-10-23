@@ -291,12 +291,9 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
         results: &Results,
     ) -> (BruteForce, BTreeMap<usize, bool>) {
         let start = Instant::now();
-        let mut probe_records: Vec<InstanceRecord> = vec![];
-        let (_, targets, probe) = self.prepare(|records| probe_records = records.to_vec());
         let mut universe: BTreeSet<Fault<MessageId>> = BTreeSet::new();
-        for record in &probe_records {
-            harvest(record, &self.tables, &mut universe);
-        }
+        let (_, targets, probe) =
+            self.prepare(|tables, record| harvest(record, tables, &mut universe));
         let bounds: Vec<CrashBounds> = targets.iter().map(|t| self.bounds(t)).collect();
         let mut done: BTreeSet<FaultSet<MessageId>> = BTreeSet::from([FaultSet::new()]);
         let mut runs: Vec<(FaultSet<MessageId>, Rc<Run>)> = vec![(FaultSet::new(), probe.clone())];
@@ -315,11 +312,9 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
             }
             for set in fresh {
                 done.insert(set.clone());
-                let (records, panic, wall) = self.execute(&set);
-                for record in &records {
-                    harvest(record, &self.tables, &mut universe);
-                }
-                let run = Rc::new(self.read(&set, records, panic, wall, &targets));
+                let run = Rc::new(self.execute(&set, &targets, false, |tables, record| {
+                    harvest(record, tables, &mut universe)
+                }));
                 schedules += run.schedules;
                 self.runs.insert(set.clone(), run.clone());
                 runs.push((set, run));
