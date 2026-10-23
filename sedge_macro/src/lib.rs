@@ -19,11 +19,14 @@
 //!   (the same form Cress's `amplification_check` takes). Streams into and out of a cluster pass
 //!   through one extra relay process the harness deploys (`sedge::SedgeRelay`), because a
 //!   deployment has no channel between an external process and a cluster.
-//! * Every `Stream<(), Loc, Unbounded, O, R>` parameter named in `timers(...)` is a timer: a
-//!   stream of `()` the harness drives over an external port, one element per period, so that
-//!   the command's `--dip timer=K` can stretch its period during the trigger. On a cluster every
-//!   member gets one element per period, the members staggered by `period / members` (the
-//!   deployment's deterministic form of independent per-member clocks).
+//! * Every `Stream<(), Loc, Unbounded, O, R>` parameter named in `timers(...)` is a timer, bound
+//!   to an in-process `source_interval` of the given period on the parameter's location
+//!   (`sedge::timer`, `sedge::cluster_timer`). The timer is part of the deployed program's real
+//!   execution, so CPU starvation under its quota delays it as it would in production. On a
+//!   cluster, member `i`'s first tick is delayed by `i · period / members` (the deterministic
+//!   form of independent per-member clocks). Only when the command names the timer in a timing
+//!   fault (`--dip timer=K`) is it instead driven by the harness over an external port, so that
+//!   its period can be stretched during the trigger; such runs are reported as `TIMING_FAULT`.
 //! * Every other stream parameter is a data stream, fed from an external port. With
 //!   `load = param` there must be exactly one, and the generator sends it one value of `T` per
 //!   round (to every member, for a cluster), made from the round number by `sedge::LoadItem`.
@@ -56,9 +59,15 @@
 //!   streams (see above).
 //! * `timers(param = Duration-expr, ...)`: the period of each timer parameter. Required for
 //!   every `()` stream parameter that is not data.
-//! * `mu = expr`: the service capacity in rounds of workload per second, the `μ` that the
-//!   command's overprovisioning factors divide. The command's `--mu` overrides it; one or the
-//!   other must be given.
+//! * `mu = expr`: where the capacity probe starts its search, in rounds of workload per second.
+//!   μ, which the command's overprovisioning factors divide, is measured under the nodes' limits
+//!   (and cached per limits and host); `mu` is used as μ itself only with `--no-calibrate` or
+//!   without a capacity backend. The command's `--mu` overrides both.
+//! * `cpus = expr`: the CPU quota, in cores, of every deployed node of the program, unless the
+//!   command's `--cpus` says otherwise (the default is 0.5). `cpus(Role = expr, ...)` gives a
+//!   per-role quota, by location marker type name (`cpus(Server = 0.1)`). The quota is set when
+//!   a node's container starts and stays fixed for the run; only the command's opt-in
+//!   `--cpu-dip` changes it mid-run. The harness's relay process is never capped.
 //! * `ignore = "reason"`: omits this check from the command unless its `--include-ignored` option
 //!   is given.
 //! * `sedge = path`: the path to the `sedge` crate, `::sedge` by default.
@@ -323,6 +332,7 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
     let mut round_data: Option<Expr> = None;
     let mut mu: Option<Expr> = None;
     let mut cpus: Option<Expr> = None;
+    let mut role_cpus: Vec<(Ident, Expr)> = Vec::new();
     let mut timers: Vec<(Ident, Expr)> = Vec::new();
     let mut generic_types: Vec<(String, Type)> = Vec::new();
     let mut values: Vec<(String, Expr, Span)> = Vec::new();
@@ -346,6 +356,17 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
             ("round_data", Some(v), _) => round_data = Some(syn::parse2(v.clone())?),
             ("mu", Some(v), _) => mu = Some(syn::parse2(v.clone())?),
             ("cpus", Some(v), _) => cpus = Some(syn::parse2(v.clone())?),
+            ("cpus", None, Some(g)) => {
+                for t in g {
+                    let Some(v) = &t.value else {
+                        return Err(syn::Error::new(
+                            t.key.span(),
+                            "per-role caps look like `cpus(Server = 0.2)`",
+                        ));
+                    };
+                    role_cpus.push((t.key.clone(), syn::parse2(v.clone())?));
+                }
+            }
             ("timers", None, Some(g)) => {
                 for t in g {
                     let Some(v) = &t.value else {
@@ -853,6 +874,8 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
         .as_ref()
         .map(|e| quote!(::std::option::Option::Some((#e) as f64)))
         .unwrap_or_else(|| quote!(::std::option::Option::None));
+    let role_cpu_names = role_cpus.iter().map(|(n, _)| n);
+    let role_cpu_values = role_cpus.iter().map(|(_, e)| e);
     let cpus_value = cpus
         .as_ref()
         .map(|e| quote!(::std::option::Option::Some((#e) as f64)))
@@ -881,6 +904,7 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
                 configuration: #config_name,
                 mu: #mu_value,
                 cpus: #cpus_value,
+                role_cpus: ::std::vec![#((stringify!(#role_cpu_names), (#role_cpu_values) as f64)),*],
                 roles: &[#(#roles),*],
             };
             #sedge::harness::run_check(&__meta, __run, async |__spec: &#sedge::harness::Spec| -> #sedge::harness::Executed {

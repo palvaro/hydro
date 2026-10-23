@@ -127,12 +127,20 @@ impl Default for CapacityConfig {
 impl CapacityConfig {
     /// The limits of a node with role `role` under check `meta`.
     pub fn limits(&self, meta: &Meta, role: &str) -> Limits {
+        // The command's per-role cap, its cap for every node, the check's per-role cap, the
+        // check's cap for every node, the default.
         let cpus = self
             .role_cpus
             .iter()
             .find(|(r, _)| r.eq_ignore_ascii_case(role))
             .map(|(_, c)| *c)
             .or(self.cpus)
+            .or_else(|| {
+                meta.role_cpus
+                    .iter()
+                    .find(|(r, _)| r.eq_ignore_ascii_case(role))
+                    .map(|(_, c)| *c)
+            })
             .or(meta.cpus)
             .unwrap_or(DEFAULT_CPUS);
         Limits {
@@ -277,7 +285,8 @@ pub struct RunConfig {
     pub dips: Vec<(String, f64)>,
     /// What each node gets.
     pub capacity: CapacityConfig,
-    /// A capacity-dip trigger.
+    /// A capacity-dip trigger, only with `--cpu-dip`. Without it (the default) every node's
+    /// quota is set when its container starts and never changed during the run.
     pub cpu_dip: Option<CpuDip>,
     /// When to measure μ.
     pub calibrate: Calibrate,
@@ -285,6 +294,8 @@ pub struct RunConfig {
     pub probe_step: Duration,
     /// The rate the probe starts its search at, overriding the check's `mu` hint.
     pub probe_start: Option<f64>,
+    /// Only measure μ (or read it from the cache); run no trials.
+    pub calibrate_only: bool,
 }
 
 impl Default for RunConfig {
@@ -310,6 +321,7 @@ impl Default for RunConfig {
             calibrate: Calibrate::Auto,
             probe_step: Duration::from_secs(10),
             probe_start: None,
+            calibrate_only: false,
         }
     }
 }
@@ -466,6 +478,7 @@ impl RunConfig {
                 }
                 "--recalibrate" => cfg.calibrate = Calibrate::Force,
                 "--no-calibrate" => cfg.calibrate = Calibrate::Off,
+                "--calibrate-only" => cfg.calibrate_only = true,
                 "--probe-step" => cfg.probe_step = secs(&value("--probe-step")?, "--probe-step")?,
                 "--probe-start" => {
                     cfg.probe_start = Some(positive(&value("--probe-start")?, "--probe-start")?)
@@ -519,7 +532,8 @@ usage: sedge [options] <crate> [function-substring]
   --grace S                seconds to wait for stragglers after the last request (default 2)
   --seed N                 seed of the first trial's arrivals (default 1)
   --features A,B           extra Cargo features for the deployed program
- capacity (from outside the program):
+ capacity (from outside the program; each node's quota is set once, when its container starts,
+ and stays fixed for the whole run unless --cpu-dip asks otherwise):
   --backend docker|none    run each node in a CPU-capped container (default docker if available)
   --cpus C                 cores' worth of CPU per node (default: the check's `cpus`, else 0.5)
   --cpus ROLE=C            per-role override, by location marker name (repeatable)
@@ -532,10 +546,12 @@ usage: sedge [options] <crate> [function-substring]
   --mu RPS                 take μ as given instead of measuring it
   --recalibrate            measure μ even if it is cached for these limits
   --no-calibrate           use the check's declared `mu` (no measurement)
+  --calibrate-only         measure (or look up) μ and stop; run no trials
   --probe-step S           seconds per probe rate (default 10)
   --probe-start RPS        rate the probe starts at (default: the check's `mu` hint, else 50)
- triggers:
-  --cpu-dip K              divide the selected nodes' CPU quota by K during the trigger window
+ triggers (default: a load burst only):
+  --cpu-dip K              opt-in capacity dip: divide the selected nodes' CPU quota by K during
+                           the trigger window, then restore it (the only mid-run quota change)
   --cpu-dip-nodes SEL,...  which nodes: all, ROLE, or ROLE:INDEX (default all)
   --dip TIMER=K            TIMING FAULT: drive TIMER from the harness and stretch its period by K
                            during the trigger (repeatable; reported apart from overload)";
@@ -561,8 +577,10 @@ pub struct Meta {
     pub configuration: &'static str,
     /// The check's `mu`: with calibration, only the rate the probe starts at.
     pub mu: Option<f64>,
-    /// The check's `cpus`: the cap each node gets unless the command says otherwise.
+    /// The check's `cpus = C`: the cap each node gets unless the command says otherwise.
     pub cpus: Option<f64>,
+    /// The check's `cpus(Role = C, ...)`: per-role caps, by location marker name.
+    pub role_cpus: Vec<(&'static str, f64)>,
     /// The role (location marker name) of every location the check deploys, for the
     /// calibration key.
     pub roles: &'static [&'static str],
@@ -1381,6 +1399,16 @@ where
         let host = host_fingerprint();
         let (mu, mu_source) = resolve_mu(meta, run, &host, &mut once).await;
         let mut results = Vec::new();
+        if run.calibrate_only {
+            println!(
+                "{} ({}): μ = {mu:.1} rounds/s ({mu_source}) under {}",
+                meta.function,
+                meta.configuration,
+                run.capacity
+                    .key(meta, &meta.roles.iter().map(|r| r.to_string()).collect::<Vec<_>>())
+            );
+            return results;
+        }
         for (factor, trial) in run.schedule() {
             let profile = run.profile(mu, factor);
             let seed = run.seed + trial as u64;
@@ -1571,12 +1599,14 @@ where
     let mut index = 0usize;
     let mut reference: Option<f64> = None;
     let mut probe = async |rate: f64, reference: &mut Option<f64>| -> ProbePoint {
-        let warm = run.probe_step / 3;
+        // Whole seconds, so that the measured window is exactly its per-second buckets.
+        let step = Duration::from_secs(run.probe_step.as_secs_f64().ceil().max(1.0) as u64);
+        let warm = Duration::from_secs((step.as_secs_f64() / 3.0).ceil().max(2.0) as u64);
         let profile = Profile {
             baseline_rps: rate,
             trigger_rps: rate,
             before: warm,
-            trigger: run.probe_step,
+            trigger: step,
             tail: Duration::ZERO,
         };
         let spec = Spec {
@@ -1959,5 +1989,110 @@ impl fmt::Display for Summary<'_> {
             write!(f, "limits: {}\nhost: {}", r.limits, r.host)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<RunConfig, String> {
+        RunConfig::from_args(args.iter().map(|s| s.to_string()))
+    }
+
+    fn meta() -> Meta {
+        Meta {
+            crate_name: "c",
+            module: "m",
+            function: "f",
+            configuration: "x",
+            mu: None,
+            cpus: Some(0.3),
+            role_cpus: vec![("Server", 0.2)],
+            roles: &["Client", "Server"],
+        }
+    }
+
+    #[test]
+    fn caps_resolve_command_first_then_check_then_default() {
+        let m = meta();
+        let run = parse(&["--backend", "docker"]).unwrap();
+        assert_eq!(run.capacity.limits(&m, "Server").cpu.unwrap().quota_us, 2000);
+        assert_eq!(run.capacity.limits(&m, "client").cpu.unwrap().quota_us, 3000);
+        let run = parse(&["--backend", "docker", "--cpus", "0.5"]).unwrap();
+        assert_eq!(run.capacity.limits(&m, "Server").cpu.unwrap().quota_us, 5000);
+        let run = parse(&["--backend", "docker", "--cpus", "0.5", "--cpus", "server=0.25"]).unwrap();
+        assert_eq!(run.capacity.limits(&m, "Server").cpu.unwrap().quota_us, 2500);
+        assert_eq!(run.capacity.limits(&m, "Client").cpu.unwrap().quota_us, 5000);
+        let m2 = Meta { cpus: None, role_cpus: vec![], ..meta() };
+        let run = parse(&["--backend", "docker"]).unwrap();
+        assert_eq!(
+            run.capacity.limits(&m2, "Client").cpu.unwrap().cores(),
+            DEFAULT_CPUS
+        );
+    }
+
+    #[test]
+    fn cpu_dip_options() {
+        let run = parse(&[
+            "--backend",
+            "docker",
+            "--cpu-dip",
+            "4",
+            "--cpu-dip-nodes",
+            "Server,Replica:0",
+        ])
+        .unwrap();
+        let dip = run.cpu_dip.clone().unwrap();
+        assert_eq!(dip.k, 4.0);
+        assert_eq!(
+            dip.nodes,
+            vec![
+                NodeSelector::Role("Server".to_owned()),
+                NodeSelector::Member("Replica".to_owned(), 0)
+            ]
+        );
+        assert_eq!(run.trigger_kind(), TriggerKind::CpuDip);
+        let replica0 = NodeSpec {
+            role: "replica".to_owned(),
+            member: Some(0),
+        };
+        assert!(dip.nodes[1].matches(&replica0));
+        assert!(!dip.nodes[0].matches(&replica0));
+        assert!(parse(&["--cpu-dip-nodes", "all"]).is_err());
+        assert!(parse(&["--backend", "none", "--cpu-dip", "2"]).is_err());
+        assert!(parse(&["--backend", "docker", "--cpu-dip", "2", "--dip", "t=2"]).is_err());
+        let run = parse(&["--dip", "heartbeat=8"]).unwrap();
+        assert_eq!(run.trigger_kind(), TriggerKind::TimingFault);
+        assert_eq!(parse(&[]).unwrap().trigger_kind(), TriggerKind::Burst);
+    }
+
+    #[test]
+    fn by_default_the_quota_never_changes_mid_run() {
+        // Only `--cpu-dip` makes the harness touch a running node's quota.
+        for args in [&[][..], &["--backend", "docker"][..], &["--dip", "t=8"][..], &["--recalibrate"][..]] {
+            let run = parse(args).unwrap();
+            assert!(run.cpu_dip.is_none(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn quotas() {
+        let q = CpuQuota::from_cores(0.25, 10_000);
+        assert_eq!(q.quota_us, 2500);
+        assert_eq!(q.divided(4.0).quota_us, 1000);
+        // Never below the kernel's 1 ms minimum.
+        assert_eq!(q.divided(10.0).quota_us, 1000);
+        assert_eq!(CpuQuota::from_cores(0.01, 10_000).quota_us, 1000);
+    }
+
+    #[test]
+    fn calibration_key_covers_every_role() {
+        let m = meta();
+        let run = parse(&["--backend", "docker", "--node-cpus", "4-7"]).unwrap();
+        let key = run.capacity.key(&m, &["Client".to_owned(), "Server".to_owned()]);
+        assert_eq!(key, "docker;Client=3000/10000,Server=2000/10000;cpuset=4-7;mem=-");
+        let run = parse(&["--backend", "none"]).unwrap();
+        assert_eq!(run.capacity.key(&m, &[]), "uncapped");
     }
 }
