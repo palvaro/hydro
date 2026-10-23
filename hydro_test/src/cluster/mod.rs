@@ -45,6 +45,9 @@ mod ec_demos_hydrofrac;
 #[cfg(test)]
 mod ec_bruteforce;
 
+#[cfg(test)]
+mod ec_casualties;
+
 // WIP: the following modules were written against an older hydro_lang API
 // (they call `broadcast_from_member`, which has since been renamed/removed,
 // and `typed_consensus` has a `T`/`usize` type mismatch at ~line 360).
