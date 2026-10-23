@@ -31,13 +31,21 @@ mod tests {
     }
 
     /// Label counts per emission-point name for the tail of `history` starting at `from`.
-    fn tail_labels(history: &[EmissionRecord], from: usize) -> BTreeMap<String, BTreeMap<Label, usize>> {
+    fn tail_labels(
+        history: &[EmissionRecord],
+        from: usize,
+    ) -> BTreeMap<String, BTreeMap<Label, usize>> {
         let classified = classify(history, false);
         // `classify(_, false)` emits one entry per record that is neither a receipt nor a
         // cycle-sink carry; count those before `from` to align.
         let sends_before = history[..from]
             .iter()
-            .filter(|r| !matches!(r.kind, EmissionPointKind::Receive | EmissionPointKind::Cycle))
+            .filter(|r| {
+                !matches!(
+                    r.kind,
+                    EmissionPointKind::Receive | EmissionPointKind::Cycle
+                )
+            })
             .count();
         let mut out: BTreeMap<String, BTreeMap<Label, usize>> = BTreeMap::new();
         for c in classified.into_iter().skip(sends_before) {
@@ -53,7 +61,11 @@ mod tests {
         let path = std::env::var("HYDRO_PROVENANCE_DUMP")
             .unwrap_or_else(|_| "target/provenance_dump.txt".to_string());
         let _ = std::fs::create_dir_all("target");
-        if let Ok(mut out) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        if let Ok(mut out) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
             let _ = writeln!(out, "## {text}");
         }
     }
@@ -62,7 +74,11 @@ mod tests {
         let path = std::env::var("HYDRO_PROVENANCE_DUMP")
             .unwrap_or_else(|_| "target/provenance_dump.txt".to_string());
         let _ = std::fs::create_dir_all("target");
-        let Ok(mut out) = std::fs::OpenOptions::new().create(true).append(true).open(path) else {
+        let Ok(mut out) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        else {
             return;
         };
         let _ = writeln!(out, "== {title}");
@@ -252,8 +268,14 @@ mod tests {
         let (cmd_send, commands) = proposers.sim_input::<u32, TotalOrder, ExactlyOnce>();
         let outs = multi_paxos(&acceptors, &learners, MAJORITY, leads, commands);
         let learned = outs.learned.sim_cluster_output();
-        outs.chosen.for_each(q!(|_| {}, commutative = manual_proof!(/** observation only */)));
-        outs.established.for_each(q!(|_| {}, commutative = manual_proof!(/** observation only */)));
+        outs.chosen.for_each(q!(
+            |_| {},
+            commutative = manual_proof!(/** observation only */)
+        ));
+        outs.established.for_each(q!(
+            |_| {},
+            commutative = manual_proof!(/** observation only */)
+        ));
 
         flow.sim()
             .skip_consistency_assertions()

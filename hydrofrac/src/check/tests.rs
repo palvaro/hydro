@@ -381,10 +381,16 @@ fn the_report_is_in_source_names() {
     );
     // The broadcast value 7 is decoded through the tapped fact with the same bytes.
     assert!(line.contains("]: 7"), "{report}");
-    assert!(!report.contains("07000000"), "raw bincode in the report:\n{report}");
+    assert!(
+        !report.contains("07000000"),
+        "raw bincode in the report:\n{report}"
+    );
     assert!(report.contains("lacks 7"), "{report}");
     // Channels are named by the program's names.
-    assert!(line.contains("initial[") || line.contains("echo["), "{report}");
+    assert!(
+        line.contains("initial[") || line.contains("echo["),
+        "{report}"
+    );
 }
 
 /// The echo broadcast without `weaken_consistency`: the plain hops stay labelled and reach the
@@ -418,7 +424,10 @@ fn the_report_lists_merged_hops_under_the_label_they_merge_into() {
         .iter()
         .filter(|l| l.plan.merged_at.is_some())
         .collect();
-    assert!(!hops.is_empty(), "the plain hops are merge-dominated:\n{report}");
+    assert!(
+        !hops.is_empty(),
+        "the plain hops are merge-dominated:\n{report}"
+    );
     let lines: Vec<&str> = report.lines().collect();
     for hop in hops {
         let at = hop.plan.merged_at.unwrap();
@@ -437,9 +446,7 @@ fn the_report_lists_merged_hops_under_the_label_they_merge_into() {
         // Under the label it merges into: after its row, before the next unindented label.
         assert!(merged < row, "{report}");
         assert!(
-            lines[merged + 1..row]
-                .iter()
-                .all(|l| !l.starts_with("  [")),
+            lines[merged + 1..row].iter().all(|l| !l.starts_with("  [")),
             "{report}"
         );
     }
@@ -468,7 +475,10 @@ fn rows_carry_the_normalized_counterexample() {
     assert_eq!(row.collection, "delivered");
     assert_eq!(row.verdict, "counterexample");
     assert_eq!(row.tolerates, "1");
-    assert!(row.cex.starts_with("{crash(") && !row.cex.contains("after"), "{row:?}");
+    assert!(
+        row.cex.starts_with("{crash(") && !row.cex.contains("after"),
+        "{row:?}"
+    );
     assert_eq!(row.hypotheses, delivered.stats.hypotheses);
     assert_eq!(row.test, "rows_carry_the_normalized_counterexample");
     let capped = echo_broadcast(EcCheck::new().max_crashes(1)).rows();
@@ -547,7 +557,9 @@ fn a_schedule_sensitive_label_is_exhausted_not_certified() {
     assert_eq!(*tolerates, Tolerance::All, "{results}");
     assert_eq!(sites, &label.plan.sites, "{results}");
     assert!(
-        results.to_string().contains("not a certificate (schedule-sensitive: batch at"),
+        results
+            .to_string()
+            .contains("not a certificate (schedule-sensitive: batch at"),
         "{results}"
     );
     assert!(!results.holds(), "{results}");
@@ -638,7 +650,10 @@ fn a_small_schedule_sensitive_label_is_certified_by_enumeration() {
         panic!("expected a certificate by enumeration:\n{results}");
     };
     assert_eq!(*tolerates, Tolerance::All, "{results}");
-    assert_eq!(*max_faults, None, "every admissible set, whatever its size:\n{results}");
+    assert_eq!(
+        *max_faults, None,
+        "every admissible set, whatever its size:\n{results}"
+    );
     // The failure-free set, and the source's crash before any send and right after each of its
     // two sends.
     assert_eq!(*sets, 4, "{results}");
@@ -735,7 +750,10 @@ fn lossy_sealed() -> Results {
 fn message_payloads_render_by_their_debug() {
     let results = lossy_orders();
     let label = results.label("orders");
-    let cex = label.verdict.counterexample().expect("an omission breaks it");
+    let cex = label
+        .verdict
+        .counterexample()
+        .expect("an omission breaks it");
     // The rendering comes from the send's metadata, not from a fact with the same bytes.
     let renderings = crate::report::payload_renderings(&cex.record.log);
     assert!(
@@ -744,11 +762,15 @@ fn message_payloads_render_by_their_debug() {
     );
     let report = results.to_string();
     assert!(
-        report.contains("breaks under omissions alone: {omit(") && report.contains("]: Order { id: 1 })}"),
+        report.contains("breaks under omissions alone: {omit(")
+            && report.contains("]: Order { id: 1 })}"),
         "{report}"
     );
     // `Order { id: 1 }` as bincode: a little-endian u32.
-    assert!(!report.contains("01000000"), "raw bincode in the report:\n{report}");
+    assert!(
+        !report.contains("01000000"),
+        "raw bincode in the report:\n{report}"
+    );
     // The diagram labels the message by it too.
     let dot = std::fs::read_to_string(
         cex.diagram
@@ -768,7 +790,10 @@ fn message_payloads_render_by_their_debug() {
 fn payloads_without_debug_stay_hex() {
     let results = lossy_sealed();
     let label = results.label("sealed");
-    let cex = label.verdict.counterexample().expect("an omission breaks it");
+    let cex = label
+        .verdict
+        .counterexample()
+        .expect("an omission breaks it");
     assert!(
         crate::report::payload_renderings(&cex.record.log).is_empty(),
         "no rendering without `Debug`"
