@@ -529,6 +529,30 @@ broadcast, ABD, multi-Paxos, 2PC) are therefore **not ground truth**; only its c
 certificates on site-free labels, are. The research branch found the CTP bug only through a hand-written spec,
 whose PRE counted a dead node's commit.
 
+**How many of them are wrong.** `hydro_test`'s `cluster::ec_casualties` (and, for ABD, whose message types
+are private to `hydro_std`, `ec_abd_hydrofrac::reliable_phase_two_brute_force_sweep`) reruns each of those labels,
+in the research harness's configuration, through the brute-force cross-check: every admissible fault set of the
+label's crash bounds, with no lineage pruning, over sampled schedules (every schedule where that finishes). None
+breaks:
+
+| label | fault sets (all admissible) | schedules per set |
+|---|---|---|
+| echoing reliable broadcast `deliveries`, 3 members | 65 (≤ 2 crashes) | 4,096 |
+| uniform broadcast (thresholds 1, 2), `certified` and the delivered set, 2 items | 176 each | 1,024 |
+| G-Set gossip closed / live, `all_elements`, 3 rounds | 40 each (1 crash) | 1,024 |
+| multi-Paxos `learned`, `facts` (cap 1) | 52 | 512 |
+| ABD reliable phase 2, `phase2_fwd` and the register | 176 (≤ 2 crashes) | 1,024 |
+| 2PC CTP, 2 participants, `committed`, 1 txn / 4 txns | 6 / 18 (coordinator only) | every / 4,096 |
+
+So within the covered space the research branch's sensitive certificates are unjustified, not wrong; the one
+known wrong one (CTP with three participants) the research branch never certified. Each sweep took at most about
+20 minutes. **Not established:** a sampled sweep does not exclude a rare schedule, and under sampling the
+learned fault universe can miss a crash point after a message only unsampled schedules send; and the harnesses
+quiesce between inputs and timers, as the research ones do, which removes most `ask_once`-style input races.
+"Not wrong" is relative to those harnesses. The same sweep with the 2PC timers racing the
+transaction instead of firing after it settles (not a research configuration) breaks `committed` with two
+participants under one coordinator crash, in about 80% of schedules; it is a regression test there.
+
 **Next.** d2 is in, but the corpus's sensitive programs are too large to explore exhaustively, so the gap it
 closes there is the schedule space, not the fault-set space. Next is (c), per-record taint with the conservative
 crash rule, measured first by how many first-observation derivations in the sensitive programs are untainted.

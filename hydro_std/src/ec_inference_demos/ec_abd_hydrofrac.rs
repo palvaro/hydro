@@ -168,3 +168,66 @@ fn reliable_phase_two_certifies_the_register() {
         "{results}"
     );
 }
+
+/// The brute-force sweep of the reliable-phase-2 register (docs/design/hydrofrac-lite.md §4.9,
+/// "The research branch has the same hole"; the other sweeps are in `hydro_test`'s
+/// `cluster::ec_casualties`): every admissible fault set of at most two crashes, without
+/// lineage pruning, over `CASUALTY_SAMPLES` (default 16) sampled schedules per set, through
+/// `EcCheck::cross_check`. Prints every set that breaks a label.
+#[test]
+#[ignore = "sweep: minutes"]
+fn reliable_phase_two_brute_force_sweep() {
+    let samples = std::env::var("CASUALTY_SAMPLES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(16);
+    let max_faults = std::env::var("CASUALTY_FAULTS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2);
+    let mut flow = FlowBuilder::new();
+    let replicas = flow.cluster::<Replica>();
+    let clients = flow.cluster::<Client>();
+    let (w_send, writes) = clients.sim_input::<(u64, u32), TotalOrder, ExactlyOnce>();
+    let (_r_send, reads) = clients.sim_input::<u64, TotalOrder, ExactlyOnce>();
+    let outs = abd_register_reliable_phase2(&replicas, REPLICAS / 2 + 1, writes, reads);
+    let _done = outs.write_done.sim_cluster_output();
+    let _read = outs.read_result.sim_cluster_output();
+    let mut check = hydrofrac::EcCheck::new().sample_schedules(samples);
+    let sim = check
+        .instrument(
+            flow.sim()
+                .with_cluster_size(&replicas, REPLICAS)
+                .with_cluster_size(&clients, 1),
+        )
+        .compiled();
+    let start = std::time::Instant::now();
+    let cross = check.cross_check(
+        &sim,
+        async || {
+            w_send.send(0, (1, 10u32));
+        },
+        max_faults,
+    );
+    eprintln!(
+        "=== abd (reliable phase 2), samples per set: {samples} ({:.1}s)\nsearch:\n{}\n{cross}",
+        start.elapsed().as_secs_f64(),
+        cross.results
+    );
+    let names = cross.results.report_names();
+    for b in &cross.brute.labels {
+        for s in &b.breaking {
+            eprintln!(
+                "CASUALTY abd: {} breaks under {}",
+                b.name,
+                names.fault_set(s)
+            );
+        }
+    }
+    eprintln!(
+        "SUMMARY abd: {} sets, {} schedules, {:.1}s",
+        cross.brute.sets,
+        cross.brute.schedules,
+        start.elapsed().as_secs_f64()
+    );
+}

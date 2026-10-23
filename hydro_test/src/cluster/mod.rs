@@ -18,13 +18,13 @@ pub mod paxos_bench;
 pub mod paxos_log_bench;
 #[cfg(feature = "tokio")]
 pub mod paxos_with_client;
-pub mod provenance_ground_truth;
+pub mod provenance_buffers;
 pub mod provenance_evidence_matrix;
+pub mod provenance_ground_truth;
+pub mod provenance_survey;
 pub mod pure_heartbeat;
 pub mod raft;
 pub mod reliable_broadcast;
-pub mod provenance_survey;
-pub mod provenance_buffers;
 pub mod simple_cluster;
 #[cfg(feature = "tokio")]
 pub mod two_pc;
@@ -44,6 +44,9 @@ mod ec_demos_hydrofrac;
 
 #[cfg(test)]
 mod ec_bruteforce;
+
+#[cfg(test)]
+mod ec_casualties;
 
 // WIP: the following modules were written against an older hydro_lang API
 // (they call `broadcast_from_member`, which has since been renamed/removed,
