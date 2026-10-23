@@ -24,6 +24,12 @@ use crate::search::{
 };
 use crate::spec::{MemberView, Observation, evaluate, learn_domain};
 
+// A child of this module (it drives the engine), kept in its own file beside it.
+#[path = "brute_force.rs"]
+mod brute;
+#[doc(hidden)]
+pub use brute::{BruteForce, BruteLabel, CrossCheck};
+
 /// Checks every `EventualConsistency` label of a program (see the [module docs](super)).
 ///
 /// Two knobs; everything else is a convention (docs/design/hydrofrac-lite.md §2):
@@ -465,6 +471,43 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
     }
 
     fn check(&mut self) -> Results {
+        let (mut verdicts, targets, probe) = self.prepare(|_| {});
+        for t in &targets {
+            let result = self.search(t, &probe, &targets);
+            verdicts[t.label] = Some(result);
+        }
+        self.write_diagrams(&mut verdicts);
+
+        let plans = &self.labels.plans;
+        Results {
+            labels: plans
+                .iter()
+                .enumerate()
+                .map(|(index, plan)| {
+                    let (verdict, stats) = verdicts[index].take().expect("every label decided");
+                    LabelResult {
+                        index,
+                        plan: plan.clone(),
+                        verdict,
+                        stats,
+                    }
+                })
+                .collect(),
+            names: self.tables.names().clone(),
+            islands: self.islands.borrow().clone(),
+            channels: self.sim.channels().to_vec(),
+            taps: self.labels.clone(),
+            test: crate::lamport::test_name(),
+        }
+    }
+
+    /// Decides the labels that need no search, and runs the failure-free probe: the verdicts
+    /// decided so far (by label index), the labels left to search (with their fact domains),
+    /// and the probe's run. `seen` gets the probe's records before they are read.
+    fn prepare(
+        &mut self,
+        seen: impl FnOnce(&[InstanceRecord]),
+    ) -> (Vec<Option<(Verdict, Stats)>>, Vec<Target>, Rc<Run>) {
         let plans = &self.labels.plans;
         let mut verdicts: Vec<Option<(Verdict, Stats)>> = vec![None; plans.len()];
         // The searched labels with more than one member; the others are decided up front.
@@ -495,6 +538,7 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
         // Hypothesis 0: the failure-free probe learns every label's fact domain, then is read
         // like any other run.
         let (records, panic, wall) = self.execute(&FaultSet::new());
+        seen(&records);
         for t in &mut targets {
             let mut domain = BTreeSet::new();
             for record in &records {
@@ -541,33 +585,7 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
         }
         let probe = Rc::new(self.read(&FaultSet::new(), records, panic, wall, &targets));
         self.runs.insert(FaultSet::new(), probe.clone());
-
-        for t in &targets {
-            let result = self.search(t, &probe, &targets);
-            verdicts[t.label] = Some(result);
-        }
-        self.write_diagrams(&mut verdicts);
-
-        Results {
-            labels: plans
-                .iter()
-                .enumerate()
-                .map(|(index, plan)| {
-                    let (verdict, stats) = verdicts[index].take().expect("every label decided");
-                    LabelResult {
-                        index,
-                        plan: plan.clone(),
-                        verdict,
-                        stats,
-                    }
-                })
-                .collect(),
-            names: self.tables.names().clone(),
-            islands: self.islands.borrow().clone(),
-            channels: self.sim.channels().to_vec(),
-            taps: self.labels.clone(),
-            test: crate::lamport::test_name(),
-        }
+        (verdicts, targets, probe)
     }
 
     /// Writes each counterexample's Lamport diagram to `target/hydrofrac/<test>/<label>/`

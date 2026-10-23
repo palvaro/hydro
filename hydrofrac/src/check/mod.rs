@@ -40,7 +40,13 @@ mod results;
 #[cfg(stageleft_runtime)]
 pub use engine::EcCheck;
 #[cfg(stageleft_runtime)]
+#[doc(hidden)]
+pub use engine::{BruteForce, BruteLabel, CrossCheck};
+#[cfg(stageleft_runtime)]
 pub use results::{Counterexample, LabelResult, Results, Stats, VacuousReason, Verdict};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod brute_tests;
