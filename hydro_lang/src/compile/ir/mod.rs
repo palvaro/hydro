@@ -158,6 +158,27 @@ impl ClosureExpr {
         self.singleton_refs.iter().any(|(_, is_mut)| *is_mut)
     }
 
+    /// The closure's expression. For IR passes outside this crate.
+    #[doc(hidden)]
+    pub fn expr(&self) -> &DebugExpr {
+        &self.expr
+    }
+
+    /// The singleton references the closure captures, as `(HydroNode::Reference, is_mut)`; the
+    /// index of each names its local via [`crate::handoff_ref::handoff_ref_ident`]. For IR passes
+    /// outside this crate.
+    #[doc(hidden)]
+    pub fn singleton_refs(&self) -> &[(HydroNode, bool)] {
+        &self.singleton_refs
+    }
+
+    /// Splits the closure into its expression and captured references (see
+    /// [`Self::singleton_refs`]). For IR passes outside this crate.
+    #[doc(hidden)]
+    pub fn into_parts(self) -> (DebugExpr, Vec<(HydroNode, bool)>) {
+        (self.expr, self.singleton_refs)
+    }
+
     pub fn deep_clone(&self, seen_tees: &mut SeenSharedNodes) -> Self {
         Self {
             expr: self.expr.clone(),
