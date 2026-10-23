@@ -5,9 +5,9 @@
 //! Every search uses the generated specification for every `EventualConsistency` label
 //! (`Spec::all_labels`). There are two labels, both on `Cluster<Member>`:
 //!
-//! - `initial`, the source's `broadcast_closed` over `fail_stop` (`relay_broadcast.rs:205`).
+//! - `initial`, the source's `broadcast_closed` over `fail_stop` (`relay_broadcast.rs:237`).
 //! - `delivered`, the merge of `initial` with the relays, labelled with a `manual_proof!`
-//!   (`relay_broadcast.rs:218`). This is the claim under test.
+//!   (`relay_broadcast.rs:250`). This is the claim under test.
 //!
 //! Setup: three members, two request ids, and the source and every member crashable. The body
 //! sends the requests and quiesces. Then it declares the end of finite failures (no new crash
@@ -26,6 +26,10 @@
 //!   source*, not the ids it got from a relay. So the source can crash after reaching only
 //!   member 0, and member 0 can then crash part-way through its echo fan-out. That leaves the
 //!   two survivors disagreeing. The unbounded search reports this case.
+//! - [`RelayPolicy::ReliableResend`] over `lossy_delayed_forever`: a member relays every id on
+//!   its first receipt from any sender, source or peer, and re-sends until acked. This closes
+//!   the gap above. `delivered` holds under one crash (no violation in 18 fault sets) and with
+//!   crashes unbounded (no violation in 55 fault sets), each with 8 sampled schedules.
 //!
 //! In every variant `initial` diverges on its own under the source's crash. It is its own row,
 //! not a hop merged into `delivered`, because the program also feeds it to the inbox.
@@ -53,15 +57,16 @@ mod tests {
 
     const MEMBERS: u32 = 3;
     /// Where `delivered` gets its label (the `assert_has_consistency_of`).
-    const DELIVERED: &str = "relay_broadcast.rs:218";
+    const DELIVERED: &str = "relay_broadcast.rs:250";
     /// Where `initial` gets its label (the source's `broadcast_closed`).
-    const INITIAL: &str = "relay_broadcast.rs:205";
+    const INITIAL: &str = "relay_broadcast.rs:237";
 
     /// Timer rounds after the cut: enough for the oldest echo to pass `ack_timeout_ticks`,
     /// be re-sent, and be merged and acknowledged.
     fn rounds_after_cut(policy: RelayPolicy) -> u64 {
         let timeout = match policy {
-            RelayPolicy::EchoResend { ack_timeout_ticks } => ack_timeout_ticks,
+            RelayPolicy::EchoResend { ack_timeout_ticks }
+            | RelayPolicy::ReliableResend { ack_timeout_ticks } => ack_timeout_ticks,
             RelayPolicy::None | RelayPolicy::Echo => 0,
         };
         timeout + 3
@@ -226,5 +231,53 @@ mod tests {
         let faults = counterexample(row(&results, DELIVERED), &results);
         assert!(crashes(&faults, "source"), "{results}");
         assert!(crashes(&faults, "member"), "{results}");
+    }
+
+    const RELIABLE: RelayPolicy = RelayPolicy::ReliableResend {
+        ack_timeout_ticks: 3,
+    };
+
+    /// The final repair, reliable broadcast with retransmission: a member relays every id on
+    /// its first receipt from any sender, so a relayer crashing part-way through its fan-out
+    /// is covered by any peer it reached. Under one crash, `delivered` holds.
+    #[test]
+    fn relay_reliable_resend_lossy_holds_under_one_crash() {
+        let results = search(RELIABLE, RelayChannel::LossyDelayedForever, |l| {
+            l.crash_budget(1)
+        });
+        assert!(
+            matches!(
+                row(&results, DELIVERED).outcome(),
+                Some(Outcome::Certificate { .. })
+            ),
+            "{results}"
+        );
+        assert!(
+            results
+                .counterexamples()
+                .all(|(r, _)| r.label().contains(INITIAL)),
+            "{results}"
+        );
+    }
+
+    /// The same with crashes unbounded: the counterexample that refutes `EchoResend` (source
+    /// and then the only relayer crash) no longer applies, since the peer member 0 reached
+    /// relays the id onward.
+    #[test]
+    fn relay_reliable_resend_lossy_holds_under_unbounded_crashes() {
+        let results = search(RELIABLE, RelayChannel::LossyDelayedForever, |l| l);
+        assert!(
+            matches!(
+                row(&results, DELIVERED).outcome(),
+                Some(Outcome::Certificate { .. })
+            ),
+            "{results}"
+        );
+        assert!(
+            results
+                .counterexamples()
+                .all(|(r, _)| r.label().contains(INITIAL)),
+            "{results}"
+        );
     }
 }

@@ -89,6 +89,15 @@ pub enum RelayPolicy {
         /// Ticks an echo may wait for its acknowledgement before it is re-sent.
         ack_timeout_ticks: u64,
     },
+    /// Reliable broadcast with retransmission: relay every id on its *first receipt from any
+    /// sender* (the source or a peer) to every peer, once, and re-send each relay until the
+    /// peer acknowledges it. Unlike `EchoResend`, an id that reached a member only through a
+    /// relay is relayed onward too, so a relayer crashing part-way through its fan-out is
+    /// covered by whichever peer it did reach.
+    ReliableResend {
+        /// Ticks a relay may wait for its acknowledgement before it is re-sent.
+        ack_timeout_ticks: u64,
+    },
 }
 
 /// The failure model of the relay channel, chosen when the graph is built. The rest of the
@@ -152,6 +161,17 @@ pub struct Outputs<'a> {
         inputs.requests.send(round as u64);
     },
 ))]
+#[cfg_attr(feature = "cress", amplification_check(
+    name = reliable_resend,
+    members = 5,
+    workload_rounds = 125,
+    skip_consistency_assertions,
+    config = RelayConfig { max_merges_per_tick: 7, policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
+    timers(timer = Duration::from_millis(50)),
+    round_data = |round, inputs| {
+        inputs.requests.send(round as u64);
+    },
+))]
 #[cfg_attr(feature = "sedge", sedge::overload_check(
     name = echo_only,
     members = 5,
@@ -166,6 +186,16 @@ pub struct Outputs<'a> {
     name = resend_on,
     members = 5,
     config = RelayConfig { max_merges_per_tick: 7, policy: RelayPolicy::EchoResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
+    mu = 28,
+    timers(timer = Duration::from_millis(50)),
+    round_data = |round, inputs| {
+        inputs.requests.send(round as u64);
+    },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = reliable_resend,
+    members = 5,
+    config = RelayConfig { max_merges_per_tick: 7, policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
     mu = 28,
     timers(timer = Duration::from_millis(50)),
     round_data = |round, inputs| {
@@ -187,10 +217,12 @@ pub fn relay_broadcast<'a>(
     } = config;
     // The policy is fixed when the graph is built: whether members echo at all, and after how
     // many ticks an unacknowledged echo is re-sent (zero: never).
-    let (echo_enabled, ack_timeout_ticks) = match policy {
-        RelayPolicy::None => (false, 0u64),
-        RelayPolicy::Echo => (true, 0u64),
-        RelayPolicy::EchoResend { ack_timeout_ticks } => (true, ack_timeout_ticks),
+    // `relay_any`: relay ids first received from a peer as well, deduplicated per member.
+    let (echo_enabled, relay_any, ack_timeout_ticks) = match policy {
+        RelayPolicy::None => (false, false, 0u64),
+        RelayPolicy::Echo => (true, false, 0u64),
+        RelayPolicy::EchoResend { ack_timeout_ticks } => (true, false, ack_timeout_ticks),
+        RelayPolicy::ReliableResend { ack_timeout_ticks } => (true, true, ack_timeout_ticks),
     };
 
     let LocationId::Cluster(cluster_key) = Location::id(members) else {
@@ -216,9 +248,13 @@ pub fn relay_broadcast<'a>(
         .weaken_consistency()
         .merge_unordered(relays_in.clone().map(q!(|r| r.id)))
         .assert_has_consistency_of::<Cluster<'a, Member, EventualConsistency>>(manual_proof!(
-            /** echo relay + resend-until-ack: any member that got id from the source relays it
-            to all peers and re-sends it until each peer acknowledges, so every live member
-            eventually receives every id that any live member received */
+            /** reliable broadcast + resend-until-ack (`ReliableResend`): a member relays every
+            id to all peers on its first receipt from any sender, source or peer, and re-sends
+            each relay until the peer acknowledges. A live member that received id has
+            therefore relayed it to every peer, and re-sends past any omission until acked, so
+            every live member eventually receives every id that any live member received.
+            `None`, `Echo` and `EchoResend` share this label but not the argument: they relay
+            only ids received from the source, which HydroFrac refutes */
         ));
 
     let arrivals_in = initial
@@ -238,6 +274,8 @@ pub fn relay_broadcast<'a>(
         let acks = use::batch(acks_in, nondet!(/** how long an acknowledgement waits before it clears the outstanding entry; late acknowledgements cause re-sends */));
         let mut inbox = use::state_null::<Stream<Arrival, Tick<_>, Bounded, TotalOrder>>();
         let mut outstanding = use::state_null::<KeyedSingleton<(u32, u64), u64, Tick<_>, Bounded>>();
+        // Ids this member has already relayed (`ReliableResend` only; empty otherwise).
+        let mut relayed = use::state_null::<KeyedSingleton<u64, (), Tick<_>, Bounded>>();
         let mut now = use::state(|l| l.singleton(q!(0u64)));
         // The other members' raw ids: deploy-time metadata, identical on every member and never
         // reassigned, so this state is a constant.
@@ -273,8 +311,17 @@ pub fn relay_broadcast<'a>(
         }));
 
         // ---- Relay: echo each initial arrival to every peer, outstanding table, re-send -----
-        let echoes = arrivals
-            .filter_map(q!(move |a| if echo_enabled && a.relay_from.is_none() { Some(a.id) } else { None }))
+        // `ReliableResend` relays on first receipt from any sender: every arrival's id, minus
+        // those already relayed, once per tick.
+        let to_relay = arrivals
+            .filter_map(q!(move |a| if echo_enabled && (relay_any || a.relay_from.is_none()) { Some(a.id) } else { None }))
+            .unique()
+            .filter_not_in(relayed.clone().keys());
+        relayed = relayed
+            .into_keyed_stream()
+            .chain(to_relay.clone().filter(q!(move |_| relay_any)).map(q!(|id| (id, ()))).into_keyed())
+            .first();
+        let echoes = to_relay
             .cross_singleton(peers.clone())
             .flat_map_ordered(q!(|(id, peers)| peers.into_iter().map(move |peer| (peer, id))));
 
