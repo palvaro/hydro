@@ -1674,388 +1674,180 @@ impl DfirBuilder for SimBuilder {
             quote::quote!(-> map(|v| -> ::std::result::Result<_, ()> { Ok(v) }))
         };
 
-        match (from, to) {
-            (LocationId::Process(_), LocationId::Process(_)) => {
-                self.extra_stmts_global.push(syn::parse_quote! {
-                    let (#sink, #source) = __root_dfir_rs::util::unsync::mpsc::unbounded::<#payload>();
-                });
+        let from_cluster = match from {
+            LocationId::Cluster(_) => true,
+            LocationId::Process(_) => false,
+            _ => panic!(
+                "Simulations do not yet support network between {:?} and {:?}",
+                from, to
+            ),
+        };
+        let to_cluster = match to {
+            LocationId::Cluster(_) => true,
+            LocationId::Process(_) => false,
+            _ => panic!(
+                "Simulations do not yet support network between {:?} and {:?}",
+                from, to
+            ),
+        };
 
-                // For a crashable sender, stage sends (recipient index 0) so the
-                // CrashHook can cut the undelivered suffix at a crash point.
-                let send_closure: syn::Expr = if let Some(chvec) = self.crash_channels_ident(from) {
-                    let stage = syn::Ident::new(
-                        &format!("__hydro_crash_stage_{}", tag_id),
-                        Span::call_site(),
-                    );
-                    self.extra_stmts_global.push(syn::parse_quote! {
-                        let #stage = ::std::rc::Rc::new(::std::cell::RefCell::new(
-                            ::std::vec::Vec::<::std::collections::VecDeque<#payload>>::new()
-                        ));
-                    });
-                    self.extra_stmts_global.push(syn::parse_quote! {
-                        {
-                            let __crash_sink = #sink.clone();
-                            #chvec.borrow_mut().push(::std::boxed::Box::new(
-                                #root::sim::runtime::StagedChannel {
-                                    buffers: #stage.clone(),
-                                    deliver: ::std::boxed::Box::new(move |_recipient, v| {
-                                        __crash_sink.try_send(v).unwrap()
-                                    }),
-                                }
-                            ));
-                        }
-                    });
-                    parse_quote!(|v| #root::sim::runtime::stage_push(&#stage, 0, v))
-                } else {
-                    parse_quote!(|v| #sink.try_send(v).unwrap())
-                };
+        // What the sender puts on the wire: cluster senders tag the payload with their member id.
+        let wire: syn::Type = if from_cluster {
+            parse_quote!((#root::__staged::location::TaglessMemberId, #payload))
+        } else {
+            payload
+        };
 
-                if let Some(serialize_pipeline) = serialize {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(#send_closure);
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                } else {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> for_each(#send_closure);
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                }
-
-                if let Some(deserialize_pipeline) = deserialize {
-                    self.get_dfir_mut(to).add_dfir(
-                        parse_quote! {
-                            #out_ident = source_stream(#source) #ok_wrap -> map(#deserialize_pipeline);
-                        },
-                        None,
-                        Some(&format!("recv{}", tag_id)),
-                    );
-                } else {
-                    self.get_dfir_mut(to).add_dfir(
-                        parse_quote! {
-                            #out_ident = source_stream(#source);
-                        },
-                        None,
-                        Some(&format!("recv{}", tag_id)),
-                    );
-                }
-            }
-            (LocationId::Cluster(_), LocationId::Process(_)) => {
-                self.extra_stmts_global.push(syn::parse_quote! {
-                    let (#sink, #source) = __root_dfir_rs::util::unsync::mpsc::unbounded::<(#root::__staged::location::TaglessMemberId, #payload)>();
-                });
-
-                self.extra_stmts_cluster
-                    .entry(from.clone())
-                    .or_default()
-                    .push(syn::parse_quote! {
+        // The channel itself: one queue for a process receiver, one per member for a cluster.
+        if to_cluster {
+            let sink_writer = syn::Ident::new(
+                &format!("__cloned_{}", sink.to_token_stream()),
+                Span::call_site(),
+            );
+            self.extra_stmts_global.push(syn::parse_quote! {
+                let #sink: ::std::rc::Rc<::std::cell::RefCell<Vec<__root_dfir_rs::util::unsync::mpsc::Sender<#wire>>>> = ::std::rc::Rc::new(::std::cell::RefCell::new(Vec::new()));
+            });
+            self.extra_stmts_global.push(syn::parse_quote! {
+                let #sink_writer = #sink.clone();
+            });
+            if from_cluster {
+                self.add_extra_stmt_internal(
+                    from,
+                    syn::parse_quote! {
                         let #sink = #sink.clone();
-                    });
-
-                // For a crashable sending cluster, stage each member's sends so
-                // its CrashHook can cut the undelivered suffix at a crash point.
-                let send_closure: syn::Expr = if let Some(chvec) = self.crash_channels_ident(from) {
-                    let stage = syn::Ident::new(
-                        &format!("__hydro_crash_stage_{}", tag_id),
-                        Span::call_site(),
-                    );
-                    self.extra_stmts_cluster
-                        .entry(from.clone())
-                        .or_default()
-                        .push(syn::parse_quote! {
-                            let #stage = ::std::rc::Rc::new(::std::cell::RefCell::new(
-                                ::std::vec::Vec::<::std::collections::VecDeque<(#root::__staged::location::TaglessMemberId, #payload)>>::new()
-                            ));
-                        });
-                    self.extra_stmts_cluster
-                        .entry(from.clone())
-                        .or_default()
-                        .push(syn::parse_quote! {
-                            {
-                                let __crash_sink = #sink.clone();
-                                #chvec.borrow_mut().push(::std::boxed::Box::new(
-                                    #root::sim::runtime::StagedChannel {
-                                        buffers: #stage.clone(),
-                                        deliver: ::std::boxed::Box::new(move |_recipient, v| {
-                                            __crash_sink.try_send(v).unwrap()
-                                        }),
-                                    }
-                                ));
-                            }
-                        });
-                    parse_quote! {
-                        |v| #root::sim::runtime::stage_push(
-                            &#stage,
-                            0,
-                            (#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v),
-                        )
-                    }
-                } else {
-                    parse_quote! {
-                        |v| #sink.try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap()
-                    }
-                };
-
-                if let Some(serialize_pipeline) = serialize {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(#send_closure);
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                } else {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> for_each(#send_closure);
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                }
-
-                if let Some(deserialize_pipeline) = deserialize {
-                    self.get_dfir_mut(to).add_dfir(
-                        parse_quote! {
-                            #out_ident = source_stream(#source) #ok_wrap -> map(#deserialize_pipeline);
-                        },
-                        None,
-                        Some(&format!("recv{}", tag_id)),
-                    );
-                } else {
-                    self.get_dfir_mut(to).add_dfir(
-                        parse_quote! {
-                            #out_ident = source_stream(#source);
-                        },
-                        None,
-                        Some(&format!("recv{}", tag_id)),
-                    );
-                }
-            }
-            (LocationId::Process(_), LocationId::Cluster(_)) => {
-                let sink_writer = syn::Ident::new(
-                    &format!("__cloned_{}", sink.to_token_stream()),
-                    Span::call_site(),
+                    },
                 );
-                self.extra_stmts_global.push(syn::parse_quote! {
-                    let #sink: ::std::rc::Rc<::std::cell::RefCell<Vec<__root_dfir_rs::util::unsync::mpsc::Sender<#payload>>>> = ::std::rc::Rc::new(::std::cell::RefCell::new(Vec::new()));
-                });
-
-                self.extra_stmts_global.push(syn::parse_quote! {
-                    let #sink_writer = #sink.clone();
-                });
-
-                self.extra_stmts_cluster
-                    .entry(to.clone())
-                    .or_default()
-                    .push(syn::parse_quote! {
-                        let #source = {
-                            let (__sink, __source) = __root_dfir_rs::util::unsync::mpsc::unbounded::<#payload>();
-                            #sink_writer.borrow_mut().push(__sink);
-                            __source
-                        };
-                    });
-
-                // For a crashable sender, stage sends per destination member so
-                // the CrashHook can cut an independent per-recipient suffix at a
-                // crash point — the partial-broadcast state a real sender crash
-                // produces.
-                let send_closure: syn::Expr = if let Some(chvec) = self.crash_channels_ident(from) {
-                    let stage = syn::Ident::new(
-                        &format!("__hydro_crash_stage_{}", tag_id),
-                        Span::call_site(),
-                    );
-                    self.extra_stmts_global.push(syn::parse_quote! {
-                        let #stage = ::std::rc::Rc::new(::std::cell::RefCell::new(
-                            ::std::vec::Vec::<::std::collections::VecDeque<#payload>>::new()
-                        ));
-                    });
-                    self.extra_stmts_global.push(syn::parse_quote! {
-                        {
-                            let __crash_sink = #sink.clone();
-                            #chvec.borrow_mut().push(::std::boxed::Box::new(
-                                #root::sim::runtime::StagedChannel {
-                                    buffers: #stage.clone(),
-                                    deliver: ::std::boxed::Box::new(move |__recipient, v| {
-                                        (__crash_sink.borrow())[__recipient].try_send(v).unwrap()
-                                    }),
-                                }
-                            ));
-                        }
-                    });
-                    parse_quote! {
-                        |(target_member_id, v)| #root::sim::runtime::stage_push(
-                            &#stage,
-                            #root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize,
-                            v,
-                        )
-                    }
-                } else {
-                    parse_quote! {
-                        |(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send(v).unwrap()
-                    }
-                };
-
-                if let Some(serialize_pipeline) = serialize {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(#send_closure);
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                } else {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> for_each(#send_closure);
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                }
-
-                if let Some(deserialize_pipeline) = deserialize {
-                    self.get_dfir_mut(to).add_dfir(
-                        parse_quote! {
-                            #out_ident = source_stream(#source) #ok_wrap -> map(#deserialize_pipeline);
-                        },
-                        None,
-                        Some(&format!("recv{}", tag_id)),
-                    );
-                } else {
-                    self.get_dfir_mut(to).add_dfir(
-                        parse_quote! {
-                            #out_ident = source_stream(#source);
-                        },
-                        None,
-                        Some(&format!("recv{}", tag_id)),
-                    );
-                }
             }
-            (LocationId::Cluster(_), LocationId::Cluster(_)) => {
-                let sink_writer = syn::Ident::new(
-                    &format!("__cloned_{}", sink.to_token_stream()),
-                    Span::call_site(),
-                );
-                self.extra_stmts_global.push(syn::parse_quote! {
-                    let #sink: ::std::rc::Rc<::std::cell::RefCell<Vec<__root_dfir_rs::util::unsync::mpsc::Sender<(#root::__staged::location::TaglessMemberId, #payload)>>>> = ::std::rc::Rc::new(::std::cell::RefCell::new(Vec::new()));
-                });
-
-                self.extra_stmts_global.push(syn::parse_quote! {
-                    let #sink_writer = #sink.clone();
-                });
-
-                self.extra_stmts_cluster
-                    .entry(from.clone())
-                    .or_default()
-                    .push(syn::parse_quote! {
+            self.add_extra_stmt_internal(
+                to,
+                syn::parse_quote! {
+                    let #source = {
+                        let (__sink, __source) = __root_dfir_rs::util::unsync::mpsc::unbounded::<#wire>();
+                        #sink_writer.borrow_mut().push(__sink);
+                        __source
+                    };
+                },
+            );
+        } else {
+            self.extra_stmts_global.push(syn::parse_quote! {
+                let (#sink, #source) = __root_dfir_rs::util::unsync::mpsc::unbounded::<#wire>();
+            });
+            if from_cluster {
+                self.add_extra_stmt_internal(
+                    from,
+                    syn::parse_quote! {
                         let #sink = #sink.clone();
-                    });
-
-                self.extra_stmts_cluster
-                    .entry(to.clone())
-                    .or_default()
-                    .push(syn::parse_quote! {
-                        let #source = {
-                            let (__sink, __source) = __root_dfir_rs::util::unsync::mpsc::unbounded::<(#root::__staged::location::TaglessMemberId, #payload)>();
-                            #sink_writer.borrow_mut().push(__sink);
-                            __source
-                        };
-                    });
-
-                // For a crashable sending cluster, stage each member's sends per
-                // destination member, so its CrashHook can cut an independent
-                // per-recipient suffix at a crash point (partial broadcast).
-                let send_closure: syn::Expr = if let Some(chvec) = self.crash_channels_ident(from) {
-                    let stage = syn::Ident::new(
-                        &format!("__hydro_crash_stage_{}", tag_id),
-                        Span::call_site(),
-                    );
-                    self.extra_stmts_cluster
-                        .entry(from.clone())
-                        .or_default()
-                        .push(syn::parse_quote! {
-                            let #stage = ::std::rc::Rc::new(::std::cell::RefCell::new(
-                                ::std::vec::Vec::<::std::collections::VecDeque<(#root::__staged::location::TaglessMemberId, #payload)>>::new()
-                            ));
-                        });
-                    self.extra_stmts_cluster
-                        .entry(from.clone())
-                        .or_default()
-                        .push(syn::parse_quote! {
-                            {
-                                let __crash_sink = #sink.clone();
-                                #chvec.borrow_mut().push(::std::boxed::Box::new(
-                                    #root::sim::runtime::StagedChannel {
-                                        buffers: #stage.clone(),
-                                        deliver: ::std::boxed::Box::new(move |__recipient, v| {
-                                            (__crash_sink.borrow())[__recipient].try_send(v).unwrap()
-                                        }),
-                                    }
-                                ));
-                            }
-                        });
-                    parse_quote! {
-                        |(target_member_id, v)| #root::sim::runtime::stage_push(
-                            &#stage,
-                            #root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize,
-                            (#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v),
-                        )
-                    }
-                } else {
-                    parse_quote! {
-                        |(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap()
-                    }
-                };
-
-                if let Some(serialize_pipeline) = serialize {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> map(#serialize_pipeline) -> for_each(#send_closure);
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                } else {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> for_each(#send_closure);
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                }
-
-                if let Some(deserialize_pipeline) = deserialize {
-                    self.get_dfir_mut(to).add_dfir(
-                        parse_quote! {
-                            #out_ident = source_stream(#source) #ok_wrap -> map(#deserialize_pipeline);
-                        },
-                        None,
-                        Some(&format!("recv{}", tag_id)),
-                    );
-                } else {
-                    self.get_dfir_mut(to).add_dfir(
-                        parse_quote! {
-                            #out_ident = source_stream(#source);
-                        },
-                        None,
-                        Some(&format!("recv{}", tag_id)),
-                    );
-                }
-            }
-            _ => {
-                panic!(
-                    "Simulations do not yet support network between {:?} and {:?}",
-                    from, to
+                    },
                 );
             }
+        }
+
+        // The send site. Pieces: the closure pattern, the recipient index (for crash staging),
+        // the item put on the wire, and the delivery into the recipient's queue.
+        let send_pat: syn::Pat = if to_cluster {
+            parse_quote!((target_member_id, v))
+        } else {
+            parse_quote!(v)
+        };
+        let recipient: syn::Expr = if to_cluster {
+            parse_quote!(#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize)
+        } else {
+            parse_quote!(0)
+        };
+        let item: syn::Expr = if from_cluster {
+            parse_quote!((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v))
+        } else {
+            parse_quote!(v)
+        };
+        let deliver = |sink: &syn::Expr, recipient: &syn::Expr, item: &syn::Expr| -> syn::Expr {
+            if to_cluster {
+                parse_quote!((#sink.borrow())[#recipient].try_send(#item).unwrap())
+            } else {
+                parse_quote!(#sink.try_send(#item).unwrap())
+            }
+        };
+
+        // For a crashable sender, stage sends per recipient so the CrashHook can cut an
+        // independent per-recipient suffix at a crash point (the partial-broadcast state a real
+        // sender crash produces).
+        let send_stmt: syn::Expr = if let Some(chvec) = self.crash_channels_ident(from) {
+            let stage = syn::Ident::new(
+                &format!("__hydro_crash_stage_{}", tag_id),
+                Span::call_site(),
+            );
+            self.add_extra_stmt_internal(
+                from,
+                syn::parse_quote! {
+                    let #stage = ::std::rc::Rc::new(::std::cell::RefCell::new(
+                        ::std::vec::Vec::<::std::collections::VecDeque<#wire>>::new()
+                    ));
+                },
+            );
+            let recipient_pat = syn::Ident::new(
+                if to_cluster { "__recipient" } else { "_recipient" },
+                Span::call_site(),
+            );
+            let staged_deliver = deliver(
+                &parse_quote!(__crash_sink),
+                &parse_quote!(#recipient_pat),
+                &parse_quote!(v),
+            );
+            self.add_extra_stmt_internal(
+                from,
+                syn::parse_quote! {
+                    {
+                        let __crash_sink = #sink.clone();
+                        #chvec.borrow_mut().push(::std::boxed::Box::new(
+                            #root::sim::runtime::StagedChannel {
+                                buffers: #stage.clone(),
+                                deliver: ::std::boxed::Box::new(move |#recipient_pat, v| {
+                                    #staged_deliver
+                                }),
+                            }
+                        ));
+                    }
+                },
+            );
+            parse_quote!(#root::sim::runtime::stage_push(&#stage, #recipient, #item))
+        } else {
+            deliver(&parse_quote!(#sink), &recipient, &item)
+        };
+        let send_closure: syn::Expr = parse_quote!(|#send_pat| #send_stmt);
+
+        if let Some(serialize_pipeline) = serialize {
+            self.get_dfir_mut(from).add_dfir(
+                parse_quote! {
+                    #input_ident -> map(#serialize_pipeline) -> for_each(#send_closure);
+                },
+                None,
+                Some(&format!("send{}", tag_id)),
+            );
+        } else {
+            self.get_dfir_mut(from).add_dfir(
+                parse_quote! {
+                    #input_ident -> for_each(#send_closure);
+                },
+                None,
+                Some(&format!("send{}", tag_id)),
+            );
+        }
+
+        if let Some(deserialize_pipeline) = deserialize {
+            self.get_dfir_mut(to).add_dfir(
+                parse_quote! {
+                    #out_ident = source_stream(#source) #ok_wrap -> map(#deserialize_pipeline);
+                },
+                None,
+                Some(&format!("recv{}", tag_id)),
+            );
+        } else {
+            self.get_dfir_mut(to).add_dfir(
+                parse_quote! {
+                    #out_ident = source_stream(#source);
+                },
+                None,
+                Some(&format!("recv{}", tag_id)),
+            );
         }
     }
 
