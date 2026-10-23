@@ -370,3 +370,51 @@ fn keyed_taps_carry_entries_and_agree_across_members() {
         }
     });
 }
+
+#[cfg(stageleft_runtime)]
+#[test]
+fn a_cluster_broadcasts_member_list_is_not_a_label() {
+    // A cluster-to-cluster `broadcast_closed` labels the destination's member-id list and joins
+    // the payload with it. That list is local (a `ClusterMembers` source), and it used to be
+    // listed as a not-checked `echoed` Stream next to the real echo, under the broadcasting
+    // statement's name.
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (_send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let initial = input.broadcast_closed(&members, TCP.fail_stop().name("initial").bincode());
+    let echoed = initial
+        .clone()
+        .broadcast_closed(&members, TCP.fail_stop().name("echo").bincode())
+        .values();
+    let delivered = initial.weaken_ordering::<NoOrder>().merge_unordered(echoed);
+    let _out = delivered.sim_cluster_output();
+    let plans = plans_of(flow);
+
+    let rows: Vec<(&str, &str)> = plans
+        .iter()
+        .map(|p| {
+            (
+                p.collection.display_name(),
+                kind_name(&p.collection.collection_kind),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("initial", "Stream"),
+            ("echoed", "KeyedStream"),
+            ("delivered", "Stream")
+        ],
+        "{plans:#?}"
+    );
+    assert!(
+        plans.iter().all(|p| p.not_checked.is_none()),
+        "every label is fed by a network: {plans:#?}"
+    );
+    // The echo hop is merged into `delivered`.
+    let (delivered_index, _) = find(&plans, "delivered");
+    let (_, echo) = find(&plans, "echoed");
+    assert_eq!(echo.collection.merged_into, [delivered_index]);
+}

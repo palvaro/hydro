@@ -5,8 +5,9 @@ use std::collections::{HashMap, HashSet};
 
 use hydro_lang::compile::builder::CycleId;
 use hydro_lang::compile::ir::backtrace::Backtrace;
-use hydro_lang::compile::ir::{CollectionKind, HydroNode, HydroRoot};
+use hydro_lang::compile::ir::{CollectionKind, HydroNode, HydroRoot, HydroSource};
 use hydro_lang::location::dynamic::{ClusterConsistency, LocationId};
+use quote::ToTokens;
 
 use super::source_names;
 
@@ -155,6 +156,10 @@ pub fn kind_name(kind: &CollectionKind) -> &'static str {
 ///   merge (an echo, a retransmission), and the exits after the merge are where agreement on
 ///   the combination is checked. A hop that reaches an exit or a send unmerged is not
 ///   dominated: its own contents leave the region and its own verdict stands.
+///
+/// A labelled collection computed from nothing but a cluster's membership is not listed: it is
+/// the member-id list a cluster-to-cluster `broadcast_closed` joins its payload with, not a
+/// collection of the program (see [`membership_only`]).
 pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
     // Raw pointers: cycle sinks are followed from `CycleSource`s to find network ancestors;
     // nothing in `ir` moves during this walk.
@@ -293,7 +298,7 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
         {
             found.merges.insert(std::ptr::from_ref(node));
         }
-        if is_ec_minting(node) {
+        if is_ec_minting(node) && !membership_only(node, cycle_sinks) {
             let scalar = found.record(node, true, false, cycle_sinks);
             // SAFETY: `scalar` points into `ir` (or a `Tee`'s cell), which does not move.
             if let Some(input) = aggregated_input(unsafe { &*scalar }) {
@@ -570,6 +575,71 @@ pub(crate) fn ec_key(node: &HydroNode) -> EcKey {
         kind_name(&node.metadata().collection_kind),
         node.metadata().location_id.root().clone(),
     )
+}
+
+/// Whether every source `node` is computed from is a cluster's membership (a
+/// `HydroSource::ClusterMembers`, or a `source_iter` over `ClusterIds`), following `Tee`s and
+/// cycles like [`has_network_ancestor`]. Such a labelled collection is the member-id list a
+/// cluster-to-cluster `broadcast_closed` labels and joins with its payload, not anything the program computes. It
+/// is local, so it would only ever be listed as not checked, and it takes the name of the
+/// statement that broadcasts (an `echoed` row next to the real `echoed`). The design keeps
+/// `broadcast_closed` unchanged and filters such rows here (docs/design/hydrofrac-lite.md §6.3).
+fn membership_only(node: &HydroNode, cycle_sinks: &HashMap<CycleId, *const HydroNode>) -> bool {
+    /// `Some(true)`: only membership sources; `Some(false)`: some other source or a network;
+    /// `None`: nothing new below (already visited or a dangling cycle).
+    fn go(
+        node: &HydroNode,
+        cycle_sinks: &HashMap<CycleId, *const HydroNode>,
+        seen: &mut HashSet<*const HydroNode>,
+    ) -> Option<bool> {
+        if !seen.insert(std::ptr::from_ref(node)) {
+            return None;
+        }
+        let combine = |results: &mut dyn Iterator<Item = Option<bool>>| {
+            let mut any = None;
+            for r in results {
+                match r {
+                    Some(false) => return Some(false),
+                    Some(true) => any = Some(true),
+                    None => {}
+                }
+            }
+            any
+        };
+        match node {
+            HydroNode::Source {
+                source: HydroSource::ClusterMembers(..),
+                ..
+            } => Some(true),
+            // `source_iter` over `ClusterIds`, which splices as `__hydro_lang_cluster_ids_<key>`:
+            // how `broadcast_closed` lists its destinations.
+            HydroNode::Source {
+                source: HydroSource::Iter(expr),
+                ..
+            } => Some(
+                expr.to_token_stream()
+                    .to_string()
+                    .contains("__hydro_lang_cluster_ids_"),
+            ),
+            HydroNode::Network { .. } => Some(false),
+            HydroNode::Tee { inner, .. }
+            | HydroNode::Reference { inner, .. }
+            | HydroNode::PartitionSide { inner, .. } => go(&inner.0.borrow(), cycle_sinks, seen),
+            HydroNode::CycleSource { cycle_id, .. } => cycle_sinks.get(cycle_id).and_then(|sink| {
+                // SAFETY: see the comment at the construction of `cycle_sinks`.
+                go(unsafe { &**sink }, cycle_sinks, seen)
+            }),
+            _ => {
+                let inputs = node.input();
+                if inputs.is_empty() {
+                    // Any other leaf: an external input, a stream, an iterator, a singleton.
+                    return Some(false);
+                }
+                combine(&mut inputs.into_iter().map(|input| go(input, cycle_sinks, seen)))
+            }
+        }
+    }
+    go(node, cycle_sinks, &mut HashSet::new()) == Some(true)
 }
 
 /// Whether a network receive is (transitively) upstream of `node`, following cycles through
