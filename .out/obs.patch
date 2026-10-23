@@ -1,0 +1,2534 @@
+From 3c747edd081ae1357a4dbec83d53a0e2704c8791 Mon Sep 17 00:00:00 2001
+From: Peter Alvaro <palvarox@amazon.com>
+Date: Fri, 23 Oct 2026 23:30:08 +0000
+Subject: [PATCH] WIP: observe/search trims
+
+---
+ hydrofrac/src/observe/collections.rs  | 336 +++++++++-----------------
+ hydrofrac/src/observe/plan.rs         |  49 ++--
+ hydrofrac/src/observe/source_names.rs |  84 ++-----
+ hydrofrac/src/observe/tap.rs          | 159 ++++--------
+ hydrofrac/src/observe/tests.rs        |  36 ++-
+ hydrofrac/src/search/clause.rs        | 186 ++++----------
+ hydrofrac/src/search/ilp.rs           | 252 ++++---------------
+ hydrofrac/src/search/mod.rs           |  13 +-
+ hydrofrac/src/search/sweep.rs         | 105 ++------
+ hydrofrac/src/search/tests.rs         | 207 +++++++++-------
+ 10 files changed, 483 insertions(+), 944 deletions(-)
+
+diff --git a/hydrofrac/src/observe/collections.rs b/hydrofrac/src/observe/collections.rs
+index d79abcc9f1..881ceb0399 100644
+--- a/hydrofrac/src/observe/collections.rs
++++ b/hydrofrac/src/observe/collections.rs
+@@ -1,59 +1,40 @@
+ //! Every collection a program labels `EventualConsistency`, found on the IR before the taps
+-//! (ported from the research branch's `sim/slice.rs`, `ec_collections` and its helpers).
++//! (the research branch's `ec_collections`).
+ 
+ use std::collections::{HashMap, HashSet};
+ 
+ use hydro_lang::compile::builder::CycleId;
+-use hydro_lang::compile::ir::backtrace::Backtrace;
+ use hydro_lang::compile::ir::{ClosureExpr, CollectionKind, HydroNode, HydroRoot, HydroSource};
+ use hydro_lang::location::dynamic::{ClusterConsistency, LocationId};
+ use quote::ToTokens;
+ 
+ use super::source_names;
+ 
+-/// A collection the program labels `EventualConsistency`: a premise that the label's
+-/// convergence is not withheld by faults, which the generated specification over it
+-/// discharges ([`crate::spec`]) and which is otherwise open. Enumerated by [`ec_collections`]
+-/// on the IR before the taps ([`super::tap`]).
++/// A collection the program labels `EventualConsistency`, enumerated by [`ec_collections`].
+ #[derive(Clone, Debug)]
+ pub struct EcCollection {
+-    /// The user's source location of the labelling operator, or its tag.
++    /// The node's tag, else the `file:line` of the user's labelling call ([`ec_label`]).
+     pub label: String,
+-    /// The operator (`Network`, `Unique`, ...), to tell apart two labelled nodes at one source
+-    /// line.
++    /// The operator (`Network`, `Unique`, ...), to tell apart labelled nodes at one line.
+     pub op: String,
+     /// The cluster the collection lives on.
+     pub location: LocationId,
+-    /// Whether a network channel feeds it (transitively): a fault can withhold its inputs.
+-    /// A labelled collection computed from local sources alone has nothing to check.
++    /// Whether a network channel feeds it (transitively): only then can a fault withhold it.
+     pub fed_by_network: bool,
+-    /// The kind of the collection (its element types are those of the IR the enumeration ran
+-    /// on: plain before the provenance rewrite, tagged after).
++    /// The kind of the collection, as the enumerated IR typed it.
+     pub collection_kind: CollectionKind,
+-    /// Whether the node lives inside a tick (or an atomic region) rather than at the cluster's
+-    /// top level.
++    /// Whether the node lives inside a tick (or an atomic region).
+     pub in_tick: bool,
+-    /// The collection is the input stream of a labelled scalar (see [`Self::covered_by`]).
+-    /// Usually it is also an exit (the aggregating operator itself is unlabelled); when it is
+-    /// not, this is why it is listed.
+-    pub aggregated: bool,
+-    /// For a labelled scalar (`Singleton`, `Optional`, `KeyedSingleton`) computed by an
+-    /// aggregation (`fold`, `reduce`, and their keyed forms) from a labelled stream: the index,
+-    /// in the enumeration, of that stream. The type system vouches that the scalar is a
+-    /// deterministic function of the stream (else the label would have been dropped), so the
+-    /// scalar converges if the stream's contents reach every correct member: the stream is
+-    /// what is checked.
++    /// For a labelled scalar aggregated (`fold`, `reduce`, keyed or not) from a labelled
++    /// stream: that stream's index. The scalar is a deterministic function of the stream, so
++    /// the stream is what is checked (§3, `covered_by`).
+     pub covered_by: Option<usize>,
+-    /// A name for reports: the node's tag, else the variable the user's statement binds, else
+-    /// the receiver of an unbound `<name>.assert_has_consistency_of(..)`, else the function
+-    /// whose tail expression it is, read back from the source (see
+-    /// [`super::source_names::site_name`]). `None` when none is available.
++    /// A name for reports: the node's tag, else the name read back from the source
++    /// ([`super::source_names::site_name`]).
+     pub name: Option<String>,
+-    /// The file name (no directories) of the user's call that labelled the collection, when
+-    /// the backtrace has one.
++    /// The file name of the user's labelling call.
+     pub file: Option<String>,
+-    /// Among the collections with the same [`Self::file`] and [`Self::display_name`], the
+-    /// 0-based position of this one in enumeration order (see [`Self::stable_key`]).
++    /// The 0-based position among collections with the same file and display name.
+     pub occurrence: usize,
+ }
+ 
+@@ -63,18 +44,6 @@ impl EcCollection {
+         self.name.as_deref().unwrap_or(&self.op)
+     }
+ 
+-    /// An identity that survives edits elsewhere in the file: `(file, name, occurrence)`, with
+-    /// the operator standing in for a missing name. Line numbers move when the source changes;
+-    /// this key does not, so verdicts can be compared across versions of a program (the
+-    /// research records key by `file:line`, docs/design/hydrofrac-lite.md §7).
+-    pub fn stable_key(&self) -> (String, String, usize) {
+-        (
+-            self.file.clone().unwrap_or_default(),
+-            self.display_name().to_owned(),
+-            self.occurrence,
+-        )
+-    }
+-
+     /// The identity of the collection among the program's labelled nodes.
+     pub(crate) fn key(&self) -> EcKey {
+         (
+@@ -87,10 +56,8 @@ impl EcCollection {
+ }
+ 
+ /// `(label, operator, collection kind, cluster)`: how labelled nodes are told apart, and how the
+-/// tap pass re-identifies the nodes this enumeration found. The kind separates two labelled
+-/// nodes of one operator in one statement (a `broadcast_closed` and an
+-/// `assert_has_consistency_of` on a `fold` of it share `file:line` and `AssertIsConsistent`);
+-/// the research branch's key merged them.
++/// tap pass re-identifies them. The kind separates a `broadcast_closed` from an
++/// `assert_has_consistency_of` on a `fold` of it, which share a line and an operator.
+ pub(crate) type EcKey = (String, String, &'static str, LocationId);
+ 
+ /// The name of a collection kind (`Stream`, `Singleton`, ...).
+@@ -104,28 +71,16 @@ pub fn kind_name(kind: &CollectionKind) -> &'static str {
+     }
+ }
+ 
+-/// Every collection `ir` labels `EventualConsistency`: every labelled node where the label is
+-/// **minted** (none of its inputs is labelled: the `broadcast_closed` or the
+-/// `assert_has_consistency_of`) and every labelled node where the collection **exits** the
+-/// labelled region (a consumer other than a send is unlabelled, or it is an output of the
+-/// program). The operators
+-/// in between inherit the label and are not listed. Nodes at the same source line, of the same
+-/// operator, on the same cluster (one per cluster member, or one per instantiation of a library
+-/// function on the same cluster) are reported once, in first-seen order; a search over such a
+-/// collection checks the union of their contents per member. A `Tee` stands for what it shares: it is neither a minting point
+-/// nor, by itself, an exit, and the shared node is reported under its own source line.
++/// Every collection `ir` labels `EventualConsistency`: each labelled node where the label is
++/// **minted** (no input is labelled) or where the collection **exits** the labelled region (an
++/// unlabelled consumer other than a send, or a program output). The operators in between
++/// inherit the label. Nodes with one [`EcKey`] (one per member, or per instantiation of a
++/// library function) are reported once, in first-seen order. A `Tee` stands for what it shares.
+ ///
+-/// **Scalars are covered by their input** ([`EcCollection::covered_by`]). The type system
+-/// keeps the label only on computations that are deterministic given their inputs, so derived
+-/// state need not be checked on its own. A labelled `Singleton` / `Optional` / `KeyedSingleton`
+-/// whose labelling node is, through pass-throughs (`assert_has_consistency_of`, casts, the
+-/// `ObserveNonDet` of an at-least-once input, `Tee`s), a `Fold`, `Reduce`, `FoldKeyed` or
+-/// `ReduceKeyed` over a labelled top-level stream is covered by that stream. The stream is
+-/// listed (flagged [`EcCollection::aggregated`]) if it is not already.
+-///
+-/// A labelled collection computed from nothing but a cluster's membership is not listed: it is
+-/// the member-id list a cluster-to-cluster `broadcast_closed` joins its payload with, not a
+-/// collection of the program (see `membership_only`).
++/// A labelled scalar whose node is, through pass-throughs, an aggregation of a labelled
++/// top-level stream is covered by that stream, which is listed if it is not already
++/// ([`EcCollection::covered_by`]). A labelled collection computed from nothing but a cluster's
++/// membership (the member-id list of a cluster-to-cluster `broadcast_closed`) is not listed.
+ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
+     // Raw pointers: cycle sinks are followed from `CycleSource`s to find network ancestors;
+     // nothing in `ir` moves during this walk.
+@@ -157,7 +112,7 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
+         ) -> *const HydroNode {
+             with_shared_resolved(node, |node| {
+                 let key = ec_key(node);
+-                let fed = has_network_ancestor(node, cycle_sinks);
++                let fed = sources(node, cycle_sinks).network;
+                 let index = *self.by_key.entry(key.clone()).or_insert_with(|| {
+                     self.collections.push(EcCollection {
+                         label: key.0,
+@@ -166,7 +121,6 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
+                         fed_by_network: false,
+                         collection_kind: node.metadata().collection_kind.clone(),
+                         in_tick: !matches!(node.metadata().location_id, LocationId::Cluster(_)),
+-                        aggregated: false,
+                         covered_by: None,
+                         name: ec_name(node),
+                         file: ec_file(node),
+@@ -174,8 +128,7 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
+                     });
+                     self.collections.len() - 1
+                 });
+-                let found = &mut self.collections[index];
+-                found.fed_by_network |= fed;
++                self.collections[index].fed_by_network |= fed;
+                 let ptr = std::ptr::from_ref(node);
+                 if self.nodes.insert(ptr, index).is_none() {
+                     self.node_order.push(ptr);
+@@ -183,6 +136,19 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
+                 ptr
+             })
+         }
++
++        /// Records the stream the labelled scalar at `scalar` aggregates, if any.
++        fn aggregation(
++            &mut self,
++            scalar: *const HydroNode,
++            cycle_sinks: &HashMap<CycleId, *const HydroNode>,
++        ) {
++            // SAFETY: `scalar` points into `ir` (or a `Tee`'s cell), which does not move.
++            if let Some(input) = aggregated_input(unsafe { &*scalar }) {
++                let input = self.record(input, cycle_sinks);
++                self.aggregations.push((scalar, input));
++            }
++        }
+     }
+     fn visit(
+         node: &HydroNode,
+@@ -211,15 +177,9 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
+                 }
+             }
+         }
+-        if is_ec_minting(node) && !membership_only(node, cycle_sinks) {
++        if is_ec_minting(node) && !sources(node, cycle_sinks).membership_only() {
+             let scalar = found.record(node, cycle_sinks);
+-            // SAFETY: `scalar` points into `ir` (or a `Tee`'s cell), which does not move.
+-            if let Some(input) = aggregated_input(unsafe { &*scalar }) {
+-                let input = found.record(input, cycle_sinks);
+-                let index = found.nodes[&input];
+-                found.collections[index].aggregated = true;
+-                found.aggregations.push((scalar, input));
+-            }
++            found.aggregation(scalar, cycle_sinks);
+         }
+     }
+     let mut found = Found {
+@@ -256,13 +216,7 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
+         .filter(|ptr| !found.aggregations.iter().any(|(s, _)| s == ptr))
+         .collect();
+     for scalar in scalars {
+-        // SAFETY: as above.
+-        if let Some(input) = aggregated_input(unsafe { &*scalar }) {
+-            let input = found.record(input, &cycle_sinks);
+-            let index = found.nodes[&input];
+-            found.collections[index].aggregated = true;
+-            found.aggregations.push((scalar, input));
+-        }
++        found.aggregation(scalar, &cycle_sinks);
+     }
+     for (scalar, input) in &found.aggregations {
+         let (scalar, input) = (found.nodes[scalar], found.nodes[input]);
+@@ -283,11 +237,9 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
+     collections
+ }
+ 
+-/// The input stream a labelled scalar aggregates (see [`ec_collections`]): `node`, through
+-/// pass-throughs (`AssertIsConsistent`, `Cast`, `ObserveNonDet` — the `assume_retries` an
+-/// idempotent `fold` puts on an at-least-once input —, `Tee`, references), is a `Fold`,
+-/// `Reduce`, `FoldKeyed` or `ReduceKeyed` whose input, through the same pass-throughs, is a
+-/// labelled stream at a cluster's top level. `None` for anything else.
++/// The input stream a labelled scalar aggregates: `node`, through pass-throughs
++/// (`AssertIsConsistent`, `Cast`, `ObserveNonDet`, `Tee`, references), is a `Fold`, `Reduce`,
++/// `FoldKeyed` or `ReduceKeyed` whose input, through the same, is a labelled top-level stream.
+ fn aggregated_input(node: &HydroNode) -> Option<&HydroNode> {
+     if !is_ec(node)
+         || !matches!(
+@@ -299,9 +251,7 @@ fn aggregated_input(node: &HydroNode) -> Option<&HydroNode> {
+     {
+         return None;
+     }
+-    /// Through `AssertIsConsistent`, `Cast`, `ObserveNonDet`, `Tee` and references, as raw
+-    /// pointers: the
+-    /// shared cells' borrows end, the nodes do not move.
++    /// Through the pass-throughs, as raw pointers: the cells' borrows end, the nodes stay.
+     fn through(node: &HydroNode) -> *const HydroNode {
+         match node {
+             HydroNode::AssertIsConsistent { inner, .. }
+@@ -333,10 +283,8 @@ fn aggregated_input(node: &HydroNode) -> Option<&HydroNode> {
+     .then_some(input)
+ }
+ 
+-/// Calls `f` on the first node under `node` that is not a labelled pass-through (a `Cast`
+-/// whose input is labelled, or what a `Tee` shares): the operator an exit stands for, so that
+-/// an exit right after the minting operator (`broadcast_closed(..).values()` into a `batch`)
+-/// is the minting operator's row.
++/// Calls `f` on the first node under `node` that is not a labelled pass-through (a `Cast` of a
++/// labelled input, or what a `Tee` shares): the operator an exit stands for.
+ fn with_casts_resolved<R>(node: &HydroNode, f: impl FnOnce(&HydroNode) -> R) -> R {
+     match node {
+         HydroNode::Tee { inner, .. } | HydroNode::Reference { inner, .. } => {
+@@ -347,15 +295,13 @@ fn with_casts_resolved<R>(node: &HydroNode, f: impl FnOnce(&HydroNode) -> R) ->
+     }
+ }
+ 
+-/// Calls `f` on the node a `Tee` (or reference) shares, through any chain of them, or on
+-/// `node` itself.
++/// Calls `f` on the node a chain of `Tee`s (or references) shares, or on `node` itself.
+ fn with_shared_resolved<R>(node: &HydroNode, f: impl FnOnce(&HydroNode) -> R) -> R {
+     match node {
+         HydroNode::Tee { inner, .. } | HydroNode::Reference { inner, .. } => {
+             with_shared_resolved(&inner.0.borrow(), f)
+         }
+-        // A partition side is one output of the shared `PartitionShared`, which cannot be
+-        // tapped as a whole; the side is the operator.
++        // A partition side is the operator: its `PartitionShared` cannot be tapped whole.
+         _ => f(node),
+     }
+ }
+@@ -368,9 +314,8 @@ pub(crate) fn is_ec(node: &HydroNode) -> bool {
+     ) && matches!(node.metadata().location_id.root(), LocationId::Cluster(_))
+ }
+ 
+-/// Whether `node` is where an `EventualConsistency` label is minted: labelled, and none of
+-/// what feeds it (including what a `Tee` shares) is. A `CycleSource` is fed by its cycle's
+-/// sink and is never a minting point.
++/// Whether `node` mints an `EventualConsistency` label: labelled, and nothing that feeds it is
++/// (a `CycleSource`, fed by its sink, never does).
+ pub(crate) fn is_ec_minting(node: &HydroNode) -> bool {
+     if !is_ec(node) {
+         return false;
+@@ -384,23 +329,27 @@ pub(crate) fn is_ec_minting(node: &HydroNode) -> bool {
+     }
+ }
+ 
+-/// The label of a labelled collection: the node's tag, else the user's source line of the
+-/// labelling operator (`file:line`, the file by its name), else the operator's name.
++/// The label of a labelled collection: the node's tag, else the user's `file:line` of the
++/// labelling operator (the file by its name), else the operator's name.
+ pub(crate) fn ec_label(node: &HydroNode) -> String {
++    let backtrace = &node.metadata().op.backtrace;
+     node.metadata()
+         .tag
+         .clone()
+         .or_else(|| {
+-            user_span(&node.metadata().op.backtrace).map(|span| {
+-                span.rsplit(['/', '\\'])
+-                    .next()
+-                    .unwrap_or(span.as_str())
+-                    .to_owned()
+-            })
++            let span = source_names::user_frame(backtrace)
++                .map(|frame| format!("{}:{}", frame.file, frame.line))
++                .or_else(|| backtrace.format_span())?;
++            Some(file_name(&span).to_owned())
+         })
+         .unwrap_or_else(|| ec_op(node))
+ }
+ 
++/// The last component of a path.
++fn file_name(path: &str) -> &str {
++    path.rsplit(['/', '\\']).next().unwrap_or(path)
++}
++
+ /// The report name of a labelled collection (see [`EcCollection::name`]).
+ fn ec_name(node: &HydroNode) -> Option<String> {
+     node.metadata().tag.clone().or_else(|| {
+@@ -409,17 +358,10 @@ fn ec_name(node: &HydroNode) -> Option<String> {
+     })
+ }
+ 
+-/// The file name of the user's call that built `node` (see [`EcCollection::file`]).
++/// The file name of the user's call that built `node`.
+ fn ec_file(node: &HydroNode) -> Option<String> {
+     let frame = source_names::user_frame(&node.metadata().op.backtrace)?;
+-    Some(
+-        frame
+-            .file
+-            .rsplit(['/', '\\'])
+-            .next()
+-            .unwrap_or(frame.file.as_str())
+-            .to_owned(),
+-    )
++    Some(file_name(&frame.file).to_owned())
+ }
+ 
+ /// The operator name of `node` (`Network`, `Unique`, ...).
+@@ -438,110 +380,80 @@ pub(crate) fn ec_key(node: &HydroNode) -> EcKey {
+     )
+ }
+ 
+-/// Whether every source `node` is computed from is a cluster's membership (a
+-/// `HydroSource::ClusterMembers`, or a `source_iter` over `ClusterIds`), following `Tee`s and
+-/// cycles like [`has_network_ancestor`]. Such a labelled collection is the member-id list a
+-/// cluster-to-cluster `broadcast_closed` labels and joins with its payload, not anything the program computes. It
+-/// is local, so it would only ever be listed as not checked, and it takes the name of the
+-/// statement that broadcasts (an `echoed` row next to the real `echoed`). The design keeps
+-/// `broadcast_closed` unchanged and filters such rows here (docs/design/hydrofrac-lite.md §6.3).
+-fn membership_only(node: &HydroNode, cycle_sinks: &HashMap<CycleId, *const HydroNode>) -> bool {
+-    /// `Some(true)`: only membership sources; `Some(false)`: some other source or a network;
+-    /// `None`: nothing new below (already visited or a dangling cycle).
++/// What `node` is computed from, following `Tee`s, cycles (through their sinks) and the
++/// singletons its closures read.
++#[derive(Default)]
++struct Sources {
++    /// A network receive is upstream.
++    network: bool,
++    /// A cluster's membership is a source (`ClusterMembers`, or `source_iter` over `ClusterIds`).
++    membership: bool,
++    /// Some other leaf is.
++    other: bool,
++}
++
++impl Sources {
++    /// Only membership: the member-id list a cluster-to-cluster `broadcast_closed` labels,
++    /// which would otherwise show up as a local duplicate row of the broadcast's name (§6.3).
++    fn membership_only(&self) -> bool {
++        self.membership && !self.network && !self.other
++    }
++}
++
++fn sources(node: &HydroNode, cycle_sinks: &HashMap<CycleId, *const HydroNode>) -> Sources {
+     fn go(
+         node: &HydroNode,
+         cycle_sinks: &HashMap<CycleId, *const HydroNode>,
+         seen: &mut HashSet<*const HydroNode>,
+-    ) -> Option<bool> {
++        out: &mut Sources,
++    ) {
+         if !seen.insert(std::ptr::from_ref(node)) {
+-            return None;
++            return;
+         }
+-        let combine = |results: &mut dyn Iterator<Item = Option<bool>>| {
+-            let mut any = None;
+-            for r in results {
+-                match r {
+-                    Some(false) => return Some(false),
+-                    Some(true) => any = Some(true),
+-                    None => {}
+-                }
+-            }
+-            any
+-        };
+         match node {
+             HydroNode::Source {
+                 source: HydroSource::ClusterMembers(..),
+                 ..
+-            } => Some(true),
+-            // `source_iter` over `ClusterIds`, which splices as `__hydro_lang_cluster_ids_<key>`:
+-            // how `broadcast_closed` lists its destinations.
++            } => out.membership = true,
++            // How `broadcast_closed` lists its destinations: `ClusterIds` splice as
++            // `__hydro_lang_cluster_ids_<key>`.
+             HydroNode::Source {
+                 source: HydroSource::Iter(expr),
+                 ..
+-            } => Some(
+-                expr.to_token_stream()
+-                    .to_string()
+-                    .contains("__hydro_lang_cluster_ids_"),
+-            ),
+-            HydroNode::Network { .. } => Some(false),
+-            HydroNode::Tee { inner, .. }
+-            | HydroNode::Reference { inner, .. }
+-            | HydroNode::PartitionSide { inner, .. } => go(&inner.0.borrow(), cycle_sinks, seen),
+-            HydroNode::CycleSource { cycle_id, .. } => cycle_sinks.get(cycle_id).and_then(|sink| {
+-                // SAFETY: see the comment at the construction of `cycle_sinks`.
+-                go(unsafe { &**sink }, cycle_sinks, seen)
+-            }),
+-            _ => {
+-                let inputs = node.input();
+-                if inputs.is_empty() {
+-                    // Any other leaf: an external input, a stream, an iterator, a singleton.
+-                    return Some(false);
+-                }
+-                combine(&mut inputs.into_iter().map(|input| go(input, cycle_sinks, seen)))
++            } if expr
++                .to_token_stream()
++                .to_string()
++                .contains("__hydro_lang_cluster_ids_") =>
++            {
++                out.membership = true;
+             }
+-        }
+-    }
+-    go(node, cycle_sinks, &mut HashSet::new()) == Some(true)
+-}
+-
+-/// Whether a network receive is (transitively) upstream of `node`, following cycles through
+-/// their sinks and `Tee`s through what they share.
+-fn has_network_ancestor(
+-    node: &HydroNode,
+-    cycle_sinks: &HashMap<CycleId, *const HydroNode>,
+-) -> bool {
+-    fn go(
+-        node: &HydroNode,
+-        cycle_sinks: &HashMap<CycleId, *const HydroNode>,
+-        seen: &mut HashSet<*const HydroNode>,
+-    ) -> bool {
+-        if !seen.insert(std::ptr::from_ref(node)) {
+-            return false;
+-        }
+-        match node {
+-            HydroNode::Network { .. } => true,
++            HydroNode::Network { .. } => out.network = true,
+             HydroNode::Tee { inner, .. }
+             | HydroNode::Reference { inner, .. }
+-            | HydroNode::PartitionSide { inner, .. } => go(&inner.0.borrow(), cycle_sinks, seen),
++            | HydroNode::PartitionSide { inner, .. } => {
++                go(&inner.0.borrow(), cycle_sinks, seen, out);
++            }
+             HydroNode::CycleSource { cycle_id, .. } => {
+-                cycle_sinks.get(cycle_id).is_some_and(|sink| {
++                if let Some(sink) = cycle_sinks.get(cycle_id) {
+                     // SAFETY: see the comment at the construction of `cycle_sinks`.
+-                    go(unsafe { &**sink }, cycle_sinks, seen)
+-                })
++                    go(unsafe { &**sink }, cycle_sinks, seen, out);
++                }
+             }
+             _ => {
+-                node.input()
+-                    .into_iter()
+-                    .any(|input| go(input, cycle_sinks, seen))
+-                    || closure_refs(node).any(|input| go(input, cycle_sinks, seen))
++                let inputs = node.input();
++                out.other |= inputs.is_empty();
++                for input in inputs.into_iter().chain(closure_refs(node)) {
++                    go(input, cycle_sinks, seen, out);
++                }
+             }
+         }
+     }
+-    go(node, cycle_sinks, &mut HashSet::new())
++    let mut out = Sources::default();
++    go(node, cycle_sinks, &mut HashSet::new(), &mut out);
++    out
+ }
+ 
+-/// The singleton references `node`'s closures read (`HydroNode::Reference`s, which
+-/// [`HydroNode::input`] does not list): a closure that reads state fed by the network is fed
+-/// by the network.
++/// The singleton references `node`'s closures read (not in [`HydroNode::input`]).
+ fn closure_refs(node: &HydroNode) -> impl Iterator<Item = &HydroNode> {
+     let closures: Vec<&ClosureExpr> = match node {
+         HydroNode::Map { f, .. }
+@@ -564,19 +476,3 @@ fn closure_refs(node: &HydroNode) -> impl Iterator<Item = &HydroNode> {
+         .into_iter()
+         .flat_map(|f| f.singleton_refs().iter().map(|(node, _)| node))
+ }
+-
+-/// The `file:line` of the first frame of `backtrace` outside `hydro_lang` itself: where the
+-/// program called `send`, rather than the networking layer's own frames.
+-pub fn user_span(backtrace: &Backtrace) -> Option<String> {
+-    let own = concat!("hydro_lang", "/src/");
+-    backtrace
+-        .elements()
+-        .find_map(|element| {
+-            let file = element.filename.as_ref()?;
+-            if file.contains(own) {
+-                return None;
+-            }
+-            Some(format!("{file}:{}", element.lineno?))
+-        })
+-        .or_else(|| backtrace.format_span())
+-}
+diff --git a/hydrofrac/src/observe/plan.rs b/hydrofrac/src/observe/plan.rs
+index d37ab657b4..44a84e5ee6 100644
+--- a/hydrofrac/src/observe/plan.rs
++++ b/hydrofrac/src/observe/plan.rs
+@@ -5,22 +5,18 @@ use std::fmt::{self, Display};
+ use hydro_lang::compile::ir::CollectionKind;
+ use hydro_lang::location::dynamic::LocationId;
+ 
+-use super::EcCollection;
++use super::{EcCollection, kind_name};
+ use crate::provenance::sensitivity::NondetSite;
+ 
+ /// Why a labelled collection is not checked by the generated specification.
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub enum NotCheckedReason {
+-    /// No network channel feeds the collection: no fault in the model can withhold an input
+-    /// from some members, so there is nothing to check.
++    /// No network channel feeds the collection: no fault can withhold its inputs.
+     LocalInputsOnly,
+-    /// The collection is a `Singleton`, `Optional` or `KeyedSingleton` whose value can change,
+-    /// and it is not an aggregation of a checked labelled stream (which would cover it,
+-    /// [`LabelPlan::covered_by`]). The set-based specification needs a collection that only
+-    /// grows; see docs/design/hydrofrac-lite.md §4.7. The string names the kind.
++    /// A scalar (the named kind) that no checked labelled stream covers: the set-based
++    /// specification needs a collection that only grows.
+     NotAStream(String),
+-    /// The labelling node lives inside a tick: its bounded per-tick contents are not "the
+-    /// collection's contents".
++    /// The labelling node lives inside a tick: its per-tick contents are not the collection's.
+     InsideTick,
+ }
+ 
+@@ -36,22 +32,17 @@ impl Display for NotCheckedReason {
+     }
+ }
+ 
+-/// One labelled collection of the program, with whether the generated specification checks
+-/// it.
++/// One labelled collection, with whether and how the generated specification checks it.
+ #[derive(Clone, Debug)]
+ pub struct LabelPlan {
+     /// The collection.
+     pub collection: EcCollection,
+     /// Why it is not checked, if it is not.
+     pub not_checked: Option<NotCheckedReason>,
+-    /// For a labelled scalar checked at its input stream ([`EcCollection::covered_by`]): the
+-    /// index of that stream's plan, which is checked. The scalar itself is not tapped.
++    /// For a labelled scalar checked at its input stream: that stream's plan index.
+     pub covered_by: Option<usize>,
+-    /// What makes the label's search schedule-sensitive
+-    /// ([`crate::provenance::sensitivity`]): the simulator's choices in its causal cone, those
+-    /// that may reorder the sends of a node in it, and what the walk cannot see through. Empty
+-    /// for a label whose fault sets each have one execution: only those can be certified
+-    /// (docs/design/hydrofrac-lite.md §4.9). Filled by the tap pass; [`plan`] leaves it empty.
++    /// What makes the label's search schedule-sensitive ([`crate::provenance::sensitivity`]);
++    /// empty for a label that can be certified (§4.9). Filled by the tap pass.
+     pub sites: Vec<NondetSite>,
+ }
+ 
+@@ -67,24 +58,18 @@ impl LabelPlan {
+     }
+ }
+ 
+-/// Whether the set-based specification applies to `collection`: local inputs, then kind,
+-/// then tick. A scalar is reported here as not a stream; [`plan`] then checks it at its input
+-/// stream when it can.
++/// Whether the set-based specification applies to `collection`: local inputs, then kind (a
++/// scalar may still be covered, see [`plan`]), then tick.
+ fn classify(collection: &EcCollection) -> Option<NotCheckedReason> {
+     if !collection.fed_by_network {
+         return Some(NotCheckedReason::LocalInputsOnly);
+     }
+-    match &collection.collection_kind {
+-        CollectionKind::Stream { .. } | CollectionKind::KeyedStream { .. } => {}
+-        CollectionKind::Singleton { .. } => {
+-            return Some(NotCheckedReason::NotAStream("Singleton".to_owned()));
+-        }
+-        CollectionKind::Optional { .. } => {
+-            return Some(NotCheckedReason::NotAStream("Optional".to_owned()));
+-        }
+-        CollectionKind::KeyedSingleton { .. } => {
+-            return Some(NotCheckedReason::NotAStream("KeyedSingleton".to_owned()));
+-        }
++    let kind = &collection.collection_kind;
++    if !matches!(
++        kind,
++        CollectionKind::Stream { .. } | CollectionKind::KeyedStream { .. }
++    ) {
++        return Some(NotCheckedReason::NotAStream(kind_name(kind).to_owned()));
+     }
+     if collection.in_tick {
+         return Some(NotCheckedReason::InsideTick);
+diff --git a/hydrofrac/src/observe/source_names.rs b/hydrofrac/src/observe/source_names.rs
+index 47840f4cf4..48e21e1b0a 100644
+--- a/hydrofrac/src/observe/source_names.rs
++++ b/hydrofrac/src/observe/source_names.rs
+@@ -1,16 +1,8 @@
+-//! Human names for program sites in hydrofrac reports, read back from the user's source.
+-//!
+-//! A labelled collection or a network channel is identified by the `file:line` of the user's
+-//! call that built it (see the `collections` module). For reports, a name the user would recognize is
+-//! better: the variable the statement binds (`let learned = initial.merge_unordered(..)` names
+-//! `learned`), else the receiver of an unbound `committed.assert_has_consistency_of(..)`
+-//! (`committed`), else the function whose tail expression the call is (`splice_epoch_log`). The
+-//! name is recovered by reading the source file at the recorded line and walking back to the
+-//! start of the statement. Everything here is best-effort: when the file cannot be read or the
+-//! statement binds nothing nameable, the caller falls back to the operator or the site.
+-//!
+-//! [`short_debug`] does the same for the `Debug` renderings of facts: it drops module paths
+-//! and renders member ids the way node names are (`Client@0`).
++//! Source-derived names for reports (docs/design/hydrofrac-lite.md §3), read back from the
++//! user's source at a site's `file:line`: the variable the statement binds, else the receiver
++//! of an unbound `x.assert_has_consistency_of(..)`, else the function whose tail it is. Best
++//! effort: callers fall back to the operator or the site. [`short_debug`] makes `Debug`
++//! renderings of facts readable.
+ 
+ use std::cell::RefCell;
+ use std::collections::HashMap;
+@@ -18,19 +10,15 @@ use std::path::{Path, PathBuf};
+ 
+ use hydro_lang::compile::ir::backtrace::Backtrace;
+ 
+-/// A user frame: the file (as recorded), the line, and the enclosing function's path.
++/// A user frame: the file (as recorded), the 1-based line, and the enclosing function's path.
+ #[derive(Clone, Debug)]
+ pub struct UserFrame {
+-    /// The file, as the backtrace recorded it (absolute, or relative to some crate root).
+     pub file: String,
+-    /// The 1-based line.
+     pub line: u32,
+-    /// The enclosing function (its full path, closures stripped), if known.
+     pub function: Option<String>,
+ }
+ 
+-/// The first frame of `backtrace` outside `hydro_lang` itself: where the program called the
+-/// operator (or `send`), rather than the library's own frames.
++/// The first frame of `backtrace` outside `hydro_lang` itself: where the program called it.
+ pub fn user_frame(backtrace: &Backtrace) -> Option<UserFrame> {
+     let own = concat!("hydro_lang", "/src/");
+     backtrace.elements().find_map(|element| {
+@@ -51,8 +39,8 @@ thread_local! {
+     static SOURCES: RefCell<HashMap<String, Option<Vec<String>>>> = RefCell::new(HashMap::new());
+ }
+ 
+-/// Resolves a recorded source path: as is, else relative to the current directory and each of
+-/// its ancestors (a backtrace may record a path relative to the workspace root).
++/// Resolves a recorded source path: as is, else relative to the current directory or an
++/// ancestor (a backtrace may record a path relative to the workspace root).
+ fn resolve(file: &str) -> Option<PathBuf> {
+     let path = Path::new(file);
+     if path.is_file() {
+@@ -78,16 +66,9 @@ fn with_source<R>(file: &str, f: impl FnOnce(&[String]) -> Option<R>) -> Option<
+     })
+ }
+ 
+-/// The name of the site at `frame`: the variable its statement binds, else the enclosing
+-/// function when the call is that function's tail expression. `None` when neither applies or
+-/// the source is unavailable.
+-///
+-/// A statement that binds nothing is named, in order of preference:
+-/// - by its receiver, when it is `<name>.assert_has_consistency_of(..)`: the assertion labels
+-///   `<name>` itself, so that is the collection's name (`committed.assert_has_consistency_of(..)`
+-///   as a function's tail names the label `committed`);
+-/// - by the enclosing function, when it is the first statement of its block or the block's tail
+-///   expression (the collection is what the function returns: `splice_epoch_log`).
++/// The name of the site at `frame` (see the module docs): a statement that binds nothing is
++/// named by its receiver if it is `<name>.assert_has_consistency_of(..)`, else by the
++/// enclosing function if it is the first statement of its block or the block's tail.
+ pub fn site_name(frame: &UserFrame) -> Option<String> {
+     let line = frame.line as usize;
+     let function = || frame.function.as_deref().and_then(function_name);
+@@ -173,8 +154,7 @@ fn asserted_receiver(statement: &[String]) -> Option<String> {
+ }
+ 
+ /// Whether the statement starting at 0-based line `start` is its block's tail expression: it
+-/// ends at the block's closing `}` rather than at a `;`. Comments, strings and character
+-/// literals are skipped; lifetimes (`'a`) are not mistaken for character literals.
++/// ends at the block's closing `}` rather than at a `;` (comments and literals skipped).
+ fn is_tail(lines: &[String], start: usize) -> bool {
+     // A statement spans at most this many lines forward, for the scan.
+     const MAX_LINES: usize = 200;
+@@ -205,24 +185,14 @@ fn is_tail(lines: &[String], start: usize) -> bool {
+                     i += 2;
+                     continue;
+                 }
++                // A string spanning lines is rare enough in a dataflow chain to ignore.
+                 '"' => {
+-                    // Skip to the closing quote (a string spanning lines is rare enough in a
+-                    // dataflow chain to ignore).
+-                    i += 1;
+-                    while i < chars.len() && chars[i] != '"' {
+-                        i += if chars[i] == '\\' { 2 } else { 1 };
+-                    }
++                    i = literal_end(&chars, i);
++                    continue;
+                 }
+-                '\'' => {
+-                    // `'x'` or `'\n'` is a character literal; `'a` is a lifetime.
+-                    if chars.get(i + 1) == Some(&'\\') {
+-                        i += 2;
+-                        while i < chars.len() && chars[i] != '\'' {
+-                            i += 1;
+-                        }
+-                    } else if chars.get(i + 2) == Some(&'\'') {
+-                        i += 2;
+-                    }
++                '\'' if is_char_literal(&chars, i) => {
++                    i = literal_end(&chars, i);
++                    continue;
+                 }
+                 '(' | '[' | '{' => depth += 1,
+                 ')' | ']' => depth -= 1,
+@@ -304,18 +274,15 @@ fn function_name(path: &str) -> Option<String> {
+         .map(str::to_owned)
+ }
+ 
+-/// The short form of a Rust type name: its last path segment, without generics
+-/// (`hydro_test::cluster::paxos::Learner` → `Learner`).
+-pub fn short_type_name(type_name: &str) -> String {
++/// The last path segment of a type name, without generics (`a::b::Learner<X>` → `Learner`).
++fn short_type_name(type_name: &str) -> String {
+     let base = type_name.split('<').next().unwrap_or(type_name);
+     base.rsplit("::").next().unwrap_or(base).to_owned()
+ }
+ 
+-/// A `Debug` rendering made readable for reports and diagrams: module paths dropped from every
+-/// path (`hydro_std_hydro_trybuild::__staged::abd::Client` → `Client`, keeping everything from
+-/// the first capitalized segment, so `Kind::A` stays), and a member id
+-/// (`MemberId::<…::Client>(0)`) rendered as `Client@0`, the way node names are. String and
+-/// character literals are left alone. Only for display: a fact's identity is its bytes.
++/// A `Debug` rendering made readable: module paths dropped (keeping everything from the first
++/// capitalized segment, so `Kind::A` stays) and member ids as `Client@0`, the way node names
++/// are. Literals are left alone.
+ pub fn short_debug(text: &str) -> String {
+     let chars: Vec<char> = text.chars().collect();
+     let mut out = String::with_capacity(text.len());
+@@ -432,8 +399,7 @@ fn member_id_parts(chars: &[char], i: usize) -> Option<(String, String, usize)>
+         .then_some((tag, member, close + 1))
+ }
+ 
+-/// The node label of a member id's tag type, as [`crate::fault::NodeNames`] labels clusters:
+-/// its short type name, or `cluster` for `()`.
++/// The node label of a member id's tag type, as [`crate::fault::NodeNames`] labels clusters.
+ fn member_label(tag: &str) -> String {
+     let tag = tag.trim();
+     if tag == "()" || tag.is_empty() {
+diff --git a/hydrofrac/src/observe/tap.rs b/hydrofrac/src/observe/tap.rs
+index 088d443476..d987934ac6 100644
+--- a/hydrofrac/src/observe/tap.rs
++++ b/hydrofrac/src/observe/tap.rs
+@@ -1,14 +1,8 @@
+-//! The tap pass: every checked labelled collection, at every member, into an external output
+-//! of its own (see the [module docs](super)).
+-//!
+-//! A tapped node becomes a `Tee` (as `Stream::clone` would make it) and a second branch maps
+-//! each element to `(bincode(element), Debug of the element)` and sends it to the simulator's
+-//! default external location, exactly the IR `Stream::sim_cluster_output` builds. A `Tee`
+-//! branch is invisible to the rest of the program, and an external output adds no schedule
+-//! choice, so the program's behaviour and its schedule space are unchanged. The pass runs
+-//! before network compilation (`IrPassStage::PreNetwork`), so the outputs are compiled like the
+-//! program's own; it runs before the provenance rewrite (`PostNetwork`), so record provenance
+-//! flows through the taps like through any other operator and arrives as the outputs' meta.
++//! The tap pass (see the [module docs](super)). A tapped node becomes a `Tee`, and a second
++//! branch maps each element to `(identity, Debug)` and sends it to an external output, the IR
++//! `Stream::sim_cluster_output` builds: invisible to the program, and no new schedule choice.
++//! It runs `PreNetwork`, before the provenance rewrite, so record provenance flows through the
++//! taps and arrives as the outputs' meta.
+ 
+ use std::cell::RefCell;
+ use std::collections::{BTreeMap, HashMap, HashSet};
+@@ -28,16 +22,12 @@ use super::collections::{EcKey, ec_key, is_ec};
+ use super::{LabelPlan, ec_collections, plan};
+ use crate::provenance::sensitivity::cones_of;
+ 
+-/// One observed element of a labelled collection, as the host receives it: its bincode (the
+-/// fact's identity) and, when the element type implements `Debug`, its `Debug` rendering for
+-/// reports. Equality, order and hashing use the bytes only.
++/// One observed element of a labelled collection: its identity (normally its bincode) and its
++/// `Debug` rendering, if any, for reports. Equality, order and hashing use the bytes only.
+ #[derive(Clone, Debug)]
+ pub struct Fact {
+-    /// `bincode` of the element.
+     pub bytes: Vec<u8>,
+-    /// `format!("{:?}", element)`, if the element type implements `Debug`, shortened for
+-    /// reports by [`super::source_names::short_debug`] (module paths dropped, member ids as
+-    /// `Client@0`). Not part of the fact's identity.
++    /// Shortened by [`super::source_names::short_debug`].
+     pub debug: Option<String>,
+ }
+ 
+@@ -80,8 +70,7 @@ impl std::fmt::Display for Fact {
+ }
+ 
+ impl Fact {
+-    /// A fact with no `Debug` rendering, from its bytes (for tests and hand-built
+-    /// observations).
++    /// A fact with no `Debug` rendering.
+     pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Self {
+         Fact {
+             bytes: bytes.into(),
+@@ -93,9 +82,7 @@ impl Fact {
+ /// The wire type of a tap output: `(bincode(element), Debug of the element)`.
+ type TapWire = (Vec<u8>, Option<String>);
+ 
+-/// Decodes the payload of a tap output (as `SimNetworkHook::on_output` sees it). The `Debug`
+-/// rendering is shortened for reports ([`super::source_names::short_debug`]); the identity (the
+-/// bytes) is as the tap shipped it.
++/// Decodes the payload of a tap output (as `SimNetworkHook::on_output` sees it).
+ pub fn decode_output(payload: &[u8]) -> Fact {
+     let (bytes, debug): TapWire =
+         bincode::deserialize(payload).expect("a tap output is `(bincode, Option<Debug>)`");
+@@ -105,16 +92,13 @@ pub fn decode_output(payload: &[u8]) -> Fact {
+     }
+ }
+ 
+-/// The labelled collections of a compiled program and the external output ports their taps
+-/// emit on.
++/// The labelled collections of a compiled program and their taps' output ports.
+ #[derive(Clone, Debug, Default)]
+ pub struct Labels {
+-    /// One plan per labelled collection, in enumeration order. The index into this vector is
+-    /// the label's identity everywhere else in hydrofrac.
++    /// One plan per labelled collection; the index is the label's identity in hydrofrac.
+     pub plans: Vec<LabelPlan>,
+-    /// Tap output port → index of the label it carries. A label tapped at several IR nodes
+-    /// (one library function instantiated twice on a cluster) has several ports.
+-    ports: BTreeMap<usize, usize>,
++    /// Tap output port → label (a label tapped at several IR nodes has several ports).
++    pub(super) ports: BTreeMap<usize, usize>,
+ }
+ 
+ impl Labels {
+@@ -122,22 +106,6 @@ impl Labels {
+     pub fn label_of_port(&self, port: usize) -> Option<usize> {
+         self.ports.get(&port).copied()
+     }
+-
+-    /// The tap output ports of `label`.
+-    pub fn ports_of(&self, label: usize) -> impl Iterator<Item = usize> + '_ {
+-        self.ports
+-            .iter()
+-            .filter(move |(_, l)| **l == label)
+-            .map(|(p, _)| *p)
+-    }
+-
+-    /// The labels searched in their own right, with their indices.
+-    pub fn searched(&self) -> impl Iterator<Item = (usize, &LabelPlan)> {
+-        self.plans
+-            .iter()
+-            .enumerate()
+-            .filter(|(_, p)| p.is_searched())
+-    }
+ }
+ 
+ /// The host's handle on a [`tap_pass`]: the labels it found, once the simulation is compiled.
+@@ -169,9 +137,8 @@ pub fn tap_pass() -> (TapPass, impl FnOnce(&mut Vec<HydroRoot>) + 'static) {
+     })
+ }
+ 
+-/// Visits every node under `ir` bottom-up, in place: unlike `transform_bottom_up`, a node a
+-/// `Tee` shares is edited inside its cell (once) rather than moved to a fresh cell, so the
+-/// branches this pass creates keep pointing at it.
++/// Visits every node under `ir` bottom-up, in place: unlike `transform_bottom_up`, a shared
++/// node is edited inside its cell (once), so the branches this pass creates keep pointing at it.
+ fn walk_in_place(ir: &mut [HydroRoot], f: &mut impl FnMut(&mut HydroNode)) {
+     fn walk(
+         node: &mut HydroNode,
+@@ -201,8 +168,7 @@ fn walk_in_place(ir: &mut [HydroRoot], f: &mut impl FnMut(&mut HydroNode)) {
+     }
+ }
+ 
+-/// The largest external port id `ir` uses (inputs and outputs), so that the taps' ports are
+-/// fresh.
++/// The largest external port id `ir` uses, so that the taps' ports are fresh.
+ fn max_port(ir: &mut [HydroRoot]) -> Option<usize> {
+     let mut max: Option<usize> = None;
+     for root in ir.iter() {
+@@ -218,29 +184,10 @@ fn max_port(ir: &mut [HydroRoot]) -> Option<usize> {
+     max
+ }
+ 
+-/// The element type of a stream-like collection kind: `T`, or `(K, V)` for a keyed stream.
+-fn element_type(kind: &CollectionKind) -> Option<syn::Type> {
+-    match kind {
+-        CollectionKind::Stream { element_type, .. } => Some((*element_type.0).clone()),
+-        CollectionKind::KeyedStream {
+-            key_type,
+-            value_type,
+-            ..
+-        } => {
+-            let (k, v) = (&*key_type.0, &*value_type.0);
+-            Some(parse_quote!((#k, #v)))
+-        }
+-        CollectionKind::Singleton { .. }
+-        | CollectionKind::Optional { .. }
+-        | CollectionKind::KeyedSingleton { .. } => None,
+-    }
+-}
+-
+ /// The closure a tap maps each element through: `(identity of x, Debug of x if T: Debug)`. The
+-/// identity is `bincode(x)` when the element type is `Serialize`, else the `Debug` rendering,
+-/// else a `Hash` digest (a labelled type need not be `Serialize`: `hydro_std`'s quorum
+-/// certificate `Durable` is deliberately not). Both are chosen by autoref specialization on the
+-/// concrete element type, so any element type compiles.
++/// identity is `bincode(x)` if `T: Serialize`, else its `Debug`, else a `Hash` digest
++/// (`hydro_std`'s `Durable` is deliberately not `Serialize`). Autoref specialization picks
++/// both, so any element type compiles.
+ fn tap_closure(element_type: &syn::Type) -> syn::Expr {
+     // The generated dylib depends on `hydro_lang` under its own name, as every IR expression
+     // `hydro_lang` itself builds assumes.
+@@ -264,10 +211,7 @@ fn tap_closure(element_type: &syn::Type) -> syn::Expr {
+                 }
+             }
+             let __debug = (&__HydrofracWrap(&__hydrofrac_x)).__hydrofrac_debug();
+-            // The fact's identity: its bincode if the element type is `Serialize`, else its
+-            // `Debug` rendering, else a `Hash` digest. Deref-based autoref specialization: the
+-            // receiver `&&&&_` matches the most specific applicable impl first. Elements of one
+-            // label share a type, so they all take the same branch.
++            // The receiver `&&&&_` matches the most specific applicable impl first.
+             trait __HydrofracViaSerialize {
+                 fn __hydrofrac_id(&self) -> ::std::vec::Vec<u8>;
+             }
+@@ -311,8 +255,7 @@ fn tap_closure(element_type: &syn::Type) -> syn::Expr {
+     )
+ }
+ 
+-/// Enumerates the labels of `ir`, plans them, and taps every searched one (see the module
+-/// docs).
++/// Enumerates the labels of `ir`, plans them, and taps every searched one.
+ pub fn tap(ir: &mut Vec<HydroRoot>) -> Labels {
+     let collections = ec_collections(ir);
+     // Each label's schedule sensitivity, on the IR as the program built it (before the taps).
+@@ -340,9 +283,8 @@ pub fn tap(ir: &mut Vec<HydroRoot>) -> Labels {
+         ::core::option::Option<::std::string::String>
+     ));
+ 
+-    // Labelled nodes are re-identified by the enumeration's key. (A `Tee` never matches: the
+-    // enumeration records what it shares, under that node's own key; a shared partition or
+-    // reference cell is not tapped as a whole.)
++    // Labelled nodes are re-identified by the enumeration's key (a `Tee` never matches: the
++    // enumeration records what it shares).
+     let mut taps: Vec<HydroRoot> = vec![];
+     let mut tap_ports: BTreeMap<usize, usize> = BTreeMap::new();
+     walk_in_place(ir, &mut |node: &mut HydroNode| {
+@@ -364,9 +306,27 @@ pub fn tap(ir: &mut Vec<HydroRoot>) -> Labels {
+             return;
+         }
+         let node_metadata = node.metadata().clone();
+-        let Some(element_type) = element_type(&node_metadata.collection_kind) else {
+-            return;
+-        };
++        // The element type (`(K, V)` for a keyed stream) and the tap's stream kind.
++        let (element_type, bound, order, retry): (syn::Type, _, _, _) =
++            match &node_metadata.collection_kind {
++                CollectionKind::Stream {
++                    element_type,
++                    bound,
++                    order,
++                    retry,
++                } => ((*element_type.0).clone(), bound, order, retry),
++                CollectionKind::KeyedStream {
++                    key_type,
++                    value_type,
++                    bound,
++                    value_order,
++                    value_retry,
++                } => {
++                    let (k, v) = (&*key_type.0, &*value_type.0);
++                    (parse_quote!((#k, #v)), bound, value_order, value_retry)
++                }
++                _ => return,
++            };
+         // Share the node: make it a `Tee` if it is not one, and take a second branch.
+         let shared: Rc<RefCell<HydroNode>> = if let HydroNode::Tee { inner, .. } = node {
+             inner.0.clone()
+@@ -387,30 +347,11 @@ pub fn tap(ir: &mut Vec<HydroRoot>) -> Labels {
+         map_metadata.consistency = None;
+         map_metadata.tag = None;
+         map_metadata.op.id = None;
+-        map_metadata.collection_kind = match &node_metadata.collection_kind {
+-            CollectionKind::Stream {
+-                bound,
+-                order,
+-                retry,
+-                ..
+-            } => CollectionKind::Stream {
+-                bound: bound.clone(),
+-                order: order.clone(),
+-                retry: retry.clone(),
+-                element_type: DebugType::from(wire_type.clone()),
+-            },
+-            CollectionKind::KeyedStream {
+-                bound,
+-                value_order,
+-                value_retry,
+-                ..
+-            } => CollectionKind::Stream {
+-                bound: bound.clone(),
+-                order: value_order.clone(),
+-                retry: value_retry.clone(),
+-                element_type: DebugType::from(wire_type.clone()),
+-            },
+-            _ => unreachable!("only streams have an element type"),
++        map_metadata.collection_kind = CollectionKind::Stream {
++            bound: bound.clone(),
++            order: order.clone(),
++            retry: retry.clone(),
++            element_type: DebugType::from(wire_type.clone()),
+         };
+         let mapped = HydroNode::Map {
+             f: ClosureExpr::new(DebugExpr::from(tap_closure(&element_type)), vec![]),
+diff --git a/hydrofrac/src/observe/tests.rs b/hydrofrac/src/observe/tests.rs
+index 796ae32461..a0f2206b97 100644
+--- a/hydrofrac/src/observe/tests.rs
++++ b/hydrofrac/src/observe/tests.rs
+@@ -33,6 +33,30 @@ use super::{LabelPlan, Labels, NotCheckedReason, ec_collections, plan, tap_pass}
+ #[cfg(stageleft_runtime)]
+ use crate::observe::{Fact, decode_output};
+ 
++#[cfg(stageleft_runtime)]
++/// `(file, name, occurrence)`: an identity that survives edits elsewhere in the file.
++fn stable_key(c: &super::EcCollection) -> (String, String, usize) {
++    (
++        c.file.clone().unwrap_or_default(),
++        c.display_name().to_owned(),
++        c.occurrence,
++    )
++}
++
++#[cfg(stageleft_runtime)]
++fn ports_of(labels: &Labels, label: usize) -> impl Iterator<Item = usize> + '_ {
++    labels
++        .ports
++        .iter()
++        .filter(move |(_, l)| **l == label)
++        .map(|(p, _)| *p)
++}
++
++#[cfg(stageleft_runtime)]
++fn searched(labels: &Labels) -> impl Iterator<Item = (usize, &LabelPlan)> {
++    labels.plans.iter().enumerate().filter(|(_, p)| p.is_searched())
++}
++
+ #[cfg(stageleft_runtime)]
+ fn plans_of(flow: FlowBuilder<'_>) -> Vec<LabelPlan> {
+     let built = flow.finalize();
+@@ -50,7 +74,7 @@ fn find<'p>(plans: &'p [LabelPlan], name: &str) -> (usize, &'p LabelPlan) {
+                 "no label `{name}` among {:?}",
+                 plans
+                     .iter()
+-                    .map(|p| p.collection.stable_key())
++                    .map(|p| stable_key(&p.collection))
+                     .collect::<Vec<_>>()
+             )
+         })
+@@ -125,7 +149,7 @@ fn a_closed_broadcast_is_one_searched_label_named_after_its_binding() {
+     let plan = &plans[0];
+     assert!(plan.is_searched(), "{plan:?}");
+     assert_eq!(
+-        plan.collection.stable_key(),
++        stable_key(&plan.collection),
+         ("tests.rs".to_owned(), "delivered".to_owned(), 0)
+     );
+ }
+@@ -237,7 +261,7 @@ fn taps_deliver_every_element_to_the_host_per_member_with_its_debug() {
+         .compiled();
+     let labels = taps.labels();
+     let (label, _) = find(&labels.plans, "delivered");
+-    assert_eq!(labels.ports_of(label).count(), 1);
++    assert_eq!(ports_of(&labels, label).count(), 1);
+ 
+     let outputs = Rc::new(Outputs::default());
+     sim.set_network_hook(outputs.clone());
+@@ -319,16 +343,16 @@ fn an_overwritten_singleton_is_not_tapped() {
+         "an overwritten singleton must not be checked by a union view: {plan:?}"
+     );
+     assert_eq!(plan.covered_by, None);
+-    assert_eq!(labels.ports_of(label).count(), 0);
++    assert_eq!(ports_of(&labels, label).count(), 0);
+     // The broadcast in the same statement is a label of its own (a stream, so it is checked),
+     // and it is the only one tapped.
+-    let searched: Vec<_> = labels.searched().collect();
++    let searched: Vec<_> = searched(&labels).collect();
+     assert_eq!(searched.len(), 1, "{:?}", labels.plans);
+     assert_eq!(
+         kind_name(&searched[0].1.collection.collection_kind),
+         "Stream"
+     );
+-    let stream_ports: Vec<usize> = labels.ports_of(searched[0].0).collect();
++    let stream_ports: Vec<usize> = ports_of(&labels, searched[0].0).collect();
+ 
+     let outputs = Rc::new(Outputs::default());
+     sim.set_network_hook(outputs.clone());
+diff --git a/hydrofrac/src/search/clause.rs b/hydrofrac/src/search/clause.rs
+index c68056c45e..6694fb0056 100644
+--- a/hydrofrac/src/search/clause.rs
++++ b/hydrofrac/src/search/clause.rs
+@@ -1,26 +1,18 @@
+-//! Faults, derivations, and the positional relation between them.
++//! Faults, derivations, and the positional kill relation between them.
+ //!
+-//! A derivation is the set of deliveries an observed fact was computed from. A fault kills a
+-//! delivery when it omits that delivery, or when it crashes the sender before it sent it.
+-//! Killing any one delivery of a derivation kills the derivation. A [`Clause`] is one
+-//! derivation, together with the facts about the run it was observed in that the kill relation
+-//! needs.
+-//!
+-//! The search is generic over `M`, the identity of a message. The omission identity is
+-//! `(channel, sender, destination, wire bytes)` (docs/design/hydrofrac-lite.md §3). A crash
+-//! point names a message of the crashing node, so the same identity serves both.
++//! A derivation is the set of deliveries an observed fact was computed from; killing any one
++//! kills it. A fault kills a delivery by omitting it, or by crashing its sender before it was
++//! sent. The search is generic over the message identity `M`, which also names crash points
++//! (docs/design/hydrofrac-lite.md §3).
+ 
+ use std::collections::{BTreeMap, BTreeSet};
+-use std::fmt::{self, Debug, Display};
++use std::fmt::{self, Display};
+ use std::rc::Rc;
+ 
+ /// A node of the program: a process (`label`) or a cluster member (`label@member`).
+ pub type Node = String;
+ 
+-/// One fault.
+-///
+-/// The derived order is only for sets. The search orders the candidates of one hypothesis
+-/// weakest first ([`universe`]).
++/// One fault. The derived order is only for sets; [`universe`] orders candidates.
+ #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+ pub enum Fault<M> {
+     /// Discard every copy of this message on its channel (lossy channels only).
+@@ -34,11 +26,8 @@ pub enum Fault<M> {
+     },
+ }
+ 
+-/// Where a crashed node dies: Molly's positional crash, `crash(node after m)`.
+-///
+-/// The node performs its sends up to and including `m` and nothing after. The point is named by
+-/// a message rather than a send count so the fault means the same thing in every run. What it
+-/// kills still depends on the order in which the run has the node attempt its sends.
++/// Where a crashed node dies: Molly's positional crash, `crash(node after m)` (it sends up to
++/// and including `m`). Named by a message, not a count, so it means the same in every run.
+ #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+ pub enum CrashAt<M> {
+     /// Before its first send.
+@@ -48,7 +37,7 @@ pub enum CrashAt<M> {
+ }
+ 
+ impl<M> Fault<M> {
+-    /// The crash of `node` right after it sends `after`, or before any send.
++    /// `crash(node after m)`, or `crash(node)` before any send.
+     pub fn crash_after(node: impl Into<Node>, after: Option<M>) -> Self {
+         Fault::Crash {
+             node: node.into(),
+@@ -93,56 +82,31 @@ pub fn crash_count<M>(set: &FaultSet<M>) -> usize {
+ }
+ 
+ /// One delivered message a derivation depends on, with what is known about its origin.
+-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
++#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+ pub struct Dependency<M> {
+     /// The message.
+     pub message: M,
+-    /// The sending node and the message's position among that node's sends in the run it was
+-    /// observed in. The position is exact, not clamped to the heal point. Together with the
+-    /// run's send sequences and pre-heal send counts it decides whether a crash point kills
+-    /// the delivery ([`Self::killed_by`]).
++    /// The sender and the message's exact position among its sends in the observed run.
+     pub sender: Option<(Node, u64)>,
+     /// Whether the channel admits omission.
+     pub lossy: bool,
+ }
+ 
+-impl<M: Debug> Debug for Dependency<M> {
+-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+-        write!(f, "{:?}", self.message)?;
+-        if let Some((sender, ordinal)) = &self.sender {
+-            write!(f, "←{sender}#{ordinal}")?;
+-        }
+-        Ok(())
+-    }
+-}
+-
+-/// Every node's send sequence in one run. It gives crash points their meaning there:
+-/// `crash(node after m)` kills the sends after `m`'s position.
++/// Every node's send sequence in one run: what gives crash points their meaning there.
+ pub type SendSequences<M> = BTreeMap<Node, Vec<M>>;
+ 
+-/// How many of each node's sends in one run happened before the network healed.
+-///
+-/// Faults happen only while the harness drives inputs. Once it is done the network heals: no
+-/// more omissions, and no new crashes (crashed nodes stay dead). So a crash point fires only
+-/// if it names a pre-heal send.
++/// How many of each node's sends in one run happened before the heal (§4.6): a crash point
++/// fires only if it names one of them.
+ pub type PreHealSends = BTreeMap<Node, usize>;
+ 
+-/// A derivation of a fact: the deliveries it was computed from. Killing any one of them kills
+-/// the derivation.
++/// A derivation of a fact: the deliveries it was computed from.
+ pub type Derivation<M> = BTreeSet<Dependency<M>>;
+ 
+ impl<M: PartialEq + Clone> Dependency<M> {
+-    /// Whether `fault` kills this delivery in the run described by `sends` and `pre_heal`.
+-    ///
+-    /// - An omission kills a lossy delivery of the same message.
+-    /// - A crash point of the sender kills the delivery if it fires in this run (it names a
+-    ///   pre-heal send) before the delivery's send. Crashing before any send kills every
+-    ///   delivery of the node.
+-    ///
+-    /// A pre-heal crash point kills every later send, including those after the heal point.
+-    /// Clamping the relation at the heal point would make a clause claim that a crash kills
+-    /// nothing of what it does kill, and a hypothesis that breaks the label would never be a
+-    /// hitting set: a false certificate.
++    /// Whether `fault` kills this delivery in the run described by `sends` and `pre_heal`: an
++    /// omission of the same lossy message, or a sender's crash point that fires (names a
++    /// pre-heal send) before this send. Not clamped at the heal: a pre-heal crash kills every
++    /// later send, and clamping would give false certificates.
+     pub fn killed_by(
+         &self,
+         fault: &Fault<M>,
+@@ -172,13 +136,8 @@ impl<M: PartialEq + Clone> Dependency<M> {
+         }
+     }
+ 
+-    /// The weakest faults that kill this delivery: its omission, if the channel is lossy, and
+-    /// the crash of its sender right after the send that precedes this one.
+-    ///
+-    /// Crash points are named by pre-heal sends only. A delivery sent after the heal point is
+-    /// killed by every crash point of its sender that fires in this run, and the weakest of
+-    /// those is the crash right after the sender's last pre-heal send. [`Self::killed_by`]
+-    /// uses the exact position.
++    /// The weakest faults that kill this delivery: its omission (if lossy), and its sender's
++    /// crash right after the send before it, or after its last pre-heal send if that is earlier.
+     pub fn candidate_faults(
+         &self,
+         sends: &SendSequences<M>,
+@@ -205,50 +164,21 @@ impl<M: PartialEq + Clone> Dependency<M> {
+     }
+ }
+ 
+-/// A derivation together with the facts about the run it was observed in that the kill relation
+-/// needs.
+-#[derive(Clone)]
++/// A derivation, with what the kill relation needs to know about the run it was observed in.
++#[derive(Clone, Debug)]
+ pub struct Clause<M> {
+     /// The deliveries the fact was derived from.
+     pub deps: Derivation<M>,
+     /// The run's send sequences.
+     pub sends: Rc<SendSequences<M>>,
+-    /// The run's pre-heal send counts: the crash points that fire in this run, and so the ones
+-    /// this clause proposes and is hit by.
++    /// The run's pre-heal send counts.
+     pub pre_heal_sends: Rc<PreHealSends>,
+-    /// The crashes of the hypothesis the derivation was observed under. A derivation found in
+-    /// a world where a node was absent is sufficient only there: agreement is not monotone in
+-    /// a node's presence (the absent node, alive, may act against it). So a hypothesis that
+-    /// does not include all of these crashes counts as hitting the clause.
++    /// The crashes of the hypothesis it was observed under. Agreement is not monotone in a
++    /// node's presence, so a hypothesis lacking one of these counts as hitting the clause.
+     pub premises: FaultSet<M>,
+ }
+ 
+-impl<M: Debug> Debug for Clause<M> {
+-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+-        f.debug_struct("Clause")
+-            .field("deps", &self.deps)
+-            .field("premises", &self.premises)
+-            .finish_non_exhaustive()
+-    }
+-}
+-
+ impl<M: Ord + Clone> Clause<M> {
+-    /// A clause of a run in which every send of `sends` happened before the heal point.
+-    pub fn new(deps: impl IntoIterator<Item = Dependency<M>>, sends: Rc<SendSequences<M>>) -> Self {
+-        let pre_heal_sends = Rc::new(
+-            sends
+-                .iter()
+-                .map(|(node, seq)| (node.clone(), seq.len()))
+-                .collect(),
+-        );
+-        Clause {
+-            deps: deps.into_iter().collect(),
+-            sends,
+-            pre_heal_sends,
+-            premises: BTreeSet::new(),
+-        }
+-    }
+-
+     /// Whether `fault` kills some delivery of this clause.
+     pub fn hit_by(&self, fault: &Fault<M>) -> bool {
+         self.deps
+@@ -263,15 +193,13 @@ impl<M: Ord + Clone> Clause<M> {
+             .flat_map(move |dep| dep.candidate_faults(&self.sends, &self.pre_heal_sends))
+     }
+ 
+-    /// Whether no fault set can kill this derivation: it has no deliveries and holds in every
+-    /// world, whatever crashes.
++    /// Whether no fault set can kill this derivation (no deliveries, no premises).
+     pub fn is_unkillable(&self) -> bool {
+         self.deps.is_empty() && self.premises.is_empty()
+     }
+ 
+-    /// Every crash of `node` that kills some delivery of this clause: the crash before any send,
+-    /// and the crash right after each pre-heal send of `node` that precedes one of its deliveries
+-    /// here. [`Self::candidate_faults`] proposes only the weakest of these per delivery.
++    /// Every crash of `node` that kills some delivery of this clause: before any send, and
++    /// right after each pre-heal send of `node` before its last delivery here.
+     pub fn crash_killers<'a>(&'a self, node: &'a Node) -> impl Iterator<Item = Fault<M>> + 'a {
+         let fires = self.pre_heal_sends.get(node).copied().unwrap_or(0);
+         let last = self
+@@ -293,37 +221,21 @@ impl<M: Ord + Clone> Clause<M> {
+ }
+ 
+ /// The faults to add to [`universe`] so that "no admissible hitting set" is a statement about
+-/// every positional fault set, not only about the weakest candidates the clauses propose.
+-///
+-/// [`universe`] holds, per delivery, only its weakest killers (its omission, and the crash of
+-/// its sender right after the send before it). A crash point that first appears in a later run
+-/// can be earlier than the weakest killer of a delivery in an older clause, and so kill
+-/// deliveries of several clauses that no single weakest killer kills together: with one crash
+-/// per node, a hitting set may then exist only through it. This completion closes that gap:
++/// every positional fault set, not only the weakest candidates (which a crash point first seen
++/// in a later run can undercut, hitting several old clauses at once):
+ ///
+-/// 1. `crash(n)`, the crash before any send, for every sender `n` of a delivery. It kills every
+-///    delivery of `n`, so it hits every clause any crash of `n` hits through a delivery.
+-/// 2. Where `crash(n)` itself appears in a clause's premises or a vacuous set, replacing a crash
+-///    of `n` by it is not neutral (it may make a hypothesis include those premises, or a vacuous
+-///    set). There every crash point of `n` that kills some delivery is added instead.
+-/// 3. Every fault that appears in a premise or a vacuous set.
++/// 1. `crash(n)` for every sender `n` of a delivery: it kills everything any crash of `n` does;
++/// 2. where `crash(n)` itself is a premise or in a vacuous set (so swapping it in is not
++///    neutral), every crash point of `n` that kills some delivery instead;
++/// 3. every fault of a premise or a vacuous set.
+ ///
+-/// **Why that suffices.** Let `H` be any admissible fault set that hits every clause, with `k`
+-/// crashes. Build `H*`: drop every fault that kills no delivery of any clause (an omission
+-/// kills a delivery only if it names it, and then [`universe`] already holds it; a crash kills
+-/// one only if it names a send before it in that clause's run); replace each remaining crash of
+-/// a node `n` that is not in the completed universe by `crash(n)` (rule 1; by rule 2 this only
+-/// happens when `crash(n)` appears in no premise and no vacuous set). Then:
+-/// - `H*` hits every clause `H` hits. A clause is hit by killing a delivery, or by `H` lacking
+-///   one of its premises. Dropped faults killed nothing; a replacement kills a superset of what
+-///   it replaces. Removing a fault can only make a premise missing, and the replacement `crash(n)`
+-///   is no premise, so no premise that `H` lacked appears in `H*`.
+-/// - `H*` has at most `k` crashes, at most one per node and no more in the checked cluster:
+-///   it crashes a subset of `H`'s nodes.
+-/// - `H*` is no superset of a vacuous set unless `H` is (dropped faults only shrink it, and the
+-///   replacement is in no vacuous set).
+-///
+-/// So if the completed universe admits no hitting set at a bound, no fault set at all does.
++/// **Why that suffices.** Take any admissible `H` hitting every clause. Drop its faults that kill
++/// no delivery of any clause (an omission that does is already in [`universe`]), and replace each
++/// remaining crash of `n` outside the completed universe by `crash(n)` (rule 1; by rule 2 that
++/// `crash(n)` is no premise and in no vacuous set). The result still hits every clause (the
++/// replacement kills a superset, and no missing premise reappears), crashes a subset of `H`'s
++/// nodes, and is a superset of a vacuous set only if `H` is. So if the completed universe admits
++/// no hitting set at a bound, no fault set does.
+ pub fn completion<M: Ord + Clone>(
+     clauses: &[Clause<M>],
+     vacuous: &[FaultSet<M>],
+@@ -350,14 +262,10 @@ pub fn completion<M: Ord + Clone>(
+     out
+ }
+ 
+-/// The candidate faults of one hypothesis, weakest first: the weakest faults that kill some
+-/// delivery of some clause, plus `extra`.
+-///
+-/// Omissions come first, then crashes. Within a node, a crash after a later message comes before
+-/// one after an earlier message, and the crash before any send comes last. A position counts
+-/// as the latest one at which any clause's run sent the message. The solver uses this order as
+-/// its tie-break, so a hypothesis leaves as much of the protocol running as a minimal hitting set
+-/// allows.
++/// The candidates of one hypothesis (each clause's weakest killers, plus `extra`), weakest first:
++/// omissions, then per node crashes after later messages before earlier ones (by the latest
++/// position any clause's run sent it at), `crash(n)` last. The solver's tie-break follows this
++/// order, so a hypothesis leaves as much of the protocol running as it can.
+ pub fn universe<'a, M: Ord + Clone + 'a>(
+     clauses: &[Clause<M>],
+     extra: impl IntoIterator<Item = &'a Fault<M>>,
+diff --git a/hydrofrac/src/search/ilp.rs b/hydrofrac/src/search/ilp.rs
+index 0544a67dd2..bb44bf73ee 100644
+--- a/hydrofrac/src/search/ilp.rs
++++ b/hydrofrac/src/search/ilp.rs
+@@ -1,7 +1,6 @@
+ //! The hitting-set integer program (docs/design/hydrofrac-lite.md §4.4).
+ 
+ use std::collections::{BTreeMap, BTreeSet};
+-use std::fmt::{self, Display};
+ 
+ use good_lp::{
+     Expression, ProblemVariables, ResolutionError, Solution, SolverModel, Variable, variable,
+@@ -9,32 +8,26 @@ use good_lp::{
+ 
+ use super::clause::{Clause, Fault, FaultSet, Node};
+ 
+-/// The bounds on the crashes of one hypothesis.
++/// The bounds on the crashes of one hypothesis (docs/design/hydrofrac-lite.md §4.5).
+ #[derive(Clone, Debug, Default, PartialEq, Eq)]
+ pub struct CrashBounds {
+-    /// An explicit cap on the number of crashes. `None` is unbounded.
++    /// The `max_crashes` cap; `None` is unbounded.
+     pub cap: Option<usize>,
+-    /// The number of nodes of the program. Crashing every node is vacuous, so a hypothesis
+-    /// holds at most `nodes - 1` crashes. `0` means no such bound (for tests).
++    /// The number of nodes: at most `nodes - 1` crash (`0`: no such bound, for tests).
+     pub nodes: usize,
+-    /// The members of the checked cluster, and how many of them may crash in one hypothesis.
+-    /// `None` when nothing is checked at a cluster.
++    /// The checked cluster, if the label lives on one.
+     pub checked: Option<CheckedCluster>,
+ }
+ 
+-/// The members of the cluster a label is checked at, and the cap on how many of them one
+-/// hypothesis may crash.
++/// The members of the checked cluster, and how many of them one hypothesis may crash.
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub struct CheckedCluster {
+-    /// The members.
+     pub nodes: BTreeSet<Node>,
+-    /// At most this many of `nodes` crash in one hypothesis.
+     pub cap: usize,
+ }
+ 
+ impl CheckedCluster {
+-    /// The checked cluster made of `members`, with the cap `|members| − 2`: crashing all of
+-    /// them, or all but one, is vacuous, since a single survivor agrees with itself.
++    /// The cap is `|members| − 2`: a single survivor agrees with itself.
+     pub fn new(members: impl IntoIterator<Item = Node>) -> Self {
+         let nodes: BTreeSet<Node> = members.into_iter().collect();
+         let cap = nodes.len().saturating_sub(2);
+@@ -43,16 +36,7 @@ impl CheckedCluster {
+ }
+ 
+ impl CrashBounds {
+-    /// Bounds with an explicit cap and nothing else.
+-    pub fn cap(crashes: usize) -> Self {
+-        CrashBounds {
+-            cap: Some(crashes),
+-            ..CrashBounds::default()
+-        }
+-    }
+-
+-    /// The largest number of crashes any hypothesis may hold under these bounds, if any. This
+-    /// counts the cap and the every-node bound; the checked-cluster cap bounds only a subset.
++    /// The most crashes any hypothesis may hold: the cap and the every-node bound.
+     pub fn max_crashes(&self) -> Option<usize> {
+         let all_nodes = (self.nodes >= 1).then(|| self.nodes - 1);
+         match (self.cap, all_nodes) {
+@@ -70,27 +54,6 @@ impl CrashBounds {
+     }
+ }
+ 
+-impl Display for CrashBounds {
+-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+-        match self.cap {
+-            Some(cap) => write!(f, "at most {cap} crash(es)")?,
+-            None => write!(f, "crashes unbounded")?,
+-        }
+-        if self.nodes >= 1 {
+-            write!(f, "; not all {} nodes at once", self.nodes)?;
+-        }
+-        if let Some(checked) = &self.checked {
+-            write!(
+-                f,
+-                "; at most {} of the checked cluster's {} member(s)",
+-                checked.cap,
+-                checked.nodes.len()
+-            )?;
+-        }
+-        Ok(())
+-    }
+-}
+-
+ /// The ILP backend.
+ #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+ pub enum Backend {
+@@ -103,73 +66,33 @@ pub enum Backend {
+ }
+ 
+ /// The weight of each candidate in a universe of `n`, by position: `1` plus a tie-break that
+-/// prefers earlier (weaker) candidates.
+-///
+-/// The tie-break must never trade cardinality. Every set of `k` candidates must cost less than
+-/// every set of `k + 1`. Each tie-break is below `0.5 / n`, so even a set of all `n` candidates
+-/// gains less than `0.5` in total. (The research branch's `0.5 / n` per position let a
+-/// `k`-set of late candidates cost more than a `(k+1)`-set of early ones once `k ≥ 3`.)
++/// prefers earlier (weaker) candidates. Each tie-break is below `0.5 / n`, so it never trades
++/// cardinality (the research branch's `0.5 / n` per position did, for sets of size ≥ 3; §4.4).
+ pub fn weights(n: usize) -> impl Iterator<Item = f64> {
+     let tie_break = 0.5 / (n as f64 * n as f64);
+     (0..n).map(move |i| 1.0 + tie_break * i as f64)
+ }
+ 
+ /// The next hypothesis: a minimum-weight subset of `universe` (sorted weakest first, see
+-/// [`super::universe`]) that kills some dependency of every clause, keeps crashes within
+-/// `bounds` and at most one crash per node, is no superset of a vacuous set, and has not been
+-/// tried. Returns `None` when no such set exists.
+-///
+-/// With no clauses this enumerates every admissible subset by weight: the blind search used to
+-/// cross-check the lineage.
++/// [`super::universe`]) that satisfies some clause of every group, keeps crashes within `bounds`
++/// and at most one per node, is no superset of a vacuous set, and has not been tried. `None`
++/// when no such set exists (proven: the MIP gap is zero).
+ ///
+-/// The integer program:
+-/// - a binary `x_f` per candidate fault `f`;
+-/// - minimize `Σ w_f x_f` ([`weights`]);
+-/// - cover: for every clause `D` with premises `P`,
+-///   `Σ { x_f : f kills some d ∈ D } + Σ_{p ∈ P} (1 − x_p) ≥ 1`. A premise outside the universe
+-///   can never be selected, so its clause applies to no hypothesis and is dropped;
+-/// - `Σ_{f = crash(n, ·)} x_f ≤ 1` per node. An earlier crash of the same node dominates a later
+-///   one;
+-/// - the crash bounds: `Σ_{crash} x_f ≤ cap`; `Σ_{crash} x_f ≤ N − 1`; and
+-///   `Σ_{crash of a member of C} x_f ≤ |C| − 2` for the checked cluster `C`;
++/// The integer program (§4.4), with a binary `x_f` per candidate, minimizing `Σ w_f x_f`
++/// ([`weights`]):
++/// - cover, per clause `D` with premises `P`: `Σ { x_f : f kills some d ∈ D } + Σ_{p ∈ P}
++///   (1 − x_p) ≥ 1` (a premise outside the universe can never be selected: no row). A group of
++///   several clauses gets a binary `y_c ≤` that left-hand side per clause, and `Σ_c y_c ≥ 1`:
++///   the heuristic for schedule-sensitive labels, where a hypothesis need only kill one
++///   schedule's derivations (§4.9);
++/// - at most one crash per node; `Σ_{crash} x_f ≤ min(cap, N − 1)`; at most `|C| − 2` crashes
++///   in the checked cluster `C`;
+ /// - no superset of a vacuous set `V`: `Σ_{f ∈ V} x_f ≤ |V| − 1`;
+-/// - a no-good per tried set `T`: `Σ_{f ∈ T} x_f − Σ_{f ∉ T} x_f ≤ |T| − 1`, excluding exactly `T`.
+-///   A tried set with a fault outside the universe cannot be proposed, so it needs no row.
++/// - a no-good per tried set `T`: `Σ_{f ∈ T} x_f − Σ_{f ∉ T} x_f ≤ |T| − 1`.
+ ///
+-/// Only the rows that can cut something off are written: a tried set gets a no-good only when no
+-/// other row already excludes it (`already_excluded`), and implied cover rows are left out
+-/// (`cover_rows`). Both are exact: the feasible region is that of the full program. No-good
+-/// rows are dense (one nonzero per candidate) and were what made the program slow as tried sets
+-/// accumulated; in a search where every run that holds yields a new derivation, none is needed.
+-///
+-/// The MIP gap is zero, so a returned set is proven optimal, and `None` is proven infeasible.
+-pub fn hitting_set<M: Ord + Clone>(
+-    universe: &[Fault<M>],
+-    clauses: &[Clause<M>],
+-    tried: &BTreeSet<FaultSet<M>>,
+-    vacuous: &[FaultSet<M>],
+-    bounds: &CrashBounds,
+-    backend: Backend,
+-) -> Option<FaultSet<M>> {
+-    solve(
+-        universe,
+-        clauses,
+-        tried,
+-        vacuous,
+-        bounds,
+-        backend,
+-        Model::Lean,
+-    )
+-}
+-
+-/// [`hitting_set`] with disjunctive clauses: each group is satisfied when the hypothesis kills
+-/// *some* clause of it (or misses one of that clause's premises), rather than every one. A group
+-/// of one clause is an ordinary cover row; a group with several gets a binary per clause,
+-/// `y_c ≤ Σ { x_f : f kills some d ∈ c } + Σ_{p ∈ P_c} (1 − x_p)`, and the row `Σ_c y_c ≥ 1`.
+-///
+-/// This is the search heuristic for schedule-sensitive labels (docs/design/hydrofrac-lite.md
+-/// §4.9): a run's group is the derivations its schedules observed, and a hypothesis need only
+-/// kill one schedule's. It is not a pruning rule a certificate can rest on.
++/// Only rows that can cut something off are written ([`cover_rows`],
++/// [`already_excluded_by_groups`]); both omissions are exact. The dense no-good rows were what
++/// made the program slow as tried sets accumulated.
+ pub fn hitting_set_any<M: Ord + Clone>(
+     universe: &[Fault<M>],
+     groups: &[&[Clause<M>]],
+@@ -197,50 +120,21 @@ pub(crate) fn group_is_unkillable<M: Ord + Clone>(group: &[Clause<M>]) -> bool {
+ /// How much of the integer program is written out. Both have the same feasible region.
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub(crate) enum Model {
+-    /// Only the rows that can cut something off: no-goods only for tried sets nothing else
+-    /// excludes ([`already_excluded`]), and cover rows without the implied ones
+-    /// ([`cover_rows`]). What [`hitting_set`] uses.
++    /// Only the rows that can cut something off.
+     Lean,
+-    /// Every row, as the model's definition reads. The reference the lean model is tested
+-    /// against.
++    /// Every row: the reference the lean model is tested against.
+     #[cfg(test)]
+     Full,
+ }
+ 
+-/// Whether the rows other than `tried`'s own no-good already exclude the tried set `tried`, so
+-/// its no-good can be left out without changing the feasible set.
+-///
+-/// The no-good of `T` removes exactly one point, `x = T`, from the feasible region. If some other
+-/// row already rejects `x = T`, then the region with and without the no-good is the same, so the
+-/// optimum, and infeasibility, are unchanged: the omission is exact, not a relaxation. Two kinds
+-/// of row reject `x = T` and are checked here, on the host, without the solver:
+-/// - **a cover row** of a clause `D` with premises `P`, when no fault of `T` kills a delivery of
+-///   `D` and `P ⊆ T`. Then the left-hand side at `x = T` is `0 − |P|`, below the bound `1 − |P|`.
+-///   The row exists: `P ⊆ T` and `T` lies inside the universe (otherwise `T` needs no row
+-///   anyway), so every premise is a candidate.
+-/// - **a vacuous row** of a vacuous set `V ⊆ T`: at `x = T` it sums to `|V| > |V| − 1`. If `V`
+-///   has a fault outside the universe then so does `T`, which then needs no row anyway.
++/// Whether rows other than its own no-good already exclude the tried set `T`, so the no-good
++/// can be left out exactly (it removes only the point `x = T`). Checked on the host:
++/// - a group all of whose clauses `T` misses with all their premises in `T` (each cover row
++///   sums to `−|P| < 1 − |P|` at `x = T`);
++/// - a vacuous set `V ⊆ T`.
+ ///
+-/// This is the common case. Once a hypothesis `T` has run and the label held, the run's
+-/// derivations are clauses, and `T` did not kill them (it ran and they were observed), so `T`
+-/// fails to hit one of them. An explicit no-good is only needed for a `T` whose run taught the
+-/// search nothing it did not already know.
+-#[cfg_attr(
+-    not(test),
+-    expect(dead_code, reason = "the one-clause-per-group form, for the tests")
+-)]
+-pub(crate) fn already_excluded<M: Ord + Clone>(
+-    tried: &FaultSet<M>,
+-    clauses: &[Clause<M>],
+-    vacuous: &[FaultSet<M>],
+-) -> bool {
+-    let groups: Vec<&[Clause<M>]> = clauses.iter().map(std::slice::from_ref).collect();
+-    already_excluded_by_groups(tried, &groups, vacuous)
+-}
+-
+-/// [`already_excluded`] with disjunctive groups: a group rejects `x = T` when it rejects it
+-/// through every clause, each missed by `T` with all its premises in `T` (its `y` binaries are
+-/// then all forced to 0, and its row `Σ y ≥ 1` fails).
++/// This is the common case: a tried set that held left its derivations alive, and they became
++/// clauses it misses.
+ pub(crate) fn already_excluded_by_groups<M: Ord + Clone>(
+     tried: &FaultSet<M>,
+     groups: &[&[Clause<M>]],
+@@ -259,20 +153,9 @@ pub(crate) fn already_excluded_by_groups<M: Ord + Clone>(
+ /// positions of its premises. Read as "some hit is selected, or some premise is not".
+ pub(crate) type CoverRow = (BTreeSet<usize>, BTreeSet<usize>);
+ 
+-/// The cover rows of `clauses` over `universe`, without the rows that cannot cut anything off.
+-///
+-/// Dropping a row that every point satisfying the kept rows also satisfies leaves the feasible
+-/// region unchanged, so this is exact:
+-/// - a clause with a premise outside the universe binds no hypothesis (the premise can never be
+-///   selected);
+-/// - a row with a premise that is also a hit is always satisfied: either it is selected, a hit,
+-///   or not, a missing premise;
+-/// - a row `(H, P)` is implied by any row `(H', P')` with `H' ⊆ H` and `P' ⊆ P`: a point that
+-///   selects a hit of `H'` selects one of `H`, and a point missing a premise of `P'` misses one
+-///   of `P`. In particular, duplicates collapse to one.
+-///
+-/// Clauses repeat a lot in practice: every run of a hypothesis that leaves a derivation intact
+-/// observes it again.
++/// The cover rows of `clauses` over `universe`, without those that cannot cut anything off
++/// (exact): a row with a premise that is also a hit always holds, and a row `(H, P)` is implied
++/// by any `(H', P')` with `H' ⊆ H`, `P' ⊆ P` (so duplicates collapse).
+ pub(crate) fn cover_rows<M: Ord + Clone>(
+     universe: &[Fault<M>],
+     clauses: &[Clause<M>],
+@@ -296,7 +179,7 @@ pub(crate) fn cover_rows<M: Ord + Clone>(
+     kept
+ }
+ 
+-/// One cover row per clause whose premises are all candidates: the program as defined.
++/// One cover row per clause whose premises are all candidates (the others bind nothing).
+ pub(crate) fn all_cover_rows<M: Ord + Clone>(
+     universe: &[Fault<M>],
+     clauses: &[Clause<M>],
+@@ -319,19 +202,6 @@ pub(crate) fn all_cover_rows<M: Ord + Clone>(
+         .collect()
+ }
+ 
+-pub(crate) fn solve<M: Ord + Clone>(
+-    universe: &[Fault<M>],
+-    clauses: &[Clause<M>],
+-    tried: &BTreeSet<FaultSet<M>>,
+-    vacuous: &[FaultSet<M>],
+-    bounds: &CrashBounds,
+-    backend: Backend,
+-    model: Model,
+-) -> Option<FaultSet<M>> {
+-    let groups: Vec<&[Clause<M>]> = clauses.iter().map(std::slice::from_ref).collect();
+-    solve_groups(universe, &groups, tried, vacuous, bounds, backend, model)
+-}
+-
+ pub(crate) fn solve_groups<M: Ord + Clone>(
+     universe: &[Fault<M>],
+     groups: &[&[Clause<M>]],
+@@ -386,35 +256,12 @@ pub(crate) fn solve_groups<M: Ord + Clone>(
+     for row in rows {
+         constraints.push(satisfied(&row).geq(1.0));
+     }
+-    // A disjunction: some clause of the group is satisfied. A clause whose row is always
+-    // satisfied (a premise outside the universe, or a premise that is also a hit) satisfies
+-    // the group outright, so the group needs no row.
++    // A disjunction: some clause of the group is satisfied. A clause whose row always holds
++    // (a premise outside the universe, or one that is also a hit) satisfies the group outright.
+     let mut disjunction_rows: BTreeSet<Vec<CoverRow>> = BTreeSet::new();
+     for group in &disjunctions {
+-        let index: BTreeMap<&Fault<M>, usize> =
+-            universe.iter().enumerate().map(|(i, f)| (f, i)).collect();
+-        let mut rows: Vec<CoverRow> = vec![];
+-        let mut always = false;
+-        for clause in group.iter() {
+-            let Some(premises) = clause
+-                .premises
+-                .iter()
+-                .map(|p| index.get(p).copied())
+-                .collect::<Option<BTreeSet<usize>>>()
+-            else {
+-                always = true;
+-                break;
+-            };
+-            let hits: BTreeSet<usize> = (0..universe.len())
+-                .filter(|&i| clause.hit_by(&universe[i]))
+-                .collect();
+-            if !hits.is_disjoint(&premises) {
+-                always = true;
+-                break;
+-            }
+-            rows.push((hits, premises));
+-        }
+-        if always {
++        let mut rows = all_cover_rows(universe, group);
++        if rows.len() < group.len() || rows.iter().any(|(h, p)| !h.is_disjoint(p)) {
+             continue;
+         }
+         rows.sort();
+@@ -435,14 +282,12 @@ pub(crate) fn solve_groups<M: Ord + Clone>(
+         constraints.push(any.geq(1.0));
+     }
+ 
+-    let crashes: Vec<usize> = (0..universe.len())
+-        .filter(|&i| universe[i].crashed_node().is_some())
+-        .collect();
+     let crash_sum = |pick: &dyn Fn(&Node) -> bool| -> Expression {
+-        crashes
++        universe
+             .iter()
+-            .filter(|&&i| universe[i].crashed_node().is_some_and(pick))
+-            .map(|&i| Expression::from(x[i]))
++            .zip(&x)
++            .filter(|(f, _)| f.crashed_node().is_some_and(pick))
++            .map(|(_, &v)| Expression::from(v))
+             .sum()
+     };
+     // With at most one crash per node (below), the sum of the crash variables is the number of
+@@ -453,10 +298,7 @@ pub(crate) fn solve_groups<M: Ord + Clone>(
+     if let Some(checked) = &bounds.checked {
+         constraints.push(crash_sum(&|n| checked.nodes.contains(n)).leq(checked.cap as f64));
+     }
+-    let nodes: BTreeSet<&Node> = crashes
+-        .iter()
+-        .filter_map(|&i| universe[i].crashed_node())
+-        .collect();
++    let nodes: BTreeSet<&Node> = universe.iter().filter_map(Fault::crashed_node).collect();
+     for node in nodes {
+         constraints.push(crash_sum(&|n| n == node).leq(1.0));
+     }
+diff --git a/hydrofrac/src/search/mod.rs b/hydrofrac/src/search/mod.rs
+index 954be5e64e..11e9c1cefc 100644
+--- a/hydrofrac/src/search/mod.rs
++++ b/hydrofrac/src/search/mod.rs
+@@ -1,11 +1,6 @@
+-//! The search: minimal hitting sets of the derivations seen so far, swept across crash bounds.
+-//!
+-//! This module is pure. It knows nothing of the simulator: the loop runs hypotheses, turns their
+-//! observations into [`Clause`]s, and asks a [`Sweep`] what to run next.
+-//!
+-//! - [`clause`]: faults, derivations, and the positional kill relation.
+-//! - [`ilp`]: the hitting-set integer program, on `microlp` (or HiGHS, behind `highs`).
+-//! - [`sweep`]: one label's search from zero crashes upwards.
++//! The search (docs/design/hydrofrac-lite.md §4.3–4.5), pure: the loop turns runs into
++//! [`Clause`]s and asks a [`Sweep`] what to run next. [`clause`] holds the kill relation,
++//! [`ilp`] the hitting-set program, [`sweep`] the crash sweep.
+ 
+ pub mod clause;
+ pub mod ilp;
+@@ -15,7 +10,7 @@ pub use clause::{
+     Clause, CrashAt, Dependency, Derivation, Fault, FaultSet, Node, PreHealSends, SendSequences,
+     completion, crash_count, universe,
+ };
+-pub use ilp::{Backend, CheckedCluster, CrashBounds, hitting_set, hitting_set_any, weights};
++pub use ilp::{Backend, CheckedCluster, CrashBounds, hitting_set_any, weights};
+ pub use sweep::{HYPOTHESIS_BUDGET, Next, Sweep, Tolerance};
+ 
+ // Runtime-only: the staged copy of this crate (compiled into simulation dylibs) does not need
+diff --git a/hydrofrac/src/search/sweep.rs b/hydrofrac/src/search/sweep.rs
+index 1a17dfb046..838f40955a 100644
+--- a/hydrofrac/src/search/sweep.rs
++++ b/hydrofrac/src/search/sweep.rs
+@@ -1,34 +1,17 @@
+-//! The crash sweep: one label's search, from zero crashes upwards.
++//! The crash sweep (docs/design/hydrofrac-lite.md §4.5): one label's search from zero crashes
++//! upwards, keeping clauses, tried sets and vacuous sets across bounds.
+ //!
+-//! The search starts with a crash bound of 0, so only omissions. When no admissible hypothesis
+-//! is left at bound `k`, the label is certified for every fault set with at most `k` crashes.
+-//! The sweep then raises the bound to `k + 1` and keeps everything it learned. A derivation is a
+-//! fact about a run, not about the bound, so clauses, tried sets and vacuous sets all carry
+-//! over. The caller stops the sweep at the first counterexample. The label then tolerates
+-//! [`Sweep::tolerated`] crashes and breaks at [`Sweep::crash_bound`].
+-//!
+-//! Every hypothesis proposed at bound `k + 1` holds exactly `k + 1` crashes. Every set with at
+-//! most `k` crashes was already excluded at bound `k`, and constraints only accumulate. So a
+-//! counterexample found at bound `k + 1` really needs `k + 1` crashes, given what the search
+-//! has seen.
+-//!
+-//! "Excluded at bound `k`" has to cover every positional fault set, not only those built from
+-//! the candidates the clauses propose at the time. Those are each delivery's weakest killers;
+-//! a run seen later can name an earlier crash point, one that hits clauses that no single old
+-//! candidate hits together. So before concluding at a bound, the sweep asks once more over the
+-//! universe extended by [`completion`] (chiefly `crash(n)` for every sender `n`), which admits
+-//! a hitting set whenever any fault set is one. This makes the certificate at `k` a statement
+-//! about all fault sets with at most `k` crashes, and with it the "exactly `k + 1`" above: a set
+-//! with at most `k` crashes that hits every clause seen later also hits the clauses seen by then,
+-//! and the completed universe would have admitted one.
++//! Every hypothesis proposed at bound `k + 1` holds exactly `k + 1` crashes, because bound `k`
++//! was exhausted first. That needs "exhausted" to cover every positional fault set, not only
++//! the weakest candidates the clauses propose, so before concluding at a bound the sweep asks
++//! once more over the universe extended by [`completion`].
+ 
+ use std::collections::BTreeSet;
+ 
+ use super::clause::{Clause, Fault, FaultSet, completion, universe};
+ use super::ilp::{Backend, CrashBounds, group_is_unkillable, hitting_set_any};
+ 
+-/// The default hypothesis budget, counting the failure-free probe. Once it is spent the verdict
+-/// is [`Next::Budget`], not a certificate (docs/design/hydrofrac-lite.md §2).
++/// The hypothesis budget, counting the failure-free probe (§2).
+ pub const HYPOTHESIS_BUDGET: usize = 1024;
+ 
+ /// What the sweep says to do next.
+@@ -38,19 +21,16 @@ pub enum Next<M> {
+     Try(FaultSet<M>),
+     /// No admissible hypothesis is left: the label holds.
+     Certified(Tolerance),
+-    /// The hypothesis budget is spent. The label holds with at most [`Sweep::tolerated`]
+-    /// crashes, if that is `Some`.
++    /// The hypothesis budget is spent: not a certificate.
+     Budget,
+ }
+ 
+ /// How many crashes a certified label tolerates.
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub enum Tolerance {
+-    /// Every admissible fault set: any omissions, and any number of crashes short of the
+-    /// vacuity bounds. Either the vacuity bounds stopped the sweep, or no crash beyond the
+-    /// last bound could kill anything the search has seen.
++    /// Every admissible fault set (the vacuity bounds, or saturation, stopped the sweep).
+     All,
+-    /// Every fault set with at most this many crashes. The explicit cap stopped the sweep.
++    /// Every fault set with at most this many crashes (the `max_crashes` cap stopped it).
+     UpTo(usize),
+ }
+ 
+@@ -58,18 +38,18 @@ pub enum Tolerance {
+ #[derive(Clone, Debug)]
+ pub struct Sweep<M> {
+     bounds: CrashBounds,
+-    bound: usize,
++    /// The current crash bound.
++    pub(super) bound: usize,
+     tolerated: Option<usize>,
+     tried: BTreeSet<FaultSet<M>>,
+     vacuous: Vec<FaultSet<M>>,
+-    extra: BTreeSet<Fault<M>>,
+-    budget: usize,
+-    backend: Backend,
++    /// The hypothesis budget, counting the probe.
++    pub(super) budget: usize,
++    pub(super) backend: Backend,
+ }
+ 
+ impl<M: Ord + Clone> Sweep<M> {
+-    /// A sweep under `bounds`, starting at zero crashes. The failure-free probe counts as
+-    /// tried: it is hypothesis 0.
++    /// A sweep under `bounds`, at zero crashes; the probe (the empty set) counts as tried.
+     pub fn new(bounds: CrashBounds) -> Self {
+         Sweep {
+             bounds,
+@@ -77,42 +57,17 @@ impl<M: Ord + Clone> Sweep<M> {
+             tolerated: None,
+             tried: BTreeSet::from([FaultSet::new()]),
+             vacuous: vec![],
+-            extra: BTreeSet::new(),
+             budget: HYPOTHESIS_BUDGET,
+             backend: Backend::default(),
+         }
+     }
+ 
+-    /// Sets the hypothesis budget, counting the probe.
+-    pub fn with_budget(mut self, budget: usize) -> Self {
+-        self.budget = budget;
+-        self
+-    }
+-
+-    /// Sets the ILP backend.
+-    pub fn with_backend(mut self, backend: Backend) -> Self {
+-        self.backend = backend;
+-        self
+-    }
+-
+-    /// Adds candidate faults beyond those the clauses propose. With no clauses, these alone
+-    /// make a blind enumeration of every admissible set by size.
+-    pub fn add_candidates(&mut self, faults: impl IntoIterator<Item = Fault<M>>) {
+-        self.extra.extend(faults);
+-    }
+-
+-    /// Records that `set` gave a vacuous run, so neither it nor any superset is proposed again.
++    /// Records that `set` gave a vacuous run: neither it nor a superset is proposed again.
+     pub fn mark_vacuous(&mut self, set: FaultSet<M>) {
+         self.vacuous.push(set);
+     }
+ 
+-    /// The current crash bound.
+-    pub fn crash_bound(&self) -> usize {
+-        self.bound
+-    }
+-
+-    /// The largest crash bound certified so far: the label holds under every fault set with at
+-    /// most this many crashes. `None` while nothing is certified, not even omissions alone.
++    /// The largest crash bound certified so far (`None`: not even omissions alone).
+     pub fn tolerated(&self) -> Option<usize> {
+         self.tolerated
+     }
+@@ -122,28 +77,20 @@ impl<M: Ord + Clone> Sweep<M> {
+         self.tried.len()
+     }
+ 
+-    /// The bounds.
+-    pub fn bounds(&self) -> &CrashBounds {
+-        &self.bounds
+-    }
+-
+     /// The next step given every clause learned so far. A proposed set counts as tried.
+     pub fn next(&mut self, clauses: &[Clause<M>]) -> Next<M> {
+         let groups: Vec<&[Clause<M>]> = clauses.iter().map(std::slice::from_ref).collect();
+         self.next_any(&groups)
+     }
+ 
+-    /// [`Self::next`] with disjunctive clauses (see [`super::hitting_set_any`]): a hypothesis
+-    /// must satisfy some clause of every group. With one clause per group this is [`Self::next`].
+-    ///
+-    /// Used as a heuristic for schedule-sensitive labels, whose "certificates" are not proofs:
+-    /// the caller decides what [`Next::Certified`] means.
++    /// [`Self::next`] with disjunctive clauses ([`super::hitting_set_any`]): the heuristic for
++    /// schedule-sensitive labels, whose [`Next::Certified`] the caller does not trust (§4.9).
+     pub fn next_any(&mut self, groups: &[&[Clause<M>]]) -> Next<M> {
+         if groups.iter().any(|g| group_is_unkillable(g)) {
+             return Next::Certified(Tolerance::All);
+         }
+         let clauses: Vec<Clause<M>> = groups.iter().flat_map(|g| g.iter().cloned()).collect();
+-        let universe = universe(&clauses, &self.extra);
++        let universe = universe(&clauses, []);
+         // The most crashes any admissible set over this universe can hold: one per node, and
+         // at most the checked cluster's cap among its members.
+         let crash_nodes: BTreeSet<_> = universe.iter().filter_map(Fault::crashed_node).collect();
+@@ -157,7 +104,8 @@ impl<M: Ord + Clone> Sweep<M> {
+                 crash_nodes.len() - members + members.min(checked.cap)
+             }
+         };
+-        // The completed universe, computed the first time the weakest candidates admit nothing.
++        // The completed universe, computed the first time the weakest candidates admit nothing:
++        // only then is "no hitting set" true of every fault set.
+         let mut complete: Option<Option<Vec<Fault<M>>>> = None;
+         loop {
+             if self.tried.len() >= self.budget {
+@@ -175,17 +123,12 @@ impl<M: Ord + Clone> Sweep<M> {
+                 self.tried.insert(set.clone());
+                 return Next::Try(set);
+             }
+-            // Before concluding anything at this bound, ask again over the completed universe
+-            // (see [`completion`]): only then is "no hitting set" true of every fault set.
+             let complete = complete.get_or_insert_with(|| {
+                 let extra = completion(&clauses, &self.vacuous);
+                 if extra.iter().all(|f| universe.contains(f)) {
+                     None
+                 } else {
+-                    Some(super::clause::universe(
+-                        &clauses,
+-                        self.extra.iter().chain(extra.iter()),
+-                    ))
++                    Some(super::clause::universe(&clauses, &extra))
+                 }
+             });
+             if let Some(complete) = complete
+diff --git a/hydrofrac/src/search/tests.rs b/hydrofrac/src/search/tests.rs
+index 6ef0c543f7..4b4ee16d78 100644
+--- a/hydrofrac/src/search/tests.rs
++++ b/hydrofrac/src/search/tests.rs
+@@ -22,6 +22,65 @@ fn reliable(channel: &'static str, payload: u32, sender: &str, ordinal: u64) ->
+     }
+ }
+ 
++/// A clause of a run in which every send of `sends` happened before the heal.
++fn new_clause(
++    deps: impl IntoIterator<Item = Dependency<M>>,
++    sends: Rc<SendSequences<M>>,
++) -> Clause<M> {
++    let pre_heal_sends = Rc::new(sends.iter().map(|(n, seq)| (n.clone(), seq.len())).collect());
++    Clause {
++        deps: deps.into_iter().collect(),
++        sends,
++        pre_heal_sends,
++        premises: BTreeSet::new(),
++    }
++}
++
++/// Bounds with an explicit cap and nothing else.
++fn cap_bounds(crashes: usize) -> CrashBounds {
++    CrashBounds {
++        cap: Some(crashes),
++        ..CrashBounds::default()
++    }
++}
++
++fn singletons(clauses: &[Clause<M>]) -> Vec<&[Clause<M>]> {
++    clauses.iter().map(std::slice::from_ref).collect()
++}
++
++/// The program with one clause per group, in either model.
++fn solve_model(
++    universe: &[Fault<M>],
++    clauses: &[Clause<M>],
++    tried: &BTreeSet<FaultSet<M>>,
++    vacuous: &[FaultSet<M>],
++    bounds: &CrashBounds,
++    backend: Backend,
++    model: ilp::Model,
++) -> Option<FaultSet<M>> {
++    let groups = singletons(clauses);
++    ilp::solve_groups(universe, &groups, tried, vacuous, bounds, backend, model)
++}
++
++fn hitting_set(
++    universe: &[Fault<M>],
++    clauses: &[Clause<M>],
++    tried: &BTreeSet<FaultSet<M>>,
++    vacuous: &[FaultSet<M>],
++    bounds: &CrashBounds,
++    backend: Backend,
++) -> Option<FaultSet<M>> {
++    solve_model(universe, clauses, tried, vacuous, bounds, backend, ilp::Model::Lean)
++}
++
++fn already_excluded(
++    tried: &FaultSet<M>,
++    clauses: &[Clause<M>],
++    vacuous: &[FaultSet<M>],
++) -> bool {
++    ilp::already_excluded_by_groups(tried, &singletons(clauses), vacuous)
++}
++
+ fn no_sends() -> Rc<SendSequences<M>> {
+     Rc::new(SendSequences::new())
+ }
+@@ -71,29 +130,29 @@ fn crashed_nodes(h: &FaultSet<M>) -> BTreeSet<&str> {
+ #[test]
+ fn hitting_sets_grow_by_size_and_skip_tried() {
+     let clauses = vec![
+-        Clause::new([lossy("req", 1), lossy("ack", 1)], no_sends()),
+-        Clause::new([lossy("req", 2), lossy("ack", 2)], no_sends()),
++        new_clause([lossy("req", 1), lossy("ack", 1)], no_sends()),
++        new_clause([lossy("req", 2), lossy("ack", 2)], no_sends()),
+     ];
+     let mut tried = BTreeSet::new();
+     // Every minimal hitting set (one literal per clause) comes first, each exactly once...
+     for _ in 0..4 {
+-        let h = solve(&clauses, &tried, &CrashBounds::cap(0)).unwrap();
++        let h = solve(&clauses, &tried, &cap_bounds(0)).unwrap();
+         assert_eq!(h.len(), 2);
+         assert!(tried.insert(h));
+     }
+     // ...and only then the non-minimal ones.
+-    let h = solve(&clauses, &tried, &CrashBounds::cap(0)).unwrap();
++    let h = solve(&clauses, &tried, &cap_bounds(0)).unwrap();
+     assert_eq!(h.len(), 3);
+ }
+ 
+ #[test]
+ fn empty_clause_has_no_hitting_set() {
+     let clauses = vec![
+-        Clause::new([lossy("req", 1)], no_sends()),
+-        Clause::new([], no_sends()),
++        new_clause([lossy("req", 1)], no_sends()),
++        new_clause([], no_sends()),
+     ];
+     assert_eq!(
+-        solve(&clauses, &BTreeSet::new(), &CrashBounds::cap(0)),
++        solve(&clauses, &BTreeSet::new(), &cap_bounds(0)),
+         None
+     );
+ }
+@@ -103,9 +162,9 @@ fn empty_clause_has_no_hitting_set() {
+ #[test]
+ fn an_empty_derivation_under_a_crash_binds_only_worlds_with_that_crash() {
+     let sends = Rc::new(SendSequences::from([("s".to_owned(), vec![("to", 1)])]));
+-    let mut under_crash = Clause::new([], sends.clone());
++    let mut under_crash = new_clause([], sends.clone());
+     under_crash.premises = set([crash("s")]);
+-    let clauses = vec![Clause::new([reliable("to", 1, "s", 0)], sends), under_crash];
++    let clauses = vec![new_clause([reliable("to", 1, "s", 0)], sends), under_crash];
+     // The only candidate is `crash(s)`, which is the premise: no hypothesis remains.
+     assert_eq!(
+         solve(&clauses, &BTreeSet::new(), &CrashBounds::default()),
+@@ -123,7 +182,7 @@ fn an_empty_derivation_under_a_crash_binds_only_worlds_with_that_crash() {
+ /// A premise that is not a candidate can never be selected: the clause applies to no hypothesis.
+ #[test]
+ fn a_clause_whose_premise_is_not_a_candidate_is_dropped() {
+-    let mut clause = Clause::new([lossy("req", 1)], no_sends());
++    let mut clause = new_clause([lossy("req", 1)], no_sends());
+     clause.premises = set([crash("elsewhere")]);
+     let clauses = vec![clause];
+     // Nothing binds, so the empty set is the minimum; once tried, the omission follows.
+@@ -141,18 +200,18 @@ fn crash_kills_later_sends_and_respects_the_cap() {
+     // The sender's fan-out to two members: sends `m0` then `m1`.
+     let (m0, m1) = (("to@0", 42), ("to@1", 42));
+     let sends = Rc::new(SendSequences::from([("s".to_owned(), vec![m0, m1])]));
+-    let clauses = vec![Clause::new(
++    let clauses = vec![new_clause(
+         [reliable("to@0", 42, "s", 0), reliable("to@1", 42, "s", 1)],
+         sends.clone(),
+     )];
+     assert_eq!(
+-        solve(&clauses, &BTreeSet::new(), &CrashBounds::cap(0)),
++        solve(&clauses, &BTreeSet::new(), &cap_bounds(0)),
+         None,
+         "a reliable channel admits no omission; with no crashes allowed nothing can be done"
+     );
+     // Weakest first: the crash after `m0` (killing only `m1`) is tried before the crash before
+     // any send (killing both).
+-    let first = solve(&clauses, &BTreeSet::new(), &CrashBounds::cap(1)).unwrap();
++    let first = solve(&clauses, &BTreeSet::new(), &cap_bounds(1)).unwrap();
+     let later = Fault::crash_after("s", Some(m0));
+     assert_eq!(first, set([later.clone()]));
+     let pre_heal = &clauses[0].pre_heal_sends;
+@@ -222,7 +281,7 @@ fn three_senders() -> Vec<Clause<M>> {
+         ("m@1".to_owned(), vec![("to", 2)]),
+         ("m@2".to_owned(), vec![("to", 3)]),
+     ]));
+-    vec![Clause::new(
++    vec![new_clause(
+         [
+             reliable("to", 1, "m@0", 0),
+             reliable("to", 2, "m@1", 0),
+@@ -265,7 +324,7 @@ fn crashing_every_candidate_node_is_proposed_when_another_node_remains() {
+     assert_eq!(crashed_nodes(&proposed[6]).len(), 3, "{proposed:?}");
+     // A single sender among others: its crash is admissible.
+     let sends = Rc::new(SendSequences::from([("s".to_owned(), vec![("to", 1)])]));
+-    let clauses = vec![Clause::new([reliable("to", 1, "s", 0)], sends)];
++    let clauses = vec![new_clause([reliable("to", 1, "s", 0)], sends)];
+     let proposed = all_hypotheses(&clauses, &program_of(2));
+     assert_eq!(proposed.len(), 1, "{proposed:?}");
+     assert_eq!(crashed_nodes(&proposed[0]), BTreeSet::from(["s"]));
+@@ -281,7 +340,7 @@ fn never_crashes_all_but_one_member_of_the_checked_cluster() {
+         ("src".to_owned(), vec![("in", 9)]),
+         ("m@0".to_owned(), vec![("to", 1)]),
+     ]));
+-    clauses.push(Clause::new(
++    clauses.push(new_clause(
+         [reliable("in", 9, "src", 0), reliable("to", 1, "m@0", 0)],
+         sends,
+     ));
+@@ -324,7 +383,7 @@ fn an_explicit_crash_cap_still_bounds() {
+     let proposed = all_hypotheses(&clauses, &one);
+     assert_eq!(proposed.len(), 3, "{proposed:?}");
+     assert!(proposed.iter().all(|h| h.len() == 1), "{proposed:?}");
+-    assert!(all_hypotheses(&clauses, &CrashBounds::cap(0)).is_empty());
++    assert!(all_hypotheses(&clauses, &cap_bounds(0)).is_empty());
+     // A cap above the vacuity bound changes nothing.
+     let two = CrashBounds {
+         cap: Some(2),
+@@ -339,8 +398,8 @@ fn an_explicit_crash_cap_still_bounds() {
+ #[test]
+ fn no_superset_of_a_vacuous_set_is_proposed() {
+     let clauses = vec![
+-        Clause::new([lossy("req", 1), lossy("ack", 1)], no_sends()),
+-        Clause::new([lossy("req", 2), lossy("ack", 2)], no_sends()),
++        new_clause([lossy("req", 1), lossy("ack", 1)], no_sends()),
++        new_clause([lossy("req", 2), lossy("ack", 2)], no_sends()),
+     ];
+     let vacuous = vec![set([Fault::Omit(("req", 1))])];
+     let mut tried = BTreeSet::new();
+@@ -383,7 +442,7 @@ fn the_minimum_cardinality_set_wins_over_cheaper_positions() {
+     let ch = "c";
+     let clauses: Vec<Clause<M>> = [(0, 97), (1, 98), (2, 99), (3, 97), (3, 98), (3, 99)]
+         .into_iter()
+-        .map(|(a, b)| Clause::new([lossy(ch, a), lossy(ch, b)], no_sends()))
++        .map(|(a, b)| new_clause([lossy(ch, a), lossy(ch, b)], no_sends()))
+         .collect();
+     let extra: Vec<Fault<M>> = (0..100).map(|p| Fault::Omit((ch, p))).collect();
+     let universe = universe(&clauses, &extra);
+@@ -409,7 +468,7 @@ fn the_minimum_cardinality_set_wins_over_cheaper_positions() {
+ 
+ #[test]
+ fn a_tried_set_outside_the_universe_constrains_nothing() {
+-    let clauses = vec![Clause::new([lossy("req", 1)], no_sends())];
++    let clauses = vec![new_clause([lossy("req", 1)], no_sends())];
+     let tried = BTreeSet::from([set([Fault::Omit(("req", 1)), Fault::Omit(("gone", 7))])]);
+     assert_eq!(
+         solve(&clauses, &tried, &CrashBounds::default()),
+@@ -426,7 +485,7 @@ fn drain(sweep: &mut Sweep<M>, clauses: &[Clause<M>]) -> (Vec<(usize, FaultSet<M
+     loop {
+         match sweep.next(clauses) {
+             Next::Try(h) => {
+-                proposed.push((sweep.crash_bound(), h));
++                proposed.push((sweep.bound, h));
+                 assert!(proposed.len() < 1000);
+             }
+             done => return (proposed, done),
+@@ -498,34 +557,35 @@ fn the_sweep_stops_when_more_crashes_cannot_kill_more() {
+ #[test]
+ fn clauses_learned_at_one_bound_carry_over_to_the_next() {
+     let sends = Rc::new(SendSequences::from([("s".to_owned(), vec![("to", 1)])]));
+-    let mut clauses = vec![Clause::new([lossy("in", 1)], sends.clone())];
++    let mut clauses = vec![new_clause([lossy("in", 1)], sends.clone())];
+     let mut sweep = Sweep::new(program_of(3));
+     assert_eq!(
+         sweep.next(&clauses),
+         Next::Try(set([Fault::Omit(("in", 1))]))
+     );
+-    assert_eq!(sweep.crash_bound(), 0);
++    assert_eq!(sweep.bound, 0);
+     // Under that omission the fact was derived anyway, from a reliable delivery.
+-    clauses.push(Clause::new([reliable("to", 1, "s", 0)], sends));
++    clauses.push(new_clause([reliable("to", 1, "s", 0)], sends));
+     assert_eq!(
+         sweep.next(&clauses),
+         Next::Try(set([Fault::Omit(("in", 1)), crash("s")]))
+     );
+-    assert_eq!(sweep.crash_bound(), 1);
++    assert_eq!(sweep.bound, 1);
+     assert_eq!(sweep.tolerated(), Some(0));
+ }
+ 
+ #[test]
+ fn an_unkillable_derivation_certifies_at_once() {
+     let mut sweep = Sweep::new(program_of(3));
+-    let clauses = vec![Clause::new([], no_sends())];
++    let clauses = vec![new_clause([], no_sends())];
+     assert_eq!(sweep.next(&clauses), Next::Certified(Tolerance::All));
+     assert_eq!(sweep.hypotheses(), 1);
+ }
+ 
+ #[test]
+ fn the_budget_counts_the_probe() {
+-    let mut sweep = Sweep::new(program_of(3)).with_budget(3);
++    let mut sweep = Sweep::new(program_of(3));
++    sweep.budget = 3;
+     let (proposed, done) = drain(&mut sweep, &three_senders());
+     assert_eq!(proposed.len(), 2);
+     assert_eq!(done, Next::Budget);
+@@ -544,27 +604,6 @@ fn a_vacuous_hypothesis_excludes_its_supersets_across_bounds() {
+     assert_eq!(proposed.len(), 3);
+ }
+ 
+-/// With no clauses and explicit candidates, the sweep is a blind enumeration of every admissible
+-/// set, by crash count and then by size: the brute-force cross-check's engine.
+-#[test]
+-fn with_no_clauses_the_sweep_enumerates_every_admissible_set() {
+-    let mut sweep = Sweep::new(program_of(3));
+-    sweep.add_candidates([
+-        Fault::Omit(("a", 1)),
+-        Fault::Omit(("b", 1)),
+-        crash("n@0"),
+-        crash("n@1"),
+-    ]);
+-    let (proposed, done) = drain(&mut sweep, &[]);
+-    assert_eq!(done, Next::Certified(Tolerance::All));
+-    // 2^4 subsets, minus the probe's empty set.
+-    assert_eq!(proposed.len(), 15, "{proposed:?}");
+-    let mut counts: Vec<usize> = proposed.iter().map(|(_, h)| crash_count(h)).collect();
+-    assert!(counts.is_sorted(), "{counts:?}");
+-    counts.dedup();
+-    assert_eq!(counts, [0, 1, 2]);
+-}
+-
+ /// A small deterministic PRNG (xorshift64), so random instances need no dependency.
+ struct Rng(u64);
+ 
+@@ -611,7 +650,7 @@ fn synthetic(nodes: usize, sends: usize, clauses: usize, seed: u64) -> Vec<Claus
+                     lossy: i.is_multiple_of(2),
+                 }
+             });
+-            Clause::new(deps, sequences.clone())
++            new_clause(deps, sequences.clone())
+         })
+         .collect()
+ }
+@@ -624,9 +663,9 @@ fn sweep_sizes(clauses: &[Clause<M>], hypotheses: usize, backend: Backend) -> Ve
+         cap: Some(2),
+         nodes: 6,
+         checked: None,
+-    })
+-    .with_backend(backend)
+-    .with_budget(hypotheses + 1);
++    });
++    sweep.backend = backend;
++    sweep.budget = hypotheses + 1;
+     let mut sizes = vec![];
+     while let Next::Try(h) = sweep.next(clauses) {
+         sizes.push(h.len());
+@@ -673,7 +712,7 @@ fn surviving_clause(
+         return None;
+     }
+     let deps = (0..1 + rng.below(3)).map(|_| spared[rng.below(spared.len())].clone());
+-    let mut clause = Clause::new(deps, sends.clone());
++    let mut clause = new_clause(deps, sends.clone());
+     clause.premises = tried
+         .iter()
+         .filter(|f| f.crashed_node().is_some())
+@@ -740,7 +779,7 @@ fn the_lean_model_is_exact() {
+         for step in 0..40 {
+             let universe = universe(&clauses, []);
+             let solve = |model| {
+-                ilp::solve(
++                solve_model(
+                     &universe,
+                     &clauses,
+                     &tried,
+@@ -796,11 +835,11 @@ fn implied_and_always_satisfied_cover_rows_are_dropped() {
+     let a = lossy("a", 1);
+     let b = lossy("b", 2);
+     let r = reliable("r", 1, "n", 0);
+-    let narrow = Clause::new([a.clone()], sends.clone());
+-    let wide = Clause::new([a.clone(), b.clone()], sends.clone());
+-    let mut under_crash = Clause::new([a.clone()], sends.clone());
++    let narrow = new_clause([a.clone()], sends.clone());
++    let wide = new_clause([a.clone(), b.clone()], sends.clone());
++    let mut under_crash = new_clause([a.clone()], sends.clone());
+     under_crash.premises = set([crash("n")]);
+-    let mut always = Clause::new([r], sends.clone());
++    let mut always = new_clause([r], sends.clone());
+     always.premises = set([crash("n")]);
+     let clauses = [
+         wide.clone(),
+@@ -823,21 +862,21 @@ fn a_tried_set_that_a_clause_excludes_needs_no_no_good() {
+     let b = lossy("b", 2);
+     let tried = set([Fault::Omit(a.message)]);
+     // The run under `tried` observed a derivation through `b`, which `tried` does not kill.
+-    let clause = Clause::new([b], sends.clone());
+-    assert!(ilp::already_excluded(
++    let clause = new_clause([b], sends.clone());
++    assert!(already_excluded(
+         &tried,
+         std::slice::from_ref(&clause),
+         &[]
+     ));
+     // A derivation `tried` kills does not exclude it.
+-    let killed = Clause::new([a], sends.clone());
+-    assert!(!ilp::already_excluded(&tried, &[killed], &[]));
++    let killed = new_clause([a], sends.clone());
++    assert!(!already_excluded(&tried, &[killed], &[]));
+     // Nor does one observed under a crash `tried` lacks.
+     let mut under_crash = clause;
+     under_crash.premises = set([crash("n")]);
+-    assert!(!ilp::already_excluded(&tried, &[under_crash], &[]));
++    assert!(!already_excluded(&tried, &[under_crash], &[]));
+     // A vacuous subset does.
+-    assert!(ilp::already_excluded(
++    assert!(already_excluded(
+         &tried,
+         &[],
+         std::slice::from_ref(&tried)
+@@ -849,8 +888,8 @@ fn a_tried_set_that_a_clause_excludes_needs_no_no_good() {
+ /// schedules' derivations of the same run.
+ #[test]
+ fn a_group_needs_only_one_of_its_clauses_killed() {
+-    let a = Clause::new([lossy("a", 1)], no_sends());
+-    let b = Clause::new([lossy("b", 1)], no_sends());
++    let a = new_clause([lossy("a", 1)], no_sends());
++    let b = new_clause([lossy("b", 1)], no_sends());
+     let clauses = [a.clone(), b.clone()];
+     let universe = universe(&clauses, []);
+     let tried = BTreeSet::from([FaultSet::new()]);
+@@ -860,7 +899,7 @@ fn a_group_needs_only_one_of_its_clauses_killed() {
+         &clauses,
+         &tried,
+         &[],
+-        &CrashBounds::cap(0),
++        &cap_bounds(0),
+         Backend::Microlp,
+     )
+     .unwrap();
+@@ -874,7 +913,7 @@ fn a_group_needs_only_one_of_its_clauses_killed() {
+         &group,
+         &tried,
+         &[],
+-        &CrashBounds::cap(0),
++        &cap_bounds(0),
+         Backend::Microlp,
+     ) {
+         assert!(tried.insert(h.clone()), "a hypothesis is proposed once");
+@@ -884,7 +923,7 @@ fn a_group_needs_only_one_of_its_clauses_killed() {
+     assert_eq!(proposed[1].len(), 1, "{proposed:?}");
+     assert_eq!(proposed.len(), 3, "both singletons, then the pair: {proposed:?}");
+     // Two groups: each must be satisfied.
+-    let c = Clause::new([lossy("c", 1)], no_sends());
++    let c = new_clause([lossy("c", 1)], no_sends());
+     let universe = super::universe(&[a.clone(), b.clone(), c.clone()], []);
+     let groups: [&[Clause<M>]; 2] = [&clauses, std::slice::from_ref(&c)];
+     let h = hitting_set_any(
+@@ -892,7 +931,7 @@ fn a_group_needs_only_one_of_its_clauses_killed() {
+         &groups,
+         &BTreeSet::from([FaultSet::new()]),
+         &[],
+-        &CrashBounds::cap(0),
++        &cap_bounds(0),
+         Backend::Microlp,
+     )
+     .unwrap();
+@@ -904,23 +943,23 @@ fn a_group_needs_only_one_of_its_clauses_killed() {
+ /// enough to propose a hypothesis. A group with one clause is Molly's cover row.
+ #[test]
+ fn a_group_is_unkillable_only_if_every_clause_is() {
+-    let dead = Clause::new([], no_sends());
+-    let live = Clause::new([lossy("a", 1)], no_sends());
++    let dead = new_clause([], no_sends());
++    let live = new_clause([lossy("a", 1)], no_sends());
+     let mixed = [dead.clone(), live.clone()];
+-    let mut sweep: Sweep<M> = Sweep::new(CrashBounds::cap(0));
++    let mut sweep: Sweep<M> = Sweep::new(cap_bounds(0));
+     let groups: [&[Clause<M>]; 1] = [&mixed];
+     assert_eq!(
+         sweep.next_any(&groups),
+         Next::Try(set([Fault::Omit(("a", 1))]))
+     );
+-    let mut sweep: Sweep<M> = Sweep::new(CrashBounds::cap(0));
++    let mut sweep: Sweep<M> = Sweep::new(cap_bounds(0));
+     let both_dead = [dead.clone(), dead.clone()];
+     let groups: [&[Clause<M>]; 1] = [&both_dead];
+     assert_eq!(sweep.next_any(&groups), Next::Certified(Tolerance::All));
+     // One clause per group is `next`.
+-    let mut by_next: Sweep<M> = Sweep::new(CrashBounds::cap(0));
+-    let mut by_groups: Sweep<M> = Sweep::new(CrashBounds::cap(0));
+-    let clauses = [live.clone(), Clause::new([lossy("b", 1)], no_sends())];
++    let mut by_next: Sweep<M> = Sweep::new(cap_bounds(0));
++    let mut by_groups: Sweep<M> = Sweep::new(cap_bounds(0));
++    let clauses = [live.clone(), new_clause([lossy("b", 1)], no_sends())];
+     let singletons: Vec<&[Clause<M>]> = clauses.iter().map(std::slice::from_ref).collect();
+     assert_eq!(by_next.next(&clauses), by_groups.next_any(&singletons));
+ }
+@@ -937,8 +976,8 @@ fn an_earlier_crash_point_hits_clauses_no_weakest_candidate_hits_together() {
+     let ab = Rc::new(SendSequences::from([("n".to_owned(), vec![a, b])]));
+     let ba = Rc::new(SendSequences::from([("n".to_owned(), vec![b, a])]));
+     let clauses = vec![
+-        Clause::new([reliable("x", 2, "n", 1)], ab),
+-        Clause::new([reliable("x", 1, "n", 1)], ba),
++        new_clause([reliable("x", 2, "n", 1)], ab),
++        new_clause([reliable("x", 1, "n", 1)], ba),
+     ];
+     // The weakest candidates are the crash after `a` and the crash after `b`; neither hits both.
+     let weakest = universe(&clauses, []);
+@@ -961,7 +1000,7 @@ fn an_earlier_crash_point_hits_clauses_no_weakest_candidate_hits_together() {
+ fn a_premise_crash_completes_with_every_crash_point_of_its_node() {
+     let (a, b, c) = (("x", 1), ("x", 2), ("x", 3));
+     let abc = Rc::new(SendSequences::from([("n".to_owned(), vec![a, b, c])]));
+-    let mut clause = Clause::new([reliable("x", 3, "n", 2)], abc);
++    let mut clause = new_clause([reliable("x", 3, "n", 2)], abc);
+     clause.premises = set([crash("n")]);
+     let completed = completion(std::slice::from_ref(&clause), &[]);
+     assert_eq!(
+@@ -1061,7 +1100,7 @@ fn reordered_surviving_clause(
+         return None;
+     }
+     let deps = (0..1 + rng.below(3)).map(|_| deliveries[rng.below(deliveries.len())].clone());
+-    let mut clause = Clause::new(deps, sends);
++    let mut clause = new_clause(deps, sends);
+     clause.premises = tried
+         .iter()
+         .filter(|f| f.crashed_node().is_some())
+@@ -1126,9 +1165,9 @@ fn certificates_hold_over_every_positional_fault_set() {
+                 Next::Try(h) => {
+                     assert_eq!(
+                         crash_count(&h),
+-                        sweep.crash_bound(),
++                        sweep.bound,
+                         "seed {seed}: {h:?} proposed at bound {}",
+-                        sweep.crash_bound()
++                        sweep.bound
+                     );
+                     tried.push(h.clone());
+                     match reordered_surviving_clause(&mut rng, &names, &messages, &lossy, &h) {
+-- 
+2.47.3
+
