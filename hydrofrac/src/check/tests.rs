@@ -314,3 +314,50 @@ fn a_two_member_exchange_holds_under_every_admissible_fault_set() {
         "{results}"
     );
 }
+
+/// The check attaches record provenance: on these programs no record falls back to the
+/// execution rule, and the rewrite leaves no opaque island.
+#[cfg(stageleft_runtime)]
+#[test]
+fn the_check_tracks_record_provenance_precisely() {
+    for results in [
+        plain_broadcast(EcCheck::new(), false),
+        plain_broadcast(EcCheck::new(), true),
+        echo_broadcast(EcCheck::new()),
+    ] {
+        assert!(results.islands.is_empty(), "{results}");
+        for label in results.results() {
+            assert_eq!(
+                label.stats.opaque_fallbacks,
+                0,
+                "{}: {results}",
+                label.name()
+            );
+        }
+    }
+}
+
+/// Each counterexample's Lamport diagram is written under
+/// `target/hydrofrac/<test>/<label>/`, and the report says where.
+#[cfg(stageleft_runtime)]
+#[test]
+fn counterexamples_write_their_lamport_diagram() {
+    let results = plain_broadcast(EcCheck::new(), false);
+    let label = results.label("delivered");
+    let cex = label.verdict.counterexample().expect("a counterexample");
+    let diagram = cex.diagram.as_ref().expect("the diagram was written");
+    let dot = diagram.with_extension("dot");
+    assert!(dot.is_file(), "{}", dot.display());
+    let parent = dot.parent().unwrap();
+    assert!(
+        parent
+            .to_string_lossy()
+            .contains("hydrofrac/counterexamples_write_their_lamport_diagram/delivered"),
+        "{}",
+        parent.display()
+    );
+    let source = std::fs::read_to_string(&dot).unwrap();
+    assert!(source.starts_with("digraph"), "{source}");
+    // The missing fact's support is highlighted, and the tap's fact is decoded.
+    assert!(results.to_string().contains("diagram: "), "{results}");
+}

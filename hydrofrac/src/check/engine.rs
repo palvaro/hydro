@@ -11,8 +11,10 @@ use hydro_lang::sim::compiled::{CompiledSim, quiesce};
 use hydro_lang::sim::flow::SimFlow;
 use hydro_lang::sim::network_hook::IrPassStage;
 
-use super::results::{Counterexample, LabelResult, Results, Stats, VacuousReason, Verdict};
-use crate::fault::{FaultHook, FaultPlan, InstanceRecord, MessageId, NodeId};
+use super::results::{
+    Counterexample, LabelResult, Results, Stats, VacuousReason, Verdict, label_name,
+};
+use crate::fault::{Event, Fate, FaultHook, FaultPlan, InstanceRecord, MessageId, NodeId};
 use crate::lineage::{Lineage, Tables};
 use crate::observe::{Fact, Labels, TapPass, decode_output, tap_pass};
 use crate::search::{
@@ -31,6 +33,8 @@ pub struct EcCheck {
     max_crashes: Option<usize>,
     sample_schedules: Option<usize>,
     taps: Option<TapPass>,
+    /// The operators the provenance rewrite left as opaque islands (filled at compile time).
+    islands: Rc<RefCell<Vec<String>>>,
 }
 
 impl EcCheck {
@@ -68,10 +72,11 @@ impl EcCheck {
             .test_safety_only()
             .with_network_hook_points()
             .with_ir_pass(IrPassStage::PreNetwork, pass);
-        // TODO(lead): attach record provenance here once `crate::provenance` is merged:
-        // `let flow = crate::provenance::install(flow, None);`. Until then every record is
-        // opaque and lineage uses the execution rule, which is sound.
-        flow
+        // Record provenance (docs/design/hydrofrac-lite.md §5): a `PostNetwork` pass, so it
+        // sees the taps' outputs and attaches each observed fact's lineage to them. Operators
+        // it cannot see into are recorded as opaque islands; their records fall back to the
+        // execution rule, which is sound.
+        crate::provenance::install(flow, Some(self.islands.clone()))
     }
 
     /// Runs the check on `sim` (compiled from a flow passed through [`Self::instrument`]).
@@ -144,6 +149,8 @@ struct Run {
 
 struct Engine<'c, B> {
     sim: &'c CompiledSim,
+    /// The provenance rewrite's opaque islands.
+    islands: Rc<RefCell<Vec<String>>>,
     labels: &'c Labels,
     body: &'c mut B,
     tables: Tables,
@@ -168,6 +175,7 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
     fn new(check: &EcCheck, sim: &'c CompiledSim, labels: &'c Labels, body: &'c mut B) -> Self {
         Engine {
             sim,
+            islands: check.islands.clone(),
             labels,
             body,
             tables: Tables::new(sim.channels(), sim.locations()),
@@ -493,7 +501,7 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
                     .events()
                     .iter()
                     .filter_map(|e| match e {
-                        crate::fault::Event::Output {
+                        Event::Output {
                             port, node, bytes, ..
                         } if self.labels.label_of_port(*port) == Some(t.label) => {
                             Some(Observation {
@@ -536,8 +544,7 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
             let result = self.search(t, &probe, &targets);
             verdicts[t.label] = Some(result);
         }
-        // TODO(lead): write each counterexample's Lamport diagram (`crate::lamport`) to
-        // `target/hydrofrac/<test>/<label>/` once that module is merged.
+        self.write_diagrams(&mut verdicts);
 
         Results {
             labels: plans
@@ -554,7 +561,79 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
                 })
                 .collect(),
             names: self.tables.names().clone(),
+            islands: self.islands.borrow().clone(),
         }
+    }
+
+    /// Writes each counterexample's Lamport diagram to `target/hydrofrac/<test>/<label>/`
+    /// (docs/design/hydrofrac-lite.md §4.8) and records where it went.
+    fn write_diagrams(&self, verdicts: &mut [Option<(Verdict, Stats)>]) {
+        let labels = self.labels;
+        let lamport_labels = crate::lamport::Labels::default()
+            .with_channels(self.sim.channels())
+            .outputs(move |port, bytes| match labels.label_of_port(port) {
+                Some(_) => decode_output(bytes).to_string(),
+                None => crate::lamport::short_hex(bytes),
+            });
+        let test = crate::lamport::test_name();
+        for (index, slot) in verdicts.iter_mut().enumerate() {
+            let Some((Verdict::Counterexample(cex), _)) = slot else {
+                continue;
+            };
+            let name = label_name(&labels.plans[index]);
+            let trace = crate::lamport::trace_with(
+                &cex.record.log,
+                self.tables.names(),
+                &cex.faults,
+                &lamport_labels,
+            );
+            let opts = crate::lamport::Options {
+                title: Some(format!("{name}: {}", Verdict::Counterexample(cex.clone()))),
+                highlight: self.missing_support(index, cex),
+                ..crate::lamport::Options::default()
+            };
+            let dir = crate::lamport::claim(crate::lamport::default_dir(&test, &name));
+            cex.diagram = crate::lamport::write(&dir, "counterexample", &trace, &opts)
+                .ok()
+                .map(|w| w.path().to_path_buf());
+        }
+    }
+
+    /// The deliveries to emphasize in a counterexample's diagram: how the members that do
+    /// hold a missing fact came to hold it (the support the run denied the others).
+    fn missing_support(&self, label: usize, cex: &Counterexample) -> BTreeSet<u64> {
+        let missing: BTreeSet<&Fact> = cex.missing.iter().map(|(_, fact)| fact).collect();
+        if missing.is_empty() {
+            return BTreeSet::new();
+        }
+        let lineage = Lineage::new(&cex.record.log, &self.tables);
+        let mut messages: BTreeSet<MessageId> = BTreeSet::new();
+        for o in lineage.observations() {
+            if self.labels.label_of_port(o.port) == Some(label)
+                && missing.contains(&decode_output(o.bytes))
+            {
+                messages.extend(
+                    lineage
+                        .derivation(o.event)
+                        .iter()
+                        .map(|d| d.message.clone()),
+                );
+            }
+        }
+        cex.record
+            .log
+            .events()
+            .iter()
+            .filter_map(|e| match e {
+                Event::Sent {
+                    id,
+                    msg,
+                    fate: Fate::Delivered,
+                    ..
+                } if messages.contains(msg) => Some(*id),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -586,6 +665,7 @@ fn counterexample(
         divergent: failure.divergent.clone(),
         panic: failure.panic.clone(),
         record: failure.record.clone(),
+        diagram: None,
     }))
 }
 

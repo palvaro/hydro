@@ -71,3 +71,95 @@ fn execution_rule_on_a_two_hop_run() {
         assert!(lineage.opaque_fallbacks() >= 1);
     }
 }
+
+/// `p1 → p2 → p3` as above, plus an unrelated `noise` message `p1 → p3` that `p3` may receive
+/// before it computes its output. The execution rule cannot tell the two apart; record
+/// provenance (the rewrite, end to end through the network hook) names only the two hops.
+#[test]
+fn record_provenance_is_precise_end_to_end() {
+    let derived_channels = |provenance: bool| {
+        let mut flow = FlowBuilder::new();
+        let p1 = flow.process::<()>();
+        let p2 = flow.process::<()>();
+        let p3 = flow.process::<()>();
+        let (in_send, input) = p1.sim_input::<i32, TotalOrder, ExactlyOnce>();
+        let (noise_send, noise) = p1.sim_input::<i32, TotalOrder, ExactlyOnce>();
+        noise
+            .send(&p3, TCP.fail_stop().bincode().name("noise"))
+            .for_each(q!(|_| {}));
+        let out = input
+            .send(&p2, TCP.lossy_delayed_forever().bincode().name("hop1"))
+            .map(q!(|x| x * 10))
+            .send(&p3, TCP.lossy_delayed_forever().bincode().name("hop2"))
+            .sim_output();
+        let sim = flow.sim().test_safety_only().with_network_hook_points();
+        let sim = if provenance {
+            crate::provenance::install(sim, None)
+        } else {
+            sim
+        }
+        .compiled();
+        let noise_channel = sim
+            .channels()
+            .iter()
+            .find(|c| c.name.as_deref() == Some("noise"))
+            .unwrap()
+            .id;
+        let tables = Tables::new(sim.channels(), sim.locations());
+
+        let hook = Rc::new(FaultHook::new(&FaultPlan::default(), &sim));
+        sim.set_network_hook(hook.clone());
+        sim.exhaustive(async || {
+            noise_send.send(0);
+            in_send.send(1);
+            let got: Vec<i32> = out.collect_sorted().await;
+            assert_eq!(got, vec![10]);
+        });
+        sim.clear_network_hook();
+        let records = hook.drain_instances();
+        assert!(!records.is_empty());
+
+        let mut with_noise = 0;
+        for rec in &records {
+            let lineage = derive(&rec.log, &tables);
+            let observations: Vec<_> = lineage.observations().collect();
+            assert_eq!(observations.len(), 1);
+            if provenance {
+                assert!(
+                    matches!(decode_meta(observations[0].meta), RecordProv::Ids(_)),
+                    "the output carries precise provenance"
+                );
+                assert_eq!(lineage.opaque_fallbacks(), 0);
+            }
+            let clause = lineage.clause_for(observations[0].event);
+            assert_eq!(
+                clause
+                    .deps
+                    .iter()
+                    .filter(|d| d.message.channel != noise_channel)
+                    .count(),
+                2,
+                "{clause:?}"
+            );
+            if clause
+                .deps
+                .iter()
+                .any(|d| d.message.channel == noise_channel)
+            {
+                with_noise += 1;
+            }
+        }
+        (with_noise, records.len())
+    };
+
+    let (with_noise, _) = derived_channels(true);
+    assert_eq!(
+        with_noise, 0,
+        "provenance never blames the unrelated message"
+    );
+    let (with_noise, schedules) = derived_channels(false);
+    assert!(
+        with_noise > 0,
+        "the execution rule blames the unrelated message in some schedule (of {schedules})"
+    );
+}

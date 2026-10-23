@@ -170,17 +170,28 @@ fn record_prov_encoding_is_bincode() {
     expected.extend_from_slice(&1u64.to_le_bytes());
     expected.extend_from_slice(&258u64.to_le_bytes());
     assert_eq!(ids.encode(), expected);
-    assert_eq!(RecordProv::decode(Some(&expected)), ids);
-    assert_eq!(RecordProv::Opaque.encode(), vec![1, 0, 0, 0]);
-    assert_eq!(RecordProv::decode(Some(&[1, 0, 0, 0])), RecordProv::Opaque);
-    // Missing or malformed metadata is opaque.
-    assert_eq!(RecordProv::decode(None), RecordProv::Opaque);
-    assert_eq!(RecordProv::decode(Some(&[0, 0, 0])), RecordProv::Opaque);
+    // The rewrite's generated code writes the variants by hand (it can name only
+    // `hydro_lang` and std); its bytes must be `RecordProv`'s.
+    let generated: BTreeSet<u64> = [1, 258].into_iter().collect();
+    assert_eq!(bincode::serialize(&(0u32, generated)).unwrap(), expected);
     assert_eq!(
-        RecordProv::decode(Some(&expected[..expected.len() - 1])),
+        bincode::serialize(&1u32).unwrap(),
+        RecordProv::Opaque.encode()
+    );
+    assert_eq!(decode_meta(Some(&expected)), ids);
+    assert_eq!(RecordProv::Opaque.encode(), vec![1, 0, 0, 0]);
+    assert_eq!(decode_meta(Some(&[1, 0, 0, 0])), RecordProv::Opaque);
+    // Missing or malformed metadata is opaque.
+    assert_eq!(decode_meta(None), RecordProv::Opaque);
+    assert_eq!(decode_meta(Some(&[0, 0, 0])), RecordProv::Opaque);
+    assert_eq!(
+        decode_meta(Some(&expected[..expected.len() - 1])),
         RecordProv::Opaque
     );
-    assert_eq!(RecordProv::decode(Some(&[7, 0, 0, 0])), RecordProv::Opaque);
+    let mut trailing = expected.clone();
+    trailing.push(0);
+    assert_eq!(decode_meta(Some(&trailing)), RecordProv::Opaque);
+    assert_eq!(decode_meta(Some(&[7, 0, 0, 0])), RecordProv::Opaque);
 }
 
 /// A → B → C, with an unrelated delivery A → B that B received first.
