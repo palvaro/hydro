@@ -33,6 +33,8 @@ pub mod two_pc_bench;
 pub mod two_pc_ctp;
 
 #[cfg(test)]
+mod ec_two_pc_hydrofrac;
+#[cfg(test)]
 mod hydrofrac_provenance_tests;
 
 // WIP: the following modules were written against an older hydro_lang API
