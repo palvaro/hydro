@@ -1043,3 +1043,223 @@ fn a_group_is_unkillable_only_if_every_clause_is() {
     let singletons: Vec<&[Clause<M>]> = clauses.iter().map(std::slice::from_ref).collect();
     assert_eq!(by_next.next(&clauses), by_groups.next_any(&singletons));
 }
+
+// The completed universe.
+
+/// Two runs in which `n` sends `a` and `b` in opposite orders, each deriving the fact from its
+/// second send. Each delivery's weakest killer (the crash right after the first send) spares the
+/// other run's delivery, so no single weakest candidate hits both clauses; `crash(n)` does.
+/// Without the completion the sweep would certify one tolerated crash.
+#[test]
+fn an_earlier_crash_point_hits_clauses_no_weakest_candidate_hits_together() {
+    let (a, b) = (("x", 1), ("x", 2));
+    let ab = Rc::new(SendSequences::from([("n".to_owned(), vec![a, b])]));
+    let ba = Rc::new(SendSequences::from([("n".to_owned(), vec![b, a])]));
+    let clauses = vec![
+        Clause::new([reliable("x", 2, "n", 1)], ab),
+        Clause::new([reliable("x", 1, "n", 1)], ba),
+    ];
+    // The weakest candidates are the crash after `a` and the crash after `b`; neither hits both.
+    let weakest = universe(&clauses, []);
+    assert_eq!(weakest.len(), 2, "{weakest:?}");
+    assert!(
+        weakest
+            .iter()
+            .all(|f| !clauses.iter().all(|c| c.hit_by(f))),
+        "{weakest:?}"
+    );
+    assert!(completion(&clauses, &[]).contains(&crash("n")));
+    let mut sweep = Sweep::new(program_of(3));
+    let (proposed, done) = drain(&mut sweep, &clauses);
+    assert_eq!(proposed, [(1, set([crash("n")]))], "{done:?}");
+}
+
+/// Where `crash(n)` is itself a premise, replacing a crash of `n` by it is not neutral, so the
+/// completion adds every crash point of `n` that kills something instead.
+#[test]
+fn a_premise_crash_completes_with_every_crash_point_of_its_node() {
+    let (a, b, c) = (("x", 1), ("x", 2), ("x", 3));
+    let abc = Rc::new(SendSequences::from([("n".to_owned(), vec![a, b, c])]));
+    let mut clause = Clause::new([reliable("x", 3, "n", 2)], abc);
+    clause.premises = set([crash("n")]);
+    let completed = completion(std::slice::from_ref(&clause), &[]);
+    assert_eq!(
+        completed,
+        set([
+            crash("n"),
+            Fault::crash_after("n", Some(a)),
+            Fault::crash_after("n", Some(b)),
+        ])
+    );
+}
+
+/// Whether `h` hits `clause` as the solver reads it: by lacking one of its premises, or by
+/// killing one of its deliveries.
+fn hits(h: &FaultSet<M>, clause: &Clause<M>) -> bool {
+    !clause.premises.is_subset(h) || h.iter().any(|f| clause.hit_by(f))
+}
+
+/// Every admissible fault set over `nodes` × `messages` with at most `crashes` crashes: any
+/// omissions of `lossy` messages, and per node no crash, `crash(n)`, or `crash(n after m)` for
+/// each of its messages.
+fn every_positional_set(
+    names: &[String],
+    messages: &[Vec<M>],
+    lossy: &[M],
+    crashes: usize,
+) -> Vec<FaultSet<M>> {
+    let mut sets = vec![FaultSet::new()];
+    for omit in lossy {
+        let with: Vec<FaultSet<M>> = sets
+            .iter()
+            .map(|s| {
+                let mut s = s.clone();
+                s.insert(Fault::Omit(*omit));
+                s
+            })
+            .collect();
+        sets.extend(with);
+    }
+    for (name, own) in names.iter().zip(messages) {
+        let options: Vec<Fault<M>> = std::iter::once(crash(name))
+            .chain(own.iter().map(|m| Fault::crash_after(name.as_str(), Some(*m))))
+            .collect();
+        let mut next = sets.clone();
+        for s in &sets {
+            if crash_count(s) >= crashes {
+                continue;
+            }
+            for f in &options {
+                let mut s = s.clone();
+                s.insert(f.clone());
+                next.push(s);
+            }
+        }
+        sets = next;
+    }
+    sets
+}
+
+/// A derivation one run could observe under `tried`: `n` senders whose sends happen in an order
+/// of the run's own (a random permutation, as schedules and faults reorder sends), and 1 to 3
+/// deliveries that `tried` kills none of, observed under `tried`'s crashes. `None` when `tried`
+/// kills every delivery of the run.
+fn reordered_surviving_clause(
+    rng: &mut Rng,
+    names: &[String],
+    messages: &[Vec<M>],
+    lossy: &[M],
+    tried: &FaultSet<M>,
+) -> Option<Clause<M>> {
+    let sends: Rc<SendSequences<M>> = Rc::new(
+        names
+            .iter()
+            .zip(messages)
+            .map(|(name, own)| {
+                let mut own = own.clone();
+                for i in (1..own.len()).rev() {
+                    own.swap(i, rng.below(i + 1));
+                }
+                (name.clone(), own)
+            })
+            .collect(),
+    );
+    let pre_heal: PreHealSends = sends.iter().map(|(n, s)| (n.clone(), s.len())).collect();
+    let deliveries: Vec<Dependency<M>> = sends
+        .iter()
+        .flat_map(|(name, seq)| {
+            seq.iter().enumerate().map(|(i, m)| Dependency {
+                message: *m,
+                sender: Some((name.clone(), i as u64)),
+                lossy: lossy.contains(m),
+            })
+        })
+        .filter(|d| !tried.iter().any(|f| d.killed_by(f, &sends, &pre_heal)))
+        .collect();
+    if deliveries.is_empty() {
+        return None;
+    }
+    let deps = (0..1 + rng.below(3)).map(|_| deliveries[rng.below(deliveries.len())].clone());
+    let mut clause = Clause::new(deps, sends);
+    clause.premises = tried
+        .iter()
+        .filter(|f| f.crashed_node().is_some())
+        .cloned()
+        .collect();
+    Some(clause)
+}
+
+/// The certificate is a statement about every positional fault set: whenever the sweep clears a
+/// bound `k`, no fault set with at most `k` crashes (other than one it tried, or a superset of a
+/// vacuous one) hits every clause it has seen, even when runs send in different orders, so
+/// that crash points first named by a later run are earlier than an older clause's weakest
+/// candidates. And every set proposed at a bound holds exactly that many crashes.
+#[test]
+fn certificates_hold_over_every_positional_fault_set() {
+    for seed in 1..=60u64 {
+        let mut rng = Rng(0x5851_f42d_4c95_7f2d ^ seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        let nodes = 2 + rng.below(2);
+        let per_node = 2 + rng.below(2);
+        let names: Vec<String> = (0..nodes).map(|n| format!("n@{n}")).collect();
+        let messages: Vec<Vec<M>> = (0..nodes)
+            .map(|n| (0..per_node).map(|i| ("m", (n * per_node + i) as u32)).collect())
+            .collect();
+        let lossy: Vec<M> = messages
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|_| rng.below(3) == 0)
+            .collect();
+        let bounds = CrashBounds {
+            cap: Some(1 + rng.below(2)),
+            nodes: nodes + 1,
+            checked: None,
+        };
+        let mut clauses: Vec<Clause<M>> = (0..1 + rng.below(2))
+            .filter_map(|_| {
+                reordered_surviving_clause(&mut rng, &names, &messages, &lossy, &FaultSet::new())
+            })
+            .collect();
+        let mut sweep = Sweep::new(bounds.clone());
+        let mut tried = vec![FaultSet::new()];
+        let mut vacuous: Vec<FaultSet<M>> = vec![];
+        let mut cleared = None;
+        for _ in 0..200 {
+            let next = sweep.next(&clauses);
+            // Whatever bound the sweep has cleared, no fault set within it hits every clause.
+            if sweep.tolerated() != cleared {
+                cleared = sweep.tolerated();
+                let k = cleared.unwrap();
+                for h in every_positional_set(&names, &messages, &lossy, k) {
+                    if tried.contains(&h) || vacuous.iter().any(|v| v.is_subset(&h)) {
+                        continue;
+                    }
+                    assert!(
+                        !clauses.iter().all(|c| hits(&h, c)),
+                        "seed {seed}: cleared {k} crash(es), but {h:?} hits every clause \
+                         {clauses:?}"
+                    );
+                }
+            }
+            match next {
+                Next::Try(h) => {
+                    assert_eq!(
+                        crash_count(&h),
+                        sweep.crash_bound(),
+                        "seed {seed}: {h:?} proposed at bound {}",
+                        sweep.crash_bound()
+                    );
+                    tried.push(h.clone());
+                    match reordered_surviving_clause(&mut rng, &names, &messages, &lossy, &h) {
+                        Some(clause) if rng.below(5) != 0 => clauses.push(clause),
+                        _ => {
+                            sweep.mark_vacuous(h.clone());
+                            vacuous.push(h);
+                        }
+                    }
+                }
+                Next::Certified(_) | Next::Budget => break,
+            }
+        }
+    }
+}
