@@ -639,11 +639,29 @@ set of records it emits over the run, up to quiescence after heal.
   algebra is not visible), threshold quorums written with mutable state (`quorum`, whose nondet comment argues
   exactly this confluence), and the stronger U2 rule for a sender whose send *sequence* is deterministic (one
   totally ordered send stream through order-preserving operators).
-- Observed, not established: provenance is positive (an `anti_join`'s negative side carries no lineage), so the
-  strong rule also needs the cone to be monotone where faults can change what is negated, even for a site-free
-  label. Hydro's types make that nearly automatic, since a non-monotone operator needs a tick and network data
-  enters a tick through a `batch` or a snapshot, which are sites; the tolerant operators above are monotone by
-  construction. A site-free cone with a non-monotone operator over network data has not been seen in the corpus.
+- Argued, with the types' help, not proven: **faults only remove records** in a site-free cone. Provenance is
+  positive (an `anti_join`'s negative side carries no lineage), and a fact a fault *creates* is seen only as
+  `divergent`, which no hypothesis targets; so the strong rule needs every operator that is not monotone to see
+  only what faults cannot grow. Two cases:
+  - *Negation* (`anti_join`, `filter_not_in`, `filter_key_not_in`) takes a `Bounded` negative side, and
+    `IsBounded` holds for `Bounded` only. Network and external data are `Unbounded` and become `Bounded` only
+    through a `batch`, a snapshot or a sample into a tick, which are sites, and which the analysis above keeps:
+    an anti-join or other `difference` is strict, except `filter_not_in` against its own history, whose negative
+    side is the operator's own output plus an initial state. Tried and rejected by the compiler: each of those
+    three against a network stream, `filter_if` on an unbounded `is_none()`, `cross_singleton` with an unbounded
+    `count()`, `first()` over a lossy channel. Unbounded singletons and optionals do have site-free non-monotone
+    operators (`is_none`, `or`, `unwrap_or`), but they reach a stream only through a snapshot or a sample, and a
+    scalar label is not checked (§4.7).
+  - *Positions and aggregates* (`enumerate`, `scan`, `fold`, `first`) need an ordered input to be site-free. A
+    top-level operator over an ordered input is prefix-causal, and in the simulator what faults take from an
+    ordered input is a suffix: `fail_stop` loses what the sender sends after its crash point, and every lossy
+    channel the simulator runs (`lossy_delayed_forever`, UDP) is `NoOrder`, where these operators are rejected by
+    the types or are a `fold_unordered` site. So their outputs also lose only suffixes, and an aggregate's lineage
+    absorbs every input it has seen. The exception is `TCP.lossy(nondet!)`, which keeps `TotalOrder` and drops
+    from the middle: omitting a filler shifts the positions after it, and a member derives a fact the
+    failure-free run never did while the label's own derivations survive. The walk counts such a channel as an
+    opaque site (`ordered_lossy_network`); the simulator rejects it today (`todo!` in `SimBuilder`), and
+    `an_ordered_lossy_channel_is_opaque` pins both, with the program to cross-check if that changes.
 
 **What it changes on the corpus** (`ec_schedule_sensitivity.rs`, 59 labels in 14 programs):
 

@@ -28,8 +28,9 @@
 //! true): an operator it does not know (every IR node kind is classified explicitly, and a new
 //! one does not compile until it is), state it cannot resolve, a cycle without its sink, an
 //! external input whose order is unspecified, an opaque stream source, futures and async streams,
-//! multi-version networks. Either kind makes the label schedule-sensitive. A label with no site
-//! is one whose fault sets each have one execution, for which lineage pruning is Molly's.
+//! multi-version networks, ordered lossy networks (`TCP.lossy`). Either kind makes the label
+//! schedule-sensitive. A label with no site is one whose fault sets each have one execution,
+//! for which lineage pruning is Molly's.
 //!
 //! That is [`Analysis::Conservative`]. What the check uses is sharper, [`Analysis::Calm`]
 //! (docs/design/hydrofrac-lite.md §4.9, "Which choices matter"):
@@ -55,6 +56,7 @@ use hydro_lang::compile::ir::{
     ClosureExpr, CollectionKind, HydroNode, HydroRoot, HydroSource, StreamOrder, StreamRetry,
 };
 use hydro_lang::location::dynamic::{ClusterConsistency, LocationId};
+use hydro_lang::networking::{NetworkingInfo, TcpFault};
 
 use crate::observe::{EcCollection, ec_collections, kind_name};
 
@@ -281,6 +283,19 @@ pub fn classify(node: &HydroNode) -> NodeClass {
             }
         }
         HydroNode::MergeOrdered { .. } => Choice("merge_ordered"),
+        // An ordered channel that may drop a message and deliver the next (`TCP.lossy`): an
+        // omission is not a suffix of what the sender sent, so a positional or aggregating
+        // operator downstream (`enumerate`, `scan`, `first`) can *create* a record under a
+        // fault, which lineage cannot see (docs/design/hydrofrac-lite.md §4.9). Every lossy
+        // channel the simulator runs today is unordered; this keeps such a label uncertified
+        // if that changes.
+        HydroNode::Network {
+            networking_info:
+                NetworkingInfo::Tcp {
+                    fault: TcpFault::Lossy,
+                },
+            ..
+        } => Opaque("ordered_lossy_network"),
         // Garbage collection by watermark: what survives depends on when the watermark arrives
         // relative to the values.
         HydroNode::ReduceKeyedWatermark { .. } => Choice("reduce_keyed_watermark"),
