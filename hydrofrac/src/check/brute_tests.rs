@@ -171,12 +171,30 @@ fn brute_force_agrees_on_an_echo_over_a_lossy_first_hop() {
     agree("echo broadcast (lossy first hop)", &cross);
 }
 
-/// [`echo_broadcast`], but each member batches what it collected before it reports it: the
-/// label `delivered` is schedule-sensitive (its batch is a choice of the simulator's), so its
-/// search is a heuristic, and its certificate, if any, comes from enumerating its fault sets
-/// (docs/design/hydrofrac-lite.md §4.9).
+/// `batch`, kept only in ticks whose count of it is positive (`snapshot`): a `filter_if` that
+/// filters nothing out but reads the tick. Else `batch` itself.
 #[cfg(stageleft_runtime)]
-fn batched_echo(n: usize, initial_lossy: bool) -> CrossCheck {
+fn through_snapshot<'a>(
+    batch: Stream<u32, Tick<Cluster<'a, ()>>, Bounded, NoOrder>,
+    snapshot: bool,
+) -> Stream<u32, Tick<Cluster<'a, ()>>, Bounded, NoOrder> {
+    if snapshot {
+        let arrived = batch.clone().count().map(q!(|n| n > 0));
+        batch.filter_if(arrived)
+    } else {
+        batch
+    }
+}
+
+/// [`echo_broadcast`], but each member batches what it collected before it reports it, and
+/// (`snapshot`) reports a tick's batch only if the tick's count of it is positive. With the
+/// snapshot the label `delivered` is schedule-sensitive (its batch is a choice of the
+/// simulator's, read through the tick), so its search is a heuristic, and its certificate, if
+/// any, comes from enumerating its fault sets (docs/design/hydrofrac-lite.md §4.9). Without it
+/// the batch reaches the label through `all_ticks` alone, the order-insensitivity analysis
+/// discharges it, and the search may certify the label: the brute force checks that.
+#[cfg(stageleft_runtime)]
+fn batched_echo(n: usize, initial_lossy: bool, snapshot: bool) -> CrossCheck {
     let mut flow = FlowBuilder::new();
     let source = flow.process::<()>();
     let members = flow.cluster::<()>();
@@ -190,10 +208,11 @@ fn batched_echo(n: usize, initial_lossy: bool) -> CrossCheck {
                 .broadcast_closed(&members, TCP.fail_stop().name("echo").bincode())
                 .values()
                 .weaken_consistency();
-            let delivered = initial
+            let batch = initial
                 .weaken_ordering::<NoOrder>()
                 .merge_unordered(echoed)
-                .batch(&tick, nondet!(/** which tick a delivery lands in */))
+                .batch(&tick, nondet!(/** which tick a delivery lands in */));
+            let delivered = through_snapshot(batch, snapshot)
                 .all_ticks()
                 .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
                     /** claimed: one correct recipient of the broadcast echoes it to everyone */
@@ -228,7 +247,7 @@ fn batched_echo(n: usize, initial_lossy: bool) -> CrossCheck {
 #[cfg(stageleft_runtime)]
 #[test]
 fn brute_force_agrees_with_a_certificate_by_enumeration() {
-    let cross = batched_echo(2, false);
+    let cross = batched_echo(2, false, true);
     agree("batched echo (2 members)", &cross);
     let label = cross.results.label("delivered");
     assert!(
@@ -252,7 +271,7 @@ fn brute_force_agrees_with_a_certificate_by_enumeration() {
 #[cfg(stageleft_runtime)]
 #[test]
 fn brute_force_agrees_on_a_batched_echo_over_a_lossy_first_hop() {
-    let cross = batched_echo(2, true);
+    let cross = batched_echo(2, true, true);
     agree("batched echo (lossy first hop)", &cross);
     let label = cross.results.label("delivered");
     assert!(
@@ -266,6 +285,32 @@ fn brute_force_agrees_on_a_batched_echo_over_a_lossy_first_hop() {
         ),
         "{cross}"
     );
+}
+
+/// The batched echo without the snapshot, over a `fail_stop` and over a lossy first hop: the
+/// order-insensitivity analysis discharges the batch, so the search certifies `delivered`
+/// with lineage pruning across schedules, and the brute force, which runs every admissible set
+/// over every schedule without pruning, must agree.
+#[cfg(stageleft_runtime)]
+#[test]
+fn brute_force_agrees_on_a_monotone_batched_echo() {
+    for lossy in [false, true] {
+        let cross = batched_echo(2, lossy, false);
+        agree(&format!("monotone batched echo (lossy: {lossy})"), &cross);
+        let label = cross.results.label("delivered");
+        assert!(label.plan.sites.is_empty(), "{cross}");
+        assert!(
+            matches!(
+                label.verdict,
+                Verdict::Certified {
+                    tolerates: Tolerance::All
+                }
+            ),
+            "{cross}"
+        );
+        let b = cross.brute.label(label.index).expect("searched");
+        assert!(b.breaking.is_empty(), "{cross}");
+    }
 }
 
 /// A relay chain with no retries: a source sends two inputs over a lossy channel to a relay

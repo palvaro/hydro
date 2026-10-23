@@ -241,6 +241,48 @@ fn claim<'c>(cross: &'c CrossCheck, name: &str) -> &'c hydrofrac::check::LabelRe
     label
 }
 
+/// [`ask_once`]'s race is in the claim's own cone (U1): member 1 answers with what it knows in
+/// the tick the query arrives (`filter_if` on the tick's queries), and member 2 asks only if it
+/// knows nothing yet (`filter_if` on a count). The order-insensitivity analysis keeps those
+/// batches, so the claim is not certified by lineage whatever happens to its senders' order.
+/// Static: no simulation.
+#[test]
+fn ask_once_is_sensitive_in_its_own_cone() {
+    use hydrofrac::provenance::sensitivity::{label_cones, label_cones_conservative};
+
+    let mut flow = FlowBuilder::new();
+    let peers = flow.cluster::<Member>();
+    let (_value_send, values) = peers.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let (_timeout_send, timeouts) = peers.sim_input::<(), TotalOrder, ExactlyOnce>();
+    let _known = ask_once(
+        &peers,
+        values,
+        timeouts,
+        nondet!(/** test */),
+        nondet!(/** test */),
+        nondet!(/** test */),
+    )
+    .sim_cluster_output();
+    let built = flow.finalize();
+    let claim = |cones: Vec<hydrofrac::provenance::sensitivity::LabelCone>| {
+        cones
+            .into_iter()
+            .find(|c| {
+                c.collection.display_name() == "known" && c.collection.op == "AssertIsConsistent"
+            })
+            .expect("the claim")
+    };
+    let calm = claim(label_cones(built.ir()));
+    assert!(calm.existence_sensitive(), "{calm:?}");
+    assert!(
+        calm.sites
+            .iter()
+            .any(|s| s.op == "batch" && !s.send_order && s.via.is_some()),
+        "a batch, through the operator that reads the tick: {calm:?}"
+    );
+    assert!(claim(label_cones_conservative(built.ir())).existence_sensitive());
+}
+
 /// [`ask_once`] over three members: member 0 gets the value and member 2's timer fires at the
 /// same time, so the query and the announcement race. Every schedule of every fault set is
 /// explored.

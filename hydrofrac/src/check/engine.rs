@@ -568,6 +568,7 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
                 local: true,
                 opaque: true,
                 send_order: false,
+                via: None,
             };
             if !sites.contains(&site) {
                 sites.push(site);
