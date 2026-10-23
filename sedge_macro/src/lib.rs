@@ -322,6 +322,7 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
     let mut load: Option<Ident> = None;
     let mut round_data: Option<Expr> = None;
     let mut mu: Option<Expr> = None;
+    let mut cpus: Option<Expr> = None;
     let mut timers: Vec<(Ident, Expr)> = Vec::new();
     let mut generic_types: Vec<(String, Type)> = Vec::new();
     let mut values: Vec<(String, Expr, Span)> = Vec::new();
@@ -344,6 +345,7 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
             ("load", Some(v), _) => load = Some(syn::parse2(v.clone())?),
             ("round_data", Some(v), _) => round_data = Some(syn::parse2(v.clone())?),
             ("mu", Some(v), _) => mu = Some(syn::parse2(v.clone())?),
+            ("cpus", Some(v), _) => cpus = Some(syn::parse2(v.clone())?),
             ("timers", None, Some(g)) => {
                 for t in g {
                     let Some(v) = &t.value else {
@@ -630,9 +632,36 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
         let (item, order, retries) = (&s.item, &s.order, &s.retries);
         let locv = &locs[s.loc].var;
         let pv = port_var(s);
-        // A timer is a `()` data stream the harness drives itself over the same kind of port,
-        // so that its period can be changed during the trigger (a capacity dip).
-        let item = if is_data(s) { quote!(#item) } else { quote!(()) };
+        if !is_data(s) {
+            // A timer runs in-process, on the deployed node's own clock, unless the command
+            // names it in a timing fault (`--dip`), in which case the harness drives it over a
+            // port like a data stream's so that it can stretch its period.
+            let name = s.name.to_string();
+            let period = &timers.iter().find(|(t, _)| *t == s.name).unwrap().1;
+            return match locs[s.loc].kind {
+                LocKind::Process => quote!(
+                    let (#pv, #sv) = if __spec.drives_timer(#name) {
+                        let (__p, __s) = #sedge::load_input::<_, ()>(&#locv, &__external);
+                        (::std::option::Option::Some(__p), __s)
+                    } else {
+                        (::std::option::Option::None, #sedge::timer(&#locv, ::std::time::Duration::from(#period)))
+                    };
+                    let #sv = #sv.weaken_ordering::<#order>().weaken_retries::<#retries>();
+                ),
+                LocKind::Cluster => {
+                    let n = size_var(s.loc);
+                    quote!(
+                        let (#pv, #sv) = if __spec.drives_timer(#name) {
+                            let (__p, __s) = #sedge::cluster_load_input::<_, ()>(&#locv, &__relay, &__external);
+                            (::std::option::Option::Some(__p), __s)
+                        } else {
+                            (::std::option::Option::None, #sedge::cluster_timer(&#locv, ::std::time::Duration::from(#period), #n))
+                        };
+                        let #sv = #sv.weaken_ordering::<#order>().weaken_retries::<#retries>();
+                    )
+                }
+            };
+        }
         match locs[s.loc].kind {
             LocKind::Process => quote!(
                 let (#pv, #sv) = #sedge::load_input::<_, #item>(&#locv, &__external);
@@ -671,7 +700,14 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
     let connect_sinks = streams.iter().map(|s| {
         let pv = port_var(s);
         let sk = sink_var(s);
-        quote!(let mut #sk = __nodes.connect(#pv).await;)
+        if is_data(s) {
+            quote!(let mut #sk = __nodes.connect(#pv).await;)
+        } else {
+            quote!(let #sk = match #pv {
+                ::std::option::Option::Some(__p) => ::std::option::Option::Some(__nodes.connect(__p).await),
+                ::std::option::Option::None => ::std::option::Option::None,
+            };)
+        }
     });
     let make_timers = streams.iter().filter(|s| !is_data(s)).map(|s| {
         let sk = sink_var(s);
@@ -679,16 +715,18 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
         let period = &timers.iter().find(|(t, _)| *t == s.name).unwrap().1;
         let (sink, members) = if is_cluster(s) {
             let n = size_var(s.loc);
-            (quote!(#sk), quote!(#n))
+            (quote!(__sink), quote!(#n))
         } else {
-            (quote!(#sedge::harness::process_timer_sink(#sk)), quote!(1u32))
+            (quote!(#sedge::harness::process_timer_sink(__sink)), quote!(1u32))
         };
-        quote!(#sedge::harness::TimerDrive {
-            name: #name.to_owned(),
-            period: ::std::time::Duration::from(#period),
-            sink: #sink,
-            members: #members,
-        },)
+        quote!(if let ::std::option::Option::Some(__sink) = #sk {
+            __timers.push(#sedge::harness::TimerDrive {
+                name: #name.to_owned(),
+                period: ::std::time::Duration::from(#period),
+                sink: #sink,
+                members: #members,
+            });
+        })
     });
     let send_round = match (&load, &round_data) {
         (Some(_), _) => {
@@ -781,15 +819,25 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
         (None, None) => unreachable!(),
     };
 
+    let role = |l: &Loc| -> String {
+        last_ident(&l.marker)
+            .map(|(i, _)| i.to_string())
+            .unwrap_or_else(|| match l.kind {
+                LocKind::Process => "process".to_owned(),
+                LocKind::Cluster => "cluster".to_owned(),
+            })
+    };
+    let roles: Vec<String> = locs.iter().map(role).collect();
     let with_processes = locs.iter().enumerate().map(|(i, l)| {
         let v = &l.var;
+        let r = role(l);
         match l.kind {
             LocKind::Process => {
-                quote!(.with_process(&#v, #sedge::harness::host(&mut __deployment, __run)))
+                quote!(.with_process(&#v, __cap.host(&mut __deployment, __run, &__meta, #r, ::std::option::Option::None)))
             }
             LocKind::Cluster => {
                 let n = size_var(i);
-                quote!(.with_cluster(&#v, (0..#n).map(|_| #sedge::harness::host(&mut __deployment, __run)).collect::<::std::vec::Vec<_>>()))
+                quote!(.with_cluster(&#v, (0..#n).map(|__m| __cap.host(&mut __deployment, __run, &__meta, #r, ::std::option::Option::Some(__m))).collect::<::std::vec::Vec<_>>()))
             }
         }
     });
@@ -805,6 +853,10 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
         .as_ref()
         .map(|e| quote!(::std::option::Option::Some((#e) as f64)))
         .unwrap_or_else(|| quote!(::std::option::Option::None));
+    let cpus_value = cpus
+        .as_ref()
+        .map(|e| quote!(::std::option::Option::Some((#e) as f64)))
+        .unwrap_or_else(|| quote!(::std::option::Option::None));
     let ignore_value = ignore
         .as_ref()
         .map(|reason| quote!(::std::option::Option::Some(#reason)))
@@ -817,7 +869,7 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
 
     Ok(quote!(
         #[doc = #doc]
-        #[allow(non_snake_case, unused_variables, clippy::all)]
+        #[allow(non_snake_case, unused_variables, unused_mut, clippy::all)]
         fn #entry_name(
             __run: &#sedge::harness::RunConfig,
         ) -> ::std::vec::Vec<#sedge::harness::TrialResult> {
@@ -828,45 +880,43 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
                 function: stringify!(#fn_name),
                 configuration: #config_name,
                 mu: #mu_value,
+                cpus: #cpus_value,
+                roles: &[#(#roles),*],
             };
-            #sedge::harness::block_on(async {
-                let mut __results = ::std::vec::Vec::new();
-                for (__factor, __trial) in __run.schedule() {
-                    let mut __deployment = #sedge::__private::hydro_deploy::Deployment::new();
-                    let mut __flow = #hydro::compile::builder::FlowBuilder::new();
-                    let __external = __flow.external::<()>();
-                    let __relay = __flow.process::<#sedge::SedgeRelay>();
-                    let mut __observer = #sedge::Observer::new(&__external, &__relay);
-                    #(#make_locs)*
-                    #(#make_sizes)*
-                    #(#make_inputs)*
-                    #observe
-                    let __nodes = __flow
-                        .with_default_optimize()
-                        #(#with_processes)*
-                        #with_relay
-                        .with_external(&__external, __deployment.Localhost())
-                        .deploy(&mut __deployment);
-                    __deployment.deploy().await.expect("deployment failed");
-                    #(#connect_sinks)*
-                    let __timers = ::std::vec![#(#make_timers)*];
-                    #send_round
-                    __results.push(
-                        #sedge::harness::run_trial(
-                            &mut __deployment,
-                            &__nodes,
-                            __send_round,
-                            __timers,
-                            __observer,
-                            &__meta,
-                            __run,
-                            __factor,
-                            __trial,
-                        )
-                        .await,
-                    );
-                }
-                __results
+            #sedge::harness::run_check(&__meta, __run, async |__spec: &#sedge::harness::Spec| -> #sedge::harness::Executed {
+                let __cap = #sedge::harness::TrialCapacity::new(__run);
+                let mut __deployment = #sedge::__private::hydro_deploy::Deployment::new();
+                let mut __flow = #hydro::compile::builder::FlowBuilder::new();
+                let __external = __flow.external::<()>();
+                let __relay = __flow.process::<#sedge::SedgeRelay>();
+                let mut __observer = #sedge::Observer::new(&__external, &__relay);
+                #(#make_locs)*
+                #(#make_sizes)*
+                #(#make_inputs)*
+                #observe
+                let __nodes = __flow
+                    .with_default_optimize()
+                    #(#with_processes)*
+                    #with_relay
+                    .with_external(&__external, __deployment.Localhost())
+                    .deploy(&mut __deployment);
+                __deployment.deploy().await.expect("deployment failed");
+                #(#connect_sinks)*
+                let mut __timers = ::std::vec::Vec::new();
+                #(#make_timers)*
+                #send_round
+                #sedge::harness::execute(
+                    &mut __deployment,
+                    &__nodes,
+                    __send_round,
+                    __timers,
+                    __observer,
+                    &__meta,
+                    __run,
+                    __spec,
+                    __cap,
+                )
+                .await
             })
         }
 

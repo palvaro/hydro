@@ -78,6 +78,10 @@ pub enum Outcome {
     /// Neither: a level is falling, or goodput is below baseline without the marks of collapse.
     /// A longer tail would decide it.
     Draining,
+    /// Not a verdict on the program: the harness itself was the bottleneck. The generator fell
+    /// behind its arrival schedule while the program's nodes were never throttled, so the load
+    /// the profile describes was never offered. Set by the harness, never by [`judge`].
+    Invalid,
 }
 
 impl fmt::Display for Outcome {
@@ -86,6 +90,7 @@ impl fmt::Display for Outcome {
             Outcome::Recovered => "RECOVERED",
             Outcome::Collapsed => "COLLAPSED",
             Outcome::Draining => "DRAINING",
+            Outcome::Invalid => "INVALID",
         })
     }
 }
@@ -127,6 +132,12 @@ impl WindowStats {
     fn stream(&self, name: &str) -> Option<&StreamWindow> {
         self.streams.iter().find(|s| s.name == name)
     }
+}
+
+/// The statistics [`judge_with_kinds`] reads from a window, for other readers of a trace (the
+/// harness's capacity probe).
+pub fn window_stats(buckets: &[Bucket], kinds: &StreamKinds) -> WindowStats {
+    stats(buckets, kinds)
 }
 
 fn stats(buckets: &[Bucket], kinds: &StreamKinds) -> WindowStats {
@@ -597,6 +608,7 @@ mod tests {
             outstanding: 0,
             stream_names: vec!["backlog".to_owned()],
             valued_names: vec!["backlog".to_owned()],
+            extra: Vec::new(),
         }
     }
 
@@ -663,6 +675,7 @@ mod tests {
             outstanding: 0,
             stream_names: vec!["sent".to_owned()],
             valued_names: vec![],
+            extra: Vec::new(),
         };
         let mut kinds = StreamKinds::new();
         kinds.insert("sent".to_owned(), StreamKind::Conserved);

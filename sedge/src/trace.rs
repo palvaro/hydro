@@ -294,6 +294,7 @@ impl Recorder {
             outstanding,
             stream_names,
             valued_names,
+            extra: Vec::new(),
         }
     }
 }
@@ -361,6 +362,11 @@ pub struct Trace {
     pub stream_names: Vec<String>,
     /// Of those, the streams that produced numeric values.
     pub valued_names: Vec<String>,
+    /// Columns the harness measured itself rather than read from the program, one value per
+    /// bucket (missing values print as `-`): per-node CPU usage and throttling, read from each
+    /// node's cgroup. The verdict never reads them; they are the run's ground truth about
+    /// capacity.
+    pub extra: Vec<(String, Vec<f64>)>,
 }
 
 impl Trace {
@@ -394,9 +400,10 @@ impl Trace {
         .collect::<Vec<_>>();
         header.extend(self.stream_names.iter().map(|n| format!("{n}_n")));
         header.extend(self.valued_names.iter().map(|n| format!("{n}_v")));
+        header.extend(self.extra.iter().map(|(n, _)| n.clone()));
         out.push_str(&header.join("\t"));
         out.push('\n');
-        for b in &self.buckets {
+        for (i, b) in self.buckets.iter().enumerate() {
             let ms = |d: Option<Duration>| {
                 d.map(|d| format!("{:.1}", d.as_secs_f64() * 1e3))
                     .unwrap_or_else(|| "-".to_owned())
@@ -425,6 +432,14 @@ impl Trace {
                 match b.stream_values.get(name) {
                     Some(v) => {
                         let _ = write!(out, "\t{v}");
+                    }
+                    None => out.push_str("\t-"),
+                }
+            }
+            for (_, values) in &self.extra {
+                match values.get(i) {
+                    Some(v) => {
+                        let _ = write!(out, "\t{v:.3}");
                     }
                     None => out.push_str("\t-"),
                 }

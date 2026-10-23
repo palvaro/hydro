@@ -51,6 +51,8 @@
 #[cfg(stageleft_runtime)]
 hydro_lang::setup!();
 
+#[cfg(stageleft_runtime)]
+pub mod capacity;
 pub mod generator;
 pub mod profile;
 pub mod program;
@@ -63,7 +65,7 @@ pub mod harness;
 
 pub use generator::drive;
 pub use profile::{Arrivals, Profile};
-pub use program::timer;
+pub use program::{cluster_timer, timer};
 #[cfg(stageleft_runtime)]
 pub use program::{
     LoadItem, Observable, Observation, Observed, Observer, cluster_load_input, load_input,

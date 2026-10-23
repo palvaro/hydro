@@ -1,12 +1,32 @@
 //! Runtime support for the harness that [`overload_check`](crate::overload_check) generates:
-//! the run configuration the command passes in, the deployment of one trial, the registry the
+//! the run configuration the command passes in, the capacity each deployed node gets, the
+//! measurement of the program's capacity μ, the deployment of one trial, the registry the
 //! command reads, and the files a run leaves behind. Nothing here is specific to any program.
+//!
+//! # What the harness controls
+//!
+//! Only what is *outside* the program: the load it is offered (an open-loop Poisson generator on
+//! its external ports), the resources each of its nodes gets (a CPU quota per node, see
+//! [`crate::capacity`]), and, for a capacity-dip trigger, a cut in that quota for a while. Its
+//! timers are its own: the generated code binds every timer parameter to an in-process
+//! `source_interval`, so CPU starvation and queueing delay them as they would in production. The
+//! old harness-driven timer survives only as a *timing fault* (`--dip TIMER=K`), reported apart
+//! from overload.
+//!
+//! # μ is measured
+//!
+//! The sweep's factors `f = μ/λ` are relative to the capacity μ, in rounds of workload per
+//! second. Unless `--mu` gives it, μ is measured before the sweep, per configuration and per set
+//! of limits, by [`calibrate`]: deploy at a constant offered rate, check whether goodput keeps
+//! up and the program's levels stay flat, and search for the highest rate that passes. The result
+//! is cached in `calibration.tsv` per (program, configuration, limits, host).
 //!
 //! # Where things end up
 //!
-//! Under `$SEDGE_RESULTS_DIR` (the command sets it to `target/sedge/`): `results.tsv` has one
-//! row per trial, and `traces/` has one per-second TSV per trial, named by crate, function,
-//! configuration, factor and trial number.
+//! Under `$SEDGE_RESULTS_DIR` (the command sets it to `target/sedge/`, or `sedge/` under
+//! `$CARGO_TARGET_DIR`): `results.tsv` has one row per trial, `probes.tsv` one row per capacity
+//! probe, `calibration.tsv` the cached μ's, and `traces/` one per-second TSV per trial, named by
+//! crate, function, configuration, factor, trial number and trigger.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -14,7 +34,8 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use futures::{Sink, SinkExt, StreamExt};
@@ -22,14 +43,202 @@ use hydro_deploy::Deployment;
 use hydro_lang::compile::deploy::DeployResult;
 use hydro_lang::deploy::{HydroDeploy, TrybuildHost};
 
+use crate::capacity::{
+    CapacityBackend, CpuQuota, CpuStat, DockerBackend, Handle, Limits, NodeSpec, Nodes,
+    host_fingerprint,
+};
 use crate::generator::drive;
 use crate::profile::Profile;
 use crate::program::Observer;
-use crate::trace::{Recorder, Sample};
-use crate::verdict::{Outcome, StreamKind, StreamKinds, Verdict, judge_with_kinds};
+use crate::trace::{Recorder, Sample, Trace};
+use crate::verdict::{
+    Outcome, StreamKind, StreamKinds, Verdict, judge_with_kinds, window_stats,
+};
+
+// ---------------------------------------------------------------------------------------------
+// Configuration
+
+/// How each deployed node is run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendChoice {
+    /// One Docker container per node, with a CFS quota (the default when Docker answers).
+    Docker,
+    /// Plain localhost processes, uncapped: the program's capacity is whatever the host gives
+    /// it, and nothing about it is measured. Only for hosts without Docker.
+    None,
+}
+
+/// What resources each deployed node of the program gets.
+#[derive(Debug, Clone)]
+pub struct CapacityConfig {
+    pub backend: BackendChoice,
+    /// Cores' worth of CPU per node, overriding the check's `cpus`.
+    pub cpus: Option<f64>,
+    /// Per-role overrides of `cpus`, by the location's marker type name (case-insensitive).
+    pub role_cpus: Vec<(String, f64)>,
+    /// The CFS period. Short, so that a small quota is a slower node rather than one that stops
+    /// for longer than a tick.
+    pub period_us: u64,
+    /// The cores the nodes run on.
+    pub node_cpuset: Option<String>,
+    /// The cores the harness itself (generator, observer, relay) is pinned to.
+    pub harness_cpuset: Option<String>,
+    /// The container image the nodes run in.
+    pub image: String,
+    /// A memory limit per node, in bytes.
+    pub memory: Option<u64>,
+}
+
+/// The cap a node gets when neither the command nor the check says.
+pub const DEFAULT_CPUS: f64 = 0.5;
+
+impl Default for CapacityConfig {
+    fn default() -> Self {
+        // Split the host: the upper half of the cores for the nodes, the lower half for the
+        // harness, so that the generator never competes with the program.
+        let n = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let (node_cpuset, harness_cpuset) = if n >= 4 {
+            (
+                Some(format!("{}-{}", n / 2, n - 1)),
+                Some(format!("0-{}", n / 2 - 1)),
+            )
+        } else {
+            (None, None)
+        };
+        Self {
+            backend: if DockerBackend::available() {
+                BackendChoice::Docker
+            } else {
+                BackendChoice::None
+            },
+            cpus: None,
+            role_cpus: Vec::new(),
+            period_us: 10_000,
+            node_cpuset,
+            harness_cpuset,
+            image: "public.ecr.aws/amazonlinux/amazonlinux:latest".to_owned(),
+            memory: None,
+        }
+    }
+}
+
+impl CapacityConfig {
+    /// The limits of a node with role `role` under check `meta`.
+    pub fn limits(&self, meta: &Meta, role: &str) -> Limits {
+        let cpus = self
+            .role_cpus
+            .iter()
+            .find(|(r, _)| r.eq_ignore_ascii_case(role))
+            .map(|(_, c)| *c)
+            .or(self.cpus)
+            .or(meta.cpus)
+            .unwrap_or(DEFAULT_CPUS);
+        Limits {
+            cpu: (cpus > 0.0).then(|| CpuQuota::from_cores(cpus, self.period_us)),
+            cpuset: self.node_cpuset.clone(),
+            memory: self.memory,
+        }
+    }
+
+    /// A key for the calibration cache: everything about the limits that changes μ.
+    pub fn key(&self, meta: &Meta, roles: &[String]) -> String {
+        match self.backend {
+            BackendChoice::None => "uncapped".to_owned(),
+            BackendChoice::Docker => {
+                let mut parts: Vec<String> = roles
+                    .iter()
+                    .map(|r| {
+                        let l = self.limits(meta, r);
+                        format!(
+                            "{r}={}",
+                            l.cpu
+                                .map(|q| format!("{}/{}", q.quota_us, q.period_us))
+                                .unwrap_or_else(|| "-".to_owned())
+                        )
+                    })
+                    .collect();
+                parts.sort();
+                parts.dedup();
+                format!(
+                    "docker;{};cpuset={};mem={}",
+                    parts.join(","),
+                    self.node_cpuset.as_deref().unwrap_or("-"),
+                    self.memory.map(|m| m.to_string()).unwrap_or_else(|| "-".to_owned())
+                )
+            }
+        }
+    }
+}
+
+/// Which nodes a capacity dip applies to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeSelector {
+    All,
+    Role(String),
+    Member(String, u32),
+}
+
+impl NodeSelector {
+    fn parse(s: &str) -> Result<Self, String> {
+        let s = s.trim();
+        if s.eq_ignore_ascii_case("all") {
+            return Ok(NodeSelector::All);
+        }
+        match s.split_once(':') {
+            Some((role, m)) => m
+                .trim()
+                .parse()
+                .map(|m| NodeSelector::Member(role.trim().to_owned(), m))
+                .map_err(|_| format!("--cpu-dip-nodes wants ROLE or ROLE:INDEX, got `{s}`")),
+            None => Ok(NodeSelector::Role(s.to_owned())),
+        }
+    }
+
+    fn matches(&self, node: &NodeSpec) -> bool {
+        match self {
+            NodeSelector::All => true,
+            NodeSelector::Role(r) => r.eq_ignore_ascii_case(&node.role),
+            NodeSelector::Member(r, m) => {
+                r.eq_ignore_ascii_case(&node.role) && node.member.unwrap_or(0) == *m
+            }
+        }
+    }
+}
+
+impl fmt::Display for NodeSelector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NodeSelector::All => f.write_str("all"),
+            NodeSelector::Role(r) => f.write_str(r),
+            NodeSelector::Member(r, m) => write!(f, "{r}:{m}"),
+        }
+    }
+}
+
+/// A capacity-dip trigger: during the trigger window, the CPU quota of the selected nodes is
+/// divided by `k`, then restored. With `--trigger-multiple 1` the offered load stays at the
+/// baseline and the dip alone is the trigger.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CpuDip {
+    pub k: f64,
+    pub nodes: Vec<NodeSelector>,
+}
+
+/// When to measure μ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Calibrate {
+    /// Use the cached μ for these limits if there is one, otherwise measure it.
+    Auto,
+    /// Measure it even if it is cached.
+    Force,
+    /// Never: use the check's `mu` as declared (the old behavior).
+    Off,
+}
 
 /// What the command asks for: which checks, at which overprovisioning factors, how many times,
-/// and the shape of the load profile.
+/// the shape of the load profile, the capacity of each node and the trigger.
 #[derive(Debug, Clone)]
 pub struct RunConfig {
     /// Substring of the function name to match; empty matches all.
@@ -42,7 +251,7 @@ pub struct RunConfig {
     pub factors: Vec<f64>,
     /// Trials per factor.
     pub trials: usize,
-    /// Overrides the check's `mu` (rounds of workload per second the service can sustain).
+    /// Gives μ (rounds of workload per second the program sustains) instead of measuring it.
     pub mu: Option<f64>,
     /// Trigger offered load as a multiple of `μ`.
     pub trigger_multiple: f64,
@@ -61,10 +270,21 @@ pub struct RunConfig {
     /// Extra Cargo features to build the deployed program with (the crate's `sedge` feature is
     /// always on).
     pub features: Vec<String>,
-    /// Capacity dips: during the trigger window, the named timer's period is multiplied by the
-    /// factor. A dip with `--trigger-multiple 1` is a trigger that removes capacity instead of
-    /// adding load.
+    /// Timing faults: during the trigger window, the named timer's period is multiplied by the
+    /// factor. A timer named here is driven by the harness over an external port instead of
+    /// running in-process, which is a change to the program's environment that no real
+    /// overload makes; its runs are reported as `TIMING_FAULT`, apart from overload.
     pub dips: Vec<(String, f64)>,
+    /// What each node gets.
+    pub capacity: CapacityConfig,
+    /// A capacity-dip trigger.
+    pub cpu_dip: Option<CpuDip>,
+    /// When to measure μ.
+    pub calibrate: Calibrate,
+    /// How long the probe offers each rate (after a warm-up of a third of it).
+    pub probe_step: Duration,
+    /// The rate the probe starts its search at, overriding the check's `mu` hint.
+    pub probe_start: Option<f64>,
 }
 
 impl Default for RunConfig {
@@ -85,6 +305,11 @@ impl Default for RunConfig {
             results_dir: results_dir(),
             features: Vec::new(),
             dips: Vec::new(),
+            capacity: CapacityConfig::default(),
+            cpu_dip: None,
+            calibrate: Calibrate::Auto,
+            probe_step: Duration::from_secs(10),
+            probe_start: None,
         }
     }
 }
@@ -109,6 +334,17 @@ impl RunConfig {
         }
     }
 
+    /// What kind of trigger this run's trials use.
+    pub fn trigger_kind(&self) -> TriggerKind {
+        if !self.dips.is_empty() {
+            TriggerKind::TimingFault
+        } else if self.cpu_dip.is_some() {
+            TriggerKind::CpuDip
+        } else {
+            TriggerKind::Burst
+        }
+    }
+
     /// Parses the command's arguments: `[--option value]... [function-substring]`. See
     /// [`USAGE`].
     pub fn from_args(args: impl IntoIterator<Item = String>) -> Result<Self, String> {
@@ -121,6 +357,15 @@ impl RunConfig {
                 .map(Duration::from_secs_f64)
                 .ok_or_else(|| format!("{what} wants a number of seconds, got `{v}`"))
         };
+        let positive = |v: &str, what: &str| -> Result<f64, String> {
+            v.trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|m| *m > 0.0)
+                .ok_or_else(|| format!("{what} wants a positive number, got `{v}`"))
+        };
+        let mut dip_k: Option<f64> = None;
+        let mut dip_nodes: Vec<NodeSelector> = Vec::new();
         while let Some(arg) = args.next() {
             let mut value = |name: &str| -> Result<String, String> {
                 args.next().ok_or_else(|| format!("{name} needs a value"))
@@ -132,15 +377,7 @@ impl RunConfig {
                     let v = value("--factors")?;
                     cfg.factors = v
                         .split(',')
-                        .map(|s| {
-                            s.trim()
-                                .parse::<f64>()
-                                .ok()
-                                .filter(|f| *f > 0.0)
-                                .ok_or_else(|| {
-                                    format!("--factors wants positive numbers, got `{s}`")
-                                })
-                        })
+                        .map(|s| positive(s, "--factors"))
                         .collect::<Result<_, _>>()?;
                 }
                 "--trials" => {
@@ -150,21 +387,10 @@ impl RunConfig {
                             format!("--trials wants a positive integer, got `{v}`")
                         })?;
                 }
-                "--mu" => {
-                    let v = value("--mu")?;
-                    cfg.mu = Some(
-                        v.parse::<f64>()
-                            .ok()
-                            .filter(|m| *m > 0.0)
-                            .ok_or_else(|| format!("--mu wants a positive number, got `{v}`"))?,
-                    );
-                }
+                "--mu" => cfg.mu = Some(positive(&value("--mu")?, "--mu")?),
                 "--trigger-multiple" => {
-                    let v = value("--trigger-multiple")?;
                     cfg.trigger_multiple =
-                        v.parse::<f64>().ok().filter(|m| *m > 0.0).ok_or_else(|| {
-                            format!("--trigger-multiple wants a positive number, got `{v}`")
-                        })?;
+                        positive(&value("--trigger-multiple")?, "--trigger-multiple")?
                 }
                 "--before" => cfg.before = secs(&value("--before")?, "--before")?,
                 "--trigger" => cfg.trigger = secs(&value("--trigger")?, "--trigger")?,
@@ -181,13 +407,7 @@ impl RunConfig {
                     let (name, k) = v
                         .split_once('=')
                         .ok_or_else(|| format!("--dip wants `timer=factor`, got `{v}`"))?;
-                    let k = k
-                        .trim()
-                        .parse::<f64>()
-                        .ok()
-                        .filter(|k| *k > 0.0)
-                        .ok_or_else(|| format!("--dip wants a positive factor, got `{k}`"))?;
-                    cfg.dips.push((name.trim().to_owned(), k));
+                    cfg.dips.push((name.trim().to_owned(), positive(k, "--dip")?));
                 }
                 "--features" => {
                     cfg.features = value("--features")?
@@ -195,6 +415,60 @@ impl RunConfig {
                         .map(|s| s.trim().to_owned())
                         .filter(|s| !s.is_empty())
                         .collect();
+                }
+                "--backend" => {
+                    cfg.capacity.backend = match value("--backend")?.as_str() {
+                        "docker" => BackendChoice::Docker,
+                        "none" => BackendChoice::None,
+                        v => return Err(format!("--backend wants docker or none, got `{v}`")),
+                    }
+                }
+                "--cpus" => {
+                    let v = value("--cpus")?;
+                    match v.split_once('=') {
+                        Some((role, c)) => cfg
+                            .capacity
+                            .role_cpus
+                            .push((role.trim().to_owned(), positive(c, "--cpus")?)),
+                        None => cfg.capacity.cpus = Some(positive(&v, "--cpus")?),
+                    }
+                }
+                "--cpu-period-us" => {
+                    let v = value("--cpu-period-us")?;
+                    cfg.capacity.period_us = v
+                        .parse()
+                        .ok()
+                        .filter(|p| (1000..=1_000_000).contains(p))
+                        .ok_or_else(|| {
+                            format!("--cpu-period-us wants 1000..=1000000, got `{v}`")
+                        })?;
+                }
+                "--node-cpus" => {
+                    let v = value("--node-cpus")?;
+                    cfg.capacity.node_cpuset = (v != "none").then_some(v);
+                }
+                "--harness-cpus" => {
+                    let v = value("--harness-cpus")?;
+                    cfg.capacity.harness_cpuset = (v != "none").then_some(v);
+                }
+                "--image" => cfg.capacity.image = value("--image")?,
+                "--memory-mb" => {
+                    cfg.capacity.memory = Some(
+                        (positive(&value("--memory-mb")?, "--memory-mb")? * 1024.0 * 1024.0)
+                            as u64,
+                    )
+                }
+                "--cpu-dip" => dip_k = Some(positive(&value("--cpu-dip")?, "--cpu-dip")?),
+                "--cpu-dip-nodes" => {
+                    for s in value("--cpu-dip-nodes")?.split(',') {
+                        dip_nodes.push(NodeSelector::parse(s)?);
+                    }
+                }
+                "--recalibrate" => cfg.calibrate = Calibrate::Force,
+                "--no-calibrate" => cfg.calibrate = Calibrate::Off,
+                "--probe-step" => cfg.probe_step = secs(&value("--probe-step")?, "--probe-step")?,
+                "--probe-start" => {
+                    cfg.probe_start = Some(positive(&value("--probe-start")?, "--probe-start")?)
                 }
                 s if s.starts_with("--") => return Err(format!("unknown option `{s}`\n{USAGE}")),
                 s => {
@@ -205,6 +479,27 @@ impl RunConfig {
                 }
             }
         }
+        match dip_k {
+            Some(k) => {
+                if dip_nodes.is_empty() {
+                    dip_nodes.push(NodeSelector::All);
+                }
+                if cfg.capacity.backend == BackendChoice::None {
+                    return Err("--cpu-dip needs a capacity backend (--backend docker)".to_owned());
+                }
+                cfg.cpu_dip = Some(CpuDip {
+                    k,
+                    nodes: dip_nodes,
+                });
+            }
+            None if !dip_nodes.is_empty() => {
+                return Err("--cpu-dip-nodes needs --cpu-dip K".to_owned());
+            }
+            None => {}
+        }
+        if cfg.cpu_dip.is_some() && !cfg.dips.is_empty() {
+            return Err("--cpu-dip and --dip are different experiments; give one".to_owned());
+        }
         Ok(cfg)
     }
 }
@@ -212,19 +507,38 @@ impl RunConfig {
 /// The command's options.
 pub const USAGE: &str = "\
 usage: sedge [options] <crate> [function-substring]
+ selection and sweep:
   --config NAME            only the configuration named NAME
   --include-ignored        also run checks marked ignore = \"...\"
   --factors F1,F2,...      overprovisioning factors μ/λ to run (default 2)
   --trials N               trials per factor (default 1)
-  --mu RPS                 service capacity, overriding the check's `mu`
-  --trigger-multiple M     trigger load as a multiple of μ (default 2)
+  --trigger-multiple M     trigger load as a multiple of μ (default 2; 1 for a dip alone)
   --before S               seconds of baseline before the trigger (default 10)
   --trigger S              seconds the trigger lasts (default 5)
   --tail S                 seconds of baseline after the trigger (default 45)
   --grace S                seconds to wait for stragglers after the last request (default 2)
   --seed N                 seed of the first trial's arrivals (default 1)
-  --dip TIMER=K            stretch TIMER's period by K during the trigger (a capacity dip; repeatable)
-  --features A,B           extra Cargo features for the deployed program";
+  --features A,B           extra Cargo features for the deployed program
+ capacity (from outside the program):
+  --backend docker|none    run each node in a CPU-capped container (default docker if available)
+  --cpus C                 cores' worth of CPU per node (default: the check's `cpus`, else 0.5)
+  --cpus ROLE=C            per-role override, by location marker name (repeatable)
+  --cpu-period-us P        CFS period in microseconds (default 10000)
+  --node-cpus LIST         cores the nodes run on (default: upper half; `none` for any)
+  --harness-cpus LIST      cores the harness is pinned to (default: lower half; `none`)
+  --image IMAGE            container image (default amazonlinux:latest)
+  --memory-mb M            memory limit per node
+ μ:
+  --mu RPS                 take μ as given instead of measuring it
+  --recalibrate            measure μ even if it is cached for these limits
+  --no-calibrate           use the check's declared `mu` (no measurement)
+  --probe-step S           seconds per probe rate (default 10)
+  --probe-start RPS        rate the probe starts at (default: the check's `mu` hint, else 50)
+ triggers:
+  --cpu-dip K              divide the selected nodes' CPU quota by K during the trigger window
+  --cpu-dip-nodes SEL,...  which nodes: all, ROLE, or ROLE:INDEX (default all)
+  --dip TIMER=K            TIMING FAULT: drive TIMER from the harness and stretch its period by K
+                           during the trigger (repeatable; reported apart from overload)";
 
 /// The directory results are written to: `$SEDGE_RESULTS_DIR` if set, otherwise `target/sedge/`
 /// under the current directory.
@@ -235,6 +549,9 @@ pub fn results_dir() -> PathBuf {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Checks and their results
+
 /// What the generated code knows about the check it is running.
 #[derive(Debug, Clone)]
 pub struct Meta {
@@ -242,8 +559,92 @@ pub struct Meta {
     pub module: &'static str,
     pub function: &'static str,
     pub configuration: &'static str,
-    /// The check's `mu`, if the attribute gave one.
+    /// The check's `mu`: with calibration, only the rate the probe starts at.
     pub mu: Option<f64>,
+    /// The check's `cpus`: the cap each node gets unless the command says otherwise.
+    pub cpus: Option<f64>,
+    /// The role (location marker name) of every location the check deploys, for the
+    /// calibration key.
+    pub roles: &'static [&'static str],
+}
+
+/// What triggered a trial's overload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TriggerKind {
+    /// Offered load above μ for the trigger window.
+    Burst,
+    /// The nodes' CPU quota cut for the trigger window (from outside).
+    CpuDip,
+    /// A harness-driven timer stretched for the trigger window: a change to the program's
+    /// environment, not overload.
+    TimingFault,
+}
+
+impl fmt::Display for TriggerKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            TriggerKind::Burst => "burst",
+            TriggerKind::CpuDip => "cpu_dip",
+            TriggerKind::TimingFault => "TIMING_FAULT",
+        })
+    }
+}
+
+/// Where a trial's μ came from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MuSource {
+    /// `--mu`.
+    Given,
+    /// The check's `mu`, unmeasured (`--no-calibrate`, or no capacity backend).
+    Declared,
+    /// Measured by the probe now.
+    Measured,
+    /// Measured by an earlier probe under the same limits on this host.
+    Cached,
+}
+
+impl fmt::Display for MuSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            MuSource::Given => "given",
+            MuSource::Declared => "declared",
+            MuSource::Measured => "measured",
+            MuSource::Cached => "cached",
+        })
+    }
+}
+
+/// The CPU one node used over a run, from its cgroup.
+#[derive(Debug, Clone)]
+pub struct NodeUsage {
+    pub node: NodeSpec,
+    pub limits: Limits,
+    /// Per second: cores used, CFS periods throttled, milliseconds throttled.
+    pub per_second: Vec<(f64, u64, f64)>,
+    /// Totals over the sampled seconds.
+    pub total: CpuStat,
+    /// Seconds sampled.
+    pub seconds: usize,
+}
+
+impl NodeUsage {
+    /// Mean cores used.
+    pub fn mean_cores(&self) -> f64 {
+        if self.seconds == 0 {
+            0.0
+        } else {
+            self.total.usage_ns as f64 / 1e9 / self.seconds as f64
+        }
+    }
+
+    /// Fraction of runnable CFS periods in which the node was throttled.
+    pub fn throttled_fraction(&self) -> f64 {
+        if self.total.nr_periods == 0 {
+            0.0
+        } else {
+            self.total.nr_throttled as f64 / self.total.nr_periods as f64
+        }
+    }
 }
 
 /// The result of one trial.
@@ -255,11 +656,20 @@ pub struct TrialResult {
     pub trial: usize,
     pub seed: u64,
     pub mu: f64,
+    pub mu_source: MuSource,
     pub lambda: f64,
+    pub trigger: TriggerKind,
+    /// The trigger, in words (`burst 2×μ`, `cpu quota ÷4 on Server`).
+    pub trigger_text: String,
     pub verdict: Verdict,
     /// Arrivals the generator fell behind on; nonzero means the offered load was below the
     /// profile.
     pub late: u64,
+    /// Per-node CPU usage, empty without a capacity backend.
+    pub usage: Vec<NodeUsage>,
+    /// The limits, in words.
+    pub limits: String,
+    pub host: String,
     pub trace_path: Option<PathBuf>,
 }
 
@@ -283,6 +693,20 @@ pub fn register_check(check: RegisteredCheck) {
         .lock()
         .expect("overload check registry lock poisoned")
         .push(check);
+}
+
+/// Pins this process (every thread, and so every child it spawns later: the relay, the docker
+/// CLI) to `cpus`.
+fn pin_harness(cpus: &str) {
+    let pid = std::process::id().to_string();
+    match std::process::Command::new("taskset")
+        .args(["-a", "-p", "-c", cpus, &pid])
+        .stdout(std::process::Stdio::null())
+        .status()
+    {
+        Ok(s) if s.success() => eprintln!("  harness pinned to cpus {cpus}"),
+        _ => eprintln!("  (could not pin the harness to cpus {cpus}; is taskset installed?)"),
+    }
 }
 
 /// Runs the registered checks `run` selects. An error means no check matched.
@@ -314,6 +738,19 @@ pub fn run_registered_checks(run: &RunConfig) -> Result<Vec<TrialResult>, String
             run.results_dir.join("traces").display()
         )
     })?;
+    match run.capacity.backend {
+        BackendChoice::Docker => {
+            if let Some(cpus) = &run.capacity.harness_cpuset {
+                pin_harness(cpus);
+            }
+            // Containers a killed earlier run of this process id left behind.
+            DockerBackend::new(&run.capacity.image, run.results_dir.join("shims"))
+                .remove_prefix(&format!("sedge-{}-", std::process::id()));
+        }
+        BackendChoice::None => eprintln!(
+            "  WARNING: no capacity backend; nodes run uncapped and μ is the check's declared value"
+        ),
+    }
     let mut results = Vec::new();
     for check in checks {
         eprintln!(
@@ -335,9 +772,103 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
         .block_on(future)
 }
 
-/// A localhost host for one deployed process, built optimized and with the crate's `sedge`
-/// feature on (so that the program's `Observed` impl and its quotes are part of the build) plus
-/// whatever `--features` asked for.
+// ---------------------------------------------------------------------------------------------
+// One deployment
+
+/// What one deployment of a check is for: a trial of the sweep, or a capacity probe at a
+/// constant rate.
+#[derive(Debug, Clone)]
+pub struct Spec {
+    pub profile: Profile,
+    pub seed: u64,
+    /// For names: `factor2.trial0` or `probe3`.
+    pub label: String,
+    pub probe: bool,
+    /// The capacity dip to apply in the trigger window.
+    pub cpu_dip: Option<CpuDip>,
+    /// The timers to drive from the harness, stretched by the factor in the trigger window.
+    pub timing_dips: Vec<(String, f64)>,
+}
+
+impl Spec {
+    /// Whether timer `name` is driven by the harness (a timing fault) rather than in-process.
+    pub fn drives_timer(&self, name: &str) -> bool {
+        self.timing_dips.iter().any(|(n, _)| n == name)
+    }
+}
+
+static NODE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// The capacity side of one deployment: the hosts its nodes run on and, with a backend, the
+/// handles to their containers. Dropping it removes the containers.
+pub struct TrialCapacity {
+    pub nodes: Option<Nodes>,
+    prefix: String,
+}
+
+impl TrialCapacity {
+    pub fn new(run: &RunConfig) -> Self {
+        let seq = NODE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let prefix = format!("sedge-{}-{seq}", std::process::id());
+        let nodes = match run.capacity.backend {
+            BackendChoice::Docker => {
+                let backend: Arc<dyn CapacityBackend> = Arc::new(DockerBackend::new(
+                    &run.capacity.image,
+                    run.results_dir.join("shims"),
+                ));
+                Some(Nodes::new(backend))
+            }
+            BackendChoice::None => None,
+        };
+        Self { nodes, prefix }
+    }
+
+    /// The host for one node of the program: role `role` (the location's marker name), member
+    /// `member` of a cluster. Built optimized, with the crate's `sedge` feature and `--features`.
+    pub fn host(
+        &self,
+        deployment: &mut Deployment,
+        run: &RunConfig,
+        meta: &Meta,
+        role: &str,
+        member: Option<u32>,
+    ) -> TrybuildHost {
+        let host: Arc<dyn hydro_deploy::Host> = match &self.nodes {
+            Some(nodes) => {
+                let name = match member {
+                    Some(m) => format!("{}-{}-{m}", self.prefix, sanitize(role)),
+                    None => format!("{}-{}", self.prefix, sanitize(role)),
+                };
+                nodes.host(
+                    deployment.Localhost(),
+                    name,
+                    NodeSpec {
+                        role: role.to_owned(),
+                        member,
+                    },
+                    run.capacity.limits(meta, role),
+                )
+            }
+            None => deployment.Localhost(),
+        };
+        let mut h = TrybuildHost::new(host)
+            .rustflags("-C opt-level=3 -C codegen-units=1 -C strip=none -C debuginfo=2 -C lto=off")
+            .feature("sedge");
+        for f in &run.features {
+            h = h.feature(f.clone());
+        }
+        h
+    }
+}
+
+fn sanitize(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .collect()
+}
+
+/// A localhost host for the harness's own relay process: uncapped, and (being a child of the
+/// pinned harness) on the harness's cores. Built like the program's nodes.
 pub fn host(deployment: &mut Deployment, run: &RunConfig) -> TrybuildHost {
     let mut host = TrybuildHost::new(deployment.Localhost())
         .rustflags("-C opt-level=3 -C codegen-units=1 -C strip=none -C debuginfo=2 -C lto=off")
@@ -348,12 +879,10 @@ pub fn host(deployment: &mut Deployment, run: &RunConfig) -> TrybuildHost {
     host
 }
 
-/// One of the program's timers, driven by the harness over an external port so that its period
-/// can be changed during the trigger (see [`RunConfig::dips`]). A timer on a cluster of `members`
-/// fires at every member once per period, the members staggered by `period / members`: the
-/// deployment's deterministic form of the per-member phase a real deployment's independent clocks
-/// (or Raft's randomized election timeouts) have, and the shape Cress's staggered timer closures
-/// take. A process is a cluster of one.
+/// One of the program's timers, driven by the harness over an external port: only for a timing
+/// fault (`--dip`), since every other timer runs in-process. A timer on a cluster of `members`
+/// fires at every member once per period, the members staggered by `period / members`, as the
+/// in-process timers are. A process is a cluster of one.
 pub struct TimerDrive {
     pub name: String,
     pub period: Duration,
@@ -389,7 +918,8 @@ async fn drive_timer(mut timer: TimerDrive, start: Instant, profile: Profile, di
             return;
         }
         let t = due.saturating_duration_since(start);
-        let stretched = dip.is_some_and(|_| t >= profile.trigger_start() && t < profile.trigger_end());
+        let stretched =
+            dip.is_some_and(|_| t >= profile.trigger_start() && t < profile.trigger_end());
         let period = if stretched {
             timer.period.mul_f64(dip.unwrap())
         } else {
@@ -403,7 +933,7 @@ async fn drive_timer(mut timer: TimerDrive, start: Instant, profile: Profile, di
 /// written: `$CRESS_RESULTS_DIR/conservation.tsv`, or `conservation.tsv` under the `cress/`
 /// sibling of the results directory (`target/cress/` beside `target/sedge/`). Later rows for the
 /// same stream win. Returns the kind of every stream named there.
-pub fn cress_kinds(run: &RunConfig, meta: &Meta) -> StreamKinds {
+pub fn cress_kinds(run: &RunConfig, meta: &Meta, quiet: bool) -> StreamKinds {
     let path = match std::env::var_os("CRESS_RESULTS_DIR") {
         Some(dir) => PathBuf::from(dir).join("conservation.tsv"),
         None => run
@@ -425,7 +955,7 @@ pub fn cress_kinds(run: &RunConfig, meta: &Meta) -> StreamKinds {
             kinds.insert(f[3].to_owned(), kind);
         }
     }
-    if !kinds.is_empty() {
+    if !kinds.is_empty() && !quiet {
         eprintln!(
             "  stream kinds from {}: {}",
             path.display(),
@@ -439,12 +969,159 @@ pub fn cress_kinds(run: &RunConfig, meta: &Meta) -> StreamKinds {
     kinds
 }
 
-/// Deploys, runs and judges one trial. The deployment must already be deployed (not started):
-/// the generated code deploys it, connects the generator's and the timers' ports, and builds
+/// What one deployment produced, before it is judged.
+pub struct Executed {
+    pub trace: Trace,
+    pub kinds: StreamKinds,
+    /// Whether goodput and latency come from request ids.
+    pub by_id: bool,
+    /// Rounds the generator offered.
+    pub rounds: u64,
+    pub late: u64,
+    pub usage: Vec<NodeUsage>,
+    pub limits: String,
+}
+
+impl Executed {
+    /// Whether the harness, not the program, limited the run: the generator fell behind while no
+    /// node was ever throttled. Only meaningful with a capacity backend.
+    pub fn harness_bound(&self) -> bool {
+        !self.usage.is_empty()
+            && self.late > 0
+            && self.usage.iter().all(|u| u.total.nr_throttled == 0)
+    }
+}
+
+/// Samples every node's `cpu.stat` once a second from `start` until the returned flag is set,
+/// and applies `dip` in the profile's trigger window.
+fn spawn_capacity_tasks(
+    nodes: &Nodes,
+    start: Instant,
+    profile: Profile,
+    dip: Option<CpuDip>,
+) -> (
+    Arc<std::sync::atomic::AtomicBool>,
+    tokio::task::JoinHandle<Vec<Vec<Option<CpuStat>>>>,
+    Option<tokio::task::JoinHandle<()>>,
+) {
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let handles = nodes.handles();
+    let backend = nodes.backend.clone();
+    let sampler = {
+        let stop = stop.clone();
+        let handles = handles.clone();
+        let backend = backend.clone();
+        tokio::spawn(async move {
+            // samples[s][node]: cumulative stat at second s.
+            let mut samples: Vec<Vec<Option<CpuStat>>> = Vec::new();
+            let mut s = 0u32;
+            loop {
+                tokio::time::sleep_until((start + Duration::from_secs(s as u64)).into()).await;
+                let hs = handles.clone();
+                let b = backend.clone();
+                let row = tokio::task::spawn_blocking(move || {
+                    hs.iter().map(|h| b.cpu_stat(h)).collect::<Vec<_>>()
+                })
+                .await
+                .unwrap_or_default();
+                samples.push(row);
+                if stop.load(Ordering::Relaxed) {
+                    return samples;
+                }
+                s += 1;
+            }
+        })
+    };
+    let dipper = dip.map(|dip| {
+        let targets: Vec<Arc<Handle>> = handles
+            .iter()
+            .filter(|h| dip.nodes.iter().any(|sel| sel.matches(&h.node)))
+            .cloned()
+            .collect();
+        assert!(
+            !targets.is_empty(),
+            "--cpu-dip-nodes {} selects none of the nodes ({})",
+            dip.nodes
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            handles
+                .iter()
+                .map(|h| h.node.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        tokio::spawn(async move {
+            let set = |to_dip: bool| {
+                let targets = targets.clone();
+                let backend = backend.clone();
+                let k = dip.k;
+                tokio::task::spawn_blocking(move || {
+                    for h in &targets {
+                        let Some(q) = h.limits.cpu else {
+                            eprintln!("  (cannot dip {}: it has no CPU quota)", h.node);
+                            continue;
+                        };
+                        let to = if to_dip { q.divided(k) } else { q };
+                        if let Err(e) = backend.set_cpu(h, to) {
+                            eprintln!("  (dip of {} failed: {e})", h.node);
+                        }
+                    }
+                })
+            };
+            tokio::time::sleep_until((start + profile.trigger_start()).into()).await;
+            let _ = set(true).await;
+            tokio::time::sleep_until((start + profile.trigger_end()).into()).await;
+            let _ = set(false).await;
+        })
+    });
+    (stop, sampler, dipper)
+}
+
+/// Turns cumulative per-second samples into per-node usage.
+fn usage_from_samples(handles: &[Arc<Handle>], samples: &[Vec<Option<CpuStat>>]) -> Vec<NodeUsage> {
+    handles
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let series: Vec<Option<CpuStat>> =
+                samples.iter().map(|row| row.get(i).copied().flatten()).collect();
+            let mut per_second = Vec::new();
+            for w in series.windows(2) {
+                per_second.push(match (w[0], w[1]) {
+                    (Some(a), Some(b)) => (
+                        b.usage_ns.saturating_sub(a.usage_ns) as f64 / 1e9,
+                        b.nr_throttled.saturating_sub(a.nr_throttled),
+                        b.throttled_ns.saturating_sub(a.throttled_ns) as f64 / 1e6,
+                    ),
+                    _ => (f64::NAN, 0, f64::NAN),
+                });
+            }
+            let first = series.iter().flatten().next().copied().unwrap_or_default();
+            let last = series.iter().flatten().last().copied().unwrap_or_default();
+            NodeUsage {
+                node: h.node.clone(),
+                limits: h.limits.clone(),
+                seconds: per_second.len(),
+                per_second,
+                total: CpuStat {
+                    usage_ns: last.usage_ns.saturating_sub(first.usage_ns),
+                    nr_periods: last.nr_periods.saturating_sub(first.nr_periods),
+                    nr_throttled: last.nr_throttled.saturating_sub(first.nr_throttled),
+                    throttled_ns: last.throttled_ns.saturating_sub(first.throttled_ns),
+                },
+            }
+        })
+        .collect()
+}
+
+/// Runs one deployment. The deployment must already be deployed (not started): the generated
+/// code deploys it, connects the generator's and the driven timers' ports, and builds
 /// `send_round`, which writes one round of the workload and returns how many records it wrote.
-/// `observer` holds the program's registered outputs.
+/// `observer` holds the program's registered outputs; `capacity` the nodes' containers.
 #[expect(clippy::too_many_arguments, reason = "called only by generated code")]
-pub async fn run_trial<'a, F, E>(
+pub async fn execute<'a, F, E>(
     deployment: &mut Deployment,
     nodes: &DeployResult<'a, HydroDeploy>,
     send_round: F,
@@ -452,27 +1129,15 @@ pub async fn run_trial<'a, F, E>(
     observer: Observer<'a>,
     meta: &Meta,
     run: &RunConfig,
-    factor: f64,
-    trial: usize,
-) -> TrialResult
+    spec: &Spec,
+    capacity: TrialCapacity,
+) -> Executed
 where
     F: AsyncFnMut(u64) -> Result<u64, E>,
     E: fmt::Display,
 {
-    let mu = run.mu.or(meta.mu).unwrap_or_else(|| {
-        panic!(
-            "{} ({}) gives no `mu`; add `mu = <rounds per second>` to the attribute or pass --mu",
-            meta.function, meta.configuration
-        )
-    });
-    let profile = run.profile(mu, factor);
-    let seed = run.seed + trial as u64;
-    let dips: Vec<String> = run
-        .dips
-        .iter()
-        .map(|(n, k)| format!("{n} period ×{k}"))
-        .collect();
-    for (n, _) in &run.dips {
+    let profile = spec.profile;
+    for (n, _) in &spec.timing_dips {
         assert!(
             timers.iter().any(|t| t.name == *n),
             "--dip names timer `{n}`, which {} has no timer parameter of (timers: {})",
@@ -480,18 +1145,6 @@ where
             timers.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", ")
         );
     }
-    eprintln!(
-        "  factor {factor}, trial {trial}: μ = {mu:.0} rounds/s, ρ = {:.1} rounds/s, trigger {:.0} rounds/s{} for {:.0}s, tail {:.0}s",
-        profile.baseline_rps,
-        profile.trigger_rps,
-        if dips.is_empty() {
-            String::new()
-        } else {
-            format!(" with {}", dips.join(", "))
-        },
-        run.trigger.as_secs_f64(),
-        run.tail.as_secs_f64()
-    );
 
     // Stream kinds: explicit registrations first, Cress's table for the rest, the item type
     // when neither says.
@@ -514,7 +1167,7 @@ where
         kinds.insert(name.clone(), StreamKind::Work);
         counters.push((name, nodes.connect(p).await));
     }
-    let from_cress = cress_kinds(run, meta);
+    let from_cress = cress_kinds(run, meta, spec.probe);
     let mut streams = Vec::new();
     for s in observer.streams {
         let kind = from_cress.get(&s.name).copied().unwrap_or(if s.numeric {
@@ -532,10 +1185,26 @@ where
 
     let recorder = Recorder::new();
     let start = recorder.start();
+    let capacity_tasks = capacity
+        .nodes
+        .as_ref()
+        .map(|n| spawn_capacity_tasks(n, start, profile, spec.cpu_dip.clone()));
+    // Only a timing fault's timers are driven from here; with none, this never completes.
+    let driven_timers = !timers.is_empty();
     let timers_running = futures::future::join_all(timers.into_iter().map(|t| {
-        let dip = run.dips.iter().find(|(n, _)| *n == t.name).map(|(_, k)| *k);
+        let dip = spec
+            .timing_dips
+            .iter()
+            .find(|(n, _)| *n == t.name)
+            .map(|(_, k)| *k);
         drive_timer(t, start, profile, dip)
     }));
+    let timers_running = async move {
+        timers_running.await;
+        if !driven_timers {
+            futures::future::pending::<()>().await;
+        }
+    };
     let mut timers_running = std::pin::pin!(timers_running);
     let readers = {
         let r = recorder.clone();
@@ -597,7 +1266,7 @@ where
     let mut readers = std::pin::pin!(readers);
 
     let driven = tokio::select! {
-        d = drive(profile, seed, &recorder, send_round) => d,
+        d = drive(profile, spec.seed, &recorder, send_round) => d,
         () = &mut readers => panic!("the program's output streams ended while the trial was running"),
         _ = &mut timers_running => panic!("a timer port closed while the trial was running"),
     };
@@ -635,52 +1304,516 @@ where
         }
     };
     let by_id = explicit_ids || completion_stream.is_some();
-    if let Some(name) = &completion_stream {
+    if let Some(name) = &completion_stream
+        && !spec.probe
+    {
         eprintln!("  reading goodput and latency from the ids in `{name}`");
     }
-    let trace = recorder.trace(profile.total(), completion_stream.as_deref());
-    let verdict = judge_with_kinds(&trace, &profile, &kinds, by_id);
+    let mut trace = recorder.trace(profile.total(), completion_stream.as_deref());
+
+    // Stop sampling (the last sample is the end of the grace period) and read the nodes' usage.
+    let mut usage = Vec::new();
+    if let (Some((stop, sampler, dipper)), Some(n)) = (capacity_tasks, &capacity.nodes) {
+        stop.store(true, Ordering::Relaxed);
+        if let Some(d) = dipper {
+            d.abort();
+        }
+        let samples = sampler.await.unwrap_or_default();
+        usage = usage_from_samples(&n.handles(), &samples);
+        let len = trace.buckets.len();
+        for u in &usage {
+            let col = |f: &dyn Fn(&(f64, u64, f64)) -> f64| -> Vec<f64> {
+                (0..len)
+                    .map(|i| u.per_second.get(i).map(f).unwrap_or(f64::NAN))
+                    .collect()
+            };
+            let tag = u.node.to_string().replace(':', "_");
+            trace.extra.push((format!("cpu_{tag}"), col(&|s| s.0)));
+            trace
+                .extra
+                .push((format!("nr_throttled_{tag}"), col(&|s| s.1 as f64)));
+            trace.extra.push((format!("throttled_ms_{tag}"), col(&|s| s.2)));
+        }
+    }
     if let Err(e) = deployment.stop().await {
         eprintln!("  (deployment did not stop cleanly: {e})");
     }
-
-    // A dip run at the same factor is a different experiment and must not overwrite the burst
-    // run's trace, so the dips are part of the name.
-    let dip_tag: String = run
-        .dips
-        .iter()
-        .map(|(n, k)| format!(".dip-{n}x{k}"))
-        .collect();
-    let trace_name = format!(
-        "{}.{}.{}.factor{}.trial{}{}.tsv",
-        meta.crate_name, meta.function, meta.configuration, factor, trial, dip_tag
-    );
-    let trace_path = run.results_dir.join("traces").join(trace_name);
-    let trace_path = match fs::write(&trace_path, trace.to_tsv()) {
-        Ok(()) => Some(trace_path),
-        Err(e) => {
-            eprintln!("  could not write {}: {e}", trace_path.display());
-            None
+    let limits = match &capacity.nodes {
+        Some(n) => {
+            let mut by_role: BTreeMap<String, String> = BTreeMap::new();
+            for h in n.handles() {
+                by_role
+                    .entry(h.node.role.clone())
+                    .or_insert_with(|| h.limits.to_string());
+            }
+            n.remove_all();
+            by_role
+                .into_iter()
+                .map(|(r, l)| format!("{r}: {l}"))
+                .collect::<Vec<_>>()
+                .join("; ")
         }
+        None => "uncapped (no backend)".to_owned(),
     };
-    let result = TrialResult {
-        function: meta.function,
-        configuration: meta.configuration,
-        factor,
-        trial,
-        seed,
-        mu,
-        lambda: profile.baseline_rps,
-        verdict,
+    drop(capacity);
+    Executed {
+        trace,
+        kinds,
+        by_id,
+        rounds: driven.rounds,
         late: driven.late,
-        trace_path,
-    };
-    eprintln!("  {}", result.verdict);
-    record(run, &result);
-    result
+        usage,
+        limits,
+    }
 }
 
-/// Appends one row for `result` to `results.tsv`.
+// ---------------------------------------------------------------------------------------------
+// A check: μ, then the sweep
+
+/// Runs one check: resolves μ (measuring it if need be), then deploys `once` for every trial of
+/// the sweep, judges it, and records it. `once` builds, deploys and [`execute`]s the program for
+/// one [`Spec`]; the generated code supplies it.
+pub fn run_check<F>(meta: &Meta, run: &RunConfig, mut once: F) -> Vec<TrialResult>
+where
+    F: AsyncFnMut(&Spec) -> Executed,
+{
+    block_on(async {
+        let host = host_fingerprint();
+        let (mu, mu_source) = resolve_mu(meta, run, &host, &mut once).await;
+        let mut results = Vec::new();
+        for (factor, trial) in run.schedule() {
+            let profile = run.profile(mu, factor);
+            let seed = run.seed + trial as u64;
+            let trigger = run.trigger_kind();
+            let trigger_text = match (&run.cpu_dip, run.dips.is_empty()) {
+                (Some(d), _) => format!(
+                    "cpu quota ÷{} on {} at {}×μ",
+                    d.k,
+                    d.nodes
+                        .iter()
+                        .map(|n| n.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    run.trigger_multiple
+                ),
+                (None, false) => format!(
+                    "timing fault: {} at {}×μ",
+                    run.dips
+                        .iter()
+                        .map(|(n, k)| format!("{n} period ×{k}"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    run.trigger_multiple
+                ),
+                (None, true) => format!("burst {}×μ", run.trigger_multiple),
+            };
+            eprintln!(
+                "  factor {factor}, trial {trial}: μ = {mu:.1} rounds/s ({mu_source}), λ = {:.1} rounds/s, trigger {:.0}s of {trigger_text}, tail {:.0}s",
+                profile.baseline_rps,
+                run.trigger.as_secs_f64(),
+                run.tail.as_secs_f64()
+            );
+            let spec = Spec {
+                profile,
+                seed,
+                label: format!("factor{factor}.trial{trial}"),
+                probe: false,
+                cpu_dip: run.cpu_dip.clone(),
+                timing_dips: run.dips.clone(),
+            };
+            let ex = once(&spec).await;
+            let mut verdict = judge_with_kinds(&ex.trace, &profile, &ex.kinds, ex.by_id);
+            if ex.harness_bound() {
+                verdict.reason = format!(
+                    "the generator fell behind on {} arrivals while no node was ever throttled: the harness, not the program, was the bottleneck (the program's own reading was {}: {})",
+                    ex.late, verdict.outcome, verdict.reason
+                );
+                verdict.outcome = Outcome::Invalid;
+            }
+            let tag = match trigger {
+                TriggerKind::Burst => String::new(),
+                TriggerKind::CpuDip => {
+                    let d = run.cpu_dip.as_ref().unwrap();
+                    format!(
+                        ".cpudip-{}x{}",
+                        d.nodes
+                            .iter()
+                            .map(|n| sanitize(&n.to_string()))
+                            .collect::<Vec<_>>()
+                            .join("+"),
+                        d.k
+                    )
+                }
+                TriggerKind::TimingFault => run
+                    .dips
+                    .iter()
+                    .map(|(n, k)| format!(".dip-{n}x{k}"))
+                    .collect(),
+            };
+            let trace_name = format!(
+                "{}.{}.{}.factor{}.trial{}{}.tsv",
+                meta.crate_name, meta.function, meta.configuration, factor, trial, tag
+            );
+            let trace_path = run.results_dir.join("traces").join(trace_name);
+            let trace_path = match fs::write(&trace_path, ex.trace.to_tsv()) {
+                Ok(()) => Some(trace_path),
+                Err(e) => {
+                    eprintln!("  could not write {}: {e}", trace_path.display());
+                    None
+                }
+            };
+            let result = TrialResult {
+                function: meta.function,
+                configuration: meta.configuration,
+                factor,
+                trial,
+                seed,
+                mu,
+                mu_source: mu_source.clone(),
+                lambda: profile.baseline_rps,
+                trigger,
+                trigger_text,
+                verdict,
+                late: ex.late,
+                usage: ex.usage,
+                limits: ex.limits,
+                host: host.clone(),
+                trace_path,
+            };
+            eprintln!("  [{}] {}", result.trigger, result.verdict);
+            for u in &result.usage {
+                eprintln!(
+                    "    {} ({}): {:.3} cores mean, throttled in {:.0}% of periods ({:.0} ms)",
+                    u.node,
+                    u.limits,
+                    u.mean_cores(),
+                    u.throttled_fraction() * 100.0,
+                    u.total.throttled_ns as f64 / 1e6
+                );
+            }
+            record(run, &result);
+            results.push(result);
+        }
+        results
+    })
+}
+
+/// μ for `meta` under `run`: given, cached, measured, or declared, in that order of preference.
+async fn resolve_mu<F>(meta: &Meta, run: &RunConfig, host: &str, once: &mut F) -> (f64, MuSource)
+where
+    F: AsyncFnMut(&Spec) -> Executed,
+{
+    if let Some(mu) = run.mu {
+        return (mu, MuSource::Given);
+    }
+    let declared = || {
+        meta.mu.unwrap_or_else(|| {
+            panic!(
+                "{} ({}) gives no `mu` and μ is not being measured; pass --mu, or measure it with a capacity backend",
+                meta.function, meta.configuration
+            )
+        })
+    };
+    if run.calibrate == Calibrate::Off || run.capacity.backend == BackendChoice::None {
+        return (declared(), MuSource::Declared);
+    }
+    let roles: Vec<String> = meta.roles.iter().map(|r| r.to_string()).collect();
+    let key = run.capacity.key(meta, &roles);
+    if run.calibrate == Calibrate::Auto
+        && let Some(mu) = cached_mu(run, meta, &key, host)
+    {
+        eprintln!("  μ = {mu:.1} rounds/s, cached for {key} on {host}");
+        return (mu, MuSource::Cached);
+    }
+    let mu = calibrate(meta, run, once).await;
+    store_mu(run, meta, &key, host, mu);
+    (mu, MuSource::Measured)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Calibration
+
+/// One probe: the program at a constant offered rate.
+#[derive(Debug, Clone)]
+pub struct ProbePoint {
+    pub rate: f64,
+    /// Rounds per second actually offered in the measured window.
+    pub offered_rate: f64,
+    /// Goodput relative to what was offered (by id), or the conserved streams' records per
+    /// round relative to the reference point's (without ids).
+    pub goodput: f64,
+    /// Levels whose second-half mean rose past the first-half mean.
+    pub rising: Vec<String>,
+    pub abandoned: u64,
+    pub harness_bound: bool,
+    pub mean_cores: Vec<(String, f64)>,
+    pub throttled: f64,
+    pub good: bool,
+}
+
+/// The fraction of offered work a probe must complete to count as keeping up.
+pub const PROBE_GOODPUT: f64 = 0.95;
+
+/// Measures μ: the highest constant offered rate (rounds per second) at which goodput is at least
+/// [`PROBE_GOODPUT`] of what was offered and no level rises. Each rate is a fresh deployment,
+/// offered for `probe_step` after a warm-up of a third of that, so an overloaded probe cannot
+/// leave a backlog for the next. The search doubles (or halves) from the starting rate until it
+/// brackets μ, then bisects geometrically until the bracket is within 10 %.
+pub async fn calibrate<F>(meta: &Meta, run: &RunConfig, once: &mut F) -> f64
+where
+    F: AsyncFnMut(&Spec) -> Executed,
+{
+    let start = run.probe_start.or(meta.mu).unwrap_or(50.0);
+    eprintln!(
+        "  measuring μ: constant-rate probes of {:.0}s from {start:.1} rounds/s",
+        run.probe_step.as_secs_f64()
+    );
+    let mut index = 0usize;
+    let mut reference: Option<f64> = None;
+    let mut probe = async |rate: f64, reference: &mut Option<f64>| -> ProbePoint {
+        let warm = run.probe_step / 3;
+        let profile = Profile {
+            baseline_rps: rate,
+            trigger_rps: rate,
+            before: warm,
+            trigger: run.probe_step,
+            tail: Duration::ZERO,
+        };
+        let spec = Spec {
+            profile,
+            seed: run.seed + 1000 + index as u64,
+            label: format!("probe{index}"),
+            probe: true,
+            cpu_dip: None,
+            timing_dips: Vec::new(),
+        };
+        index += 1;
+        let ex = once(&spec).await;
+        let p = judge_probe(&ex, &profile, rate, reference);
+        eprintln!(
+            "    probe {rate:>9.1}/s: offered {:.1}/s, goodput {:.1}%, {}{}{} → {}",
+            p.offered_rate,
+            p.goodput * 100.0,
+            if p.rising.is_empty() {
+                "levels flat".to_owned()
+            } else {
+                format!("{} rising", p.rising.join(", "))
+            },
+            if p.abandoned > 0 {
+                format!(", {} abandoned", p.abandoned)
+            } else {
+                String::new()
+            },
+            if p.harness_bound {
+                ", generator fell behind with no throttling (harness-bound)".to_owned()
+            } else {
+                format!(", throttled {:.0}%", p.throttled * 100.0)
+            },
+            if p.good { "keeps up" } else { "falls behind" }
+        );
+        record_probe(run, meta, &ex, &p);
+        p
+    };
+    let mut lo: Option<f64> = None;
+    let mut hi: Option<f64> = None;
+    let mut r = start;
+    for _ in 0..12 {
+        let p = probe(r, &mut reference).await;
+        if p.good {
+            lo = Some(r);
+            if hi.is_some() {
+                break;
+            }
+            r *= 2.0;
+        } else {
+            hi = Some(r);
+            if lo.is_some() {
+                break;
+            }
+            r /= 2.0;
+            if r < 0.5 {
+                break;
+            }
+        }
+    }
+    let (Some(mut lo), Some(mut hi)) = (lo, hi) else {
+        let mu = lo.unwrap_or(r);
+        eprintln!(
+            "  WARNING: the probe never bracketed μ (it {} at every rate tried); taking μ = {mu:.1}",
+            if lo.is_some() { "kept up" } else { "fell behind" }
+        );
+        return mu;
+    };
+    while hi / lo > 1.1 {
+        let m = (lo * hi).sqrt();
+        if probe(m, &mut reference).await.good {
+            lo = m;
+        } else {
+            hi = m;
+        }
+    }
+    eprintln!("  μ = {lo:.1} rounds/s (falls behind at {hi:.1})");
+    lo
+}
+
+/// Reads one probe. The measured window is the part after the warm-up.
+fn judge_probe(ex: &Executed, profile: &Profile, rate: f64, reference: &mut Option<f64>) -> ProbePoint {
+    let window = ex.trace.window(profile.trigger_start(), profile.total());
+    let w = window_stats(window, &ex.kinds);
+    let secs = window.len().max(1) as f64;
+    let rounds: u64 = window.iter().map(|b| b.rounds).sum();
+    let offered_rate = rounds as f64 / secs;
+    let goodput = if ex.by_id {
+        w.completion_fraction
+    } else {
+        // Without ids, goodput is the conserved streams' records per round, against the same
+        // ratio at the first probe that kept its levels flat.
+        let per_round = w
+            .streams
+            .iter()
+            .filter(|s| s.kind == StreamKind::Conserved)
+            .filter_map(|s| s.per_round)
+            .fold(f64::INFINITY, f64::min);
+        if !per_round.is_finite() {
+            1.0
+        } else {
+            match *reference {
+                Some(r) if r > 0.0 => per_round / r,
+                _ => 1.0,
+            }
+        }
+    };
+    let rising: Vec<String> = w
+        .gauge_halves()
+        .into_iter()
+        .filter(|(_, first, second)| *second > first * 1.10 + 2.0)
+        .map(|(n, _, _)| n)
+        .collect();
+    let harness_bound = ex.harness_bound();
+    let throttled = if ex.usage.is_empty() {
+        0.0
+    } else {
+        ex.usage.iter().map(|u| u.throttled_fraction()).fold(0.0, f64::max)
+    };
+    let good = goodput >= PROBE_GOODPUT
+        && rising.is_empty()
+        && w.abandoned == 0
+        && offered_rate >= 0.8 * rate
+        && !harness_bound;
+    if good && reference.is_none() && !ex.by_id {
+        *reference = w
+            .streams
+            .iter()
+            .filter(|s| s.kind == StreamKind::Conserved)
+            .filter_map(|s| s.per_round)
+            .reduce(f64::min);
+    }
+    ProbePoint {
+        rate,
+        offered_rate,
+        goodput,
+        rising,
+        abandoned: w.abandoned,
+        harness_bound,
+        mean_cores: ex
+            .usage
+            .iter()
+            .map(|u| (u.node.to_string(), u.mean_cores()))
+            .collect(),
+        throttled,
+        good,
+    }
+}
+
+fn calibration_path(run: &RunConfig) -> PathBuf {
+    run.results_dir.join("calibration.tsv")
+}
+
+/// The latest cached μ for this check, limits and host.
+fn cached_mu(run: &RunConfig, meta: &Meta, key: &str, host: &str) -> Option<f64> {
+    let text = fs::read_to_string(calibration_path(run)).ok()?;
+    text.lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            (f.len() >= 6
+                && f[0] == meta.crate_name
+                && f[1] == meta.function
+                && f[2] == meta.configuration
+                && f[3] == key
+                && f[4] == host)
+                .then(|| f[5].parse().ok())
+                .flatten()
+        })
+        .last()
+}
+
+fn store_mu(run: &RunConfig, meta: &Meta, key: &str, host: &str, mu: f64) {
+    let path = calibration_path(run);
+    let write = || -> std::io::Result<()> {
+        let new = !path.exists();
+        let mut f = fs::OpenOptions::new().create(true).append(true).open(&path)?;
+        if new {
+            writeln!(f, "crate\tfunction\tconfiguration\tlimits\thost\tmu\tunix_time")?;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        writeln!(
+            f,
+            "{}\t{}\t{}\t{key}\t{host}\t{mu:.2}\t{now}",
+            meta.crate_name, meta.function, meta.configuration
+        )
+    };
+    if let Err(e) = write() {
+        eprintln!("sedge: could not cache μ in {}: {e}", path.display());
+    }
+}
+
+fn record_probe(run: &RunConfig, meta: &Meta, ex: &Executed, p: &ProbePoint) {
+    let path = run.results_dir.join("probes.tsv");
+    let write = || -> std::io::Result<()> {
+        let new = !path.exists();
+        let mut f = fs::OpenOptions::new().create(true).append(true).open(&path)?;
+        if new {
+            writeln!(
+                f,
+                "function\tconfiguration\tlimits\trate\toffered_rate\tgoodput\trising\tabandoned\tharness_bound\tmax_throttled_fraction\tmean_cores\tgood"
+            )?;
+        }
+        writeln!(
+            f,
+            "{}\t{}\t{}\t{:.2}\t{:.2}\t{:.4}\t{}\t{}\t{}\t{:.3}\t{}\t{}",
+            meta.function,
+            meta.configuration,
+            ex.limits,
+            p.rate,
+            p.offered_rate,
+            p.goodput,
+            p.rising.join(","),
+            p.abandoned,
+            p.harness_bound,
+            p.throttled,
+            p.mean_cores
+                .iter()
+                .map(|(n, c)| format!("{n}={c:.3}"))
+                .collect::<Vec<_>>()
+                .join(","),
+            p.good
+        )
+    };
+    if let Err(e) = write() {
+        eprintln!("sedge: could not record probe in {}: {e}", path.display());
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Reporting
+
+const RESULTS_HEADER: &str = "function\tconfiguration\ttrigger\tfactor\ttrial\tseed\tmu\tmu_source\tlambda\toutcome\ttail_goodput\ttail_p50_ms\ttail_p99_ms\ttail_abandoned\toutstanding\tlate\tby_id\trelative_goodput\tamplified_stream\tamplification\tnode_cores\tmax_throttled_fraction\tlimits\thost\treason\ttrace";
+
+/// Appends one row for `result` to `results.tsv`. A table with another header (from an older
+/// Sedge) is moved aside first.
 fn record(run: &RunConfig, r: &TrialResult) {
     let ms = |d: Option<Duration>| {
         d.map(|d| format!("{:.1}", d.as_secs_f64() * 1e3))
@@ -688,26 +1821,30 @@ fn record(run: &RunConfig, r: &TrialResult) {
     };
     let path = run.results_dir.join("results.tsv");
     let write = || -> std::io::Result<()> {
+        if let Ok(text) = fs::read_to_string(&path)
+            && text.lines().next() != Some(RESULTS_HEADER)
+        {
+            fs::rename(&path, run.results_dir.join("results.old.tsv"))?;
+        }
         let new = !path.exists();
         let mut f = fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)?;
         if new {
-            writeln!(
-                f,
-                "function\tconfiguration\tfactor\ttrial\tseed\tmu\tlambda\toutcome\ttail_goodput\ttail_p50_ms\ttail_p99_ms\ttail_abandoned\toutstanding\tlate\tby_id\trelative_goodput\tamplified_stream\tamplification\treason\ttrace"
-            )?;
+            writeln!(f, "{RESULTS_HEADER}")?;
         }
         writeln!(
             f,
-            "{}\t{}\t{}\t{}\t{}\t{:.1}\t{:.2}\t{}\t{:.3}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.3}\t{}\t{:.2}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{:.2}\t{}\t{:.3}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.3}\t{}\t{:.2}\t{}\t{:.3}\t{}\t{}\t{}\t{}",
             r.function,
             r.configuration,
+            r.trigger,
             r.factor,
             r.trial,
             r.seed,
             r.mu,
+            r.mu_source,
             r.lambda,
             r.verdict.outcome,
             r.verdict.tail.completion_fraction,
@@ -720,6 +1857,17 @@ fn record(run: &RunConfig, r: &TrialResult) {
             r.verdict.relative_goodput,
             r.verdict.amplification.0,
             r.verdict.amplification.1,
+            r.usage
+                .iter()
+                .map(|u| format!("{}={:.3}", u.node, u.mean_cores()))
+                .collect::<Vec<_>>()
+                .join(","),
+            r.usage
+                .iter()
+                .map(|u| u.throttled_fraction())
+                .fold(0.0, f64::max),
+            r.limits,
+            r.host,
             r.verdict.reason,
             r.trace_path
                 .as_ref()
@@ -735,13 +1883,13 @@ fn record(run: &RunConfig, r: &TrialResult) {
     }
 }
 
-/// Prints every trial's verdict, then one summary line per check and factor with the count of
-/// each outcome.
+/// Prints every trial's verdict, then one summary line per check, trigger and factor with the
+/// count of each outcome.
 pub fn print_results(results: &[TrialResult]) {
     for r in results {
         println!(
-            "{} ({}) factor {} trial {}: {}",
-            r.function, r.configuration, r.factor, r.trial, r.verdict
+            "{} ({}) [{}] factor {} trial {}: {}",
+            r.function, r.configuration, r.trigger, r.factor, r.trial, r.verdict
         );
         if r.late > 0 {
             println!(
@@ -754,16 +1902,16 @@ pub fn print_results(results: &[TrialResult]) {
     println!("{}", Summary::new(results));
 }
 
-/// Outcome counts per check and factor.
+/// Outcome counts per check, trigger and factor.
 pub struct Summary<'r> {
-    rows: BTreeMap<(&'static str, &'static str, u64), Vec<&'r TrialResult>>,
+    rows: BTreeMap<(&'static str, &'static str, TriggerKind, u64), Vec<&'r TrialResult>>,
 }
 
 impl<'r> Summary<'r> {
     pub fn new(results: &'r [TrialResult]) -> Self {
         let mut rows: BTreeMap<_, Vec<&TrialResult>> = BTreeMap::new();
         for r in results {
-            rows.entry((r.function, r.configuration, r.factor.to_bits()))
+            rows.entry((r.function, r.configuration, r.trigger, r.factor.to_bits()))
                 .or_default()
                 .push(r);
         }
@@ -775,24 +1923,40 @@ impl fmt::Display for Summary<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
             f,
-            "{:<24} {:<16} {:>6} {:>8} {:>8} {:>9} {:>8} {:>9}",
-            "function", "configuration", "factor", "μ", "λ", "recovered", "draining", "collapsed"
+            "{:<24} {:<16} {:<12} {:>6} {:>8} {:>9} {:>8} {:>9} {:>8} {:>9} {:>7}",
+            "function",
+            "configuration",
+            "trigger",
+            "factor",
+            "μ",
+            "μ from",
+            "λ",
+            "recovered",
+            "draining",
+            "collapsed",
+            "invalid"
         )?;
-        for ((function, configuration, _), trials) in &self.rows {
+        for ((function, configuration, trigger, _), trials) in &self.rows {
             let count = |o: Outcome| trials.iter().filter(|t| t.verdict.outcome == o).count();
             let first = trials[0];
             writeln!(
                 f,
-                "{:<24} {:<16} {:>6} {:>8.0} {:>8.1} {:>9} {:>8} {:>9}",
+                "{:<24} {:<16} {:<12} {:>6} {:>8.1} {:>9} {:>8.1} {:>9} {:>8} {:>9} {:>7}",
                 function,
                 configuration,
+                trigger.to_string(),
                 first.factor,
                 first.mu,
+                first.mu_source.to_string(),
                 first.lambda,
                 count(Outcome::Recovered),
                 count(Outcome::Draining),
-                count(Outcome::Collapsed)
+                count(Outcome::Collapsed),
+                count(Outcome::Invalid)
             )?;
+        }
+        if let Some(r) = self.rows.values().next().map(|t| t[0]) {
+            write!(f, "limits: {}\nhost: {}", r.limits, r.host)?;
         }
         Ok(())
     }

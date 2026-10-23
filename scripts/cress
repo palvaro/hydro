@@ -71,7 +71,10 @@ print(m.group(1) or m.group(2))
 PY
 )
 
-export CRESS_RESULTS_DIR="$root/target/cress"
+# Cargo's target directory: $CARGO_TARGET_DIR if set (so it can live outside the repository),
+# otherwise target/ at the root. Results go under it, Cress's and Sedge's side by side.
+target_dir=${CARGO_TARGET_DIR:-$root/target}
+export CRESS_RESULTS_DIR="${CRESS_RESULTS_DIR:-$target_dir/cress}"
 runner_dir="$CRESS_RESULTS_DIR/runner"
 mkdir -p "$CRESS_RESULTS_DIR/reports" "$runner_dir/src"
 : > "$CRESS_RESULTS_DIR/results.tsv"
@@ -141,5 +144,5 @@ fn main() {
 RS
 
 CRESS_SOURCE_DIR="$package_dir" \
-CARGO_TARGET_DIR="$root/target" \
+CARGO_TARGET_DIR="$target_dir" \
 cargo run --quiet --manifest-path "$runner_dir/Cargo.toml" -- "$substring" "$configuration" "$include_ignored"

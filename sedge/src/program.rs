@@ -22,7 +22,7 @@ use hydro_lang::live_collections::boundedness::Unbounded;
 use hydro_lang::live_collections::stream::{
     AtLeastOnce, ExactlyOnce, NoOrder, Ordering, Retries, Stream, TotalOrder,
 };
-use hydro_lang::location::cluster::Consistency;
+use hydro_lang::location::cluster::{CLUSTER_SELF_ID, Consistency};
 use hydro_lang::location::external_process::{ExternalBincodeSink, ExternalBincodeStream, NotMany};
 use hydro_lang::location::tick::Atomic;
 use hydro_lang::location::{Cluster, External, Location, MemberId, Process};
@@ -144,7 +144,10 @@ impl<T> ClusterRoundSender<T> {
     }
 }
 
-/// A `()` stream that fires every `period`, for a program's timer parameters.
+/// A `()` stream that fires every `period`, for a program's timer parameters. The generated
+/// harness binds every timer parameter of a process to one of these, so the timer runs inside
+/// the deployed process, on its own clock, and is delayed by whatever delays the process (CPU
+/// starvation under its quota, a long tick), as a production timer is.
 pub fn timer<'a, L>(
     location: &Process<'a, L>,
     period: Duration,
@@ -152,6 +155,29 @@ pub fn timer<'a, L>(
     // `q!` closures can only capture primitives, so the duration crosses as nanos.
     let nanos = period.as_nanos() as u64;
     location.source_interval(q!(Duration::from_nanos(nanos)))
+}
+
+/// [`timer`] on every member of a cluster of `members`, member `i`'s first tick delayed by
+/// `i · period / members`: the deterministic form of the phase that independent clocks (or
+/// Raft's randomized election timeouts) give real members, and the stagger Cress's timer closures
+/// use. Without it, members started together would time out together.
+pub fn cluster_timer<'a, L>(
+    cluster: &Cluster<'a, L>,
+    period: Duration,
+    members: u32,
+) -> Stream<(), Cluster<'a, L>, Unbounded, TotalOrder, ExactlyOnce>
+where
+    L: 'a,
+{
+    let nanos = period.as_nanos() as u64;
+    let members = members.max(1) as u64;
+    cluster.source_interval_delayed(
+        q!(Duration::from_nanos(
+            nanos * (CLUSTER_SELF_ID.get_raw_id() as u64 % members)
+                / members
+        )),
+        q!(Duration::from_nanos(nanos)),
+    )
 }
 
 #[cfg(stageleft_runtime)]
