@@ -44,6 +44,7 @@ use hydro_lang::compile::ir::{
     NetworkRecv, NetworkSend, SeenSharedNodes,
 };
 use hydro_lang::handoff_ref::{HandoffRefKind, handoff_ref_ident};
+use hydro_lang::location::dynamic::LocationId;
 
 /// Item representation of a collection kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +130,39 @@ fn meta_expr(tags: TokenStream) -> TokenStream {
 fn net() -> TokenStream {
     let root = hydro_lang_crate();
     quote!(#root::sim::network_hook::rt)
+}
+
+/// Statements appending the `Debug` rendering of `#payload` (a reference expression) to the
+/// metadata being built in `__prov_meta`, when the payload type implements `Debug`
+/// ([`super::split_meta`]'s format). The host sees only a payload's bytes, so the rendering has
+/// to be made here, where the type is known. Chosen by autoref specialization on the concrete
+/// payload type (as the label taps do), so any payload type compiles.
+fn append_payload_debug(payload: TokenStream) -> TokenStream {
+    let root = hydro_lang_crate();
+    quote!({
+        struct __ProvWrap<'__a, __T>(&'__a __T);
+        trait __ProvViaDebug {
+            fn __prov_debug(&self) -> ::core::option::Option<::std::string::String>;
+        }
+        impl<__T: ::core::fmt::Debug> __ProvViaDebug for __ProvWrap<'_, __T> {
+            fn __prov_debug(&self) -> ::core::option::Option<::std::string::String> {
+                ::core::option::Option::Some(::std::format!("{:?}", self.0))
+            }
+        }
+        trait __ProvNoDebug {
+            fn __prov_debug(&self) -> ::core::option::Option<::std::string::String>;
+        }
+        impl<__T> __ProvNoDebug for &__ProvWrap<'_, __T> {
+            fn __prov_debug(&self) -> ::core::option::Option<::std::string::String> {
+                ::core::option::Option::None
+            }
+        }
+        if let ::core::option::Option::Some(__prov_debug) =
+            (&__ProvWrap(#payload)).__prov_debug()
+        {
+            __prov_meta.extend(#root::runtime_support::bincode::serialize(&__prov_debug).unwrap());
+        }
+    })
 }
 
 /// Calls the closure `f` on `x` so that rustc infers the closure's parameter type from `x`.
@@ -1009,12 +1043,23 @@ fn transform_node(node: &mut HydroNode, ctx: &Ctx) {
             let untag = untag(in_repr, quote!(__prov_item));
             let orig_ser = &ser.0;
             let call_ser = apply1(quote!(#orig_ser), quote!(__prov_x));
-            // The record's lineage becomes the metadata of the send that immediately follows.
+            // A send to a cluster is a demux: its item is `(destination, payload)` and only the
+            // payload goes on the wire (`serialize_bincode_with_type(true, ..)`).
+            let payload = if matches!(metadata.location_id.root(), LocationId::Cluster(_)) {
+                quote!(&__prov_x.1)
+            } else {
+                quote!(&__prov_x)
+            };
+            let append_debug = append_payload_debug(payload);
+            // The record's lineage becomes the metadata of the send that immediately follows,
+            // followed by the payload's `Debug` rendering for reports (`super::split_meta`).
             let wrapped_ser: syn::Expr = parse_quote!(
                 move |__prov_item: #in_ty| {
                     let (__prov_t, __prov_c, __prov_x) = #untag;
                     let _ = __prov_c;
-                    #net::set_send_meta(#meta);
+                    let mut __prov_meta: ::std::vec::Vec<u8> = #meta;
+                    #append_debug
+                    #net::set_send_meta(__prov_meta);
                     #call_ser
                 }
             );

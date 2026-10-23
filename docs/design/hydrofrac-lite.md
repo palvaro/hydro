@@ -363,6 +363,10 @@ limit. Order is the subject of the phase-2 order check (§3).
   - **Facts render as raw bincode** (`⇒ 01000000`). Each tap ships `(bincode, Debug)`: its closure is generated
     for the concrete element type and picks the `Debug` rendering by autoref specialization, so reports print facts
     as the program's values, and fall back to hex for types without `Debug`.
+  - **Message payloads render as raw bincode** (`peer[..]: 0100000001000000`). The host sees only a message's
+    bytes, so the provenance rewrite renders the payload with `Debug` at the send, where the channel's element
+    type is known (the same autoref specialization), and appends it to the send's metadata after the lineage
+    (`provenance::split_meta`). Reports and diagrams print `Decided(Txn(1))`; types without `Debug` stay hex.
   - **Recovery repeats itself.** Heartbeat and retry rounds after a fault are mostly identical (the research
     branch's ISR diagram was 51 lines, mostly identical heartbeat/view rounds). Collapse consecutive identical
     rounds into one with a `×k` note.
