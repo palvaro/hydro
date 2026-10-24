@@ -132,3 +132,35 @@ The test runs these steps:
 Its knobs are `ABD_KV_TRACE_SEEDS`, `ABD_KV_ZERO_PREFIX`, `ABD_KV_DEPTH_SCAN`, `ABD_KV_KNUTH_SAMPLES`, `ABD_KV_MIN_ALL`
 and `ABD_KV_TRACE_LOG` together with `HYDRO_SIM_LOG=1`. Run it with
 `RUSTFLAGS='--cfg abd_kv_trace' cargo test -p hydro_std --lib ec_abd_kv_hydrofrac::abd_kv_two_writes_trace -- --ignored --nocapture`.
+
+## Finding 2: deferred data never schedules a tick, in the simulator or in deployment
+
+Different question: if a tick's only pending work is data deferred to the next tick, does the next tick run?
+
+- **Hydro uses the lazy variant (ARGUED).** `HydroNode::DeferTick` always compiles to `defer_tick_lazy()`
+  (`hydro_lang/src/compile/ir/mod.rs:4821`). Deployment and the simulator use the same lowering.
+- **DFIR (ARGUED).** Only a non-lazy `defer_tick()` with buffered data calls `schedule_subgraph(true)` at the end of a
+  tick (`dfir_lang/src/graph/meta_graph.rs:2126-2153`, `2205-2210`). `defer_tick_lazy` handoffs are just swapped in.
+  The next tick runs only after an external wake: `run_available` stops when `can_start_tick` is unset
+  (`dfir_rs/src/scheduled/context.rs:353-370`), and `run` then parks (`:391-407`). A deployed process runs
+  `dfir.run().await` (`hydro_lang/src/compile/trybuild/generate.rs:282`).
+- **DEMONSTRATED** (throwaway test in `dfir_rs/tests`, `cargo test -p dfir_rs`). It feeds `source_stream -> X -> for_each`
+  one item and calls `run_available_sync()` once:
+  - `X = defer_tick_lazy()` gives `outputs [], 1 tick`.
+  - `X = defer_tick()` gives `outputs [1], 2 ticks`.
+  - Then an item sent on an *unrelated* `source_stream` in the same graph releases the lazy item (`[]`, then `[1]`).
+- **Simulator (ARGUED).** `SimTick::can_run` (`hydro_lang/src/sim/compiled.rs:2022-2027`) needs one of the tick's
+  *own* hooks to be able to release. Deferred data does not count. The tick DFIR's `run_tick()` result is only
+  asserted (`:2254`, `:2277`). That result reflects nothing pending: lazy handoffs never set `can_start_tick`. So no
+  signal is ignored.
+
+**Verdict.** On the question asked, the simulator matches deployment. When no later event reaches the process,
+deferred records are never released in either one. The counterexample from `deferred_records_are_fragile`
+(`hydrofrac/src/check/brute_tests.rs:912`) can therefore happen in deployment. That test sends 1 and 2 to two cluster
+members, and each member batches them into a tick, `defer_tick`s them and outputs them. A member whose last batch
+holds the last message never emits it, so the members disagree with no fault.
+
+**Remaining divergence (ARGUED, other direction).** A deployed process runs *every* tick on *any* wake of its single
+DFIR. That includes input meant for other ticks or top-level streams, and spurious waker fires. The simulator runs a
+tick only when that tick's hooks have input. So the simulator never explores "deferred records released by an
+unrelated wake". It may miss bugs that need that release, but it never invents an impossible schedule here.
