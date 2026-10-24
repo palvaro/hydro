@@ -1,39 +1,48 @@
-//! Which EC labels of the corpus have a schedule-sensitive causal cone: the static diagnostic
-//! `hydrofrac::provenance::sensitivity::label_cones`, over every corpus program (doc
-//! docs/design/hydrofrac-lite.md §7).
+//! Which corpus programs have schedule choices (docs/design/hydrofrac-lite.md §4.9): the static
+//! scan `hydrofrac::provenance::choices::program_choices`, over every corpus program. A program
+//! with none is the only kind whose labels hydrofrac certifies.
 //!
-//! No simulation: each program is built and its IR walked. Run with `--nocapture` for the
-//! table (tab-separated: program, label, operator, kind, sensitive?, summary, sites).
-
-use std::collections::BTreeSet;
+//! No simulation: each program is built and its IR scanned. Run with `--nocapture` for the
+//! table (tab-separated: program, labels, choices).
 
 use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
 use hydro_lang::location::Location;
 use hydro_lang::networking::TCP;
 use hydro_lang::nondet::nondet;
 use hydro_lang::prelude::FlowBuilder;
-use hydrofrac::provenance::sensitivity::{LabelCone, label_cones, table};
+use hydrofrac::observe::ec_collections;
+use hydrofrac::provenance::choices::{ChoiceSite, program_choices};
 
-fn cones(program: &str, flow: FlowBuilder<'_>) -> Vec<LabelCone> {
-    let built = flow.finalize();
-    let cones = label_cones(built.ir());
-    print!("{}", table(program, &cones));
-    cones
+/// A corpus program's labels (by display name) and schedule choices.
+struct Scanned {
+    labels: Vec<String>,
+    choices: Vec<ChoiceSite>,
 }
 
-fn find<'c>(cones: &'c [LabelCone], name: &str) -> &'c LabelCone {
-    cones
-        .iter()
-        .find(|c| c.collection.display_name() == name)
-        .unwrap_or_else(|| {
-            panic!(
-                "no label `{name}` among {:?}",
-                cones
-                    .iter()
-                    .map(|c| c.collection.display_name().to_owned())
-                    .collect::<Vec<_>>()
-            )
-        })
+fn scan(program: &str, flow: FlowBuilder<'_>) -> Scanned {
+    let built = flow.finalize();
+    let scanned = Scanned {
+        labels: ec_collections(built.ir())
+            .iter()
+            .map(|c| c.display_name().to_owned())
+            .collect(),
+        choices: program_choices(built.ir()),
+    };
+    println!(
+        "{program}\t{}\t{}",
+        scanned.labels.len(),
+        if scanned.choices.is_empty() {
+            "-".to_owned()
+        } else {
+            scanned
+                .choices
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        }
+    );
+    scanned
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -44,7 +53,7 @@ enum Broadcast {
     Uniform,
 }
 
-fn std_broadcast(which: Broadcast) -> Vec<LabelCone> {
+fn std_broadcast(which: Broadcast) -> Scanned {
     use hydro_std::ec_inference_demos::broadcast_live::broadcast_live_from_process;
     use hydro_std::ec_inference_demos::reliable_broadcast::{
         reliable_broadcast_closed, reliable_broadcast_live,
@@ -69,10 +78,10 @@ fn std_broadcast(which: Broadcast) -> Vec<LabelCone> {
         }
     };
     let _out = delivered.sim_cluster_output();
-    cones(&format!("hydro_std {which:?}"), flow)
+    scan(&format!("hydro_std {which:?}"), flow)
 }
 
-fn gossip(live: bool) -> Vec<LabelCone> {
+fn gossip(live: bool) -> Scanned {
     use hydro_std::ec_inference_demos::crdt_gossip::{g_set_gossip, g_set_gossip_live};
 
     let mut flow = FlowBuilder::new();
@@ -95,7 +104,7 @@ fn gossip(live: bool) -> Vec<LabelCone> {
         .into_stream()
         .all_ticks()
         .sim_cluster_output();
-    cones(
+    scan(
         if live {
             "g_set_gossip_live"
         } else {
@@ -105,7 +114,7 @@ fn gossip(live: bool) -> Vec<LabelCone> {
     )
 }
 
-fn leader_merge() -> Vec<LabelCone> {
+fn leader_merge() -> Scanned {
     use hydro_std::ec_inference_demos::leader_merge::leader_merge_broadcast;
 
     let mut flow = FlowBuilder::new();
@@ -122,10 +131,10 @@ fn leader_merge() -> Vec<LabelCone> {
     )
     .weaken_consistency()
     .sim_cluster_output();
-    cones("leader_merge_broadcast", flow)
+    scan("leader_merge_broadcast", flow)
 }
 
-fn multi_paxos() -> Vec<LabelCone> {
+fn multi_paxos() -> Scanned {
     use hydro_std::ec_inference_demos::multi_paxos::multi_paxos;
 
     let mut flow = FlowBuilder::new();
@@ -136,10 +145,10 @@ fn multi_paxos() -> Vec<LabelCone> {
     let (_command, commands) = proposers.sim_input::<u32, TotalOrder, ExactlyOnce>();
     let outputs = multi_paxos(&acceptors, &learners, 2, leads, commands);
     let _out = outputs.learned.weaken_consistency().sim_cluster_output();
-    cones("multi_paxos", flow)
+    scan("multi_paxos", flow)
 }
 
-fn abd(reliable: bool) -> Vec<LabelCone> {
+fn abd(reliable: bool) -> Scanned {
     use hydro_std::ec_inference_demos::abd::{abd_register, abd_register_reliable_phase2};
 
     let mut flow = FlowBuilder::new();
@@ -154,7 +163,7 @@ fn abd(reliable: bool) -> Vec<LabelCone> {
     };
     let _done = outs.write_done.sim_cluster_output();
     let _read = outs.read_result.sim_cluster_output();
-    cones(
+    scan(
         if reliable {
             "abd_register_reliable_phase2"
         } else {
@@ -164,7 +173,7 @@ fn abd(reliable: bool) -> Vec<LabelCone> {
     )
 }
 
-fn test_broadcast(echo: bool) -> Vec<LabelCone> {
+fn test_broadcast(echo: bool) -> Scanned {
     use hydro_test::cluster::reliable_broadcast::{Broadcaster, Member, Payload, broadcast};
 
     let mut flow = FlowBuilder::new();
@@ -179,7 +188,7 @@ fn test_broadcast(echo: bool) -> Vec<LabelCone> {
         nondet!(/** test */),
     )
     .sim_cluster_output();
-    cones(
+    scan(
         if echo {
             "hydro_test broadcast (echo)"
         } else {
@@ -189,7 +198,7 @@ fn test_broadcast(echo: bool) -> Vec<LabelCone> {
     )
 }
 
-fn two_pc(ctp: bool) -> Vec<LabelCone> {
+fn two_pc(ctp: bool) -> Scanned {
     use hydro_test::cluster::two_pc_ctp::{Coordinator, Participant, Txn, two_pc};
 
     let mut flow = FlowBuilder::new();
@@ -211,14 +220,11 @@ fn two_pc(ctp: bool) -> Vec<LabelCone> {
         nondet!(/** test */),
     )
     .sim_cluster_output();
-    cones(if ctp { "two_pc (ctp)" } else { "two_pc" }, flow)
+    scan(if ctp { "two_pc (ctp)" } else { "two_pc" }, flow)
 }
 
-/// A process broadcasting its input over `fail_stop` (the research `ec_ldfi` programs): no
-/// non-deterministic operator anywhere, so every derivation is schedule-independent at the
-/// operator level.
-#[test]
-fn a_plain_closed_broadcast_has_a_deterministic_cone() {
+/// A process broadcasting its input over `fail_stop` (the research `ec_ldfi` programs).
+fn closed_broadcast() -> Scanned {
     let mut flow = FlowBuilder::new();
     let source = flow.process::<()>();
     let members = flow.cluster::<()>();
@@ -226,69 +232,86 @@ fn a_plain_closed_broadcast_has_a_deterministic_cone() {
     let _out = input
         .broadcast_closed(&members, TCP.fail_stop().bincode())
         .sim_cluster_output();
-    let cones = cones("closed broadcast", flow);
-    assert!(!cones.is_empty());
-    assert!(cones.iter().all(|c| !c.schedule_sensitive()), "{cones:?}");
+    scan("closed broadcast", flow)
 }
 
-/// The 2PC `committed` label (agreement) is computed through the participants' batches: the
-/// case where a derivation holds only under the schedule that produced it.
+/// Every corpus program, by name.
+fn corpus() -> Vec<(&'static str, Scanned)> {
+    vec![
+        ("closed broadcast", closed_broadcast()),
+        (
+            "broadcast_live_from_process",
+            std_broadcast(Broadcast::Live),
+        ),
+        (
+            "reliable_broadcast_closed",
+            std_broadcast(Broadcast::ReliableClosed),
+        ),
+        (
+            "reliable_broadcast_live",
+            std_broadcast(Broadcast::ReliableLive),
+        ),
+        (
+            "uniform_reliable_broadcast_closed",
+            std_broadcast(Broadcast::Uniform),
+        ),
+        ("g_set_gossip", gossip(false)),
+        ("g_set_gossip_live", gossip(true)),
+        ("leader_merge_broadcast", leader_merge()),
+        ("multi_paxos", multi_paxos()),
+        ("abd_register", abd(false)),
+        ("abd_register_reliable_phase2", abd(true)),
+        ("hydro_test broadcast (plain)", test_broadcast(false)),
+        ("hydro_test broadcast (echo)", test_broadcast(true)),
+        ("two_pc", two_pc(false)),
+        ("two_pc (ctp)", two_pc(true)),
+    ]
+}
+
+/// The whole-program classification of the corpus. Only the plain closed broadcast and the
+/// `hydro_std` broadcasts (`broadcast_live_from_process`, and the reliable broadcasts, closed
+/// and live) have no schedule choice. Every other program batches, folds an unordered stream or
+/// observes somewhere, so none of its labels can be certified.
 #[test]
-fn two_pc_committed_is_schedule_sensitive() {
+fn corpus_schedule_choices() {
+    let corpus = corpus();
+    for (program, scanned) in &corpus {
+        assert!(!scanned.labels.is_empty(), "{program}: no labels");
+    }
+    let choice_free: Vec<&str> = corpus
+        .iter()
+        .filter(|(_, s)| s.choices.is_empty())
+        .map(|(program, _)| *program)
+        .collect();
+    println!(
+        "SUMMARY\t{} of {} programs choice-free: {choice_free:?}",
+        choice_free.len(),
+        corpus.len()
+    );
+    assert_eq!(
+        choice_free,
+        [
+            "closed broadcast",
+            "broadcast_live_from_process",
+            "reliable_broadcast_closed",
+            "reliable_broadcast_live"
+        ]
+    );
+}
+
+/// 2PC batches at the participants, with or without cooperative termination: the case where a
+/// derivation holds only under the schedule that produced it.
+#[test]
+fn two_pc_has_a_batch() {
     for ctp in [false, true] {
-        let cones = two_pc(ctp);
-        let committed = cones
-            .iter()
-            .find(|c| c.collection.name.as_deref() == Some("committed"))
-            .or_else(|| cones.last())
-            .unwrap();
-        assert!(committed.schedule_sensitive(), "{committed:?}");
+        let scanned = two_pc(ctp);
         assert!(
-            committed.sites.iter().any(|s| s.op == "batch"),
-            "{committed:?}"
+            scanned
+                .choices
+                .iter()
+                .any(|c| c.op == "batch" && c.site.starts_with("two_pc_ctp.rs:")),
+            "{:?}",
+            scanned.choices
         );
     }
-}
-
-/// The whole corpus, for the table. Asserts only that every program's labels are found.
-#[test]
-fn corpus_table() {
-    let mut all: Vec<(String, Vec<LabelCone>)> = vec![];
-    for which in [
-        Broadcast::Live,
-        Broadcast::ReliableClosed,
-        Broadcast::ReliableLive,
-        Broadcast::Uniform,
-    ] {
-        all.push((format!("{which:?}"), std_broadcast(which)));
-    }
-    all.push(("g_set_gossip".into(), gossip(false)));
-    all.push(("g_set_gossip_live".into(), gossip(true)));
-    all.push(("leader_merge".into(), leader_merge()));
-    all.push(("multi_paxos".into(), multi_paxos()));
-    all.push(("abd_register".into(), abd(false)));
-    all.push(("abd_register_reliable_phase2".into(), abd(true)));
-    all.push(("broadcast (plain)".into(), test_broadcast(false)));
-    all.push(("broadcast (echo)".into(), test_broadcast(true)));
-    all.push(("two_pc".into(), two_pc(false)));
-    all.push(("two_pc (ctp)".into(), two_pc(true)));
-    let mut labels = 0;
-    let mut sensitive = 0;
-    let mut programs_sensitive: BTreeSet<String> = BTreeSet::new();
-    for (program, cones) in &all {
-        assert!(!cones.is_empty(), "{program}: no labels");
-        labels += cones.len();
-        for c in cones {
-            if c.schedule_sensitive() {
-                sensitive += 1;
-                programs_sensitive.insert(program.clone());
-            }
-        }
-    }
-    println!(
-        "SUMMARY\t{labels} labels\t{sensitive} with a schedule-sensitive cone\t{} of {} programs: {programs_sensitive:?}",
-        programs_sensitive.len(),
-        all.len()
-    );
-    let _ = find(&all[0].1, all[0].1[0].collection.display_name());
 }

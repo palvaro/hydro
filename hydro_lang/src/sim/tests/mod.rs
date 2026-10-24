@@ -1077,6 +1077,89 @@ fn sim_unbounded_keyed_singleton_rejected_snapshot() {
     hydro_build_utils::assert_snapshot!(panic_msg);
 }
 
+/// `exhaustive_then` calls `after` once per explored execution, after it has finished.
+#[test]
+fn sim_exhaustive_then_calls_after_each_execution() {
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+    let tick = node.tick();
+    let (in_send, input) = node.sim_input::<i32, TotalOrder, ExactlyOnce>();
+    let out_recv = input
+        .batch(&tick, nondet!(/** test */))
+        .count()
+        .all_ticks()
+        .sim_output();
+
+    let mut runs = 0usize;
+    let mut afters = 0usize;
+    let count = flow.sim().compiled().exhaustive_then(
+        async || {
+            runs += 1;
+            in_send.send_many([1, 2]);
+            let _: Vec<usize> = out_recv.collect().await;
+        },
+        || afters += 1,
+    );
+    assert!(count > 1, "batching should give several executions");
+    assert_eq!(runs, count);
+    assert_eq!(afters, count);
+}
+
+/// `fuzz_bounded_then` runs exactly the requested number of executions.
+#[test]
+fn sim_fuzz_bounded_then_runs_exactly_n() {
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+    let tick = node.tick();
+    let (in_send, input) = node.sim_input::<i32, TotalOrder, ExactlyOnce>();
+    let out_recv = input
+        .batch(&tick, nondet!(/** test */))
+        .all_ticks()
+        .sim_output();
+
+    let mut afters = 0usize;
+    flow.sim().compiled().fuzz_bounded_then(
+        5,
+        async || {
+            in_send.send_many([1, 2, 3]);
+            let all: Vec<i32> = out_recv.collect().await;
+            assert_eq!(all, vec![1, 2, 3]);
+        },
+        || afters += 1,
+    );
+    assert_eq!(afters, 5);
+}
+
+/// `first_schedule` runs one execution, and always the same one.
+#[test]
+fn sim_first_schedule_is_deterministic() {
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+    let tick = node.tick();
+    let (in_send, input) = node.sim_input::<i32, TotalOrder, ExactlyOnce>();
+    let out_recv = input
+        .batch(&tick, nondet!(/** test */))
+        .count()
+        .all_ticks()
+        .sim_output();
+
+    let sim = flow.sim().compiled();
+    let mut seen: Vec<Vec<usize>> = Vec::new();
+    for _ in 0..3 {
+        let mut runs = 0usize;
+        let mut this_run = Vec::new();
+        sim.first_schedule(async || {
+            runs += 1;
+            in_send.send_many([1, 2, 3]);
+            this_run = out_recv.collect().await;
+        });
+        assert_eq!(runs, 1);
+        seen.push(this_run);
+    }
+    assert!(seen.iter().all(|s| s == &seen[0]), "{seen:?}");
+    assert_eq!(seen[0].iter().sum::<usize>(), 3);
+}
+
 /// The simulator does not yet support non-atomic yield of an Optional (i.e., `latest()`
 /// on a tick-level Optional that produces a top-level Unbounded Optional).
 /// This snapshot test verifies the panic message.
@@ -1367,92 +1450,3 @@ fn sim_retry_cast_is_identity() {
     });
     assert_eq!(count, 1, "a retry cast introduces no schedule choice");
 }
-
-/// `exhaustive_then` calls `after` once per explored execution, after it has finished.
-#[test]
-fn sim_exhaustive_then_calls_after_each_execution() {
-    let mut flow = FlowBuilder::new();
-    let node = flow.process::<()>();
-    let tick = node.tick();
-    let (in_send, input) = node.sim_input::<i32, TotalOrder, ExactlyOnce>();
-    let out_recv = input
-        .batch(&tick, nondet!(/** test */))
-        .count()
-        .all_ticks()
-        .sim_output();
-
-    let mut runs = 0usize;
-    let mut afters = 0usize;
-    let count = flow.sim().compiled().exhaustive_then(
-        async || {
-            runs += 1;
-            in_send.send_many([1, 2]);
-            let _: Vec<usize> = out_recv.collect().await;
-        },
-        || afters += 1,
-    );
-    assert!(count > 1, "batching should give several executions");
-    assert_eq!(runs, count);
-    assert_eq!(afters, count);
-}
-
-/// `fuzz_bounded_then` runs exactly the requested number of executions.
-#[test]
-fn sim_fuzz_bounded_then_runs_exactly_n() {
-    let mut flow = FlowBuilder::new();
-    let node = flow.process::<()>();
-    let tick = node.tick();
-    let (in_send, input) = node.sim_input::<i32, TotalOrder, ExactlyOnce>();
-    let out_recv = input
-        .batch(&tick, nondet!(/** test */))
-        .all_ticks()
-        .sim_output();
-
-    let mut afters = 0usize;
-    flow.sim().compiled().fuzz_bounded_then(
-        5,
-        async || {
-            in_send.send_many([1, 2, 3]);
-            let all: Vec<i32> = out_recv.collect().await;
-            assert_eq!(all, vec![1, 2, 3]);
-        },
-        || afters += 1,
-    );
-    assert_eq!(afters, 5);
-}
-
-/// `first_schedule` runs one execution, and always the same one.
-#[test]
-fn sim_first_schedule_is_deterministic() {
-    let mut flow = FlowBuilder::new();
-    let node = flow.process::<()>();
-    let tick = node.tick();
-    let (in_send, input) = node.sim_input::<i32, TotalOrder, ExactlyOnce>();
-    let out_recv = input
-        .batch(&tick, nondet!(/** test */))
-        .count()
-        .all_ticks()
-        .sim_output();
-
-    let sim = flow.sim().compiled();
-    let mut seen: Vec<Vec<usize>> = Vec::new();
-    for _ in 0..3 {
-        let mut runs = 0usize;
-        let mut this_run = Vec::new();
-        sim.first_schedule(async || {
-            runs += 1;
-            in_send.send_many([1, 2, 3]);
-            this_run = out_recv.collect().await;
-        });
-        assert_eq!(runs, 1);
-        seen.push(this_run);
-    }
-    assert!(seen.iter().all(|s| s == &seen[0]), "{seen:?}");
-    assert_eq!(seen[0].iter().sum::<usize>(), 3);
-}
-
-// Declared last so the line numbers in this file's trace snapshots do not move.
-#[cfg(feature = "hydrofrac")]
-mod network_hook;
-
-mod dylib_panic;

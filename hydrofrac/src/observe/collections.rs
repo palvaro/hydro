@@ -1,99 +1,47 @@
 //! Every collection a program labels `EventualConsistency`, found on the IR before the taps
-//! (ported from the research branch's `sim/slice.rs`, `ec_collections` and its helpers).
+//! (the research branch's `ec_collections`).
 
 use std::collections::{HashMap, HashSet};
 
 use hydro_lang::compile::builder::CycleId;
-use hydro_lang::compile::ir::backtrace::Backtrace;
 use hydro_lang::compile::ir::{ClosureExpr, CollectionKind, HydroNode, HydroRoot, HydroSource};
 use hydro_lang::location::dynamic::{ClusterConsistency, LocationId};
 use quote::ToTokens;
 
 use super::source_names;
 
-/// A collection the program labels `EventualConsistency`: a premise that the label's
-/// convergence is not withheld by faults, which the generated specification over it
-/// discharges ([`crate::spec`]) and which is otherwise open. Enumerated by [`ec_collections`]
-/// on the IR before the taps ([`super::tap`]).
+/// A collection the program labels `EventualConsistency`, enumerated by [`ec_collections`].
 #[derive(Clone, Debug)]
 pub struct EcCollection {
-    /// The user's source location of the labelling operator, or its tag.
+    /// The node's tag, else the `file:line` of the user's labelling call ([`ec_label`]).
     pub label: String,
-    /// The operator (`Network`, `Unique`, ...), to tell apart two labelled nodes at one source
-    /// line.
+    /// The operator (`Network`, `Unique`, ...), to tell apart labelled nodes at one line.
     pub op: String,
     /// The cluster the collection lives on.
     pub location: LocationId,
-    /// Whether a network channel feeds it (transitively): a fault can withhold its inputs.
-    /// A labelled collection computed from local sources alone has nothing to check.
+    /// Whether a network channel feeds it (transitively): only then can a fault withhold it.
     pub fed_by_network: bool,
-    /// The kind of the collection (its element types are those of the IR the enumeration ran
-    /// on: plain before the provenance rewrite, tagged after).
+    /// The kind of the collection, as the enumerated IR typed it.
     pub collection_kind: CollectionKind,
-    /// Whether the node lives inside a tick (or an atomic region) rather than at the cluster's
-    /// top level.
+    /// Whether the node lives inside a tick (or an atomic region).
     pub in_tick: bool,
-    /// The label is minted here: none of the node's inputs is labelled (a `broadcast_closed`
-    /// over a transport that grants it, an `assert_has_consistency_of`). What the type system
-    /// assumes about faults, it assumes here.
-    pub minted: bool,
-    /// The collection leaves the labelled region here: a consumer drops the label (a
-    /// `weaken_consistency`, a `batch` into an unlabelled tick) or it is an output of the
-    /// program. What the program delivers under the label, it delivers here. (A send to
-    /// another location is not an exit: the collection continues there, labelled or not by the
-    /// transport's own rule.)
-    pub exit: bool,
-    /// The collection is the input stream of a labelled scalar (see [`Self::covered_by`]).
-    /// Usually it is also an exit (the aggregating operator itself is unlabelled); when it is
-    /// not, this is why it is listed.
-    pub aggregated: bool,
-    /// For a labelled scalar (`Singleton`, `Optional`, `KeyedSingleton`) computed by an
-    /// aggregation (`fold`, `reduce`, and their keyed forms) from a labelled stream: the index,
-    /// in the enumeration, of that stream. The type system vouches that the scalar is a
-    /// deterministic function of the stream (else the label would have been dropped), so the
-    /// scalar converges if the stream's contents reach every correct member: the stream is
-    /// what is checked.
+    /// For a labelled scalar aggregated (`fold`, `reduce`, keyed or not) from a labelled
+    /// stream: that stream's index. The scalar is a deterministic function of the stream, so
+    /// the stream is what is checked (§3, `covered_by`).
     pub covered_by: Option<usize>,
-    /// For a minted collection that is not itself an exit: the exits that a **merge**
-    /// downstream of it reaches, nearest first, by index in the enumeration. Non-empty only
-    /// when the collection is *merge-dominated* (see [`ec_collections`]): its contents are
-    /// combined with another labelled stream before anything leaves the labelled region, so
-    /// agreement is owed at the combination, which the exits check.
-    pub merged_into: Vec<usize>,
-    /// A name for reports: the node's tag, else the variable the user's statement binds, else
-    /// the receiver of an unbound `<name>.assert_has_consistency_of(..)`, else the function
-    /// whose tail expression it is, read back from the source (see
-    /// [`super::source_names::site_name`]). `None` when none is available.
+    /// A name for reports: the node's tag, else the name read back from the source
+    /// ([`super::source_names::site_name`]).
     pub name: Option<String>,
-    /// The file name (no directories) of the user's call that labelled the collection, when
-    /// the backtrace has one.
+    /// The file name of the user's labelling call.
     pub file: Option<String>,
-    /// Among the collections with the same [`Self::file`] and [`Self::display_name`], the
-    /// 0-based position of this one in enumeration order (see [`Self::stable_key`]).
+    /// The 0-based position among collections with the same file and display name.
     pub occurrence: usize,
 }
 
 impl EcCollection {
-    /// The location, as `Cluster(...)`, for reports.
-    pub fn location_label(&self) -> String {
-        format!("{:?}", self.location)
-    }
-
     /// The name reports use: [`Self::name`], else the operator.
     pub fn display_name(&self) -> &str {
         self.name.as_deref().unwrap_or(&self.op)
-    }
-
-    /// An identity that survives edits elsewhere in the file: `(file, name, occurrence)`, with
-    /// the operator standing in for a missing name. Line numbers move when the source changes;
-    /// this key does not, so verdicts can be compared across versions of a program (the
-    /// research records key by `file:line`, docs/design/hydrofrac-lite.md §7).
-    pub fn stable_key(&self) -> (String, String, usize) {
-        (
-            self.file.clone().unwrap_or_default(),
-            self.display_name().to_owned(),
-            self.occurrence,
-        )
     }
 
     /// The identity of the collection among the program's labelled nodes.
@@ -108,10 +56,8 @@ impl EcCollection {
 }
 
 /// `(label, operator, collection kind, cluster)`: how labelled nodes are told apart, and how the
-/// tap pass re-identifies the nodes this enumeration found. The kind separates two labelled
-/// nodes of one operator in one statement (a `broadcast_closed` and an
-/// `assert_has_consistency_of` on a `fold` of it share `file:line` and `AssertIsConsistent`);
-/// the research branch's key merged them.
+/// tap pass re-identifies them. The kind separates a `broadcast_closed` from an
+/// `assert_has_consistency_of` on a `fold` of it, which share a line and an operator.
 pub(crate) type EcKey = (String, String, &'static str, LocationId);
 
 /// The name of a collection kind (`Stream`, `Singleton`, ...).
@@ -125,42 +71,16 @@ pub fn kind_name(kind: &CollectionKind) -> &'static str {
     }
 }
 
-/// Every collection `ir` labels `EventualConsistency`: every labelled node where the label is
-/// **minted** (none of its inputs is labelled: the `broadcast_closed` or the
-/// `assert_has_consistency_of`) and every labelled node where the collection **exits** the
-/// labelled region (a consumer other than a send is unlabelled, or it is an output of the
-/// program). The operators
-/// in between inherit the label and are not listed. Nodes at the same source line, of the same
-/// operator, on the same cluster (one per cluster member, or one per instantiation of a library
-/// function on the same cluster) are reported once, in first-seen order; a search over such a
-/// collection checks the union of their contents per member. A `Tee` stands for what it shares: it is neither a minting point
-/// nor, by itself, an exit, and the shared node is reported under its own source line.
+/// Every collection `ir` labels `EventualConsistency`: each labelled node where the label is
+/// **minted** (no input is labelled) or where the collection **exits** the labelled region (an
+/// unlabelled consumer other than a send, or a program output). The operators in between
+/// inherit the label. Nodes with one [`EcKey`] (one per member, or per instantiation of a
+/// library function) are reported once, in first-seen order. A `Tee` stands for what it shares.
 ///
-/// Two structural relations are recorded alongside, both resting on the same principle: the
-/// type system keeps the label only on computations that are deterministic given their
-/// inputs, so convergence is owed only where inputs are **combined**, and derived state need
-/// not be checked on its own.
-///
-/// - **Scalars are covered by their input** ([`EcCollection::covered_by`]). A labelled
-///   `Singleton` / `Optional` / `KeyedSingleton` whose labelling node is, through
-///   pass-throughs (`assert_has_consistency_of`, casts, the `ObserveNonDet` of an
-///   at-least-once input, `Tee`s), a `Fold`, `Reduce`, `FoldKeyed` or `ReduceKeyed` over a
-///   labelled top-level stream is covered by that stream. The stream is listed (flagged
-///   [`EcCollection::aggregated`]) if it is not already.
-/// - **Merge-dominated hops** ([`EcCollection::merged_into`]). A minted collection that is not
-///   an exit is merge-dominated when, following its consumers downstream through labelled
-///   operators on its own cluster (a `Tee` to its branches, a `forward_ref`'s sink to its
-///   `CycleSource`), **every** path reaches a merge (a `Chain`, `ChainFirst` or
-///   `MergeOrdered` whose inputs are all labelled) before it reaches an exit or a send to
-///   another location, and at least one path reaches an exit after a merge. The hop's
-///   elements then reach the outside only combined with the other labelled inputs of the
-///   merge (an echo, a retransmission), and the exits after the merge are where agreement on
-///   the combination is checked. A hop that reaches an exit or a send unmerged is not
-///   dominated: its own contents leave the region and its own verdict stands.
-///
-/// A labelled collection computed from nothing but a cluster's membership is not listed: it is
-/// the member-id list a cluster-to-cluster `broadcast_closed` joins its payload with, not a
-/// collection of the program (see `membership_only`).
+/// A labelled scalar whose node is, through pass-throughs, an aggregation of a labelled
+/// top-level stream is covered by that stream, which is listed if it is not already
+/// ([`EcCollection::covered_by`]). A labelled collection computed from nothing but a cluster's
+/// membership (the member-id list of a cluster-to-cluster `broadcast_closed`) is not listed.
 pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
     // Raw pointers: cycle sinks are followed from `CycleSource`s to find network ancestors;
     // nothing in `ir` moves during this walk.
@@ -181,14 +101,6 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
         nodes: HashMap<*const HydroNode, usize>,
         /// The keys of `nodes`, in first-recorded order.
         node_order: Vec<*const HydroNode>,
-        /// The nodes recorded as exits (a collection's `exit` is the union over its nodes).
-        exit_nodes: HashSet<*const HydroNode>,
-        /// Labelled → labelled edges on one cluster, input to consumer.
-        consumers: HashMap<*const HydroNode, Vec<*const HydroNode>>,
-        /// Labelled nodes some send consumes.
-        sent: HashSet<*const HydroNode>,
-        /// Labelled merges.
-        merges: HashSet<*const HydroNode>,
         /// A labelled scalar's node, and the node of the stream it aggregates.
         aggregations: Vec<(*const HydroNode, *const HydroNode)>,
     }
@@ -196,13 +108,11 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
         fn record(
             &mut self,
             node: &HydroNode,
-            minted: bool,
-            exit: bool,
             cycle_sinks: &HashMap<CycleId, *const HydroNode>,
         ) -> *const HydroNode {
             with_shared_resolved(node, |node| {
                 let key = ec_key(node);
-                let fed = has_network_ancestor(node, cycle_sinks);
+                let fed = sources(node, cycle_sinks).network;
                 let index = *self.by_key.entry(key.clone()).or_insert_with(|| {
                     self.collections.push(EcCollection {
                         label: key.0,
@@ -211,30 +121,33 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
                         fed_by_network: false,
                         collection_kind: node.metadata().collection_kind.clone(),
                         in_tick: !matches!(node.metadata().location_id, LocationId::Cluster(_)),
-                        minted: false,
-                        exit: false,
-                        aggregated: false,
                         covered_by: None,
-                        merged_into: vec![],
                         name: ec_name(node),
                         file: ec_file(node),
                         occurrence: 0,
                     });
                     self.collections.len() - 1
                 });
-                let found = &mut self.collections[index];
-                found.fed_by_network |= fed;
-                found.minted |= minted;
-                found.exit |= exit;
+                self.collections[index].fed_by_network |= fed;
                 let ptr = std::ptr::from_ref(node);
                 if self.nodes.insert(ptr, index).is_none() {
                     self.node_order.push(ptr);
                 }
-                if exit {
-                    self.exit_nodes.insert(ptr);
-                }
                 ptr
             })
+        }
+
+        /// Records the stream the labelled scalar at `scalar` aggregates, if any.
+        fn aggregation(
+            &mut self,
+            scalar: *const HydroNode,
+            cycle_sinks: &HashMap<CycleId, *const HydroNode>,
+        ) {
+            // SAFETY: `scalar` points into `ir` (or a `Tee`'s cell), which does not move.
+            if let Some(input) = aggregated_input(unsafe { &*scalar }) {
+                let input = self.record(input, cycle_sinks);
+                self.aggregations.push((scalar, input));
+            }
         }
     }
     fn visit(
@@ -251,18 +164,7 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
             // is not an exit: the collection continues at another location, labelled or not
             // by the transport's own rule.
             if is_ec(input) && !is_ec(node) && !matches!(node, HydroNode::Network { .. }) {
-                with_casts_resolved(input, |input| found.record(input, false, true, cycle_sinks));
-            }
-            if is_ec(input) {
-                if matches!(node, HydroNode::Network { .. }) {
-                    found.sent.insert(std::ptr::from_ref(input));
-                } else if is_ec(node) {
-                    found
-                        .consumers
-                        .entry(std::ptr::from_ref(input))
-                        .or_default()
-                        .push(std::ptr::from_ref(node));
-                }
+                with_casts_resolved(input, |input| found.record(input, cycle_sinks));
             }
         };
         match node {
@@ -275,39 +177,9 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
                 }
             }
         }
-        // A `forward_ref` continues the collection its sink receives.
-        if let HydroNode::CycleSource { cycle_id, .. } = node
-            && is_ec(node)
-            && let Some(&sink) = cycle_sinks.get(cycle_id)
-            // SAFETY: see the comment at the construction of `cycle_sinks`.
-            && is_ec(unsafe { &*sink })
-        {
-            found
-                .consumers
-                .entry(sink)
-                .or_default()
-                .push(std::ptr::from_ref(node));
-        }
-        if is_ec(node)
-            && matches!(
-                node,
-                HydroNode::Chain { .. }
-                    | HydroNode::ChainFirst { .. }
-                    | HydroNode::MergeOrdered { .. }
-            )
-            && node.input().into_iter().all(is_ec)
-        {
-            found.merges.insert(std::ptr::from_ref(node));
-        }
-        if is_ec_minting(node) && !membership_only(node, cycle_sinks) {
-            let scalar = found.record(node, true, false, cycle_sinks);
-            // SAFETY: `scalar` points into `ir` (or a `Tee`'s cell), which does not move.
-            if let Some(input) = aggregated_input(unsafe { &*scalar }) {
-                let input = found.record(input, false, false, cycle_sinks);
-                let index = found.nodes[&input];
-                found.collections[index].aggregated = true;
-                found.aggregations.push((scalar, input));
-            }
+        if is_ec_minting(node) && !sources(node, cycle_sinks).membership_only() {
+            let scalar = found.record(node, cycle_sinks);
+            found.aggregation(scalar, cycle_sinks);
         }
     }
     let mut found = Found {
@@ -316,10 +188,6 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
         seen: HashSet::new(),
         nodes: HashMap::new(),
         node_order: vec![],
-        exit_nodes: HashSet::new(),
-        consumers: HashMap::new(),
-        sent: HashSet::new(),
-        merges: HashSet::new(),
         aggregations: vec![],
     };
     for root in ir {
@@ -335,9 +203,7 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
                     | HydroRoot::EmbeddedOutput { .. }
             )
         {
-            with_casts_resolved(input, |input| {
-                found.record(input, false, true, &cycle_sinks)
-            });
+            with_casts_resolved(input, |input| found.record(input, &cycle_sinks));
         }
     }
 
@@ -350,64 +216,12 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
         .filter(|ptr| !found.aggregations.iter().any(|(s, _)| s == ptr))
         .collect();
     for scalar in scalars {
-        // SAFETY: as above.
-        if let Some(input) = aggregated_input(unsafe { &*scalar }) {
-            let input = found.record(input, false, false, &cycle_sinks);
-            let index = found.nodes[&input];
-            found.collections[index].aggregated = true;
-            found.aggregations.push((scalar, input));
-        }
+        found.aggregation(scalar, &cycle_sinks);
     }
     for (scalar, input) in &found.aggregations {
         let (scalar, input) = (found.nodes[scalar], found.nodes[input]);
         if scalar != input {
             found.collections[scalar].covered_by.get_or_insert(input);
-        }
-    }
-
-    // Merge-dominated hops (see the function docs): breadth-first downstream from each node of
-    // a minted, non-exit collection, carrying whether a merge has been passed.
-    for index in 0..found.collections.len() {
-        let c = &found.collections[index];
-        if !c.minted || c.exit {
-            continue;
-        }
-        let starts: Vec<*const HydroNode> = found
-            .node_order
-            .iter()
-            .copied()
-            .filter(|ptr| found.nodes[ptr] == index)
-            .collect();
-        let mut queue: std::collections::VecDeque<(*const HydroNode, bool)> =
-            starts.iter().map(|ptr| (*ptr, false)).collect();
-        let mut seen: HashSet<(*const HydroNode, bool)> = queue.iter().copied().collect();
-        let mut dominated = true;
-        let mut merged_into: Vec<usize> = vec![];
-        while let Some((ptr, merged)) = queue.pop_front() {
-            let merged = merged || found.merges.contains(&ptr);
-            let is_start = starts.contains(&ptr);
-            if !is_start && found.exit_nodes.contains(&ptr) {
-                if !merged {
-                    dominated = false;
-                    break;
-                }
-                let exit = found.nodes[&ptr];
-                if !merged_into.contains(&exit) {
-                    merged_into.push(exit);
-                }
-            }
-            if !merged && found.sent.contains(&ptr) {
-                dominated = false;
-                break;
-            }
-            for &next in found.consumers.get(&ptr).into_iter().flatten() {
-                if seen.insert((next, merged)) {
-                    queue.push_back((next, merged));
-                }
-            }
-        }
-        if dominated {
-            found.collections[index].merged_into = merged_into;
         }
     }
 
@@ -423,11 +237,9 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
     collections
 }
 
-/// The input stream a labelled scalar aggregates (see [`ec_collections`]): `node`, through
-/// pass-throughs (`AssertIsConsistent`, `Cast`, `ObserveNonDet` — the `assume_retries` an
-/// idempotent `fold` puts on an at-least-once input —, `Tee`, references), is a `Fold`,
-/// `Reduce`, `FoldKeyed` or `ReduceKeyed` whose input, through the same pass-throughs, is a
-/// labelled stream at a cluster's top level. `None` for anything else.
+/// The input stream a labelled scalar aggregates: `node`, through pass-throughs
+/// (`AssertIsConsistent`, `Cast`, `ObserveNonDet`, `Tee`, references), is a `Fold`, `Reduce`,
+/// `FoldKeyed` or `ReduceKeyed` whose input, through the same, is a labelled top-level stream.
 fn aggregated_input(node: &HydroNode) -> Option<&HydroNode> {
     if !is_ec(node)
         || !matches!(
@@ -439,9 +251,7 @@ fn aggregated_input(node: &HydroNode) -> Option<&HydroNode> {
     {
         return None;
     }
-    /// Through `AssertIsConsistent`, `Cast`, `ObserveNonDet`, `Tee` and references, as raw
-    /// pointers: the
-    /// shared cells' borrows end, the nodes do not move.
+    /// Through the pass-throughs, as raw pointers: the cells' borrows end, the nodes stay.
     fn through(node: &HydroNode) -> *const HydroNode {
         match node {
             HydroNode::AssertIsConsistent { inner, .. }
@@ -473,10 +283,8 @@ fn aggregated_input(node: &HydroNode) -> Option<&HydroNode> {
     .then_some(input)
 }
 
-/// Calls `f` on the first node under `node` that is not a labelled pass-through (a `Cast`
-/// whose input is labelled, or what a `Tee` shares): the operator an exit stands for, so that
-/// an exit right after the minting operator (`broadcast_closed(..).values()` into a `batch`)
-/// is the minting operator's row.
+/// Calls `f` on the first node under `node` that is not a labelled pass-through (a `Cast` of a
+/// labelled input, or what a `Tee` shares): the operator an exit stands for.
 fn with_casts_resolved<R>(node: &HydroNode, f: impl FnOnce(&HydroNode) -> R) -> R {
     match node {
         HydroNode::Tee { inner, .. } | HydroNode::Reference { inner, .. } => {
@@ -487,15 +295,13 @@ fn with_casts_resolved<R>(node: &HydroNode, f: impl FnOnce(&HydroNode) -> R) -> 
     }
 }
 
-/// Calls `f` on the node a `Tee` (or reference) shares, through any chain of them, or on
-/// `node` itself.
+/// Calls `f` on the node a chain of `Tee`s (or references) shares, or on `node` itself.
 fn with_shared_resolved<R>(node: &HydroNode, f: impl FnOnce(&HydroNode) -> R) -> R {
     match node {
         HydroNode::Tee { inner, .. } | HydroNode::Reference { inner, .. } => {
             with_shared_resolved(&inner.0.borrow(), f)
         }
-        // A partition side is one output of the shared `PartitionShared`, which cannot be
-        // tapped as a whole; the side is the operator.
+        // A partition side is the operator: its `PartitionShared` cannot be tapped whole.
         _ => f(node),
     }
 }
@@ -508,9 +314,8 @@ pub(crate) fn is_ec(node: &HydroNode) -> bool {
     ) && matches!(node.metadata().location_id.root(), LocationId::Cluster(_))
 }
 
-/// Whether `node` is where an `EventualConsistency` label is minted: labelled, and none of
-/// what feeds it (including what a `Tee` shares) is. A `CycleSource` is fed by its cycle's
-/// sink and is never a minting point.
+/// Whether `node` mints an `EventualConsistency` label: labelled, and nothing that feeds it is
+/// (a `CycleSource`, fed by its sink, never does).
 pub(crate) fn is_ec_minting(node: &HydroNode) -> bool {
     if !is_ec(node) {
         return false;
@@ -524,21 +329,25 @@ pub(crate) fn is_ec_minting(node: &HydroNode) -> bool {
     }
 }
 
-/// The label of a labelled collection: the node's tag, else the user's source line of the
-/// labelling operator (`file:line`, the file by its name), else the operator's name.
+/// The label of a labelled collection: the node's tag, else the user's `file:line` of the
+/// labelling operator (the file by its name), else the operator's name.
 pub(crate) fn ec_label(node: &HydroNode) -> String {
+    let backtrace = &node.metadata().op.backtrace;
     node.metadata()
         .tag
         .clone()
         .or_else(|| {
-            user_span(&node.metadata().op.backtrace).map(|span| {
-                span.rsplit(['/', '\\'])
-                    .next()
-                    .unwrap_or(span.as_str())
-                    .to_owned()
-            })
+            let span = source_names::user_frame(backtrace)
+                .map(|frame| format!("{}:{}", frame.file, frame.line))
+                .or_else(|| backtrace.format_span())?;
+            Some(file_name(&span).to_owned())
         })
         .unwrap_or_else(|| ec_op(node))
+}
+
+/// The last component of a path.
+fn file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 /// The report name of a labelled collection (see [`EcCollection::name`]).
@@ -549,17 +358,10 @@ fn ec_name(node: &HydroNode) -> Option<String> {
     })
 }
 
-/// The file name of the user's call that built `node` (see [`EcCollection::file`]).
+/// The file name of the user's call that built `node`.
 fn ec_file(node: &HydroNode) -> Option<String> {
     let frame = source_names::user_frame(&node.metadata().op.backtrace)?;
-    Some(
-        frame
-            .file
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or(frame.file.as_str())
-            .to_owned(),
-    )
+    Some(file_name(&frame.file).to_owned())
 }
 
 /// The operator name of `node` (`Network`, `Unique`, ...).
@@ -578,110 +380,80 @@ pub(crate) fn ec_key(node: &HydroNode) -> EcKey {
     )
 }
 
-/// Whether every source `node` is computed from is a cluster's membership (a
-/// `HydroSource::ClusterMembers`, or a `source_iter` over `ClusterIds`), following `Tee`s and
-/// cycles like [`has_network_ancestor`]. Such a labelled collection is the member-id list a
-/// cluster-to-cluster `broadcast_closed` labels and joins with its payload, not anything the program computes. It
-/// is local, so it would only ever be listed as not checked, and it takes the name of the
-/// statement that broadcasts (an `echoed` row next to the real `echoed`). The design keeps
-/// `broadcast_closed` unchanged and filters such rows here (docs/design/hydrofrac-lite.md §6.3).
-fn membership_only(node: &HydroNode, cycle_sinks: &HashMap<CycleId, *const HydroNode>) -> bool {
-    /// `Some(true)`: only membership sources; `Some(false)`: some other source or a network;
-    /// `None`: nothing new below (already visited or a dangling cycle).
+/// What `node` is computed from, following `Tee`s, cycles (through their sinks) and the
+/// singletons its closures read.
+#[derive(Default)]
+struct Sources {
+    /// A network receive is upstream.
+    network: bool,
+    /// A cluster's membership is a source (`ClusterMembers`, or `source_iter` over `ClusterIds`).
+    membership: bool,
+    /// Some other leaf is.
+    other: bool,
+}
+
+impl Sources {
+    /// Only membership: the member-id list a cluster-to-cluster `broadcast_closed` labels,
+    /// which would otherwise show up as a local duplicate row of the broadcast's name (§6.3).
+    fn membership_only(&self) -> bool {
+        self.membership && !self.network && !self.other
+    }
+}
+
+fn sources(node: &HydroNode, cycle_sinks: &HashMap<CycleId, *const HydroNode>) -> Sources {
     fn go(
         node: &HydroNode,
         cycle_sinks: &HashMap<CycleId, *const HydroNode>,
         seen: &mut HashSet<*const HydroNode>,
-    ) -> Option<bool> {
+        out: &mut Sources,
+    ) {
         if !seen.insert(std::ptr::from_ref(node)) {
-            return None;
+            return;
         }
-        let combine = |results: &mut dyn Iterator<Item = Option<bool>>| {
-            let mut any = None;
-            for r in results {
-                match r {
-                    Some(false) => return Some(false),
-                    Some(true) => any = Some(true),
-                    None => {}
-                }
-            }
-            any
-        };
         match node {
             HydroNode::Source {
                 source: HydroSource::ClusterMembers(..),
                 ..
-            } => Some(true),
-            // `source_iter` over `ClusterIds`, which splices as `__hydro_lang_cluster_ids_<key>`:
-            // how `broadcast_closed` lists its destinations.
+            } => out.membership = true,
+            // How `broadcast_closed` lists its destinations: `ClusterIds` splice as
+            // `__hydro_lang_cluster_ids_<key>`.
             HydroNode::Source {
                 source: HydroSource::Iter(expr),
                 ..
-            } => Some(
-                expr.to_token_stream()
-                    .to_string()
-                    .contains("__hydro_lang_cluster_ids_"),
-            ),
-            HydroNode::Network { .. } => Some(false),
+            } if expr
+                .to_token_stream()
+                .to_string()
+                .contains("__hydro_lang_cluster_ids_") =>
+            {
+                out.membership = true;
+            }
+            HydroNode::Network { .. } => out.network = true,
             HydroNode::Tee { inner, .. }
             | HydroNode::Reference { inner, .. }
-            | HydroNode::PartitionSide { inner, .. } => go(&inner.0.borrow(), cycle_sinks, seen),
-            HydroNode::CycleSource { cycle_id, .. } => cycle_sinks.get(cycle_id).and_then(|sink| {
-                // SAFETY: see the comment at the construction of `cycle_sinks`.
-                go(unsafe { &**sink }, cycle_sinks, seen)
-            }),
+            | HydroNode::PartitionSide { inner, .. } => {
+                go(&inner.0.borrow(), cycle_sinks, seen, out);
+            }
+            HydroNode::CycleSource { cycle_id, .. } => {
+                if let Some(sink) = cycle_sinks.get(cycle_id) {
+                    // SAFETY: see the comment at the construction of `cycle_sinks`.
+                    go(unsafe { &**sink }, cycle_sinks, seen, out);
+                }
+            }
             _ => {
                 let inputs = node.input();
-                if inputs.is_empty() {
-                    // Any other leaf: an external input, a stream, an iterator, a singleton.
-                    return Some(false);
+                out.other |= inputs.is_empty();
+                for input in inputs.into_iter().chain(closure_refs(node)) {
+                    go(input, cycle_sinks, seen, out);
                 }
-                combine(&mut inputs.into_iter().map(|input| go(input, cycle_sinks, seen)))
             }
         }
     }
-    go(node, cycle_sinks, &mut HashSet::new()) == Some(true)
+    let mut out = Sources::default();
+    go(node, cycle_sinks, &mut HashSet::new(), &mut out);
+    out
 }
 
-/// Whether a network receive is (transitively) upstream of `node`, following cycles through
-/// their sinks and `Tee`s through what they share.
-fn has_network_ancestor(
-    node: &HydroNode,
-    cycle_sinks: &HashMap<CycleId, *const HydroNode>,
-) -> bool {
-    fn go(
-        node: &HydroNode,
-        cycle_sinks: &HashMap<CycleId, *const HydroNode>,
-        seen: &mut HashSet<*const HydroNode>,
-    ) -> bool {
-        if !seen.insert(std::ptr::from_ref(node)) {
-            return false;
-        }
-        match node {
-            HydroNode::Network { .. } => true,
-            HydroNode::Tee { inner, .. }
-            | HydroNode::Reference { inner, .. }
-            | HydroNode::PartitionSide { inner, .. } => go(&inner.0.borrow(), cycle_sinks, seen),
-            HydroNode::CycleSource { cycle_id, .. } => {
-                cycle_sinks.get(cycle_id).is_some_and(|sink| {
-                    // SAFETY: see the comment at the construction of `cycle_sinks`.
-                    go(unsafe { &**sink }, cycle_sinks, seen)
-                })
-            }
-            _ => {
-                node.input()
-                    .into_iter()
-                    .any(|input| go(input, cycle_sinks, seen))
-                    || closure_refs(node).any(|input| go(input, cycle_sinks, seen))
-            }
-        }
-    }
-    go(node, cycle_sinks, &mut HashSet::new())
-}
-
-/// The singleton references `node`'s closures read (`HydroNode::Reference`s, which
-/// [`HydroNode::input`] does not list): a closure that reads state fed by the network is fed
-/// by the network.
+/// The singleton references `node`'s closures read (not in [`HydroNode::input`]).
 fn closure_refs(node: &HydroNode) -> impl Iterator<Item = &HydroNode> {
     let closures: Vec<&ClosureExpr> = match node {
         HydroNode::Map { f, .. }
@@ -703,20 +475,4 @@ fn closure_refs(node: &HydroNode) -> impl Iterator<Item = &HydroNode> {
     closures
         .into_iter()
         .flat_map(|f| f.singleton_refs().iter().map(|(node, _)| node))
-}
-
-/// The `file:line` of the first frame of `backtrace` outside `hydro_lang` itself: where the
-/// program called `send`, rather than the networking layer's own frames.
-pub fn user_span(backtrace: &Backtrace) -> Option<String> {
-    let own = concat!("hydro_lang", "/src/");
-    backtrace
-        .elements()
-        .find_map(|element| {
-            let file = element.filename.as_ref()?;
-            if file.contains(own) {
-                return None;
-            }
-            Some(format!("{file}:{}", element.lineno?))
-        })
-        .or_else(|| backtrace.format_span())
 }

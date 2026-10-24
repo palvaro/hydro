@@ -1,0 +1,26 @@
+test(hydrofrac): demonstrate S2, a crash point whose meaning moves with the send order
+
+Lite's kill relation (`Dependency::killed_by`) decides whether `crash(n after m)` kills
+a delivery `d` by `n`'s send order in the run where the clause was seen. With no `nondet!`
+anywhere, a fault elsewhere can still change that order, so a clause can "survive" a
+fault set that actually kills it.
+
+The program (`positional_crash_order_relay`): two members `m0`, `m1`, one fact `7`. A
+relay `n` gets `7` first over the lossy one-hop `direct` (forward to `m0`), then over two
+redundant `fail_stop` two-hop paths (forward to `m1`, then `m0`). `m1` echoes to `m0`.
+
+- Probe: `n` sends `→m0, →m1, …`.
+- `{omit(direct)}` holds; `n` sends `→m1, →m0, …`.
+- `{crash(n after →m0)}` breaks the label with one crash (`m1` lacks `7`). But in
+  `{omit(direct)}`'s clause `→m0` comes after `→m1`, so the relation says this set
+  kills nothing there, and the set is never proposed.
+
+The new tests pass while the bug exists:
+- `suspected_positional_crash_order_tolerance` (uncapped; brute force up to 2, 3 and 4
+  faults): the search says "tolerates 1 crash (certified), breaks at 2 with
+  `{crash(s1), crash(s2)}`".
+- `suspected_positional_crash_order_certificate` (`max_crashes(1)`, 3 faults): a false
+  "holds with up to 1 crash".
+
+`races_on_the_positional_crash_order_relay`: the races mode agrees (it finds
+`{crash(n after →m0)}` at one crash), uncapped and capped, with up to 4 faults.

@@ -25,8 +25,8 @@
 //!
 //! # Opaque islands
 //!
-//! Operators the pass cannot see into ([`opaque_operators`]) are left uninstrumented: their
-//! inputs are stripped of lineage and everything they emit is
+//! Operators the pass cannot see into (`ResolveFutures*`, `VersionedNetwork*`, …) are left
+//! uninstrumented: their inputs are stripped of lineage and everything they emit is
 //! [`RecordProv::Opaque`](super::RecordProv::Opaque). The same applies to a node whose item
 //! shape the pass cannot follow: a keyed-to-flat `Cast`/`ObserveNonDet` (for example
 //! `entries_partially_ordered`) whose simulator hook is typed by the node's own collection kind
@@ -101,6 +101,32 @@ fn opaque_tag() -> TokenStream {
     quote!(#p::Tag { kind: #p::TagKind::Operational, port: #PORT, member: #PORT, seq: u64::MAX })
 }
 
+/// The tag naming fragile site `index` (docs/design/hydrofrac-races.md §4.1). It reaches message
+/// metadata as the id `FRAGILE_BIT | index` ([`super::FRAGILE_BIT`]); its `member` keeps it
+/// distinct from every delivery tag and from [`opaque_tag`].
+fn fragile_tag(index: usize) -> TokenStream {
+    let p = prov();
+    let seq = super::FRAGILE_BIT | u64::try_from(index).expect("site index fits u64");
+    let member = PORT - 1;
+    quote!(#p::Tag { kind: #p::TagKind::Operational, port: #PORT, member: #member, seq: #seq })
+}
+
+/// A `Map` closure adding the tag of fragile site `index` to every item of representation `repr`
+/// and (tagged) type `ty`.
+fn add_fragile_tag(index: usize, repr: Repr, ty: &syn::Type) -> ClosureExpr {
+    let tag = fragile_tag(index);
+    match repr {
+        Repr::Flat => plain_closure(quote!(|mut __prov_x: #ty| {
+            __prov_x.tags.insert(#tag);
+            __prov_x
+        })),
+        Repr::Keyed => plain_closure(quote!(|(__prov_k, mut __prov_v): #ty| {
+            __prov_v.tags.insert(#tag);
+            (__prov_k, __prov_v)
+        })),
+    }
+}
+
 /// An item with opaque lineage.
 fn opaque_item(value: TokenStream) -> TokenStream {
     let p = prov();
@@ -132,13 +158,10 @@ fn net() -> TokenStream {
     quote!(#root::sim::network_hook::rt)
 }
 
-/// Statements appending the `Debug` rendering of `#payload` (a reference expression) to the
-/// metadata being built in `__prov_meta`, when the payload type implements `Debug`
-/// ([`super::split_meta`]'s format). The host sees only a payload's bytes, so the rendering has
-/// to be made here, where the type is known. Chosen by autoref specialization on the concrete
-/// payload type (as the label taps do), so any payload type compiles.
-fn append_payload_debug(payload: TokenStream) -> TokenStream {
-    let root = hydro_lang_crate();
+/// An `Option<String>` expression: the `Debug` rendering of `value` (a reference) if its type
+/// implements `Debug`, by autoref specialization on the concrete type (so any type compiles).
+/// Made in the simulation, where the type is known: the host only sees bytes.
+pub(crate) fn debug_of(value: TokenStream) -> TokenStream {
     quote!({
         struct __ProvWrap<'__a, __T>(&'__a __T);
         trait __ProvViaDebug {
@@ -157,11 +180,7 @@ fn append_payload_debug(payload: TokenStream) -> TokenStream {
                 ::core::option::Option::None
             }
         }
-        if let ::core::option::Option::Some(__prov_debug) =
-            (&__ProvWrap(#payload)).__prov_debug()
-        {
-            __prov_meta.extend(#root::runtime_support::bincode::serialize(&__prov_debug).unwrap());
-        }
+        (&__ProvWrap(#value)).__prov_debug()
     })
 }
 
@@ -422,7 +441,8 @@ struct Body {
 /// inside `call`. Reference shadows, lineage absorption and write-back are spliced around it.
 fn wrap_closure(f: &ClosureExpr, build: impl FnOnce(&RefShadow) -> Body) -> ClosureExpr {
     let shadow = ref_shadow(f);
-    let orig = &f.expr().0;
+    let (orig, refs) = f.clone().into_parts();
+    let orig = &orig.0;
     let per_run = &shadow.per_run;
     let per_item = &shadow.per_item;
     let absorb = &shadow.absorb;
@@ -470,7 +490,7 @@ fn wrap_closure(f: &ClosureExpr, build: impl FnOnce(&RefShadow) -> Body) -> Clos
             }
         })
     };
-    ClosureExpr::new(DebugExpr::from(expr), f.clone().into_parts().1)
+    ClosureExpr::new(DebugExpr::from(expr), refs)
 }
 
 fn wrap_map(f: &ClosureExpr, in_repr: Repr, in_ty: &syn::Type, out_repr: Repr) -> ClosureExpr {
@@ -639,11 +659,29 @@ fn plain_closure(tokens: TokenStream) -> ClosureExpr {
 // Node rewriting
 // ---------------------------------------------------------------------------------------------
 
-/// What the pass learned, for reporting.
+/// An identity for an IR node that survives the rewrite moving it: the heap address of its
+/// collection kind's type. Every node owns that allocation, a node is moved but never copied
+/// before the rewrite visits it, and a copy of its metadata (a `Map` the rewrite inserts)
+/// allocates a new one. Valid only until the rewrite has visited the node.
+pub(crate) fn node_key(node: &HydroNode) -> usize {
+    let ty = match &node.metadata().collection_kind {
+        CollectionKind::Stream { element_type, .. }
+        | CollectionKind::Singleton { element_type, .. }
+        | CollectionKind::Optional { element_type, .. } => element_type,
+        CollectionKind::KeyedStream { value_type, .. }
+        | CollectionKind::KeyedSingleton { value_type, .. } => value_type,
+    };
+    std::ptr::from_ref::<syn::Type>(&ty.0) as usize
+}
+
+/// What the pass learned, for reporting, and what it was told.
 #[derive(Default)]
 struct Ctx {
     /// Operators left as opaque islands, by debug name.
     islands: std::cell::RefCell<Vec<String>>,
+    /// The fragile steps to tag, by their key before the rewrite ([`node_key`]) to site
+    /// index. Empty unless the rewrite runs in fragile mode.
+    fragile: std::collections::HashMap<usize, usize>,
 }
 
 /// Wraps `node` in a `Map` applying `f`; the map inherits `node`'s (already retyped) metadata.
@@ -744,6 +782,20 @@ fn ty_of(node: &HydroNode) -> syn::Type {
 }
 
 fn transform_node(node: &mut HydroNode, ctx: &Ctx) {
+    // Looked up before the node is rewritten, which invalidates its key.
+    let fragile = if ctx.fragile.is_empty() || matches!(node, HydroNode::Placeholder) {
+        None
+    } else {
+        ctx.fragile.get(&node_key(node)).copied()
+    };
+    transform_node_inner(node, ctx);
+    // After a fragile step, every record it emits names its site.
+    if let Some(index) = fragile {
+        wrap_after(node, add_fragile_tag(index, kind_of(node), &ty_of(node)));
+    }
+}
+
+fn transform_node_inner(node: &mut HydroNode, ctx: &Ctx) {
     let p = prov();
     match node {
         HydroNode::Placeholder => panic!("provenance: unexpected placeholder"),
@@ -1043,14 +1095,14 @@ fn transform_node(node: &mut HydroNode, ctx: &Ctx) {
             let untag = untag(in_repr, quote!(__prov_item));
             let orig_ser = &ser.0;
             let call_ser = apply1(quote!(#orig_ser), quote!(__prov_x));
-            // A send to a cluster is a demux: its item is `(destination, payload)` and only the
-            // payload goes on the wire (`serialize_bincode_with_type(true, ..)`).
+            // A send to a cluster is a demux: only the payload of `(destination, payload)` goes
+            // on the wire.
             let payload = if matches!(metadata.location_id.root(), LocationId::Cluster(_)) {
-                quote!(&__prov_x.1)
+                debug_of(quote!(&__prov_x.1))
             } else {
-                quote!(&__prov_x)
+                debug_of(quote!(&__prov_x))
             };
-            let append_debug = append_payload_debug(payload);
+            let root = hydro_lang_crate();
             // The record's lineage becomes the metadata of the send that immediately follows,
             // followed by the payload's `Debug` rendering for reports (`super::split_meta`).
             let wrapped_ser: syn::Expr = parse_quote!(
@@ -1058,7 +1110,11 @@ fn transform_node(node: &mut HydroNode, ctx: &Ctx) {
                     let (__prov_t, __prov_c, __prov_x) = #untag;
                     let _ = __prov_c;
                     let mut __prov_meta: ::std::vec::Vec<u8> = #meta;
-                    #append_debug
+                    if let ::core::option::Option::Some(__prov_debug) = #payload {
+                        __prov_meta.extend(
+                            #root::runtime_support::bincode::serialize(&__prov_debug).unwrap(),
+                        );
+                    }
                     #net::set_send_meta(__prov_meta);
                     #call_ser
                 }
@@ -1311,7 +1367,10 @@ fn transform_root(root: &mut HydroRoot) {
 ///
 /// [`IrPassStage::PostNetwork`]: hydro_lang::sim::network_hook::IrPassStage::PostNetwork
 pub fn rewrite(ir: &mut [HydroRoot]) -> Vec<String> {
-    let ctx = Ctx::default();
+    rewrite_with(ir, Ctx::default())
+}
+
+fn rewrite_with(ir: &mut [HydroRoot], ctx: Ctx) -> Vec<String> {
     let mut seen_tees: SeenSharedNodes = Default::default();
     for root in ir.iter_mut() {
         root.transform_bottom_up(
@@ -1341,16 +1400,30 @@ pub fn install<'a>(
     )
 }
 
-/// The operators the rewrite leaves as opaque islands, by IR node name.
-pub fn opaque_operators() -> &'static [&'static str] {
-    &[
-        "ResolveFutures",
-        "ResolveFuturesBlocking",
-        "ResolveFuturesOrdered",
-        "FlatMapStreamBlocking",
-        "ScanAsyncBlocking",
-        "ReduceKeyedWatermark",
-        "VersionedNetworkFork",
-        "VersionedNetwork",
-    ]
+/// Like [`install`], in *fragile mode* (docs/design/hydrofrac-races.md §4.1): before the rewrite,
+/// the program's fragile steps are found (`fragile::classify`) and stored in `sites`; then
+/// every record a fragile step emits also carries that step's site, which reaches message
+/// metadata as the id `FRAGILE_BIT | index` ([`super::FRAGILE_BIT`]). Lineage collects them
+/// ([`crate::lineage::Lineage::fragile_sites`]); lite's lineage skips them as unknown ids.
+#[cfg(stageleft_runtime)]
+pub fn install_fragile<'a>(
+    flow: hydro_lang::sim::flow::SimFlow<'a>,
+    islands: Option<std::rc::Rc<std::cell::RefCell<Vec<String>>>>,
+    sites: std::rc::Rc<std::cell::RefCell<Vec<super::FragileSite>>>,
+) -> hydro_lang::sim::flow::SimFlow<'a> {
+    flow.with_network_hook_points().with_ir_pass(
+        hydro_lang::sim::network_hook::IrPassStage::PostNetwork,
+        move |ir| {
+            let (found, fragile) = super::fragile::classify(ir);
+            *sites.borrow_mut() = found;
+            let ctx = Ctx {
+                fragile,
+                ..Ctx::default()
+            };
+            let found = rewrite_with(ir, ctx);
+            if let Some(islands) = islands {
+                islands.borrow_mut().extend(found);
+            }
+        },
+    )
 }
