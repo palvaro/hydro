@@ -1,14 +1,8 @@
-//! The tap pass: every checked labelled collection, at every member, into an external output
-//! of its own (see the [module docs](super)).
-//!
-//! A tapped node becomes a `Tee` (as `Stream::clone` would make it) and a second branch maps
-//! each element to `(bincode(element), Debug of the element)` and sends it to the simulator's
-//! default external location, exactly the IR `Stream::sim_cluster_output` builds. A `Tee`
-//! branch is invisible to the rest of the program, and an external output adds no schedule
-//! choice, so the program's behaviour and its schedule space are unchanged. The pass runs
-//! before network compilation (`IrPassStage::PreNetwork`), so the outputs are compiled like the
-//! program's own; it runs before the provenance rewrite (`PostNetwork`), so record provenance
-//! flows through the taps like through any other operator and arrives as the outputs' meta.
+//! The tap pass (see the [module docs](super)). A tapped node becomes a `Tee`, and a second
+//! branch maps each element to `(identity, Debug)` and sends it to an external output, the IR
+//! `Stream::sim_cluster_output` builds: invisible to the program, and no new schedule choice.
+//! It runs `PreNetwork`, before the provenance rewrite, so record provenance flows through the
+//! taps and arrives as the outputs' meta.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -26,18 +20,15 @@ use syn::parse_quote;
 
 use super::collections::{EcKey, ec_key, is_ec};
 use super::{LabelPlan, ec_collections, plan};
-use crate::provenance::sensitivity::cones_of;
+use crate::provenance::choices::{ChoiceSite, program_choices};
+use crate::provenance::rewrite::debug_of;
 
-/// One observed element of a labelled collection, as the host receives it: its bincode (the
-/// fact's identity) and, when the element type implements `Debug`, its `Debug` rendering for
-/// reports. Equality, order and hashing use the bytes only.
+/// One observed element of a labelled collection: its identity (normally its bincode) and its
+/// `Debug` rendering, if any, for reports. Equality, order and hashing use the bytes only.
 #[derive(Clone, Debug)]
 pub struct Fact {
-    /// `bincode` of the element.
     pub bytes: Vec<u8>,
-    /// `format!("{:?}", element)`, if the element type implements `Debug`, shortened for
-    /// reports by [`super::source_names::short_debug`] (module paths dropped, member ids as
-    /// `Client@0`). Not part of the fact's identity.
+    /// Shortened by [`super::source_names::short_debug`].
     pub debug: Option<String>,
 }
 
@@ -80,8 +71,7 @@ impl std::fmt::Display for Fact {
 }
 
 impl Fact {
-    /// A fact with no `Debug` rendering, from its bytes (for tests and hand-built
-    /// observations).
+    /// A fact with no `Debug` rendering.
     pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Self {
         Fact {
             bytes: bytes.into(),
@@ -93,9 +83,7 @@ impl Fact {
 /// The wire type of a tap output: `(bincode(element), Debug of the element)`.
 type TapWire = (Vec<u8>, Option<String>);
 
-/// Decodes the payload of a tap output (as `SimNetworkHook::on_output` sees it). The `Debug`
-/// rendering is shortened for reports ([`super::source_names::short_debug`]); the identity (the
-/// bytes) is as the tap shipped it.
+/// Decodes the payload of a tap output (as `SimNetworkHook::on_output` sees it).
 pub fn decode_output(payload: &[u8]) -> Fact {
     let (bytes, debug): TapWire =
         bincode::deserialize(payload).expect("a tap output is `(bincode, Option<Debug>)`");
@@ -105,38 +93,22 @@ pub fn decode_output(payload: &[u8]) -> Fact {
     }
 }
 
-/// The labelled collections of a compiled program and the external output ports their taps
-/// emit on.
+/// The labelled collections of a compiled program and their taps' output ports.
 #[derive(Clone, Debug, Default)]
 pub struct Labels {
-    /// One plan per labelled collection, in enumeration order. The index into this vector is
-    /// the label's identity everywhere else in hydrofrac.
+    /// One plan per labelled collection; the index is the label's identity in hydrofrac.
     pub plans: Vec<LabelPlan>,
-    /// Tap output port → index of the label it carries. A label tapped at several IR nodes
-    /// (one library function instantiated twice on a cluster) has several ports.
-    ports: BTreeMap<usize, usize>,
+    /// The program's schedule choices ([`crate::provenance::choices`]), on the IR as the
+    /// program built it. Empty iff its labels can be certified (§4.9).
+    pub choices: Vec<ChoiceSite>,
+    /// Tap output port → label (a label tapped at several IR nodes has several ports).
+    pub(super) ports: BTreeMap<usize, usize>,
 }
 
 impl Labels {
     /// The label a tap output port carries, if `port` is a tap.
     pub fn label_of_port(&self, port: usize) -> Option<usize> {
         self.ports.get(&port).copied()
-    }
-
-    /// The tap output ports of `label`.
-    pub fn ports_of(&self, label: usize) -> impl Iterator<Item = usize> + '_ {
-        self.ports
-            .iter()
-            .filter(move |(_, l)| **l == label)
-            .map(|(p, _)| *p)
-    }
-
-    /// The labels searched in their own right, with their indices.
-    pub fn searched(&self) -> impl Iterator<Item = (usize, &LabelPlan)> {
-        self.plans
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| p.is_searched())
     }
 }
 
@@ -169,9 +141,8 @@ pub fn tap_pass() -> (TapPass, impl FnOnce(&mut Vec<HydroRoot>) + 'static) {
     })
 }
 
-/// Visits every node under `ir` bottom-up, in place: unlike `transform_bottom_up`, a node a
-/// `Tee` shares is edited inside its cell (once) rather than moved to a fresh cell, so the
-/// branches this pass creates keep pointing at it.
+/// Visits every node under `ir` bottom-up, in place: unlike `transform_bottom_up`, a shared
+/// node is edited inside its cell (once), so the branches this pass creates keep pointing at it.
 fn walk_in_place(ir: &mut [HydroRoot], f: &mut impl FnMut(&mut HydroNode)) {
     fn walk(
         node: &mut HydroNode,
@@ -197,12 +168,17 @@ fn walk_in_place(ir: &mut [HydroRoot], f: &mut impl FnMut(&mut HydroNode)) {
     }
     let mut seen = HashSet::new();
     for root in ir.iter_mut() {
-        walk(root.input_mut(), &mut seen, f);
+        let (HydroRoot::ForEach { input, .. }
+        | HydroRoot::SendExternal { input, .. }
+        | HydroRoot::DestSink { input, .. }
+        | HydroRoot::CycleSink { input, .. }
+        | HydroRoot::EmbeddedOutput { input, .. }
+        | HydroRoot::Null { input, .. }) = root;
+        walk(input, &mut seen, f);
     }
 }
 
-/// The largest external port id `ir` uses (inputs and outputs), so that the taps' ports are
-/// fresh.
+/// The largest external port id `ir` uses, so that the taps' ports are fresh.
 fn max_port(ir: &mut [HydroRoot]) -> Option<usize> {
     let mut max: Option<usize> = None;
     for root in ir.iter() {
@@ -218,56 +194,19 @@ fn max_port(ir: &mut [HydroRoot]) -> Option<usize> {
     max
 }
 
-/// The element type of a stream-like collection kind: `T`, or `(K, V)` for a keyed stream.
-fn element_type(kind: &CollectionKind) -> Option<syn::Type> {
-    match kind {
-        CollectionKind::Stream { element_type, .. } => Some((*element_type.0).clone()),
-        CollectionKind::KeyedStream {
-            key_type,
-            value_type,
-            ..
-        } => {
-            let (k, v) = (&*key_type.0, &*value_type.0);
-            Some(parse_quote!((#k, #v)))
-        }
-        CollectionKind::Singleton { .. }
-        | CollectionKind::Optional { .. }
-        | CollectionKind::KeyedSingleton { .. } => None,
-    }
-}
-
 /// The closure a tap maps each element through: `(identity of x, Debug of x if T: Debug)`. The
-/// identity is `bincode(x)` when the element type is `Serialize`, else the `Debug` rendering,
-/// else a `Hash` digest (a labelled type need not be `Serialize`: `hydro_std`'s quorum
-/// certificate `Durable` is deliberately not). Both are chosen by autoref specialization on the
-/// concrete element type, so any element type compiles.
+/// identity is `bincode(x)` if `T: Serialize`, else its `Debug`, else a `Hash` digest
+/// (`hydro_std`'s `Durable` is deliberately not `Serialize`). Autoref specialization picks
+/// both, so any element type compiles.
 fn tap_closure(element_type: &syn::Type) -> syn::Expr {
     // The generated dylib depends on `hydro_lang` under its own name, as every IR expression
     // `hydro_lang` itself builds assumes.
+    let debug = debug_of(quote::quote!(&__hydrofrac_x));
     parse_quote!(
         move |__hydrofrac_x: #element_type| -> (::std::vec::Vec<u8>, ::core::option::Option<::std::string::String>) {
             struct __HydrofracWrap<'__a, __T>(&'__a __T);
-            trait __HydrofracViaDebug {
-                fn __hydrofrac_debug(&self) -> ::core::option::Option<::std::string::String>;
-            }
-            impl<__T: ::core::fmt::Debug> __HydrofracViaDebug for __HydrofracWrap<'_, __T> {
-                fn __hydrofrac_debug(&self) -> ::core::option::Option<::std::string::String> {
-                    ::core::option::Option::Some(::std::format!("{:?}", self.0))
-                }
-            }
-            trait __HydrofracNoDebug {
-                fn __hydrofrac_debug(&self) -> ::core::option::Option<::std::string::String>;
-            }
-            impl<__T> __HydrofracNoDebug for &__HydrofracWrap<'_, __T> {
-                fn __hydrofrac_debug(&self) -> ::core::option::Option<::std::string::String> {
-                    ::core::option::Option::None
-                }
-            }
-            let __debug = (&__HydrofracWrap(&__hydrofrac_x)).__hydrofrac_debug();
-            // The fact's identity: its bincode if the element type is `Serialize`, else its
-            // `Debug` rendering, else a `Hash` digest. Deref-based autoref specialization: the
-            // receiver `&&&&_` matches the most specific applicable impl first. Elements of one
-            // label share a type, so they all take the same branch.
+            let __debug = #debug;
+            // The receiver `&&&&_` matches the most specific applicable impl first.
             trait __HydrofracViaSerialize {
                 fn __hydrofrac_id(&self) -> ::std::vec::Vec<u8>;
             }
@@ -311,17 +250,12 @@ fn tap_closure(element_type: &syn::Type) -> syn::Expr {
     )
 }
 
-/// Enumerates the labels of `ir`, plans them, and taps every searched one (see the module
-/// docs).
+/// Enumerates the labels of `ir`, plans them, and taps every searched one.
 pub fn tap(ir: &mut Vec<HydroRoot>) -> Labels {
     let collections = ec_collections(ir);
-    // Each label's schedule sensitivity, on the IR as the program built it (before the taps).
-    let cones = cones_of(ir, collections.clone());
-    let mut plans = plan(collections);
-    for (plan, cone) in plans.iter_mut().zip(cones) {
-        debug_assert_eq!(plan.collection.key(), cone.collection.key());
-        plan.sites = cone.sites;
-    }
+    // The program's schedule choices, on the IR as the program built it (before the taps).
+    let choices = program_choices(ir);
+    let plans = plan(collections);
     let index_of: HashMap<EcKey, usize> = plans
         .iter()
         .enumerate()
@@ -340,9 +274,8 @@ pub fn tap(ir: &mut Vec<HydroRoot>) -> Labels {
         ::core::option::Option<::std::string::String>
     ));
 
-    // Labelled nodes are re-identified by the enumeration's key. (A `Tee` never matches: the
-    // enumeration records what it shares, under that node's own key; a shared partition or
-    // reference cell is not tapped as a whole.)
+    // Labelled nodes are re-identified by the enumeration's key (a `Tee` never matches: the
+    // enumeration records what it shares).
     let mut taps: Vec<HydroRoot> = vec![];
     let mut tap_ports: BTreeMap<usize, usize> = BTreeMap::new();
     walk_in_place(ir, &mut |node: &mut HydroNode| {
@@ -364,9 +297,27 @@ pub fn tap(ir: &mut Vec<HydroRoot>) -> Labels {
             return;
         }
         let node_metadata = node.metadata().clone();
-        let Some(element_type) = element_type(&node_metadata.collection_kind) else {
-            return;
-        };
+        // The element type (`(K, V)` for a keyed stream) and the tap's stream kind.
+        let (element_type, bound, order, retry): (syn::Type, _, _, _) =
+            match &node_metadata.collection_kind {
+                CollectionKind::Stream {
+                    element_type,
+                    bound,
+                    order,
+                    retry,
+                } => ((*element_type.0).clone(), bound, order, retry),
+                CollectionKind::KeyedStream {
+                    key_type,
+                    value_type,
+                    bound,
+                    value_order,
+                    value_retry,
+                } => {
+                    let (k, v) = (&*key_type.0, &*value_type.0);
+                    (parse_quote!((#k, #v)), bound, value_order, value_retry)
+                }
+                _ => return,
+            };
         // Share the node: make it a `Tee` if it is not one, and take a second branch.
         let shared: Rc<RefCell<HydroNode>> = if let HydroNode::Tee { inner, .. } = node {
             inner.0.clone()
@@ -387,30 +338,11 @@ pub fn tap(ir: &mut Vec<HydroRoot>) -> Labels {
         map_metadata.consistency = None;
         map_metadata.tag = None;
         map_metadata.op.id = None;
-        map_metadata.collection_kind = match &node_metadata.collection_kind {
-            CollectionKind::Stream {
-                bound,
-                order,
-                retry,
-                ..
-            } => CollectionKind::Stream {
-                bound: bound.clone(),
-                order: order.clone(),
-                retry: retry.clone(),
-                element_type: DebugType::from(wire_type.clone()),
-            },
-            CollectionKind::KeyedStream {
-                bound,
-                value_order,
-                value_retry,
-                ..
-            } => CollectionKind::Stream {
-                bound: bound.clone(),
-                order: value_order.clone(),
-                retry: value_retry.clone(),
-                element_type: DebugType::from(wire_type.clone()),
-            },
-            _ => unreachable!("only streams have an element type"),
+        map_metadata.collection_kind = CollectionKind::Stream {
+            bound: bound.clone(),
+            order: order.clone(),
+            retry: retry.clone(),
+            element_type: DebugType::from(wire_type.clone()),
         };
         let mapped = HydroNode::Map {
             f: ClosureExpr::new(DebugExpr::from(tap_closure(&element_type)), vec![]),
@@ -436,6 +368,7 @@ pub fn tap(ir: &mut Vec<HydroRoot>) -> Labels {
 
     Labels {
         plans,
+        choices,
         ports: tap_ports,
     }
 }
