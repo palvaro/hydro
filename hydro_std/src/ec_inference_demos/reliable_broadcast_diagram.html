@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <style>
+        body { font-family: sans-serif; margin: 40px; background: #fff; }
+        h2 { color: #333; }
+        .mermaid { margin: 20px 0; }
+    </style>
+</head>
+<body>
+    <h2>Reliable Broadcast: Per-Member Dataflow (no cycles)</h2>
+    <div class="mermaid">
+    graph LR
+        A["initial broadcast<br/>(from Process)<br/>EC inferred"] --> MERGE["merge_unordered<br/>EC preserved"]
+        B["re-broadcasts<br/>(from other members)<br/>EC inferred"] --> MERGE
+        MERGE --> DEDUP["unique()<br/>EC preserved"]
+        DEDUP --> OUT["delivered stream<br/>EC ✓"]
+        A --> REBCAST["broadcast_closed<br/>(Cluster → Cluster)<br/>to OTHER members"]
+    </div>
+
+    <h2>Reliable Broadcast: Full System View (3 members)</h2>
+    <div class="mermaid">
+    graph TD
+        P["Process<br/>(source stream)"]
+        
+        P -->|"broadcast_closed<br/>EC inferred"| I0["M0: initial"]
+        P -->|"broadcast_closed<br/>EC inferred"| I1["M1: initial"]
+        P -->|"broadcast_closed<br/>EC inferred"| I2["M2: initial"]
+
+        I0 -->|"re-broadcast"| R1["M1: re-recv"]
+        I0 -->|"re-broadcast"| R2["M2: re-recv"]
+
+        I1 -->|"re-broadcast"| R0["M0: re-recv"]
+        I1 -->|"re-broadcast"| R2
+
+        I2 -->|"re-broadcast"| R0
+        I2 -->|"re-broadcast"| R1
+
+        I0 --> D0["M0: merge + dedup"]
+        R0 --> D0
+        D0 --> OUT0["M0: deliver (EC)"]
+
+        I1 --> D1["M1: merge + dedup"]
+        R1 --> D1
+        D1 --> OUT1["M1: deliver (EC)"]
+
+        I2 --> D2["M2: merge + dedup"]
+        R2 --> D2
+        D2 --> OUT2["M2: deliver (EC)"]
+    </div>
+
+    <h2>Why it works: Sender crashes after delivering to M0 only</h2>
+    <div class="mermaid">
+    graph TD
+        P["Process<br/>(CRASHES mid-broadcast)"]
+        
+        P -->|"✓ delivered"| I0["M0: got message"]
+        P -->|"✗ connection died"| I1["M1: nothing"]
+        P -->|"✗ connection died"| I2["M2: nothing"]
+
+        I0 -->|"re-broadcast<br/>(M0 is alive, forwards)"| R1["M1: gets message<br/>via re-broadcast"]
+        I0 -->|"re-broadcast"| R2["M2: gets message<br/>via re-broadcast"]
+
+        R1 --> D1["M1: deliver ✓"]
+        R2 --> D2["M2: deliver ✓"]
+        I0 --> D0["M0: deliver ✓"]
+    </div>
+
+    <script>mermaid.initialize({startOnLoad:true, theme:'default'});</script>
+</body>
+</html>

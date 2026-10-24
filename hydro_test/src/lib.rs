@@ -5,6 +5,11 @@ pub mod cluster;
 pub mod distributed;
 pub mod embedded;
 pub mod external_client;
+// QUARANTINED: unsound smell predicates, gated off via `#![cfg(any())]` inside
+// the file so it never compiles. Kept in-tree as a record; see the module header and
+// `AI_WORK_STATUS.md`. The reproducible telemetry parsing lives in `stage_telemetry`.
+pub mod feedback_smells;
+pub mod stage_telemetry;
 pub mod local;
 #[cfg(feature = "tokio")]
 pub mod maelstrom;

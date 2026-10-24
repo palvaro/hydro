@@ -18,10 +18,7 @@ fn root() -> TokenStream {
 
     use proc_macro_crate::FoundCrate;
 
-    if matches!(
-        proc_macro_crate::crate_name("lattices_macro"),
-        Ok(FoundCrate::Itself)
-    ) {
+    if let Ok(FoundCrate::Itself) = proc_macro_crate::crate_name("lattices_macro") {
         return quote! { lattices };
     }
 

@@ -52,10 +52,9 @@ where
     T: PartialEq,
 {
     fn merge(&mut self, other: Point<T, Provenance>) -> bool {
-        assert!(
-            self.val == other.val,
-            "The `Point` lattice cannot merge inequal elements."
-        );
+        if self.val != other.val {
+            panic!("The `Point` lattice cannot merge inequal elements.")
+        }
         false
     }
 }
@@ -71,10 +70,9 @@ where
     T: PartialEq,
 {
     fn partial_cmp(&self, other: &Point<T, Provenance>) -> Option<core::cmp::Ordering> {
-        assert!(
-            self.val == other.val,
-            "The `Point` lattice does not have a partial order between inequal elements."
-        );
+        if self.val != other.val {
+            panic!("The `Point` lattice does not have a partial order between inequal elements.");
+        }
         Some(core::cmp::Ordering::Equal)
     }
 }

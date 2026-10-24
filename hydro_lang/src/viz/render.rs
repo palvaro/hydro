@@ -7,10 +7,10 @@ use std::sync::OnceLock;
 use auto_impl::auto_impl;
 use slotmap::{Key, SecondaryMap, SlotMap};
 
-pub use super::graphviz::{HydroDot, escape_dot};
+pub use super::graphviz::{escape_dot, HydroDot};
 pub use super::json::HydroJson;
 // Re-export specific implementations
-pub use super::mermaid::{HydroMermaid, escape_mermaid};
+pub use super::mermaid::{escape_mermaid, HydroMermaid};
 use crate::compile::ir::backtrace::Backtrace;
 use crate::compile::ir::{DebugExpr, HydroIrMetadata, HydroNode, HydroRoot, HydroSource};
 use crate::location::dynamic::LocationId;
@@ -140,7 +140,7 @@ pub trait HydroGraphWrite {
     fn write_epilogue(&mut self) -> Result<(), Self::Err>;
 }
 
-/// Node type utilities - centralized handling of `HydroNodeType` operations
+/// Node type utilities - centralized handling of HydroNodeType operations
 pub mod node_type_utils {
     use super::HydroNodeType;
 
@@ -156,7 +156,7 @@ pub mod node_type_utils {
         (HydroNodeType::NonDeterministic, "NonDeterministic"),
     ];
 
-    /// Convert `HydroNodeType` to string representation (used by JSON format)
+    /// Convert HydroNodeType to string representation (used by JSON format)
     pub fn to_string(node_type: HydroNodeType) -> &'static str {
         NODE_TYPE_DATA
             .iter()
@@ -280,7 +280,7 @@ impl Default for UnifiedEdgeStyle {
     }
 }
 
-/// Convert `HydroEdgeType` properties to unified edge style.
+/// Convert HydroEdgeType properties to unified edge style.
 /// This is the core logic for determining edge visual properties.
 ///
 /// # Visual Encoding Mapping
@@ -353,7 +353,7 @@ pub fn get_unified_edge_style(
     style
 }
 
-/// Extract semantic edge properties from `CollectionKind` metadata.
+/// Extract semantic edge properties from CollectionKind metadata.
 /// This function analyzes the collection type and extracts relevant semantic tags
 /// for visualization purposes.
 pub fn extract_edge_properties_from_collection_kind(
@@ -385,7 +385,7 @@ pub fn extract_edge_properties_from_collection_kind(
         }
         CollectionKind::Optional { bound, .. } => {
             properties.insert(HydroEdgeProp::Optional);
-            add_optional_bound_property(&mut properties, bound);
+            add_bound_property(&mut properties, bound);
             // Optionals have implicit TotalOrder
             properties.insert(HydroEdgeProp::TotalOrder);
         }
@@ -401,7 +401,7 @@ pub fn extract_edge_properties_from_collection_kind(
     properties
 }
 
-/// Helper function to add bound property based on `BoundKind`.
+/// Helper function to add bound property based on BoundKind.
 fn add_bound_property(
     properties: &mut HashSet<HydroEdgeProp>,
     bound: &crate::compile::ir::BoundKind,
@@ -418,24 +418,7 @@ fn add_bound_property(
     }
 }
 
-/// Helper function to add bound property for Optional based on `OptionalBoundKind`.
-fn add_optional_bound_property(
-    properties: &mut HashSet<HydroEdgeProp>,
-    bound: &crate::compile::ir::OptionalBoundKind,
-) {
-    use crate::compile::ir::OptionalBoundKind;
-
-    match bound {
-        OptionalBoundKind::Bounded => {
-            properties.insert(HydroEdgeProp::Bounded);
-        }
-        OptionalBoundKind::InitNone | OptionalBoundKind::Unbounded => {
-            properties.insert(HydroEdgeProp::Unbounded);
-        }
-    }
-}
-
-/// Helper function to add bound property for Singleton based on `SingletonBoundKind`.
+/// Helper function to add bound property for Singleton based on SingletonBoundKind.
 fn add_singleton_bound_property(
     properties: &mut HashSet<HydroEdgeProp>,
     bound: &crate::compile::ir::SingletonBoundKind,
@@ -452,7 +435,7 @@ fn add_singleton_bound_property(
     }
 }
 
-/// Helper function to add bound property for `KeyedSingleton` based on `KeyedSingletonBoundKind`.
+/// Helper function to add bound property for KeyedSingleton based on KeyedSingletonBoundKind.
 fn add_keyed_singleton_bound_property(
     properties: &mut HashSet<HydroEdgeProp>,
     bound: &crate::compile::ir::KeyedSingletonBoundKind,
@@ -472,7 +455,7 @@ fn add_keyed_singleton_bound_property(
     }
 }
 
-/// Helper function to add order property based on `StreamOrder`.
+/// Helper function to add order property based on StreamOrder.
 fn add_order_property(
     properties: &mut HashSet<HydroEdgeProp>,
     order: &crate::compile::ir::StreamOrder,
@@ -557,7 +540,7 @@ impl std::str::FromStr for VizNodeKey {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let nvn = s.strip_prefix("viz").ok_or(None)?;
-        let (idx, ver) = nvn.split_once('v').ok_or(None)?;
+        let (idx, ver) = nvn.split_once("v").ok_or(None)?;
         let idx: u64 = idx.parse()?;
         let ver: u64 = ver.parse()?;
         Ok(slotmap::KeyData::from_ffi((ver << 32) | idx).into())
@@ -670,7 +653,7 @@ impl HydroGraphStructure {
     }
 }
 
-/// Function to extract an `op_name` from a `print_root()` result for use in labels.
+/// Function to extract an op_name from a print_root() result for use in labels.
 pub fn extract_op_name(full_label: String) -> String {
     full_label
         .split('(')
@@ -679,7 +662,7 @@ pub fn extract_op_name(full_label: String) -> String {
         .to_lowercase()
 }
 
-/// Extract a short, readable label from the full token stream label using `print_root()` style naming
+/// Extract a short, readable label from the full token stream label using print_root() style naming
 pub fn extract_short_label(full_label: &str) -> String {
     // Use the same logic as extract_op_name but handle the specific cases we need for UI display
     if let Some(op_name) = full_label.split('(').next() {
@@ -766,7 +749,7 @@ fn add_edge_with_metadata(
     structure.add_edge(src_id, dst_id, properties, label);
 }
 
-/// Helper function to write a graph structure using any `GraphWrite` implementation
+/// Helper function to write a graph structure using any GraphWrite implementation
 fn write_graph_structure<W>(
     structure: &HydroGraphStructure,
     graph_write: W,
@@ -1089,6 +1072,7 @@ impl HydroNode {
             } => {
                 let label = match source {
                     HydroSource::Stream(expr) => format!("source_stream({})", expr),
+                    HydroSource::Interval(expr) => format!("source_interval({})", expr),
                     HydroSource::ExternalNetwork() => "external_network()".to_owned(),
                     HydroSource::Iter(expr) => format!("source_iter({})", expr),
                     HydroSource::Spin() => "spin()".to_owned(),

@@ -1,0 +1,1641 @@
+---
+source: hydro_test/src/cluster/typed_consensus.rs
+assertion_line: 3072
+expression: "preview.dfir_for(&cluster).to_mermaid(&WriteConfig\n{\n    no_subgraphs: true, no_pull_push: true, no_handoffs: true,\n    op_text_no_imports: true, ..WriteConfig::default()\n})"
+---
+%%{init:{'theme':'base','themeVariables':{'clusterBkg':'#ddd','clusterBorder':'#888'}}}%%
+flowchart TD
+classDef pullClass fill:#8af,stroke:#000,text-align:left,white-space:pre
+classDef pushClass fill:#ff8,stroke:#000,text-align:left,white-space:pre
+classDef otherClass fill:#fdc,stroke:#000,text-align:left,white-space:pre
+linkStyle default stroke:#aaa
+1v1["<div style=text-align:center>(1v1)</div> <code><br>source_stream({<br>    hydro_lang::__stageleft_quote_src_location_mod_rs_LINE_COL!(<br>        [interval__free = { use crate ::__staged::__deps:: *; use crate<br>        ::__staged::cluster::typed_consensus::tests:: *; { let CLUSTER_SELF_ID__free<br>        = hydro_lang::__staged::location::MemberId:: &lt;<br>        hydro_test::__staged::cluster::typed_consensus::Nodes &gt;<br>        ::from_tagless((__hydro_lang_cluster_self_id_loc1v1).clone());<br>        std::time::Duration::from_millis(500 + u64::from(CLUSTER_SELF_ID__free<br>        .get_raw_id()) * 130) } },]<br>        [tokio_stream::StreamExt::map(tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(interval__free)),<br>        | _ | ())]<br>    )<br>})</code>"]:::otherClass
+2v1["<div style=text-align:center>(2v1)</div> <code><br>fold::&lt;<br>    'tick,<br>&gt;(<br>    {<br>        hydro_lang::__stageleft_quote_src_live_collections_stream_mod_rs_LINE_COL!(<br>            [] [| | 0usize]<br>        )<br>    },<br>    {<br>        hydro_lang::__stageleft_quote_src_live_collections_stream_mod_rs_LINE_COL!(<br>            [] [| count, _ | * count += 1]<br>        )<br>    },<br>)</code>"]:::otherClass
+3v1["<div style=text-align:center>(3v1)</div> <code><br>defer_tick_lazy()</code>"]:::otherClass
+4v1["<div style=text-align:center>(4v1)</div> <code><br>source_iter([<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [0usize]<br>        )<br>    },<br>])</code>"]:::otherClass
+5v1["<div style=text-align:center>(5v1)</div> <code><br>persist::&lt;'static&gt;()</code>"]:::otherClass
+6v1["<div style=text-align:center>(6v1)</div> <code><br>chain_first_n(1)</code>"]:::otherClass
+7v1["<div style=text-align:center>(7v1)</div> <code><br>tee()</code>"]:::otherClass
+8v1["<div style=text-align:center>(8v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+9v1["<div style=text-align:center>(9v1)</div> <code><br>filter_map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| (hb, cur_view) | { if hb.view == cur_view { Some(true) } else { None }<br>        }]<br>    )<br>})</code>"]:::otherClass
+10v1["<div style=text-align:center>(10v1)</div> <code><br>fold::&lt;<br>    'tick,<br>&gt;(<br>    {<br>        hydro_lang::__stageleft_quote_src_live_collections_stream_mod_rs_LINE_COL!(<br>            [] [| | 0usize]<br>        )<br>    },<br>    {<br>        hydro_lang::__stageleft_quote_src_live_collections_stream_mod_rs_LINE_COL!(<br>            [] [| count, _ | * count += 1]<br>        )<br>    },<br>)</code>"]:::otherClass
+11v1["<div style=text-align:center>(11v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+12v1["<div style=text-align:center>(12v1)</div> <code><br>defer_tick_lazy()</code>"]:::otherClass
+13v1["<div style=text-align:center>(13v1)</div> <code><br>source_iter([<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [0usize]<br>        )<br>    },<br>])</code>"]:::otherClass
+14v1["<div style=text-align:center>(14v1)</div> <code><br>persist::&lt;'static&gt;()</code>"]:::otherClass
+15v1["<div style=text-align:center>(15v1)</div> <code><br>chain_first_n(1)</code>"]:::otherClass
+17v1["<div style=text-align:center>(17v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+18v1["<div style=text-align:center>(18v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| ((ticks_this_batch, valid_hb_count), old_ticks) | { if valid_hb_count &gt;<br>        0 { ticks_this_batch } else { old_ticks + ticks_this_batch } }]<br>    )<br>})</code>"]:::otherClass
+19v1["<div style=text-align:center>(19v1)</div> <code><br>tee()</code>"]:::otherClass
+20v1["<div style=text-align:center>(20v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+21v1["<div style=text-align:center>(21v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [CLUSTER_SELF_ID__free = hydro_lang::__staged::location::MemberId:: &lt;<br>        hydro_test::__staged::cluster::typed_consensus::Nodes &gt;<br>        ::from_tagless((__hydro_lang_cluster_self_id_loc1v1).clone()),<br>        cluster_size__free = 3usize, election_timeout_threshold__free = 0usize,]<br>        [move | (ticks, cur_ballot) | { if ticks &gt; election_timeout_threshold__free {<br>        let self_id = CLUSTER_SELF_ID__free.get_raw_id() as usize; let next_round =<br>        (cur_ballot / cluster_size__free) + 1; next_round * cluster_size__free +<br>        self_id } else { cur_ballot } }]<br>    )<br>})</code>"]:::otherClass
+22v1["<div style=text-align:center>(22v1)</div> <code><br>identity::&lt;usize&gt;()</code>"]:::otherClass
+23v1["<div style=text-align:center>(23v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [election_timeout_threshold__free = 0usize,] [move | ticks | { if ticks &gt;<br>        election_timeout_threshold__free { 0usize } else { ticks } }]<br>    )<br>})</code>"]:::otherClass
+24v1["<div style=text-align:center>(24v1)</div> <code><br>identity::&lt;usize&gt;()</code>"]:::otherClass
+25v1["<div style=text-align:center>(25v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+26v1["<div style=text-align:center>(26v1)</div> <code><br>filter_map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [CLUSTER_SELF_ID__free = hydro_lang::__staged::location::MemberId:: &lt;<br>        hydro_test::__staged::cluster::typed_consensus::Nodes &gt;<br>        ::from_tagless((__hydro_lang_cluster_self_id_loc1v1).clone()),<br>        cluster_size__free = 3usize, election_timeout_threshold__free = 0usize,]<br>        [move | (ticks, cur_ballot) | { if ticks &gt; election_timeout_threshold__free {<br>        let self_id = CLUSTER_SELF_ID__free.get_raw_id() as usize; let next_round =<br>        (cur_ballot / cluster_size__free) + 1; let next_ballot = next_round *<br>        cluster_size__free + self_id; Some(PrepareMsg { view : next_ballot,<br>        from_leader : CLUSTER_SELF_ID__free.clone(), }) } else { None } }]<br>    )<br>})</code>"]:::otherClass
+27v1["<div style=text-align:center>(27v1)</div> <code><br>map({<br>    hydro_lang::__stageleft_quote_src_live_collections_stream_mod_rs_LINE_COL!(<br>        [] [| v | ((), v)]<br>    )<br>})</code>"]:::otherClass
+28v1["<div style=text-align:center>(28v1)</div> <code><br>source_iter(<br>    stageleft::runtime_support::type_hint::&lt;<br>        core::iter::Map&lt;<br>            core::slice::Iter&lt;<br>                '_,<br>                hydro_test::__staged::__deps::hydro_lang::location::member_id::TaglessMemberId,<br>            &gt;,<br>            _,<br>        &gt;,<br>    &gt;({<br>        hydro_lang::__stageleft_quote_src_live_collections_stream_networking_rs_LINE_COL!(<br>            [cluster_ids__free = __hydro_lang_cluster_ids_loc1v1,] [cluster_ids__free<br>            .iter().map(| id | MemberId::from_tagless(id.clone()))]<br>        )<br>    }),<br>)</code>"]:::otherClass
+29v1["<div style=text-align:center>(29v1)</div> <code><br>map({<br>    hydro_lang::__stageleft_quote_src_live_collections_stream_mod_rs_LINE_COL!(<br>        [] [| v | ((), v)]<br>    )<br>})</code>"]:::otherClass
+30v1["<div style=text-align:center>(30v1)</div> <code><br>join_multiset_half::&lt;'static, 'tick&gt;()</code>"]:::otherClass
+31v1["<div style=text-align:center>(31v1)</div> <code><br>map({<br>    hydro_lang::__stageleft_quote_src_live_collections_stream_mod_rs_LINE_COL!(<br>        [] [| ((), (v1, v2)) | (v1, v2)]<br>    )<br>})</code>"]:::otherClass
+32v1["<div style=text-align:center>(32v1)</div> <code><br>map({<br>    hydro_lang::__stageleft_quote_src_live_collections_stream_networking_rs_LINE_COL!(<br>        [] [| (data, member_id) | (member_id, data)]<br>    )<br>})</code>"]:::otherClass
+33v1["<div style=text-align:center>(33v1)</div> <code><br>map(|(id, data)| {<br>    (<br>        id.into_tagless(),<br>        hydro_lang::runtime_support::bincode::serialize(&amp;data).unwrap().into(),<br>    )<br>})</code>"]:::otherClass
+34v1["<div style=text-align:center>(34v1)</div> <code><br>dest_sink(DUMMY_SINK)</code>"]:::otherClass
+35v1["<div style=text-align:center>(35v1)</div> <code><br>source_stream(DUMMY_SOURCE)</code>"]:::otherClass
+36v1["<div style=text-align:center>(36v1)</div> <code><br>map(|res| {<br>    let (id, b) = res.unwrap();<br>    (<br>        hydro_lang::__staged::location::MemberId::&lt;<br>            hydro_test::__staged::cluster::typed_consensus::Nodes,<br>        &gt;::from_tagless(id as hydro_lang::__staged::location::TaglessMemberId),<br>        hydro_lang::runtime_support::bincode::deserialize::&lt;<br>            hydro_test::__staged::cluster::typed_consensus::PrepareMsg&lt;<br>                hydro_test::__staged::cluster::typed_consensus::Nodes,<br>            &gt;,<br>        &gt;(&amp;b)<br>            .unwrap(),<br>    )<br>})</code>"]:::otherClass
+37v1["<div style=text-align:center>(37v1)</div> <code><br>map({<br>    hydro_lang::__stageleft_quote_src_live_collections_keyed_stream_mod_rs_LINE_COL!(<br>        [] [| (_, v) | v]<br>    )<br>})</code>"]:::otherClass
+38v1["<div style=text-align:center>(38v1)</div> <code><br>tee()</code>"]:::otherClass
+39v1["<div style=text-align:center>(39v1)</div> <code><br>tee()</code>"]:::otherClass
+40v1["<div style=text-align:center>(40v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| p | p.view]<br>    )<br>})</code>"]:::otherClass
+41v1["<div style=text-align:center>(41v1)</div> <code><br>fold::&lt;<br>    'tick,<br>&gt;(<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| | 0usize]<br>        )<br>    },<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| max, v | { if v &gt; * max { * max = v; } }]<br>        )<br>    },<br>)</code>"]:::otherClass
+42v1["<div style=text-align:center>(42v1)</div> <code><br>defer_tick_lazy()</code>"]:::otherClass
+43v1["<div style=text-align:center>(43v1)</div> <code><br>source_iter([<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [0usize]<br>        )<br>    },<br>])</code>"]:::otherClass
+44v1["<div style=text-align:center>(44v1)</div> <code><br>persist::&lt;'static&gt;()</code>"]:::otherClass
+45v1["<div style=text-align:center>(45v1)</div> <code><br>chain_first_n(1)</code>"]:::otherClass
+46v1["<div style=text-align:center>(46v1)</div> <code><br>tee()</code>"]:::otherClass
+47v1["<div style=text-align:center>(47v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+48v1["<div style=text-align:center>(48v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| (tick_max, current) | tick_max.max(current)]<br>    )<br>})</code>"]:::otherClass
+49v1["<div style=text-align:center>(49v1)</div> <code><br>identity::&lt;usize&gt;()</code>"]:::otherClass
+50v1["<div style=text-align:center>(50v1)</div> <code><br>defer_tick_lazy()</code>"]:::otherClass
+51v1["<div style=text-align:center>(51v1)</div> <code><br>source_iter([<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [0usize]<br>        )<br>    },<br>])</code>"]:::otherClass
+52v1["<div style=text-align:center>(52v1)</div> <code><br>persist::&lt;'static&gt;()</code>"]:::otherClass
+53v1["<div style=text-align:center>(53v1)</div> <code><br>chain_first_n(1)</code>"]:::otherClass
+55v1["<div style=text-align:center>(55v1)</div> <code><br>fold::&lt;<br>    'tick,<br>&gt;(<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| | 0usize]<br>        )<br>    },<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| max, s | { if s &gt; * max { * max = s; } }]<br>        )<br>    },<br>)</code>"]:::otherClass
+56v1["<div style=text-align:center>(56v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+57v1["<div style=text-align:center>(57v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| (old, batch_max) | old.max(batch_max)]<br>    )<br>})</code>"]:::otherClass
+58v1["<div style=text-align:center>(58v1)</div> <code><br>tee()</code>"]:::otherClass
+59v1["<div style=text-align:center>(59v1)</div> <code><br>identity::&lt;usize&gt;()</code>"]:::otherClass
+60v1["<div style=text-align:center>(60v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+61v1["<div style=text-align:center>(61v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+62v1["<div style=text-align:center>(62v1)</div> <code><br>filter_map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [CLUSTER_SELF_ID__free = hydro_lang::__staged::location::MemberId:: &lt;<br>        hydro_test::__staged::cluster::typed_consensus::Nodes &gt;<br>        ::from_tagless((__hydro_lang_cluster_self_id_loc1v1).clone()),] [move |<br>        ((prepare, old_max_promised), max_slot) | { if prepare.view &gt;<br>        old_max_promised { Some((prepare.from_leader, PromiseMsg { view : prepare<br>        .view, max_committed_slot : max_slot, from_member : CLUSTER_SELF_ID__free<br>        .clone(), },)) } else { None } }]<br>    )<br>})</code>"]:::otherClass
+63v1["<div style=text-align:center>(63v1)</div> <code><br>map(|(id, data)| {<br>    (<br>        id.into_tagless(),<br>        hydro_lang::runtime_support::bincode::serialize(&amp;data).unwrap().into(),<br>    )<br>})</code>"]:::otherClass
+64v1["<div style=text-align:center>(64v1)</div> <code><br>dest_sink(DUMMY_SINK)</code>"]:::otherClass
+65v1["<div style=text-align:center>(65v1)</div> <code><br>source_stream(DUMMY_SOURCE)</code>"]:::otherClass
+66v1["<div style=text-align:center>(66v1)</div> <code><br>map(|res| {<br>    let (id, b) = res.unwrap();<br>    (<br>        hydro_lang::__staged::location::MemberId::&lt;<br>            hydro_test::__staged::cluster::typed_consensus::Nodes,<br>        &gt;::from_tagless(id as hydro_lang::__staged::location::TaglessMemberId),<br>        hydro_lang::runtime_support::bincode::deserialize::&lt;<br>            hydro_test::__staged::cluster::typed_consensus::PromiseMsg&lt;<br>                hydro_test::__staged::cluster::typed_consensus::Nodes,<br>            &gt;,<br>        &gt;(&amp;b)<br>            .unwrap(),<br>    )<br>})</code>"]:::otherClass
+67v1["<div style=text-align:center>(67v1)</div> <code><br>map({<br>    hydro_lang::__stageleft_quote_src_live_collections_keyed_stream_mod_rs_LINE_COL!(<br>        [] [| (_, v) | v]<br>    )<br>})</code>"]:::otherClass
+68v1["<div style=text-align:center>(68v1)</div> <code><br>tee()</code>"]:::otherClass
+69v1["<div style=text-align:center>(69v1)</div> <code><br>fold::&lt;<br>    'tick,<br>&gt;(<br>    {<br>        hydro_lang::__stageleft_quote_src_live_collections_stream_mod_rs_LINE_COL!(<br>            [] [| | 0usize]<br>        )<br>    },<br>    {<br>        hydro_lang::__stageleft_quote_src_live_collections_stream_mod_rs_LINE_COL!(<br>            [] [| count, _ | * count += 1]<br>        )<br>    },<br>)</code>"]:::otherClass
+70v1["<div style=text-align:center>(70v1)</div> <code><br>defer_tick_lazy()</code>"]:::otherClass
+71v1["<div style=text-align:center>(71v1)</div> <code><br>source_iter([<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [0usize]<br>        )<br>    },<br>])</code>"]:::otherClass
+72v1["<div style=text-align:center>(72v1)</div> <code><br>persist::&lt;'static&gt;()</code>"]:::otherClass
+73v1["<div style=text-align:center>(73v1)</div> <code><br>chain_first_n(1)</code>"]:::otherClass
+75v1["<div style=text-align:center>(75v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+76v1["<div style=text-align:center>(76v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| (batch_n, total) | total + batch_n]<br>    )<br>})</code>"]:::otherClass
+77v1["<div style=text-align:center>(77v1)</div> <code><br>tee()</code>"]:::otherClass
+78v1["<div style=text-align:center>(78v1)</div> <code><br>identity::&lt;usize&gt;()</code>"]:::otherClass
+79v1["<div style=text-align:center>(79v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| p | p.max_committed_slot]<br>    )<br>})</code>"]:::otherClass
+80v1["<div style=text-align:center>(80v1)</div> <code><br>fold::&lt;<br>    'tick,<br>&gt;(<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| | 0usize]<br>        )<br>    },<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| max, slot | { if slot &gt; * max { * max = slot; } }]<br>        )<br>    },<br>)</code>"]:::otherClass
+81v1["<div style=text-align:center>(81v1)</div> <code><br>defer_tick_lazy()</code>"]:::otherClass
+82v1["<div style=text-align:center>(82v1)</div> <code><br>source_iter([<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [0usize]<br>        )<br>    },<br>])</code>"]:::otherClass
+83v1["<div style=text-align:center>(83v1)</div> <code><br>persist::&lt;'static&gt;()</code>"]:::otherClass
+84v1["<div style=text-align:center>(84v1)</div> <code><br>chain_first_n(1)</code>"]:::otherClass
+86v1["<div style=text-align:center>(86v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+87v1["<div style=text-align:center>(87v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| (batch_m, running_m) | batch_m.max(running_m)]<br>    )<br>})</code>"]:::otherClass
+88v1["<div style=text-align:center>(88v1)</div> <code><br>tee()</code>"]:::otherClass
+89v1["<div style=text-align:center>(89v1)</div> <code><br>identity::&lt;usize&gt;()</code>"]:::otherClass
+90v1["<div style=text-align:center>(90v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| p | p.view]<br>    )<br>})</code>"]:::otherClass
+91v1["<div style=text-align:center>(91v1)</div> <code><br>fold::&lt;<br>    'tick,<br>&gt;(<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| | 0usize]<br>        )<br>    },<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| max, v | { if v &gt; * max { * max = v; } }]<br>        )<br>    },<br>)</code>"]:::otherClass
+92v1["<div style=text-align:center>(92v1)</div> <code><br>defer_tick_lazy()</code>"]:::otherClass
+93v1["<div style=text-align:center>(93v1)</div> <code><br>source_iter([<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [0usize]<br>        )<br>    },<br>])</code>"]:::otherClass
+94v1["<div style=text-align:center>(94v1)</div> <code><br>persist::&lt;'static&gt;()</code>"]:::otherClass
+95v1["<div style=text-align:center>(95v1)</div> <code><br>chain_first_n(1)</code>"]:::otherClass
+97v1["<div style=text-align:center>(97v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+98v1["<div style=text-align:center>(98v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| (batch_v, running_v) | batch_v.max(running_v)]<br>    )<br>})</code>"]:::otherClass
+99v1["<div style=text-align:center>(99v1)</div> <code><br>tee()</code>"]:::otherClass
+100v1["<div style=text-align:center>(100v1)</div> <code><br>identity::&lt;usize&gt;()</code>"]:::otherClass
+101v1["<div style=text-align:center>(101v1)</div> <code><br>defer_tick_lazy()</code>"]:::otherClass
+102v1["<div style=text-align:center>(102v1)</div> <code><br>source_iter([<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [false]<br>        )<br>    },<br>])</code>"]:::otherClass
+103v1["<div style=text-align:center>(103v1)</div> <code><br>persist::&lt;'static&gt;()</code>"]:::otherClass
+104v1["<div style=text-align:center>(104v1)</div> <code><br>chain_first_n(1)</code>"]:::otherClass
+105v1["<div style=text-align:center>(105v1)</div> <code><br>tee()</code>"]:::otherClass
+106v1["<div style=text-align:center>(106v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+107v1["<div style=text-align:center>(107v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [quorum_size__free = 2usize,] [move | (count, was_emitted) | was_emitted ||<br>        count &gt;= quorum_size__free]<br>    )<br>})</code>"]:::otherClass
+108v1["<div style=text-align:center>(108v1)</div> <code><br>identity::&lt;bool&gt;()</code>"]:::otherClass
+109v1["<div style=text-align:center>(109v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| p : PrepareMsg &lt; Nodes &gt; | p.view]<br>    )<br>})</code>"]:::otherClass
+110v1["<div style=text-align:center>(110v1)</div> <code><br>fold::&lt;<br>    'tick,<br>&gt;(<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| | 0usize]<br>        )<br>    },<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| max, v | { if v &gt; * max { * max = v; } }]<br>        )<br>    },<br>)</code>"]:::otherClass
+111v1["<div style=text-align:center>(111v1)</div> <code><br>defer_tick_lazy()</code>"]:::otherClass
+112v1["<div style=text-align:center>(112v1)</div> <code><br>source_iter([<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [0usize]<br>        )<br>    },<br>])</code>"]:::otherClass
+113v1["<div style=text-align:center>(113v1)</div> <code><br>persist::&lt;'static&gt;()</code>"]:::otherClass
+114v1["<div style=text-align:center>(114v1)</div> <code><br>chain_first_n(1)</code>"]:::otherClass
+116v1["<div style=text-align:center>(116v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+117v1["<div style=text-align:center>(117v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| (batch_max, current) | batch_max.max(current)]<br>    )<br>})</code>"]:::otherClass
+118v1["<div style=text-align:center>(118v1)</div> <code><br>tee()</code>"]:::otherClass
+119v1["<div style=text-align:center>(119v1)</div> <code><br>identity::&lt;usize&gt;()</code>"]:::otherClass
+120v1["<div style=text-align:center>(120v1)</div> <code><br>source_stream({<br>    hydro_lang::__stageleft_quote_src_location_mod_rs_LINE_COL!(<br>        [interval__free = { use crate ::__staged::__deps:: *; use crate<br>        ::__staged::cluster::typed_consensus::tests:: *; {<br>        std::time::Duration::from_secs(1) } },]<br>        [tokio_stream::StreamExt::map(tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(interval__free)),<br>        | _ | ())]<br>    )<br>})</code>"]:::otherClass
+121v1["<div style=text-align:center>(121v1)</div> <code><br>map({<br>    {<br>        let CLUSTER_SELF_ID__free = hydro_lang::__staged::location::MemberId::&lt;<br>            hydro_test::__staged::cluster::typed_consensus::Nodes,<br>        &gt;::from_tagless((__hydro_lang_cluster_self_id_loc1v1).clone());<br>        move |_| CLUSTER_SELF_ID__free.get_raw_id()<br>    }<br>})</code>"]:::otherClass
+122v1["<div style=text-align:center>(122v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+123v1["<div style=text-align:center>(123v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [CLUSTER_SELF_ID__free = hydro_lang::__staged::location::MemberId:: &lt;<br>        hydro_test::__staged::cluster::typed_consensus::Nodes &gt;<br>        ::from_tagless((__hydro_lang_cluster_self_id_loc1v1).clone()),<br>        cluster_size__free = 3usize,] [move | (request, view) | { let leader_raw_id =<br>        (view % cluster_size__free) as u32; let self_id = CLUSTER_SELF_ID__free<br>        .clone(); let leader_id : MemberId &lt; Nodes &gt; =<br>        MemberId::from_raw_id(leader_raw_id); let leader_hint : Option &lt; MemberId &lt;<br>        Nodes &gt; &gt; = Some(leader_id.clone()); if self_id == leader_id {<br>        (Some(request), None) } else { (None, Some((request, leader_hint))) } }]<br>    )<br>})</code>"]:::otherClass
+124v1["<div style=text-align:center>(124v1)</div> <code><br>tee()</code>"]:::otherClass
+125v1["<div style=text-align:center>(125v1)</div> <code><br>filter_map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| (leader_req, _redirected) | leader_req]<br>    )<br>})</code>"]:::otherClass
+126v1["<div style=text-align:center>(126v1)</div> <code><br>fold::&lt;<br>    'tick,<br>&gt;(<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| | vec![]]<br>        )<br>    },<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| buf, item | { buf.push(item); }]<br>        )<br>    },<br>)</code>"]:::otherClass
+127v1["<div style=text-align:center>(127v1)</div> <code><br>defer_tick_lazy()</code>"]:::otherClass
+128v1["<div style=text-align:center>(128v1)</div> <code><br>source_iter([<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [vec![]]<br>        )<br>    },<br>])</code>"]:::otherClass
+129v1["<div style=text-align:center>(129v1)</div> <code><br>persist::&lt;'static&gt;()</code>"]:::otherClass
+130v1["<div style=text-align:center>(130v1)</div> <code><br>chain_first_n(1)</code>"]:::otherClass
+132v1["<div style=text-align:center>(132v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+133v1["<div style=text-align:center>(133v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| (mut new_items, mut existing) | { existing.append(&amp; mut new_items);<br>        existing }]<br>    )<br>})</code>"]:::otherClass
+134v1["<div style=text-align:center>(134v1)</div> <code><br>tee()</code>"]:::otherClass
+135v1["<div style=text-align:center>(135v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+136v1["<div style=text-align:center>(136v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+137v1["<div style=text-align:center>(137v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+138v1["<div style=text-align:center>(138v1)</div> <code><br>filter_map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [quorum_size__free = 2usize,] [move | (((count, max_slot), view), emitted) |<br>        { if count &gt;= quorum_size__free &amp;&amp; ! emitted { Some((view, max_slot + 1)) }<br>        else { None } }]<br>    )<br>})</code>"]:::otherClass
+139v1["<div style=text-align:center>(139v1)</div> <code><br>tee()</code>"]:::otherClass
+140v1["<div style=text-align:center>(140v1)</div> <code><br>fold::&lt;<br>    'tick,<br>&gt;(<br>    {<br>        hydro_lang::__stageleft_quote_src_live_collections_stream_mod_rs_LINE_COL!(<br>            [] [| | 0usize]<br>        )<br>    },<br>    {<br>        hydro_lang::__stageleft_quote_src_live_collections_stream_mod_rs_LINE_COL!(<br>            [] [| count, _ | * count += 1]<br>        )<br>    },<br>)</code>"]:::otherClass
+141v1["<div style=text-align:center>(141v1)</div> <code><br>defer_tick_lazy()</code>"]:::otherClass
+142v1["<div style=text-align:center>(142v1)</div> <code><br>source_iter([<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [false]<br>        )<br>    },<br>])</code>"]:::otherClass
+143v1["<div style=text-align:center>(143v1)</div> <code><br>persist::&lt;'static&gt;()</code>"]:::otherClass
+144v1["<div style=text-align:center>(144v1)</div> <code><br>chain_first_n(1)</code>"]:::otherClass
+145v1["<div style=text-align:center>(145v1)</div> <code><br>tee()</code>"]:::otherClass
+146v1["<div style=text-align:center>(146v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+147v1["<div style=text-align:center>(147v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| (n, was_started) | was_started || n &gt; 0]<br>    )<br>})</code>"]:::otherClass
+148v1["<div style=text-align:center>(148v1)</div> <code><br>tee()</code>"]:::otherClass
+149v1["<div style=text-align:center>(149v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+150v1["<div style=text-align:center>(150v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| (buf, is_started) | if is_started { buf.len() } else { 0 }]<br>    )<br>})</code>"]:::otherClass
+151v1["<div style=text-align:center>(151v1)</div> <code><br>fold::&lt;<br>    'tick,<br>&gt;(<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| | (0usize, 0usize)]<br>        )<br>    },<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| acc, (view, slot) | { if view &gt; acc.0 { acc.0 = view; } if slot &gt;<br>            acc.1 { acc.1 = slot; } }]<br>        )<br>    },<br>)</code>"]:::otherClass
+152v1["<div style=text-align:center>(152v1)</div> <code><br>tee()</code>"]:::otherClass
+153v1["<div style=text-align:center>(153v1)</div> <code><br>defer_tick_lazy()</code>"]:::otherClass
+154v1["<div style=text-align:center>(154v1)</div> <code><br>source_iter([<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [0usize]<br>        )<br>    },<br>])</code>"]:::otherClass
+155v1["<div style=text-align:center>(155v1)</div> <code><br>persist::&lt;'static&gt;()</code>"]:::otherClass
+156v1["<div style=text-align:center>(156v1)</div> <code><br>chain_first_n(1)</code>"]:::otherClass
+158v1["<div style=text-align:center>(158v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+159v1["<div style=text-align:center>(159v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+160v1["<div style=text-align:center>(160v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| (((_sig_view, sig_slot), cur_slot), was_started) | { if ! was_started<br>        &amp;&amp; sig_slot &gt; 0 { sig_slot } else { cur_slot } }]<br>    )<br>})</code>"]:::otherClass
+161v1["<div style=text-align:center>(161v1)</div> <code><br>tee()</code>"]:::otherClass
+162v1["<div style=text-align:center>(162v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+163v1["<div style=text-align:center>(163v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| (n, base) | base + n]<br>    )<br>})</code>"]:::otherClass
+164v1["<div style=text-align:center>(164v1)</div> <code><br>identity::&lt;usize&gt;()</code>"]:::otherClass
+165v1["<div style=text-align:center>(165v1)</div> <code><br>defer_tick_lazy()</code>"]:::otherClass
+166v1["<div style=text-align:center>(166v1)</div> <code><br>source_iter([<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [0usize]<br>        )<br>    },<br>])</code>"]:::otherClass
+167v1["<div style=text-align:center>(167v1)</div> <code><br>persist::&lt;'static&gt;()</code>"]:::otherClass
+168v1["<div style=text-align:center>(168v1)</div> <code><br>chain_first_n(1)</code>"]:::otherClass
+170v1["<div style=text-align:center>(170v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+171v1["<div style=text-align:center>(171v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+172v1["<div style=text-align:center>(172v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| (((sig_view, _sig_slot), cur_view), was_started) | { if ! was_started<br>        &amp;&amp; sig_view &gt; 0 { sig_view } else { cur_view } }]<br>    )<br>})</code>"]:::otherClass
+173v1["<div style=text-align:center>(173v1)</div> <code><br>tee()</code>"]:::otherClass
+174v1["<div style=text-align:center>(174v1)</div> <code><br>identity::&lt;usize&gt;()</code>"]:::otherClass
+175v1["<div style=text-align:center>(175v1)</div> <code><br>identity::&lt;bool&gt;()</code>"]:::otherClass
+176v1["<div style=text-align:center>(176v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+177v1["<div style=text-align:center>(177v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| (buf, is_started) | if is_started { vec![] } else { buf }]<br>    )<br>})</code>"]:::otherClass
+178v1["<div style=text-align:center>(178v1)</div> <code><br>identity::&lt;std::vec::Vec&lt;u32&gt;&gt;()</code>"]:::otherClass
+179v1["<div style=text-align:center>(179v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| p | p.view]<br>    )<br>})</code>"]:::otherClass
+180v1["<div style=text-align:center>(180v1)</div> <code><br>fold::&lt;<br>    'tick,<br>&gt;(<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| | 0usize]<br>        )<br>    },<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| max, v | { if v &gt; * max { * max = v; } }]<br>        )<br>    },<br>)</code>"]:::otherClass
+181v1["<div style=text-align:center>(181v1)</div> <code><br>defer_tick_lazy()</code>"]:::otherClass
+182v1["<div style=text-align:center>(182v1)</div> <code><br>source_iter([<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [0usize]<br>        )<br>    },<br>])</code>"]:::otherClass
+183v1["<div style=text-align:center>(183v1)</div> <code><br>persist::&lt;'static&gt;()</code>"]:::otherClass
+184v1["<div style=text-align:center>(184v1)</div> <code><br>chain_first_n(1)</code>"]:::otherClass
+186v1["<div style=text-align:center>(186v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+187v1["<div style=text-align:center>(187v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| (prepare_max, current) | prepare_max.max(current)]<br>    )<br>})</code>"]:::otherClass
+188v1["<div style=text-align:center>(188v1)</div> <code><br>tee()</code>"]:::otherClass
+189v1["<div style=text-align:center>(189v1)</div> <code><br>identity::&lt;usize&gt;()</code>"]:::otherClass
+190v1["<div style=text-align:center>(190v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+191v1["<div style=text-align:center>(191v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+192v1["<div style=text-align:center>(192v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+193v1["<div style=text-align:center>(193v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [move | (((buffer, is_started), base), view) | { if is_started { buffer<br>        .into_iter().enumerate().map(| (idx, value) | ProposalMsg { view, slot : base<br>        + idx, value, }).collect:: &lt; Vec &lt; _ &gt; &gt; () } else { vec![] } }]<br>    )<br>})</code>"]:::otherClass
+194v1["<div style=text-align:center>(194v1)</div> <code><br>flat_map({<br>    hydro_lang::__stageleft_quote_src_live_collections_stream_mod_rs_LINE_COL!(<br>        [] [| d | d]<br>    )<br>})</code>"]:::otherClass
+195v1["<div style=text-align:center>(195v1)</div> <code><br>map({<br>    hydro_lang::__stageleft_quote_src_live_collections_stream_mod_rs_LINE_COL!(<br>        [] [| v | ((), v)]<br>    )<br>})</code>"]:::otherClass
+196v1["<div style=text-align:center>(196v1)</div> <code><br>source_iter(<br>    stageleft::runtime_support::type_hint::&lt;<br>        core::iter::Map&lt;<br>            core::slice::Iter&lt;<br>                '_,<br>                hydro_test::__staged::__deps::hydro_lang::location::member_id::TaglessMemberId,<br>            &gt;,<br>            _,<br>        &gt;,<br>    &gt;({<br>        hydro_lang::__stageleft_quote_src_live_collections_stream_networking_rs_LINE_COL!(<br>            [cluster_ids__free = __hydro_lang_cluster_ids_loc1v1,] [cluster_ids__free<br>            .iter().map(| id | MemberId::from_tagless(id.clone()))]<br>        )<br>    }),<br>)</code>"]:::otherClass
+197v1["<div style=text-align:center>(197v1)</div> <code><br>map({<br>    hydro_lang::__stageleft_quote_src_live_collections_stream_mod_rs_LINE_COL!(<br>        [] [| v | ((), v)]<br>    )<br>})</code>"]:::otherClass
+198v1["<div style=text-align:center>(198v1)</div> <code><br>join_multiset_half::&lt;'static, 'tick&gt;()</code>"]:::otherClass
+199v1["<div style=text-align:center>(199v1)</div> <code><br>map({<br>    hydro_lang::__stageleft_quote_src_live_collections_stream_mod_rs_LINE_COL!(<br>        [] [| ((), (v1, v2)) | (v1, v2)]<br>    )<br>})</code>"]:::otherClass
+200v1["<div style=text-align:center>(200v1)</div> <code><br>map({<br>    hydro_lang::__stageleft_quote_src_live_collections_stream_networking_rs_LINE_COL!(<br>        [] [| (data, member_id) | (member_id, data)]<br>    )<br>})</code>"]:::otherClass
+201v1["<div style=text-align:center>(201v1)</div> <code><br>map(|(id, data)| {<br>    (<br>        id.into_tagless(),<br>        hydro_lang::runtime_support::bincode::serialize(&amp;data).unwrap().into(),<br>    )<br>})</code>"]:::otherClass
+202v1["<div style=text-align:center>(202v1)</div> <code><br>dest_sink(DUMMY_SINK)</code>"]:::otherClass
+203v1["<div style=text-align:center>(203v1)</div> <code><br>source_stream(DUMMY_SOURCE)</code>"]:::otherClass
+204v1["<div style=text-align:center>(204v1)</div> <code><br>map(|res| {<br>    let (id, b) = res.unwrap();<br>    (<br>        hydro_lang::__staged::location::MemberId::&lt;<br>            hydro_test::__staged::cluster::typed_consensus::Nodes,<br>        &gt;::from_tagless(id as hydro_lang::__staged::location::TaglessMemberId),<br>        hydro_lang::runtime_support::bincode::deserialize::&lt;<br>            hydro_test::__staged::cluster::typed_consensus::ProposalMsg&lt;u32&gt;,<br>        &gt;(&amp;b)<br>            .unwrap(),<br>    )<br>})</code>"]:::otherClass
+205v1["<div style=text-align:center>(205v1)</div> <code><br>map({<br>    hydro_lang::__stageleft_quote_src_live_collections_keyed_stream_mod_rs_LINE_COL!(<br>        [] [| (_, v) | v]<br>    )<br>})</code>"]:::otherClass
+206v1["<div style=text-align:center>(206v1)</div> <code><br>tee()</code>"]:::otherClass
+207v1["<div style=text-align:center>(207v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+208v1["<div style=text-align:center>(208v1)</div> <code><br>filter_map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| (proposal, max_p) | { if proposal.view &gt;= max_p { Some(proposal) } else<br>        { None } }]<br>    )<br>})</code>"]:::otherClass
+209v1["<div style=text-align:center>(209v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [CLUSTER_SELF_ID__free = hydro_lang::__staged::location::MemberId:: &lt;<br>        hydro_test::__staged::cluster::typed_consensus::Nodes &gt;<br>        ::from_tagless((__hydro_lang_cluster_self_id_loc1v1).clone()),<br>        cluster_size__free = 3usize,] [move | proposal : ProposalMsg &lt; _ &gt; | { let<br>        leader_id = MemberId:: &lt; Nodes &gt; ::from_raw_id((proposal.view %<br>        cluster_size__free) as u32,); (leader_id, ProposalAckMsg { view : proposal<br>        .view, slot : proposal.slot, from_member : CLUSTER_SELF_ID__free.clone(), },)<br>        }]<br>    )<br>})</code>"]:::otherClass
+210v1["<div style=text-align:center>(210v1)</div> <code><br>map(|(id, data)| {<br>    (<br>        id.into_tagless(),<br>        hydro_lang::runtime_support::bincode::serialize(&amp;data).unwrap().into(),<br>    )<br>})</code>"]:::otherClass
+211v1["<div style=text-align:center>(211v1)</div> <code><br>dest_sink(DUMMY_SINK)</code>"]:::otherClass
+212v1["<div style=text-align:center>(212v1)</div> <code><br>source_stream(DUMMY_SOURCE)</code>"]:::otherClass
+213v1["<div style=text-align:center>(213v1)</div> <code><br>map(|res| {<br>    let (id, b) = res.unwrap();<br>    (<br>        hydro_lang::__staged::location::MemberId::&lt;<br>            hydro_test::__staged::cluster::typed_consensus::Nodes,<br>        &gt;::from_tagless(id as hydro_lang::__staged::location::TaglessMemberId),<br>        hydro_lang::runtime_support::bincode::deserialize::&lt;<br>            hydro_test::__staged::cluster::typed_consensus::ProposalAckMsg&lt;<br>                hydro_test::__staged::cluster::typed_consensus::Nodes,<br>            &gt;,<br>        &gt;(&amp;b)<br>            .unwrap(),<br>    )<br>})</code>"]:::otherClass
+214v1["<div style=text-align:center>(214v1)</div> <code><br>map({<br>    hydro_lang::__stageleft_quote_src_live_collections_keyed_stream_mod_rs_LINE_COL!(<br>        [] [| (_, v) | v]<br>    )<br>})</code>"]:::otherClass
+215v1["<div style=text-align:center>(215v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| ack | (ack.view, ack.slot)]<br>    )<br>})</code>"]:::otherClass
+216v1["<div style=text-align:center>(216v1)</div> <code><br>fold::&lt;<br>    'tick,<br>&gt;(<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| | std::collections::HashMap:: &lt; (usize, usize), usize &gt; ::new()]<br>        )<br>    },<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| batch_counts, key | { * batch_counts.entry(key).or_insert(0) += 1;<br>            }]<br>        )<br>    },<br>)</code>"]:::otherClass
+217v1["<div style=text-align:center>(217v1)</div> <code><br>defer_tick_lazy()</code>"]:::otherClass
+218v1["<div style=text-align:center>(218v1)</div> <code><br>source_iter([<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [std::collections::HashMap:: &lt; (usize, usize), usize &gt; ::new()]<br>        )<br>    },<br>])</code>"]:::otherClass
+219v1["<div style=text-align:center>(219v1)</div> <code><br>persist::&lt;'static&gt;()</code>"]:::otherClass
+220v1["<div style=text-align:center>(220v1)</div> <code><br>chain_first_n(1)</code>"]:::otherClass
+222v1["<div style=text-align:center>(222v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+223v1["<div style=text-align:center>(223v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| (batch_counts, mut total_counts) | { for (key, count) in batch_counts {<br>        * total_counts.entry(key).or_insert(0) += count; } total_counts }]<br>    )<br>})</code>"]:::otherClass
+224v1["<div style=text-align:center>(224v1)</div> <code><br>tee()</code>"]:::otherClass
+225v1["<div style=text-align:center>(225v1)</div> <code><br>identity::&lt;std::collections::hash_map::HashMap&lt;(usize, usize), usize&gt;&gt;()</code>"]:::otherClass
+226v1["<div style=text-align:center>(226v1)</div> <code><br>defer_tick_lazy()</code>"]:::otherClass
+227v1["<div style=text-align:center>(227v1)</div> <code><br>source_iter([<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [std::collections::HashSet:: &lt; (usize, usize) &gt; ::new()]<br>        )<br>    },<br>])</code>"]:::otherClass
+228v1["<div style=text-align:center>(228v1)</div> <code><br>persist::&lt;'static&gt;()</code>"]:::otherClass
+229v1["<div style=text-align:center>(229v1)</div> <code><br>chain_first_n(1)</code>"]:::otherClass
+230v1["<div style=text-align:center>(230v1)</div> <code><br>tee()</code>"]:::otherClass
+231v1["<div style=text-align:center>(231v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+232v1["<div style=text-align:center>(232v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [quorum_size__free = 2usize,] [move | (counts, committed) | { counts<br>        .into_iter().filter(| (key, count) | * count &gt;= quorum_size__free &amp;&amp; !<br>        committed.contains(key)).map(| ((view, slot), _) | CommitMsg { view, slot })<br>        .collect:: &lt; Vec &lt; _ &gt; &gt; () }]<br>    )<br>})</code>"]:::otherClass
+233v1["<div style=text-align:center>(233v1)</div> <code><br>flat_map({<br>    hydro_lang::__stageleft_quote_src_live_collections_stream_mod_rs_LINE_COL!(<br>        [] [| d | d]<br>    )<br>})</code>"]:::otherClass
+234v1["<div style=text-align:center>(234v1)</div> <code><br>tee()</code>"]:::otherClass
+235v1["<div style=text-align:center>(235v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| cm | (cm.view, cm.slot)]<br>    )<br>})</code>"]:::otherClass
+236v1["<div style=text-align:center>(236v1)</div> <code><br>fold::&lt;<br>    'tick,<br>&gt;(<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| | std::collections::HashSet:: &lt; (usize, usize) &gt; ::new()]<br>        )<br>    },<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| set, key | { set.insert(key); }]<br>        )<br>    },<br>)</code>"]:::otherClass
+237v1["<div style=text-align:center>(237v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+238v1["<div style=text-align:center>(238v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| (new, mut existing) | { existing.extend(new); existing }]<br>    )<br>})</code>"]:::otherClass
+239v1["<div style=text-align:center>(239v1)</div> <code><br>identity::&lt;std::collections::hash_set::HashSet&lt;(usize, usize)&gt;&gt;()</code>"]:::otherClass
+240v1["<div style=text-align:center>(240v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| p | (p.view, p.slot, p.value)]<br>    )<br>})</code>"]:::otherClass
+241v1["<div style=text-align:center>(241v1)</div> <code><br>fold::&lt;<br>    'tick,<br>&gt;(<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| | vec![]]<br>        )<br>    },<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| vec, item | { vec.push(item); }]<br>        )<br>    },<br>)</code>"]:::otherClass
+242v1["<div style=text-align:center>(242v1)</div> <code><br>defer_tick_lazy()</code>"]:::otherClass
+243v1["<div style=text-align:center>(243v1)</div> <code><br>source_iter([<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [Vec::new()]<br>        )<br>    },<br>])</code>"]:::otherClass
+244v1["<div style=text-align:center>(244v1)</div> <code><br>persist::&lt;'static&gt;()</code>"]:::otherClass
+245v1["<div style=text-align:center>(245v1)</div> <code><br>chain_first_n(1)</code>"]:::otherClass
+247v1["<div style=text-align:center>(247v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+248v1["<div style=text-align:center>(248v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| (batch_proposals, mut all_proposals) | { all_proposals<br>        .extend(batch_proposals); all_proposals }]<br>    )<br>})</code>"]:::otherClass
+249v1["<div style=text-align:center>(249v1)</div> <code><br>tee()</code>"]:::otherClass
+250v1["<div style=text-align:center>(250v1)</div> <code><br>identity::&lt;std::vec::Vec&lt;(usize, usize, u32)&gt;&gt;()</code>"]:::otherClass
+251v1["<div style=text-align:center>(251v1)</div> <code><br>map({<br>    hydro_lang::__stageleft_quote_src_live_collections_stream_mod_rs_LINE_COL!(<br>        [] [| v | ((), v)]<br>    )<br>})</code>"]:::otherClass
+252v1["<div style=text-align:center>(252v1)</div> <code><br>source_iter(<br>    stageleft::runtime_support::type_hint::&lt;<br>        core::iter::Map&lt;<br>            core::slice::Iter&lt;<br>                '_,<br>                hydro_test::__staged::__deps::hydro_lang::location::member_id::TaglessMemberId,<br>            &gt;,<br>            _,<br>        &gt;,<br>    &gt;({<br>        hydro_lang::__stageleft_quote_src_live_collections_stream_networking_rs_LINE_COL!(<br>            [cluster_ids__free = __hydro_lang_cluster_ids_loc1v1,] [cluster_ids__free<br>            .iter().map(| id | MemberId::from_tagless(id.clone()))]<br>        )<br>    }),<br>)</code>"]:::otherClass
+253v1["<div style=text-align:center>(253v1)</div> <code><br>map({<br>    hydro_lang::__stageleft_quote_src_live_collections_stream_mod_rs_LINE_COL!(<br>        [] [| v | ((), v)]<br>    )<br>})</code>"]:::otherClass
+254v1["<div style=text-align:center>(254v1)</div> <code><br>join_multiset_half::&lt;'static, 'tick&gt;()</code>"]:::otherClass
+255v1["<div style=text-align:center>(255v1)</div> <code><br>map({<br>    hydro_lang::__stageleft_quote_src_live_collections_stream_mod_rs_LINE_COL!(<br>        [] [| ((), (v1, v2)) | (v1, v2)]<br>    )<br>})</code>"]:::otherClass
+256v1["<div style=text-align:center>(256v1)</div> <code><br>map({<br>    hydro_lang::__stageleft_quote_src_live_collections_stream_networking_rs_LINE_COL!(<br>        [] [| (data, member_id) | (member_id, data)]<br>    )<br>})</code>"]:::otherClass
+257v1["<div style=text-align:center>(257v1)</div> <code><br>map(|(id, data)| {<br>    (<br>        id.into_tagless(),<br>        hydro_lang::runtime_support::bincode::serialize(&amp;data).unwrap().into(),<br>    )<br>})</code>"]:::otherClass
+258v1["<div style=text-align:center>(258v1)</div> <code><br>dest_sink(DUMMY_SINK)</code>"]:::otherClass
+259v1["<div style=text-align:center>(259v1)</div> <code><br>source_stream(DUMMY_SOURCE)</code>"]:::otherClass
+260v1["<div style=text-align:center>(260v1)</div> <code><br>map(|res| {<br>    let (id, b) = res.unwrap();<br>    (<br>        hydro_lang::__staged::location::MemberId::&lt;<br>            hydro_test::__staged::cluster::typed_consensus::Nodes,<br>        &gt;::from_tagless(id as hydro_lang::__staged::location::TaglessMemberId),<br>        hydro_lang::runtime_support::bincode::deserialize::&lt;<br>            hydro_test::__staged::cluster::typed_consensus::CommitMsg,<br>        &gt;(&amp;b)<br>            .unwrap(),<br>    )<br>})</code>"]:::otherClass
+261v1["<div style=text-align:center>(261v1)</div> <code><br>map({<br>    hydro_lang::__stageleft_quote_src_live_collections_keyed_stream_mod_rs_LINE_COL!(<br>        [] [| (_, v) | v]<br>    )<br>})</code>"]:::otherClass
+262v1["<div style=text-align:center>(262v1)</div> <code><br>tee()</code>"]:::otherClass
+263v1["<div style=text-align:center>(263v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| c | (c.view, c.slot)]<br>    )<br>})</code>"]:::otherClass
+264v1["<div style=text-align:center>(264v1)</div> <code><br>fold::&lt;<br>    'tick,<br>&gt;(<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| | std::collections::HashSet:: &lt; (usize, usize) &gt; ::new()]<br>        )<br>    },<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| set, key | { set.insert(key); }]<br>        )<br>    },<br>)</code>"]:::otherClass
+265v1["<div style=text-align:center>(265v1)</div> <code><br>defer_tick_lazy()</code>"]:::otherClass
+266v1["<div style=text-align:center>(266v1)</div> <code><br>source_iter([<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [std::collections::HashSet:: &lt; (usize, usize) &gt; ::new()]<br>        )<br>    },<br>])</code>"]:::otherClass
+267v1["<div style=text-align:center>(267v1)</div> <code><br>persist::&lt;'static&gt;()</code>"]:::otherClass
+268v1["<div style=text-align:center>(268v1)</div> <code><br>chain_first_n(1)</code>"]:::otherClass
+270v1["<div style=text-align:center>(270v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+271v1["<div style=text-align:center>(271v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| (batch_commits, mut all_commits) | { all_commits.extend(batch_commits);<br>        all_commits }]<br>    )<br>})</code>"]:::otherClass
+272v1["<div style=text-align:center>(272v1)</div> <code><br>tee()</code>"]:::otherClass
+273v1["<div style=text-align:center>(273v1)</div> <code><br>identity::&lt;std::collections::hash_set::HashSet&lt;(usize, usize)&gt;&gt;()</code>"]:::otherClass
+274v1["<div style=text-align:center>(274v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+275v1["<div style=text-align:center>(275v1)</div> <code><br>defer_tick_lazy()</code>"]:::otherClass
+276v1["<div style=text-align:center>(276v1)</div> <code><br>source_iter([<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [std::collections::HashSet:: &lt; (usize, usize) &gt; ::new()]<br>        )<br>    },<br>])</code>"]:::otherClass
+277v1["<div style=text-align:center>(277v1)</div> <code><br>persist::&lt;'static&gt;()</code>"]:::otherClass
+278v1["<div style=text-align:center>(278v1)</div> <code><br>chain_first_n(1)</code>"]:::otherClass
+279v1["<div style=text-align:center>(279v1)</div> <code><br>tee()</code>"]:::otherClass
+280v1["<div style=text-align:center>(280v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+281v1["<div style=text-align:center>(281v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| ((proposals, commits), already_emitted) | { let mut entries =<br>        Vec::new(); for &amp; (view, slot) in commits.iter() { if ! already_emitted<br>        .contains(&amp; (view, slot)) { if let Some((_, _, value)) = proposals.iter()<br>        .find(| (v, s, _) | * v == view &amp;&amp; * s == slot) { entries.push(LogEntry {<br>        message : value.clone(), view, slot, }); } } } entries }]<br>    )<br>})</code>"]:::otherClass
+282v1["<div style=text-align:center>(282v1)</div> <code><br>flat_map({<br>    hydro_lang::__stageleft_quote_src_live_collections_stream_mod_rs_LINE_COL!(<br>        [] [| d | d]<br>    )<br>})</code>"]:::otherClass
+283v1["<div style=text-align:center>(283v1)</div> <code><br>tee()</code>"]:::otherClass
+284v1["<div style=text-align:center>(284v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| entry | (entry.view, entry.slot)]<br>    )<br>})</code>"]:::otherClass
+285v1["<div style=text-align:center>(285v1)</div> <code><br>fold::&lt;<br>    'tick,<br>&gt;(<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| | std::collections::HashSet:: &lt; (usize, usize) &gt; ::new()]<br>        )<br>    },<br>    {<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [| set, key | { set.insert(key); }]<br>        )<br>    },<br>)</code>"]:::otherClass
+286v1["<div style=text-align:center>(286v1)</div> <code><br>cross_singleton()</code>"]:::otherClass
+287v1["<div style=text-align:center>(287v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| (new, mut existing) | { existing.extend(new); existing }]<br>    )<br>})</code>"]:::otherClass
+288v1["<div style=text-align:center>(288v1)</div> <code><br>identity::&lt;std::collections::hash_set::HashSet&lt;(usize, usize)&gt;&gt;()</code>"]:::otherClass
+289v1["<div style=text-align:center>(289v1)</div> <code><br>source_iter(<br>    stageleft::runtime_support::type_hint::&lt;<br>        core::iter::Empty&lt;<br>            hydro_test::__staged::cluster::typed_consensus::HeartbeatMsg&lt;<br>                hydro_test::__staged::cluster::typed_consensus::Nodes,<br>            &gt;,<br>        &gt;,<br>    &gt;({<br>        crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>            [] [std::iter::empty:: &lt; HeartbeatMsg &lt; Nodes &gt; &gt; ()]<br>        )<br>    }),<br>)</code>"]:::otherClass
+290v1["<div style=text-align:center>(290v1)</div> <code><br>identity::&lt;<br>    hydro_test::__staged::cluster::typed_consensus::HeartbeatMsg&lt;<br>        hydro_test::__staged::cluster::typed_consensus::Nodes,<br>    &gt;,<br>&gt;()</code>"]:::otherClass
+291v1["<div style=text-align:center>(291v1)</div> <code><br>map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| c : CommitMsg | c.slot]<br>    )<br>})</code>"]:::otherClass
+292v1["<div style=text-align:center>(292v1)</div> <code><br>identity::&lt;usize&gt;()</code>"]:::otherClass
+293v1["<div style=text-align:center>(293v1)</div> <code><br>source_stream({<br>    hydro_lang::__stageleft_quote_src_location_mod_rs_LINE_COL!(<br>        [interval__free = { use crate ::__staged::__deps:: *; use crate<br>        ::__staged::cluster::typed_consensus::tests:: *; {<br>        std::time::Duration::from_millis(100) } },]<br>        [tokio_stream::StreamExt::map(tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(interval__free)),<br>        | _ | ())]<br>    )<br>})</code>"]:::otherClass
+294v1["<div style=text-align:center>(294v1)</div> <code><br>for_each(|_| {})</code>"]:::otherClass
+295v1["<div style=text-align:center>(295v1)</div> <code><br>sort()</code>"]:::otherClass
+296v1["<div style=text-align:center>(296v1)</div> <code><br>for_each({<br>    {<br>        |entry| {<br>            println!(<br>                &quot;committed [view {}, slot {}]: {}&quot;,<br>                entry.view,<br>                entry.slot,<br>                entry.message,<br>            )<br>        }<br>    }<br>})</code>"]:::otherClass
+297v1["<div style=text-align:center>(297v1)</div> <code><br>filter_map({<br>    crate::__staged::__stageleft_quote_src_cluster_typed_consensus_rs_LINE_COL!(<br>        [] [| (_leader_req, redirected) | redirected]<br>    )<br>})</code>"]:::otherClass
+298v1["<div style=text-align:center>(298v1)</div> <code><br>for_each({<br>    {<br>        |(request, leader_hint)| {<br>            println!(&quot;redirected: {request:?} (leader hint: {leader_hint:?})&quot;)<br>        }<br>    }<br>})</code>"]:::otherClass
+1v1-->2v1
+22v1--o3v1; linkStyle 1 stroke:red
+4v1-->5v1
+3v1-->|0|6v1
+5v1-->|1|6v1
+6v1-->7v1
+290v1-->|input|8v1
+7v1-->|single|8v1
+8v1-->9v1
+9v1-->10v1
+2v1-->|input|11v1
+10v1-->|single|11v1
+24v1--o12v1; linkStyle 12 stroke:red
+13v1-->14v1
+12v1-->|0|15v1
+14v1-->|1|15v1
+11v1-->|input|17v1
+15v1-->|single|17v1
+17v1-->18v1
+18v1-->19v1
+19v1-->|input|20v1
+7v1-->|single|20v1
+20v1-->21v1
+21v1-->22v1
+19v1-->23v1
+23v1-->24v1
+19v1-->|input|25v1
+7v1-->|single|25v1
+25v1-->26v1
+26v1-->27v1
+28v1-->29v1
+27v1-->|probe|30v1
+29v1-->|build|30v1
+30v1-->31v1
+31v1-->32v1
+33v1-->34v1
+32v1-->33v1
+35v1-->36v1
+36v1-->37v1
+37v1-->38v1
+38v1-->39v1
+39v1-->40v1
+40v1-->41v1
+49v1--o42v1; linkStyle 43 stroke:red
+43v1-->44v1
+42v1-->|0|45v1
+44v1-->|1|45v1
+45v1-->46v1
+41v1-->|input|47v1
+46v1-->|single|47v1
+47v1-->48v1
+48v1-->49v1
+59v1--o50v1; linkStyle 52 stroke:red
+51v1-->52v1
+50v1-->|0|53v1
+52v1-->|1|53v1
+292v1-->55v1
+53v1-->|input|56v1
+55v1-->|single|56v1
+56v1-->57v1
+57v1-->58v1
+58v1-->59v1
+39v1-->|input|60v1
+46v1-->|single|60v1
+60v1-->|input|61v1
+58v1-->|single|61v1
+61v1-->62v1
+63v1-->64v1
+62v1-->63v1
+65v1-->66v1
+66v1-->67v1
+67v1-->68v1
+68v1-->69v1
+78v1--o70v1; linkStyle 73 stroke:red
+71v1-->72v1
+70v1-->|0|73v1
+72v1-->|1|73v1
+69v1-->|input|75v1
+73v1-->|single|75v1
+75v1-->76v1
+76v1-->77v1
+77v1-->78v1
+68v1-->79v1
+79v1-->80v1
+89v1--o81v1; linkStyle 84 stroke:red
+82v1-->83v1
+81v1-->|0|84v1
+83v1-->|1|84v1
+80v1-->|input|86v1
+84v1-->|single|86v1
+86v1-->87v1
+87v1-->88v1
+88v1-->89v1
+68v1-->90v1
+90v1-->91v1
+100v1--o92v1; linkStyle 95 stroke:red
+93v1-->94v1
+92v1-->|0|95v1
+94v1-->|1|95v1
+91v1-->|input|97v1
+95v1-->|single|97v1
+97v1-->98v1
+98v1-->99v1
+99v1-->100v1
+108v1--o101v1; linkStyle 104 stroke:red
+102v1-->103v1
+101v1-->|0|104v1
+103v1-->|1|104v1
+104v1-->105v1
+77v1-->|input|106v1
+105v1-->|single|106v1
+106v1-->107v1
+107v1-->108v1
+38v1-->109v1
+109v1-->110v1
+119v1--o111v1; linkStyle 115 stroke:red
+112v1-->113v1
+111v1-->|0|114v1
+113v1-->|1|114v1
+110v1-->|input|116v1
+114v1-->|single|116v1
+116v1-->117v1
+117v1-->118v1
+118v1-->119v1
+120v1-->121v1
+121v1-->|input|122v1
+118v1-->|single|122v1
+122v1-->123v1
+123v1-->124v1
+124v1-->125v1
+125v1-->126v1
+178v1--o127v1; linkStyle 131 stroke:red
+128v1-->129v1
+127v1-->|0|130v1
+129v1-->|1|130v1
+126v1-->|input|132v1
+130v1-->|single|132v1
+132v1-->133v1
+133v1-->134v1
+77v1-->|input|135v1
+88v1-->|single|135v1
+135v1-->|input|136v1
+99v1-->|single|136v1
+136v1-->|input|137v1
+105v1-->|single|137v1
+137v1-->138v1
+138v1-->139v1
+139v1-->140v1
+175v1--o141v1; linkStyle 148 stroke:red
+142v1-->143v1
+141v1-->|0|144v1
+143v1-->|1|144v1
+144v1-->145v1
+140v1-->|input|146v1
+145v1-->|single|146v1
+146v1-->147v1
+147v1-->148v1
+134v1-->|input|149v1
+148v1-->|single|149v1
+149v1-->150v1
+139v1-->151v1
+151v1-->152v1
+164v1--o153v1; linkStyle 162 stroke:red
+154v1-->155v1
+153v1-->|0|156v1
+155v1-->|1|156v1
+152v1-->|input|158v1
+156v1-->|single|158v1
+158v1-->|input|159v1
+145v1-->|single|159v1
+159v1-->160v1
+160v1-->161v1
+150v1-->|input|162v1
+161v1-->|single|162v1
+162v1-->163v1
+163v1-->164v1
+174v1--o165v1; linkStyle 176 stroke:red
+166v1-->167v1
+165v1-->|0|168v1
+167v1-->|1|168v1
+152v1-->|input|170v1
+168v1-->|single|170v1
+170v1-->|input|171v1
+145v1-->|single|171v1
+171v1-->172v1
+172v1-->173v1
+173v1-->174v1
+148v1-->175v1
+134v1-->|input|176v1
+148v1-->|single|176v1
+176v1-->177v1
+177v1-->178v1
+38v1-->179v1
+179v1-->180v1
+189v1--o181v1; linkStyle 194 stroke:red
+182v1-->183v1
+181v1-->|0|184v1
+183v1-->|1|184v1
+180v1-->|input|186v1
+184v1-->|single|186v1
+186v1-->187v1
+187v1-->188v1
+188v1-->189v1
+134v1-->|input|190v1
+148v1-->|single|190v1
+190v1-->|input|191v1
+161v1-->|single|191v1
+191v1-->|input|192v1
+173v1-->|single|192v1
+192v1-->193v1
+193v1-->194v1
+194v1-->195v1
+196v1-->197v1
+195v1-->|probe|198v1
+197v1-->|build|198v1
+198v1-->199v1
+199v1-->200v1
+201v1-->202v1
+200v1-->201v1
+203v1-->204v1
+204v1-->205v1
+205v1-->206v1
+206v1-->|input|207v1
+188v1-->|single|207v1
+207v1-->208v1
+208v1-->209v1
+210v1-->211v1
+209v1-->210v1
+212v1-->213v1
+213v1-->214v1
+214v1-->215v1
+215v1-->216v1
+225v1--o217v1; linkStyle 232 stroke:red
+218v1-->219v1
+217v1-->|0|220v1
+219v1-->|1|220v1
+216v1-->|input|222v1
+220v1-->|single|222v1
+222v1-->223v1
+223v1-->224v1
+224v1-->225v1
+239v1--o226v1; linkStyle 241 stroke:red
+227v1-->228v1
+226v1-->|0|229v1
+228v1-->|1|229v1
+229v1-->230v1
+224v1-->|input|231v1
+230v1-->|single|231v1
+231v1-->232v1
+232v1-->233v1
+233v1-->234v1
+234v1-->235v1
+235v1-->236v1
+236v1-->|input|237v1
+230v1-->|single|237v1
+237v1-->238v1
+238v1-->239v1
+206v1-->240v1
+240v1-->241v1
+250v1--o242v1; linkStyle 259 stroke:red
+243v1-->244v1
+242v1-->|0|245v1
+244v1-->|1|245v1
+241v1-->|input|247v1
+245v1-->|single|247v1
+247v1-->248v1
+248v1-->249v1
+249v1-->250v1
+234v1-->251v1
+252v1-->253v1
+251v1-->|probe|254v1
+253v1-->|build|254v1
+254v1-->255v1
+255v1-->256v1
+257v1-->258v1
+256v1-->257v1
+259v1-->260v1
+260v1-->261v1
+261v1-->262v1
+262v1-->263v1
+263v1-->264v1
+273v1--o265v1; linkStyle 281 stroke:red
+266v1-->267v1
+265v1-->|0|268v1
+267v1-->|1|268v1
+264v1-->|input|270v1
+268v1-->|single|270v1
+270v1-->271v1
+271v1-->272v1
+272v1-->273v1
+249v1-->|input|274v1
+272v1-->|single|274v1
+288v1--o275v1; linkStyle 292 stroke:red
+276v1-->277v1
+275v1-->|0|278v1
+277v1-->|1|278v1
+278v1-->279v1
+274v1-->|input|280v1
+279v1-->|single|280v1
+280v1-->281v1
+281v1-->282v1
+282v1-->283v1
+283v1-->284v1
+284v1-->285v1
+285v1-->|input|286v1
+279v1-->|single|286v1
+286v1-->287v1
+287v1-->288v1
+289v1-->290v1
+262v1-->291v1
+291v1-->292v1
+293v1-->294v1
+283v1-->295v1
+295v1-->296v1
+124v1-->297v1
+297v1-->298v1
+33v1
+34v1
+63v1
+64v1
+298v1
+201v1
+202v1
+210v1
+211v1
+257v1
+258v1
+296v1
+294v1
+subgraph var_cycle_0 ["var <tt>cycle_0</tt>"]
+    style var_cycle_0 fill:transparent
+    290v1
+end
+subgraph var_cycle_1 ["var <tt>cycle_1</tt>"]
+    style var_cycle_1 fill:transparent
+    292v1
+end
+subgraph var_cycle_10 ["var <tt>cycle_10</tt>"]
+    style var_cycle_10 fill:transparent
+    119v1
+end
+subgraph var_cycle_11 ["var <tt>cycle_11</tt>"]
+    style var_cycle_11 fill:transparent
+    164v1
+end
+subgraph var_cycle_12 ["var <tt>cycle_12</tt>"]
+    style var_cycle_12 fill:transparent
+    174v1
+end
+subgraph var_cycle_13 ["var <tt>cycle_13</tt>"]
+    style var_cycle_13 fill:transparent
+    175v1
+end
+subgraph var_cycle_14 ["var <tt>cycle_14</tt>"]
+    style var_cycle_14 fill:transparent
+    178v1
+end
+subgraph var_cycle_15 ["var <tt>cycle_15</tt>"]
+    style var_cycle_15 fill:transparent
+    189v1
+end
+subgraph var_cycle_16 ["var <tt>cycle_16</tt>"]
+    style var_cycle_16 fill:transparent
+    225v1
+end
+subgraph var_cycle_17 ["var <tt>cycle_17</tt>"]
+    style var_cycle_17 fill:transparent
+    239v1
+end
+subgraph var_cycle_18 ["var <tt>cycle_18</tt>"]
+    style var_cycle_18 fill:transparent
+    250v1
+end
+subgraph var_cycle_19 ["var <tt>cycle_19</tt>"]
+    style var_cycle_19 fill:transparent
+    273v1
+end
+subgraph var_cycle_2 ["var <tt>cycle_2</tt>"]
+    style var_cycle_2 fill:transparent
+    22v1
+end
+subgraph var_cycle_20 ["var <tt>cycle_20</tt>"]
+    style var_cycle_20 fill:transparent
+    288v1
+end
+subgraph var_cycle_3 ["var <tt>cycle_3</tt>"]
+    style var_cycle_3 fill:transparent
+    24v1
+end
+subgraph var_cycle_4 ["var <tt>cycle_4</tt>"]
+    style var_cycle_4 fill:transparent
+    49v1
+end
+subgraph var_cycle_5 ["var <tt>cycle_5</tt>"]
+    style var_cycle_5 fill:transparent
+    59v1
+end
+subgraph var_cycle_6 ["var <tt>cycle_6</tt>"]
+    style var_cycle_6 fill:transparent
+    78v1
+end
+subgraph var_cycle_7 ["var <tt>cycle_7</tt>"]
+    style var_cycle_7 fill:transparent
+    89v1
+end
+subgraph var_cycle_8 ["var <tt>cycle_8</tt>"]
+    style var_cycle_8 fill:transparent
+    100v1
+end
+subgraph var_cycle_9 ["var <tt>cycle_9</tt>"]
+    style var_cycle_9 fill:transparent
+    108v1
+end
+subgraph var_stream_0 ["var <tt>stream_0</tt>"]
+    style var_stream_0 fill:transparent
+    1v1
+end
+subgraph var_stream_101 ["var <tt>stream_101</tt>"]
+    style var_stream_101 fill:transparent
+    69v1
+end
+subgraph var_stream_103 ["var <tt>stream_103</tt>"]
+    style var_stream_103 fill:transparent
+    70v1
+end
+subgraph var_stream_104 ["var <tt>stream_104</tt>"]
+    style var_stream_104 fill:transparent
+    71v1
+    72v1
+end
+subgraph var_stream_106 ["var <tt>stream_106</tt>"]
+    style var_stream_106 fill:transparent
+    73v1
+end
+subgraph var_stream_109 ["var <tt>stream_109</tt>"]
+    style var_stream_109 fill:transparent
+    75v1
+end
+subgraph var_stream_11 ["var <tt>stream_11</tt>"]
+    style var_stream_11 fill:transparent
+    6v1
+end
+subgraph var_stream_111 ["var <tt>stream_111</tt>"]
+    style var_stream_111 fill:transparent
+    76v1
+end
+subgraph var_stream_112 ["var <tt>stream_112</tt>"]
+    style var_stream_112 fill:transparent
+    77v1
+end
+subgraph var_stream_114 ["var <tt>stream_114</tt>"]
+    style var_stream_114 fill:transparent
+    79v1
+end
+subgraph var_stream_115 ["var <tt>stream_115</tt>"]
+    style var_stream_115 fill:transparent
+    80v1
+end
+subgraph var_stream_117 ["var <tt>stream_117</tt>"]
+    style var_stream_117 fill:transparent
+    81v1
+end
+subgraph var_stream_118 ["var <tt>stream_118</tt>"]
+    style var_stream_118 fill:transparent
+    82v1
+    83v1
+end
+subgraph var_stream_120 ["var <tt>stream_120</tt>"]
+    style var_stream_120 fill:transparent
+    84v1
+end
+subgraph var_stream_123 ["var <tt>stream_123</tt>"]
+    style var_stream_123 fill:transparent
+    86v1
+end
+subgraph var_stream_125 ["var <tt>stream_125</tt>"]
+    style var_stream_125 fill:transparent
+    87v1
+end
+subgraph var_stream_126 ["var <tt>stream_126</tt>"]
+    style var_stream_126 fill:transparent
+    88v1
+end
+subgraph var_stream_128 ["var <tt>stream_128</tt>"]
+    style var_stream_128 fill:transparent
+    90v1
+end
+subgraph var_stream_129 ["var <tt>stream_129</tt>"]
+    style var_stream_129 fill:transparent
+    91v1
+end
+subgraph var_stream_13 ["var <tt>stream_13</tt>"]
+    style var_stream_13 fill:transparent
+    7v1
+end
+subgraph var_stream_131 ["var <tt>stream_131</tt>"]
+    style var_stream_131 fill:transparent
+    92v1
+end
+subgraph var_stream_132 ["var <tt>stream_132</tt>"]
+    style var_stream_132 fill:transparent
+    93v1
+    94v1
+end
+subgraph var_stream_134 ["var <tt>stream_134</tt>"]
+    style var_stream_134 fill:transparent
+    95v1
+end
+subgraph var_stream_137 ["var <tt>stream_137</tt>"]
+    style var_stream_137 fill:transparent
+    97v1
+end
+subgraph var_stream_139 ["var <tt>stream_139</tt>"]
+    style var_stream_139 fill:transparent
+    98v1
+end
+subgraph var_stream_140 ["var <tt>stream_140</tt>"]
+    style var_stream_140 fill:transparent
+    99v1
+end
+subgraph var_stream_143 ["var <tt>stream_143</tt>"]
+    style var_stream_143 fill:transparent
+    101v1
+end
+subgraph var_stream_144 ["var <tt>stream_144</tt>"]
+    style var_stream_144 fill:transparent
+    102v1
+    103v1
+end
+subgraph var_stream_146 ["var <tt>stream_146</tt>"]
+    style var_stream_146 fill:transparent
+    104v1
+end
+subgraph var_stream_148 ["var <tt>stream_148</tt>"]
+    style var_stream_148 fill:transparent
+    105v1
+end
+subgraph var_stream_149 ["var <tt>stream_149</tt>"]
+    style var_stream_149 fill:transparent
+    106v1
+end
+subgraph var_stream_15 ["var <tt>stream_15</tt>"]
+    style var_stream_15 fill:transparent
+    8v1
+end
+subgraph var_stream_151 ["var <tt>stream_151</tt>"]
+    style var_stream_151 fill:transparent
+    107v1
+end
+subgraph var_stream_154 ["var <tt>stream_154</tt>"]
+    style var_stream_154 fill:transparent
+    109v1
+end
+subgraph var_stream_157 ["var <tt>stream_157</tt>"]
+    style var_stream_157 fill:transparent
+    110v1
+end
+subgraph var_stream_159 ["var <tt>stream_159</tt>"]
+    style var_stream_159 fill:transparent
+    111v1
+end
+subgraph var_stream_16 ["var <tt>stream_16</tt>"]
+    style var_stream_16 fill:transparent
+    9v1
+end
+subgraph var_stream_160 ["var <tt>stream_160</tt>"]
+    style var_stream_160 fill:transparent
+    112v1
+    113v1
+end
+subgraph var_stream_162 ["var <tt>stream_162</tt>"]
+    style var_stream_162 fill:transparent
+    114v1
+end
+subgraph var_stream_165 ["var <tt>stream_165</tt>"]
+    style var_stream_165 fill:transparent
+    116v1
+end
+subgraph var_stream_167 ["var <tt>stream_167</tt>"]
+    style var_stream_167 fill:transparent
+    117v1
+end
+subgraph var_stream_168 ["var <tt>stream_168</tt>"]
+    style var_stream_168 fill:transparent
+    118v1
+end
+subgraph var_stream_169 ["var <tt>stream_169</tt>"]
+    style var_stream_169 fill:transparent
+    120v1
+end
+subgraph var_stream_17 ["var <tt>stream_17</tt>"]
+    style var_stream_17 fill:transparent
+    10v1
+end
+subgraph var_stream_170 ["var <tt>stream_170</tt>"]
+    style var_stream_170 fill:transparent
+    121v1
+end
+subgraph var_stream_176 ["var <tt>stream_176</tt>"]
+    style var_stream_176 fill:transparent
+    122v1
+end
+subgraph var_stream_177 ["var <tt>stream_177</tt>"]
+    style var_stream_177 fill:transparent
+    123v1
+end
+subgraph var_stream_178 ["var <tt>stream_178</tt>"]
+    style var_stream_178 fill:transparent
+    124v1
+end
+subgraph var_stream_179 ["var <tt>stream_179</tt>"]
+    style var_stream_179 fill:transparent
+    125v1
+end
+subgraph var_stream_18 ["var <tt>stream_18</tt>"]
+    style var_stream_18 fill:transparent
+    11v1
+end
+subgraph var_stream_182 ["var <tt>stream_182</tt>"]
+    style var_stream_182 fill:transparent
+    126v1
+end
+subgraph var_stream_184 ["var <tt>stream_184</tt>"]
+    style var_stream_184 fill:transparent
+    127v1
+end
+subgraph var_stream_185 ["var <tt>stream_185</tt>"]
+    style var_stream_185 fill:transparent
+    128v1
+    129v1
+end
+subgraph var_stream_187 ["var <tt>stream_187</tt>"]
+    style var_stream_187 fill:transparent
+    130v1
+end
+subgraph var_stream_190 ["var <tt>stream_190</tt>"]
+    style var_stream_190 fill:transparent
+    132v1
+end
+subgraph var_stream_192 ["var <tt>stream_192</tt>"]
+    style var_stream_192 fill:transparent
+    133v1
+end
+subgraph var_stream_193 ["var <tt>stream_193</tt>"]
+    style var_stream_193 fill:transparent
+    134v1
+end
+subgraph var_stream_196 ["var <tt>stream_196</tt>"]
+    style var_stream_196 fill:transparent
+    135v1
+end
+subgraph var_stream_199 ["var <tt>stream_199</tt>"]
+    style var_stream_199 fill:transparent
+    136v1
+end
+subgraph var_stream_202 ["var <tt>stream_202</tt>"]
+    style var_stream_202 fill:transparent
+    137v1
+end
+subgraph var_stream_204 ["var <tt>stream_204</tt>"]
+    style var_stream_204 fill:transparent
+    138v1
+end
+subgraph var_stream_208 ["var <tt>stream_208</tt>"]
+    style var_stream_208 fill:transparent
+    139v1
+end
+subgraph var_stream_209 ["var <tt>stream_209</tt>"]
+    style var_stream_209 fill:transparent
+    140v1
+end
+subgraph var_stream_21 ["var <tt>stream_21</tt>"]
+    style var_stream_21 fill:transparent
+    12v1
+end
+subgraph var_stream_211 ["var <tt>stream_211</tt>"]
+    style var_stream_211 fill:transparent
+    141v1
+end
+subgraph var_stream_212 ["var <tt>stream_212</tt>"]
+    style var_stream_212 fill:transparent
+    142v1
+    143v1
+end
+subgraph var_stream_214 ["var <tt>stream_214</tt>"]
+    style var_stream_214 fill:transparent
+    144v1
+end
+subgraph var_stream_216 ["var <tt>stream_216</tt>"]
+    style var_stream_216 fill:transparent
+    145v1
+end
+subgraph var_stream_217 ["var <tt>stream_217</tt>"]
+    style var_stream_217 fill:transparent
+    146v1
+end
+subgraph var_stream_219 ["var <tt>stream_219</tt>"]
+    style var_stream_219 fill:transparent
+    147v1
+end
+subgraph var_stream_22 ["var <tt>stream_22</tt>"]
+    style var_stream_22 fill:transparent
+    13v1
+    14v1
+end
+subgraph var_stream_220 ["var <tt>stream_220</tt>"]
+    style var_stream_220 fill:transparent
+    148v1
+end
+subgraph var_stream_221 ["var <tt>stream_221</tt>"]
+    style var_stream_221 fill:transparent
+    149v1
+end
+subgraph var_stream_223 ["var <tt>stream_223</tt>"]
+    style var_stream_223 fill:transparent
+    150v1
+end
+subgraph var_stream_225 ["var <tt>stream_225</tt>"]
+    style var_stream_225 fill:transparent
+    151v1
+end
+subgraph var_stream_226 ["var <tt>stream_226</tt>"]
+    style var_stream_226 fill:transparent
+    152v1
+end
+subgraph var_stream_228 ["var <tt>stream_228</tt>"]
+    style var_stream_228 fill:transparent
+    153v1
+end
+subgraph var_stream_229 ["var <tt>stream_229</tt>"]
+    style var_stream_229 fill:transparent
+    154v1
+    155v1
+end
+subgraph var_stream_231 ["var <tt>stream_231</tt>"]
+    style var_stream_231 fill:transparent
+    156v1
+end
+subgraph var_stream_234 ["var <tt>stream_234</tt>"]
+    style var_stream_234 fill:transparent
+    158v1
+end
+subgraph var_stream_237 ["var <tt>stream_237</tt>"]
+    style var_stream_237 fill:transparent
+    159v1
+end
+subgraph var_stream_239 ["var <tt>stream_239</tt>"]
+    style var_stream_239 fill:transparent
+    160v1
+end
+subgraph var_stream_24 ["var <tt>stream_24</tt>"]
+    style var_stream_24 fill:transparent
+    15v1
+end
+subgraph var_stream_240 ["var <tt>stream_240</tt>"]
+    style var_stream_240 fill:transparent
+    161v1
+end
+subgraph var_stream_241 ["var <tt>stream_241</tt>"]
+    style var_stream_241 fill:transparent
+    162v1
+end
+subgraph var_stream_243 ["var <tt>stream_243</tt>"]
+    style var_stream_243 fill:transparent
+    163v1
+end
+subgraph var_stream_246 ["var <tt>stream_246</tt>"]
+    style var_stream_246 fill:transparent
+    165v1
+end
+subgraph var_stream_247 ["var <tt>stream_247</tt>"]
+    style var_stream_247 fill:transparent
+    166v1
+    167v1
+end
+subgraph var_stream_249 ["var <tt>stream_249</tt>"]
+    style var_stream_249 fill:transparent
+    168v1
+end
+subgraph var_stream_252 ["var <tt>stream_252</tt>"]
+    style var_stream_252 fill:transparent
+    170v1
+end
+subgraph var_stream_255 ["var <tt>stream_255</tt>"]
+    style var_stream_255 fill:transparent
+    171v1
+end
+subgraph var_stream_257 ["var <tt>stream_257</tt>"]
+    style var_stream_257 fill:transparent
+    172v1
+end
+subgraph var_stream_258 ["var <tt>stream_258</tt>"]
+    style var_stream_258 fill:transparent
+    173v1
+end
+subgraph var_stream_262 ["var <tt>stream_262</tt>"]
+    style var_stream_262 fill:transparent
+    176v1
+end
+subgraph var_stream_264 ["var <tt>stream_264</tt>"]
+    style var_stream_264 fill:transparent
+    177v1
+end
+subgraph var_stream_267 ["var <tt>stream_267</tt>"]
+    style var_stream_267 fill:transparent
+    179v1
+end
+subgraph var_stream_268 ["var <tt>stream_268</tt>"]
+    style var_stream_268 fill:transparent
+    180v1
+end
+subgraph var_stream_27 ["var <tt>stream_27</tt>"]
+    style var_stream_27 fill:transparent
+    17v1
+end
+subgraph var_stream_270 ["var <tt>stream_270</tt>"]
+    style var_stream_270 fill:transparent
+    181v1
+end
+subgraph var_stream_271 ["var <tt>stream_271</tt>"]
+    style var_stream_271 fill:transparent
+    182v1
+    183v1
+end
+subgraph var_stream_273 ["var <tt>stream_273</tt>"]
+    style var_stream_273 fill:transparent
+    184v1
+end
+subgraph var_stream_276 ["var <tt>stream_276</tt>"]
+    style var_stream_276 fill:transparent
+    186v1
+end
+subgraph var_stream_278 ["var <tt>stream_278</tt>"]
+    style var_stream_278 fill:transparent
+    187v1
+end
+subgraph var_stream_279 ["var <tt>stream_279</tt>"]
+    style var_stream_279 fill:transparent
+    188v1
+end
+subgraph var_stream_282 ["var <tt>stream_282</tt>"]
+    style var_stream_282 fill:transparent
+    190v1
+end
+subgraph var_stream_285 ["var <tt>stream_285</tt>"]
+    style var_stream_285 fill:transparent
+    191v1
+end
+subgraph var_stream_288 ["var <tt>stream_288</tt>"]
+    style var_stream_288 fill:transparent
+    192v1
+end
+subgraph var_stream_29 ["var <tt>stream_29</tt>"]
+    style var_stream_29 fill:transparent
+    18v1
+end
+subgraph var_stream_290 ["var <tt>stream_290</tt>"]
+    style var_stream_290 fill:transparent
+    193v1
+end
+subgraph var_stream_292 ["var <tt>stream_292</tt>"]
+    style var_stream_292 fill:transparent
+    194v1
+end
+subgraph var_stream_294 ["var <tt>stream_294</tt>"]
+    style var_stream_294 fill:transparent
+    195v1
+end
+subgraph var_stream_295 ["var <tt>stream_295</tt>"]
+    style var_stream_295 fill:transparent
+    196v1
+end
+subgraph var_stream_296 ["var <tt>stream_296</tt>"]
+    style var_stream_296 fill:transparent
+    197v1
+end
+subgraph var_stream_297 ["var <tt>stream_297</tt>"]
+    style var_stream_297 fill:transparent
+    198v1
+end
+subgraph var_stream_298 ["var <tt>stream_298</tt>"]
+    style var_stream_298 fill:transparent
+    199v1
+end
+subgraph var_stream_299 ["var <tt>stream_299</tt>"]
+    style var_stream_299 fill:transparent
+    200v1
+end
+subgraph var_stream_30 ["var <tt>stream_30</tt>"]
+    style var_stream_30 fill:transparent
+    19v1
+end
+subgraph var_stream_301 ["var <tt>stream_301</tt>"]
+    style var_stream_301 fill:transparent
+    203v1
+    204v1
+end
+subgraph var_stream_303 ["var <tt>stream_303</tt>"]
+    style var_stream_303 fill:transparent
+    205v1
+end
+subgraph var_stream_305 ["var <tt>stream_305</tt>"]
+    style var_stream_305 fill:transparent
+    206v1
+end
+subgraph var_stream_309 ["var <tt>stream_309</tt>"]
+    style var_stream_309 fill:transparent
+    207v1
+end
+subgraph var_stream_310 ["var <tt>stream_310</tt>"]
+    style var_stream_310 fill:transparent
+    208v1
+end
+subgraph var_stream_314 ["var <tt>stream_314</tt>"]
+    style var_stream_314 fill:transparent
+    209v1
+end
+subgraph var_stream_316 ["var <tt>stream_316</tt>"]
+    style var_stream_316 fill:transparent
+    212v1
+    213v1
+end
+subgraph var_stream_318 ["var <tt>stream_318</tt>"]
+    style var_stream_318 fill:transparent
+    214v1
+end
+subgraph var_stream_32 ["var <tt>stream_32</tt>"]
+    style var_stream_32 fill:transparent
+    20v1
+end
+subgraph var_stream_320 ["var <tt>stream_320</tt>"]
+    style var_stream_320 fill:transparent
+    215v1
+end
+subgraph var_stream_321 ["var <tt>stream_321</tt>"]
+    style var_stream_321 fill:transparent
+    216v1
+end
+subgraph var_stream_323 ["var <tt>stream_323</tt>"]
+    style var_stream_323 fill:transparent
+    217v1
+end
+subgraph var_stream_324 ["var <tt>stream_324</tt>"]
+    style var_stream_324 fill:transparent
+    218v1
+    219v1
+end
+subgraph var_stream_326 ["var <tt>stream_326</tt>"]
+    style var_stream_326 fill:transparent
+    220v1
+end
+subgraph var_stream_329 ["var <tt>stream_329</tt>"]
+    style var_stream_329 fill:transparent
+    222v1
+end
+subgraph var_stream_331 ["var <tt>stream_331</tt>"]
+    style var_stream_331 fill:transparent
+    223v1
+end
+subgraph var_stream_332 ["var <tt>stream_332</tt>"]
+    style var_stream_332 fill:transparent
+    224v1
+end
+subgraph var_stream_335 ["var <tt>stream_335</tt>"]
+    style var_stream_335 fill:transparent
+    226v1
+end
+subgraph var_stream_336 ["var <tt>stream_336</tt>"]
+    style var_stream_336 fill:transparent
+    227v1
+    228v1
+end
+subgraph var_stream_338 ["var <tt>stream_338</tt>"]
+    style var_stream_338 fill:transparent
+    229v1
+end
+subgraph var_stream_34 ["var <tt>stream_34</tt>"]
+    style var_stream_34 fill:transparent
+    21v1
+end
+subgraph var_stream_340 ["var <tt>stream_340</tt>"]
+    style var_stream_340 fill:transparent
+    230v1
+end
+subgraph var_stream_341 ["var <tt>stream_341</tt>"]
+    style var_stream_341 fill:transparent
+    231v1
+end
+subgraph var_stream_343 ["var <tt>stream_343</tt>"]
+    style var_stream_343 fill:transparent
+    232v1
+end
+subgraph var_stream_345 ["var <tt>stream_345</tt>"]
+    style var_stream_345 fill:transparent
+    233v1
+end
+subgraph var_stream_346 ["var <tt>stream_346</tt>"]
+    style var_stream_346 fill:transparent
+    234v1
+end
+subgraph var_stream_347 ["var <tt>stream_347</tt>"]
+    style var_stream_347 fill:transparent
+    235v1
+end
+subgraph var_stream_348 ["var <tt>stream_348</tt>"]
+    style var_stream_348 fill:transparent
+    236v1
+end
+subgraph var_stream_350 ["var <tt>stream_350</tt>"]
+    style var_stream_350 fill:transparent
+    237v1
+end
+subgraph var_stream_352 ["var <tt>stream_352</tt>"]
+    style var_stream_352 fill:transparent
+    238v1
+end
+subgraph var_stream_355 ["var <tt>stream_355</tt>"]
+    style var_stream_355 fill:transparent
+    240v1
+end
+subgraph var_stream_356 ["var <tt>stream_356</tt>"]
+    style var_stream_356 fill:transparent
+    241v1
+end
+subgraph var_stream_358 ["var <tt>stream_358</tt>"]
+    style var_stream_358 fill:transparent
+    242v1
+end
+subgraph var_stream_359 ["var <tt>stream_359</tt>"]
+    style var_stream_359 fill:transparent
+    243v1
+    244v1
+end
+subgraph var_stream_36 ["var <tt>stream_36</tt>"]
+    style var_stream_36 fill:transparent
+    23v1
+end
+subgraph var_stream_361 ["var <tt>stream_361</tt>"]
+    style var_stream_361 fill:transparent
+    245v1
+end
+subgraph var_stream_364 ["var <tt>stream_364</tt>"]
+    style var_stream_364 fill:transparent
+    247v1
+end
+subgraph var_stream_366 ["var <tt>stream_366</tt>"]
+    style var_stream_366 fill:transparent
+    248v1
+end
+subgraph var_stream_367 ["var <tt>stream_367</tt>"]
+    style var_stream_367 fill:transparent
+    249v1
+end
+subgraph var_stream_370 ["var <tt>stream_370</tt>"]
+    style var_stream_370 fill:transparent
+    251v1
+end
+subgraph var_stream_371 ["var <tt>stream_371</tt>"]
+    style var_stream_371 fill:transparent
+    252v1
+end
+subgraph var_stream_372 ["var <tt>stream_372</tt>"]
+    style var_stream_372 fill:transparent
+    253v1
+end
+subgraph var_stream_373 ["var <tt>stream_373</tt>"]
+    style var_stream_373 fill:transparent
+    254v1
+end
+subgraph var_stream_374 ["var <tt>stream_374</tt>"]
+    style var_stream_374 fill:transparent
+    255v1
+end
+subgraph var_stream_375 ["var <tt>stream_375</tt>"]
+    style var_stream_375 fill:transparent
+    256v1
+end
+subgraph var_stream_377 ["var <tt>stream_377</tt>"]
+    style var_stream_377 fill:transparent
+    259v1
+    260v1
+end
+subgraph var_stream_379 ["var <tt>stream_379</tt>"]
+    style var_stream_379 fill:transparent
+    261v1
+end
+subgraph var_stream_381 ["var <tt>stream_381</tt>"]
+    style var_stream_381 fill:transparent
+    262v1
+end
+subgraph var_stream_383 ["var <tt>stream_383</tt>"]
+    style var_stream_383 fill:transparent
+    263v1
+end
+subgraph var_stream_384 ["var <tt>stream_384</tt>"]
+    style var_stream_384 fill:transparent
+    264v1
+end
+subgraph var_stream_386 ["var <tt>stream_386</tt>"]
+    style var_stream_386 fill:transparent
+    265v1
+end
+subgraph var_stream_387 ["var <tt>stream_387</tt>"]
+    style var_stream_387 fill:transparent
+    266v1
+    267v1
+end
+subgraph var_stream_389 ["var <tt>stream_389</tt>"]
+    style var_stream_389 fill:transparent
+    268v1
+end
+subgraph var_stream_39 ["var <tt>stream_39</tt>"]
+    style var_stream_39 fill:transparent
+    25v1
+end
+subgraph var_stream_392 ["var <tt>stream_392</tt>"]
+    style var_stream_392 fill:transparent
+    270v1
+end
+subgraph var_stream_394 ["var <tt>stream_394</tt>"]
+    style var_stream_394 fill:transparent
+    271v1
+end
+subgraph var_stream_395 ["var <tt>stream_395</tt>"]
+    style var_stream_395 fill:transparent
+    272v1
+end
+subgraph var_stream_398 ["var <tt>stream_398</tt>"]
+    style var_stream_398 fill:transparent
+    274v1
+end
+subgraph var_stream_4 ["var <tt>stream_4</tt>"]
+    style var_stream_4 fill:transparent
+    2v1
+end
+subgraph var_stream_401 ["var <tt>stream_401</tt>"]
+    style var_stream_401 fill:transparent
+    275v1
+end
+subgraph var_stream_402 ["var <tt>stream_402</tt>"]
+    style var_stream_402 fill:transparent
+    276v1
+    277v1
+end
+subgraph var_stream_404 ["var <tt>stream_404</tt>"]
+    style var_stream_404 fill:transparent
+    278v1
+end
+subgraph var_stream_406 ["var <tt>stream_406</tt>"]
+    style var_stream_406 fill:transparent
+    279v1
+end
+subgraph var_stream_407 ["var <tt>stream_407</tt>"]
+    style var_stream_407 fill:transparent
+    280v1
+end
+subgraph var_stream_409 ["var <tt>stream_409</tt>"]
+    style var_stream_409 fill:transparent
+    281v1
+end
+subgraph var_stream_41 ["var <tt>stream_41</tt>"]
+    style var_stream_41 fill:transparent
+    26v1
+end
+subgraph var_stream_411 ["var <tt>stream_411</tt>"]
+    style var_stream_411 fill:transparent
+    282v1
+end
+subgraph var_stream_412 ["var <tt>stream_412</tt>"]
+    style var_stream_412 fill:transparent
+    283v1
+end
+subgraph var_stream_413 ["var <tt>stream_413</tt>"]
+    style var_stream_413 fill:transparent
+    284v1
+end
+subgraph var_stream_414 ["var <tt>stream_414</tt>"]
+    style var_stream_414 fill:transparent
+    285v1
+end
+subgraph var_stream_416 ["var <tt>stream_416</tt>"]
+    style var_stream_416 fill:transparent
+    286v1
+end
+subgraph var_stream_418 ["var <tt>stream_418</tt>"]
+    style var_stream_418 fill:transparent
+    287v1
+end
+subgraph var_stream_419 ["var <tt>stream_419</tt>"]
+    style var_stream_419 fill:transparent
+    289v1
+end
+subgraph var_stream_423 ["var <tt>stream_423</tt>"]
+    style var_stream_423 fill:transparent
+    291v1
+end
+subgraph var_stream_425 ["var <tt>stream_425</tt>"]
+    style var_stream_425 fill:transparent
+    293v1
+end
+subgraph var_stream_429 ["var <tt>stream_429</tt>"]
+    style var_stream_429 fill:transparent
+    295v1
+end
+subgraph var_stream_437 ["var <tt>stream_437</tt>"]
+    style var_stream_437 fill:transparent
+    297v1
+end
+subgraph var_stream_44 ["var <tt>stream_44</tt>"]
+    style var_stream_44 fill:transparent
+    27v1
+end
+subgraph var_stream_45 ["var <tt>stream_45</tt>"]
+    style var_stream_45 fill:transparent
+    28v1
+end
+subgraph var_stream_46 ["var <tt>stream_46</tt>"]
+    style var_stream_46 fill:transparent
+    29v1
+end
+subgraph var_stream_47 ["var <tt>stream_47</tt>"]
+    style var_stream_47 fill:transparent
+    30v1
+end
+subgraph var_stream_48 ["var <tt>stream_48</tt>"]
+    style var_stream_48 fill:transparent
+    31v1
+end
+subgraph var_stream_49 ["var <tt>stream_49</tt>"]
+    style var_stream_49 fill:transparent
+    32v1
+end
+subgraph var_stream_51 ["var <tt>stream_51</tt>"]
+    style var_stream_51 fill:transparent
+    35v1
+    36v1
+end
+subgraph var_stream_53 ["var <tt>stream_53</tt>"]
+    style var_stream_53 fill:transparent
+    37v1
+end
+subgraph var_stream_55 ["var <tt>stream_55</tt>"]
+    style var_stream_55 fill:transparent
+    38v1
+end
+subgraph var_stream_58 ["var <tt>stream_58</tt>"]
+    style var_stream_58 fill:transparent
+    39v1
+end
+subgraph var_stream_59 ["var <tt>stream_59</tt>"]
+    style var_stream_59 fill:transparent
+    40v1
+end
+subgraph var_stream_60 ["var <tt>stream_60</tt>"]
+    style var_stream_60 fill:transparent
+    41v1
+end
+subgraph var_stream_62 ["var <tt>stream_62</tt>"]
+    style var_stream_62 fill:transparent
+    42v1
+end
+subgraph var_stream_63 ["var <tt>stream_63</tt>"]
+    style var_stream_63 fill:transparent
+    43v1
+    44v1
+end
+subgraph var_stream_65 ["var <tt>stream_65</tt>"]
+    style var_stream_65 fill:transparent
+    45v1
+end
+subgraph var_stream_67 ["var <tt>stream_67</tt>"]
+    style var_stream_67 fill:transparent
+    46v1
+end
+subgraph var_stream_68 ["var <tt>stream_68</tt>"]
+    style var_stream_68 fill:transparent
+    47v1
+end
+subgraph var_stream_70 ["var <tt>stream_70</tt>"]
+    style var_stream_70 fill:transparent
+    48v1
+end
+subgraph var_stream_72 ["var <tt>stream_72</tt>"]
+    style var_stream_72 fill:transparent
+    50v1
+end
+subgraph var_stream_73 ["var <tt>stream_73</tt>"]
+    style var_stream_73 fill:transparent
+    51v1
+    52v1
+end
+subgraph var_stream_75 ["var <tt>stream_75</tt>"]
+    style var_stream_75 fill:transparent
+    53v1
+end
+subgraph var_stream_8 ["var <tt>stream_8</tt>"]
+    style var_stream_8 fill:transparent
+    3v1
+end
+subgraph var_stream_80 ["var <tt>stream_80</tt>"]
+    style var_stream_80 fill:transparent
+    55v1
+end
+subgraph var_stream_81 ["var <tt>stream_81</tt>"]
+    style var_stream_81 fill:transparent
+    56v1
+end
+subgraph var_stream_83 ["var <tt>stream_83</tt>"]
+    style var_stream_83 fill:transparent
+    57v1
+end
+subgraph var_stream_84 ["var <tt>stream_84</tt>"]
+    style var_stream_84 fill:transparent
+    58v1
+end
+subgraph var_stream_88 ["var <tt>stream_88</tt>"]
+    style var_stream_88 fill:transparent
+    60v1
+end
+subgraph var_stream_9 ["var <tt>stream_9</tt>"]
+    style var_stream_9 fill:transparent
+    4v1
+    5v1
+end
+subgraph var_stream_91 ["var <tt>stream_91</tt>"]
+    style var_stream_91 fill:transparent
+    61v1
+end
+subgraph var_stream_92 ["var <tt>stream_92</tt>"]
+    style var_stream_92 fill:transparent
+    62v1
+end
+subgraph var_stream_95 ["var <tt>stream_95</tt>"]
+    style var_stream_95 fill:transparent
+    65v1
+    66v1
+end
+subgraph var_stream_97 ["var <tt>stream_97</tt>"]
+    style var_stream_97 fill:transparent
+    67v1
+end
+subgraph var_stream_99 ["var <tt>stream_99</tt>"]
+    style var_stream_99 fill:transparent
+    68v1
+end
