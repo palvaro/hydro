@@ -900,3 +900,50 @@ fn a_top_level_scan_over_a_chosen_order_is_fragile() {
         .unwrap_or_else(|| panic!("the members disagree with no fault: {cross}"));
     assert!(cex.faults.is_empty(), "{cross}");
 }
+
+/// A record that reaches the output only through `defer_tick` is emitted only if a later tick
+/// runs at that member, and the simulator runs a tick only when a hook releases something. Two
+/// values to two members, each batched, deferred a tick and emitted: a member that batched them
+/// apart emits the first (the second tick runs), one that batched them together emits nothing.
+/// Before `defer_tick` was fragile, this program counted as fragile-free and was certified;
+/// brute force broke it with the empty set.
+#[cfg(stageleft_runtime)]
+#[test]
+fn deferred_records_are_fragile() {
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let tick = members.tick();
+    let delayed = input
+        .broadcast_closed(&members, TCP.fail_stop().name("initial").bincode())
+        .batch(&tick, nondet!(/** which tick a delivery lands in */))
+        .defer_tick()
+        .all_ticks()
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed (wrongly): every member emits what it received, a tick later */
+        ));
+    let _out = delayed.sim_cluster_output();
+    let mut check = EcCheck::new().max_crashes(0);
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 2))
+        .compiled();
+    let sites = check.fragile_sites().expect("instrumented");
+    assert!(sites.iter().any(|s| s.op == "defer_tick"), "{sites:?}");
+    let cross = check.cross_check(
+        &sim,
+        async || {
+            send.send(1);
+            send.send(2);
+        },
+        MAX_FAULTS,
+    );
+    agree("deferred records", &cross);
+    let broken = cross
+        .results
+        .results()
+        .iter()
+        .filter_map(|l| l.verdict.counterexample())
+        .any(|c| c.faults.is_empty());
+    assert!(broken, "the members disagree with no fault: {cross}");
+}

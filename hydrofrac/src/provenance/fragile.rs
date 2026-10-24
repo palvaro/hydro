@@ -13,8 +13,7 @@
 //! kinds this module does not know (a new IR kind is fragile until someone proves otherwise).
 //! The robust entries, each justified in [`View::fragile`]:
 //! - plumbing that passes every record through unchanged (casts, tees, references, atomic
-//!   brackets, consistency assertions, counters, `observe_nondet`, cycle sources, `defer_tick`,
-//!   `all_ticks`);
+//!   brackets, consistency assertions, counters, `observe_nondet`, cycle sources, `all_ticks`);
 //! - element-wise operators with pure closures (`map`, `flat_map`, `filter`, `filter_map`,
 //!   `inspect`, partitions);
 //! - set-preserving merges and reorderings (`chain`, `merge_ordered`, `sort`, `unique`);
@@ -23,7 +22,9 @@
 //! - joins and cross products over a whole run (top level), and a half join at top level, whose
 //!   bounded build side is complete before it is probed;
 //! - the dedup idiom `fresh = arrived.filter_not_in(seen); seen = seen.chain(fresh)` over a
-//!   constant initial state (`View::is_dedup`);
+//!   constant initial state (`View::dedup_edge`), and the `defer_tick` that carries its `seen`
+//!   to the next tick: that edge only feeds the negation's negative side, whose tags the rewrite
+//!   drops, and the idiom's output over the run does not depend on how many ticks run;
 //! - any structural step whose every input is *constant* (`View::constant`): it computes the same
 //!   records in every schedule. This is what keeps `use::state`'s initial value
 //!   (`initial.filter_if(first_tick)`) robust;
@@ -33,7 +34,11 @@
 //! `enumerate`, `chain_first`; folds, reduces and scans anywhere, since even at top level their
 //! input order can be a schedule choice (`assume_ordering` at top level is a simulator hook); joins
 //! inside a tick; snapshots (a `batch` of a singleton, optional or keyed singleton); closures that
-//! read Hydro state by reference; and other sources (timers, intervals, streams).
+//! read Hydro state by reference; other sources (timers, intervals, streams); and `defer_tick`
+//! (but the dedup idiom's): a deferred record reaches the next tick only if a next tick runs at
+//! that location, and the simulator runs a tick only when some hook releases something
+//! (`hydro_lang/src/sim/compiled.rs`, `SimTick::can_run`), so whether it is ever emitted depends
+//! on how the deliveries were batched.
 //!
 //! Opaque islands (async and versioned operators, which the rewrite cannot see into) get no tag:
 //! lineage treats every record through an opaque island as fragile, and an island makes the
@@ -98,6 +103,8 @@ struct View<'a> {
     ir: &'a [HydroRoot],
     /// Each tick cycle's sink input.
     cycle_sinks: HashMap<CycleId, *const HydroNode>,
+    /// The `DeferTick`s that carry a dedup idiom's state to the next tick ([`Self::dedup_edge`]).
+    dedup_edges: HashSet<*const HydroNode>,
 }
 
 /// The inputs of `node`, including the node a `Tee`, `Reference` or `PartitionSide` shares.
@@ -139,7 +146,19 @@ impl<'a> View<'a> {
                 _ => None,
             })
             .collect();
-        View { ir, cycle_sinks }
+        let mut view = View {
+            ir,
+            cycle_sinks,
+            dedup_edges: HashSet::new(),
+        };
+        let edges = view
+            .nodes()
+            .into_iter()
+            // SAFETY: as in `classify`.
+            .filter_map(|ptr| view.dedup_edge(unsafe { &*ptr }))
+            .collect();
+        view.dedup_edges = edges;
+        view
     }
 
     /// Every node reachable from the roots (through shared nodes and the state closures read),
@@ -193,8 +212,10 @@ impl<'a> View<'a> {
             | Counter { .. }
             | UnboundSingleton { .. }
             | CycleSource { .. }
-            | DeferTick { .. }
             | YieldConcat { .. } => true,
+            // A deferred record exists only if a later tick runs (see the module docs), except on
+            // the dedup idiom's state edge, which only feeds a negation's negative side.
+            DeferTick { .. } => self.dedup_edges.contains(&std::ptr::from_ref(node)),
             // Element-wise with a pure closure (`reads_state` is false here): each output is a
             // function of one input record.
             Map { .. } | FlatMap { .. } | Filter { .. } | FilterMap { .. } | Inspect { .. } => true,
@@ -232,7 +253,7 @@ impl<'a> View<'a> {
             // arrived; a half join's bounded build side is complete before it is probed.
             Join { .. } | CrossProduct { .. } | JoinHalf { .. } => top_level,
             // The dedup idiom: every record of `pos` not in the constant initial state.
-            Difference { .. } => self.is_dedup(node),
+            Difference { .. } => self.dedup_edge(node).is_some(),
             // Opaque islands: no tag (lineage treats their records as fragile, see the module
             // docs).
             ResolveFutures { .. }
@@ -268,6 +289,7 @@ impl<'a> View<'a> {
             Enumerate { .. } => "enumerate",
             ChainFirst { .. } => "chain_first",
             Batch { .. } => "snapshot",
+            DeferTick { .. } => "defer_tick",
             _ => "unlisted",
         })
     }
@@ -291,51 +313,50 @@ impl<'a> View<'a> {
         structural && inputs(node).into_iter().all(|i| self.constant(i))
     }
 
-    /// Whether `node` is `filter_not_in` against its own history: a `Difference` whose `neg` is
-    /// a tick state that starts as a constant and then accumulates the `Difference`'s own
-    /// output (`seen = seen.chain(fresh)` with `fresh = arrived.filter_not_in(seen)`, the idiom
-    /// of `use::state`). Its output over the run is then every record of `pos` not in the
-    /// initial state, whatever ticks they arrive in. Ported from the research branch's
-    /// `Cones::self_difference` (`origin/hydrofrac-sensitivity`, `sensitivity.rs`).
-    fn is_dedup(&self, node: &HydroNode) -> bool {
+    /// If `node` is `filter_not_in` against its own history, the `DeferTick` that carries that
+    /// history to the next tick. That is a `Difference` whose `neg` is a tick state that starts
+    /// as a constant and then accumulates the `Difference`'s own output (`seen = seen.chain(fresh)`
+    /// with `fresh = arrived.filter_not_in(seen)`, the idiom of `use::state`). Its output over the
+    /// run is then every record of `pos` not in the initial state, whatever ticks they arrive in.
+    /// Ported from the research branch's `Cones::self_difference`
+    /// (`origin/hydrofrac-sensitivity`, `sensitivity.rs`).
+    fn dedup_edge(&self, node: &HydroNode) -> Option<*const HydroNode> {
         let HydroNode::Difference { neg, .. } = node else {
-            return false;
+            return None;
         };
         let me = std::ptr::from_ref(node);
         let state = strip(std::ptr::from_ref(&**neg));
         // SAFETY: as in `strip`.
         let HydroNode::Chain { first, second, .. } = (unsafe { &*state }) else {
-            return false;
+            return None;
         };
-        // The cycle a side carries over from the previous tick, if it does.
-        let carried = |side: &HydroNode| -> Option<CycleId> {
+        // The cycle a side carries over from the previous tick, and its `DeferTick`, if it does.
+        let carried = |side: &HydroNode| -> Option<(CycleId, *const HydroNode)> {
+            let defer = strip(std::ptr::from_ref(side));
             // SAFETY: as in `strip`.
-            let HydroNode::DeferTick { input, .. } = (unsafe { &*strip(std::ptr::from_ref(side)) })
-            else {
+            let HydroNode::DeferTick { input, .. } = (unsafe { &*defer }) else {
                 return None;
             };
             // SAFETY: as in `strip`.
             match unsafe { &*strip(std::ptr::from_ref(&**input)) } {
-                HydroNode::CycleSource { cycle_id, .. } => Some(*cycle_id),
+                HydroNode::CycleSource { cycle_id, .. } => Some((*cycle_id, defer)),
                 _ => None,
             }
         };
-        let (cycle, init) = match (carried(first), carried(second)) {
+        let ((cycle, defer), init) = match (carried(first), carried(second)) {
             (Some(c), _) => (c, std::ptr::from_ref(&**second)),
             (None, Some(c)) => (c, std::ptr::from_ref(&**first)),
-            (None, None) => return false,
+            (None, None) => return None,
         };
-        let Some(&sink) = self.cycle_sinks.get(&cycle) else {
-            return false;
-        };
+        let &sink = self.cycle_sinks.get(&cycle)?;
         // SAFETY: as in `strip`.
         let HydroNode::Chain { first, second, .. } = (unsafe { &*strip(sink) }) else {
-            return false;
+            return None;
         };
         let parts = (
             strip(std::ptr::from_ref(&**first)),
             strip(std::ptr::from_ref(&**second)),
         );
-        (parts == (state, me) || parts == (me, state)) && self.constant(init)
+        ((parts == (state, me) || parts == (me, state)) && self.constant(init)).then_some(defer)
     }
 }
