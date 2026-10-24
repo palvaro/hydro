@@ -1,0 +1,3 @@
+0000000000000000000000000000000000000000 dd5c4d05a5615a97e63fc2cb5f9636c15659157f Peter Alvaro <palvarox@amazon.com> 1792873656 +0000
+dd5c4d05a5615a97e63fc2cb5f9636c15659157f dd5c4d05a5615a97e63fc2cb5f9636c15659157f Peter Alvaro <palvarox@amazon.com> 1792873656 +0000	reset: moving to HEAD
+dd5c4d05a5615a97e63fc2cb5f9636c15659157f 14b674c97aa7ddb656c36b9dbdc11b9193799150 Infinity <infinity@localhost> 1792879572 +0000	commit: wip(hydrofrac): forbid barriers in the fault phase; add a recovery phase

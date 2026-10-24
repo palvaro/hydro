@@ -34,5 +34,6 @@ hydro_lang = { path = "../hydro_lang", version = "^0.17.0-alpha.4", features = [
     "sim",
 ] }
 hydro_deploy = { path = "../hydro_deploy/core", version = "^0.17.0-alpha.3" }
-# The provenance rewrite on the EC demos (`ec_inference_demos::hydrofrac_provenance_tests`).
+# `EcCheck` and the provenance rewrite on the EC demos (`ec_inference_demos::ec_abd_hydrofrac`,
+# `ec_inference_demos::hydrofrac_provenance_tests`).
 hydrofrac = { path = "../hydrofrac" }

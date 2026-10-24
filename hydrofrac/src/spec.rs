@@ -132,8 +132,6 @@ pub struct HeldPair<S> {
 pub struct Evaluation<S> {
     /// The domain facts some correct member held: what every correct member owes.
     pub required: BTreeSet<Fact>,
-    /// The members the run did not crash.
-    pub correct: BTreeSet<u32>,
     /// Every required `(member, fact)` pair the run delivered, by member then fact. When
     /// [`Self::holds`], this is the derivation of `POST`: a run that recomputes one support
     /// of every pair (with the same correct members) satisfies `POST` again.
@@ -181,7 +179,6 @@ pub fn evaluate<S: Clone>(
     }
     Evaluation {
         required,
-        correct: correct.clone(),
         held,
         missing,
         outside_domain,

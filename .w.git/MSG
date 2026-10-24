@@ -1,0 +1,50 @@
+wip(hydrofrac): forbid barriers in the fault phase; add a recovery phase
+
+A run now has two phases: the inputs (the fault phase), then the heal and an optional
+fault-free recovery phase. A `quiesce()` inside the inputs hid the interleavings it cut;
+now it is the harness's error.
+
+## API
+
+- `EcCheck::run_then_recover(sim, inputs, recover)` and
+  `EcCheck::cross_check_then_recover(sim, inputs, recover, max_faults)` are new.
+  `run` and `cross_check` keep their signatures and pass an empty recovery.
+- A single `drive()` (engine.rs) runs every instance, for both the search and brute force:
+  `forbid_barriers(inputs)`, quiesce, heal, `recover`, quiesce.
+- `hydro_lang::sim::compiled::forbid_barriers(reason, fut)` (`hydrofrac` feature) sets a
+  per-instance flag on `QuiescenceState`. While it is set, `quiesce()` panics, and so does
+  sending input after an observation forced quiescence. Waiting for an output stays allowed.
+  The check re-raises the panic as a harness error, not a counterexample.
+- Post-heal sends: never omitted, no crash point fires on them, no candidates harvested.
+  They keep their sender-crash dependency, which is correct (soundness doc §12).
+- `two_pc_ctp.rs` is unchanged: it already re-sends its queries on every tick while uncertain.
+  "One-shot" means the harness fires no recovery tick.
+
+## Verdict changes
+
+- CTP-2, timers racing the transaction, one-shot (barrier harness: Exhausted(All)):
+  counterexample. A single crash of the coordinator right after its commit to P0 makes
+  P1 never commit. Search 3/129 vs brute force 6/384 (sampled 64, ≤1 fault); they agree.
+- CTP-2, racing timers + 1 recovery tick: Exhausted(All). 6/384 = brute force; they agree.
+- CTP-2, timers only in recovery, exhaustive: Certified(All). 6/2,460 = brute force.
+  This is the narrower claim (no crash during the peer exchange).
+- CTP-3, racing one-shot (barrier harness: broke at 2 crashes, coordinator + P0): breaks
+  at ONE crash. The coordinator dies after its commit to one participant, and another,
+  whose one query reached its peers before they decided, never commits. Brute force:
+  42 of 200 sets break; they agree (ec_bruteforce).
+- CTP-3, racing + 1 recovery tick: no admissible set breaks it (Exhausted, sampled).
+  200/12,800 = brute force; they agree.
+- `peer`/`peer_in` in plain/CTP 2PC: no longer vacuous with racing timers (not asserted).
+- G-Set gossip (ec_demos): one racing tick in the fault phase plus 3 recovery rounds; the
+  test expectations are unchanged (Exhausted(All)).
+- multi_paxos (ec_demos): the barrier between lead and commands is dropped; the test
+  expectations are unchanged.
+- ec_races_targets: ctp2 "quiescing" became "timers after the faults" (still certified);
+  gossip rounds moved to recovery (ignored probes); paxos barrier dropped (ignored probe).
+
+## Tests
+
+- PASS: `cargo test -p hydrofrac --features cross-check` (145 passed, 3 new).
+- PASS: `cargo test -p hydro_test --lib cluster::ec_` (43 passed, 10 ignored).
+- NOT CONFIRMED: `cargo test -p hydro_std --lib hydrofrac` (the run was interrupted by the
+  server move; no hydro_std harness was changed). Clippy not run.

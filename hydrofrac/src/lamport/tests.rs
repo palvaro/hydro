@@ -3,24 +3,25 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::rc::Rc;
 
+use hydro_lang::compile::ir::HydroIrOpMetadata;
 use hydro_lang::location::LocationKey;
 use hydro_lang::location::dynamic::LocationId;
-use hydro_lang::sim::network_hook::{ExecKind, LocationInfo};
+use hydro_lang::networking::{NetworkingInfo, TcpFault};
+use hydro_lang::sim::network_hook::{ChannelInfo, LocationInfo};
 
-use super::dot::{escape_dot, escape_html, strip_paths};
+use super::dot::escape;
 use super::*;
 use crate::search::Fault;
 
-/// Three processes `A`, `B` and `C`, plus an eager `Obs`.
+/// Three processes `A`, `B` and `C`.
 fn locations() -> Vec<LocationInfo> {
-    ["A", "B", "C", "Obs"]
+    ["A", "B", "C"]
         .iter()
         .enumerate()
         .map(|(i, name)| LocationInfo {
             id: LocationId::Process(format!("loc{}v1", i + 1).parse::<LocationKey>().unwrap()),
             name: format!("test::{name}"),
             members: None,
-            eager: *name == "Obs",
         })
         .collect()
 }
@@ -43,11 +44,8 @@ struct Log {
 
 impl Log {
     fn exec(&mut self, at: &str) -> &mut Self {
-        self.events.push(Event::Exec {
-            node: node(at),
-            kind: ExecKind::Async,
-        });
-        self.events.push(Event::ExecEnd { progressed: true });
+        self.events.push(Event::Exec { node: node(at) });
+        self.events.push(Event::ExecEnd);
         self
     }
 
@@ -124,15 +122,31 @@ impl Log {
 
 /// Channels named `msg` (0) and `ack` (1); payloads and outputs are their text.
 fn labels() -> Labels<'static> {
+    let at = locations()[0].id.clone();
+    let channels: Vec<ChannelInfo> = ["msg", "ack"]
+        .iter()
+        .enumerate()
+        .map(|(id, name)| ChannelInfo {
+            id,
+            name: Some((*name).to_owned()),
+            from: at.clone(),
+            to: at.clone(),
+            networking: NetworkingInfo::Tcp {
+                fault: TcpFault::LossyDelayedForever,
+            },
+            intercepted: true,
+            op: HydroIrOpMetadata::new(),
+        })
+        .collect();
     Labels::default()
-        .channel_names(|c| ["msg", "ack"].get(c).map(|s| (*s).to_owned()))
+        .with_channels(&channels)
         .payloads(|m| String::from_utf8_lossy(&m.bytes).into_owned())
         .outputs(|_, bytes| String::from_utf8_lossy(bytes).into_owned())
 }
 
-fn render(log: &Log, faults: &FaultSet<MessageId>, opts: &Options) -> (Trace, String) {
+fn render(log: &Log, faults: &FaultSet<MessageId>) -> (Trace, String) {
     let trace = trace_with(&log.log(), &names(), faults, &labels());
-    let out = dot(&trace, opts);
+    let out = dot(&trace, "");
     (trace, out)
 }
 
@@ -163,14 +177,14 @@ fn a_message_in_flight_across_a_crash_starts_above_the_crash() {
     log.halt("A");
     log.exec("B").recv(first, 0, "B").recv(second, 0, "B");
     let faults = [Fault::crash_after("A", Some(m2))].into_iter().collect();
-    let (trace, out) = render(&log, &faults, &Options::default());
+    let (trace, out) = render(&log, &faults);
     well_formed(&out);
 
     let a = trace.node("A").unwrap();
     let b = trace.node("B").unwrap();
     let crash = trace.nodes[a].crash.expect("A crashed");
     assert_eq!(trace.events[crash].kind, TraceEventKind::Crash);
-    let m = trace.message(second).unwrap();
+    let m = trace.messages.iter().position(|m| m.id == second).unwrap();
     let (send, recv) = (
         trace.messages[m].send_event,
         trace.messages[m].recv_event.unwrap(),
@@ -207,7 +221,7 @@ fn an_omitted_message_ends_in_a_cross_on_the_receivers_lane() {
     let (id, _) = log.send(0, "A", "B", "kept", Fate::Delivered);
     log.exec("B").recv(id, 0, "B");
     let faults = [Fault::Omit(m)].into_iter().collect();
-    let (trace, out) = render(&log, &faults, &Options::default());
+    let (trace, out) = render(&log, &faults);
     well_formed(&out);
     let lost = trace
         .messages
@@ -241,14 +255,14 @@ fn a_node_crashed_from_the_start_loses_its_sends() {
     log.halt("A").exec("A");
     log.send(0, "A", "B", "never", Fate::SenderDead);
     let faults = [Fault::crash_after("A", None)].into_iter().collect();
-    let (trace, out) = render(&log, &faults, &Options::default());
+    let (trace, out) = render(&log, &faults);
     well_formed(&out);
     let a = trace.node("A").unwrap();
     assert_eq!(trace.nodes[a].crash, Some(0));
     assert!(out.contains("(sender crashed)"), "{out}");
     assert!(out.contains("color=\"gray50\""), "{out}");
     // The lane is dead from the crash mark on, which comes before the lost send.
-    assert!(pos_of(&out, &format!("crash{a}")).1 > pos_of(&out, "e2").1);
+    assert!(pos_of(&out, &format!("crash{a}")).1 > pos_of(&out, "e1").1);
     assert!(out.contains("faults: crash(A)"), "{out}");
 }
 
@@ -263,7 +277,7 @@ fn a_crash_that_never_fired_is_named() {
         bytes: Rc::from(&b"y"[..]),
     };
     let faults = [Fault::crash_after("C", Some(point))].into_iter().collect();
-    let (trace, out) = render(&log, &faults, &Options::default());
+    let (trace, out) = render(&log, &faults);
     assert_eq!(trace.unfired, ["crash(C after msg: →A y)"]);
     assert!(
         out.contains("never fired: crash(C after msg: →A y)"),
@@ -276,66 +290,25 @@ fn a_crash_that_never_fired_is_named() {
 }
 
 #[test]
-fn identical_rounds_are_drawn_once() {
-    let mut log = Log::default();
-    for _ in 0..5 {
-        log.exec("A").round_trip(0, "A", "B", "ping");
-        log.exec("B").round_trip(1, "B", "A", "pong");
-    }
-    log.exec("A").round_trip(0, "A", "B", "bye");
-    let faults = FaultSet::new();
-    let (_, out) = render(&log, &faults, &Options::default());
-    well_formed(&out);
-    assert_eq!(out.matches("label=\"msg: ping\"").count(), 1, "{out}");
-    assert_eq!(out.matches("label=\"ack: pong\"").count(), 1, "{out}");
-    assert_eq!(out.matches("label=\"msg: bye\"").count(), 1, "{out}");
-    assert!(out.contains("label=\"×5\""), "{out}");
-
-    let opts = Options {
-        collapse_rounds: false,
-        ..Options::default()
-    };
-    let (_, out) = render(&log, &faults, &opts);
-    assert_eq!(out.matches("label=\"msg: ping\"").count(), 5, "{out}");
-    assert!(!out.contains('×'), "{out}");
-}
-
-#[test]
-fn rounds_do_not_collapse_across_a_heal_or_a_crash() {
-    let mut log = Log::default();
-    for _ in 0..2 {
-        log.exec("A").round_trip(0, "A", "B", "ping");
-    }
-    log.heal();
-    for _ in 0..2 {
-        log.exec("A").round_trip(0, "A", "B", "ping");
-    }
-    log.halt("B");
-    for _ in 0..2 {
-        log.exec("A").round_trip(0, "A", "C", "ping");
-    }
-    let (_, out) = render(&log, &FaultSet::new(), &Options::default());
-    well_formed(&out);
-    assert_eq!(out.matches("label=\"×2\"").count(), 3, "{out}");
-    assert!(!out.contains("×4"), "{out}");
-    assert!(out.contains("t_heal [label=\"heal\""), "{out}");
-    assert!(out.contains("heal_l -> heal_r [style=dashed"), "{out}");
-}
-
-#[test]
 fn the_heal_is_drawn_where_it_happened() {
     let mut log = Log::default();
     log.exec("A").round_trip(0, "A", "B", "before");
     log.heal();
     log.exec("A").round_trip(0, "A", "B", "after");
-    let (trace, out) = render(&log, &FaultSet::new(), &Options::default());
-    let heal = trace.heal_event().unwrap();
+    let (trace, out) = render(&log, &FaultSet::new());
+    let heal = trace
+        .events
+        .iter()
+        .position(|e| e.kind == TraceEventKind::Heal)
+        .unwrap();
     let before = trace.messages[0].send_event;
     let after = trace.messages[1].send_event;
     assert!(before < heal && heal < after);
     let heal_y = pos_of(&out, "heal_l").1;
     assert!(pos_of(&out, &format!("e{before}")).1 > heal_y);
     assert!(heal_y > pos_of(&out, &format!("e{after}")).1);
+    assert!(out.contains("t_heal [label=\"heal\""), "{out}");
+    assert!(out.contains("heal_l -> heal_r [style=dashed"), "{out}");
 }
 
 #[test]
@@ -344,11 +317,7 @@ fn long_labels_are_cut_and_listed_in_the_legend() {
     let mut log = Log::default();
     log.exec("A").round_trip(0, "A", "B", &long);
     log.exec("B").output("B", &long).output("B", "short");
-    let opts = Options {
-        collapse_rounds: false,
-        ..Options::default()
-    };
-    let (_, out) = render(&log, &FaultSet::new(), &opts);
+    let (_, out) = render(&log, &FaultSet::new());
     well_formed(&out);
     // The message and the output share one legend entry.
     assert!(out.contains("…‹1›\""), "{out}");
@@ -358,49 +327,16 @@ fn long_labels_are_cut_and_listed_in_the_legend() {
             .any(|l| l.trim_start().starts_with(prefix) && l.contains("…‹1›"))
     };
     assert!(tagged("l0 ["), "{out}");
-    assert!(tagged("o4 ["), "{out}");
+    assert!(tagged("o2 ["), "{out}");
     assert!(out.contains("label=\"⇒ short\""), "{out}");
     let legend = out
         .lines()
         .find(|l| l.trim_start().starts_with("legend ["))
         .expect("a legend");
     assert!(legend.contains("‹1›"), "{legend}");
-    assert!(legend.contains(&escape_html(&long)), "{legend}");
+    assert!(legend.contains(&escape(&long)), "{legend}");
     // Lanes are only as far apart as the cut labels need.
     assert!(pos_of(&out, "h1").0 < 400.0, "{out}");
-}
-
-#[test]
-fn eager_locations_are_hidden_by_default() {
-    let mut log = Log::default();
-    log.exec("A").round_trip(0, "A", "Obs", "fact");
-    log.round_trip(0, "A", "B", "msg");
-    let (trace, out) = render(&log, &FaultSet::new(), &Options::default());
-    let obs = trace.node("Obs").unwrap();
-    assert!(trace.nodes[obs].eager);
-    assert!(!out.contains("label=\"Obs\""), "{out}");
-    assert!(!out.contains("msg: fact"), "{out}");
-    assert!(out.contains("msg: msg"), "{out}");
-    let opts = Options {
-        show_eager: true,
-        ..Options::default()
-    };
-    let (_, out) = render(&log, &FaultSet::new(), &opts);
-    assert!(out.contains("label=\"Obs\""), "{out}");
-    assert!(out.contains("msg: fact"), "{out}");
-}
-
-#[test]
-fn highlighted_messages_are_emphasized() {
-    let mut log = Log::default();
-    log.exec("A");
-    let (id, _) = log.send(0, "A", "B", "key", Fate::Delivered);
-    log.recv(id, 0, "B");
-    log.round_trip(0, "A", "B", "other");
-    let (_, out) = render(&log, &FaultSet::new(), &Options::default().highlight([id]));
-    assert!(out.contains("label=\"★ msg: key\""), "{out}");
-    assert!(out.contains("penwidth=2, color=\"#d35400\""), "{out}");
-    assert!(out.contains("label=\"msg: other\""), "{out}");
 }
 
 #[test]
@@ -429,13 +365,7 @@ fn writes_dot_and_svg_when_graphviz_is_installed() {
         .collect();
     let trace = trace_with(&log.log(), &names(), &faults, &labels());
     let dir = std::env::temp_dir().join(format!("hydrofrac-lamport-{}", std::process::id()));
-    let written = write(
-        &dir,
-        "failing run",
-        &trace,
-        &Options::default().title("A/x: counterexample"),
-    )
-    .unwrap();
+    let written = write(&dir, "failing run", &trace, "A/x: counterexample").unwrap();
     assert_eq!(written.dot, dir.join("failing_run.dot"));
     assert!(written.dot.is_file());
     let graphviz = Command::new("neato")
@@ -477,15 +407,6 @@ fn directories() {
 }
 
 #[test]
-fn text_helpers() {
-    assert_eq!(
-        strip_paths("Ballot { proposer_id: MemberId::<hydro_test::cluster::paxos::Proposer>(1) }"),
-        "Ballot { proposer_id: MemberId::<Proposer>(1) }"
-    );
-    assert_eq!(strip_paths("x: 1, y: Some(\"x\")"), "x: 1, y: Some(\"x\")");
-    assert_eq!(escape_dot("a\"b\\c\nd"), "a\\\"b\\\\c\\nd");
-    assert_eq!(
-        escape_html("a<b>&\"c\"\nd"),
-        "a&lt;b&gt;&amp;&quot;c&quot;<BR/>d"
-    );
+fn escaping() {
+    assert_eq!(escape("a\"b\\c\nd"), "a\\\"b\\\\c\\nd");
 }

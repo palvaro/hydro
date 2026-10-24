@@ -23,8 +23,9 @@
 //! - no hand-written `Spec`: the single-stream searches take the verdict of the label the demo
 //!   returns, and the all-labels searches are the same check read in full;
 //! - the verdict is a crash sweep: "tolerates k crashes, breaks with k + 1";
-//! - no `end_of_finite_failures`: the network heals when the body returns (the gossip search
-//!   used to end failures after the updates; it now admits crashes during the gossip rounds);
+//! - no `end_of_finite_failures`: the network heals after the fault phase (the gossip search
+//!   used to end failures after the updates; it now admits crashes during a first gossip round
+//!   racing the updates, and runs the later rounds in the recovery phase);
 //! - `leader_merge` is compiled with provenance (the rewrite now tracks its keyed
 //!   `entries_partially_ordered` precisely);
 //! - the static order check and the one-schedule-per-hypothesis search are phase 2 and are not
@@ -130,9 +131,11 @@ fn broadcast_check(which: Broadcast) -> Results {
     results
 }
 
-/// G-Set gossip (closed or live fan-out) among three members, each contributing one element,
-/// with three gossip ticks fired at every member after the updates. The G-Set is a labelled
-/// `Singleton`, checked at the labelled stream it folds.
+/// G-Set gossip (closed or live fan-out) among three members, each contributing one element.
+/// In the fault phase every member's gossip tick fires once, racing the updates, so crashes
+/// strike during gossip; the recovery phase fires three more rounds at every member, each once
+/// the previous one settled. The G-Set is a labelled `Singleton`, checked at the labelled
+/// stream it folds.
 #[cfg(stageleft_runtime)]
 fn gossip_check(live: bool) -> Results {
     const ROUNDS: u32 = 3;
@@ -153,16 +156,22 @@ fn gossip_check(live: bool) -> Results {
         .instrument(flow.sim().with_cluster_size(&members, MEMBERS))
         .compiled();
     let start = Instant::now();
-    let results = check.run(&sim, async || {
-        for m in 0..MEMBERS as u32 {
-            update.send(m, 10 + m);
-        }
-        hydro_lang::sim::compiled::quiesce().await;
-        for _ in 0..ROUNDS {
-            tick.send_many((0..MEMBERS as u32).map(|m| (m, ())));
-            hydro_lang::sim::compiled::quiesce().await;
-        }
-    });
+    let every = || (0..MEMBERS as u32).map(|m| (m, ()));
+    let results = check.run_then_recover(
+        &sim,
+        async || {
+            for m in 0..MEMBERS as u32 {
+                update.send(m, 10 + m);
+            }
+            tick.send_many(every());
+        },
+        async || {
+            for _ in 0..ROUNDS {
+                tick.send_many(every());
+                hydro_lang::sim::compiled::quiesce().await;
+            }
+        },
+    );
     report(&format!("g_set_gossip (live: {live})"), start, &results);
     results
 }
@@ -204,8 +213,8 @@ fn leader_merge_check() -> Results {
     results
 }
 
-/// Multi-decree Paxos (`multi_paxos`): one proposer told to lead round 1, two commands, three
-/// acceptors (majority two), three learners. `learned`, the chosen decrees at each learner, is
+/// Multi-decree Paxos (`multi_paxos`): one proposer told to lead round 1 and given two commands
+/// together, three acceptors (majority two), three learners. `learned`, the chosen decrees at each learner, is
 /// disseminated by the leader's broadcast plus a learner-side echo cycle. One crash at most:
 /// the protocol's own fault model (`f = 1` of three acceptors); unbounded, the research search
 /// did not finish within 2,000 hypotheses.
@@ -233,7 +242,6 @@ fn multi_paxos_check() -> Results {
     let start = Instant::now();
     let results = check.run(&sim, async || {
         lead.send(0, 1);
-        hydro_lang::sim::compiled::quiesce().await;
         command.send(0, 7);
         command.send(0, 8);
     });
@@ -273,9 +281,9 @@ fn certified_all(verdict: &Verdict) -> bool {
     )
 }
 
-/// A schedule-sensitive label whose search found no counterexample under `tolerates`: all the
-/// check can say for it, since only labels whose fault sets have one execution each can be
-/// certified (docs/design/hydrofrac-lite.md §4.9).
+/// A label of a program with schedule choices whose search found no counterexample under
+/// `tolerates`: all the check can say for it, since only labels of a program whose fault sets
+/// have one execution each can be certified (docs/design/hydrofrac-lite.md §4.9).
 #[cfg(stageleft_runtime)]
 fn exhausted(verdict: &Verdict, tolerates: Tolerance) -> bool {
     matches!(verdict, Verdict::Exhausted { tolerates: t, .. } if *t == tolerates)
@@ -362,8 +370,8 @@ fn ec_demo_reliable_broadcast_all_labels() {
 /// Uniform reliable broadcast delivers after `threshold` echoes. Its delivered set (the `map`
 /// out of the quorum, and the quorum's certificates before it) has no counterexample under
 /// any admissible crash set for thresholds 1 and 2; the single hops into the echo cycle break
-/// on their own. The quorum batches its acks, so the delivered set is schedule-sensitive:
-/// searched, not certified.
+/// on their own. The quorum batches its acks, so the program has schedule choices: the
+/// delivered set is searched, not certified.
 #[test]
 fn ec_demo_uniform_broadcast() {
     for threshold in [1, 2] {
@@ -385,8 +393,8 @@ fn ec_demo_uniform_broadcast() {
 }
 
 /// State-based G-Set gossip, closed and live: the G-Set, checked at the stream it folds, has
-/// no counterexample under any admissible crash set. Gossip rounds are batched, so it is
-/// schedule-sensitive: searched, not certified.
+/// no counterexample under any admissible crash set. Gossip rounds are batched, so the program
+/// has schedule choices: searched, not certified.
 #[test]
 fn ec_demo_g_set_gossip_certifies() {
     for live in [false, true] {

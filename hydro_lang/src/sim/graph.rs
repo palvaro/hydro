@@ -569,8 +569,7 @@ pub(super) fn compile_sim(bin: String, trybuild: TrybuildConfig) -> Result<TempP
 
 #[cfg(test)]
 thread_local! {
-    /// The source of the last simulation this thread generated, so tests can check what codegen
-    /// emits (e.g. that hook points add nothing to a flow that did not opt in).
+    /// The source of the last simulation this thread generated, for codegen tests.
     pub(crate) static LAST_SIM_SOURCE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
@@ -592,7 +591,7 @@ pub(super) fn create_sim_graph_trybuild(
 
     let is_test = IS_TEST.load(std::sync::atomic::Ordering::Relaxed);
 
-    let generated_code = {
+    let mut generated_code = {
         let _span = tracing::debug_span!(target: "hydro_build", "sim_codegen").entered();
         compile_sim_graph_trybuild(
             process_graphs,
@@ -606,10 +605,8 @@ pub(super) fn create_sim_graph_trybuild(
             &crate_name,
         )
     };
-    let mut generated_code = generated_code;
     if network_hooks {
-        // Lets the host install its `SimNetworkHook` in the dylib's copy of the runtime (see
-        // `sim::network_hook::rt`). Only emitted when the flow has hook points.
+        // Lets the host install its `SimNetworkHook` in the dylib's copy of the runtime.
         let root = get_this_crate();
         generated_code.items.push(syn::parse_quote! {
             #[unsafe(no_mangle)]
