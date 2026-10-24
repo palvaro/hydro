@@ -1,0 +1,955 @@
+Running Tick (Cluster Member 0)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+
+Running Tick (Cluster Member 3)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 0)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 1)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 0)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 2)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 0)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 1)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [(), (), ()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [ReconfigurationRequest { request_id: 3, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(3)) }, ReconfigurationRequest { request_id: 4, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(2)) }, ReconfigurationRequest { request_id: 11, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(3)) }]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+
+Running Tick (Cluster Member 2)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [(), (), ()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [ReconfigurationRequest { request_id: 5, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(3)) }, ReconfigurationRequest { request_id: 6, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(2)) }, ReconfigurationRequest { request_id: 13, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(3)) }]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 3)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?, ?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [(), (), ()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [ReconfigurationRequest { request_id: 7, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(3)) }, ReconfigurationRequest { request_id: 8, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(2)) }, ReconfigurationRequest { request_id: 15, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(3)) }]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?, ?]
+
+Running Tick (Cluster Member 1)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?, ?, ?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [ReconfigurationRequest { request_id: 12, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(2)) }]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?, ?, ?]
+
+Running Tick (Cluster Member 2)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?, ?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [ReconfigurationRequest { request_id: 14, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(2)) }]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?, ?]
+
+Running Tick (Cluster Member 3)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?, ?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [ReconfigurationRequest { request_id: 16, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(2)) }]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?, ?]
+
+Running Tick (Cluster Member 1)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?, ?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [ReconfigurationRequest { request_id: 19, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(3)) }, ReconfigurationRequest { request_id: 20, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(2)) }]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?, ?]
+
+Running Tick (Cluster Member 0)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [ReconfigurationRequest { request_id: 1, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(3)) }]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+
+Running Tick (Cluster Member 2)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [ReconfigurationRequest { request_id: 21, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(3)) }]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+
+Running Tick (Cluster Member 1)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+
+Running Tick (Cluster Member 3)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [ReconfigurationRequest { request_id: 23, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(3)) }]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 2)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 3)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [ReconfigurationRequest { request_id: 24, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(2)) }]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+
+Running Tick (Cluster Member 1)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 2)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [ReconfigurationRequest { request_id: 22, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(2)) }]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+
+Running Tick (Cluster Member 3)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 2)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+
+Running Tick (Cluster Member 3)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 1)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 2)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+
+Running Tick (Cluster Member 0)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?, ?, ?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [(), (), ()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [ReconfigurationRequest { request_id: 2, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(2)) }, ReconfigurationRequest { request_id: 9, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(3)) }]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?, ?, ?]
+
+Running Tick (Cluster Member 3)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 2)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 1)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 3)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 0)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?, ?, ?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [ReconfigurationRequest { request_id: 10, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(2)) }]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?, ?, ?]
+
+Running Tick (Cluster Member 0)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?, ?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [ReconfigurationRequest { request_id: 17, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(3)) }]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?, ?]
+
+Running Tick (Cluster Member 2)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?, ?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?, ?]
+
+Running Tick (Cluster Member 0)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?, ?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?, ?]
+
+Running Tick (Cluster Member 1)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 3)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 0)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [ReconfigurationRequest { request_id: 18, change: Remove(MemberId::<hydro_test_hydro_trybuild::__staged::cluster::dyn_raft::tests::Replica>(2)) }]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+
+Running Tick (Cluster Member 1)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 0)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+
+Running Tick (Cluster Member 1)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 0)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing items: [()]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+
+Running Tick (Cluster Member 0)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 1)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 2)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 0)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 0)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+Running Tick (Cluster Member 0)
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing unordered items: [?]
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1280:8
+*  |    ) = sliced! {
+*  |       ^ releasing no items
+* --> src/cluster/dyn_raft.rs:1296:38
+*  |        let messages = traffic_batch.fold(
+*  |                                     ^ observed non-deterministic order: [?]
+
+thread 'cluster::dyn_raft::tests::simulator_discovers_ongaro_membership_bug_bootstrapped' (9552121) panicked at hydro_test/src/cluster/dyn_raft.rs:2021:29:
+assertion `left == right` failed: committed log forked: physical index 1 committed two different entries
+  left: DynLogEntry { payload: Noop, term: 1, index: 1 }
+ right: DynLogEntry { payload: Noop, term: 4, index: 1 }
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/panicking.rs:80:14
+   2: core::panicking::assert_failed_inner
+   3: assert_failed<&hydro_test::cluster::dyn_raft::DynLogEntry<alloc::string::String, hydro_test::cluster::dyn_raft::tests::Replica>, &hydro_test::cluster::dyn_raft::DynLogEntry<alloc::string::String, hydro_test::cluster::dyn_raft::tests::Replica>>

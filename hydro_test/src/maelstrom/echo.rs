@@ -36,10 +36,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    #[cfg_attr(
-        not(maelstrom_available),
-        ignore = "requires the Maelstrom binary (set the MAELSTROM_PATH env var)"
-    )]
+    #[cfg_attr(not(maelstrom_available), ignore)]
     async fn test_with_maelstrom() {
         let mut flow = FlowBuilder::new();
         let cluster = flow.cluster::<()>();

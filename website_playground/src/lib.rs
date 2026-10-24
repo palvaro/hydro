@@ -133,7 +133,7 @@ pub fn compile_dfir(
                         }
                     };
                     let compiled = prettyplease::unparse(&file);
-                    let output = DfirOutput { compiled, mermaid };
+                    let output = DfirOutput { mermaid, compiled };
                     (Some(output), diagnostics)
                 }
                 Err(diagnostics) => (None, diagnostics),

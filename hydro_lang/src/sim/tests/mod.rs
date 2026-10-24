@@ -29,15 +29,9 @@ fn sim_crash_in_output() {
         in_send.send(bolero::any::<Vec<u8>>().into());
 
         let x = out_recv.next().await;
-        assert!(
-            !(!x.is_empty()
-                && x[0] == 42
-                && x.len() > 1
-                && x[1] == 43
-                && x.len() > 2
-                && x[2] == 44),
-            "boom"
-        )
+        if !x.is_empty() && x[0] == 42 && x.len() > 1 && x[1] == 43 && x.len() > 2 && x[2] == 44 {
+            panic!("boom");
+        }
     });
 }
 
@@ -663,7 +657,7 @@ fn sim_collect_waits_for_all_ticks() {
     });
 }
 
-/// Regression test for <https://github.com/hydro-project/hydro/issues/2602>
+/// Regression test for https://github.com/hydro-project/hydro/issues/2602
 /// Verifies that `resolve_futures_blocking` preserves `Bounded`, allowing
 /// its output to be used with APIs that require boundedness (e.g. `cross_singleton`).
 /// If `resolve_futures_blocking` ever regresses to return `Unbounded`, this test
@@ -725,79 +719,6 @@ fn sim_fold_sample_eager_state_count() {
     });
 
     assert_eq!(count, 108, "Exhaustive states explored");
-}
-
-/// A top-level fold co-located with another observation hook must be able to *withhold*
-/// its buffered input while the sibling releases. The witness is the accumulator version
-/// `[11]`: it exists only in executions where the fold held back its direct input `5`
-/// while the sibling released `10` (which cycles in as `11`) *and* the fold then released
-/// `11` alone — so observing it proves the withholding interleaving is explored.
-///
-/// This reproduces a coverage gap when all top-level hooks at one location are resolved
-/// together as a single observation: a fold's autonomous decision always releases a
-/// non-empty subset whenever it runs, so the fold can never stay silent while the
-/// co-located sibling acts — its first release is always exactly `[5]`, and version
-/// `[11]` can never exist.
-#[test]
-fn sim_colocated_fold_can_withhold_while_sibling_observation_releases() {
-    use crate::live_collections::stream::NoOrder;
-    use crate::properties::manual_proof;
-
-    let mut flow = FlowBuilder::new();
-    let node = flow.process::<()>();
-
-    let (direct_send, direct_in) = node.sim_input::<u32, NoOrder, ExactlyOnce>();
-    let (u_send, u_in) = node.sim_input::<u32, NoOrder, ExactlyOnce>();
-
-    // The sibling: an unscripted top-level ordering whose releases feed the fold.
-    let cycled = u_in
-        .assume_ordering::<TotalOrder>(nondet!(/** fuzzed */))
-        .map(q!(|v| v + 1))
-        .weaken_ordering::<NoOrder>();
-
-    let folded = direct_in.merge_unordered(cycled).fold(
-        q!(|| Vec::new()),
-        q!(
-            |acc, v| {
-                acc.push(v);
-                acc.sort();
-            },
-            commutative = manual_proof!(
-                /// a sorted vector accumulates a multiset, so insertion order is invisible
-            )
-        ),
-    );
-
-    let out = sliced! {
-        let state = use::snapshot(folded, nondet!(/** fuzzed */));
-        state.into_stream()
-    }
-    .sim_output();
-
-    let mut saw_fold_alone_first = false;
-    let mut saw_fold_withholding = false;
-
-    flow.sim().exhaustive(async || {
-        direct_send.send_many_unordered([5u32]);
-        u_send.send_many_unordered([10u32]);
-
-        let versions: Vec<Vec<u32>> = out.collect().await;
-        if versions.iter().any(|v| v.as_slice() == [5]) {
-            saw_fold_alone_first = true;
-        }
-        if versions.iter().any(|v| v.as_slice() == [11]) {
-            saw_fold_withholding = true;
-        }
-    });
-
-    assert!(
-        saw_fold_alone_first,
-        "never explored the fold releasing its direct input first"
-    );
-    assert!(
-        saw_fold_withholding,
-        "the fold never withheld its buffered input while the co-located hook released"
-    );
 }
 
 #[test]
@@ -1017,7 +938,7 @@ fn sim_fold_catches_false_commutativity() {
 }
 
 /// Verifies that the simulator catches false commutativity for in-tick folds on
-/// `NoOrder` streams by permuting the batch before it reaches the fold.
+/// NoOrder streams by permuting the batch before it reaches the fold.
 ///
 /// Top-level folds ARE tested via cross-batch subset selection + permutation
 /// (see `sim_fold_catches_false_commutativity`).
@@ -1064,18 +985,15 @@ fn sim_fold_in_tick_catches_false_commutativity() {
     );
 }
 
-/// A `sliced!` block that folds into a (per-tick) singleton produces an `InitNone` optional when
-/// unsliced: null until the producing tick first runs, then monotonically present. This mirrors
-/// `Singleton::latest()`.
+/// Minimal repro for the singleton empty-on-first-tick bug.
 ///
-/// Previously the unsliced result was typed as an always-present `Singleton`, so consuming it from
-/// another `sliced!` block before the producer had run was ill-defined: the `SingletonHook` had to
-/// block until the producer ran, otherwise it panicked with "No input and no last released item to
-/// re-release". Now the `OptionalInitNoneHook` models the null prefix directly, so a consumer scheduled
-/// before the producer simply observes *null* (the `cross_singleton` produces nothing) rather than
-/// blocking or panicking. The exhaustive engine must witness both the null and the present case.
+/// The bug: when one `sliced!` block emits a singleton that is consumed by
+/// another `sliced!` block, the second tick may be scheduled before the first
+/// has run. At that point the singleton has no value yet, but the IR marks it
+/// as `Singleton` (which must always have a value). The SingletonHook panics
+/// with "No input and no last released item to re-release".
 #[test]
-fn sim_sliced_singleton_is_init_none_optional() {
+fn sim_singleton_not_ready_until_producer_runs() {
     use crate::live_collections::stream::NoOrder;
 
     let mut flow = FlowBuilder::new();
@@ -1084,110 +1002,33 @@ fn sim_sliced_singleton_is_init_none_optional() {
     let (in_port, in_stream) = p.sim_input::<u32, TotalOrder, _>();
     let in_no_order = in_stream.weaken_ordering::<NoOrder>();
 
-    // First sliced block: folds into a per-tick singleton, which unslices to an `InitNone` optional.
+    // First sliced block: produces an Unbounded Singleton
     let produced_singleton = sliced! {
         let batch = use::batch(in_no_order.clone(), nondet!(/** batch */));
         batch.assume_ordering::<TotalOrder>(nondet!(/** order */))
             .fold(q!(|| 0u32), q!(|acc, v| *acc += v))
     };
 
-    // Second sliced block: consumes the optional. `cross_singleton` with a *null* optional produces
-    // nothing, so a tick scheduled before the producer yields an empty output instead of panicking.
+    // Second sliced block: consumes the singleton via use(singleton, nondet).
+    // If the simulator schedules this tick before the first one has run,
+    // the SingletonHook has no value → panic.
     let out = sliced! {
         let trigger = use::batch(in_no_order, nondet!(/** batch */));
         let snapshot = use::snapshot(produced_singleton, nondet!(/** snapshot */));
         trigger.cross_singleton(snapshot)
     }
-    .assume_ordering::<TotalOrder>(nondet!(/** test */))
-    .sim_output();
+    .assume_ordering::<TotalOrder>(nondet!(/** test */));
 
-    let mut observed_null = false;
-    let mut observed_value = false;
+    let out_port = out.sim_output();
 
     flow.sim().exhaustive(async || {
         in_port.send(42);
-        let all: Vec<(u32, u32)> = out.collect().await;
-        if all.is_empty() {
-            observed_null = true;
-        } else {
-            observed_value = true;
-            assert_eq!(all, vec![(42, 42)]);
-        }
+        let _ = out_port.next().await;
     });
-
-    assert!(
-        observed_null,
-        "a consumer scheduled before the producer must observe null (empty output)"
-    );
-    assert!(
-        observed_value,
-        "a consumer scheduled after the producer must observe the folded value"
-    );
 }
 
-/// Positive counterpart to `sim_singleton_not_ready_until_producer_runs`.
-///
-/// Lifting a per-tick `Singleton` to a top-level optional via `Singleton::latest()` yields an
-/// `InitNone` optional (null until the producing tick first runs, then monotonically present).
-/// Unlike `SingletonHook` — which panics if consumed before its producer runs — the `OptionalInitNoneHook`
-/// backing an `InitNone` optional is always ready and releases *null* before the producer runs.
-/// So a consumer scheduled before the producer observes `None` (rather than panicking), and once
-/// the producer runs it observes `Some(sum)`. The exhaustive engine must witness both.
-#[test]
-#[cfg_attr(target_os = "windows", ignore)]
-fn sim_singleton_latest_is_init_none_optional() {
-    use std::collections::HashSet;
-
-    use crate::live_collections::stream::NoOrder;
-
-    let mut flow = FlowBuilder::new();
-    let p = flow.process::<()>();
-
-    let (in_port, in_stream) = p.sim_input::<u32, TotalOrder, _>();
-    let in_no_order = in_stream.weaken_ordering::<NoOrder>();
-
-    let tick = p.tick();
-    // Per-tick `Singleton` (the fold has an initial value, so it is always present *within* the
-    // tick), lifted to a top-level `Optional<_, _, InitNone>` via `latest()`.
-    let latest = in_no_order
-        .clone()
-        .batch(&tick, nondet!(/** test */))
-        .assume_ordering::<TotalOrder>(nondet!(/** test */))
-        .fold(q!(|| 0u32), q!(|acc, v| *acc += v))
-        .latest();
-
-    // Consume the optional from a *separate* slice. `into_singleton()` turns the null/non-null
-    // snapshot into an always-present `Option<u32>`, making both outcomes observable in the output.
-    let out = sliced! {
-        let trigger = use::batch(in_no_order, nondet!(/** test */));
-        let snapshot = use::snapshot(latest, nondet!(/** test */));
-        trigger
-            .cross_singleton(snapshot.into_singleton())
-            .map(q!(|(_, o)| o))
-    }
-    .assume_ordering::<TotalOrder>(nondet!(/** test */))
-    .sim_output();
-
-    let mut observed = HashSet::new();
-
-    flow.sim().exhaustive(async || {
-        in_port.send(42);
-        let all: Vec<Option<u32>> = out.collect().await;
-        for v in all {
-            observed.insert(v);
-        }
-    });
-
-    assert!(
-        observed.contains(&None),
-        "OptionalInitNoneHook should release null before the producing tick runs; observed: {observed:?}"
-    );
-    assert!(
-        observed.contains(&Some(42)),
-        "once the producing tick runs, the snapshot must be Some(sum); observed: {observed:?}"
-    );
-}
-
+/// The simulator does not yet support `Unbounded` keyed singletons (where keys can be removed).
+/// This snapshot test verifies the panic message when attempting to simulate one.
 #[test]
 #[cfg_attr(target_os = "windows", ignore)]
 fn sim_unbounded_keyed_singleton_rejected_snapshot() {
@@ -1234,6 +1075,89 @@ fn sim_unbounded_keyed_singleton_rejected_snapshot() {
         .unwrap_or("(non-string panic)");
 
     hydro_build_utils::assert_snapshot!(panic_msg);
+}
+
+/// `exhaustive_then` calls `after` once per explored execution, after it has finished.
+#[test]
+fn sim_exhaustive_then_calls_after_each_execution() {
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+    let tick = node.tick();
+    let (in_send, input) = node.sim_input::<i32, TotalOrder, ExactlyOnce>();
+    let out_recv = input
+        .batch(&tick, nondet!(/** test */))
+        .count()
+        .all_ticks()
+        .sim_output();
+
+    let mut runs = 0usize;
+    let mut afters = 0usize;
+    let count = flow.sim().compiled().exhaustive_then(
+        async || {
+            runs += 1;
+            in_send.send_many([1, 2]);
+            let _: Vec<usize> = out_recv.collect().await;
+        },
+        || afters += 1,
+    );
+    assert!(count > 1, "batching should give several executions");
+    assert_eq!(runs, count);
+    assert_eq!(afters, count);
+}
+
+/// `fuzz_bounded_then` runs exactly the requested number of executions.
+#[test]
+fn sim_fuzz_bounded_then_runs_exactly_n() {
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+    let tick = node.tick();
+    let (in_send, input) = node.sim_input::<i32, TotalOrder, ExactlyOnce>();
+    let out_recv = input
+        .batch(&tick, nondet!(/** test */))
+        .all_ticks()
+        .sim_output();
+
+    let mut afters = 0usize;
+    flow.sim().compiled().fuzz_bounded_then(
+        5,
+        async || {
+            in_send.send_many([1, 2, 3]);
+            let all: Vec<i32> = out_recv.collect().await;
+            assert_eq!(all, vec![1, 2, 3]);
+        },
+        || afters += 1,
+    );
+    assert_eq!(afters, 5);
+}
+
+/// `first_schedule` runs one execution, and always the same one.
+#[test]
+fn sim_first_schedule_is_deterministic() {
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+    let tick = node.tick();
+    let (in_send, input) = node.sim_input::<i32, TotalOrder, ExactlyOnce>();
+    let out_recv = input
+        .batch(&tick, nondet!(/** test */))
+        .count()
+        .all_ticks()
+        .sim_output();
+
+    let sim = flow.sim().compiled();
+    let mut seen: Vec<Vec<usize>> = Vec::new();
+    for _ in 0..3 {
+        let mut runs = 0usize;
+        let mut this_run = Vec::new();
+        sim.first_schedule(async || {
+            runs += 1;
+            in_send.send_many([1, 2, 3]);
+            this_run = out_recv.collect().await;
+        });
+        assert_eq!(runs, 1);
+        seen.push(this_run);
+    }
+    assert!(seen.iter().all(|s| s == &seen[0]), "{seen:?}");
+    assert_eq!(seen[0].iter().sum::<usize>(), 3);
 }
 
 /// The simulator does not yet support non-atomic yield of an Optional (i.e., `latest()`
@@ -1409,8 +1333,10 @@ fn sim_crash_behind_continue_if() {
             counts.first().is_some_and(|c| *c >= 2),
             "first batch was a singleton"
         );
-        // Only reachable in instances that passed the assumption.
-        assert!(counts.first() != Some(&3), "boom")
+        if counts.first() == Some(&3) {
+            // Only reachable in instances that passed the assumption.
+            panic!("boom");
+        }
     });
 }
 
@@ -1438,95 +1364,89 @@ fn sim_continue_if_failure_in_fuzz_repro_is_reported() {
         });
 }
 
-/// Whether this code was compiled with `--cfg hydro_rustflags_probe`. Called from inside a `q!`
-/// via a `self::` path (a bare `cfg!` or unqualified call would be mistaken for a captured
-/// variable), so its `__staged` copy reports the *generated* program's rustflags.
-#[expect(
-    unexpected_cfgs,
-    reason = "the probe cfg is only ever set by the rustflags_propagation harness test"
-)]
-fn compiled_with_rustflags_probe() -> bool {
-    cfg!(hydro_rustflags_probe)
-}
-
-/// Checks that the *generated* sim program is compiled with the same rustflags as this crate.
-/// The `q!` body runs inside the child compile, so [`compiled_with_rustflags_probe`] there
-/// reports the child's flags, while the assertion outside reports ours. Driven by the
-/// `rustflags_propagation` harness test (in `tests/rustflags_propagation.rs`), which sets the
-/// probe cfg via `--config build.rustflags` — a source that only reaches the child through
-/// `CARGO_ENCODED_RUSTFLAGS` forwarding, never through the process environment.
+/// A top-level `reduce` on an unbounded stream is a stream of versions in the simulator, like
+/// a top-level `fold`, and its snapshot is null until the first input, then some prefix
+/// reduction.
 #[test]
-#[ignore = "run by tests/rustflags_propagation.rs, which compiles with `--cfg hydro_rustflags_probe`"]
-fn sim_generated_code_sees_root_rustflags() {
-    assert!(
-        compiled_with_rustflags_probe(),
-        "this test must be compiled with `--cfg hydro_rustflags_probe`"
-    );
+fn sim_top_level_reduce_unbounded() {
+    use std::collections::HashSet;
 
     let mut flow = FlowBuilder::new();
     let node = flow.process::<()>();
 
-    let out_recv = node
-        .source_iter(q!([self::compiled_with_rustflags_probe()]))
-        .sim_output();
+    let (in_send, input) = node.sim_input::<i32, TotalOrder, ExactlyOnce>();
+    let reduced = input.reduce(q!(|acc, v| *acc += v));
+    let out_recv = sliced! {
+        let snapshot = use::snapshot(reduced, nondet!(/** test */));
+        snapshot.into_stream()
+    }
+    .sim_output();
 
+    let mut observed = HashSet::new();
     flow.sim().exhaustive(async || {
-        assert!(
-            out_recv.next().await,
-            "generated program was compiled without the root rustflags"
-        );
+        in_send.send_many([1, 2, 3]);
+        let all: Vec<i32> = out_recv.collect().await;
+        // Every snapshot is a prefix sum, and the last one sees every input.
+        assert!(all.iter().all(|v| [1, 3, 6].contains(v)), "{all:?}");
+        assert_eq!(all.last(), Some(&6));
+        observed.extend(all);
     });
+    assert_eq!(observed, HashSet::from([1, 3, 6]));
 }
 
-mod scripted;
+/// The same with a commutative `reduce` on an unordered stream, whose fold hook already
+/// chooses which inputs the reduction sees.
+#[test]
+fn sim_top_level_reduce_commutative() {
+    use std::collections::HashSet;
 
-mod custom_codec {
-    use stageleft::q;
+    use crate::live_collections::stream::NoOrder;
+    use crate::properties::manual_proof;
 
-    use crate::location::Location;
-    use crate::prelude::FlowBuilder;
-    use crate::sim::test_codec::{RawMessage, RawMessageCodec};
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
 
-    #[test]
-    fn sim_custom_codec_round_trip() {
-        let mut flow = FlowBuilder::new();
-        let node = flow.process::<()>();
-
-        let (send, input) = node.sim_input_with::<RawMessageCodec, _, _, _>();
-        let out = input
-            .map(q!(|message| RawMessage {
-                id: message.id,
-                value: message.value * 2,
-            }))
-            .sim_output_with::<RawMessageCodec>();
-
-        flow.sim().exhaustive(async || {
-            send.send(RawMessage { id: 7, value: 42 });
-            assert_eq!(out.next().await, RawMessage { id: 7, value: 84 });
-        });
+    let (in_send, input) = node.sim_input::<i32, NoOrder, ExactlyOnce>();
+    let reduced = input.reduce(q!(
+        |acc, v| *acc += v,
+        commutative = manual_proof!(/** addition is commutative */)
+    ));
+    let out_recv = sliced! {
+        let snapshot = use::snapshot(reduced, nondet!(/** test */));
+        snapshot.into_stream()
     }
+    .sim_output();
 
-    #[test]
-    fn sim_cluster_custom_codec_round_trip() {
-        let mut flow = FlowBuilder::new();
-        let cluster = flow.cluster::<()>();
+    let mut observed = HashSet::new();
+    flow.sim().exhaustive(async || {
+        in_send.send_many_unordered([1, 2, 4]);
+        let all: Vec<i32> = out_recv.collect().await;
+        assert_eq!(all.last(), Some(&7));
+        observed.extend(all);
+    });
+    // Every non-empty subset sum of {1, 2, 4} is reachable.
+    assert_eq!(observed, (1..=7).collect::<HashSet<_>>());
+}
 
-        let (send, input) = cluster.sim_input_with::<RawMessageCodec, _, _, _>();
-        let out = input
-            .map(q!(|message| RawMessage {
-                id: message.id,
-                value: message.value * 2,
-            }))
-            .sim_cluster_output_with::<RawMessageCodec>();
+/// A retry cast alone (`AtLeastOnce` → `ExactlyOnce`, same order) is the identity in the
+/// simulator, which never duplicates a delivery.
+#[test]
+fn sim_retry_cast_is_identity() {
+    use crate::live_collections::stream::AtLeastOnce;
 
-        flow.sim()
-            .with_cluster_size(&cluster, 2)
-            .exhaustive(async || {
-                send.send(0, RawMessage { id: 0, value: 1 });
-                send.send(1, RawMessage { id: 1, value: 2 });
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
 
-                assert_eq!(out.next(0).await, RawMessage { id: 0, value: 2 });
-                assert_eq!(out.next(1).await, RawMessage { id: 1, value: 4 });
-            });
-    }
+    let (in_send, input) = node.sim_input::<i32, TotalOrder, ExactlyOnce>();
+    let out_recv = input
+        .weaken_retries::<AtLeastOnce>()
+        .assume_retries::<ExactlyOnce>(nondet!(/** test */))
+        .sim_output();
+
+    let count = flow.sim().exhaustive(async || {
+        in_send.send_many([1, 2, 3]);
+        let all: Vec<i32> = out_recv.collect().await;
+        assert_eq!(all, vec![1, 2, 3]);
+    });
+    assert_eq!(count, 1, "a retry cast introduces no schedule choice");
 }

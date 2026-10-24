@@ -1,1138 +1,1120 @@
-//! The record-level provenance rewrite (LDFI "Level 2"): a sim-only IR pass that wraps
-//! every collection element in [`Tagged`](crate::sim::runtime::Tagged) and makes each
-//! operator propagate the delivery ids its outputs were computed from.
+//! Forward provenance ("taint") tracking for simulated Hydro programs.
 //!
-//! Physical representation after the rewrite:
+//! When a simulation is compiled with [`crate::sim::flow::SimFlow::with_provenance`], every item
+//! flowing through the program is wrapped in a [`Tagged`] carrying the set of *source events* it
+//! descends from. Source events are the items sent into the simulation through `sim_input`
+//! ports, and are of two kinds:
 //!
-//! * a `Stream` / `Singleton` / `Optional` of `T` carries `Tagged<T>`;
-//! * a `KeyedStream` / `KeyedSingleton` of `(K, V)` carries `(K, Tagged<V>)`, so keyed DFIR
-//!   operators still see the key as the first tuple component.
+//! - [`TagKind::Data`]: ordinary application input (a request, an edge, a write);
+//! - [`TagKind::Operational`]: a stimulus that carries no information of its own (a timer tick,
+//!   an election timeout), declared with `sim_input_operational`.
 //!
-//! Closures are wrapped so the user's code still sees `T`; adapters are inserted where a
-//! DFIR operator destructures pairs (joins, cross products) or where the representation
-//! changes (a `Cast` between a flat and a keyed kind). Sources and external inputs produce
-//! empty provenance; a network receive tags each record with the delivery id of the send
-//! that produced it (the id travels with the message; `SimBuilder` emits the tagging);
-//! network sends and external outputs are preceded by a map to `(value, Prov)`, which
-//! `SimBuilder` (in provenance mode) serializes and records.
+//! Tags are propagated structurally by the dataflow: `map`/`filter` keep them, `join`/`cross`
+//! union the two sides, `fold`/`reduce` accumulate every input, and network edges carry them in
+//! a side frame alongside the real serialized payload (so byte counts are those of the untagged
+//! program). Closures that read Hydro state through `by_ref`/`by_mut` references inherit *all*
+//! tags the referenced state has accumulated and mark their outputs [`Tagged::coarse`], since the
+//! dataflow cannot see inside the closure to do better.
 //!
-//! Deduplication is where alternative derivations of one value meet. A `unique` inside a tick
-//! is preceded by a map giving each record a fresh disjunction cell
-//! ([`codegen::rebox`](crate::sim::runtime::codegen::rebox)), which the dedup's equality
-//! comparison fills with the alternatives it drops (see `sim::runtime::provenance`); a
-//! `filter_not_in` on a flat stream is compiled as an anti-join whose negative side carries
-//! plain values, so the comparison between a positive record and a negative one (different
-//! facts that happen to be equal) never runs on `Tagged`s.
+//! Every *physical emission* — a message crossing a network edge, an item leaving through a sim
+//! output, an item crossing a cycle sink — is appended to a log as an [`EmissionRecord`]. The
+//! test reads the log back with [`take_emissions`] and interprets it with [`classify`], which
+//! labels each emission by the *shape of its lineage* alone, without reference to operator or
+//! protocol names.
 //!
-//! Aggregates are where "any `k` of `n`" is lost: a fold's output is the conjunction of every
-//! input. Under aggregate witnesses (`Ldfi::aggregate_witnesses`, a run-time mode read from
-//! `__hydro_lineage`, the instance's `LineageHandles`), a `fold` / `fold_keyed` step also
-//! records the input's value in the accumulator's provenance cell
-//! ([`codegen::agg_push`](crate::sim::runtime::codegen::agg_push), with fresh instances of the
-//! fold's `init` and `acc` for re-folding); a `filter` (through a map placed after it) or a
-//! `filter_map` whose input carries such a cell gives its output the disjunction of the
-//! minimal input subsets its predicate accepts
-//! ([`codegen::agg_witness`](crate::sim::runtime::codegen::agg_witness)). The casts between
-//! the keyed and the flat representation re-shape the re-folded value the predicate sees
-//! (`key_in_cast`, `key_out_cast`); operators that change the value (`map`, `filter_map`'s
-//! own output, `flat_map`, `scan`, `enumerate`) strip the cell to its conjunction, so no
-//! predicate ever re-evaluates an aggregate through a value it did not see. With the mode
-//! off every one of these is the identity on the formula.
-//!
-//! Unsupported operators panic at compile time with their name: the rewrite is complete for
-//! the operators the LDFI examples use and explicit about what it does not cover.
+//! The instrumentation is passive: it does not consume simulator decisions and does not change
+//! how items compare (`Eq`/`Hash`/`Ord` on [`Tagged`] delegate to the value), so a recorded
+//! fuzz/exhaustive execution replays identically under the instrumented build.
 
-use proc_macro2::Span;
-use syn::parse_quote;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Debug;
+use std::hash::{Hash, Hasher};
 
-use crate::compile::ir::{
-    ClosureExpr, CollectionKind, DebugExpr, DebugType, HydroIrMetadata, HydroNode, HydroRoot,
-    transform_bottom_up,
-};
-use crate::handoff_ref::HandoffRefKind;
-use crate::staging_util::get_this_crate;
+use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 
-/// How a collection's elements are laid out after the rewrite.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Rep {
-    /// `Tagged<T>`.
-    Flat,
-    /// `(K, Tagged<V>)`.
-    Keyed,
+/// Whether a source event is application data or an operational stimulus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum TagKind {
+    /// Ordinary application input.
+    Data,
+    /// A timer tick, timeout, or similar stimulus with no informational content.
+    Operational,
 }
 
-fn rep_of(kind: &CollectionKind) -> Rep {
-    match kind {
-        CollectionKind::Stream { .. }
-        | CollectionKind::Singleton { .. }
-        | CollectionKind::Optional { .. } => Rep::Flat,
-        CollectionKind::KeyedStream { .. } | CollectionKind::KeyedSingleton { .. } => Rep::Keyed,
-    }
+/// Identifies one source event: the `seq`-th item delivered on sim input `port` at cluster
+/// member `member` (`u32::MAX` for processes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Tag {
+    /// Data or operational.
+    pub kind: TagKind,
+    /// The sim input port the event arrived on.
+    pub port: u32,
+    /// The receiving cluster member, or `u32::MAX` for a process.
+    pub member: u32,
+    /// Position of the event among those delivered on this port to this member.
+    pub seq: u64,
 }
 
-fn tagged(ty: &DebugType) -> DebugType {
-    let root = get_this_crate();
-    let inner: &syn::Type = &ty.0;
-    let out: syn::Type = parse_quote!(#root::sim::runtime::Tagged<#inner>);
-    DebugType::from(out)
-}
+/// The lineage of one item: the set of source events it descends from.
+pub type TagSet = BTreeSet<Tag>;
 
-/// The inverse of [`tagged`] on a type: `Tagged<T>` → `T`; any other type is returned as is.
-/// For the send sites `SimBuilder` emits in provenance mode, where the IR names the tagged
-/// element type but the value in hand is the plain one.
-pub(crate) fn plain_type(ty: &syn::Type) -> syn::Type {
-    if let syn::Type::Path(path) = ty
-        && let Some(segment) = path.path.segments.last()
-        && segment.ident == "Tagged"
-        && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
-        && args.args.len() == 1
-        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
-    {
-        return inner.clone();
-    }
-    if let syn::Type::Tuple(tuple) = ty {
-        let mut tuple = tuple.clone();
-        for elem in tuple.elems.iter_mut() {
-            *elem = plain_type(elem);
-        }
-        return syn::Type::Tuple(tuple);
-    }
-    ty.clone()
-}
-
-/// `(A, B)` → `(Tagged<A>, Tagged<B>)` (and `(K, (A, B))` → `(K, (Tagged<A>, Tagged<B>))`
-/// with `key`), the element type a pair-producing DFIR operator yields after the rewrite.
-fn tag_pair_type(ty: &DebugType, key: bool) -> DebugType {
-    let root = get_this_crate();
-    let tag = |t: &syn::Type| -> syn::Type { parse_quote!(#root::sim::runtime::Tagged<#t>) };
-    let pair = |t: &syn::Type| -> syn::Type {
-        if let syn::Type::Tuple(tuple) = t
-            && tuple.elems.len() == 2
-        {
-            let a = tag(&tuple.elems[0]);
-            let b = tag(&tuple.elems[1]);
-            parse_quote!((#a, #b))
-        } else {
-            parse_quote!((_, _))
-        }
-    };
-    let inner: &syn::Type = &ty.0;
-    let out: syn::Type = if key {
-        if let syn::Type::Tuple(tuple) = inner
-            && tuple.elems.len() == 2
-        {
-            let k = &tuple.elems[0];
-            let v = pair(&tuple.elems[1]);
-            parse_quote!((#k, #v))
-        } else {
-            parse_quote!((_, (_, _)))
-        }
-    } else {
-        pair(inner)
-    };
-    DebugType::from(out)
-}
-
-/// `(K, V)` → `(K, Tagged<V>)`.
-fn tag_value_type(ty: &DebugType) -> DebugType {
-    let root = get_this_crate();
-    let inner: &syn::Type = &ty.0;
-    let out: syn::Type = if let syn::Type::Tuple(tuple) = inner
-        && tuple.elems.len() == 2
-    {
-        let k = &tuple.elems[0];
-        let v = &tuple.elems[1];
-        parse_quote!((#k, #root::sim::runtime::Tagged<#v>))
-    } else {
-        parse_quote!((_, _))
-    };
-    DebugType::from(out)
-}
-
-fn set_element_type(kind: &mut CollectionKind, ty: DebugType) {
-    match kind {
-        CollectionKind::Stream { element_type, .. }
-        | CollectionKind::Singleton { element_type, .. }
-        | CollectionKind::Optional { element_type, .. } => *element_type = ty,
-        CollectionKind::KeyedStream { .. } | CollectionKind::KeyedSingleton { .. } => {
-            unreachable!("pair-producing operators yield flat kinds")
-        }
-    }
-}
-
-pub(crate) fn element_type(kind: &CollectionKind) -> DebugType {
-    match kind {
-        CollectionKind::Stream { element_type, .. }
-        | CollectionKind::Singleton { element_type, .. }
-        | CollectionKind::Optional { element_type, .. } => element_type.clone(),
-        CollectionKind::KeyedStream {
-            key_type,
-            value_type,
-            ..
-        }
-        | CollectionKind::KeyedSingleton {
-            key_type,
-            value_type,
-            ..
-        } => {
-            let k: &syn::Type = &key_type.0;
-            let v: &syn::Type = &value_type.0;
-            let out: syn::Type = parse_quote!((#k, #v));
-            DebugType::from(out)
-        }
-    }
-}
-
-/// Rewrites the kind's element types to the tagged representation.
-fn tag_kind(kind: &mut CollectionKind) {
-    match kind {
-        CollectionKind::Stream { element_type, .. }
-        | CollectionKind::Singleton { element_type, .. }
-        | CollectionKind::Optional { element_type, .. } => {
-            *element_type = tagged(element_type);
-        }
-        CollectionKind::KeyedStream { value_type, .. }
-        | CollectionKind::KeyedSingleton { value_type, .. } => {
-            *value_type = tagged(value_type);
-        }
-    }
-}
-
-/// The destructuring pattern and reconstructed plain value for one input element.
-fn unwrap_tokens(rep: Rep) -> (syn::Pat, syn::Expr) {
-    let root = get_this_crate();
-    match rep {
-        Rep::Flat => (
-            parse_quote!(#root::sim::runtime::Tagged(__val, __prov)),
-            parse_quote!(__val),
-        ),
-        Rep::Keyed => (
-            parse_quote!((__key, #root::sim::runtime::Tagged(__val, __prov))),
-            parse_quote!((__key, __val)),
-        ),
-    }
-}
-
-/// Wraps a plain output value `expr` with provenance `prov` in the representation `rep`.
-fn wrap_tokens(rep: Rep, expr: syn::Expr, prov: syn::Expr) -> syn::Expr {
-    let root = get_this_crate();
-    match rep {
-        Rep::Flat => parse_quote!(#root::sim::runtime::Tagged(#expr, #prov)),
-        Rep::Keyed => parse_quote!({
-            let (__k, __u) = #expr;
-            (__k, #root::sim::runtime::Tagged(__u, #prov))
-        }),
-    }
-}
-
-fn wrap_closure(closure: &ClosureExpr, make: impl FnOnce(&syn::Expr) -> syn::Expr) -> ClosureExpr {
-    let mut wrapped = closure.clone();
-    wrapped.expr = DebugExpr::from(make(&closure.expr));
-    wrapped
-}
-
-/// `map`-style: `Fn(T) -> U`. The value changes, so an aggregate cell is stripped to the
-/// conjunction it wraps (see `sim::runtime::provenance`).
-fn wrap_map(f: &ClosureExpr, input: Rep, output: Rep) -> ClosureExpr {
-    let (pat, val) = unwrap_tokens(input);
-    wrap_closure(f, |f| {
-        let out = wrap_tokens(
-            output,
-            parse_quote!(__f(#val)),
-            parse_quote!(__prov.strip_agg()),
-        );
-        parse_quote!({
-            let mut __f = #f;
-            move |#pat| #out
-        })
-    })
-}
-
-/// `filter` / `inspect`-style: `Fn(&T) -> R`, where `T` must be reconstructed by reference.
-/// `input` is the (already tagged) kind of the input, whose concrete types the closure's
-/// parameter is annotated with (push-based operators infer the item type from it).
-fn wrap_by_ref(f: &ClosureExpr, input: &CollectionKind) -> ClosureExpr {
-    wrap_closure(f, |f| match input {
-        CollectionKind::Stream { element_type, .. }
-        | CollectionKind::Singleton { element_type, .. }
-        | CollectionKind::Optional { element_type, .. } => {
-            let ty: &syn::Type = &element_type.0;
-            parse_quote!({
-                let mut __f = #f;
-                move |__x: &#ty| __f(&__x.0)
-            })
-        }
-        CollectionKind::KeyedStream {
-            key_type,
-            value_type,
-            ..
-        }
-        | CollectionKind::KeyedSingleton {
-            key_type,
-            value_type,
-            ..
-        } => {
-            let k: &syn::Type = &key_type.0;
-            let v: &syn::Type = &value_type.0;
-            parse_quote!({
-                let mut __f = #f;
-                move |__x: &(#k, #v)| {
-                    let __plain = (__x.0.clone(), (__x.1).0.clone());
-                    __f(&__plain)
-                }
-            })
-        }
-    })
-}
-
-/// The map placed after a `filter` with predicate `f`: gives each record that passed the
-/// provenance of its aggregate witnesses when its input is a fold's accumulator
-/// ([`codegen::agg_witness`](crate::sim::runtime::codegen::agg_witness)); the identity
-/// otherwise and with the mode off. `kind` is the filter's (already tagged) kind, whose
-/// concrete types annotate the parameter (a push-based `map` infers nothing else).
-fn filter_witness_expr(f: &ClosureExpr, kind: &CollectionKind) -> syn::Expr {
-    let root = get_this_crate();
-    let f: &syn::Expr = &f.expr;
-    match kind {
-        CollectionKind::Stream { element_type, .. }
-        | CollectionKind::Singleton { element_type, .. }
-        | CollectionKind::Optional { element_type, .. } => {
-            let ty: &syn::Type = &element_type.0;
-            parse_quote!({
-                let mut __f = #f;
-                let __h = __hydro_lineage.clone();
-                move |#root::sim::runtime::Tagged(__val, __prov): #ty| {
-                    let __prov = #root::sim::runtime::codegen::agg_witness(
-                        &__h,
-                        &__prov,
-                        #root::sim::runtime::codegen::type_of(&__val),
-                        |__c| __f(&__c),
-                    );
-                    #root::sim::runtime::Tagged(__val, __prov)
-                }
-            })
-        }
-        CollectionKind::KeyedStream {
-            key_type,
-            value_type,
-            ..
-        }
-        | CollectionKind::KeyedSingleton {
-            key_type,
-            value_type,
-            ..
-        } => {
-            let k: &syn::Type = &key_type.0;
-            let v: &syn::Type = &value_type.0;
-            parse_quote!({
-                let mut __f = #f;
-                let __h = __hydro_lineage.clone();
-                move |(__key, #root::sim::runtime::Tagged(__val, __prov)): (#k, #v)| {
-                    let __prov = #root::sim::runtime::codegen::agg_witness(
-                        &__h,
-                        &__prov,
-                        #root::sim::runtime::codegen::type_of(&__val),
-                        |__c| __f(&(__key.clone(), __c)),
-                    );
-                    (__key, #root::sim::runtime::Tagged(__val, __prov))
-                }
-            })
-        }
-    }
-}
-
-/// `filter_map`-style: `Fn(T) -> Option<U>`. An output's provenance is its aggregate
-/// witnesses when the input is a fold's accumulator (a second instance of `f` is the
-/// predicate: "is `Some`"), else the input's.
-fn wrap_filter_map(f: &ClosureExpr, input: Rep, output: Rep) -> ClosureExpr {
-    let root = get_this_crate();
-    wrap_closure(f, |f| {
-        let out = wrap_tokens(output, parse_quote!(__u), parse_quote!(__prov));
-        match input {
-            Rep::Flat => parse_quote!({
-                let mut __f = #f;
-                let mut __g = #f;
-                let __h = __hydro_lineage.clone();
-                move |#root::sim::runtime::Tagged(__val, __prov)| {
-                    let __like = #root::sim::runtime::codegen::type_of(&__val);
-                    let __u = match __f(__val) {
-                        Some(__u) => __u,
-                        None => return None,
-                    };
-                    let __prov = #root::sim::runtime::codegen::agg_witness(
-                        &__h,
-                        &__prov,
-                        __like,
-                        |__c| __g(__c).is_some(),
-                    );
-                    Some(#out)
-                }
-            }),
-            Rep::Keyed => parse_quote!({
-                let mut __f = #f;
-                let mut __g = #f;
-                let __h = __hydro_lineage.clone();
-                move |(__key, #root::sim::runtime::Tagged(__val, __prov))| {
-                    let __like = #root::sim::runtime::codegen::type_of(&__val);
-                    let __key2 = __key.clone();
-                    let __u = match __f((__key, __val)) {
-                        Some(__u) => __u,
-                        None => return None,
-                    };
-                    let __prov = #root::sim::runtime::codegen::agg_witness(
-                        &__h,
-                        &__prov,
-                        __like,
-                        |__c| __g((__key2.clone(), __c)).is_some(),
-                    );
-                    Some(#out)
-                }
-            }),
-        }
-    })
-}
-
-/// `flat_map`-style: `Fn(T) -> impl IntoIterator<Item = U>`.
-fn wrap_flat_map(f: &ClosureExpr, input: Rep, output: Rep) -> ClosureExpr {
-    let (pat, val) = unwrap_tokens(input);
-    wrap_closure(f, |f| {
-        let out = wrap_tokens(output, parse_quote!(__u), parse_quote!(__prov.clone()));
-        parse_quote!({
-            let mut __f = #f;
-            move |#pat| {
-                let __prov = __prov.strip_agg();
-                __f(#val).into_iter().map(move |__u| #out)
-            }
-        })
-    })
-}
-
-/// `Fn() -> A` producing an accumulator with empty provenance.
-fn wrap_init(init: &ClosureExpr) -> ClosureExpr {
-    let root = get_this_crate();
-    wrap_closure(init, |init| {
-        parse_quote!({
-            let mut __init = #init;
-            move || #root::sim::runtime::Tagged(__init(), #root::sim::runtime::Prov::empty())
-        })
-    })
-}
-
-/// `Fn(&mut A, T)` over a tagged accumulator: applies, then absorbs the input's provenance.
-/// `input` is the representation of the *value* the closure receives (`Flat` for keyed folds,
-/// whose keys DFIR strips).
-fn wrap_acc(acc: &ClosureExpr, input: Rep) -> ClosureExpr {
-    let (pat, val) = unwrap_tokens(input);
-    let root = get_this_crate();
-    wrap_closure(acc, |acc| {
-        parse_quote!({
-            let mut __acc = #acc;
-            move |__state: &mut #root::sim::runtime::Tagged<_>, #pat| {
-                __acc(&mut __state.0, #val);
-                __state.1.extend(&__prov);
-            }
-        })
-    })
-}
-
-/// [`wrap_acc`] for a fold with an initial state: the step also records the input's value
-/// for aggregate witnesses when the mode is on
-/// ([`codegen::agg_push`](crate::sim::runtime::codegen::agg_push)), with fresh instances of
-/// the fold's `init` and `acc` for the re-folds; off, exactly [`wrap_acc`].
-fn wrap_fold_acc(acc: &ClosureExpr, init: &ClosureExpr, input: Rep) -> ClosureExpr {
-    let (pat, val) = unwrap_tokens(input);
-    let root = get_this_crate();
-    let init: &syn::Expr = &init.expr;
-    wrap_closure(acc, |acc| {
-        parse_quote!({
-            let mut __acc = #acc;
-            let __h = __hydro_lineage.clone();
-            move |__state: &mut #root::sim::runtime::Tagged<_>, #pat| {
-                #root::sim::runtime::codegen::agg_push(
-                    &__h,
-                    &mut __state.1,
-                    &__state.0,
-                    &__val,
-                    &__prov,
-                    || #root::sim::runtime::TypedAggregate::new(#init, #acc),
-                );
-                __acc(&mut __state.0, #val);
-            }
-        })
-    })
-}
-
-/// `Fn(&mut A, T) -> Option<U>` (scan): absorbs, applies, tags any output with the
-/// accumulated provenance.
-fn wrap_scan_acc(acc: &ClosureExpr, input: Rep, output: Rep) -> ClosureExpr {
-    let (pat, val) = unwrap_tokens(input);
-    let root = get_this_crate();
-    wrap_closure(acc, |acc| {
-        let out = wrap_tokens(output, parse_quote!(__u), parse_quote!(__state.1.clone()));
-        parse_quote!({
-            let mut __acc = #acc;
-            move |__state: &mut #root::sim::runtime::Tagged<_>, #pat| {
-                __state.1.extend(&__prov.strip_agg());
-                __acc(&mut __state.0, #val).map(|__u| #out)
-            }
-        })
-    })
-}
-
-/// `Tagged<T>` → `T` (the element type of an already rewritten node, un-tagged).
-fn untag(ty: &syn::Type) -> syn::Type {
-    if let syn::Type::Path(path) = ty
-        && let Some(last) = path.path.segments.last()
-        && last.ident == "Tagged"
-        && let syn::PathArguments::AngleBracketed(args) = &last.arguments
-        && args.args.len() == 1
-        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
-    {
-        return inner.clone();
-    }
-    parse_quote!(_)
-}
-
-/// What a closure does with its result, for [`wrap_opaque`].
-#[derive(Clone, Copy)]
-enum Shape {
-    /// `Fn(T) -> U`.
-    Map,
-    /// `Fn(T) -> Option<U>`.
-    FilterMap,
-    /// `Fn(T) -> impl IntoIterator<Item = U>`.
-    FlatMap,
-}
-
-/// Wraps a closure that captures `Reference`s (the `by_ref` / `by_mut` handles of the
-/// closure encoding). The rewrite cannot see which of the closure's reads produced which
-/// output, so every output is tagged [`Prov::opaque`](crate::sim::runtime::Prov::opaque) and
-/// every cell the closure may write becomes opaque too; the LDFI closure derives such records
-/// by counterfactual replay of the node instead.
+/// An item together with its lineage.
 ///
-/// The user's code must still see plain values. The captured handles are bound outside this
-/// expression (see `ClosureExpr::emit_tokens`) to the tagged slots: `&Tagged<T>` /
-/// `&mut Tagged<T>` for singletons, `&Option<Tagged<T>>` for optionals, `&Vec<Tagged<T>>` /
-/// `&mut Vec<Tagged<T>>` for streams. Per call, each handle is shadowed by a plain view
-/// (`&T`, `&mut T`, a cloned `Option<T>` / `Vec<T>`, or a scratch `Vec<T>` for a mutable
-/// stream handle whose contents are appended, opaque, after the call), and the user's
-/// closure is constructed inside the call so it captures the shadows.
-fn wrap_opaque(f: &ClosureExpr, input: Rep, output: Rep, shape: Shape, name: &str) -> ClosureExpr {
-    let root = get_this_crate();
-    let (pat, val) = unwrap_tokens(input);
-    let mut preludes: Vec<syn::Stmt> = vec![];
-    let mut postludes: Vec<syn::Stmt> = vec![];
-    for (i, (node, is_mut)) in f.singleton_refs.iter().enumerate() {
-        let HydroNode::Reference { kind, metadata, .. } = node else {
-            unreachable!("singleton_refs only hold HydroNode::Reference");
-        };
-        let handle = crate::handoff_ref::handoff_ref_ident(i);
-        let local = syn::Ident::new(&format!("__hydro_opaque_local_{i}"), Span::call_site());
-        let real = syn::Ident::new(&format!("__hydro_opaque_real_{i}"), Span::call_site());
-        let prov = syn::Ident::new(&format!("__hydro_opaque_prov_{i}"), Span::call_site());
-        let plain = untag(&element_type(&metadata.collection_kind).0);
-        match (kind, is_mut) {
-            (HandoffRefKind::Singleton, false) => {
-                preludes.push(parse_quote!(let #handle = &(*#handle).0;));
-            }
-            (HandoffRefKind::Singleton, true) => {
-                preludes.push(parse_quote!(
-                    let #root::sim::runtime::Tagged(#local, #prov) = &mut *#handle;
-                ));
-                preludes.push(parse_quote!(let #handle = #local;));
-                postludes.push(parse_quote!(#prov.set_opaque();));
-            }
-            (HandoffRefKind::Optional, false) => {
-                preludes.push(parse_quote!(
-                    let #local: ::std::option::Option<#plain> =
-                        (*#handle).clone().map(|__t| __t.0);
-                ));
-                preludes.push(parse_quote!(let #handle = &#local;));
-            }
-            (HandoffRefKind::Vec, false) => {
-                preludes.push(parse_quote!(
-                    let #local: ::std::vec::Vec<#plain> =
-                        (*#handle).iter().map(|__t| __t.0.clone()).collect();
-                ));
-                preludes.push(parse_quote!(let #handle = &#local;));
-            }
-            (HandoffRefKind::Vec, true) => {
-                preludes.push(parse_quote!(let #real = &mut *#handle;));
-                preludes.push(
-                    parse_quote!(let mut #local: ::std::vec::Vec<#plain> = ::std::vec::Vec::new();),
-                );
-                preludes.push(parse_quote!(let #handle = &mut #local;));
-                postludes.push(parse_quote!(
-                    #real.extend(#local.into_iter().map(|__x| {
-                        #root::sim::runtime::Tagged(__x, #root::sim::runtime::Prov::opaque())
-                    }));
-                ));
-            }
-            (HandoffRefKind::Optional, true) => {
-                panic!(
-                    "the provenance rewrite does not support a mutable optional reference captured by `{name}`"
-                );
-            }
+/// Comparison, hashing and ordering delegate to `value` only, so deduplicating, sorting and
+/// set-difference operators behave exactly as they do on the untagged program.
+#[derive(Clone)]
+pub struct Tagged<T> {
+    /// Source events this item descends from.
+    pub tags: TagSet,
+    /// Set when some ancestor was produced by a closure reading opaque Hydro state, in which
+    /// case `tags` is an over-approximation (everything that state had accumulated).
+    pub coarse: bool,
+    /// The item as the untagged program would see it.
+    pub value: T,
+}
+
+impl<T> Tagged<T> {
+    /// An item with no lineage at all (a compile-time constant, cluster membership, ...).
+    pub fn pristine(value: T) -> Self {
+        Self {
+            tags: TagSet::new(),
+            coarse: false,
+            value,
         }
     }
-    let call: syn::Expr = match shape {
-        Shape::Map | Shape::FilterMap => parse_quote!(__f(#val)),
-        Shape::FlatMap => parse_quote!(__f(#val).into_iter().collect::<::std::vec::Vec<_>>()),
-    };
-    let opaque: syn::Expr = parse_quote!(#root::sim::runtime::Prov::opaque());
-    let result: syn::Expr = match shape {
-        Shape::Map => wrap_tokens(output, parse_quote!(__out), opaque),
-        Shape::FilterMap => {
-            let one = wrap_tokens(output, parse_quote!(__u), opaque);
-            parse_quote!(__out.map(|__u| #one))
+
+    /// An item entering the program as source event `tag`.
+    pub fn source(tag: Tag, value: T) -> Self {
+        let mut tags = TagSet::new();
+        tags.insert(tag);
+        Self {
+            tags,
+            coarse: false,
+            value,
         }
-        Shape::FlatMap => {
-            let one = wrap_tokens(output, parse_quote!(__u), opaque);
-            parse_quote!(__out.into_iter().map(|__u| #one))
+    }
+
+    /// Rebuilds an item from parts.
+    pub fn from_parts(tags: TagSet, coarse: bool, value: T) -> Self {
+        Self {
+            tags,
+            coarse,
+            value,
         }
-    };
-    wrap_closure(f, |f| {
-        parse_quote!({
-            move |#pat| {
-                let _ = &__prov;
-                #(#preludes)*
-                let __out = {
-                    let mut __f = #f;
-                    #call
-                };
-                #(#postludes)*
-                #result
-            }
-        })
+    }
+
+    /// Splits an item into `(lineage, coarse, value)`.
+    pub fn into_parts(self) -> (TagSet, bool, T) {
+        (self.tags, self.coarse, self.value)
+    }
+
+    /// Absorbs the lineage of another item into this one (for folds and reference reads).
+    pub fn absorb(&mut self, tags: &TagSet, coarse: bool) {
+        self.tags.extend(tags.iter().copied());
+        self.coarse |= coarse;
+    }
+}
+
+impl<T: Debug> Debug for Tagged<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.value.fmt(f)
+    }
+}
+
+impl<T: PartialEq> PartialEq for Tagged<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl<T: Eq> Eq for Tagged<T> {}
+
+impl<T: Hash> Hash for Tagged<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.value.hash(state);
+    }
+}
+
+impl<T: PartialOrd> PartialOrd for Tagged<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.value.partial_cmp(&other.value)
+    }
+}
+
+impl<T: Ord> Ord for Tagged<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.value.cmp(&other.value)
+    }
+}
+
+/// Applies an un-annotated closure to a value. Used by generated code so that rustc infers the
+/// closure's parameter type from the argument (closures passed as arguments are type-checked
+/// after the other arguments), which a plain `let f = |x| ..; f(v)` binding would not allow.
+#[doc(hidden)]
+#[inline(always)]
+pub fn apply1<A, B>(f: impl FnOnce(A) -> B, a: A) -> B {
+    f(a)
+}
+
+/// Merges two lineages (for joins and cross products).
+pub fn union(mut a: TagSet, b: &TagSet) -> TagSet {
+    a.extend(b.iter().copied());
+    a
+}
+
+// ---------------------------------------------------------------------------------------------
+// Network framing: tags ride alongside the real payload so byte accounting stays honest.
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct FrameRef<'a> {
+    tags: &'a TagSet,
+    coarse: bool,
+    #[serde(with = "serde_bytes")]
+    payload: &'a [u8],
+}
+
+#[derive(Deserialize)]
+struct FrameOwned {
+    tags: TagSet,
+    coarse: bool,
+    #[serde(with = "serde_bytes")]
+    payload: Vec<u8>,
+}
+
+mod serde_bytes {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &&[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_bytes(v)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        Vec::<u8>::deserialize(d)
+    }
+}
+
+/// The value produced by a network serialize function: either raw bytes or, for demuxed sends,
+/// a `(recipient, bytes)` pair. Implemented so the provenance pass can wrap either uniformly.
+pub trait NetworkPayload: Sized {
+    /// Bytes of the real (untagged) payload.
+    fn payload_len(&self) -> usize;
+    /// Content hash of the real payload.
+    fn payload_hash(&self) -> u64 {
+        use std::hash::Hasher;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        h.write(self.payload_bytes());
+        h.finish()
+    }
+    /// The real payload bytes.
+    fn payload_bytes(&self) -> &[u8];
+    /// The destination member for demuxed sends, if any.
+    fn recipient(&self) -> Option<u32>;
+    /// Attaches a lineage frame around the payload.
+    fn frame(self, tags: &TagSet, coarse: bool) -> Self;
+    /// Removes the lineage frame, returning it with the real payload.
+    fn unframe(self) -> (TagSet, bool, Self);
+}
+
+fn frame_bytes(bytes: &[u8], tags: &TagSet, coarse: bool) -> Bytes {
+    bincode::serialize(&FrameRef {
+        tags,
+        coarse,
+        payload: bytes,
+    })
+    .expect("provenance frame serialization cannot fail")
+    .into()
+}
+
+fn unframe_bytes(bytes: &[u8]) -> (TagSet, bool, Bytes) {
+    let frame: FrameOwned =
+        bincode::deserialize(bytes).expect("provenance frame deserialization failed");
+    (frame.tags, frame.coarse, frame.payload.into())
+}
+
+impl NetworkPayload for Bytes {
+    fn payload_len(&self) -> usize {
+        self.len()
+    }
+
+    fn payload_bytes(&self) -> &[u8] {
+        self
+    }
+
+    fn recipient(&self) -> Option<u32> {
+        None
+    }
+
+    fn frame(self, tags: &TagSet, coarse: bool) -> Self {
+        frame_bytes(&self, tags, coarse)
+    }
+
+    fn unframe(self) -> (TagSet, bool, Self) {
+        unframe_bytes(&self)
+    }
+}
+
+impl NetworkPayload for (crate::location::TaglessMemberId, Bytes) {
+    fn payload_len(&self) -> usize {
+        self.1.len()
+    }
+
+    fn payload_bytes(&self) -> &[u8] {
+        &self.1
+    }
+
+    fn recipient(&self) -> Option<u32> {
+        Some(self.0.get_raw_id())
+    }
+
+    fn frame(self, tags: &TagSet, coarse: bool) -> Self {
+        (self.0, frame_bytes(&self.1, tags, coarse))
+    }
+
+    fn unframe(self) -> (TagSet, bool, Self) {
+        let (tags, coarse, payload) = unframe_bytes(&self.1);
+        (tags, coarse, (self.0, payload))
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Emission log.
+// ---------------------------------------------------------------------------------------------
+
+/// Where a physical emission was observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum EmissionPointKind {
+    /// A message serialized onto a network channel.
+    Network,
+    /// A message deserialized off a network channel: the recipient now holds this lineage. Not
+    /// physical work and not consulted by [`classify`] (which describes the sender's mechanism);
+    /// recorded so a per-run utility analysis can ask what the recipient already held.
+    Receive,
+    /// An item serialized to a sim output port.
+    Output,
+    /// An item crossing a cycle sink (includes per-tick state carry; usually ignored).
+    Cycle,
+}
+
+/// One physical emission and the lineage of the item that caused it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmissionRecord {
+    /// Network edge, sim output, or cycle sink.
+    pub kind: EmissionPointKind,
+    /// Stable index of the emission point within the program (assigned by the provenance pass).
+    pub point: u32,
+    /// Human-readable name of the emission point (channel name if given, else a location pair).
+    pub name: String,
+    /// Debug rendering of the root location that emitted the item (`Process(..)`/`Cluster(..)`).
+    /// Together with `member` this identifies the emitting node.
+    pub source: String,
+    /// The sending cluster member, if the sender is a cluster (for `Receive` records this is
+    /// recovered from the channel's demux id, so send and receipt share a [`Channel`]).
+    pub member: Option<u32>,
+    /// The receiving location (a location for network sends, the port for sim outputs).
+    pub destination: String,
+    /// The receiving cluster member, if the receiver is a cluster.
+    pub recipient: Option<u32>,
+    /// Lineage of the emitted item.
+    pub tags: TagSet,
+    /// Whether the lineage is an over-approximation (see [`Tagged::coarse`]).
+    pub coarse: bool,
+    /// Serialized payload bytes (zero for cycle sinks).
+    pub bytes: usize,
+    /// Hash of the serialized payload (zero for cycle sinks). Content identity, not lineage:
+    /// lets a test count *distinct* payloads on a channel when lineage downstream of opaque
+    /// state is too coarse to separate originals from duplicates.
+    pub payload_hash: u64,
+}
+
+impl EmissionRecord {
+    /// Data lineage only.
+    pub fn data_tags(&self) -> impl Iterator<Item = &Tag> {
+        self.tags.iter().filter(|t| t.kind == TagKind::Data)
+    }
+
+    /// Operational lineage only.
+    pub fn operational_tags(&self) -> impl Iterator<Item = &Tag> {
+        self.tags.iter().filter(|t| t.kind == TagKind::Operational)
+    }
+}
+
+thread_local! {
+    static EMISSIONS: RefCell<Vec<EmissionRecord>> = const { RefCell::new(Vec::new()) };
+    static SOURCE_SEQ: RefCell<BTreeMap<(u32, u32), u64>> = const { RefCell::new(BTreeMap::new()) };
+}
+
+/// Allocates the next source-event sequence number for `(port, member)`. Called from generated
+/// simulation code; lives outside the dataflow because DFIR re-evaluates operator closure
+/// expressions on every subgraph run, so a counter captured by the closure would reset.
+#[doc(hidden)]
+pub fn next_source_seq(port: u32, member: u32) -> u64 {
+    SOURCE_SEQ.with(|m| {
+        let mut m = m.borrow_mut();
+        let e = m.entry((port, member)).or_insert(0);
+        let s = *e;
+        *e += 1;
+        s
     })
 }
 
-/// A plain `Map` node applying `f` to `input`, with the given (already tagged) metadata.
-fn map_node(f: syn::Expr, input: HydroNode, metadata: HydroIrMetadata) -> HydroNode {
-    HydroNode::Map {
-        f: ClosureExpr::new(DebugExpr::from(f), vec![]),
-        input: Box::new(input),
-        metadata,
+/// Appends an emission to the log. Called from generated simulation code.
+#[doc(hidden)]
+pub fn record(record: EmissionRecord) {
+    EMISSIONS.with(|log| log.borrow_mut().push(record));
+}
+
+/// Drains the log into a serialized buffer. Exported from the simulation dylib as
+/// `__hydro_provenance_drain`; not intended to be called directly.
+#[doc(hidden)]
+pub fn drain_serialized() -> Vec<u8> {
+    let records = EMISSIONS.with(|log| std::mem::take(&mut *log.borrow_mut()));
+    // A drain marks the end of an observation epoch but not of the instance; sequence numbers
+    // keep increasing so tags stay unique across epochs within one instance. They are reset
+    // when a new instance starts (see `reset_instance`).
+    bincode::serialize(&records).expect("emission log serialization cannot fail")
+}
+
+/// Clears per-instance state (emission log and source counters). Exported from the simulation
+/// dylib as `__hydro_provenance_reset`; called by the host when a new instance starts.
+#[doc(hidden)]
+pub fn reset_instance() {
+    EMISSIONS.with(|log| log.borrow_mut().clear());
+    SOURCE_SEQ.with(|m| m.borrow_mut().clear());
+}
+
+/// Signature of the dylib's exported reset function.
+pub(crate) type ResetFn = unsafe extern "Rust" fn();
+
+/// Signature of the dylib's exported drain function.
+pub(crate) type DrainFn = unsafe extern "Rust" fn() -> Vec<u8>;
+
+thread_local! {
+    pub(crate) static HOST_DRAIN: RefCell<Option<DrainFn>> = const { RefCell::new(None) };
+}
+
+/// Takes every emission recorded since the last call, in program order.
+///
+/// Must be called from within a simulation compiled with
+/// [`crate::sim::flow::SimFlow::with_provenance`]; typically after
+/// [`crate::sim::quiesce`] so the log covers a complete causal epoch.
+pub fn take_emissions() -> Vec<EmissionRecord> {
+    let drain = HOST_DRAIN
+        .with(|d| *d.borrow())
+        .expect("take_emissions() requires a simulation compiled with `with_provenance()`");
+    let bytes = unsafe { drain() };
+    bincode::deserialize(&bytes).expect("emission log deserialization failed")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Classification.
+// ---------------------------------------------------------------------------------------------
+
+/// The lineage shape of one emission. Derived purely from tag sets; no operator or protocol
+/// names are consulted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Label {
+    /// No lineage at all: a constant or membership-derived item.
+    Constant,
+    /// Operational lineage only. Fixed-size work funded by a stimulus, independent of any data
+    /// (a heartbeat, a vote request).
+    FixedOperational,
+    /// Carries data lineage that had never crossed this emission point before: new information
+    /// is leaving the node.
+    Productive,
+    /// Carries only already-emitted data lineage *and* an operational tag: a stimulus turned
+    /// retained state back into physical work.
+    Reactivated,
+    /// Carries only already-emitted data lineage and no operational tag: a data-driven
+    /// re-emission (e.g. an at-least-once relay).
+    Redundant,
+}
+
+/// One classified emission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Classified {
+    /// The emission.
+    pub record: EmissionRecord,
+    /// Its lineage-shape label.
+    pub label: Label,
+    /// Data tags the recipient had never received from this sender before this emission.
+    /// May be empty for a `Productive` emission whose lineage is a novel *combination*.
+    pub novel: TagSet,
+}
+
+/// Identifies one sender→receiver relationship: the scope over which "already told" is judged.
+pub type Channel = (Option<u32>, String, Option<u32>);
+
+impl EmissionRecord {
+    /// The (sender member, destination, recipient member) this emission travelled along.
+    pub fn channel(&self) -> Channel {
+        (self.member, self.destination.clone(), self.recipient)
     }
 }
 
-/// Replaces `node` by a `Map` applying `f` to it, with `metadata` on the wrapper.
-fn wrap_node(node: &mut HydroNode, f: syn::Expr, metadata: HydroIrMetadata) {
-    let inner = std::mem::replace(node, HydroNode::Placeholder);
-    *node = map_node(f, inner, metadata);
+/// Classifies each emission relative to what its sender had already told its recipient, in log
+/// order. Cycle-sink records are skipped unless `include_cycles` is set, since they include
+/// per-tick state carry that is not physical work.
+///
+/// **Novelty is dominance-based.** An emission is non-novel when its data lineage is a subset
+/// of a *single* earlier emission on the same channel: everything it descends from had
+/// already reached that recipient together. A transitive-closure fact derived from two known
+/// edges is therefore novel (no single prior emission carried both), while a gossip pump
+/// re-sending an unchanged set, or a retry of a request, is not.
+///
+/// **History is per channel**, not per operator. A node that has told a peer something over one
+/// network edge and repeats it over another has done redundant physical work; a node
+/// forwarding to a peer that has not heard it has not.
+///
+/// **History is the sender's own record of what it has emitted**, and advances on send.
+/// [`EmissionPointKind::Receive`] records are ignored here. The labels describe *mechanism* —
+/// what the emitting node did with the information it had — not *utility*. A retry of a request
+/// whose first copy was lost in the network is still `Reactivated`: the node re-emitted retained
+/// state on a timer, and it would have done exactly the same had the first copy arrived. That
+/// invariance to network luck is the point; the shape that amplifies under overload is present
+/// whether or not a given run wastes anything. Receipts are kept in the log for a separate,
+/// per-run utility analysis ("how much of this traffic was redundant from the recipient's point
+/// of view"), which is not this function's business.
+///
+/// **Runs of identical *coarse* lineage are one causal unit.** A closure reading opaque state
+/// stamps every item it emits in one invocation with the same (over-approximate) tag set, so
+/// consecutive coarse emissions with identical tags are classified against the history as it
+/// stood before the run, then history is updated once. Exact-lineage emissions are always
+/// judged individually: identical exact lineage twice really is the same information twice.
+pub fn classify(records: &[EmissionRecord], include_cycles: bool) -> Vec<Classified> {
+    // Per channel: the antichain of maximal data-lineage sets emitted so far, plus the union.
+    struct History {
+        maximal: Vec<TagSet>,
+        union: TagSet,
+    }
+    impl History {
+        fn dominates(&self, data: &TagSet) -> bool {
+            self.maximal.iter().any(|m| data.is_subset(m))
+        }
+        fn add(&mut self, data: &TagSet) {
+            if self.dominates(data) {
+                return;
+            }
+            self.maximal.retain(|m| !m.is_subset(data));
+            self.maximal.push(data.clone());
+            self.union.extend(data.iter().copied());
+        }
+    }
+
+    let records: Vec<&EmissionRecord> = records
+        .iter()
+        .filter(|r| include_cycles || r.kind != EmissionPointKind::Cycle)
+        .collect();
+    let mut seen: BTreeMap<Channel, History> = BTreeMap::new();
+    let mut out = Vec::with_capacity(records.len());
+    let mut i = 0;
+    while i < records.len() {
+        if records[i].kind == EmissionPointKind::Receive {
+            // Utility information, not mechanism; see the doc comment.
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        while records[i].coarse
+            && j < records.len()
+            && records[j].kind != EmissionPointKind::Receive
+            && records[j].coarse
+            && records[j].tags == records[i].tags
+        {
+            j += 1;
+        }
+        let run = &records[i..j];
+        let data: TagSet = run[0].data_tags().copied().collect();
+        let has_operational = run[0].operational_tags().next().is_some();
+        for r in run {
+            let history = seen.entry(r.channel()).or_insert_with(|| History {
+                maximal: Vec::new(),
+                union: TagSet::new(),
+            });
+            let novel: TagSet = data.difference(&history.union).copied().collect();
+            let label = if data.is_empty() {
+                if has_operational {
+                    Label::FixedOperational
+                } else {
+                    Label::Constant
+                }
+            } else if !history.dominates(&data) {
+                Label::Productive
+            } else if has_operational {
+                Label::Reactivated
+            } else {
+                Label::Redundant
+            };
+            out.push(Classified {
+                record: (*r).clone(),
+                label,
+                novel,
+            });
+        }
+        for r in run {
+            seen.get_mut(&r.channel()).unwrap().add(&data);
+        }
+        i = j;
+    }
+    out
 }
 
-/// The expression tagging a plain value with empty provenance, for the representation.
-fn empty_tag_expr(rep: Rep) -> syn::Expr {
-    let root = get_this_crate();
-    match rep {
-        Rep::Flat => parse_quote!(#root::sim::runtime::Tagged::empty),
-        Rep::Keyed => parse_quote!(|(__k, __v)| (__k, #root::sim::runtime::Tagged::empty(__v))),
+/// Aggregate physical work at one emission point attributed to one operational source event.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Attribution {
+    /// Number of emissions.
+    pub messages: usize,
+    /// Total payload bytes.
+    pub bytes: usize,
+    /// Distinct data tags carried by those messages (the retained state the stimulus funded).
+    pub data_tags: TagSet,
+    /// Whether any contributing lineage was coarse.
+    pub coarse: bool,
+}
+
+/// Work per (emission point name, operational tag). Emissions with no operational lineage are
+/// grouped under `None`.
+pub fn attribute(records: &[EmissionRecord]) -> BTreeMap<(String, Option<Tag>), Attribution> {
+    let mut out: BTreeMap<(String, Option<Tag>), Attribution> = BTreeMap::new();
+    for record in records {
+        if matches!(
+            record.kind,
+            EmissionPointKind::Cycle | EmissionPointKind::Receive
+        ) {
+            continue;
+        }
+        let ops: Vec<Option<Tag>> = {
+            let v: Vec<_> = record.operational_tags().copied().map(Some).collect();
+            if v.is_empty() { vec![None] } else { v }
+        };
+        for op in ops {
+            let entry = out.entry((record.name.clone(), op)).or_default();
+            entry.messages += 1;
+            entry.bytes += record.bytes;
+            entry.data_tags.extend(record.data_tags().copied());
+            entry.coarse |= record.coarse;
+        }
+    }
+    out
+}
+
+/// Counts of each label at each emission point name.
+pub fn label_counts(classified: &[Classified]) -> BTreeMap<String, BTreeMap<Label, usize>> {
+    let mut out: BTreeMap<String, BTreeMap<Label, usize>> = BTreeMap::new();
+    for c in classified {
+        *out.entry(c.record.name.clone())
+            .or_default()
+            .entry(c.label)
+            .or_default() += 1;
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------------------------
+// Per-buffer admission table.
+//
+// The per-emission label is the primitive; the deliverable is a decision *per buffer*. A buffer
+// is anything that admits lineage and can hold it across time: a network edge feeding a node's
+// input, a cycle sink carrying state to the next tick, a sim output. The classifier on the edge
+// that *feeds* a buffer is exactly the admission classifier for that buffer, so the three facts
+// the report asks of every buffer are read straight off the emission log with no new
+// instrumentation:
+//
+//   1. does it re-admit lineage it has already admitted (a `Reactivated` or `Redundant`
+//      admission), and only under an operational stimulus?
+//   2. does that re-admission grow with retained state, or stay fixed per stimulus?
+//   3. is a dedup gate on the path from the operational source? — structural, supplied by the
+//      caller since it cannot be read from the log.
+//
+// The expected reading of the surveyed programs (report §"Next step"): retry's service queue is
+// the one buffer that re-admits with backlog-proportional growth and no gate; transitive
+// closure's frontier never re-admits; Paxos's covering re-admits at fixed size.
+// ---------------------------------------------------------------------------------------------
+
+/// Identifies one buffer: the emission point (kind + name) whose admissions this row summarises,
+/// together with the channel over which "already admitted" is judged. Distinct channels of the
+/// same emission point (e.g. a fan-out to several recipients) are separate rows, because whether
+/// a recipient has already been told is a per-channel fact.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BufferId {
+    /// Network edge, cycle sink, or sim output.
+    pub kind: EmissionPointKind,
+    /// Human-readable name of the emission point (channel name or cycle id).
+    pub name: String,
+    /// The (sender, destination, recipient) the admissions travelled along.
+    pub channel: Channel,
+}
+
+/// How the re-admitted work at a buffer scales with the retained state that funds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Growth {
+    /// The buffer never re-admits lineage it has already admitted (a fixpoint/draining buffer:
+    /// transitive closure's frontier, reliable broadcast). Nothing to bound.
+    None,
+    /// Every re-admission carries the same amount of data lineage (fixed per stimulus: a Paxos
+    /// covering, a gossip pump, a steady-state heartbeat, a MicroBus keepalive). Cost is bounded
+    /// per firing; a rate limit is the remedy, not a gate.
+    Fixed,
+    /// Re-admission carries progressively more data lineage as retained state accumulates (a
+    /// retry service queue growing with the backlog). Unbounded without a gate; this is the
+    /// collapse-candidate shape.
+    WithState,
+}
+
+/// What is known about a dedup gate (`unique`, `anti_join`) on the path from the operational
+/// source to this buffer. Structural, so it must be supplied by the caller from the program's
+/// shape; the log cannot reveal it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Gate {
+    /// A dedup gate is known to be on the path (the source of a re-admission cannot reach the
+    /// buffer without passing a `unique`/`anti_join`).
+    Present,
+    /// No dedup gate is on the path (retry's service queue admits whatever arrives).
+    Absent,
+    /// The caller did not say. The default when a buffer is discovered from the log alone.
+    Unknown,
+}
+
+/// One buffer's admission summary: the three facts the report asks of every buffer, plus the raw
+/// counts that back them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BufferAdmissions {
+    /// Which buffer this row describes.
+    pub id: BufferId,
+    /// Total admissions carrying data lineage (excludes pure-operational and constant crossings:
+    /// a heartbeat admits no data, so it funds no buffer).
+    pub admissions: usize,
+    /// Admissions whose data lineage was new on this channel (`Productive`).
+    pub novel: usize,
+    /// Re-admissions under an operational stimulus (`Reactivated`): retained state turned back
+    /// into work by a timer.
+    pub reactivated: usize,
+    /// Re-admissions with no operational stimulus (`Redundant`): a data-driven repeat.
+    pub redundant: usize,
+    /// How re-admitted lineage scales with retained state.
+    pub growth: Growth,
+    /// Whether a dedup gate is on the path (caller-supplied; see [`Gate`]).
+    pub gate: Gate,
+}
+
+impl BufferAdmissions {
+    /// Does this buffer ever re-admit lineage it has already admitted?
+    pub fn re_admits(&self) -> bool {
+        self.reactivated + self.redundant > 0
+    }
+
+    /// Does every re-admission happen only under an operational stimulus? True when the buffer
+    /// re-admits and never does so without a timer (no `Redundant` admissions). Vacuously false
+    /// for a buffer that never re-admits.
+    pub fn re_admits_only_operationally(&self) -> bool {
+        self.re_admits() && self.redundant == 0
+    }
+
+    /// The collapse-candidate shape: re-admits under a stimulus, grows with retained state, and
+    /// has no dedup gate on the path. This is the one row the report expects retry's service
+    /// queue — and only it — to match among the surveyed programs.
+    pub fn is_unbounded_reactivation(&self) -> bool {
+        self.re_admits_only_operationally()
+            && self.growth == Growth::WithState
+            && self.gate == Gate::Absent
     }
 }
 
-/// The expression turning a tagged element into `(plain value, Prov)`, for the send / output
-/// sites `SimBuilder` emits in provenance mode.
-fn strip_expr(rep: Rep) -> syn::Expr {
-    let (pat, val) = unwrap_tokens(rep);
-    parse_quote!(move |#pat| (#val, __prov))
+/// Builds the per-buffer admission table from an emission log.
+///
+/// Each network/output emission point, split per channel, is one buffer. Its admissions are
+/// classified exactly as [`classify`] does — same per-channel dominance history, same coarse-run
+/// grouping — so the counts here agree with the per-emission labels. `gates` supplies the
+/// structural [`Gate`] fact per emission-point *name* (the finest granularity a static shape
+/// analysis works at); names absent from the map are [`Gate::Unknown`].
+///
+/// [`Growth`] is read from the sizes of the re-admitted data lineages on each channel: a buffer
+/// whose reactivations all carry the same number of data tags is [`Growth::Fixed`]; one whose
+/// reactivations carry ever-larger lineages is [`Growth::WithState`]; one that never re-admits is
+/// [`Growth::None`]. Growth is the property that separates the work-buffer archetype (retry's
+/// service queue, whose re-admission tracks a backlog that itself grows) from the fixed-rate
+/// archetype (a gossip pump or Paxos covering, whose re-admission is the same bounded set every
+/// stimulus); it is therefore read *within one run* from successive re-admissions on a channel,
+/// and a run whose backlog does not change between re-admissions will read [`Growth::Fixed`] even
+/// for a work buffer — vary the retained state across the run (or across runs) to expose it.
+///
+/// Cycle-sink crossings are excluded unless `include_cycles` is set, matching [`classify`]: the
+/// cross-tick carry of a fixpoint accumulator re-emits its whole retained set every tick by
+/// construction, which is the accumulator working as intended, not physical re-admission of new
+/// work. The buffers that matter for bounding are the network/output edges out of a node.
+pub fn buffer_table(
+    records: &[EmissionRecord],
+    gates: &BTreeMap<String, Gate>,
+    include_cycles: bool,
+) -> Vec<BufferAdmissions> {
+    // Per channel history, identical to `classify`'s, but we also remember the data-lineage size
+    // of each re-admission so we can read growth.
+    struct History {
+        maximal: Vec<TagSet>,
+    }
+    impl History {
+        fn dominates(&self, data: &TagSet) -> bool {
+            self.maximal.iter().any(|m| data.is_subset(m))
+        }
+        fn add(&mut self, data: &TagSet) {
+            if self.dominates(data) {
+                return;
+            }
+            self.maximal.retain(|m| !m.is_subset(data));
+            self.maximal.push(data.clone());
+        }
+    }
+
+    #[derive(Default)]
+    struct Acc {
+        admissions: usize,
+        novel: usize,
+        reactivated: usize,
+        redundant: usize,
+        // Data-lineage sizes of re-admissions, in order, to detect growth.
+        readmit_sizes: Vec<usize>,
+    }
+
+    // Receipts are not admissions by the sender (see `classify`); cycle carries are the fixpoint
+    // accumulator's own state, excluded unless asked for.
+    let records: Vec<&EmissionRecord> = records
+        .iter()
+        .filter(|r| {
+            r.kind != EmissionPointKind::Receive
+                && (include_cycles || r.kind != EmissionPointKind::Cycle)
+        })
+        .collect();
+
+    let mut history: BTreeMap<Channel, History> = BTreeMap::new();
+    let mut acc: BTreeMap<BufferId, Acc> = BTreeMap::new();
+    let mut i = 0;
+    while i < records.len() {
+        // Group a run of identical coarse lineage into one causal unit, exactly as `classify`.
+        let mut j = i + 1;
+        while records[i].coarse
+            && j < records.len()
+            && records[j].coarse
+            && records[j].tags == records[i].tags
+        {
+            j += 1;
+        }
+        let run = &records[i..j];
+        let data: TagSet = run[0].data_tags().copied().collect();
+        let has_operational = run[0].operational_tags().next().is_some();
+        for r in run {
+            let h = history
+                .entry(r.channel())
+                .or_insert_with(|| History { maximal: Vec::new() });
+            let id = BufferId {
+                kind: r.kind,
+                name: r.name.clone(),
+                channel: r.channel(),
+            };
+            let entry = acc.entry(id).or_default();
+            // Pure-operational and constant crossings admit no data, so they fund no buffer.
+            if data.is_empty() {
+                continue;
+            }
+            entry.admissions += 1;
+            if !h.dominates(&data) {
+                entry.novel += 1;
+            } else if has_operational {
+                entry.reactivated += 1;
+                entry.readmit_sizes.push(data.len());
+            } else {
+                entry.redundant += 1;
+                entry.readmit_sizes.push(data.len());
+            }
+        }
+        for r in run {
+            history.get_mut(&r.channel()).unwrap().add(&data);
+        }
+        i = j;
+    }
+
+    acc.into_iter()
+        .map(|(id, a)| {
+            let growth = if a.readmit_sizes.is_empty() {
+                Growth::None
+            } else if a.readmit_sizes.windows(2).all(|w| w[0] == w[1]) {
+                Growth::Fixed
+            } else {
+                Growth::WithState
+            };
+            let gate = gates.get(&id.name).copied().unwrap_or(Gate::Unknown);
+            BufferAdmissions {
+                admissions: a.admissions,
+                novel: a.novel,
+                reactivated: a.reactivated,
+                redundant: a.redundant,
+                growth,
+                gate,
+                id,
+            }
+        })
+        .collect()
 }
 
-/// `T` → `(T, Tagged<()>)` (the positive side of a set difference keyed by the whole value).
-fn diff_pos_type(ty: &DebugType) -> DebugType {
-    let root = get_this_crate();
-    let inner: &syn::Type = &ty.0;
-    let out: syn::Type = parse_quote!((#inner, #root::sim::runtime::Tagged<()>));
-    DebugType::from(out)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Rewrites `ir` in place. Must run after network compilation and before slicing and
-/// emission.
-pub fn rewrite(ir: &mut [HydroRoot]) {
-    let root = get_this_crate();
-    transform_bottom_up(
-        ir,
-        &mut |hroot: &mut HydroRoot| match hroot {
-            HydroRoot::SendExternal { input, .. } | HydroRoot::DestSink { input, .. } => {
-                // The sink sees `(value, Vec<id>)`.
-                let rep = rep_of(&input.metadata().collection_kind);
-                let strip = strip_expr(rep);
-                let metadata = input.metadata().clone();
-                let inner = std::mem::replace(input.as_mut(), HydroNode::Placeholder);
-                **input = map_node(strip, inner, metadata);
-            }
-            HydroRoot::ForEach { f, input, .. } => {
-                let rep = rep_of(&input.metadata().collection_kind);
-                let (pat, val) = unwrap_tokens(rep);
-                *f = wrap_closure(f, |f| {
-                    parse_quote!({
-                        let mut __f = #f;
-                        move |#pat| __f(#val)
-                    })
-                });
-            }
-            HydroRoot::CycleSink { .. }
-            | HydroRoot::EmbeddedOutput { .. }
-            | HydroRoot::Null { .. } => {}
-        },
-        &mut |node: &mut HydroNode| {
-            // Children are already rewritten; this node's own kind is still the original.
-            let out_rep = rep_of(&node.metadata().collection_kind);
-            let input_rep = |input: &HydroNode| rep_of(&input.metadata().collection_kind);
-            let name = node.print_root();
-            let name = name.split('(').next().unwrap_or(&name).to_owned();
-            // A wrapper to put around this node once the match releases its borrows.
-            let mut post: Option<(syn::Expr, HydroIrMetadata)> = None;
+    fn tag(kind: TagKind, seq: u64) -> Tag {
+        Tag {
+            kind,
+            port: 0,
+            member: 0,
+            seq,
+        }
+    }
 
-            match node {
-                HydroNode::Placeholder => unreachable!(),
-                // Pass-through: the representation of the input is the representation of
-                // the output.
-                HydroNode::Cast { inner, metadata } => {
-                    let in_rep = input_rep(inner);
-                    tag_kind(&mut metadata.collection_kind);
-                    if in_rep != out_rep {
-                        let adapter: syn::Expr = match (in_rep, out_rep) {
-                            (Rep::Flat, Rep::Keyed) => {
-                                parse_quote!(#root::sim::runtime::codegen::key_out_cast)
-                            }
-                            (Rep::Keyed, Rep::Flat) => {
-                                parse_quote!(#root::sim::runtime::codegen::key_in_cast)
-                            }
-                            _ => unreachable!(),
-                        };
-                        let metadata = metadata.clone();
-                        let old = std::mem::replace(inner.as_mut(), HydroNode::Placeholder);
-                        **inner = map_node(adapter, old, metadata);
-                    }
-                }
-                HydroNode::ObserveNonDet { metadata, .. }
-                | HydroNode::YieldConcat { metadata, .. }
-                | HydroNode::BeginAtomic { metadata, .. }
-                | HydroNode::EndAtomic { metadata, .. }
-                | HydroNode::UnboundSingleton { metadata, .. }
-                | HydroNode::AssertIsConsistent { metadata, .. }
-                | HydroNode::Chain { metadata, .. }
-                | HydroNode::MergeOrdered { metadata, .. }
-                | HydroNode::ChainFirst { metadata, .. }
-                | HydroNode::Tee { metadata, .. }
-                | HydroNode::CycleSource { metadata, .. }
-                | HydroNode::DeferTick { metadata, .. }
-                | HydroNode::Sort { metadata, .. }
-                | HydroNode::Counter { metadata, .. } => {
-                    tag_kind(&mut metadata.collection_kind);
-                }
-                // Dedup: inside a tick, every arrival gets a fresh disjunction cell, which the
-                // operator's equality comparison fills with the alternatives it drops (see
-                // the module docs). A top-level `unique` keeps `'static` state, and a
-                // duplicate arriving in a later execution is no derivation of what the first
-                // copy already produced, so it is left alone (first copy wins).
-                HydroNode::Unique { input, metadata } => {
-                    let in_rep = input_rep(input);
-                    if !input.metadata().location_id.is_top_level() {
-                        let rebox: syn::Expr = match in_rep {
-                            Rep::Flat => parse_quote!(#root::sim::runtime::codegen::rebox),
-                            Rep::Keyed => parse_quote!(#root::sim::runtime::codegen::rebox_keyed),
-                        };
-                        let in_meta = input.metadata().clone();
-                        let old = std::mem::replace(input.as_mut(), HydroNode::Placeholder);
-                        **input = map_node(rebox, old, in_meta);
-                    }
-                    tag_kind(&mut metadata.collection_kind);
-                }
-                // Set difference: as an anti-join keyed by the whole value, with a plain
-                // negative side (DFIR's `difference` is `anti_join` under the hood), so the
-                // operator never compares a positive `Tagged` with a negative one.
-                HydroNode::Difference { pos, neg, metadata } => {
-                    assert!(
-                        out_rep == Rep::Flat
-                            && input_rep(pos) == Rep::Flat
-                            && input_rep(neg) == Rep::Flat,
-                        "provenance rewrite: keyed difference"
-                    );
-                    let pos_f: syn::Expr = parse_quote!(#root::sim::runtime::codegen::diff_pos);
-                    let neg_f: syn::Expr = parse_quote!(#root::sim::runtime::codegen::diff_neg);
-                    let out_f: syn::Expr = parse_quote!(#root::sim::runtime::codegen::diff_out);
-                    let plain = element_type(&metadata.collection_kind);
-                    let mut pos_meta = pos.metadata().clone();
-                    set_element_type(&mut pos_meta.collection_kind, diff_pos_type(&plain));
-                    let old = std::mem::replace(pos.as_mut(), HydroNode::Placeholder);
-                    **pos = map_node(pos_f, old, pos_meta);
-                    let mut neg_meta = neg.metadata().clone();
-                    set_element_type(&mut neg_meta.collection_kind, plain.clone());
-                    let old = std::mem::replace(neg.as_mut(), HydroNode::Placeholder);
-                    **neg = map_node(neg_f, old, neg_meta);
-                    let mut tagged_meta = metadata.clone();
-                    tag_kind(&mut tagged_meta.collection_kind);
-                    let mut anti_meta = metadata.clone();
-                    set_element_type(&mut anti_meta.collection_kind, diff_pos_type(&plain));
-                    let pos = std::mem::replace(pos.as_mut(), HydroNode::Placeholder);
-                    let neg = std::mem::replace(neg.as_mut(), HydroNode::Placeholder);
-                    *node = HydroNode::AntiJoin {
-                        pos: Box::new(pos),
-                        neg: Box::new(neg),
-                        metadata: anti_meta,
-                    };
-                    post = Some((out_f, tagged_meta));
-                }
-                // A reference slot (`by_ref` / `by_mut`): holds the tagged value; the closures
-                // that capture it are wrapped by `wrap_opaque`.
-                HydroNode::Reference { metadata, .. } => {
-                    tag_kind(&mut metadata.collection_kind);
-                }
+    fn coarse(mut r: EmissionRecord) -> EmissionRecord {
+        r.coarse = true;
+        r
+    }
 
-                // Enumerate numbers tagged elements: `(i, Tagged(v, p))` becomes
-                // `Tagged((i, v), p)`; the position carries the element's provenance.
-                HydroNode::Enumerate { metadata, .. } => {
-                    assert_eq!(out_rep, Rep::Flat, "provenance rewrite: keyed enumerate");
-                    let mut tagged_meta = metadata.clone();
-                    tag_kind(&mut tagged_meta.collection_kind);
-                    post = Some((
-                        parse_quote!(|(__i, #root::sim::runtime::Tagged(__v, __p))| {
-                            #root::sim::runtime::Tagged((__i, __v), __p.strip_agg())
-                        }),
-                        tagged_meta,
-                    ));
-                }
+    fn rec(tags: &[Tag], point: u32) -> EmissionRecord {
+        EmissionRecord {
+            kind: EmissionPointKind::Output,
+            point,
+            name: format!("edge{point}"),
+            source: "Process(test)".into(),
+            member: None,
+            destination: format!("dest{point}"),
+            recipient: None,
+            tags: tags.iter().copied().collect(),
+            coarse: false,
+            bytes: 10,
+            payload_hash: 0,
+        }
+    }
 
-                // Sources: empty provenance.
-                HydroNode::Source { metadata, .. } | HydroNode::ExternalInput { metadata, .. } => {
-                    let mut tagged_meta = metadata.clone();
-                    tag_kind(&mut tagged_meta.collection_kind);
-                    post = Some((empty_tag_expr(out_rep), tagged_meta));
-                }
-                HydroNode::SingletonSource {
-                    value, metadata, ..
-                } => {
-                    let inner: &syn::Expr = value;
-                    let wrapped: syn::Expr =
-                        parse_quote!(#root::sim::runtime::Tagged::empty(#inner));
-                    *value = DebugExpr::from(wrapped);
-                    tag_kind(&mut metadata.collection_kind);
-                }
+    #[test]
+    fn combinations_are_novel_and_channels_share_history_across_edges() {
+        let ab = tag(TagKind::Data, 1);
+        let bc = tag(TagKind::Data, 2);
+        let t = tag(TagKind::Operational, 1);
+        let same_dest = |tags: &[Tag], point: u32| {
+            let mut r = rec(tags, point);
+            r.destination = "peer".into();
+            r
+        };
+        let records = vec![
+            same_dest(&[ab], 0),        // base fact
+            same_dest(&[bc], 0),        // base fact
+            same_dest(&[ab, bc, t], 0), // derived fact: novel combination despite no new tag
+            same_dest(&[ab, bc, t], 1), // same lineage to the same peer over another edge
+            same_dest(&[ab], 0),        // dominated by the derived fact
+        ];
+        let labels: Vec<Label> = classify(&records, false)
+            .into_iter()
+            .map(|c| c.label)
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                Label::Productive,
+                Label::Productive,
+                Label::Productive,
+                Label::Reactivated,
+                Label::Redundant,
+            ]
+        );
+    }
 
-                // A batch passes the tags of what it releases through (a network arrival
-                // carries the id of its send; a local or external item carries none).
-                // A keyed batch buffers `(k, Tagged<v>)` pairs per key, and is as transparent.
-                HydroNode::Batch { metadata, .. } => {
-                    tag_kind(&mut metadata.collection_kind);
-                }
+    #[test]
+    fn labels_follow_lineage_shape() {
+        let d1 = tag(TagKind::Data, 1);
+        let d2 = tag(TagKind::Data, 2);
+        let t1 = tag(TagKind::Operational, 1);
+        let t2 = tag(TagKind::Operational, 2);
+        let records = vec![
+            rec(&[], 0),                   // constant
+            rec(&[t1], 0),                 // heartbeat
+            rec(&[d1], 0),                 // first send of d1
+            rec(&[d1, t1], 0),             // retry of d1 on timer
+            coarse(rec(&[d1, d2, t2], 0)), // opaque-state pump carrying new d2
+            coarse(rec(&[d1, d2, t2], 0)), // same invocation: grouped with the previous record
+            rec(&[d1], 0),                 // data-driven duplicate
+            rec(&[d1, d2, t2], 0),         // later pump with nothing new
+            rec(&[d1], 1),                 // same data on a different edge is novel there
+        ];
+        let labels: Vec<Label> = classify(&records, false)
+            .into_iter()
+            .map(|c| c.label)
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                Label::Constant,
+                Label::FixedOperational,
+                Label::Productive,
+                Label::Reactivated,
+                Label::Productive,
+                Label::Productive,
+                Label::Redundant,
+                Label::Reactivated,
+                Label::Productive,
+            ]
+        );
+    }
 
-                // Network: the send side sees `(value, Vec<id>)` and records the record's
-                // provenance with the send. On the receive side the delivery id travels
-                // with the message: `SimBuilder::create_network` tags each deserialized
-                // record with the id of the send that produced it (it owns the wire format),
-                // so the node's own output is tagged. An embedded channel carries no id and
-                // starts with empty provenance.
-                HydroNode::Network {
-                    input,
-                    serialize,
-                    metadata,
-                    ..
-                } => {
-                    let in_rep = input_rep(input);
-                    let strip = strip_expr(in_rep);
-                    let in_meta = input.metadata().clone();
-                    let old = std::mem::replace(input.as_mut(), HydroNode::Placeholder);
-                    **input = map_node(strip, old, in_meta);
-                    if matches!(serialize, crate::compile::ir::NetworkSend::Embedded { .. }) {
-                        let mut tagged_meta = metadata.clone();
-                        tag_kind(&mut tagged_meta.collection_kind);
-                        post = Some((empty_tag_expr(out_rep), tagged_meta));
-                    } else {
-                        match out_rep {
-                            Rep::Flat => tag_kind(&mut metadata.collection_kind),
-                            // The receive half tags the whole `(k, v)` record; a keyed
-                            // output moves the tag onto the value.
-                            Rep::Keyed => {
-                                let mut tagged_meta = metadata.clone();
-                                tag_kind(&mut tagged_meta.collection_kind);
-                                post = Some((
-                                    parse_quote!(#root::sim::runtime::codegen::key_out),
-                                    tagged_meta,
-                                ));
-                            }
-                        }
-                    }
-                }
+    #[test]
+    fn labels_describe_mechanism_and_ignore_receipts() {
+        let d1 = tag(TagKind::Data, 1);
+        let t1 = tag(TagKind::Operational, 1);
+        let send = |tags: &[Tag]| {
+            let mut r = rec(tags, 0);
+            r.kind = EmissionPointKind::Network;
+            r
+        };
+        let receive = |tags: &[Tag]| {
+            let mut r = rec(tags, 0);
+            r.kind = EmissionPointKind::Receive;
+            r
+        };
+        // Whether or not the first copy arrived, the retry is the same mechanism.
+        let lost = vec![send(&[d1]), send(&[d1, t1])];
+        let delivered = vec![send(&[d1]), receive(&[d1]), send(&[d1, t1])];
+        for log in [lost, delivered] {
+            let labels: Vec<Label> = classify(&log, false).into_iter().map(|c| c.label).collect();
+            assert_eq!(labels, vec![Label::Productive, Label::Reactivated]);
+        }
+        // A receipt with the same coarse tags as the preceding send is not part of its run.
+        let coarse_send = coarse(send(&[d1]));
+        let coarse_receipt = coarse(receive(&[d1]));
+        let out = classify(&[coarse_send, coarse_receipt], false);
+        assert_eq!(out.len(), 1, "receipts are never labelled");
+    }
 
-                // Closures.
-                HydroNode::Map { f, input, metadata } => {
-                    *f = if f.singleton_refs.is_empty() {
-                        wrap_map(f, input_rep(input), out_rep)
-                    } else {
-                        wrap_opaque(f, input_rep(input), out_rep, Shape::Map, &name)
-                    };
-                    tag_kind(&mut metadata.collection_kind);
-                }
-                // A filter keeps the record as it is, so the aggregate witnesses of what it
-                // lets through are computed by a map placed after it (see the module docs).
-                HydroNode::Filter { f, input, metadata } => {
-                    assert!(
-                        f.singleton_refs.is_empty(),
-                        "the provenance rewrite does not support references captured by `{name}`"
-                    );
-                    let predicate = f.clone();
-                    *f = wrap_by_ref(f, &input.metadata().collection_kind);
-                    tag_kind(&mut metadata.collection_kind);
-                    let witness = filter_witness_expr(&predicate, &metadata.collection_kind);
-                    post = Some((witness, metadata.clone()));
-                }
-                HydroNode::Inspect { f, input, metadata } => {
-                    assert!(
-                        f.singleton_refs.is_empty(),
-                        "the provenance rewrite does not support references captured by `{name}`"
-                    );
-                    *f = wrap_by_ref(f, &input.metadata().collection_kind);
-                    tag_kind(&mut metadata.collection_kind);
-                }
-                HydroNode::FilterMap { f, input, metadata } => {
-                    *f = if f.singleton_refs.is_empty() {
-                        wrap_filter_map(f, input_rep(input), out_rep)
-                    } else {
-                        wrap_opaque(f, input_rep(input), out_rep, Shape::FilterMap, &name)
-                    };
-                    tag_kind(&mut metadata.collection_kind);
-                }
-                HydroNode::FlatMap { f, input, metadata } => {
-                    *f = if f.singleton_refs.is_empty() {
-                        wrap_flat_map(f, input_rep(input), out_rep)
-                    } else {
-                        wrap_opaque(f, input_rep(input), out_rep, Shape::FlatMap, &name)
-                    };
-                    tag_kind(&mut metadata.collection_kind);
-                }
-                HydroNode::Fold {
-                    init,
-                    acc,
-                    input,
-                    metadata,
-                } => {
-                    assert_eq!(
-                        input_rep(input),
-                        Rep::Flat,
-                        "provenance rewrite: keyed input to fold"
-                    );
-                    *acc = wrap_fold_acc(acc, init, Rep::Flat);
-                    *init = wrap_init(init);
-                    tag_kind(&mut metadata.collection_kind);
-                }
-                HydroNode::FoldKeyed {
-                    init,
-                    acc,
-                    input,
-                    metadata,
-                } => {
-                    assert_eq!(
-                        input_rep(input),
-                        Rep::Keyed,
-                        "provenance rewrite: flat input to fold_keyed"
-                    );
-                    *acc = wrap_fold_acc(acc, init, Rep::Flat);
-                    *init = wrap_init(init);
-                    tag_kind(&mut metadata.collection_kind);
-                }
-                HydroNode::Reduce { f, input, metadata } => {
-                    assert_eq!(
-                        input_rep(input),
-                        Rep::Flat,
-                        "provenance rewrite: keyed input to reduce"
-                    );
-                    *f = wrap_acc(f, Rep::Flat);
-                    tag_kind(&mut metadata.collection_kind);
-                }
-                HydroNode::ReduceKeyed { f, input, metadata } => {
-                    assert_eq!(
-                        input_rep(input),
-                        Rep::Keyed,
-                        "provenance rewrite: flat input to reduce_keyed"
-                    );
-                    *f = wrap_acc(f, Rep::Flat);
-                    tag_kind(&mut metadata.collection_kind);
-                }
-                // As `ReduceKeyed`; the watermark only garbage-collects keys below it, so its
-                // tag is dropped (the retained records' provenance does not depend on it).
-                HydroNode::ReduceKeyedWatermark {
-                    f,
-                    input,
-                    watermark,
-                    metadata,
-                } => {
-                    assert_eq!(
-                        input_rep(input),
-                        Rep::Keyed,
-                        "provenance rewrite: flat input to reduce_keyed_watermark"
-                    );
-                    assert_eq!(
-                        input_rep(watermark),
-                        Rep::Flat,
-                        "provenance rewrite: keyed watermark"
-                    );
-                    *f = wrap_acc(f, Rep::Flat);
-                    let mut watermark_meta = watermark.metadata().clone();
-                    let plain = DebugType::from(plain_type(
-                        &element_type(&watermark.metadata().collection_kind).0,
-                    ));
-                    set_element_type(&mut watermark_meta.collection_kind, plain);
-                    let old = std::mem::replace(watermark.as_mut(), HydroNode::Placeholder);
-                    **watermark = map_node(
-                        parse_quote!(|__x: #root::sim::runtime::Tagged<_>| __x.0),
-                        old,
-                        watermark_meta,
-                    );
-                    tag_kind(&mut metadata.collection_kind);
-                }
-                HydroNode::Scan {
-                    init,
-                    acc,
-                    input,
-                    metadata,
-                } => {
-                    let in_rep = input_rep(input);
-                    *init = wrap_init(init);
-                    *acc = wrap_scan_acc(acc, in_rep, out_rep);
-                    tag_kind(&mut metadata.collection_kind);
-                }
+    #[test]
+    fn buffer_table_reads_the_three_facts() {
+        let d1 = tag(TagKind::Data, 1);
+        let d2 = tag(TagKind::Data, 2);
+        let t1 = tag(TagKind::Operational, 1);
+        // A retry-shaped buffer on one channel: first the originals arrive and the queue's coarse
+        // state accumulates their combined lineage as a single maximal set; then timer-driven
+        // reactivations re-send subsets of that state, growing as the backlog is re-read.
+        let net = |tags: &[Tag]| {
+            let mut r = rec(tags, 0);
+            r.kind = EmissionPointKind::Network;
+            r.name = "requests".into();
+            r.destination = "service".into();
+            r
+        };
+        let records = vec![
+            net(&[d1]),         // Productive
+            net(&[d2]),         // Productive (novel: not dominated by {d1})
+            net(&[d1, d2]),     // Productive (novel combination) — the queue now holds both
+            net(&[d1, t1]),     // Reactivated, 1 data tag (dominated by {d1,d2})
+            net(&[d1, d2, t1]), // Reactivated, 2 data tags (dominated) -> grows with state
+        ];
+        let mut gates = BTreeMap::new();
+        gates.insert("requests".to_string(), Gate::Absent);
+        let table = buffer_table(&records, &gates, false);
+        assert_eq!(table.len(), 1);
+        let b = &table[0];
+        assert_eq!(b.admissions, 5);
+        assert_eq!(b.novel, 3);
+        assert_eq!(b.reactivated, 2);
+        assert_eq!(b.redundant, 0);
+        assert!(b.re_admits());
+        assert!(b.re_admits_only_operationally());
+        assert_eq!(b.growth, Growth::WithState);
+        assert_eq!(b.gate, Gate::Absent);
+        assert!(
+            b.is_unbounded_reactivation(),
+            "backlog-growing, timer-driven, ungated: the collapse-candidate shape"
+        );
+    }
 
-                // Pair-producing operators: the operator yields `(Tagged<A>, Tagged<B>)`; a
-                // wrapper merges the two provenances.
-                HydroNode::CrossProduct {
-                    left,
-                    right,
-                    metadata,
-                }
-                | HydroNode::CrossSingleton {
-                    left,
-                    right,
-                    metadata,
-                } => {
-                    assert_eq!(
-                        out_rep,
-                        Rep::Flat,
-                        "provenance rewrite: keyed cross product"
-                    );
-                    // An input may still be keyed (`(K, Tagged<V>)`): a keyed stream crossed
-                    // with a singleton lowers to a flat cross product of its entries. The merge
-                    // then re-keys that side as it unions the two provenances.
-                    let merge: syn::Expr = match (input_rep(left), input_rep(right)) {
-                        (Rep::Flat, Rep::Flat) => {
-                            parse_quote!(#root::sim::runtime::codegen::merge_pair)
-                        }
-                        (Rep::Keyed, Rep::Flat) => {
-                            parse_quote!(#root::sim::runtime::codegen::merge_pair_keyed_left)
-                        }
-                        (Rep::Flat, Rep::Keyed) => {
-                            parse_quote!(#root::sim::runtime::codegen::merge_pair_keyed_right)
-                        }
-                        (Rep::Keyed, Rep::Keyed) => {
-                            parse_quote!(#root::sim::runtime::codegen::merge_pair_keyed_both)
-                        }
-                    };
-                    let flat_inputs = input_rep(left) == Rep::Flat && input_rep(right) == Rep::Flat;
-                    let mut tagged_meta = metadata.clone();
-                    tag_kind(&mut tagged_meta.collection_kind);
-                    let pair = if flat_inputs {
-                        tag_pair_type(&element_type(&metadata.collection_kind), false)
-                    } else {
-                        let any: syn::Type = parse_quote!((_, _));
-                        DebugType::from(any)
-                    };
-                    set_element_type(&mut metadata.collection_kind, pair);
-                    post = Some((merge, tagged_meta));
-                }
-                HydroNode::Join {
-                    left,
-                    right,
-                    metadata,
-                }
-                | HydroNode::JoinHalf {
-                    left,
-                    right,
-                    metadata,
-                } => {
-                    assert_eq!(out_rep, Rep::Flat, "provenance rewrite: keyed join output");
-                    for side in [left, right] {
-                        assert_eq!(
-                            input_rep(side),
-                            Rep::Flat,
-                            "provenance rewrite: keyed join input"
-                        );
-                        let mut meta = side.metadata().clone();
-                        let keyed = tag_value_type(&element_type(&side.metadata().collection_kind));
-                        set_element_type(&mut meta.collection_kind, keyed);
-                        let old = std::mem::replace(side.as_mut(), HydroNode::Placeholder);
-                        **side = map_node(
-                            parse_quote!(#root::sim::runtime::codegen::key_out),
-                            old,
-                            meta,
-                        );
-                    }
-                    let mut tagged_meta = metadata.clone();
-                    tag_kind(&mut tagged_meta.collection_kind);
-                    let pair = tag_pair_type(&element_type(&metadata.collection_kind), true);
-                    set_element_type(&mut metadata.collection_kind, pair);
-                    post = Some((
-                        parse_quote!(#root::sim::runtime::codegen::key_in_pair),
-                        tagged_meta,
-                    ));
-                }
-                HydroNode::AntiJoin { pos, neg, metadata } => {
-                    // `pos` is `(K, V)`, `neg` is `K`; the output is `(K, V)`. The anti-join runs
-                    // on `(K, Tagged<V>)`: a flat `pos` (`Tagged<(K, V)>`) is keyed first, and a
-                    // keyed one (a `KeyedSingleton`/`KeyedStream`, as `filter_key_not_in`
-                    // produces) already has that shape.
-                    if input_rep(pos) == Rep::Flat {
-                        let mut pos_meta = pos.metadata().clone();
-                        let keyed = tag_value_type(&element_type(&pos.metadata().collection_kind));
-                        set_element_type(&mut pos_meta.collection_kind, keyed);
-                        let old = std::mem::replace(pos.as_mut(), HydroNode::Placeholder);
-                        **pos = map_node(
-                            parse_quote!(#root::sim::runtime::codegen::key_out),
-                            old,
-                            pos_meta,
-                        );
-                    }
-                    let neg_meta = neg.metadata().clone();
-                    let old = std::mem::replace(neg.as_mut(), HydroNode::Placeholder);
-                    **neg = map_node(
-                        parse_quote!(|__x: #root::sim::runtime::Tagged<_>| __x.0),
-                        old,
-                        neg_meta,
-                    );
-                    if out_rep == Rep::Keyed {
-                        // A keyed output keeps `(K, Tagged<V>)`, its native tagged form.
-                        tag_kind(&mut metadata.collection_kind);
-                    } else {
-                        let mut tagged_meta = metadata.clone();
-                        tag_kind(&mut tagged_meta.collection_kind);
-                        let keyed = tag_value_type(&element_type(&metadata.collection_kind));
-                        set_element_type(&mut metadata.collection_kind, keyed);
-                        post = Some((
-                            parse_quote!(#root::sim::runtime::codegen::key_in),
-                            tagged_meta,
-                        ));
-                    }
-                }
+    #[test]
+    fn buffer_table_fixpoint_buffer_never_re_admits() {
+        // Transitive-closure shape: every crossing is a novel combination, none dominated.
+        let ab = tag(TagKind::Data, 1);
+        let bc = tag(TagKind::Data, 2);
+        let t = tag(TagKind::Operational, 1);
+        let out = |tags: &[Tag]| {
+            let mut r = rec(tags, 0);
+            r.name = "facts".into();
+            r.destination = "sink".into();
+            r
+        };
+        let records = vec![out(&[ab]), out(&[bc]), out(&[ab, bc, t])];
+        let table = buffer_table(&records, &BTreeMap::new(), false);
+        assert_eq!(table.len(), 1);
+        let b = &table[0];
+        assert_eq!(b.novel, 3);
+        assert!(!b.re_admits());
+        assert_eq!(b.growth, Growth::None);
+        assert_eq!(b.gate, Gate::Unknown, "not supplied");
+        assert!(!b.is_unbounded_reactivation());
+    }
 
-                HydroNode::PartitionSide { .. }
-                | HydroNode::PartitionShared { .. }
-                | HydroNode::ResolveFutures { .. }
-                | HydroNode::ResolveFuturesBlocking { .. }
-                | HydroNode::ResolveFuturesOrdered { .. }
-                | HydroNode::FlatMapStreamBlocking { .. }
-                | HydroNode::ScanAsyncBlocking { .. }
-                | HydroNode::VersionedNetwork { .. }
-                | HydroNode::VersionedNetworkFork { .. } => {
-                    panic!(
-                        "the provenance rewrite (Level 2 lineage) does not support `{name}` yet; \
-                         compile without `with_provenance()` or extend `sim::provenance`"
-                    );
-                }
-            }
-            if let Some((f, metadata)) = post {
-                wrap_node(node, f, metadata);
-            }
-        },
-        false,
-    );
+    #[test]
+    fn buffer_table_fixed_re_admission_is_not_a_collapse_candidate() {
+        // Gossip/Paxos-covering shape: re-admits under a timer, but always the same lineage size.
+        let d1 = tag(TagKind::Data, 1);
+        let d2 = tag(TagKind::Data, 2);
+        let t1 = tag(TagKind::Operational, 1);
+        let net = |tags: &[Tag]| {
+            let mut r = rec(tags, 0);
+            r.kind = EmissionPointKind::Network;
+            r.name = "gossip".into();
+            r.destination = "peer".into();
+            r
+        };
+        let records = vec![
+            net(&[d1, d2]),     // Productive: first full-state pump (novel combination)
+            net(&[d1, d2, t1]), // Reactivated, 2 data tags
+            net(&[d1, d2, t1]), // Reactivated, 2 data tags -> fixed
+        ];
+        let table = buffer_table(&records, &BTreeMap::new(), false);
+        let b = &table[0];
+        assert_eq!(b.reactivated, 2);
+        assert_eq!(b.growth, Growth::Fixed);
+        assert!(b.re_admits_only_operationally());
+        assert!(
+            !b.is_unbounded_reactivation(),
+            "fixed-size re-admission is rate-limited, not gated"
+        );
+    }
+
+    #[test]
+    fn buffer_table_separates_channels_of_one_edge() {
+        // The same edge name fanning out to two recipients is two buffers.
+        let d1 = tag(TagKind::Data, 1);
+        let mk = |recipient: u32| {
+            let mut r = rec(&[d1], 0);
+            r.kind = EmissionPointKind::Network;
+            r.name = "fanout".into();
+            r.destination = "peers".into();
+            r.recipient = Some(recipient);
+            r
+        };
+        let records = vec![mk(0), mk(1), mk(0)];
+        let table = buffer_table(&records, &BTreeMap::new(), false);
+        assert_eq!(table.len(), 2, "one row per recipient channel");
+        let to0 = table.iter().find(|b| b.id.channel.2 == Some(0)).unwrap();
+        let to1 = table.iter().find(|b| b.id.channel.2 == Some(1)).unwrap();
+        assert_eq!(to0.novel, 1);
+        assert_eq!(to0.redundant, 1, "the third send repeats what recipient 0 got");
+        assert_eq!(to1.novel, 1);
+        assert!(!to1.re_admits());
+    }
+
+    #[test]
+    fn frame_roundtrip_preserves_payload_and_tags() {
+        let tags: TagSet = [tag(TagKind::Data, 7)].into_iter().collect();
+        let payload = Bytes::from_static(b"hello");
+        let framed = payload.clone().frame(&tags, true);
+        assert_ne!(framed, payload);
+        let (t, coarse, p) = framed.unframe();
+        assert_eq!(t, tags);
+        assert!(coarse);
+        assert_eq!(p, payload);
+        assert_eq!(p.payload_len(), 5);
+    }
 }

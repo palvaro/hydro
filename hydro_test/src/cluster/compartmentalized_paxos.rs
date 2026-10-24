@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use hydro_lang::live_collections::optional::InitNone;
 use hydro_lang::live_collections::stream::NoOrder;
 use hydro_lang::location::{Atomic, Location, MemberId};
 use hydro_lang::prelude::*;
@@ -9,8 +8,8 @@ use hydro_std::request_response::join_responses;
 use serde::{Deserialize, Serialize};
 
 use super::paxos::{
-    Acceptor, Ballot, LeaderTiming, LogValue, P2a, PaxosConfig, PaxosPayload, PaxosTestVariant,
-    Proposer, acceptor_p2, index_payloads, leader_election_with, recommit_after_leader_election,
+    Acceptor, Ballot, LogValue, P2a, PaxosConfig, PaxosPayload, Proposer, acceptor_p2,
+    index_payloads, leader_election, recommit_after_leader_election,
 };
 use super::paxos_with_client::PaxosLike;
 
@@ -57,7 +56,7 @@ impl<'a> PaxosLike<'a> for CoreCompartmentalizedPaxos<'a> {
         ballot.map(q!(|ballot| ballot.proposer_id))
     }
 
-    fn build<P: PaxosPayload + 'a>(
+    fn build<P: PaxosPayload>(
         self,
         with_ballot: impl FnOnce(
             Stream<Ballot, Cluster<'a, Self::PaxosIn>, Unbounded>,
@@ -73,62 +72,6 @@ impl<'a> PaxosLike<'a> for CoreCompartmentalizedPaxos<'a> {
             a_checkpoint,
             with_ballot,
             self.config,
-            nondet_leader,
-            nondet_commit,
-        )
-        .1
-    }
-}
-
-/// [`CoreCompartmentalizedPaxos`] with the leader timing and the test variant chosen by the
-/// caller: the [`PaxosLike`] for simulation and fault injection (`paxos_ldfi.rs`).
-pub struct CoreCompartmentalizedPaxosWith<'a> {
-    pub proposers: Cluster<'a, Proposer>,
-    pub proxy_leaders: Cluster<'a, ProxyLeader>,
-    pub acceptors: Cluster<'a, Acceptor>,
-    pub config: CompartmentalizedPaxosConfig,
-    pub timing: LeaderTiming<'a>,
-    pub variant: PaxosTestVariant,
-}
-
-impl<'a> PaxosLike<'a> for CoreCompartmentalizedPaxosWith<'a> {
-    type PaxosIn = Proposer;
-    type PaxosLog = Acceptor;
-    type PaxosOut = ProxyLeader;
-    type Ballot = Ballot;
-
-    fn payload_recipients(&self) -> &Cluster<'a, Self::PaxosIn> {
-        &self.proposers
-    }
-
-    fn log_stores(&self) -> &Cluster<'a, Self::PaxosLog> {
-        &self.acceptors
-    }
-
-    fn get_recipient_from_ballot<L: Location<'a>>(
-        ballot: Optional<Self::Ballot, L, Unbounded>,
-    ) -> Optional<MemberId<Self::PaxosIn>, L, Unbounded> {
-        ballot.map(q!(|ballot| ballot.proposer_id))
-    }
-
-    fn build<P: PaxosPayload + 'a>(
-        self,
-        with_ballot: impl FnOnce(
-            Stream<Ballot, Cluster<'a, Self::PaxosIn>, Unbounded>,
-        ) -> Stream<P, Cluster<'a, Self::PaxosIn>, Unbounded>,
-        a_checkpoint: Optional<usize, Cluster<'a, Acceptor>, Unbounded>,
-        nondet_leader: NonDet,
-        nondet_commit: NonDet,
-    ) -> Stream<(usize, Option<P>), Cluster<'a, Self::PaxosOut>, Unbounded, NoOrder> {
-        compartmentalized_paxos_core_with(
-            &self.proposers,
-            &self.proxy_leaders,
-            &self.acceptors,
-            a_checkpoint,
-            with_ballot,
-            self.config,
-            self.timing,
-            self.variant,
             nondet_leader,
             nondet_commit,
         )
@@ -156,7 +99,7 @@ impl<'a> PaxosLike<'a> for CoreCompartmentalizedPaxosWith<'a> {
 /// non-deterministically dropped. The stream of ballots is also non-deterministic because
 /// leaders are elected in a non-deterministic process.
 #[expect(clippy::too_many_arguments, reason = "internal paxos code // TODO")]
-pub fn compartmentalized_paxos_core<'a, P: PaxosPayload + 'a>(
+pub fn compartmentalized_paxos_core<'a, P: PaxosPayload>(
     proposers: &Cluster<'a, Proposer>,
     proxy_leaders: &Cluster<'a, ProxyLeader>,
     acceptors: &Cluster<'a, Acceptor>,
@@ -165,40 +108,6 @@ pub fn compartmentalized_paxos_core<'a, P: PaxosPayload + 'a>(
         Stream<Ballot, Cluster<'a, Proposer>, Unbounded>,
     ) -> Stream<P, Cluster<'a, Proposer>, Unbounded>,
     config: CompartmentalizedPaxosConfig,
-    nondet_leader: NonDet,
-    nondet_commit_leader_change: NonDet,
-) -> (
-    Stream<Ballot, Cluster<'a, Proposer>, Unbounded>,
-    Stream<(usize, Option<P>), Cluster<'a, ProxyLeader>, Unbounded, NoOrder>,
-) {
-    compartmentalized_paxos_core_with(
-        proposers,
-        proxy_leaders,
-        acceptors,
-        a_checkpoint,
-        c_to_proposers,
-        config,
-        LeaderTiming::WallClock,
-        PaxosTestVariant::default(),
-        nondet_leader,
-        nondet_commit_leader_change,
-    )
-}
-
-/// [`compartmentalized_paxos_core`] with the leader timing and the test variant chosen by the
-/// caller (see [`super::paxos::paxos_core_with`]).
-#[expect(clippy::too_many_arguments, reason = "internal paxos code // TODO")]
-pub fn compartmentalized_paxos_core_with<'a, P: PaxosPayload + 'a>(
-    proposers: &Cluster<'a, Proposer>,
-    proxy_leaders: &Cluster<'a, ProxyLeader>,
-    acceptors: &Cluster<'a, Acceptor>,
-    a_checkpoint: Optional<usize, Cluster<'a, Acceptor>, Unbounded>,
-    c_to_proposers: impl FnOnce(
-        Stream<Ballot, Cluster<'a, Proposer>, Unbounded>,
-    ) -> Stream<P, Cluster<'a, Proposer>, Unbounded>,
-    config: CompartmentalizedPaxosConfig,
-    timing: LeaderTiming<'a>,
-    variant: PaxosTestVariant,
     nondet_leader: NonDet,
     nondet_commit_leader_change: NonDet,
 ) -> (
@@ -226,18 +135,14 @@ pub fn compartmentalized_paxos_core_with<'a, P: PaxosPayload + 'a>(
     let (a_log_complete_cycle, a_log_forward_reference) =
         acceptor_tick.forward_ref::<Singleton<_, _, _>>();
 
-    let (p_ballot, p_is_leader, p_relevant_p1bs, a_max_ballot) = leader_election_with(
+    let (p_ballot, p_is_leader, p_relevant_p1bs, a_max_ballot) = leader_election(
         proposers,
         acceptors,
         &proposer_tick,
         &acceptor_tick,
-        // A read quorum is a whole column of the grid.
         config.acceptor_grid_rows,
-        config.acceptor_grid_rows,
+        config.acceptor_grid_rows * config.acceptor_grid_cols,
         config.paxos_config,
-        config.acceptor_grid_cols,
-        timing,
-        variant,
         sequencing_max_ballot_forward_reference,
         a_log_forward_reference,
         nondet!(
@@ -281,7 +186,6 @@ pub fn compartmentalized_paxos_core_with<'a, P: PaxosPayload + 'a>(
         p_relevant_p1bs,
         config,
         a_max_ballot,
-        variant,
         nondet!(
             /// The relevant p1bs are non-deterministic because they come from a arbitrary quorum, but because
             /// we use a quorum, if we remain the leader there are no missing committed values when we combine the logs.
@@ -291,18 +195,14 @@ pub fn compartmentalized_paxos_core_with<'a, P: PaxosPayload + 'a>(
         ),
     );
 
-    a_log_complete_cycle.complete(
-        a_log
-            .snapshot_atomic(
-                &acceptor_tick,
-                nondet!(
-                    /// We will always write payloads to the log before acknowledging them to the proposers,
-                    /// which guarantees that if the leader changes the quorum overlap between sequencing and leader
-                    /// election will include the committed value.
-                ),
-            )
-            .unwrap_or(acceptor_tick.singleton(q!((None, HashMap::new())))),
-    );
+    a_log_complete_cycle.complete(a_log.snapshot_atomic(
+        &acceptor_tick,
+        nondet!(
+            /// We will always write payloads to the log before acknowledging them to the proposers,
+            /// which guarantees that if the leader changes the quorum overlap between sequencing and leader
+            /// election will include the committed value.
+        ),
+    ));
     sequencing_max_ballot_complete_cycle.complete(sequencing_max_ballots);
 
     (
@@ -338,24 +238,18 @@ fn sequence_payload<'a, P: PaxosPayload>(
     >,
     config: CompartmentalizedPaxosConfig,
     a_max_ballot: Singleton<Option<Ballot>, Tick<Cluster<'a, Acceptor>>, Bounded>,
-    variant: PaxosTestVariant,
     nondet_commit_leader_change: NonDet,
 ) -> (
     Stream<(usize, Option<P>), Cluster<'a, ProxyLeader>, Unbounded, NoOrder>,
-    Optional<(Option<usize>, HashMap<usize, LogValue<P>>), Atomic<Cluster<'a, Acceptor>>, InitNone>,
+    Singleton<
+        (Option<usize>, HashMap<usize, LogValue<P>>),
+        Atomic<Cluster<'a, Acceptor>>,
+        Unbounded,
+    >,
     Stream<Ballot, Cluster<'a, Proposer>, Unbounded, NoOrder>,
 ) {
     let (p_log_to_recommit, p_max_slot) =
         recommit_after_leader_election(p_relevant_p1bs, p_ballot.clone(), config.paxos_config.f);
-    // Recommit once, in the tick the proposer becomes the leader (see `paxos::sequence_payload`).
-    let was_not_leader = p_is_leader
-        .clone()
-        .map(q!(|is_leader| is_leader.then_some(())))
-        .into_optional()
-        .defer_tick()
-        .is_none();
-    let just_became_leader = p_is_leader.clone().and(was_not_leader);
-    let p_log_to_recommit = p_log_to_recommit.filter_if(just_became_leader);
 
     let p_indexed_payloads = index_payloads(
         p_max_slot,
@@ -386,7 +280,7 @@ fn sequence_payload<'a, P: PaxosPayload>(
             ((slot, ballot), payload)
         ))))
         .all_ticks()
-        .demux(proxy_leaders, TCP.fail_stop().name("p2a_proxy").bincode())
+        .demux(proxy_leaders, TCP.fail_stop().bincode())
         .values()
         .atomic();
 
@@ -411,16 +305,9 @@ fn sequence_payload<'a, P: PaxosPayload>(
                 )
             })
         }))
-        .end_atomic();
-    let pl_to_acceptors_p2a_thrifty = if variant.lossy_acceptor_links {
-        pl_to_acceptors_p2a_thrifty
-            .demux(acceptors, TCP.lossy_delayed_forever().name("p2a").bincode())
-            .values()
-    } else {
-        pl_to_acceptors_p2a_thrifty
-            .demux(acceptors, TCP.fail_stop().name("p2a").bincode())
-            .values()
-    };
+        .end_atomic()
+        .demux(acceptors, TCP.fail_stop().bincode())
+        .values();
 
     let (a_log, a_to_proxy_leaders_p2b) = acceptor_p2(
         acceptor_tick,
@@ -428,21 +315,13 @@ fn sequence_payload<'a, P: PaxosPayload>(
         pl_to_acceptors_p2a_thrifty,
         a_checkpoint,
         proxy_leaders,
-        variant.lossy_acceptor_links,
     );
 
     // TODO: This is a liveness problem if any node in the thrifty quorum fails
     // Need special operator for per-value timeout detection
-    // The write quorum is a whole row of `acceptor_grid_cols` acceptors; the injected bug
-    // settles for one fewer, which no longer intersects every read quorum (a column).
-    let write_quorum = if variant.commit_quorum_off_by_one {
-        config.acceptor_grid_cols - 1
-    } else {
-        config.acceptor_grid_cols
-    };
     let (quorums, fails) = collect_quorum(
         a_to_proxy_leaders_p2b,
-        write_quorum,
+        config.acceptor_grid_cols,
         config.acceptor_grid_cols,
     );
 

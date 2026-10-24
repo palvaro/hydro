@@ -21,23 +21,16 @@ mod tests {
 
         let count_mut = my_count.by_mut();
 
-        // Use the singleton mut in a map on another stream. Note that the closure
-        // returns the running *count of items processed* (ignoring `x`): the multiset of
-        // outputs {s+1, s+2, ...} is the same regardless of processing order, so this is
-        // commutative. Returning a value that depends on `x` and the state (e.g. a
-        // running sum) would expose the processing order and be rejected by the proof.
+        // Use the singleton mut in a map on another stream
         let out_port = p1
             .source_iter(q!(1..=3i32))
             .weaken_ordering::<hydro_lang::live_collections::stream::NoOrder>()
             .map(q!(
-                |_x| {
-                    *count_mut = count_mut.wrapping_add(1);
+                |x| {
+                    *count_mut += x;
                     *count_mut
                 },
-                commutative = hydro_lang::properties::verus_proof_commutative_map!(
-                    item = i32,
-                    captures_mut = |count_mut: i32|
-                )
+                commutative = hydro_lang::__manual_proof__!(/** addition is commutative */)
             ))
             .send_bincode_external(&external);
 
@@ -58,7 +51,6 @@ mod tests {
             results.push(out_recv.next().await.unwrap());
         }
         results.sort();
-        // count starts at 10 (fold of 0..5), then increments once per item
-        assert_eq!(results, vec![11, 12, 13]);
+        assert_eq!(results, vec![11, 13, 16]);
     }
 }

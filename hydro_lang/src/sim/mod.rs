@@ -4,47 +4,69 @@
 
 use std::marker::PhantomData;
 
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
 use crate::compile::builder::ExternalPortId;
 use crate::live_collections::stream::{Ordering, Retries};
 
-/// A receiver for an external stream in a simulation.
-pub struct SimReceiver<T, O: Ordering, R: Retries>(
+/// A receiver for an external bincode stream in a simulation.
+pub struct SimReceiver<T: Serialize + DeserializeOwned, O: Ordering, R: Retries>(
     pub(crate) ExternalPortId,
     pub(crate) PhantomData<(T, O, R)>,
-    pub(crate) fn(&[u8]) -> T,
 );
 
-/// A sender to an external sink in a simulation.
-pub struct SimSender<T, O: Ordering, R: Retries>(
+/// A sender to an external bincode sink in a simulation.
+pub struct SimSender<T: Serialize + DeserializeOwned, O: Ordering, R: Retries>(
     pub(crate) ExternalPortId,
     pub(crate) PhantomData<(T, O, R)>,
-    pub(crate) fn(&T) -> Vec<u8>,
 );
 
 /// A receiver for an external cluster stream in a simulation.
 ///
 /// Each received value is a `(u32, T)` tuple where the `u32` is the raw
 /// cluster member ID that produced the value.
-pub struct SimClusterReceiver<T, O: Ordering, R: Retries>(
+pub struct SimClusterReceiver<T: Serialize + DeserializeOwned, O: Ordering, R: Retries>(
     pub(crate) ExternalPortId,
     pub(crate) PhantomData<(T, O, R)>,
-    pub(crate) fn(&[u8]) -> T,
 );
 
 /// A sender to an external cluster sink in a simulation.
 ///
 /// Each sent value is a `(u32, T)` tuple where the `u32` is the raw
 /// cluster member ID that should receive the value.
-pub struct SimClusterSender<T, O: Ordering, R: Retries>(
+pub struct SimClusterSender<T: Serialize + DeserializeOwned, O: Ordering, R: Retries>(
     pub(crate) ExternalPortId,
     pub(crate) PhantomData<(T, O, R)>,
-    pub(crate) fn(&T) -> Vec<u8>,
 );
 
-pub mod codec;
+impl<T: Serialize + DeserializeOwned, O: Ordering, R: Retries> SimSender<T, O, R> {
+    /// Numeric ID of this input port in the simulator boundary manifest.
+    pub fn port_id(&self) -> usize {
+        self.0.into_inner()
+    }
+}
 
-#[doc(hidden)]
-pub mod test_codec;
+impl<T: Serialize + DeserializeOwned, O: Ordering, R: Retries> SimClusterSender<T, O, R> {
+    /// Numeric ID of this cluster input port in the simulator boundary manifest.
+    pub fn port_id(&self) -> usize {
+        self.0.into_inner()
+    }
+}
+
+impl<T: Serialize + DeserializeOwned, O: Ordering, R: Retries> SimReceiver<T, O, R> {
+    /// Numeric ID of this output port in the simulator boundary manifest.
+    pub fn port_id(&self) -> usize {
+        self.0.into_inner()
+    }
+}
+
+impl<T: Serialize + DeserializeOwned, O: Ordering, R: Retries> SimClusterReceiver<T, O, R> {
+    /// Numeric ID of this cluster output port in the simulator boundary manifest.
+    pub fn port_id(&self) -> usize {
+        self.0.into_inner()
+    }
+}
 
 #[cfg(stageleft_runtime)]
 mod builder;
@@ -59,45 +81,23 @@ pub(crate) mod graph;
 pub mod flow;
 
 #[cfg(stageleft_runtime)]
-pub mod hooks;
-
-#[cfg(stageleft_runtime)]
-#[cfg(feature = "ldfi")]
-pub mod ldfi;
-
-#[cfg(stageleft_runtime)]
-#[cfg(feature = "ldfi")]
-pub mod spec;
-
-#[cfg(stageleft_runtime)]
-#[cfg(feature = "ldfi")]
-pub mod observe;
-
-#[cfg(stageleft_runtime)]
-#[cfg(feature = "ldfi")]
-pub mod order;
-
-#[cfg(stageleft_runtime)]
-#[cfg(feature = "ldfi")]
-pub mod viz;
+pub(crate) mod versioned_network;
 
 #[cfg(stageleft_runtime)]
 pub mod provenance;
 
 #[cfg(stageleft_runtime)]
-pub mod slice;
+pub mod feedback_campaign;
 
 #[cfg(stageleft_runtime)]
-pub(crate) mod source_names;
+pub mod network_hook;
 
 #[cfg(stageleft_runtime)]
-pub mod prompt_schedule;
+#[doc(hidden)]
+pub mod panic_guard;
 
 #[cfg(stageleft_runtime)]
-pub mod extension;
-
-#[cfg(stageleft_runtime)]
-pub(crate) mod versioned_network;
+mod provenance_ir;
 
 #[cfg(stageleft_runtime)]
 #[doc(hidden)]
@@ -153,3 +153,14 @@ pub use crate::continue_if;
 
 #[cfg(test)]
 mod tests;
+
+// Declared here rather than in `tests/mod.rs`, so the line numbers in that file's trace snapshots
+// do not move.
+#[cfg(test)]
+#[path = "tests/dylib_panic.rs"]
+mod dylib_panic_tests;
+
+#[cfg(test)]
+#[cfg(feature = "hydrofrac")]
+#[path = "tests/network_hook.rs"]
+mod network_hook_tests;

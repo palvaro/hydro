@@ -97,10 +97,6 @@ pub(crate) struct FlowStateInner {
     /// Counter for generating unique sidecar identifiers, not used for anything else.
     next_sidecar_id: crate::Counter<SidecarId>,
 
-    /// Counter for generating unique simulator hook handle IDs (see
-    /// [`FlowBuilder::sim_hook`]).
-    next_sim_hook_id: usize,
-
     /// Compile-time sidecar directives. Processed during compilation,
     /// not part of the dataflow IR.
     pub sidecars: Vec<Sidecar>,
@@ -111,6 +107,9 @@ pub(crate) struct FlowStateInner {
     /// so that dataflow with side effects (e.g. `inspect`) is not silently lost just
     /// because the collection was dropped after finalization.
     pub(crate) live_collection_nodes: Vec<Weak<RefCell<HydroNode>>>,
+
+    /// Sim input ports declared as operational stimuli (see `sim_input_operational`).
+    pub(crate) operational_sim_ports: std::collections::BTreeSet<ExternalPortId>,
 }
 
 impl FlowStateInner {
@@ -128,12 +127,6 @@ impl FlowStateInner {
 
     pub fn next_sidecar_id(&mut self) -> SidecarId {
         self.next_sidecar_id.get_and_increment()
-    }
-
-    pub fn next_sim_hook_id(&mut self) -> usize {
-        let id = self.next_sim_hook_id;
-        self.next_sim_hook_id += 1;
-        id
     }
 
     pub fn push_root(&mut self, root: HydroRoot) {
@@ -179,7 +172,7 @@ pub struct FlowBuilder<'a> {
     /// drop without finalizing.
     finalized: bool,
 
-    /// 'a on a `FlowBuilder` is used to ensure that staged code does not
+    /// 'a on a FlowBuilder is used to ensure that staged code does not
     /// capture more data that it is allowed to; 'a is generated at the
     /// entrypoint of the staged code and we keep it invariant here
     /// to enforce the appropriate constraints
@@ -188,10 +181,11 @@ pub struct FlowBuilder<'a> {
 
 impl Drop for FlowBuilder<'_> {
     fn drop(&mut self) {
-        assert!(
-            self.finalized || std::thread::panicking(),
-            "Dropped FlowBuilder without finalizing, you may have forgotten to call `with_default_optimize`, `optimize_with`, or `finalize`."
-        );
+        if !self.finalized && !std::thread::panicking() {
+            panic!(
+                "Dropped FlowBuilder without finalizing, you may have forgotten to call `with_default_optimize`, `optimize_with`, or `finalize`."
+            );
+        }
     }
 }
 
@@ -221,9 +215,9 @@ impl<'a> FlowBuilder<'a> {
                 next_cycle_id: crate::Counter::default(),
                 next_clock_id: crate::Counter::default(),
                 next_sidecar_id: crate::Counter::default(),
-                next_sim_hook_id: 0,
                 sidecars: Vec::new(),
                 live_collection_nodes: Vec::new(),
+                operational_sim_ports: Default::default(),
             })),
             locations: SlotMap::with_key(),
             location_names: SecondaryMap::new(),
@@ -279,23 +273,6 @@ impl<'a> FlowBuilder<'a> {
         }
     }
 
-    /// Creates a fresh set of **simulator hook handles** (see [`crate::sim_hooks`]).
-    ///
-    /// A handle is attached to a specific unsafe operator with the
-    /// `nondet!(/** reason */ hook = handle)` syntax, and lets a simulation test script the
-    /// non-deterministic decisions of that operator. `B` may be a single handle type (e.g.
-    /// `BatchHook<u32>`) or a struct of handles implementing
-    /// [`SimHook`](crate::sim_hooks::SimHook).
-    ///
-    /// Creating a handle and never binding it is allowed (a bundle may be only partially
-    /// used by a particular program configuration), but scripting a decision on an unbound
-    /// handle panics at that call. Binding the same handle to two different operators is an
-    /// error at flow build time.
-    pub fn sim_hook<B: crate::sim_hooks::SimHook>(&mut self) -> B {
-        let flow_state = self.flow_state.clone();
-        B::create(&mut move || flow_state.borrow_mut().next_sim_hook_id())
-    }
-
     #[cfg(feature = "sim")]
     pub fn next_version<C>(&mut self, cluster: &Cluster<'a, C>) -> Cluster<'a, C> {
         let group_root = self.location_version_group_root[cluster.key];
@@ -342,6 +319,8 @@ impl<'a> FlowBuilder<'a> {
 
         let mut ir = flow_state.roots.take().unwrap();
         let sidecars = std::mem::take(&mut flow_state.sidecars);
+        #[cfg(feature = "sim")]
+        let operational_sim_ports = std::mem::take(&mut flow_state.operational_sim_ports);
         drop(flow_state);
 
         super::ir::unify_atomic_ticks(&mut ir);
@@ -356,6 +335,8 @@ impl<'a> FlowBuilder<'a> {
             location_version: std::mem::take(&mut self.location_version),
             #[cfg(feature = "sim")]
             location_version_group_root: std::mem::take(&mut self.location_version_group_root),
+            #[cfg(feature = "sim")]
+            operational_sim_ports,
             _phantom: PhantomData,
         }
     }
@@ -436,9 +417,9 @@ impl<'a> FlowBuilder<'a> {
                 next_cycle_id: crate::Counter::default(),
                 next_clock_id: crate::Counter::default(),
                 next_sidecar_id: crate::Counter::default(),
-                next_sim_hook_id: 0,
                 sidecars: Vec::new(),
                 live_collection_nodes: Vec::new(),
+                operational_sim_ports: Default::default(),
             })),
             locations: built.locations.clone(),
             location_names: built.location_names.clone(),

@@ -12,8 +12,9 @@ use slotmap::{SecondaryMap, SparseSecondaryMap};
 use super::builder::SimBuilder;
 use super::compiled::{CompiledSim, CompiledSimInstance};
 use super::graph::{SimDeploy, SimExternal, SimNode, compile_sim, create_sim_graph_trybuild};
+use super::network_hook::{IrPassStage, LocationInfo};
 use crate::compile::builder::StmtId;
-use crate::compile::ir::{HydroNode, HydroRoot};
+use crate::compile::ir::HydroRoot;
 use crate::location::LocationKey;
 use crate::location::dynamic::LocationId;
 use crate::prelude::Cluster;
@@ -24,19 +25,31 @@ use crate::staging_util::Invariant;
 pub struct SimFlow<'a> {
     pub(crate) ir: Vec<HydroRoot>,
 
-    /// [`SimNode`] for each Process.
+    /// SimNode for each Process.
     pub(crate) processes: SparseSecondaryMap<LocationKey, SimNode>,
-    /// [`SimNode`] for each Cluster.
+    /// SimNode for each Cluster.
     pub(crate) clusters: SparseSecondaryMap<LocationKey, SimNode>,
-    /// [`SimExternal`] for each External.
+    /// SimExternal for each External.
     pub(crate) externals: SparseSecondaryMap<LocationKey, SimExternal>,
-
-    /// Locations whose ticks the scheduler runs as soon as they are runnable, without making
-    /// their interleaving a schedule choice (a specification's observer, which only consumes).
-    pub(crate) eager_locations: HashSet<LocationId>,
 
     /// Max size of each cluster.
     pub(crate) cluster_max_sizes: SparseSecondaryMap<LocationKey, usize>,
+    /// Clusters whose membership should be delivered *dynamically* in the
+    /// simulator: instead of emitting all `Joined` events up front, join timing
+    /// becomes a nondeterministic decision the exhaustive search explores (via
+    /// [`MembershipHook`](crate::sim::runtime::MembershipHook)). Clusters not in
+    /// this set keep the default eager behavior.
+    pub(crate) dynamic_membership: HashSet<LocationKey>,
+    /// Locations opted into crash-fault injection, mapped to their fault budget
+    /// (max crashes in the fault domain). Crashable senders' outgoing network
+    /// sends are staged so a [`CrashHook`](crate::sim::runtime::CrashHook) can
+    /// crash the location at a nondeterministically explored send boundary,
+    /// delivering only a per-recipient prefix of its in-flight sends (the
+    /// classical crash-stop model). For clusters, *which* member crashes (and
+    /// when) is a search dimension, and the budget bounds the total crashes in
+    /// the cluster — the `F` of the fault model. Locations not in this map
+    /// never crash.
+    pub(crate) crashable: HashMap<LocationKey, usize>,
     /// Handle to state handling `external`s' ports.
     pub(crate) externals_port_registry: Rc<RefCell<SimExternalPortRegistry>>,
 
@@ -48,8 +61,6 @@ pub struct SimFlow<'a> {
     /// the same logical location. Every location has an entry (its own key unless it is a
     /// `next_version` successor); populated eagerly at location creation.
     pub(crate) location_version_group_root: SecondaryMap<LocationKey, LocationKey>,
-    /// Each location's name (its Rust type name), for reports.
-    pub(crate) location_names: SecondaryMap<LocationKey, String>,
 
     /// When true, the simulator only tests safety properties (not liveness).
     pub(crate) test_safety_only: bool,
@@ -58,20 +69,206 @@ pub struct SimFlow<'a> {
     /// When false (default), encountering a consistency assertion panics because
     /// validating consistency assertions is not yet supported in the simulator.
     pub(crate) skip_consistency_assertions: bool,
-    /// Compile with record-level provenance (see [`super::provenance`]).
-    pub(crate) provenance: bool,
 
     /// Number of iterations to use for fuzzing, defaults to 8192
     pub(crate) unit_test_fuzz_iterations: usize,
 
+    /// Who refuses the simulator's own fault injection ([`Self::refuse_sim_faults`]), if anyone.
+    pub(crate) refuse_sim_faults: Option<&'static str>,
+
+    /// When true, the program is compiled with provenance tracking
+    /// (see [`crate::sim::provenance`]).
+    pub(crate) provenance: bool,
+
+    /// Sim input ports declared as operational stimuli via `sim_input_operational`.
+    pub(crate) operational_ports:
+        std::collections::BTreeSet<crate::compile::builder::ExternalPortId>,
+
+    /// IR passes registered with [`Self::with_ir_pass`], in registration order.
+    pub(crate) ir_passes: Vec<(IrPassStage, IrPass<'a>)>,
+
+    /// Emit network hook points (see [`Self::with_network_hook_points`]).
+    pub(crate) network_hooks: bool,
+
+    /// Each location's Rust type name, for [`CompiledSim::locations`].
+    pub(crate) location_names: SecondaryMap<LocationKey, String>,
+
     pub(crate) _phantom: Invariant<'a>,
 }
 
+/// An IR pass registered with [`SimFlow::with_ir_pass`].
+pub(crate) type IrPass<'a> = Box<dyn FnOnce(&mut Vec<HydroRoot>) + 'a>;
+
 impl<'a> SimFlow<'a> {
+    /// Compiles the program with forward provenance tracking. Every item carries the set of
+    /// source events it descends from, and every network send, sim output and cycle sink is
+    /// logged with its lineage. Read the log with [`crate::sim::provenance::take_emissions`]
+    /// and interpret it with [`crate::sim::provenance::classify`].
+    ///
+    /// Tracking is passive: it does not add or remove nondeterministic decisions, so recorded
+    /// executions replay identically. Sources must be `sim_input`s (wall-clock timers cannot be
+    /// simulated); declare stimuli such as timer ticks with `sim_input_operational` so their
+    /// lineage is distinguished from application data.
+    pub fn with_provenance(mut self) -> Self {
+        self.provenance = true;
+        self
+    }
+
+    /// Registers an IR pass to run when the simulation is compiled, after the passes registered
+    /// before it at the same [`IrPassStage`]. A pass may edit roots in place and append new ones.
+    /// `PostNetwork` passes run after `with_provenance`'s rewrite.
+    #[cfg(feature = "hydrofrac")]
+    pub fn with_ir_pass(
+        mut self,
+        stage: IrPassStage,
+        pass: impl FnOnce(&mut Vec<HydroRoot>) + 'a,
+    ) -> Self {
+        self.ir_passes.push((stage, Box::new(pass)));
+        self
+    }
+
+    /// Emits network hook points, which call the hook installed with
+    /// [`CompiledSim::set_network_hook`] (see [`super::network_hook`]). Without this call, the
+    /// generated code has none.
+    #[cfg(feature = "hydrofrac")]
+    pub fn with_network_hook_points(mut self) -> Self {
+        self.network_hooks = true;
+        self
+    }
+
+    /// Inventories the simulator-visible boundary for a deterministic feedback campaign.
+    ///
+    /// Port IDs, locations, debug type descriptions, output ports and cycle sinks are read from
+    /// Hydro IR. The input *role* is **not** discovered: it is whatever the program author
+    /// declared by choosing `sim_input_operational` over `sim_input`. The manifest only makes that
+    /// declaration visible. It does not manufacture typed values: adapters must register
+    /// deterministic generators for the listed input ports and can use
+    /// [`crate::sim::feedback_campaign::BoundaryManifest::assert_inputs_covered`] to prove that no
+    /// boundary input was silently ignored. Locations are rendered as root locations so they
+    /// compare equal to `source`/`destination` on emission records.
+    pub fn feedback_boundary_manifest(
+        &mut self,
+    ) -> crate::sim::feedback_campaign::BoundaryManifest {
+        use crate::compile::ir::{HydroNode, HydroRoot};
+        use crate::sim::feedback_campaign::{
+            BoundaryCycle, BoundaryDirection, BoundaryManifest, BoundaryPort, InputRole,
+        };
+
+        let ports = RefCell::new(Vec::new());
+        let cycles = RefCell::new(Vec::new());
+        crate::compile::ir::transform_bottom_up(
+            &mut self.ir,
+            &mut |root| match root {
+                HydroRoot::SendExternal {
+                    to_port_id,
+                    to_many,
+                    input,
+                    ..
+                } => ports.borrow_mut().push(BoundaryPort {
+                    port: to_port_id.into_inner(),
+                    direction: BoundaryDirection::Output,
+                    role: None,
+                    location: format!("{:?}", input.metadata().location_id.root()),
+                    type_name: format!("{:?}", input.metadata().collection_kind),
+                    many: *to_many,
+                }),
+                HydroRoot::CycleSink {
+                    cycle_id, input, ..
+                } => cycles.borrow_mut().push(BoundaryCycle {
+                    cycle: cycle_id.into_inner(),
+                    location: format!("{:?}", input.metadata().location_id.root()),
+                    collection: format!("{:?}", input.metadata().collection_kind),
+                }),
+                _ => {}
+            },
+            &mut |node| {
+                if let HydroNode::ExternalInput {
+                    from_port_id,
+                    from_many,
+                    codec_type,
+                    metadata,
+                    ..
+                } = node
+                {
+                    ports.borrow_mut().push(BoundaryPort {
+                        port: from_port_id.into_inner(),
+                        direction: BoundaryDirection::Input,
+                        role: Some(if self.operational_ports.contains(from_port_id) {
+                            InputRole::Operational
+                        } else {
+                            InputRole::Data
+                        }),
+                        location: format!("{:?}", metadata.location_id.root()),
+                        type_name: format!("{codec_type:?}"),
+                        many: *from_many,
+                    });
+                }
+            },
+            false,
+        );
+        let mut manifest = BoundaryManifest {
+            ports: ports.into_inner(),
+            cycles: cycles.into_inner(),
+        };
+        manifest.ports.sort();
+        manifest.ports.dedup();
+        manifest.cycles.sort();
+        manifest.cycles.dedup();
+        manifest
+    }
+
     /// Sets the maximum size of the given cluster in the simulation.
-    #[must_use]
     pub fn with_cluster_size<C>(mut self, cluster: &Cluster<'a, C>, max_size: usize) -> Self {
         self.cluster_max_sizes.insert(cluster.key, max_size);
+        self
+    }
+
+    /// Opts in to *dynamic membership* for the given cluster: its members'
+    /// `Joined` events are delivered one at a time at nondeterministic moments
+    /// (explored by the simulator) rather than all up front. This is what lets
+    /// tests exercise a member joining *after* messages are already flowing.
+    ///
+    /// Clusters without this opt-in keep the default behavior (all members
+    /// present from the start), so existing tests are unaffected.
+    pub fn with_dynamic_membership<C>(mut self, cluster: &Cluster<'a, C>) -> Self {
+        self.dynamic_membership.insert(cluster.key);
+        self
+    }
+
+    /// Opts in to **crash-fault injection** for the given process: the exhaustive
+    /// search (or fuzzer) explores executions in which the process crash-stops at
+    /// a send boundary. A crash halts the process permanently and delivers only a
+    /// nondeterministically chosen per-recipient *prefix* of its undelivered
+    /// sends — so a broadcast can genuinely reach some recipients and not others,
+    /// the classical partial-broadcast crash state.
+    ///
+    /// Processes without this opt-in never crash, and no staging is added to
+    /// their sends, so existing tests are unaffected. Assertions in crash tests
+    /// should be phrased over *survivors* (e.g. agreement: all live members
+    /// deliver the same set), since the crashed process stops producing outputs.
+    pub fn with_crashable_process<P>(mut self, process: &crate::location::Process<'a, P>) -> Self {
+        self.crashable.insert(process.key, 1);
+        self
+    }
+
+    /// Opts in to **crash-fault injection** for the given cluster, with at most
+    /// `max_crashes` members crashing (the `F` of the fault model — e.g. `1` for
+    /// a minority-fault demo on a 3-member cluster). *Which* members crash,
+    /// *when* (at which of their send boundaries), and *which per-recipient
+    /// prefix* of their in-flight sends survives are all search dimensions: no
+    /// member is targeted, so assertions hold over every single-fault
+    /// configuration — the correct quantifier for non-blockingness claims.
+    ///
+    /// Crashed members halt permanently but their inbound channels stay open
+    /// (fail-stop: sends to failed members are wasted, not wrong). Phrase
+    /// assertions over survivors — e.g. "at least `N - max_crashes` members
+    /// commit" — since the test cannot know which members died.
+    pub fn with_crashable_cluster<C>(
+        mut self,
+        cluster: &Cluster<'a, C>,
+        max_crashes: usize,
+    ) -> Self {
+        self.crashable.insert(cluster.key, max_crashes);
         self
     }
 
@@ -83,7 +280,6 @@ impl<'a> SimFlow<'a> {
     /// it only tests safety properties—not liveness—since messages may never arrive.
     /// Calling this method acknowledges that the simulation will not verify that the
     /// program eventually makes progress.
-    #[must_use]
     pub fn test_safety_only(mut self) -> Self {
         self.test_safety_only = true;
         self
@@ -93,26 +289,22 @@ impl<'a> SimFlow<'a> {
     /// nodes are treated as identity no-ops in the simulator. When disabled (the default),
     /// encountering a consistency assertion will panic because validating consistency
     /// assertions is not yet supported in the simulator.
-    #[must_use]
     pub fn skip_consistency_assertions(mut self) -> Self {
         self.skip_consistency_assertions = true;
         self
     }
 
-    /// Compiles the simulation with record-level provenance: every element carries the set
-    /// of channel deliveries it was computed from, and network sends / external outputs
-    /// record it in the lineage log (LDFI "Level 2" lineage; see [`super::provenance`]).
-    /// Supported for the dataflow operators the LDFI examples use; unsupported operators
-    /// panic at compile time.
-    #[must_use]
-    pub fn with_provenance(mut self) -> Self {
-        self.provenance = true;
+    /// Makes [`Self::compiled`] panic if the flow opts into the simulator's own crash injection
+    /// ([`Self::with_crashable_process`], [`Self::with_crashable_cluster`]) or dynamic membership
+    /// ([`Self::with_dynamic_membership`]), before or after this call. For a checker (`by`) that
+    /// injects its own faults and does not see these.
+    pub fn refuse_sim_faults(mut self, by: &'static str) -> Self {
+        self.refuse_sim_faults = Some(by);
         self
     }
 
     /// Sets the number of fuzz iterations for this test. Overrides the
     /// the default value of 8192
-    #[must_use]
     pub fn unit_test_fuzz_iterations(mut self, iterations: usize) -> Self {
         self.unit_test_fuzz_iterations = iterations;
         self
@@ -151,43 +343,17 @@ impl<'a> SimFlow<'a> {
         self.compiled().exhaustive(thunk)
     }
 
-    /// Runs the test body against exactly **one** execution of the program, with no fuzzer
-    /// involved anywhere. Requires every unsafe operator that receives data to be bound to
-    /// a sim hook and scripted; see [`crate::sim::compiled::CompiledSim::deterministic`].
-    pub fn deterministic(self, thunk: impl AsyncFnOnce() + RefUnwindSafe) {
-        self.compiled().deterministic(thunk)
-    }
-
-    /// Runs the test body against one execution of the program in which every scheduling
-    /// decision is drawn from the given bolero driver. See
-    /// [`crate::sim::compiled::CompiledSim::run_with_driver`], including why it exists and when
-    /// it should be deleted in favor of [`SimFlow::deterministic`].
-    pub fn run_with_driver<D: bolero::bolero_engine::driver::Driver + 'static>(
-        self,
-        driver: D,
-        thunk: impl AsyncFnOnce() + RefUnwindSafe,
-    ) {
-        self.compiled().run_with_driver(driver, async |instance| {
-            instance.run_with_scheduler(thunk()).await
-        })
-    }
-
-    /// Runs the test body against one execution of the program under the *prompt* schedule:
-    /// every batch releases everything buffered, every snapshot observes the oldest unobserved
-    /// version, and ready ticks run round-robin. See
-    /// [`crate::sim::prompt_schedule::PromptScheduleDriver`]. Unlike
-    /// [`SimFlow::deterministic`], this does not require the program's hooks to be scripted; it
-    /// is the stand-in for `deterministic()` described there, to be deleted once
-    /// `deterministic()` can take its place.
-    pub fn run_prompt(self, thunk: impl AsyncFnOnce() + RefUnwindSafe) {
-        self.run_with_driver(
-            super::prompt_schedule::PromptScheduleDriver::default(),
-            thunk,
-        )
-    }
-
     /// Compiles the simulation into a dynamically loadable library, and returns a handle to it.
     pub fn compiled(mut self) -> CompiledSim {
+        if let Some(by) = self.refuse_sim_faults {
+            assert!(
+                self.crashable.is_empty() && self.dynamic_membership.is_empty(),
+                "{by} does not support the simulator's own crash injection \
+                 (`with_crashable_process`, `with_crashable_cluster`) or dynamic membership \
+                 (`with_dynamic_membership`): it injects its own faults, and would count the \
+                 simulator's crashed members as correct"
+            );
+        }
         use dfir_lang::graph::{eliminate_extra_unions_tees, partition_graph};
 
         let compiled_span = tracing::debug_span!(target: "hydro_build", "sim_compiled").entered();
@@ -205,9 +371,13 @@ impl<'a> SimFlow<'a> {
             next_hoff_id: crate::Counter::default(),
             test_safety_only: self.test_safety_only,
             skip_consistency_assertions: self.skip_consistency_assertions,
-            provenance: self.provenance,
             channel_tables: BTreeMap::new(),
-            bound_sim_hooks: HashMap::new(),
+            crashable: self.crashable.iter().map(|(k, v)| (*k, *v)).collect(),
+            crash_channel_vecs: BTreeMap::new(),
+            network_hooks: self.network_hooks,
+            channels: vec![],
+            pending_network_meta: None,
+            pending_output_port: None,
         };
 
         // Ensure the default (0) external is always present.
@@ -218,22 +388,15 @@ impl<'a> SimFlow<'a> {
             },
         );
 
+        let (pre_network, post_network): (Vec<_>, Vec<_>) = std::mem::take(&mut self.ir_passes)
+            .into_iter()
+            .partition(|(stage, _)| *stage == IrPassStage::PreNetwork);
+        for (_, pass) in pre_network {
+            pass(&mut self.ir);
+        }
+
         let mut seen_tees_instantiate: HashMap<_, _> = HashMap::new();
         let mut seen_cluster_members = HashSet::new();
-
-        // An automatic specification (`Spec::all_labels`) observes every labelled collection:
-        // the taps are ordinary network sends, inserted before the networks are compiled and
-        // before the provenance rewrite (see `sim::observe`).
-        #[cfg(feature = "ldfi")]
-        let labels = super::observe::tap_labels(&mut self.ir).map(Rc::new);
-        #[cfg(not(feature = "ldfi"))]
-        let labels = None;
-        // What reaches each location, and whether it is order-insensitive (see `sim::order`):
-        // on the IR as the program built it, before the networks are compiled.
-        #[cfg(feature = "ldfi")]
-        let upstream_nondet =
-            Rc::new(super::order::Cones::new(&self.ir).nondet_by_destination(&self.ir));
-
         self.ir.iter_mut().for_each(|leaf| {
             leaf.compile_network::<SimDeploy>(
                 &mut SparseSecondaryMap::new(),
@@ -254,11 +417,36 @@ impl<'a> SimFlow<'a> {
             );
         }
 
-        if self.provenance {
-            super::provenance::rewrite(&mut self.ir);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "nondeterministic iteration order, fine for checks"
+        )]
+        for c in self.clusters.keys() {
+            assert!(
+                self.cluster_max_sizes.contains_key(c),
+                "Cluster {:?} missing max size; call with_cluster_size() before compiled()",
+                c
+            );
         }
-        collapse_ticks_around_atomic(&mut self.ir);
-        let slices = Rc::new(super::slice::compute(&mut self.ir));
+
+        let (cluster_max_sizes, cluster_member_ids) = self.cluster_sizing();
+
+        // M0: rewrite dynamic-membership clusters' `ClusterMembers` sources to be
+        // hook-backed (join timing becomes a nondeterministic decision), before
+        // the IR is consumed by `emit`. No-op unless `with_dynamic_membership`
+        // was called.
+        super::graph::apply_dynamic_membership(
+            &mut self.ir,
+            &self.dynamic_membership,
+            &cluster_member_ids,
+        );
+
+        if self.provenance {
+            super::provenance_ir::apply_provenance(&mut self.ir, &self.operational_ports);
+        }
+        for (_, pass) in post_network {
+            pass(&mut self.ir);
+        }
 
         let mut seen_tees = HashMap::new();
         let mut built_tees = HashMap::new();
@@ -294,37 +482,27 @@ impl<'a> SimFlow<'a> {
                 .collect()
         }
 
+        let name = |key: LocationKey| self.location_names.get(key).cloned().unwrap_or_default();
+        #[expect(clippy::disallowed_methods, reason = "sorted below")]
+        let mut locations: Vec<LocationInfo> = (self.processes.keys())
+            .map(|key| LocationInfo {
+                id: LocationId::Process(key),
+                name: name(key),
+                members: None,
+            })
+            .chain(self.clusters.keys().map(|key| LocationInfo {
+                id: LocationId::Cluster(key),
+                name: name(key),
+                members: cluster_member_ids.get(&LocationId::Cluster(key)).cloned(),
+            }))
+            .collect();
+        locations.sort_by(|a, b| a.id.cmp(&b.id));
+
         let process_graphs = build_graphs(sim_emit.process_graphs);
         let cluster_graphs = build_graphs(sim_emit.cluster_graphs);
         let process_tick_graphs = build_graphs(sim_emit.process_tick_dfirs);
         let cluster_tick_graphs = build_graphs(sim_emit.cluster_tick_dfirs);
 
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "nondeterministic iteration order, fine for checks"
-        )]
-        for c in self.clusters.keys() {
-            assert!(
-                self.cluster_max_sizes.contains_key(c),
-                "Cluster {:?} missing max size; call with_cluster_size() before compiled()",
-                c
-            );
-        }
-
-        let (cluster_max_sizes, cluster_member_ids) = self.cluster_sizing();
-        let cluster_members = cluster_member_ids.clone();
-        // The program's processes, less the observer a specification adds (an eager location;
-        // see `sim::spec`), for `CompiledSim::node_count`.
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "nondeterministic iteration order, fine for a count"
-        )]
-        let eager_processes = self
-            .eager_locations
-            .iter()
-            .filter(|location| matches!(location, LocationId::Process(_)))
-            .count();
-        let process_count = self.processes.len() - eager_processes;
         drop(flow_build_span);
 
         let (bin, trybuild) = create_sim_graph_trybuild(
@@ -336,12 +514,13 @@ impl<'a> SimFlow<'a> {
             cluster_tick_graphs,
             sim_emit.extra_stmts_global,
             sim_emit.extra_stmts_cluster,
+            self.network_hooks,
         );
 
         let out = compile_sim(bin, trybuild).unwrap();
         let lib = {
             let _span = tracing::debug_span!(target: "hydro_build", "load_dylib").entered();
-            unsafe { Library::new(&*out).unwrap() }
+            unsafe { Library::new(&out).unwrap() }
         };
         drop(compiled_span);
 
@@ -350,20 +529,10 @@ impl<'a> SimFlow<'a> {
             lib,
             externals_port_registry: self.externals_port_registry.take(),
             unit_test_fuzz_iterations: self.unit_test_fuzz_iterations,
-            slices,
-            provenance: self.provenance,
-            eager_locations: Rc::new(self.eager_locations),
-            cluster_members: Rc::new(cluster_members),
-            process_count,
-            labels,
-            location_names: Rc::new(
-                self.location_names
-                    .iter()
-                    .map(|(key, name)| (key, super::source_names::short_type_name(name)))
-                    .collect(),
-            ),
-            #[cfg(feature = "ldfi")]
-            upstream_nondet,
+            network_hooks: self.network_hooks,
+            network_hook: RefCell::new(None),
+            channels: sim_emit.channels,
+            locations,
         }
     }
 
@@ -429,36 +598,4 @@ impl<'a> SimFlow<'a> {
 
         (cluster_sizes, cluster_member_ids)
     }
-}
-
-/// A tick created on an atomic location (`Tick { tick: None, parent_location: Atomic(t) }`, as
-/// `Optional::or` does on a top-level atomic optional) is the atomic region's own tick `t`:
-/// production emission places it in `t`'s loop. The simulator keys its per-tick DFIR graphs
-/// and hooks by the location, so the alias is rewritten to `t` before emission.
-fn collapse_ticks_around_atomic(ir: &mut [HydroRoot]) {
-    fn collapse(location: &mut LocationId) {
-        match location {
-            LocationId::Tick {
-                tick: None,
-                parent_location,
-            } => {
-                collapse(parent_location);
-                if let LocationId::Atomic(inner) = parent_location.as_ref() {
-                    *location = inner.as_ref().clone();
-                }
-            }
-            LocationId::Tick {
-                tick: Some(_),
-                parent_location,
-            } => collapse(parent_location),
-            LocationId::Atomic(inner) => collapse(inner),
-            LocationId::Process(_) | LocationId::Cluster(_) => {}
-        }
-    }
-    crate::compile::ir::transform_bottom_up(
-        ir,
-        &mut |_| {},
-        &mut |node: &mut HydroNode| collapse(&mut node.metadata_mut().location_id),
-        false,
-    );
 }

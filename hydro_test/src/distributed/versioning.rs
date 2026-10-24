@@ -7,7 +7,7 @@ use hydro_lang::location::tick::Tick;
 use hydro_lang::networking::NetworkFor;
 use hydro_lang::nondet::NonDet;
 use hydro_lang::prelude::*;
-use hydro_lang::properties::{NotProved, StreamMapFuncAlgebra};
+use hydro_lang::properties::StreamMapFuncAlgebra;
 use hydro_std::membership::track_membership;
 use serde::{Deserialize, Serialize};
 use stageleft::IntoQuotedMut;
@@ -44,13 +44,7 @@ fn hash_demux<'a, F, N: NetworkFor<Request>>(
         'a,
         F,
         OperatorContext<Tick<Cluster<'a, GossipServer>>, Bounded>,
-        StreamMapFuncAlgebra<
-            (Request, Vec<MemberId<GossipServer>>),
-            Bounded,
-            NotProved,
-            NotProved,
-            hydro_lang::sim_hooks::OnCluster<GossipServer>,
-        >,
+        StreamMapFuncAlgebra,
     >,
     via: N,
     nondet_membership: NonDet,
@@ -74,22 +68,13 @@ where
             .source_cluster_membership_stream(to, nondet_membership),
     );
     let (filtered, members_out) = sliced! {
-        let members_snapshot = use::snapshot(ids, nondet!(
-            /// membership timing is captured by the caller's guard
-            nondet_membership
-        ));
-        let elements = use::batch(requests, nondet!(
-            /// batching timing is captured by the caller's guard
-            nondet_membership
-        ));
+        let members_snapshot = use::snapshot(ids, nondet_membership);
+        let elements = use::batch(requests, nondet_membership);
 
         let current_members = members_snapshot
             .filter(q!(|b| *b))
             .keys()
-            .assume_ordering::<TotalOrder>(nondet!(
-                /// membership timing is captured by the caller's guard
-                nondet_membership
-            ))
+            .assume_ordering::<TotalOrder>(nondet_membership)
             .collect_vec();
 
         let filtered = elements
@@ -111,13 +96,7 @@ fn gossip_server<'a, F>(
         'a,
         F,
         OperatorContext<Tick<Cluster<'a, GossipServer>>, Bounded>,
-        StreamMapFuncAlgebra<
-            (Request, Vec<MemberId<GossipServer>>),
-            Bounded,
-            NotProved,
-            NotProved,
-            hydro_lang::sim_hooks::OnCluster<GossipServer>,
-        >,
+        StreamMapFuncAlgebra,
     >,
 ) -> (
     Stream<Response, Cluster<'a, GossipServer>, Unbounded, NoOrder>,
@@ -259,8 +238,9 @@ mod tests {
 
                 inputter.send(0, Request::Write { value: 42 });
 
-                match output.next_only(0).await {
-                    Response { value: 42 } => {
+                let r1 = output.collect_n_sorted::<Vec<_>>(0, 1).await;
+                match r1.as_slice() {
+                    [Response { value: 42 }] => {
                         write_confirmed = true;
                     }
                     other => panic!("unexpected write response: {other:?}"),
@@ -331,8 +311,10 @@ mod tests {
 
                 inputter.send(0, Request::Write { value: 42 });
 
-                match output.next_only(0).await {
-                    Response { value: 42 } => {
+                let r1 = output.collect_n_sorted::<Vec<_>>(0, 1).await;
+                match r1.as_slice() {
+                    [] => return,
+                    [Response { value: 42 }] => {
                         write_confirmed = true;
                     }
                     other => panic!("unexpected write response: {other:?}"),
@@ -402,8 +384,9 @@ mod tests {
 
                 inputter.send(0, Request::Write { value: 42 });
 
-                match output.next_only(0).await {
-                    Response { value: 42 } => {
+                let r1 = output.collect_n_sorted::<Vec<_>>(0, 1).await;
+                match r1.as_slice() {
+                    [Response { value: 42 }] => {
                         write_confirmed = true;
                     }
                     other => panic!("unexpected write response: {other:?}"),
@@ -488,8 +471,9 @@ mod tests {
 
                 inputter.send(0, Request::Write { value: 42 });
 
-                match output.next_only(0).await {
-                    Response { value: 42 } => {
+                let r1 = output.collect_n_sorted::<Vec<_>>(0, 1).await;
+                match r1.as_slice() {
+                    [Response { value: 42 }] => {
                         write_confirmed = true;
                     }
                     other => panic!("unexpected write response: {other:?}"),

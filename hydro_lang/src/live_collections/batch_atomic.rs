@@ -1,6 +1,5 @@
 use super::boundedness::{Bounded, Unbounded};
 use crate::live_collections::keyed_singleton::KeyedSingletonBound;
-use crate::live_collections::optional::OptionalBound;
 use crate::live_collections::singleton::SingletonBound;
 use crate::live_collections::stream::{Ordering, Retries};
 use crate::location::tick::Tick;
@@ -39,9 +38,7 @@ impl<'a, L: Location<'a>, T, B: SingletonBound> BatchAtomic<'a>
     }
 }
 
-impl<'a, L: Location<'a>, T, B: OptionalBound> BatchAtomic<'a>
-    for super::Optional<T, Atomic<L>, B>
-{
+impl<'a, L: Location<'a>, T> BatchAtomic<'a> for super::Optional<T, Atomic<L>, Unbounded> {
     type Batched = super::Optional<T, Tick<L::DropConsistency>, Bounded>;
 
     fn batched_atomic(self) -> Self::Batched {

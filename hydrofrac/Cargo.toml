@@ -1,0 +1,41 @@
+[package]
+name = "hydrofrac"
+publish = false
+version = "0.0.0"
+description = "Lineage-driven fault injection for Hydro programs in the simulator: checks every `EventualConsistency` label under the fault model its transports declare"
+edition = { workspace = true }
+repository = { workspace = true }
+license = { workspace = true }
+
+[features]
+default = ["tokio"]
+tokio = ["hydro_lang/tokio"]
+stageleft_macro_entrypoint = ["hydro_lang/stageleft_macro_entrypoint"]
+# The brute-force honesty check `EcCheck::cross_check` (docs/design/hydrofrac-lite.md §7), for
+# tests only.
+cross-check = []
+
+[lints]
+workspace = true
+
+[dependencies]
+# `hydrofrac` enables the simulator extension points (E1–E5, docs/design/hydrofrac-lite.md §6.2);
+# it implies `sim`.
+hydro_lang = { path = "../hydro_lang", version = "^0.17.0-alpha.4", default-features = false, features = [
+    "hydrofrac",
+] }
+stageleft.workspace = true
+good_lp = { version = "1.15", default-features = false, features = ["microlp"] }
+bincode = "1.3.1"
+proc-macro-crate = "3.3"
+proc-macro2 = "1.0.95"
+quote = "1.0.35"
+serde = { version = "1.0.197", features = ["derive"] }
+syn = { version = "2.0.46", features = ["parsing", "extra-traits", "full", "visit"] }
+
+[dev-dependencies]
+# The corpus programs, for the label-enumeration and tap tests.
+hydro_std = { path = "../hydro_std", version = "^0.17.0-alpha.4" }
+
+[build-dependencies]
+stageleft_tool.workspace = true
