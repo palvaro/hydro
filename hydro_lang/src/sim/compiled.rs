@@ -77,7 +77,7 @@ macro_rules! abort_assert {
 
 use core::{fmt, panic};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::panic::RefUnwindSafe;
 use std::path::Path;
@@ -96,9 +96,7 @@ use serde::de::DeserializeOwned;
 use tempfile::TempPath;
 use tokio::sync::{Mutex, Notify};
 
-#[cfg(feature = "hydrofrac")]
-use super::network_hook::ExecKind;
-use super::network_hook::{ChannelInfo, LocationInfo, OutputInfo, SimNetworkHook};
+use super::network_hook::{ChannelInfo, LocationInfo, SimNetworkHook};
 use super::runtime::{Hooks, InlineHooks};
 use super::{SimClusterReceiver, SimClusterSender, SimReceiver, SimSender};
 use crate::compile::builder::ExternalPortId;
@@ -134,12 +132,17 @@ struct QuiescenceState {
     tainted: Cell<bool>,
     /// Set when new input is sent after `tainted`; all further receives panic.
     poisoned: Cell<bool>,
+    /// While set (see [`forbid_barriers`]), a phase barrier — [`quiesce`], or input after an
+    /// observation forced quiescence — panics with this message.
+    barriers_forbidden: Cell<Option<&'static str>>,
 }
 
 impl QuiescenceState {
     /// Signal that new input has been sent, waking the scheduler if it was quiescent.
     fn resume(&self) {
         if self.tainted.get() {
+            // Input after a forced quiescence: the observation was a phase barrier.
+            guard_barrier_allowed(self);
             self.poisoned.set(true);
         }
         self.quiescent.set(false);
@@ -268,6 +271,29 @@ impl Drop for SettlePauseGuard {
 /// Panics if the simulation has been poisoned: an earlier observation forced the simulation
 /// to quiesce (running pending nondeterministic work), and new input has been sent since, so
 /// further observations could misattribute failures caused by the forced overrun.
+/// Panics if phase barriers are forbidden (see [`forbid_barriers`]).
+fn guard_barrier_allowed(quiescence: &QuiescenceState) {
+    if let Some(reason) = quiescence.barriers_forbidden.get() {
+        panic!("{reason}");
+    }
+}
+
+/// Runs `phase` with phase barriers forbidden: a [`quiesce`] inside it, or new input after an
+/// observation forced the simulation to quiesce (such as [`SimReceiver::try_next`] with
+/// nondeterministic work pending), panics with `reason`. Waiting for a message stays allowed.
+///
+/// For checkers that explore every interleaving of a phase: a barrier inside it would hide
+/// the interleavings it cuts.
+#[cfg(feature = "hydrofrac")]
+pub async fn forbid_barriers<T>(reason: &'static str, phase: impl Future<Output = T>) -> T {
+    let quiescence =
+        CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().quiescence.clone());
+    let outer = quiescence.barriers_forbidden.replace(Some(reason));
+    let out = phase.await;
+    quiescence.barriers_forbidden.set(outer);
+    out
+}
+
 fn guard_not_poisoned(quiescence: &QuiescenceState) {
     if quiescence.poisoned.get() {
         panic!(
@@ -295,6 +321,7 @@ pub async fn quiesce() {
     let quiescence =
         CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().quiescence.clone());
     guard_not_poisoned(&quiescence);
+    guard_barrier_allowed(&quiescence);
 
     let mut notified_fut = pin!(None);
     std::future::poll_fn(|cx| {
@@ -477,32 +504,18 @@ pub struct CompiledSim {
     pub(super) network_hooks: bool,
     /// The hook installed with [`Self::set_network_hook`], handed to every instance.
     pub(super) network_hook: RefCell<Option<Rc<dyn SimNetworkHook>>>,
-    #[cfg_attr(
-        not(feature = "hydrofrac"),
-        expect(dead_code, reason = "read only through `hydrofrac` APIs")
-    )]
+    #[cfg_attr(not(feature = "hydrofrac"), expect(dead_code, reason = "hydrofrac API"))]
     pub(super) channels: Vec<ChannelInfo>,
-    #[cfg_attr(
-        not(feature = "hydrofrac"),
-        expect(dead_code, reason = "read only through `hydrofrac` APIs")
-    )]
-    pub(super) outputs: Vec<OutputInfo>,
-    #[cfg_attr(
-        not(feature = "hydrofrac"),
-        expect(dead_code, reason = "read only through `hydrofrac` APIs")
-    )]
+    #[cfg_attr(not(feature = "hydrofrac"), expect(dead_code, reason = "hydrofrac API"))]
     pub(super) locations: Vec<LocationInfo>,
-    pub(super) eager_locations: Rc<HashSet<LocationId>>,
 }
 
 /// Signature of the dylib's exported network-hook installer.
 type SetNetworkHookFn = unsafe extern "Rust" fn(Option<Rc<dyn SimNetworkHook>>);
 
 #[cfg(feature = "hydrofrac")]
-#[cfg_attr(docsrs, doc(cfg(feature = "hydrofrac")))]
 impl CompiledSim {
-    /// Installs `hook` for every subsequent instance (each execution of [`Self::exhaustive`],
-    /// [`Self::fuzz`], [`Self::with_instance`], ...). Requires a flow compiled with
+    /// Installs `hook` for every subsequent instance. Requires a flow compiled with
     /// [`SimFlow::with_network_hook_points`](super::flow::SimFlow::with_network_hook_points).
     pub fn set_network_hook(&self, hook: Rc<dyn SimNetworkHook>) {
         assert!(
@@ -522,23 +535,9 @@ impl CompiledSim {
         &self.channels
     }
 
-    /// The program's external outputs, one per `sim_output`, in emission order.
-    pub fn outputs(&self) -> &[OutputInfo] {
-        &self.outputs
-    }
-
-    /// The program's processes and clusters (including eager ones, which are flagged).
+    /// The program's processes and clusters, in location order.
     pub fn locations(&self) -> &[LocationInfo] {
         &self.locations
-    }
-
-    /// The number of nodes (processes plus cluster members), excluding eager locations.
-    pub fn node_count(&self) -> usize {
-        self.locations
-            .iter()
-            .filter(|l| !l.eager)
-            .map(|l| l.members.as_ref().map_or(1, Vec::len))
-            .sum()
     }
 }
 
@@ -552,12 +551,13 @@ impl<'a, T: RefUnwindSafe + Fn() -> CompiledSimInstance<'a>> Instantiator<'a> fo
 
 fn null_handler(_args: fmt::Arguments<'_>) {}
 
+// The dylib calls these mid-tick, so a panic in them (e.g. a closed stdout) stays host-side.
 fn println_handler(args: fmt::Arguments<'_>) {
-    println!("{}", args);
+    super::panic_guard::catch_host((), || println!("{}", args));
 }
 
 fn eprintln_handler(args: fmt::Arguments<'_>) {
-    eprintln!("{}", args);
+    super::panic_guard::catch_host((), || eprintln!("{}", args));
 }
 
 /// Creates a simulation instance, returning:
@@ -613,17 +613,15 @@ impl CompiledSim {
         let reset_fn: Option<super::provenance::ResetFn> = reset.map(|d| *d);
         let log = always_log || std::env::var("HYDRO_SIM_LOG").is_ok_and(|v| v == "1");
         // Only dylibs generated with hook points export the installer.
-        let set_network_hook: Option<SetNetworkHookFn> = if self.network_hooks {
-            let sym: libloading::Symbol<'_, SetNetworkHookFn> =
-                unsafe { self.lib.get(b"__hydro_set_network_hook").unwrap() };
-            Some(*sym)
-        } else {
-            None
-        };
-        // The hook is not `RefUnwindSafe`; a panic inside an instance aborts that instance
-        // (the hook sees `on_instance_begin` again before the next one), so asserting is fine.
+        let set_network_hook: Option<SetNetworkHookFn> = self.network_hooks.then(|| unsafe {
+            *self
+                .lib
+                .get::<SetNetworkHookFn>(b"__hydro_set_network_hook")
+                .unwrap()
+        });
+        // A panic inside an instance aborts that instance, and the hook sees
+        // `on_instance_begin` before the next one.
         let network_hook = std::panic::AssertUnwindSafe(self.network_hook.borrow().clone());
-        let eager_locations = self.eager_locations.clone();
         let externals_port_registry = &self.externals_port_registry;
         thunk(
             &(|| CompiledSimInstance {
@@ -636,7 +634,6 @@ impl CompiledSim {
                 provenance_reset: reset_fn,
                 set_network_hook,
                 network_hook: Option::clone(&network_hook),
-                eager_locations: eager_locations.clone(),
             }),
         )
     }
@@ -1002,10 +999,8 @@ pub struct CompiledSimInstance<'a> {
     exhaustive: bool,
     provenance_drain: Option<super::provenance::DrainFn>,
     provenance_reset: Option<super::provenance::ResetFn>,
-    /// The dylib's network-hook installer (present iff compiled with hook points).
     set_network_hook: Option<SetNetworkHookFn>,
     network_hook: Option<Rc<dyn SimNetworkHook>>,
-    eager_locations: Rc<HashSet<LocationId>>,
 }
 
 impl<'a> CompiledSimInstance<'a> {
@@ -1036,9 +1031,8 @@ impl<'a> CompiledSimInstance<'a> {
         // A host panic stashed by a previous instance (which then panicked itself) is stale.
         super::panic_guard::clear_pending();
 
-        // Hand this instance's network hook (if any) to the dylib before any dataflow exists.
-        // The dylib's copy is guarded so a panic in the hook's callbacks stays on the host side
-        // of the dylib boundary (see `sim::panic_guard`).
+        // Hand this instance's hook to the dylib, guarded so a panic in its callbacks stays on the
+        // host side of the dylib boundary (see `sim::panic_guard`).
         if let Some(set_network_hook) = self.set_network_hook {
             if let Some(hook) = &self.network_hook {
                 hook.on_instance_begin();
@@ -1081,6 +1075,7 @@ impl<'a> CompiledSimInstance<'a> {
             settle_wakers: RefCell::new(vec![]),
             tainted: Cell::new(false),
             poisoned: Cell::new(false),
+            barriers_forbidden: Cell::new(None),
         });
 
         let mut input_senders = HashMap::new();
@@ -1271,7 +1266,6 @@ impl<'a> CompiledSimInstance<'a> {
             quiescence,
             halted: vec![],
             network_hook: self.network_hook.take(),
-            eager_locations: self.eager_locations.clone(),
         }
     }
 }
@@ -2123,14 +2117,8 @@ struct LaunchedSim<W: std::io::Write> {
     /// (but kept alive so inbound channels stay open), and their ticks and
     /// observations have been removed.
     halted: Vec<(LocationId, Option<u32>)>,
-    /// The instance's network hook, told about execution boundaries and polled for halts.
-    #[cfg_attr(
-        not(feature = "hydrofrac"),
-        expect(dead_code, reason = "read only with `hydrofrac`")
-    )]
+    /// The instance's network hook, told about executions and polled for halts.
     network_hook: Option<Rc<dyn SimNetworkHook>>,
-    /// Locations whose ticks and observations run before any schedule choice.
-    eager_locations: Rc<HashSet<LocationId>>,
 }
 
 impl<W: std::io::Write> LaunchedSim<W> {
@@ -2164,17 +2152,8 @@ impl<W: std::io::Write> LaunchedSim<W> {
     /// code never runs (and never observes intermediate state) while a step is in flight.
     async fn step(&mut self) {
         self.step_inner().await;
-        #[cfg(feature = "hydrofrac")]
-        self.apply_network_hook_halts();
-    }
-
-    /// Halts every location member the network hook asked to halt.
-    #[cfg(feature = "hydrofrac")]
-    fn apply_network_hook_halts(&mut self) {
-        let Some(hook) = &self.network_hook else {
-            return;
-        };
-        for (loc, c_id) in hook.take_halts() {
+        let halts = self.network_hook.as_ref().map(|h| h.take_halts());
+        for (loc, c_id) in halts.into_iter().flatten() {
             self.halt_location(&loc, c_id);
         }
     }
@@ -2187,14 +2166,12 @@ impl<W: std::io::Write> LaunchedSim<W> {
                 // alive so channels into it stay open).
                 continue;
             }
-            #[cfg(feature = "hydrofrac")]
             if let Some(hook) = &self.network_hook {
-                hook.on_exec_begin(loc, *c_id, ExecKind::Async);
+                hook.on_exec_begin(loc, *c_id);
             }
             let progressed = dfir.run_tick().await;
-            #[cfg(feature = "hydrofrac")]
             if let Some(hook) = &self.network_hook {
-                hook.on_exec_end(progressed);
+                hook.on_exec_end();
             }
             if progressed {
                 any_made_progress = true;
@@ -2232,6 +2209,13 @@ impl<W: std::io::Write> LaunchedSim<W> {
             // If any tick is blocked because a hook is not ready, that's a
             // simulator bug — it means a singleton never received a value.
             for tick in &self.not_ready_ticks {
+                // hydrofrac injects faults that can starve a snapshot's producer, so a tick that
+                // can never run is a property of the run, not a simulator bug: the run quiesces
+                // with that member never processing the tick, and the checker sees what it lacks.
+                #[cfg(feature = "hydrofrac")]
+                if !tick.hooks.iter().all(|hook| hook.is_ready()) {
+                    continue;
+                }
                 abort_assert!(
                     tick.hooks.iter().all(|hook| hook.is_ready()),
                     "tick has a hook that never became ready"
@@ -2249,20 +2233,14 @@ impl<W: std::io::Write> LaunchedSim<W> {
             self.quiescence.nondet_pending.set(true);
             self.quiescence.wake_settled();
         } else {
-            // An eager location's ready work runs first, without a schedule choice.
-            let eager_choice = self.eager_choice();
-            let next_tick_or_obs = eager_choice.unwrap_or_else(|| {
-                (0..(self.possibly_ready_ticks.len() + self.possibly_ready_observations.len()))
-                    .any()
-            });
-            let eager = eager_choice.is_some();
+            let next_tick_or_obs = (0..(self.possibly_ready_ticks.len()
+                + self.possibly_ready_observations.len()))
+                .any();
 
             if next_tick_or_obs < self.possibly_ready_ticks.len() {
                 let mut tick = self.possibly_ready_ticks.remove(next_tick_or_obs);
-
-                #[cfg(feature = "hydrofrac")]
                 if let Some(hook) = &self.network_hook {
-                    hook.on_exec_begin(&tick.parent_location, tick.cluster_id, ExecKind::Tick);
+                    hook.on_exec_begin(&tick.parent_location, tick.cluster_id);
                 }
 
                 match &mut self.log {
@@ -2300,11 +2278,7 @@ impl<W: std::io::Write> LaunchedSim<W> {
                     })
                 });
 
-                if eager {
-                    run_hooks_eagerly(tick_decision_writer.as_mut(), &mut tick.hooks);
-                } else {
-                    run_hooks(tick_decision_writer.as_mut(), &mut tick.hooks);
-                }
+                run_hooks(tick_decision_writer.as_mut(), &mut tick.hooks);
 
                 let run_tick_future = tick.dfir.run_tick();
                 if !tick.inline_hooks.is_empty() {
@@ -2339,27 +2313,18 @@ impl<W: std::io::Write> LaunchedSim<W> {
                 } else {
                     abort_assert!(run_tick_future.await, "tick DFIR run_tick() returned false");
                 }
-
-                #[cfg(feature = "hydrofrac")]
                 if let Some(hook) = &self.network_hook {
-                    hook.on_exec_end(true);
+                    hook.on_exec_end();
                 }
 
                 self.possibly_ready_ticks.push(tick);
             } else {
                 let next_obs = next_tick_or_obs - self.possibly_ready_ticks.len();
                 let log_writer = (!matches!(self.log, LogKind::Null)).then_some(&mut self.log);
-                if eager {
-                    run_hooks_eagerly(
-                        log_writer,
-                        &mut self.possibly_ready_observations[next_obs].hooks,
-                    );
-                } else {
-                    run_hooks(
-                        log_writer,
-                        &mut self.possibly_ready_observations[next_obs].hooks,
-                    );
-                }
+                run_hooks(
+                    log_writer,
+                    &mut self.possibly_ready_observations[next_obs].hooks,
+                );
 
                 // A crash hook may have just fired: permanently halt the crashed
                 // location (removes this observation, among others).
@@ -2370,54 +2335,6 @@ impl<W: std::io::Write> LaunchedSim<W> {
                 }
             }
         }
-    }
-}
-
-impl<W: std::io::Write> LaunchedSim<W> {
-    /// The index (in the combined tick/observation numbering of `step`) of the first ready tick
-    /// or observation at an eager location, if any. Always `None` without the `hydrofrac`
-    /// feature, which is the only way to declare eager locations.
-    fn eager_choice(&self) -> Option<usize> {
-        if self.eager_locations.is_empty() {
-            return None;
-        }
-        self.possibly_ready_ticks
-            .iter()
-            .position(|tick| self.eager_locations.contains(tick.parent_location.root()))
-            .or_else(|| {
-                self.possibly_ready_observations
-                    .iter()
-                    .position(|obs| self.eager_locations.contains(obs.location.root()))
-                    .map(|i| i + self.possibly_ready_ticks.len())
-            })
-    }
-}
-
-/// Resolves the hooks of an eager location's tick or observation: every hook that can release
-/// everything it has buffered does so (no schedule choice); any other hook decides as usual.
-fn run_hooks_eagerly<W: std::fmt::Write>(
-    mut tick_decision_writer: Option<&mut W>,
-    hooks: &mut [Box<dyn SimHook>],
-) {
-    let mut fallback = vec![];
-    for (i, hook) in hooks.iter_mut().enumerate() {
-        if hook.current_decision().is_none() && !hook.release_all() {
-            fallback.push(i);
-        }
-    }
-    if !fallback.is_empty() {
-        bolero::generator::bolero_generator::any::scope::borrow_with(|driver| {
-            for &i in &fallback {
-                hooks[i].autonomous_decision(driver, false);
-            }
-        });
-    }
-    for hook in hooks.iter_mut() {
-        hook.release_decision(
-            tick_decision_writer
-                .as_deref_mut()
-                .map(|w| w as &mut dyn std::fmt::Write),
-        );
     }
 }
 

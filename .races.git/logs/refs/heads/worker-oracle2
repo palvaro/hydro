@@ -1,0 +1,1 @@
+0000000000000000000000000000000000000000 cb5b07d1e17aa4128abc79bb09b712029ed5447c Peter Alvaro <palvarox@amazon.com> 1792879739 +0000	fetch -q ./oracle2.bundle +oracle2:refs/heads/worker-oracle2: storing head

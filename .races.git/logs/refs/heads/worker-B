@@ -1,0 +1,2 @@
+0000000000000000000000000000000000000000 a30ff79af3c8ea9d6ca4cded568068754d2cbd13 Peter Alvaro <palvarox@amazon.com> 1792813031 +0000	fetch -q ./races-B.bundle hydrofrac-races:refs/heads/worker-B: storing head
+a30ff79af3c8ea9d6ca4cded568068754d2cbd13 6a697527f3aa195f998da12d822a65ccb664b148 Peter Alvaro <palvarox@amazon.com> 1792813656 +0000	fetch -q ./races-B2.bundle hydrofrac-races:refs/heads/worker-B: fast-forward

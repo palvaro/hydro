@@ -1,0 +1,35 @@
+0000000000000000000000000000000000000000 58d0b3bcbf65d47fd56a075ec44a857f3c57fd3f Peter Alvaro <palvarox@amazon.com> 1792810271 +0000
+58d0b3bcbf65d47fd56a075ec44a857f3c57fd3f 897f9a9a311c12f76c1574a41b5e3ae0939c7a5a Infinity <infinity@localhost> 1792811695 +0000	commit: docs(hydrofrac): races design note, stage 1
+897f9a9a311c12f76c1574a41b5e3ae0939c7a5a 2f8708f97cc9d3d4214097d8c4b0a4cfbd2b29dc Infinity <infinity@localhost> 1792812092 +0000	commit: docs(hydrofrac): races note: per-target predictions and the closure-threshold gap
+2f8708f97cc9d3d4214097d8c4b0a4cfbd2b29dc 6fe5c65e4ef0d65dc431d4ec7f3ff676ac72ed5e Peter Alvaro <palvarox@amazon.com> 1792814088 +0000	reset: moving to worker-A
+6fe5c65e4ef0d65dc431d4ec7f3ff676ac72ed5e 59ad568f858207e08910650fffa965d0185ab750 Infinity <infinity@localhost> 1792814088 +0000	cherry-pick: feat(hydrofrac): races search core: per-pair clauses and an order-free crash rule
+59ad568f858207e08910650fffa965d0185ab750 56018e95ddccd4835d9b85d678242b7953a4133a Infinity <infinity@localhost> 1792814088 +0000	cherry-pick: feat(hydrofrac): races: excuse pairs by start crashes and dead facts
+56018e95ddccd4835d9b85d678242b7953a4133a dc4c74ebcf2b4445a476de6fe010918560c41940 Infinity <infinity@localhost> 1792814096 +0000	cherry-pick: test(hydrofrac): demonstrate a false certificate from a total-loss clause
+dc4c74ebcf2b4445a476de6fe010918560c41940 8dea36ff128cc0795bc2182e0cbb23132d7046d2 Peter Alvaro <palvarox@amazon.com> 1792815958 +0000	reset: moving to worker-B-eng
+8dea36ff128cc0795bc2182e0cbb23132d7046d2 3efefed6dd85287d28fd3bb775e5cdc372112d8b Peter Alvaro <palvarox@amazon.com> 1792818496 +0000	reset: moving to worker-B-ord
+3efefed6dd85287d28fd3bb775e5cdc372112d8b 887aa74c9c5cdd4c6e6ecd7b5426581d03897385 Peter Alvaro <palvarox@amazon.com> 1792819424 +0000	reset: moving to worker-B-ord2
+887aa74c9c5cdd4c6e6ecd7b5426581d03897385 7e9b821fdd267559d146b1cbcb008a05aef6dfbd Infinity <infinity@localhost> 1792820952 +0000	cherry-pick: test(hydro_test): races cross-checks on small target configurations
+7e9b821fdd267559d146b1cbcb008a05aef6dfbd ba5278901c6c309341f0db45ee45b25216268c3c Infinity <infinity@localhost> 1792821201 +0000	commit: test(hydro_test): accept a certificate for every admissible set in the races target checks
+ba5278901c6c309341f0db45ee45b25216268c3c 9b5a4705e9cc6b6ef2a9190896308d0627d1ca2c Infinity <infinity@localhost> 1792822278 +0000	cherry-pick: test(hydro_test): lite and races cross-checks with several payloads
+9b5a4705e9cc6b6ef2a9190896308d0627d1ca2c fbff7b595568101197066609f36f54446766aa63 Infinity <infinity@localhost> 1792822494 +0000	commit: test(hydro_test): races mode alone on the echo broadcast over three members
+fbff7b595568101197066609f36f54446766aa63 9f9f7ff2e42178f00563956dbec653cf155c6743 Infinity <infinity@localhost> 1792822544 +0000	commit: docs(hydrofrac): races results table (stage 3)
+9f9f7ff2e42178f00563956dbec653cf155c6743 d2e851a8c5c1c63ca8190de0a50bdc79c654206c Infinity <infinity@localhost> 1792859207 +0000	cherry-pick: docs(hydrofrac): quorum sites and the trusted-combinator question
+d2e851a8c5c1c63ca8190de0a50bdc79c654206c a420a3d6fe1b7a9398655832e8d5666c7fd4c0b2 Infinity <infinity@localhost> 1792861325 +0000	commit: docs(hydrofrac): races §12, order in the formula (design for review)
+a420a3d6fe1b7a9398655832e8d5666c7fd4c0b2 58b9ed0950cf987ced9c1639b56589ac6ab98007 Infinity <infinity@localhost> 1792861733 +0000	cherry-pick: test(hydro_std): ABD-KV with two concurrent requests, as a blind target
+58b9ed0950cf987ced9c1639b56589ac6ab98007 93b63bb79bd6ef7f96b1c1c96125ac8a30710784 Infinity <infinity@localhost> 1792861795 +0000	cherry-pick: test(hydrofrac): demonstrate S2, a crash point whose meaning moves with the send order
+93b63bb79bd6ef7f96b1c1c96125ac8a30710784 6f6672ce6393410eb8dd793ee3fa1ec32646ed67 Infinity <infinity@localhost> 1792861882 +0000	cherry-pick: docs(hydrofrac): lite baseline over lite's corpus
+6f6672ce6393410eb8dd793ee3fa1ec32646ed67 cbfff465dbf06584acc60d1f1c2d682595abcb64 Infinity <infinity@localhost> 1792862424 +0000	cherry-pick: feat(hydrofrac): races: trust `quorum`'s mint
+cbfff465dbf06584acc60d1f1c2d682595abcb64 8c5f9c094d390acd807266a994b7a411f5b3491c Infinity <infinity@localhost> 1792863629 +0000	cherry-pick: docs(hydro_lang): exhaustive simulation misses an ABD-KV liveness bug that sampling finds
+8c5f9c094d390acd807266a994b7a411f5b3491c cd61c8de103e8e3e4c4f3b22f49442ea25d9a03d Infinity <infinity@localhost> 1792863629 +0000	commit: docs(hydro_lang): the trace-driver patch behind the ABD-KV exhaustive-order note
+cd61c8de103e8e3e4c4f3b22f49442ea25d9a03d d5f1bbeb22738add5c970e88ee7b4249e5c8e815 Infinity <infinity@localhost> 1792864034 +0000	cherry-pick: feat(hydrofrac): races: order in the formula, no fallback
+d5f1bbeb22738add5c970e88ee7b4249e5c8e815 29bed35165c1234aaf20d78708bee2db6e1dad31 Peter Alvaro <palvarox@amazon.com> 1792867293 +0000	reset: moving to worker-B-s2
+29bed35165c1234aaf20d78708bee2db6e1dad31 7c50e2f9ad6abd9f398d7ba187adece5a4285242 Peter Alvaro <palvarox@amazon.com> 1792871292 +0000	reset: moving to worker-B-fix1
+7c50e2f9ad6abd9f398d7ba187adece5a4285242 7df7e0753a43105864a71b06eab3c4abc94dec11 Peter Alvaro <palvarox@amazon.com> 1792872529 +0000	reset: moving to worker-B-fix2
+7df7e0753a43105864a71b06eab3c4abc94dec11 444ff7eacc2c3e80036b309bbe347f7f6f274dea Infinity <infinity@localhost> 1792872845 +0000	cherry-pick: docs(hydro_lang): deferred data schedules no tick in the simulator or in deployment
+444ff7eacc2c3e80036b309bbe347f7f6f274dea 830679514935fed1c48e9752ecaa55c55aa6ef43 Infinity <infinity@localhost> 1792872917 +0000	cherry-pick: docs(hydrofrac): the soundness argument, standalone
+830679514935fed1c48e9752ecaa55c55aa6ef43 6b88c8e9c2d81ebe03ea69d109729138a3b20f64 Infinity <infinity@localhost> 1792872998 +0000	cherry-pick: refactor(hydrofrac)!: drop the HiGHS backend
+6b88c8e9c2d81ebe03ea69d109729138a3b20f64 6ad2f0297ad014efaa06b9b904defef6651386c4 Infinity <infinity@localhost> 1792872998 +0000	cherry-pick: refactor(hydrofrac)!: remove accessors and a field nothing reads
+6ad2f0297ad014efaa06b9b904defef6651386c4 00d2a068eb3fbf12fad2ad7eb171062cd3176b9d Infinity <infinity@localhost> 1792872998 +0000	cherry-pick: docs(hydrofrac): keep the schedule-choice scan, and say what it is for now
+00d2a068eb3fbf12fad2ad7eb171062cd3176b9d dd5c4d05a5615a97e63fc2cb5f9636c15659157f Infinity <infinity@localhost> 1792872999 +0000	cherry-pick: test(hydrofrac): fold the oracle tests' engine-parameterised builders
+dd5c4d05a5615a97e63fc2cb5f9636c15659157f 73208efd3bebd7f3c778380b70fb240ccf4273e5 Peter Alvaro <palvarox@amazon.com> 1792880076 +0000	branch: Reset to HEAD
+73208efd3bebd7f3c778380b70fb240ccf4273e5 33b58f83b6d1b728d5613a93b00d0a53f052ec57 Peter Alvaro <palvarox@amazon.com> 1792880085 +0000	branch: Reset to HEAD

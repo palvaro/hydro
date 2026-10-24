@@ -1,0 +1,11 @@
+docs(hydrofrac): handoff note for hydrofrac-races
+
+Plain-English handoff written at a forced stop. It covers:
+- the design in brief;
+- the branch map;
+- the user decisions in force;
+- the status of every finding from review rounds 1-3;
+- item D's results;
+- the queued work;
+- verification commands and test status;
+- process lessons.

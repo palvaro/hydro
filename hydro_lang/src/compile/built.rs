@@ -193,11 +193,11 @@ impl<'a> BuiltFlow<'a> {
             test_safety_only: false,
             skip_consistency_assertions: false,
             unit_test_fuzz_iterations: 8192,
+            refuse_sim_faults: None,
             provenance: false,
             operational_ports: self.operational_sim_ports,
             ir_passes: Vec::new(),
             network_hooks: false,
-            eager_locations: HashSet::new(),
             location_names: self.location_names,
             _phantom: PhantomData,
         }

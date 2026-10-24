@@ -56,21 +56,22 @@ fn check(reliable: bool, samples: usize) -> hydrofrac::Results {
     results
 }
 
-/// The register: the labelled `fold` into a `Singleton`, checked at its input stream. Returns
-/// its input's result.
+/// The register: the labelled `fold` into a `Singleton`. It is not checked itself (members that
+/// agree on a stream's facts can disagree on a fold of it), so this returns the result of the
+/// stream it folds, which is.
 #[cfg(stageleft_runtime)]
 fn register(results: &hydrofrac::Results) -> &hydrofrac::check::LabelResult {
-    let covered: Vec<_> = results
+    let folds: Vec<_> = results
         .labels_named("abd_register_state")
-        .filter(|l| l.plan.covered_by.is_some())
+        .filter(|l| l.plan.collection.covered_by.is_some())
         .collect();
-    let [register] = covered[..] else {
-        panic!("one covered register label\n{results}");
+    let [register] = folds[..] else {
+        panic!("one register label folding a labelled stream\n{results}");
     };
-    let hydrofrac::Verdict::CoveredBy(input) = register.verdict else {
-        panic!("the register is checked at its input\n{results}");
+    let hydrofrac::Verdict::NotChecked(_) = register.verdict else {
+        panic!("the register itself is not checked\n{results}");
     };
-    &results.labels[input]
+    &results.labels[register.plan.collection.covered_by.expect("filtered")]
 }
 
 /// The one searched label named `name` (other labels of that name are covered or not checked).
@@ -109,11 +110,11 @@ fn breaks_at_one_crash_of(
 }
 
 /// No counterexample under any admissible crash set. ABD's replicas batch (its quorums), so
-/// its labels are schedule-sensitive and the search, which finds none, cannot certify them
+/// the program has schedule choices and the search, which finds none, cannot certify its labels
 /// (docs/design/hydrofrac-lite.md §4.9).
 #[cfg(stageleft_runtime)]
 fn no_counterexample(results: &hydrofrac::Results, label: &hydrofrac::check::LabelResult) {
-    assert!(!label.plan.sites.is_empty(), "{}\n{results}", label.name());
+    assert!(!results.choices.is_empty(), "{}\n{results}", label.name());
     assert!(
         matches!(
             label.verdict,
@@ -166,5 +167,46 @@ fn reliable_phase_two_certifies_the_register() {
             .iter()
             .any(|l| matches!(l.verdict, hydrofrac::Verdict::Budget { .. })),
         "{results}"
+    );
+}
+
+/// Measurement (docs/design/hydrofrac-races.md §7): the failure-free schedule space of the
+/// register after one client write, phase 2 over `broadcast_closed`, explored exhaustively by
+/// the races mode capped at zero crashes. Decides whether the brute-force cross-check of
+/// `hydro_test`'s `ec_races_targets` can include ABD. Measured: 131,476 schedules (about 222 per
+/// second) in 10 minutes without finishing, so it cannot.
+#[cfg(stageleft_runtime)]
+#[test]
+#[ignore = "measurement"]
+fn races_targets_probe_abd() {
+    let mut flow = FlowBuilder::new();
+    let replicas = flow.cluster::<Replica>();
+    let clients = flow.cluster::<Client>();
+    let (w_send, writes) = clients.sim_input::<(u64, u32), TotalOrder, ExactlyOnce>();
+    let (_r_send, reads) = clients.sim_input::<u64, TotalOrder, ExactlyOnce>();
+    let outs = abd_register(&replicas, REPLICAS / 2 + 1, writes, reads);
+    let _done = outs.write_done.sim_cluster_output();
+    let _read = outs.read_result.sim_cluster_output();
+    let mut check = hydrofrac::EcCheck::new().max_crashes(0);
+    let sim = check
+        .instrument(
+            flow.sim()
+                .with_cluster_size(&replicas, REPLICAS)
+                .with_cluster_size(&clients, 1),
+        )
+        .compiled();
+    let start = std::time::Instant::now();
+    let results = check.run(&sim, async || {
+        w_send.send(0, (1, 10u32));
+    });
+    let schedules = results
+        .results()
+        .iter()
+        .map(|l| l.stats.schedules)
+        .max()
+        .unwrap_or(0);
+    eprintln!(
+        "PROBE abd (plain phase 2): {schedules} failure-free schedules in {:.1}s\n{results}",
+        start.elapsed().as_secs_f64()
     );
 }
