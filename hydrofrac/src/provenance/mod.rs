@@ -25,6 +25,11 @@ use serde::{Deserialize, Serialize};
 #[doc(hidden)]
 pub mod check;
 pub mod rewrite;
+/// Which labels are schedule-sensitive (docs/design/hydrofrac-lite.md §4.9): a label whose
+/// derivations may depend on the schedule is never certified.
+#[cfg(stageleft_runtime)]
+#[doc(hidden)]
+pub mod sensitivity;
 
 pub use rewrite::{install, rewrite};
 

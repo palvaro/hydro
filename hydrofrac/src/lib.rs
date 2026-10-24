@@ -13,7 +13,12 @@ hydro_lang::setup!();
 
 pub mod fault;
 pub mod lineage;
+pub mod observe;
 pub mod provenance;
 #[cfg(stageleft_runtime)]
 pub mod search;
+// Host-side only, so kept out of the staged copy of the crate that simulations link (`observe`
+// gates its items itself, so that its tests' staged closures still resolve).
+#[cfg(stageleft_runtime)]
+pub mod spec;
 
