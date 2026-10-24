@@ -383,3 +383,135 @@ fn the_cross_check_catches_wrong_verdicts() {
     cross.recheck();
     cross.assert_agrees();
 }
+
+/// Suspected soundness bug S1: a clause learned in a run where a fact vanished everywhere says
+/// nothing about that fact, yet the search treats it as a constraint on every hypothesis.
+///
+/// Two members (`m0`, `m1`), two facts in the label `known`:
+/// - `f = 0`: the source `s` broadcasts it over the lossy `assign`; only `m0` keeps it (it owns
+///   the even values), and `m0` gossips what it keeps to every member over the lossy `gossip`;
+/// - `g = 101`: a second process `t` broadcasts it to both members over `fail_stop` (`steady`).
+///
+/// `omit(gossip m0→m1)` alone breaks the label (`m0` holds `f`, `m1` never does). But the
+/// omissions the probe's clause proposes are tried in channel order, so the search first tries
+/// `omit(assign s→m0)`: `f` is then lost at *every* member, `POST` holds on `g` alone, and the
+/// run's clause is `g`'s derivation (two `fail_stop` deliveries from `t`). No omission kills it,
+/// so the zero-crash bound is declared exhausted and `omit(gossip m0→m1)` is never tried.
+///
+/// Returns the cross-check, with the search capped at `max_crashes` crashes if given.
+#[cfg(stageleft_runtime)]
+fn total_loss_masks_a_partial_loss(max_crashes: Option<usize>) -> CrossCheck {
+    use hydro_lang::location::cluster::CLUSTER_SELF_ID;
+
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let steady = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send_f, input_f) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let (send_g, input_g) = steady.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let owned = input_f
+        .broadcast_closed(
+            &members,
+            TCP.lossy_delayed_forever().name("assign").bincode(),
+        )
+        .weaken_consistency()
+        .filter(q!(move |x| *x % 2 == CLUSTER_SELF_ID.get_raw_id()));
+    let heard = owned
+        .clone()
+        .broadcast_closed(
+            &members,
+            TCP.lossy_delayed_forever().name("gossip").bincode(),
+        )
+        .values()
+        .weaken_consistency();
+    let g = input_g
+        .broadcast_closed(&members, TCP.fail_stop().name("steady").bincode())
+        .weaken_consistency()
+        .weaken_ordering::<NoOrder>();
+    let known = owned
+        .weaken_ordering::<NoOrder>()
+        .merge_unordered(heard)
+        .merge_unordered(g)
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed (wrongly): the owner tells everyone */
+        ));
+    let _out = known.sim_cluster_output();
+
+    let mut check = match max_crashes {
+        Some(n) => EcCheck::new().max_crashes(n),
+        None => EcCheck::new(),
+    };
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 2))
+        .compiled();
+    check.cross_check(
+        &sim,
+        async || {
+            send_f.send(0);
+            send_g.send(101);
+        },
+        MAX_FAULTS,
+    )
+}
+
+/// S1 with the search capped at zero crashes: a false certificate.
+#[cfg(stageleft_runtime)]
+#[test]
+fn suspected_total_loss_masks_a_partial_loss_certificate() {
+    let start = std::time::Instant::now();
+    let cross = total_loss_masks_a_partial_loss(Some(0));
+    eprintln!(
+        "=== S1 (max_crashes 0), {:?}\n{cross}\n{}",
+        start.elapsed(),
+        cross.results
+    );
+    assert!(
+        cross.results.choices.is_empty(),
+        "not choice-free: {:?}",
+        cross.results.choices
+    );
+    // The enumeration finds a zero-crash breaking set; the search certifies zero crashes.
+    assert!(
+        matches!(
+            cross.results.label("known").verdict,
+            Verdict::Certified {
+                tolerates: Tolerance::UpTo(0)
+            }
+        ),
+        "{cross}"
+    );
+    let label = cross.results.label("known");
+    let b = cross.brute.label(label.index).expect("searched");
+    assert_eq!(b.min_crashes(), Some(0), "{cross}");
+    assert!(
+        cross
+            .disagreements
+            .iter()
+            .any(|d| d.starts_with("known") && d.contains("omit(gossip[cluster@0→cluster@1]")),
+        "expected the search to disagree with the enumeration on `known`:\n{cross}"
+    );
+}
+
+/// S1 uncapped: the search reports a counterexample, but claims the label tolerates every
+/// zero-crash fault set, while `omit(gossip m0→m1)` alone breaks it.
+#[cfg(stageleft_runtime)]
+#[test]
+fn suspected_total_loss_masks_a_partial_loss_tolerance() {
+    let start = std::time::Instant::now();
+    let cross = total_loss_masks_a_partial_loss(None);
+    eprintln!(
+        "=== S1 (uncapped), {:?}\n{cross}\n{}",
+        start.elapsed(),
+        cross.results
+    );
+    let label = cross.results.label("known");
+    let b = cross.brute.label(label.index).expect("searched");
+    assert_eq!(b.min_crashes(), Some(0), "{cross}");
+    assert!(
+        cross
+            .disagreements
+            .iter()
+            .any(|d| d.starts_with("known") && d.contains("omit(gossip[cluster@0→cluster@1]")),
+        "expected the search to disagree with the enumeration on `known`:\n{cross}"
+    );
+}
