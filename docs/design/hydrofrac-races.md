@@ -510,3 +510,120 @@ cannot certify them at any size worth having.
 2. v2 (§8.1): "trigger meets state" premises with barrier discharge. This is what would let G-Set gossip and CTP-2
    with the quiescing harness be certified without enumerating.
 3. §8.2: a trusted quorum combinator, for uniform broadcast, multi-Paxos and ABD.
+
+## 12. Order in the formula (design for review, before implementation)
+
+The user's direction: put order into the hitting-set formula instead of falling back to an enumeration. A
+certificate is then "the formula has no solution". This section gives the encoding, the soundness argument, what
+it deletes, and the one place where I think the direction needs a correction.
+
+### 12.1 Encoding
+
+- **Ordering literals.** A literal is a yes/no statement about a run, with a definite truth value in every run.
+  - **Crash literals:** `after(d, m)` = "node n sent `d` after `m`" (two sends of one node).
+  - **Premise literals of fragile steps** (§3.1):
+    - for "trigger meets stored state": `before_n(x, y)` = "delivery `x` was in node n's state when trigger `y`
+      was released";
+    - for a join of two batches: `same_tick_n(a, b)`;
+    - for a negation: `clear_n(k, y)` = "no record with key `k` was on the negative side when `y` was released";
+    - for a fold or count read mid-way: `before_n(x, y)` for each folded input.
+- **Clauses.** A derivation `D` of pair p becomes the row
+  `Σ x_f (faults f that kill a delivery of D) + Σ (1 − ℓ) (premise literals ℓ of D) ≥ z_p`.
+  - A crash `crash(n after m)` kills a delivery `d` sent by n only together with `after(d, m)`: the row gets the
+    product `x_crash · after(d, m)`, linearised as usual.
+  - Robust derivations have no premise literals, so their rows are unchanged.
+- **Free and fixed literals.** A literal is a free variable of the adversary unless it is **proved constant**,
+  i.e. it has the same value in every run of every fault set. Two proofs exist today:
+  - **fan-out order:** `after(d, m)` is false when `d` precedes `m` in one `broadcast_closed` fan-out (§4.2,
+    verified at the IR level);
+  - **send-free nodes:** a node that never sent `m` never fires `crash(n after m)`.
+
+  Barrier order (v2, §8.1) would be a third proof: `before_n(x, y)` is true when `x`'s derivation is robust and
+  finishes before a `quiesce()` that precedes `y`'s harness input.
+- **The solver** proposes a fault set plus a value for every free literal. The engine runs the fault set.
+- **Certificate.** The formula is infeasible over the completed universe, with every tried fault set excluded by a
+  no-good. There is no size bound beyond the crash bound.
+
+### 12.2 Why it is sound
+
+Take any fault set H that was neither tried nor ruled out, and any schedule σ of H. Let L(σ) be the truth values
+the literals actually take in that run. Then (H, L(σ)) satisfies every row it hits, so it is not a solution: some
+pair p has a row it misses.
+- That row's deliveries survive H in σ.
+- Its premise literals are true in σ.
+- **Premise lemma** (one per fragile-step kind, extending Lemma R): if a derivation's deliveries all occur and its
+  premises hold in a run, its record is produced in that run.
+
+So every pair holds in every schedule of every untried fault set.
+
+**Completion, with literals.**
+- A crash after a message that no clause names is mapped to `crash(n)`. Its crash literals are free, so it kills
+  every send of n, as `crash(n)` does.
+- An omission of a message no clause names is dropped.
+- **The gap.** Both mappings are sound only if the image has been run, or the extra fault cannot change the run.
+  For an omission this holds: a message never sent in any schedule of the image is never sent in H either. For a
+  crash after an unseen message it does not hold in a program with fragile steps, because the image may never have
+  been run. This is worker B's "stuck set" finding.
+- **The fix.** The universe holds one symbolic candidate per node, "crash n after a message not seen yet". If the
+  solver picks it, the engine first runs the set without it, to learn which messages n sends there, then names them.
+  This replaces both the enumeration and the `Unnamed` candidate.
+
+### 12.3 Directed schedules: not needed for soundness
+
+The soundness argument above never assumes that a proposed literal value can be realized. The engine only has to
+check whether H's schedules break the spec, and it runs every schedule of H unless H is already ruled out by robust
+derivations alone. So:
+- **No literal value is ever concluded impossible because a directed run failed.** That would be unsound unless
+  the director were complete.
+- **Directed runs are only an optimisation:** they find the schedule that realizes the proposed flips first. That is
+  how a counterexample is found after one schedule instead of thousands.
+- **Every directed run is a legitimate schedule by construction.** The director only picks among the decisions each
+  hook is already allowed to make (`SimHook::autonomous_decision`: how many pending items a batch releases, which
+  snapshot version, which ready tick runs next). The run is exactly the run the simulator would make with that byte
+  sequence.
+- **The minimal hook:** a driver that replays the bytes of a run and overrides the decisions at the named hook so
+  as to hold back `x` until `y` is released.
+
+### 12.4 Where I disagree: negation, and the fan-out rule
+
+1. **Negation literals cannot be fixed, so their derivations never prune.**
+   - `clear_n(k, y)` is about records that may exist only under faults: an Abort, a timeout's query. The checker can
+     never prove that no such record arrives.
+   - So the literal stays free, and a derivation through a negation protects nothing.
+   - For the labels that need such derivations (2PC `committed` through peer answers), the solver ends up proposing
+     every fault set over the universe and the engine runs each one. That is still a certificate when the formula
+     becomes infeasible, and it needs no size bound for crash-only programs. But it costs what brute force costs.
+   - With lossy channels the number of omission sets is exponential, though finite over the observed universe.
+2. **Deleting the fan-out rule would multiply cost, without gaining soundness.**
+   - The rule is not a special case of the encoding. It is the proof that makes one literal constant. Without it,
+     every `after(d, m)` is free.
+   - Every crash set in a fragile-free program would then have to run all its schedules. For the echo broadcast
+     over 3 members, that means more than 160,000 schedules per set, instead of 1.
+   - I propose to keep it, as the first entry in a short list of proved constant literals (`literals.rs`: fan-out,
+     never-sent; later, barriers).
+
+### 12.5 What is deleted, and what changes
+
+- **Deleted:**
+  - `races/enumerate.rs`, `Next::Unconstrained` and the fallback path in `check/races_engine.rs`;
+  - the `Unnamed` candidate;
+  - `mark_dead` and dead sets: the solver now proposes supersets itself;
+  - the crashed-at-start excusal: it becomes a literal-free row, "a pair of a member crashed at start needs
+    nothing";
+  - the planned multi-payload fix: crash literals between two payload chains are free, so those crash sets are
+    run. In a program with no choices that is one schedule each.
+- **Kept, as proved literals:** the fan-out order (`provenance/fanout.rs`) and "one schedule when every literal H
+  touches is proved and the program has no fragile step". The latter is `is_exact`, restated as "all of H's crash
+  literals are fixed".
+- **Size:** `races/` plus `check/races_engine.rs` are about 1,900 lines of product code today (tests excluded). I
+  expect about −250 from the deletions and +150 for literals. I'll report exact numbers.
+
+### 12.6 Predicted gate outcomes (to be measured)
+
+| case | prediction |
+|---|---|
+| `ask_once`, CTP-3, CTP-2 racing, S1 | found, as now |
+| `reliable_broadcast_closed` `new_messages`, 1–3 payloads | certified with no size bound (crash-only, finite universe), at about the cost of today's enumeration (8 / 134 / 281 sets, one schedule each) |
+| echo broadcasts (2 and 3 members) | certified, same cost as now, because fan-out literals are proved |
+| CTP-2 quiescing | certified, at brute-force cost (6 / 2,460) |
+| lossy programs (echo over a lossy first hop, relay chain) | certificates without a size bound; cost grows with the number of omission sets the robust clauses can't rule out |
