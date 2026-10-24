@@ -1,0 +1,52 @@
+wip: test(hydrofrac): a second, independent cross-check oracle
+
+Oracle 2 (`hydrofrac/src/check/oracle2.rs`, `cfg(any(test, feature = "cross-check"))`) runs after the
+search and the brute force in every `EcCheck::cross_check`, and adds its disagreements (prefixed
+`oracle 2:`) to `CrossCheck::disagreements`; `CrossCheck`'s `Display` prints its summary.
+
+## What it does not share with the search
+
+- **Its own program**: `EcCheck::instrument` forks the incoming flow with the new
+  `SimFlow::try_fork` (`hydro_lang/src/sim/flow.rs`: deep-clones the IR, gives the copy fresh port
+  counters and a fresh external-port registry, clones every other field; returns `None` when IR
+  passes are registered, as `FnOnce` closures cannot be copied). Oracle 2 compiles the fork lazily,
+  with hook points, but **without** the provenance rewrite and without hydrofrac's tap pass.
+- **Its own taps**: one external output per labelled cluster node where the label is minted (no
+  labelled input) or exits (an unlabelled non-send consumer, or a program output), by node identity.
+  Elements leave as `Option<bincode>` (`None` when not `Serialize`: then not compared). Scalars and
+  in-tick nodes are listed as skipped.
+- **Its own faults and hook**: omission of a message by content on a lossy channel; crash before the
+  first send or right after the node's `k`-th send; only before the heal (`body; quiesce; heal;
+  quiesce`, as the brute force drives it).
+- **Its own enumeration** (rewritten, mirroring the brute force's fixpoint over a harvested
+  universe) and the same bounds (one crash per node, `max_crashes`, never every node, at most
+  `|members| - 2` of the cluster).
+- **Its own comparison**: per schedule and collection, correct members' element sets must be equal;
+  a panic breaks everything. No lineage, no `spec.rs`, no pruning.
+
+It still shares the simulator, the user's IR, the harness, and (for mapping collections to labels
+only) `ec_label` and the `(label, operator, kind, cluster)` key.
+
+## Agreement rules
+
+- a claim of holding with up to `k` crashes is refuted by an oracle-2 breaking set with at most `k`
+  crashes;
+- a counterexample of `n <= max_faults` faults and `c` crashes (unsampled) needs an oracle-2
+  breaking set with at most `n` faults and `c` crashes;
+- the failure-free runs agree on vacuity (empty domain).
+
+## Limitations (documented in the module)
+
+- one collection per node: stricter than the search's union per label;
+- crash after a re-sent payload's second copy is outside the search's vocabulary;
+- non-`Serialize` elements, scalars, in-tick nodes are not compared.
+
+## Status
+
+- Done: implementation, wiring, docs (`docs/design/hydrofrac-soundness.md` §15), planted-bug test
+  `check::oracle2_tests::oracle2_catches_wrong_verdicts_on_its_own`.
+- Tested: `cargo test -p hydrofrac --features cross-check -- --nocapture` was interrupted by the
+  server move at 92 of 143 tests passed, 0 failed; all 17 `check::brute_tests` passed with
+  oracle 2 active and no oracle-2 disagreement.
+- Not yet run: the new planted-bug test and the remaining ~51 tests; `hydro_test` cross-checks.
+- `// merge:` in `try_fork`: copy `refuse_sim_faults` once the parent's field lands.

@@ -1,0 +1,3 @@
+0000000000000000000000000000000000000000 dd5c4d05a5615a97e63fc2cb5f9636c15659157f Peter Alvaro <palvarox@amazon.com> 1792877408 +0000	checkout: moving from master to oracle2
+dd5c4d05a5615a97e63fc2cb5f9636c15659157f dd5c4d05a5615a97e63fc2cb5f9636c15659157f Peter Alvaro <palvarox@amazon.com> 1792877409 +0000	reset: moving to HEAD
+dd5c4d05a5615a97e63fc2cb5f9636c15659157f cb5b07d1e17aa4128abc79bb09b712029ed5447c Infinity <infinity@localhost> 1792879598 +0000	commit: wip: test(hydrofrac): a second, independent cross-check oracle

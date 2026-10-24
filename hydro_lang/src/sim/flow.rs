@@ -81,18 +81,13 @@ pub struct SimFlow<'a> {
     pub(crate) operational_ports:
         std::collections::BTreeSet<crate::compile::builder::ExternalPortId>,
 
-    /// IR passes to run at compile time, in registration order within each stage (see
-    /// [`Self::with_ir_pass`]).
+    /// IR passes registered with [`Self::with_ir_pass`], in registration order.
     pub(crate) ir_passes: Vec<(IrPassStage, IrPass<'a>)>,
 
     /// Emit network hook points (see [`Self::with_network_hook_points`]).
     pub(crate) network_hooks: bool,
 
-    /// Locations whose ticks run outside the schedule choice (see
-    /// [`Self::with_eager_location`]).
-    pub(crate) eager_locations: HashSet<LocationKey>,
-
-    /// Each location's name (its Rust type name), for [`CompiledSim::locations`].
+    /// Each location's Rust type name, for [`CompiledSim::locations`].
     pub(crate) location_names: SecondaryMap<LocationKey, String>,
 
     pub(crate) _phantom: Invariant<'a>,
@@ -112,30 +107,14 @@ impl<'a> SimFlow<'a> {
     /// simulated); declare stimuli such as timer ticks with `sim_input_operational` so their
     /// lineage is distinguished from application data.
     pub fn with_provenance(mut self) -> Self {
-        if !self.provenance {
-            self.provenance = true;
-            let operational_ports = self.operational_ports.clone();
-            self.ir_passes.push((
-                IrPassStage::PostNetwork,
-                Box::new(move |ir| super::provenance_ir::apply_provenance(ir, &operational_ports)),
-            ));
-        }
+        self.provenance = true;
         self
     }
 
-    /// Registers an IR pass to run when the simulation is compiled. Passes run in registration
-    /// order within their [`IrPassStage`]:
-    /// - [`IrPassStage::PreNetwork`] passes run before networks are compiled, so `Network` nodes
-    ///   they add are compiled like the program's own;
-    /// - [`IrPassStage::PostNetwork`] passes run on the final IR just before codegen (after
-    ///   multi-version networks are spliced and dynamic membership is applied).
-    ///
-    /// A pass may edit roots in place and append new ones (an observation tap's external
-    /// output is a root of its own).
-    ///
-    /// For simulator-only instrumentation (observation taps, lineage rewrites, test oracles).
+    /// Registers an IR pass to run when the simulation is compiled, after the passes registered
+    /// before it at the same [`IrPassStage`]. A pass may edit roots in place and append new ones.
+    /// `PostNetwork` passes run after `with_provenance`'s rewrite.
     #[cfg(feature = "hydrofrac")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "hydrofrac")))]
     pub fn with_ir_pass(
         mut self,
         stage: IrPassStage,
@@ -145,31 +124,75 @@ impl<'a> SimFlow<'a> {
         self
     }
 
-    /// Emits network hook points: every bincode `Network` send and receive and every external
-    /// output calls the [`SimNetworkHook`](super::network_hook::SimNetworkHook) installed with
-    /// [`CompiledSim::set_network_hook`], and the scheduler reports execution boundaries to it.
-    /// See [`super::network_hook`].
+    /// An independent copy of this flow, to compile a second program from the same user IR (a
+    /// test oracle compiling its own variant of the program, say). The IR is deep-cloned (shared
+    /// nodes stay shared within the copy); the port counters and the external port registry are
+    /// copied into fresh cells, so compiling one flow does not touch the other; every other field
+    /// is cloned.
     ///
-    /// Without this call the generated code has no hook points at all.
+    /// Returns `None` if IR passes are registered: they are `FnOnce` closures, which cannot be
+    /// copied. Without them, nothing in a flow borrows for `'a` (the lifetime only ties the flow to
+    /// its builder's locations), so the copy is `'static`.
     #[cfg(feature = "hydrofrac")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "hydrofrac")))]
-    pub fn with_network_hook_points(mut self) -> Self {
-        self.network_hooks = true;
-        self
+    pub fn try_fork(&self) -> Option<SimFlow<'static>> {
+        if !self.ir_passes.is_empty() {
+            return None;
+        }
+        // The process and cluster nodes share one port counter, and the externals one registry:
+        // the copy gets its own of each, starting where this flow's are.
+        let counter = self
+            .processes
+            .values()
+            .chain(self.clusters.values())
+            .next()
+            .map(|node| *node.shared_port_counter.borrow())
+            .unwrap_or_default();
+        let counter = Rc::new(RefCell::new(counter));
+        let node = || SimNode {
+            shared_port_counter: counter.clone(),
+        };
+        let registry = Rc::new(RefCell::new(self.externals_port_registry.borrow().clone()));
+        Some(SimFlow {
+            ir: crate::compile::ir::deep_clone(&self.ir),
+            processes: self.processes.iter().map(|(k, _)| (k, node())).collect(),
+            clusters: self.clusters.iter().map(|(k, _)| (k, node())).collect(),
+            externals: self
+                .externals
+                .iter()
+                .map(|(k, _)| {
+                    (
+                        k,
+                        SimExternal {
+                            shared_inner: registry.clone(),
+                        },
+                    )
+                })
+                .collect(),
+            cluster_max_sizes: self.cluster_max_sizes.clone(),
+            dynamic_membership: self.dynamic_membership.clone(),
+            crashable: self.crashable.clone(),
+            externals_port_registry: registry,
+            location_version: self.location_version.clone(),
+            location_version_group_root: self.location_version_group_root.clone(),
+            test_safety_only: self.test_safety_only,
+            skip_consistency_assertions: self.skip_consistency_assertions,
+            unit_test_fuzz_iterations: self.unit_test_fuzz_iterations,
+            provenance: self.provenance,
+            operational_ports: self.operational_ports.clone(),
+            ir_passes: Vec::new(),
+            network_hooks: self.network_hooks,
+            location_names: self.location_names.clone(),
+            // merge: copy `refuse_sim_faults: self.refuse_sim_faults,` here.
+            _phantom: std::marker::PhantomData,
+        })
     }
 
-    /// Marks `process` as **eager**: whenever one of its ticks (or observations) can run, the
-    /// scheduler runs it before making any schedule choice, and its stream batches release
-    /// everything buffered. An eager process therefore adds no nondeterminism to the search.
-    ///
-    /// Meant for observation-only locations (an oracle that consumes, and never sends back into
-    /// the program): exploring their interleavings would only multiply schedules. Eager
-    /// locations are flagged in [`CompiledSim::locations`] and excluded from
-    /// [`CompiledSim::node_count`].
+    /// Emits network hook points, which call the hook installed with
+    /// [`CompiledSim::set_network_hook`] (see [`super::network_hook`]). Without this call, the
+    /// generated code has none.
     #[cfg(feature = "hydrofrac")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "hydrofrac")))]
-    pub fn with_eager_location<P>(mut self, process: &crate::location::Process<'a, P>) -> Self {
-        self.eager_locations.insert(process.key);
+    pub fn with_network_hook_points(mut self) -> Self {
+        self.network_hooks = true;
         self
     }
 
@@ -395,7 +418,6 @@ impl<'a> SimFlow<'a> {
             crash_channel_vecs: BTreeMap::new(),
             network_hooks: self.network_hooks,
             channels: vec![],
-            outputs: vec![],
             pending_network_meta: None,
             pending_output_port: None,
         };
@@ -408,11 +430,10 @@ impl<'a> SimFlow<'a> {
             },
         );
 
-        let (pre_network_passes, post_network_passes): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut self.ir_passes)
-                .into_iter()
-                .partition(|(stage, _)| *stage == IrPassStage::PreNetwork);
-        for (_, pass) in pre_network_passes {
+        let (pre_network, post_network): (Vec<_>, Vec<_>) = std::mem::take(&mut self.ir_passes)
+            .into_iter()
+            .partition(|(stage, _)| *stage == IrPassStage::PreNetwork);
+        for (_, pass) in pre_network {
             pass(&mut self.ir);
         }
 
@@ -462,7 +483,10 @@ impl<'a> SimFlow<'a> {
             &cluster_member_ids,
         );
 
-        for (_, pass) in post_network_passes {
+        if self.provenance {
+            super::provenance_ir::apply_provenance(&mut self.ir, &self.operational_ports);
+        }
+        for (_, pass) in post_network {
             pass(&mut self.ir);
         }
 
@@ -500,14 +524,21 @@ impl<'a> SimFlow<'a> {
                 .collect()
         }
 
-        let locations = self.location_infos(&cluster_member_ids);
-        let channels = std::mem::take(&mut sim_emit.channels);
-        let outputs = std::mem::take(&mut sim_emit.outputs);
-        let eager_locations: HashSet<LocationId> = locations
-            .iter()
-            .filter(|l| l.eager)
-            .map(|l| l.id.clone())
+        let name = |key: LocationKey| self.location_names.get(key).cloned().unwrap_or_default();
+        #[expect(clippy::disallowed_methods, reason = "sorted below")]
+        let mut locations: Vec<LocationInfo> = (self.processes.keys())
+            .map(|key| LocationInfo {
+                id: LocationId::Process(key),
+                name: name(key),
+                members: None,
+            })
+            .chain(self.clusters.keys().map(|key| LocationInfo {
+                id: LocationId::Cluster(key),
+                name: name(key),
+                members: cluster_member_ids.get(&LocationId::Cluster(key)).cloned(),
+            }))
             .collect();
+        locations.sort_by(|a, b| a.id.cmp(&b.id));
 
         let process_graphs = build_graphs(sim_emit.process_graphs);
         let cluster_graphs = build_graphs(sim_emit.cluster_graphs);
@@ -542,50 +573,9 @@ impl<'a> SimFlow<'a> {
             unit_test_fuzz_iterations: self.unit_test_fuzz_iterations,
             network_hooks: self.network_hooks,
             network_hook: RefCell::new(None),
-            channels,
-            outputs,
+            channels: sim_emit.channels,
             locations,
-            eager_locations: Rc::new(eager_locations),
         }
-    }
-
-    /// The processes and clusters of this flow, sorted by location, for
-    /// [`CompiledSim::locations`].
-    fn location_infos(
-        &self,
-        cluster_member_ids: &BTreeMap<LocationId, Vec<u32>>,
-    ) -> Vec<LocationInfo> {
-        let name_of = |key: LocationKey| {
-            self.location_names
-                .get(key)
-                .cloned()
-                .unwrap_or_else(|| format!("{key:?}"))
-        };
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "nondeterministic iteration order, sorted below"
-        )]
-        let mut out: Vec<LocationInfo> = self
-            .processes
-            .keys()
-            .map(|key| LocationInfo {
-                id: LocationId::Process(key),
-                name: name_of(key),
-                members: None,
-                eager: self.eager_locations.contains(&key),
-            })
-            .chain(self.clusters.keys().map(|key| {
-                let id = LocationId::Cluster(key);
-                LocationInfo {
-                    members: Some(cluster_member_ids.get(&id).cloned().unwrap_or_default()),
-                    id,
-                    name: name_of(key),
-                    eager: self.eager_locations.contains(&key),
-                }
-            }))
-            .collect();
-        out.sort_by(|a, b| a.id.cmp(&b.id));
-        out
     }
 
     /// Computes each cluster's merged size and the global member-id slice it constructs.

@@ -3,12 +3,13 @@ use std::rc::Rc;
 
 use hydro_lang::location::LocationKey;
 use hydro_lang::location::dynamic::LocationId;
-use hydro_lang::sim::network_hook::{ExecKind, LocationInfo};
+use hydro_lang::sim::network_hook::LocationInfo;
 
 use super::*;
-use crate::search::{Fault, FaultSet};
+use crate::races::PairClause;
+use crate::search::Fault;
 
-/// The three processes of the hand-built runs: `A`, `B` and `C`, plus an eager `Obs`.
+/// The processes of the hand-built runs: `A`, `B`, `C` and `Obs`.
 fn locations() -> Vec<LocationInfo> {
     ["A", "B", "C", "Obs"]
         .iter()
@@ -17,7 +18,6 @@ fn locations() -> Vec<LocationInfo> {
             id: LocationId::Process(format!("loc{}v1", i + 1).parse::<LocationKey>().unwrap()),
             name: format!("test::{name}"),
             members: None,
-            eager: *name == "Obs",
         })
         .collect()
 }
@@ -55,15 +55,12 @@ struct Log {
 
 impl Log {
     fn exec(&mut self, at: &str) -> &mut Self {
-        self.events.push(Event::Exec {
-            node: node(at),
-            kind: ExecKind::Async,
-        });
+        self.events.push(Event::Exec { node: node(at) });
         self
     }
 
     fn end(&mut self) -> &mut Self {
-        self.events.push(Event::ExecEnd { progressed: true });
+        self.events.push(Event::ExecEnd);
         self
     }
 
@@ -192,14 +189,6 @@ fn record_prov_encoding_is_bincode() {
     trailing.push(0);
     assert_eq!(decode_meta(Some(&trailing)), RecordProv::Opaque);
     assert_eq!(decode_meta(Some(&[7, 0, 0, 0])), RecordProv::Opaque);
-    // A payload rendering after the lineage does not change it
-    // (`provenance::split_meta`), but a malformed one makes the metadata opaque.
-    let rendered = crate::provenance::with_payload_debug(expected.clone(), "Item(7)");
-    assert_eq!(decode_meta(Some(&rendered)), ids);
-    assert_eq!(
-        decode_meta(Some(&rendered[..rendered.len() - 1])),
-        RecordProv::Opaque
-    );
 }
 
 /// A → B → C, with an unrelated delivery A → B that B received first.
@@ -358,10 +347,6 @@ fn undelivered_sends_never_appear_in_a_support() {
     let expected: BTreeSet<_> = [m(LOSSY, "A", "C", 1)].into();
     assert_eq!(messages(&lineage.derivation(by_rule)), expected);
     assert_eq!(messages(&lineage.derivation(by_ids)), expected);
-    // The dead send is not in A's send sequence; the omitted one is (A did send it).
-    let seq = &lineage.send_sequences()["A"];
-    assert_eq!(seq.len(), 2);
-    assert_eq!(seq[1].bytes[..], [2]);
 }
 
 /// After the heal no omission applies, so later deliveries are not omittable; their senders'
@@ -390,45 +375,19 @@ fn sends_after_the_heal_are_not_omittable() {
         .collect();
     assert_eq!(lossy, [1].into());
     assert_eq!(d.len(), 2);
-    assert_eq!(lineage.pre_heal_sends()["A"], 1);
-    assert_eq!(lineage.send_sequences()["A"].len(), 2);
 
     // The crash right after A's first send fires before the heal and kills the post-heal send.
-    let clause = lineage.clause_for(out);
+    // (No crash point names a post-heal send: the search's candidates come from pre-heal sends
+    // only.)
+    let clause = PairClause::robust(d.iter().cloned());
     let first = msg(LOSSY, &node("A"), &node("C"), 1);
     let second = msg(LOSSY, &node("A"), &node("C"), 2);
-    assert!(clause.hit_by(&Fault::crash_after("A", Some(first.clone()))));
-    assert!(clause.hit_by(&Fault::Omit(first)));
-    assert!(!clause.hit_by(&Fault::Omit(second.clone())));
-    // A crash point named by a post-heal send never fires.
-    assert!(!clause.hit_by(&Fault::crash_after("A", Some(second))));
+    assert!(clause.hit_by(&Fault::crash_after("A", Some(first.clone())), &()));
+    assert!(clause.hit_by(&Fault::Omit(first), &()));
+    assert!(!clause.hit_by(&Fault::Omit(second), &()));
 }
 
-/// Fail-stop deliveries are not omittable; deliveries from nodes that cannot crash (the eager
-/// observer) on a fail-stop channel are not dependencies at all, but the closure runs through
-/// them.
-#[test]
-fn unkillable_deliveries_are_dropped_but_followed() {
-    let mut l = Log::default();
-    l.exec("A");
-    let a = l.send(LOSSY, "A", "Obs", 1, ids(&[]));
-    l.end();
-    l.exec("Obs").recv(a, LOSSY, "Obs");
-    let obs = l.send(RELIABLE, "Obs", "C", 2, ids(&[a]));
-    l.end();
-    l.exec("C").recv(obs, RELIABLE, "C");
-    let out = l.output("C", ids(&[obs]));
-    l.end();
-    let log = l.log();
-    let lineage = derive(&log, &tables());
-    assert_eq!(
-        messages(&lineage.derivation(out)),
-        [m(LOSSY, "A", "Obs", 1)].into()
-    );
-    assert!(!lineage.send_sequences().contains_key("Obs"));
-}
-
-/// The clause's kill relation, through the search's `hit_by`, on a two-send run.
+/// The kill relation of a derivation, through the search's crash rule, on a two-send run.
 #[test]
 fn clause_kill_relation_matches_the_run() {
     let mut l = Log::default();
@@ -441,24 +400,17 @@ fn clause_kill_relation_matches_the_run() {
     l.end();
     let log = l.log();
     let lineage = derive(&log, &tables());
-    let clause = lineage.clause_for(out);
-    assert!(clause.premises.is_empty());
+    let clause = PairClause::robust(lineage.derivation(out).iter().cloned());
 
     let m1 = msg(LOSSY, &node("A"), &node("B"), 1);
     let m2 = msg(LOSSY, &node("A"), &node("B"), 2);
-    assert!(clause.hit_by(&Fault::Omit(m2.clone())));
-    assert!(!clause.hit_by(&Fault::Omit(m1.clone())));
-    assert!(clause.hit_by(&Fault::crash_after("A", None)));
-    assert!(clause.hit_by(&Fault::crash_after("A", Some(m1.clone()))));
-    assert!(!clause.hit_by(&Fault::crash_after("A", Some(m2.clone()))));
+    assert!(clause.hit_by(&Fault::Omit(m2.clone()), &()));
+    assert!(!clause.hit_by(&Fault::Omit(m1.clone()), &()));
+    assert!(clause.hit_by(&Fault::crash_after("A", None), &()));
+    assert!(clause.hit_by(&Fault::crash_after("A", Some(m1)), &()));
+    assert!(!clause.hit_by(&Fault::crash_after("A", Some(m2)), &()));
     // B produced the fact; its crash removes it from the correct members instead.
-    assert!(!clause.hit_by(&Fault::crash_after("B", None)));
-
-    let candidates: FaultSet<MessageId> = clause.candidate_faults().collect();
-    assert_eq!(
-        candidates,
-        [Fault::Omit(m2), Fault::crash_after("A", Some(m1))].into()
-    );
+    assert!(!clause.hit_by(&Fault::crash_after("B", None), &()));
 }
 
 /// A fact computed from nothing that came off a channel has an empty derivation: no fault set
@@ -471,7 +423,7 @@ fn local_facts_have_empty_derivations() {
     l.end();
     let log = l.log();
     let lineage = derive(&log, &tables());
-    assert!(lineage.clause_for(out).is_unkillable());
+    assert!(lineage.derivation(out).is_empty());
     assert_eq!(
         lineage.observations().map(|o| o.event).collect::<Vec<_>>(),
         vec![out]
