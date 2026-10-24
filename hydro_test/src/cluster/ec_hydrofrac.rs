@@ -247,7 +247,9 @@ mod tests {
     /// Control: the generated specification separates the protocols. The plain broadcast's
     /// deliveries break at one crash of the broadcaster (exhaustively); the echoing broadcast's
     /// survive every admissible combination of crashes (any number of them, as long as two
-    /// members are left correct), over [`ECHO_SCHEDULES`] sampled schedules per hypothesis.
+    /// members are left correct). The echoing broadcast is fragile-free, so each fault set runs
+    /// on one schedule even with [`ECHO_SCHEDULES`] sampled per hypothesis, and the certificate
+    /// holds.
     #[test]
     fn ec_generated_spec_separates_plain_from_reliable_broadcast() {
         let plain = echo_broadcast(false, EcCheck::new());
@@ -259,25 +261,24 @@ mod tests {
         assert!(node.starts_with("Broadcaster"), "{plain}");
 
         // The echoing broadcast's members batch what they receive (`reliable_broadcast.rs`'s
-        // tick), so its deliveries are schedule-sensitive: the search finds no counterexample
-        // under any admissible crash set, but cannot certify it (docs/design/hydrofrac-lite.md
-        // §4.9).
+        // tick), so the program has schedule choices, but no fragile step: every derivation is
+        // robust, and its deliveries are certified under any admissible crash set
+        // (docs/design/hydrofrac-races.md §4.4).
         let reliable = echo_broadcast(true, EcCheck::new().sample_schedules(ECHO_SCHEDULES));
         eprintln!("{reliable}");
         let deliveries = label(&reliable, "reliable_broadcast.rs", "deliveries", 0);
         assert!(
-            deliveries.plan.sites.iter().any(|s| s.op == "batch"),
+            reliable.choices.iter().any(|s| s.op == "batch"),
             "{reliable}"
         );
         assert!(
             matches!(
                 deliveries.verdict,
-                Verdict::Exhausted {
-                    tolerates: Tolerance::All,
-                    ..
+                Verdict::Certified {
+                    tolerates: Tolerance::All
                 }
             ),
-            "reliable broadcast: expected no counterexample under any admissible crash set:\n{reliable}"
+            "reliable broadcast: expected a certificate under any admissible crash set:\n{reliable}"
         );
     }
 

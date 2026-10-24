@@ -1,0 +1,5 @@
+docs(hydro_lang): deferred data schedules no tick in the simulator or in deployment
+
+- Hydro lowers `defer_tick` to DFIR's `defer_tick_lazy`, which never wakes the runtime; only an external event does.
+- The simulator matches deployment on this question, so the `deferred_records_are_fragile` counterexample can happen in deployment.
+- Remaining divergence: deployment runs every tick on any process wake, so the simulator does not explore deferred records being released by an unrelated wake.

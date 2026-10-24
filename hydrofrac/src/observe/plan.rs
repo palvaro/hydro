@@ -5,22 +5,17 @@ use std::fmt::{self, Display};
 use hydro_lang::compile::ir::CollectionKind;
 use hydro_lang::location::dynamic::LocationId;
 
-use super::EcCollection;
-use crate::provenance::sensitivity::NondetSite;
+use super::{EcCollection, kind_name};
 
 /// Why a labelled collection is not checked by the generated specification.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NotCheckedReason {
-    /// No network channel feeds the collection: no fault in the model can withhold an input
-    /// from some members, so there is nothing to check.
+    /// No network channel feeds the collection: no fault can withhold its inputs.
     LocalInputsOnly,
-    /// The collection is a `Singleton`, `Optional` or `KeyedSingleton` whose value can change,
-    /// and it is not an aggregation of a checked labelled stream (which would cover it,
-    /// [`LabelPlan::covered_by`]). The set-based specification needs a collection that only
-    /// grows; see docs/design/hydrofrac-lite.md §4.7. The string names the kind.
+    /// A scalar (the named kind) that no checked labelled stream covers: the set-based
+    /// specification needs a collection that only grows.
     NotAStream(String),
-    /// The labelling node lives inside a tick: its bounded per-tick contents are not "the
-    /// collection's contents".
+    /// The labelling node lives inside a tick: its per-tick contents are not the collection's.
     InsideTick,
 }
 
@@ -36,27 +31,15 @@ impl Display for NotCheckedReason {
     }
 }
 
-/// One labelled collection of the program, with whether the generated specification checks
-/// it.
+/// One labelled collection, with whether and how the generated specification checks it.
 #[derive(Clone, Debug)]
 pub struct LabelPlan {
     /// The collection.
     pub collection: EcCollection,
     /// Why it is not checked, if it is not.
     pub not_checked: Option<NotCheckedReason>,
-    /// For a labelled scalar checked at its input stream ([`EcCollection::covered_by`]): the
-    /// index of that stream's plan, which is checked. The scalar itself is not tapped.
+    /// For a labelled scalar checked at its input stream: that stream's plan index.
     pub covered_by: Option<usize>,
-    /// For a merge-dominated hop ([`EcCollection::merged_into`]): the index of the nearest
-    /// checked exit after the merge, whose verdict is authoritative. The hop is still tapped
-    /// and searched; its verdict is informational.
-    pub merged_at: Option<usize>,
-    /// What makes the label's search schedule-sensitive
-    /// ([`crate::provenance::sensitivity`]): the simulator's choices in its causal cone, those
-    /// that may reorder the sends of a node in it, and what the walk cannot see through. Empty
-    /// for a label whose fault sets each have one execution: only those can be certified
-    /// (docs/design/hydrofrac-lite.md §4.9). Filled by the tap pass; [`plan`] leaves it empty.
-    pub sites: Vec<NondetSite>,
 }
 
 impl LabelPlan {
@@ -71,24 +54,18 @@ impl LabelPlan {
     }
 }
 
-/// Whether the set-based specification applies to `collection`: local inputs, then kind,
-/// then tick. A scalar is reported here as not a stream; [`plan`] then checks it at its input
-/// stream when it can.
+/// Whether the set-based specification applies to `collection`: local inputs, then kind (a
+/// scalar may still be covered, see [`plan`]), then tick.
 fn classify(collection: &EcCollection) -> Option<NotCheckedReason> {
     if !collection.fed_by_network {
         return Some(NotCheckedReason::LocalInputsOnly);
     }
-    match &collection.collection_kind {
-        CollectionKind::Stream { .. } | CollectionKind::KeyedStream { .. } => {}
-        CollectionKind::Singleton { .. } => {
-            return Some(NotCheckedReason::NotAStream("Singleton".to_owned()));
-        }
-        CollectionKind::Optional { .. } => {
-            return Some(NotCheckedReason::NotAStream("Optional".to_owned()));
-        }
-        CollectionKind::KeyedSingleton { .. } => {
-            return Some(NotCheckedReason::NotAStream("KeyedSingleton".to_owned()));
-        }
+    let kind = &collection.collection_kind;
+    if !matches!(
+        kind,
+        CollectionKind::Stream { .. } | CollectionKind::KeyedStream { .. }
+    ) {
+        return Some(NotCheckedReason::NotAStream(kind_name(kind).to_owned()));
     }
     if collection.in_tick {
         return Some(NotCheckedReason::InsideTick);
@@ -97,8 +74,7 @@ fn classify(collection: &EcCollection) -> Option<NotCheckedReason> {
 }
 
 /// The plan for every collection of the enumeration: `classify`, then a scalar whose input
-/// stream is checked is covered by it, and a merge-dominated hop is attributed to the nearest
-/// checked exit after its merge.
+/// stream is checked is covered by it.
 pub fn plan(collections: Vec<EcCollection>) -> Vec<LabelPlan> {
     let mut plans: Vec<LabelPlan> = collections
         .into_iter()
@@ -106,8 +82,6 @@ pub fn plan(collections: Vec<EcCollection>) -> Vec<LabelPlan> {
             not_checked: classify(&collection),
             collection,
             covered_by: None,
-            merged_at: None,
-            sites: vec![],
         })
         .collect();
     for i in 0..plans.len() {
@@ -118,17 +92,6 @@ pub fn plan(collections: Vec<EcCollection>) -> Vec<LabelPlan> {
             plans[i].not_checked = None;
             plans[i].covered_by = Some(input);
         }
-    }
-    for i in 0..plans.len() {
-        if !plans[i].is_searched() {
-            continue;
-        }
-        plans[i].merged_at = plans[i]
-            .collection
-            .merged_into
-            .iter()
-            .copied()
-            .find(|&exit| plans[exit].is_searched());
     }
     plans
 }

@@ -153,3 +153,14 @@ pub use crate::continue_if;
 
 #[cfg(test)]
 mod tests;
+
+// Declared here rather than in `tests/mod.rs`, so the line numbers in that file's trace snapshots
+// do not move.
+#[cfg(test)]
+#[path = "tests/dylib_panic.rs"]
+mod dylib_panic_tests;
+
+#[cfg(test)]
+#[cfg(feature = "hydrofrac")]
+#[path = "tests/network_hook.rs"]
+mod network_hook_tests;
