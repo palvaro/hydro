@@ -92,6 +92,7 @@ impl EcCheck {
         // The tap pass runs before networks are compiled, so the provenance rewrite (a
         // `PostNetwork` pass) traces the taps like any other operator.
         let flow = flow
+            .refuse_sim_faults("hydrofrac")
             .skip_consistency_assertions()
             .test_safety_only()
             .with_network_hook_points()

@@ -73,6 +73,9 @@ pub struct SimFlow<'a> {
     /// Number of iterations to use for fuzzing, defaults to 8192
     pub(crate) unit_test_fuzz_iterations: usize,
 
+    /// Who refuses the simulator's own fault injection ([`Self::refuse_sim_faults`]), if anyone.
+    pub(crate) refuse_sim_faults: Option<&'static str>,
+
     /// When true, the program is compiled with provenance tracking
     /// (see [`crate::sim::provenance`]).
     pub(crate) provenance: bool,
@@ -291,6 +294,15 @@ impl<'a> SimFlow<'a> {
         self
     }
 
+    /// Makes [`Self::compiled`] panic if the flow opts into the simulator's own crash injection
+    /// ([`Self::with_crashable_process`], [`Self::with_crashable_cluster`]) or dynamic membership
+    /// ([`Self::with_dynamic_membership`]), before or after this call. For a checker (`by`) that
+    /// injects its own faults and does not see these.
+    pub fn refuse_sim_faults(mut self, by: &'static str) -> Self {
+        self.refuse_sim_faults = Some(by);
+        self
+    }
+
     /// Sets the number of fuzz iterations for this test. Overrides the
     /// the default value of 8192
     pub fn unit_test_fuzz_iterations(mut self, iterations: usize) -> Self {
@@ -333,6 +345,15 @@ impl<'a> SimFlow<'a> {
 
     /// Compiles the simulation into a dynamically loadable library, and returns a handle to it.
     pub fn compiled(mut self) -> CompiledSim {
+        if let Some(by) = self.refuse_sim_faults {
+            assert!(
+                self.crashable.is_empty() && self.dynamic_membership.is_empty(),
+                "{by} does not support the simulator's own crash injection \
+                 (`with_crashable_process`, `with_crashable_cluster`) or dynamic membership \
+                 (`with_dynamic_membership`): it injects its own faults, and would count the \
+                 simulator's crashed members as correct"
+            );
+        }
         use dfir_lang::graph::{eliminate_extra_unions_tees, partition_graph};
 
         let compiled_span = tracing::debug_span!(target: "hydro_build", "sim_compiled").entered();

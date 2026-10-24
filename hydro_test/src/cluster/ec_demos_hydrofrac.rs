@@ -253,12 +253,14 @@ fn labels_in<'r>(results: &'r Results, file: &'r str) -> impl Iterator<Item = &'
     })
 }
 
-/// The verdict a label is checked by: its own, or for a covered scalar the verdict of the
-/// labelled stream it aggregates.
+/// The verdict a label is judged by here: its own, or for a scalar folding a labelled stream
+/// (which hydrofrac does not check: agreeing streams can still fold to different values) the
+/// verdict of that stream. For an idempotent fold such as a G-Set's union, agreeing streams do
+/// fold to the same value, by reading.
 #[cfg(stageleft_runtime)]
 fn effective<'r>(results: &'r Results, label: &'r LabelResult) -> &'r Verdict {
-    match label.verdict {
-        Verdict::CoveredBy(index) => &results.results()[index].verdict,
+    match (&label.verdict, label.plan.collection.covered_by) {
+        (Verdict::NotChecked(_), Some(index)) => &results.results()[index].verdict,
         _ => &label.verdict,
     }
 }
@@ -384,15 +386,15 @@ fn ec_demo_uniform_broadcast() {
     }
 }
 
-/// State-based G-Set gossip, closed and live: the G-Set, checked at the stream it folds, has
-/// no counterexample under any admissible crash set. Gossip rounds are batched, so the program
+/// State-based G-Set gossip, closed and live: the stream the G-Set folds (the G-Set itself is
+/// not checked, see [`effective`]) has no counterexample under any admissible crash set. Gossip rounds are batched, so the program
 /// has schedule choices: searched, not certified.
 #[test]
 fn ec_demo_g_set_gossip_certifies() {
     for live in [false, true] {
         let results = gossip_check(live);
         let set: Vec<_> = labels_in(&results, "crdt_gossip.rs")
-            .filter(|l| matches!(l.verdict, Verdict::CoveredBy(_)))
+            .filter(|l| l.plan.collection.covered_by.is_some())
             .collect();
         assert_eq!(set.len(), 1, "live: {live}\n{results}");
         assert!(
@@ -417,7 +419,7 @@ fn ec_demo_g_set_gossip_all_labels() {
         );
         assert!(
             labels_in(&results, "crdt_gossip.rs")
-                .filter(|l| matches!(l.verdict, Verdict::CoveredBy(_)))
+                .filter(|l| l.plan.collection.covered_by.is_some())
                 .all(|l| exhausted(effective(&results, l), Tolerance::All)),
             "live: {live}\n{results}"
         );

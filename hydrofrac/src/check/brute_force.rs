@@ -502,6 +502,9 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
             let after = || absorb(hook.drain_instances());
             let sim = self.sim;
             let sample = self.sample_schedules;
+            if sample.is_none() {
+                super::races_engine::refuse_truncated_exhaustive();
+            }
             std::panic::catch_unwind(AssertUnwindSafe(move || match sample {
                 Some(n) => sim.fuzz_bounded_then(n, thunk, after),
                 None => {

@@ -38,7 +38,8 @@ pub struct LabelPlan {
     pub collection: EcCollection,
     /// Why it is not checked, if it is not.
     pub not_checked: Option<NotCheckedReason>,
-    /// For a labelled scalar checked at its input stream: that stream's plan index.
+    /// For a labelled scalar checked at its input stream: that stream's plan index. Always
+    /// `None` ([`plan`] no longer covers scalars).
     pub covered_by: Option<usize>,
 }
 
@@ -73,25 +74,18 @@ fn classify(collection: &EcCollection) -> Option<NotCheckedReason> {
     None
 }
 
-/// The plan for every collection of the enumeration: `classify`, then a scalar whose input
-/// stream is checked is covered by it.
+/// The plan for every collection of the enumeration: `classify`. A scalar is never covered by
+/// the stream it aggregates (`covered_by` stays `None`): the specification compares sets of
+/// facts, and members that agree on a stream's set can still disagree on a fold of it (a count
+/// or a sum over a duplicate, or any fold that is not idempotent). The IR does not record
+/// whether a fold is idempotent, so such a scalar is reported not checked.
 pub fn plan(collections: Vec<EcCollection>) -> Vec<LabelPlan> {
-    let mut plans: Vec<LabelPlan> = collections
+    collections
         .into_iter()
         .map(|collection| LabelPlan {
             not_checked: classify(&collection),
             collection,
             covered_by: None,
         })
-        .collect();
-    for i in 0..plans.len() {
-        if let Some(input) = plans[i].collection.covered_by
-            && matches!(plans[i].not_checked, Some(NotCheckedReason::NotAStream(_)))
-            && plans[input].not_checked.is_none()
-        {
-            plans[i].not_checked = None;
-            plans[i].covered_by = Some(input);
-        }
-    }
-    plans
+        .collect()
 }

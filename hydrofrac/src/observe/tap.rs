@@ -18,7 +18,7 @@ use hydro_lang::live_collections::stream::networking::serialize_bincode_with_typ
 use hydro_lang::location::LocationKey;
 use syn::parse_quote;
 
-use super::collections::{EcKey, ec_key, is_ec};
+use super::collections::is_ec;
 use super::{LabelPlan, ec_collections, plan};
 use crate::provenance::choices::{ChoiceSite, program_choices};
 use crate::provenance::rewrite::debug_of;
@@ -256,11 +256,14 @@ pub fn tap(ir: &mut Vec<HydroRoot>) -> Labels {
     // The program's schedule choices, on the IR as the program built it (before the taps).
     let choices = program_choices(ir);
     let plans = plan(collections);
-    let index_of: HashMap<EcKey, usize> = plans
+    // Each label is one node, by address: the walk below visits every node where the
+    // enumeration saw it (it replaces a node only after visiting its inputs).
+    let index_of: HashMap<usize, usize> = plans
         .iter()
         .enumerate()
-        .map(|(i, plan)| (plan.collection.key(), i))
+        .map(|(i, plan)| (plan.collection.node, i))
         .collect();
+    let mut tapped = vec![0usize; plans.len()];
 
     let mut ports = Counter::<ExternalPortId>::default();
     if let Some(max) = max_port(ir) {
@@ -274,8 +277,8 @@ pub fn tap(ir: &mut Vec<HydroRoot>) -> Labels {
         ::core::option::Option<::std::string::String>
     ));
 
-    // Labelled nodes are re-identified by the enumeration's key (a `Tee` never matches: the
-    // enumeration records what it shares).
+    // Labelled nodes are re-identified by address (a `Tee` never matches: the enumeration
+    // records what it shares).
     let mut taps: Vec<HydroRoot> = vec![];
     let mut tap_ports: BTreeMap<usize, usize> = BTreeMap::new();
     walk_in_place(ir, &mut |node: &mut HydroNode| {
@@ -290,12 +293,13 @@ pub fn tap(ir: &mut Vec<HydroRoot>) -> Labels {
         {
             return;
         }
-        let Some(&index) = index_of.get(&ec_key(node)) else {
+        let Some(&index) = index_of.get(&(std::ptr::from_ref(node) as usize)) else {
             return;
         };
         if !plans[index].is_searched() {
             return;
         }
+        tapped[index] += 1;
         let node_metadata = node.metadata().clone();
         // The element type (`(K, V)` for a keyed stream) and the tap's stream kind.
         let (element_type, bound, order, retry): (syn::Type, _, _, _) =
@@ -364,6 +368,15 @@ pub fn tap(ir: &mut Vec<HydroRoot>) -> Labels {
             op_metadata,
         });
     });
+    // One label, one node: a label tapped at no node (or at two) would check the wrong facts.
+    for (plan, &count) in plans.iter().zip(&tapped) {
+        assert!(
+            !plan.is_searched() || count == 1,
+            "hydrofrac: label `{}` ({}) was tapped at {count} nodes, not one",
+            plan.collection.display_name(),
+            plan.collection.label
+        );
+    }
     ir.extend(taps);
 
     Labels {

@@ -252,6 +252,29 @@ impl EventLog {
         &self.0
     }
 
+    /// Panics unless the heal ended the faults: after an [`Event::Heal`], no send is omitted
+    /// and no crash fires. Lineage relies on it: it marks a delivery omittable only if it was
+    /// sent before the heal, and keeps every delivery's sender-crash dependency, since a node
+    /// that crashed before the heal sends nothing after it. Sends after the heal are fine.
+    pub fn check_heal(events: &[Event]) {
+        let Some(heal) = events.iter().position(|e| matches!(e, Event::Heal)) else {
+            return;
+        };
+        for e in &events[heal..] {
+            match e {
+                Event::Sent {
+                    fate: Fate::Omitted,
+                    msg,
+                    ..
+                } => panic!("hydrofrac: `{msg}` was omitted after the network healed"),
+                Event::Halted { node } => {
+                    panic!("hydrofrac: a crash of `{node}` fired after the network healed")
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// The sends, in program order, as `(id, message, ordinal, fate)`.
     pub fn sends(&self) -> impl Iterator<Item = (DeliveryId, &MessageId, u64, Fate)> + '_ {
         self.0.iter().filter_map(|e| match e {
@@ -305,6 +328,7 @@ impl Instance {
     }
 
     fn record(self) -> InstanceRecord {
+        EventLog::check_heal(&self.log);
         InstanceRecord {
             log: EventLog(self.log),
             crashed: self.dead,

@@ -56,21 +56,22 @@ fn check(reliable: bool, samples: usize) -> hydrofrac::Results {
     results
 }
 
-/// The register: the labelled `fold` into a `Singleton`, checked at its input stream. Returns
-/// its input's result.
+/// The register: the labelled `fold` into a `Singleton`. It is not checked itself (members that
+/// agree on a stream's facts can disagree on a fold of it), so this returns the result of the
+/// stream it folds, which is.
 #[cfg(stageleft_runtime)]
 fn register(results: &hydrofrac::Results) -> &hydrofrac::check::LabelResult {
-    let covered: Vec<_> = results
+    let folds: Vec<_> = results
         .labels_named("abd_register_state")
-        .filter(|l| l.plan.covered_by.is_some())
+        .filter(|l| l.plan.collection.covered_by.is_some())
         .collect();
-    let [register] = covered[..] else {
-        panic!("one covered register label\n{results}");
+    let [register] = folds[..] else {
+        panic!("one register label folding a labelled stream\n{results}");
     };
-    let hydrofrac::Verdict::CoveredBy(input) = register.verdict else {
-        panic!("the register is checked at its input\n{results}");
+    let hydrofrac::Verdict::NotChecked(_) = register.verdict else {
+        panic!("the register itself is not checked\n{results}");
     };
-    &results.labels[input]
+    &results.labels[register.plan.collection.covered_by.expect("filtered")]
 }
 
 /// The one searched label named `name` (other labels of that name are covered or not checked).

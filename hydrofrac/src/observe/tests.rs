@@ -197,9 +197,12 @@ fn a_label_fed_through_closure_references_is_checked() {
     assert!(delivered[0].is_searched(), "{:?}", delivered[0]);
 }
 
+/// The gossip state (a fold of `all_elements`) is not checked: agreement on the stream's set of
+/// facts does not fix a fold's value (a count over duplicates differs), so a scalar is never
+/// covered by its stream.
 #[cfg(stageleft_runtime)]
 #[test]
-fn gossip_state_is_checked_at_the_stream_it_folds() {
+fn gossip_state_is_not_covered_by_the_stream_it_folds() {
     let mut flow = FlowBuilder::new();
     let members = flow.cluster::<()>();
     let (_u, updates) = members.sim_input::<u32, NoOrder, ExactlyOnce>();
@@ -215,7 +218,9 @@ fn gossip_state_is_checked_at_the_stream_it_folds() {
     let (all, all_elements) = find(&plans, "all_elements");
     assert!(all_elements.is_searched());
     let (_, state) = find(&plans, "gset_state");
-    assert_eq!(state.covered_by, Some(all));
+    assert_eq!(state.collection.covered_by, Some(all));
+    assert_eq!(state.covered_by, None);
+    assert!(matches!(state.not_checked, Some(NotCheckedReason::NotAStream(_))), "{state:?}");
     assert!(!state.is_searched());
     for hop in ["initial", "echo"] {
         assert!(find(&plans, hop).1.is_searched());

@@ -2179,6 +2179,13 @@ impl<W: std::io::Write> LaunchedSim<W> {
             // If any tick is blocked because a hook is not ready, that's a
             // simulator bug — it means a singleton never received a value.
             for tick in &self.not_ready_ticks {
+                // hydrofrac injects faults that can starve a snapshot's producer, so a tick that
+                // can never run is a property of the run, not a simulator bug: the run quiesces
+                // with that member never processing the tick, and the checker sees what it lacks.
+                #[cfg(feature = "hydrofrac")]
+                if !tick.hooks.iter().all(|hook| hook.is_ready()) {
+                    continue;
+                }
                 abort_assert!(
                     tick.hooks.iter().all(|hook| hook.is_ready()),
                     "tick has a hook that never became ready"

@@ -62,6 +62,19 @@ enum Reading {
     },
 }
 
+/// Panics if bolero would cut an exhaustive exploration short without saying so. With
+/// `BOLERO_RANDOM_TEST_TIME_MS` set, bolero's `run_exhaustive` stops at the time limit and
+/// returns normally, so an exploration would look complete when it is not (and a certificate
+/// built on it would be wrong). Exhaustive runs ignore bolero's other limits.
+pub(super) fn refuse_truncated_exhaustive() {
+    if let Ok(limit) = std::env::var("BOLERO_RANDOM_TEST_TIME_MS") {
+        panic!(
+            "hydrofrac: BOLERO_RANDOM_TEST_TIME_MS={limit} would silently cut the exhaustive \
+             exploration short; unset it (or use `sample_schedules`, which never certifies)"
+        );
+    }
+}
+
 /// What one run revealed: the faults it makes possible (`check/brute_force.rs` `harvest`), and
 /// each crashable node's sends before the heal, with their positions among that node's sends.
 #[derive(Default)]
@@ -324,6 +337,9 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
             };
             let sim = self.sim;
             let sample = self.sample_schedules;
+            if policy == Policy::All && sample.is_none() {
+                refuse_truncated_exhaustive();
+            }
             std::panic::catch_unwind(AssertUnwindSafe(move || match (policy, sample) {
                 (Policy::One, _) => sim.first_schedule(thunk),
                 (Policy::All, Some(n)) => sim.fuzz_bounded_then(n, thunk, after),

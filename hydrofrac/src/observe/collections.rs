@@ -36,6 +36,9 @@ pub struct EcCollection {
     pub file: Option<String>,
     /// The 0-based position among collections with the same file and display name.
     pub occurrence: usize,
+    /// The address of the labelled node in the enumerated IR: its identity. Two nodes are two
+    /// collections, even with one [`EcKey`] (a helper that labels on one line, called twice).
+    pub(crate) node: usize,
 }
 
 impl EcCollection {
@@ -43,20 +46,10 @@ impl EcCollection {
     pub fn display_name(&self) -> &str {
         self.name.as_deref().unwrap_or(&self.op)
     }
-
-    /// The identity of the collection among the program's labelled nodes.
-    pub(crate) fn key(&self) -> EcKey {
-        (
-            self.label.clone(),
-            self.op.clone(),
-            kind_name(&self.collection_kind),
-            self.location.clone(),
-        )
-    }
 }
 
-/// `(label, operator, collection kind, cluster)`: how labelled nodes are told apart, and how the
-/// tap pass re-identifies them. The kind separates a `broadcast_closed` from an
+/// `(label, operator, collection kind, cluster)`: what a labelled node's report names come
+/// from. Not its identity: two nodes with one key are two collections ([`ec_collections`]). The kind separates a `broadcast_closed` from an
 /// `assert_has_consistency_of` on a `fold` of it, which share a line and an operator.
 pub(crate) type EcKey = (String, String, &'static str, LocationId);
 
@@ -74,8 +67,10 @@ pub fn kind_name(kind: &CollectionKind) -> &'static str {
 /// Every collection `ir` labels `EventualConsistency`: each labelled node where the label is
 /// **minted** (no input is labelled) or where the collection **exits** the labelled region (an
 /// unlabelled consumer other than a send, or a program output). The operators in between
-/// inherit the label. Nodes with one [`EcKey`] (one per member, or per instantiation of a
-/// library function) are reported once, in first-seen order. A `Tee` stands for what it shares.
+/// inherit the label. Each labelled node is one collection, in first-seen order, even if another
+/// node has the same [`EcKey`] (a library function instantiated twice, a helper labelling on one
+/// line): merging them would let one collection's facts mask another's missing ones. A `Tee`
+/// stands for what it shares.
 ///
 /// A labelled scalar whose node is, through pass-throughs, an aggregation of a labelled
 /// top-level stream is covered by that stream, which is listed if it is not already
@@ -94,7 +89,7 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
         })
         .collect();
     struct Found {
-        by_key: HashMap<EcKey, usize>,
+        by_node: HashMap<*const HydroNode, usize>,
         collections: Vec<EcCollection>,
         seen: HashSet<*const HydroNode>,
         /// The nodes recorded under each collection.
@@ -103,6 +98,8 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
         node_order: Vec<*const HydroNode>,
         /// A labelled scalar's node, and the node of the stream it aggregates.
         aggregations: Vec<(*const HydroNode, *const HydroNode)>,
+        /// Each tick's entry points ([`tick_entries`]).
+        entries: HashMap<LocationId, Vec<*const HydroNode>>,
     }
     impl Found {
         fn record(
@@ -112,8 +109,9 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
         ) -> *const HydroNode {
             with_shared_resolved(node, |node| {
                 let key = ec_key(node);
-                let fed = sources(node, cycle_sinks).network;
-                let index = *self.by_key.entry(key.clone()).or_insert_with(|| {
+                let fed = sources(node, cycle_sinks, &self.entries).network;
+                let ptr = std::ptr::from_ref(node);
+                let index = *self.by_node.entry(ptr).or_insert_with(|| {
                     self.collections.push(EcCollection {
                         label: key.0,
                         op: key.1,
@@ -125,11 +123,11 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
                         name: ec_name(node),
                         file: ec_file(node),
                         occurrence: 0,
+                        node: ptr as usize,
                     });
                     self.collections.len() - 1
                 });
                 self.collections[index].fed_by_network |= fed;
-                let ptr = std::ptr::from_ref(node);
                 if self.nodes.insert(ptr, index).is_none() {
                     self.node_order.push(ptr);
                 }
@@ -177,18 +175,19 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
                 }
             }
         }
-        if is_ec_minting(node) && !sources(node, cycle_sinks).membership_only() {
+        if is_ec_minting(node) && !sources(node, cycle_sinks, &found.entries).membership_only() {
             let scalar = found.record(node, cycle_sinks);
             found.aggregation(scalar, cycle_sinks);
         }
     }
     let mut found = Found {
-        by_key: HashMap::new(),
+        by_node: HashMap::new(),
         collections: vec![],
         seen: HashSet::new(),
         nodes: HashMap::new(),
         node_order: vec![],
         aggregations: vec![],
+        entries: tick_entries(ir),
     };
     for root in ir {
         let input = root.input();
@@ -400,15 +399,79 @@ impl Sources {
     }
 }
 
-fn sources(node: &HydroNode, cycle_sinks: &HashMap<CycleId, *const HydroNode>) -> Sources {
+/// The tick a location belongs to: itself for a tick, the enclosing tick for an atomic region,
+/// `None` at top level.
+pub(crate) fn tick_of(location: &LocationId) -> Option<&LocationId> {
+    match location {
+        LocationId::Tick(..) => Some(location),
+        LocationId::Atomic(tick) => tick_of(tick),
+        LocationId::Process(_) | LocationId::Cluster(_) => None,
+    }
+}
+
+/// Each tick's entry points: the `batch`es and `atomic`s whose records enter it. The simulator
+/// runs a tick only when one of them has something to release, so whether a tick runs at all
+/// (and so whether its constants and cycles emit anything) depends on what feeds them.
+pub(crate) fn tick_entries(ir: &[HydroRoot]) -> HashMap<LocationId, Vec<*const HydroNode>> {
+    let (mut seen, mut out) = (HashSet::new(), HashMap::<LocationId, Vec<_>>::new());
+    let mut stack: Vec<*const HydroNode> = ir.iter().map(|r| std::ptr::from_ref(r.input())).collect();
+    while let Some(ptr) = stack.pop() {
+        if !seen.insert(ptr) {
+            continue;
+        }
+        // SAFETY: every pointer points into `ir`, which is borrowed for the whole walk.
+        let node = unsafe { &*ptr };
+        match node {
+            HydroNode::Placeholder => continue,
+            HydroNode::Batch { metadata, .. } | HydroNode::BeginAtomic { metadata, .. } => {
+                if let Some(tick) = tick_of(&metadata.location_id) {
+                    out.entry(tick.clone()).or_default().push(ptr);
+                }
+            }
+            _ => {}
+        }
+        match node {
+            HydroNode::Tee { inner, .. }
+            | HydroNode::Reference { inner, .. }
+            | HydroNode::PartitionSide { inner, .. } => {
+                stack.push(std::ptr::from_ref(&*inner.0.borrow()));
+            }
+            _ => stack.extend(
+                node.input()
+                    .into_iter()
+                    .chain(closure_refs(node))
+                    .map(std::ptr::from_ref),
+            ),
+        }
+    }
+    out
+}
+
+/// What feeds `node`: networks, membership, other sources. A node inside a tick is also fed by
+/// whatever feeds that tick's entry points ([`tick_entries`]): if no delivery reaches them, the
+/// tick never runs.
+fn sources(
+    node: &HydroNode,
+    cycle_sinks: &HashMap<CycleId, *const HydroNode>,
+    entries: &HashMap<LocationId, Vec<*const HydroNode>>,
+) -> Sources {
     fn go(
         node: &HydroNode,
         cycle_sinks: &HashMap<CycleId, *const HydroNode>,
+        entries: &HashMap<LocationId, Vec<*const HydroNode>>,
         seen: &mut HashSet<*const HydroNode>,
         out: &mut Sources,
     ) {
         if !seen.insert(std::ptr::from_ref(node)) {
             return;
+        }
+        if !matches!(node, HydroNode::Placeholder)
+            && let Some(tick) = tick_of(&node.metadata().location_id)
+        {
+            for &entry in entries.get(tick).into_iter().flatten() {
+                // SAFETY: see the comment at the construction of `cycle_sinks`.
+                go(unsafe { &*entry }, cycle_sinks, entries, seen, out);
+            }
         }
         match node {
             HydroNode::Source {
@@ -431,25 +494,25 @@ fn sources(node: &HydroNode, cycle_sinks: &HashMap<CycleId, *const HydroNode>) -
             HydroNode::Tee { inner, .. }
             | HydroNode::Reference { inner, .. }
             | HydroNode::PartitionSide { inner, .. } => {
-                go(&inner.0.borrow(), cycle_sinks, seen, out);
+                go(&inner.0.borrow(), cycle_sinks, entries, seen, out);
             }
             HydroNode::CycleSource { cycle_id, .. } => {
                 if let Some(sink) = cycle_sinks.get(cycle_id) {
                     // SAFETY: see the comment at the construction of `cycle_sinks`.
-                    go(unsafe { &**sink }, cycle_sinks, seen, out);
+                    go(unsafe { &**sink }, cycle_sinks, entries, seen, out);
                 }
             }
             _ => {
                 let inputs = node.input();
                 out.other |= inputs.is_empty();
                 for input in inputs.into_iter().chain(closure_refs(node)) {
-                    go(input, cycle_sinks, seen, out);
+                    go(input, cycle_sinks, entries, seen, out);
                 }
             }
         }
     }
     let mut out = Sources::default();
-    go(node, cycle_sinks, &mut HashSet::new(), &mut out);
+    go(node, cycle_sinks, entries, &mut HashSet::new(), &mut out);
     out
 }
 
