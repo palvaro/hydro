@@ -10,8 +10,8 @@ use hydro_lang::sim::network_hook::ChannelInfo;
 
 use crate::fault::{Event, InstanceRecord, MessageId, NodeNames};
 use crate::observe::{Fact, LabelPlan, Labels, NotCheckedReason, decode_output, kind_name};
-pub use crate::provenance::sensitivity::NondetSite;
-use crate::report::{ReportNames, ReportRow};
+pub use crate::provenance::choices::ChoiceSite;
+use crate::report::ReportNames;
 use crate::search::{FaultSet, Tolerance, crash_count};
 
 /// Why a label has nothing to check.
@@ -44,9 +44,9 @@ pub struct Counterexample {
     /// omissions alone. A certificate when [`Self::tolerance_certified`], else only what the
     /// search found.
     pub tolerates: Option<usize>,
-    /// Whether [`Self::tolerates`] is a certificate. It is for a label whose fault sets each
-    /// have one execution; for a schedule-sensitive label (docs/design/hydrofrac-lite.md §4.9)
-    /// it says only that the search found no counterexample with fewer crashes.
+    /// Whether [`Self::tolerates`] is a certificate. It is in a program whose fault sets each
+    /// have one execution. In a program with schedule choices (docs/design/hydrofrac-lite.md
+    /// §4.9) it says only that the search found no counterexample with fewer crashes.
     pub tolerance_certified: bool,
     /// The index of the hypothesis in the label's search (0 is the failure-free probe).
     pub hypothesis: usize,
@@ -88,36 +88,20 @@ pub enum Verdict {
     /// The hypothesis budget ran out: not a certificate.
     Budget {
         /// The largest crash bound cleared before the budget ran out, if any (a certificate only
-        /// for a label that is not schedule-sensitive).
+        /// in a program with no schedule choices).
         tolerates: Option<usize>,
     },
-    /// A schedule-sensitive label (docs/design/hydrofrac-lite.md §4.9) whose search ran out of
-    /// hypotheses without a counterexample: **not a certificate**. Lineage pruning is sound only
-    /// where each fault set has one execution; here a derivation seen in one schedule need not
-    /// recur in another, so the fault sets the search skipped were not ruled out.
+    /// A label of a program with schedule choices (docs/design/hydrofrac-lite.md §4.9) whose
+    /// search ran out of hypotheses without a counterexample: **not a certificate**. Lineage
+    /// pruning is sound only where each fault set has one execution. Here a derivation seen in
+    /// one schedule need not recur in another, so the fault sets the search skipped were not
+    /// ruled out.
     Exhausted {
         /// How far the search went: every crash bound up to the vacuity bounds
         /// ([`Tolerance::All`]), or up to the `max_crashes` cap.
         tolerates: Tolerance,
-        /// What makes the label schedule-sensitive.
-        sites: Vec<NondetSite>,
-    },
-    /// A schedule-sensitive label certified without lineage: every admissible fault set within
-    /// the bounds below was run over every schedule, and none breaks it
-    /// (docs/design/hydrofrac-lite.md §4.9, "Bounded certificates by enumeration"). A bounded
-    /// certificate, over the fault model's universe: omissions of messages sent before the heal
-    /// on lossy channels, and crashes before any send or right after one.
-    CertifiedByEnumeration {
-        /// The crashes covered: every admissible set with at most this many crashes (and, with
-        /// [`Tolerance::All`], any number up to the vacuity bounds), within `max_faults`.
-        tolerates: Tolerance,
-        /// The largest fault set covered, if the enumeration had to stop short of every
-        /// admissible set; `None` when it covers them all, whatever their size.
-        max_faults: Option<usize>,
-        /// The fault sets run, counting the failure-free one.
-        sets: usize,
-        /// What makes the label schedule-sensitive.
-        sites: Vec<NondetSite>,
+        /// The program's schedule choices ([`Results::choices`]).
+        sites: Vec<ChoiceSite>,
     },
     /// The generated specification does not apply to the collection.
     NotChecked(NotCheckedReason),
@@ -128,8 +112,8 @@ pub enum Verdict {
 
 impl Verdict {
     /// Whether the verdict is not a certificate of a label that needs checking: a
-    /// counterexample, an exhausted budget, or an exhausted search of a schedule-sensitive label
-    /// (what [`Results::assert_holds`] rejects).
+    /// counterexample, an exhausted budget, or an exhausted search in a program with schedule
+    /// choices (what [`Results::assert_holds`] rejects).
     pub fn fails(&self) -> bool {
         matches!(
             self,
@@ -162,9 +146,6 @@ pub struct Stats {
     pub schedules: usize,
     /// Wall time of the search, counting the runs it caused (not those it reused).
     pub wall: Duration,
-    /// Records whose derivation fell back to the execution rule (opaque to the provenance
-    /// rewrite), summed over the runs.
-    pub opaque_fallbacks: usize,
 }
 
 /// The result for one labelled collection.
@@ -213,12 +194,13 @@ pub struct Results {
     /// name. Records computed through them use the execution rule: sound, but coarser.
     /// Empty when the whole program is tracked precisely.
     pub islands: Vec<String>,
+    /// The program's schedule choices (docs/design/hydrofrac-lite.md §4.9): what the scan of its
+    /// IR found, then its opaque [`Self::islands`]. If there are any, no label is certified.
+    pub choices: Vec<ChoiceSite>,
     /// The program's network channels (the report names channels by them).
     pub channels: Vec<ChannelInfo>,
     /// The labels and their tap output ports (the report decodes observed facts by them).
     pub taps: Labels,
-    /// The test that ran the check: the libtest thread name's last segment, or `run`.
-    pub test: String,
 }
 
 impl Results {
@@ -251,14 +233,14 @@ impl Results {
     }
 
     /// Whether every label is certified (or needs no check): no counterexample, no exhausted
-    /// budget, and no schedule-sensitive label whose search merely found nothing
-    /// ([`Verdict::Exhausted`]).
+    /// budget, and no label whose search merely found nothing in a program with schedule
+    /// choices ([`Verdict::Exhausted`]).
     pub fn holds(&self) -> bool {
         !self.labels.iter().any(|l| l.verdict.fails())
     }
 
-    /// Panics with the report unless every label holds (see [`Self::holds`]). A
-    /// schedule-sensitive label can never be certified, so for a program with one use
+    /// Panics with the report unless every label holds (see [`Self::holds`]). No label of a
+    /// program with schedule choices can be certified, so for such a program use
     /// [`Self::assert_no_counterexample`].
     #[track_caller]
     pub fn assert_holds(&self) {
@@ -269,8 +251,8 @@ impl Results {
             && !self.labels.iter().any(|l| l.verdict.is_counterexample())
         {
             panic!(
-                "hydrofrac: label `{}` is schedule-sensitive, so its search is not a certificate \
-                 (`assert_no_counterexample` accepts it)\n{self}",
+                "hydrofrac: the program has schedule choices, so the search of label `{}` is not a \
+                 certificate (`assert_no_counterexample` accepts it)\n{self}",
                 l.name()
             );
         }
@@ -284,9 +266,9 @@ impl Results {
     }
 
     /// Panics with the report if some label has a counterexample. Weaker than
-    /// [`Self::assert_holds`]: it also accepts a schedule-sensitive label whose search found
-    /// nothing ([`Verdict::Exhausted`]) and an exhausted budget, neither of which is a
-    /// certificate.
+    /// [`Self::assert_holds`]: it also accepts a label whose search found nothing in a program
+    /// with schedule choices ([`Verdict::Exhausted`]) and an exhausted budget, neither of which
+    /// is a certificate.
     #[track_caller]
     pub fn assert_no_counterexample(&self) {
         assert!(
@@ -294,104 +276,33 @@ impl Results {
             "hydrofrac: a label has a counterexample\n{self}"
         );
     }
-}
 
-impl Results {
-    /// How this report names nodes, channels and payloads: facts the runs observed decode the
-    /// payloads that carry them.
+    /// How this report names nodes, channels and payloads: by the `Debug` renderings the
+    /// counterexamples' sends carried, else by the facts their runs observed.
     pub fn report_names(&self) -> ReportNames<'_> {
-        let mut facts = vec![];
-        let mut messages = vec![];
-        for l in &self.labels {
-            if let Verdict::Counterexample(c) = &l.verdict {
-                facts.extend(counterexample_facts(c, &self.taps));
-                messages.extend(crate::report::payload_renderings(&c.record.log));
-            }
-        }
-        ReportNames::new(&self.names, &self.channels)
-            .with_facts(facts.iter())
-            .with_messages(messages)
-    }
-
-    /// One flat row per label, for comparing verdicts with the research records
-    /// (docs/design/hydrofrac-lite.md §7).
-    #[doc(hidden)]
-    pub fn rows(&self) -> Vec<ReportRow> {
-        let names = self.report_names();
-        self.labels
+        let cexes: Vec<&Counterexample> =
+            self.labels.iter().filter_map(|l| l.verdict.counterexample()).collect();
+        let facts: Vec<Fact> = cexes
             .iter()
-            .map(|l| {
-                let c = &l.plan.collection;
-                let (verdict, cex, tolerates) = match &l.verdict {
-                    Verdict::Certified { tolerates } => {
-                        ("certificate", "-".to_owned(), tolerance(Some(*tolerates)))
-                    }
-                    Verdict::Counterexample(cex) => (
-                        "counterexample",
-                        names.normalized(&cex.faults),
-                        tolerance(cex.tolerates.map(Tolerance::UpTo)),
-                    ),
-                    Verdict::Vacuous(_) => ("vacuous", "-".to_owned(), "-".to_owned()),
-                    Verdict::Budget { tolerates } => (
-                        "budget",
-                        "-".to_owned(),
-                        tolerance(tolerates.map(Tolerance::UpTo)),
-                    ),
-                    Verdict::Exhausted { tolerates, .. } => {
-                        ("exhausted", "-".to_owned(), tolerance(Some(*tolerates)))
-                    }
-                    Verdict::CertifiedByEnumeration { tolerates, .. } => {
-                        ("enumerated", "-".to_owned(), tolerance(Some(*tolerates)))
-                    }
-                    Verdict::NotChecked(_) => ("not-checked", "-".to_owned(), "-".to_owned()),
-                    Verdict::CoveredBy(_) => ("covered", "-".to_owned(), "-".to_owned()),
-                };
-                ReportRow {
-                    test: self.test.clone(),
-                    index: l.index,
-                    label: l.name(),
-                    file: c.file.clone().unwrap_or_default(),
-                    collection: c.display_name().to_owned(),
-                    occurrence: c.occurrence,
-                    kind: kind_name(&c.collection_kind).to_owned(),
-                    verdict,
-                    cex,
-                    tolerates,
-                    merged_at: l.plan.merged_at,
-                    hypotheses: l.stats.hypotheses,
-                    schedules: l.stats.schedules,
-                    wall_ms: l.stats.wall.as_secs_f64() * 1000.0,
-                }
-            })
-            .collect()
-    }
-}
-
-/// The first few sites of a schedule-sensitive label, for its verdict line.
-pub(crate) fn site_list(sites: &[NondetSite]) -> String {
-    const SHOWN: usize = 3;
-    // Sites that differ only in what the line does not show (their location, say) read once.
-    let mut distinct: Vec<String> = vec![];
-    for site in sites {
-        let shown = site.to_string();
-        if !distinct.contains(&shown) {
-            distinct.push(shown);
+            .flat_map(|c| counterexample_facts(c, &self.taps))
+            .collect();
+        let mut names = ReportNames::new(&self.names, &self.channels).with_facts(facts.iter());
+        for c in cexes {
+            names = names.with_log(&c.record.log);
         }
+        names
     }
-    let more = distinct.len().saturating_sub(SHOWN);
-    distinct.truncate(SHOWN);
-    if more > 0 {
-        distinct.push(format!("{more} more"));
-    }
-    distinct.join(", ")
 }
 
-fn tolerance(t: Option<Tolerance>) -> String {
-    match t {
-        Some(Tolerance::All) => "all".to_owned(),
-        Some(Tolerance::UpTo(k)) => k.to_string(),
-        None => "-".to_owned(),
+/// The first few of a program's schedule choices, for an exhausted label's verdict line.
+pub(crate) fn site_list(sites: &[ChoiceSite]) -> String {
+    const SHOWN: usize = 3;
+    let mut shown: Vec<String> = sites.iter().take(SHOWN).map(ToString::to_string).collect();
+    let more = sites.len().saturating_sub(SHOWN);
+    if more > 0 {
+        shown.push(format!("and {more} more"));
     }
+    shown.join(", ")
 }
 
 /// The facts a counterexample's report and diagram can decode payloads with: the missing and
@@ -441,7 +352,7 @@ pub(crate) fn verdict_line(
                 Some(k) if c.tolerance_certified => {
                     format!("tolerates {}, breaks at {n}", crashes(k))
                 }
-                // Schedule-sensitive: fewer crashes were searched, not ruled out.
+                // Schedule choices: fewer crashes were searched, not ruled out.
                 Some(k) => format!(
                     "no counterexample with up to {} found, breaks at {n}",
                     crashes(k)
@@ -474,42 +385,12 @@ pub(crate) fn verdict_line(
                 }
             };
             format!(
-                "{searched}; not a certificate (schedule-sensitive: {})",
-                site_list(sites)
-            )
-        }
-        Verdict::CertifiedByEnumeration {
-            tolerates,
-            max_faults,
-            sets,
-            sites,
-        } => {
-            let scope = match tolerates {
-                Tolerance::All => "any crashes".to_owned(),
-                Tolerance::UpTo(k) => format!("up to {}", crashes(*k)),
-            };
-            let size = max_faults.map_or_else(String::new, |f| {
-                format!(" in every set of at most {}", plural(f, "fault", "faults"))
-            });
-            format!(
-                "holds under {scope}{size} by enumeration ({} over every schedule; \
-                 schedule-sensitive: {})",
-                plural(*sets, "fault set", "fault sets"),
+                "{searched}; not a certificate (program has schedule choices: {})",
                 site_list(sites)
             )
         }
         Verdict::NotChecked(reason) => format!("not checked: {reason}"),
         Verdict::CoveredBy(j) => format!("covered by [{j}] {}", label(*j)),
-    }
-}
-
-/// The verdict without source names (faults print by their raw identities); the report
-/// ([`Results`]'s `Display`) names them.
-impl Display for Verdict {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let names = NodeNames::default();
-        let names = ReportNames::new(&names, &[]);
-        f.write_str(&verdict_line(self, &names, |j| format!("label {j}")))
     }
 }
 
@@ -519,9 +400,8 @@ impl Results {
         f: &mut fmt::Formatter<'_>,
         l: &LabelResult,
         names: &ReportNames<'_>,
-        hop: bool,
     ) -> fmt::Result {
-        let (indent, detail) = if hop { ("    ↳ ", "        ") } else { ("  ", "      ") };
+        let (indent, detail) = ("  ", "      ");
         let c = &l.plan.collection;
         write!(
             f,
@@ -531,9 +411,6 @@ impl Results {
             kind_name(&c.collection_kind),
             c.label
         )?;
-        if hop {
-            write!(f, ", a hop merged at [{}]", l.plan.merged_at.unwrap_or(l.index))?;
-        }
         let line = verdict_line(&l.verdict, names, |j| {
             self.labels
                 .get(j)
@@ -573,10 +450,7 @@ impl Results {
     }
 }
 
-/// The report: one block per cluster, one row per label in source names. A merge-dominated
-/// hop (a `broadcast_closed` whose contents are merged with another labelled stream before
-/// they leave the labelled region) is listed under the label it merges into, whose verdict is
-/// the authoritative one; a hop on its own breaks more easily than the merged label.
+/// The report: one block per cluster, one row per label in source names.
 impl Display for Results {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let names = self.report_names();
@@ -593,22 +467,12 @@ impl Display for Results {
                 .iter()
                 .filter(|l| l.plan.cluster().root() == cluster)
                 .collect();
-            let shown = |j: usize| in_cluster.iter().any(|l| l.index == j);
             match self.names.label(cluster) {
                 Some(label) => writeln!(f, "{label}:")?,
                 None => writeln!(f, "{cluster:?}:")?,
             }
             for l in &in_cluster {
-                if l.plan.merged_at.is_some_and(shown) {
-                    continue;
-                }
-                self.write_label(f, l, &names, false)?;
-                for hop in in_cluster
-                    .iter()
-                    .filter(|h| h.index != l.index && h.plan.merged_at == Some(l.index))
-                {
-                    self.write_label(f, hop, &names, true)?;
-                }
+                self.write_label(f, l, &names)?;
             }
         }
         let legend = names.legend();
@@ -623,13 +487,6 @@ impl Display for Results {
                 f,
                 "opaque to provenance (execution rule): {}",
                 self.islands.join(", ")
-            )?;
-        }
-        let opaque: usize = self.labels.iter().map(|l| l.stats.opaque_fallbacks).sum();
-        if opaque > 0 {
-            writeln!(
-                f,
-                "records derived by the execution rule (opaque to provenance): {opaque}"
             )?;
         }
         Ok(())

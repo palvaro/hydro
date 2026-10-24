@@ -14,6 +14,9 @@ stageleft_macro_entrypoint = ["hydro_lang/stageleft_macro_entrypoint"]
 # Solve the hitting-set ILP with HiGHS instead of the pure-Rust `microlp`. Needs cmake, libclang
 # and a C++ toolchain; used to cross-check `microlp` (docs/design/hydrofrac-lite.md §4.4, §7).
 highs = ["good_lp/highs"]
+# The brute-force honesty check `EcCheck::cross_check` (docs/design/hydrofrac-lite.md §7), for
+# tests only.
+cross-check = []
 
 [lints]
 workspace = true

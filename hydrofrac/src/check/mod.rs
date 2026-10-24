@@ -14,31 +14,17 @@
 //!     .assert_holds();
 //! ```
 //!
-//! [`EcCheck::instrument`] taps every checked label ([`crate::observe`]), turns on the network
-//! hook points and skips the program's own consistency assertions. [`EcCheck::run`] then runs
-//! the Molly loop for every label:
+//! [`EcCheck::instrument`] taps every checked label ([`crate::observe`]) and attaches record
+//! provenance; [`EcCheck::run`] runs the loop of docs/design/hydrofrac-lite.md §4.3 for every
+//! label: the failure-free probe (hypothesis 0) learns each fact domain, then each label's
+//! [`Sweep`](crate::search::Sweep) proposes fault sets from zero crashes upwards (§4.5). Each set
+//! runs once over every schedule (or [`EcCheck::sample_schedules`] of them), shared by every
+//! label; when the body returns the network heals (§4.6) and the run quiesces.
 //!
-//! 1. The failure-free probe (hypothesis 0) runs over every schedule. It learns each label's
-//!    fact domain ([`crate::spec::learn_domain`]); an empty domain makes the label vacuous.
-//!    Its runs are evaluated like any other hypothesis's, so members that disagree with no
-//!    faults at all are a counterexample at hypothesis 0.
-//! 2. Each label's [`Sweep`](crate::search::Sweep) proposes the minimal admissible fault set
-//!    that kills every derivation seen so far, from zero crashes upwards.
-//! 3. The set runs over every schedule (or [`EcCheck::sample_schedules`] of them). In each
-//!    schedule the body drives inputs; when it returns, the network **heals** (no more
-//!    omissions, no new crashes) and the run quiesces.
-//! 4. A schedule in which a correct member lacks a required fact is a counterexample. Every
-//!    schedule that holds yields a clause: what the hypothesis after it must kill.
-//!
-//! Runs are shared: a fault set is run once, and every label reads its outcome.
-//!
-//! Only a label whose fault sets each have a single execution can be certified: lineage pruning
-//! assumes a derivation seen in one run recurs whenever its deliveries do, which a choice of the
-//! simulator's can break (docs/design/hydrofrac-lite.md §4.9). For a **schedule-sensitive**
-//! label ([`crate::observe::LabelPlan::sites`]) step 2 is a heuristic instead: a hypothesis
-//! need only kill the derivations of *one* schedule of each earlier run
-//! ([`crate::search::Sweep::next_any`]), and a search that runs out of hypotheses ends
-//! [`Verdict::Exhausted`], never certified. Counterexamples are counterexamples either way.
+//! No label of a program with **schedule choices** ([`Results::choices`]) can be certified:
+//! lineage pruning assumes a derivation recurs whenever its deliveries do. Each label's search
+//! then only needs to kill one schedule's derivations of each earlier run
+//! ([`crate::search::Sweep::next_any`]), and ends [`Verdict::Exhausted`] instead of certified.
 
 #[cfg(stageleft_runtime)]
 mod engine;
@@ -48,11 +34,11 @@ mod results;
 #[cfg(stageleft_runtime)]
 pub use engine::EcCheck;
 #[cfg(stageleft_runtime)]
-#[doc(hidden)]
+#[cfg(any(test, feature = "cross-check"))]
 pub use engine::{BruteForce, BruteLabel, CrossCheck};
 #[cfg(stageleft_runtime)]
 pub use results::{
-    Counterexample, LabelResult, NondetSite, Results, Stats, VacuousReason, Verdict,
+    ChoiceSite, Counterexample, LabelResult, Results, Stats, VacuousReason, Verdict,
 };
 
 #[cfg(test)]

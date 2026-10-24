@@ -109,11 +109,11 @@ fn breaks_at_one_crash_of(
 }
 
 /// No counterexample under any admissible crash set. ABD's replicas batch (its quorums), so
-/// its labels are schedule-sensitive and the search, which finds none, cannot certify them
+/// the program has schedule choices and the search, which finds none, cannot certify its labels
 /// (docs/design/hydrofrac-lite.md §4.9).
 #[cfg(stageleft_runtime)]
 fn no_counterexample(results: &hydrofrac::Results, label: &hydrofrac::check::LabelResult) {
-    assert!(!label.plan.sites.is_empty(), "{}\n{results}", label.name());
+    assert!(!results.choices.is_empty(), "{}\n{results}", label.name());
     assert!(
         matches!(
             label.verdict,

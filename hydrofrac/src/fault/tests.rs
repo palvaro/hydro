@@ -76,7 +76,10 @@ fn node_names_are_short_and_disambiguated() {
         all,
         vec!["cluster@0", "cluster@1", "process#0", "process#1"]
     );
-    assert_eq!(names.crashable().len(), sim.node_count());
+    let nodes: usize = (sim.locations().iter())
+        .map(|l| l.members.as_ref().map_or(1, Vec::len))
+        .sum();
+    assert_eq!(names.crashable().len(), nodes);
     for n in names.crashable() {
         assert_eq!(names.id(&names.name(n)), Some(n));
         assert_eq!(n.node_name(sim.locations()), names.name(n));
@@ -319,7 +322,7 @@ fn event_log_is_in_program_order_and_tags_round_trip() {
                     assert!(open.is_none(), "nested execution");
                     open = Some(node);
                 }
-                Event::ExecEnd { .. } => {
+                Event::ExecEnd => {
                     assert!(open.take().is_some(), "end without begin");
                 }
                 Event::Sent { id, msg, fate, .. } => {

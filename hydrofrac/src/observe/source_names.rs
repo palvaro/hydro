@@ -1,16 +1,8 @@
-//! Human names for program sites in hydrofrac reports, read back from the user's source.
-//!
-//! A labelled collection or a network channel is identified by the `file:line` of the user's
-//! call that built it (see the `collections` module). For reports, a name the user would recognize is
-//! better: the variable the statement binds (`let learned = initial.merge_unordered(..)` names
-//! `learned`), else the receiver of an unbound `committed.assert_has_consistency_of(..)`
-//! (`committed`), else the function whose tail expression the call is (`splice_epoch_log`). The
-//! name is recovered by reading the source file at the recorded line and walking back to the
-//! start of the statement. Everything here is best-effort: when the file cannot be read or the
-//! statement binds nothing nameable, the caller falls back to the operator or the site.
-//!
-//! [`short_debug`] does the same for the `Debug` renderings of facts: it drops module paths
-//! and renders member ids the way node names are (`Client@0`).
+//! Source-derived names for reports (docs/design/hydrofrac-lite.md §3), read back from the
+//! user's source at a site's `file:line`: the variable the statement binds, else the receiver
+//! of an unbound `x.assert_has_consistency_of(..)`, else the function whose tail it is. Best
+//! effort: callers fall back to the operator or the site. [`short_debug`] makes `Debug`
+//! renderings of facts readable.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -18,19 +10,15 @@ use std::path::{Path, PathBuf};
 
 use hydro_lang::compile::ir::backtrace::Backtrace;
 
-/// A user frame: the file (as recorded), the line, and the enclosing function's path.
+/// A user frame: the file (as recorded), the 1-based line, and the enclosing function's path.
 #[derive(Clone, Debug)]
 pub struct UserFrame {
-    /// The file, as the backtrace recorded it (absolute, or relative to some crate root).
     pub file: String,
-    /// The 1-based line.
     pub line: u32,
-    /// The enclosing function (its full path, closures stripped), if known.
     pub function: Option<String>,
 }
 
-/// The first frame of `backtrace` outside `hydro_lang` itself: where the program called the
-/// operator (or `send`), rather than the library's own frames.
+/// The first frame of `backtrace` outside `hydro_lang` itself: where the program called it.
 pub fn user_frame(backtrace: &Backtrace) -> Option<UserFrame> {
     let own = concat!("hydro_lang", "/src/");
     backtrace.elements().find_map(|element| {
@@ -51,8 +39,8 @@ thread_local! {
     static SOURCES: RefCell<HashMap<String, Option<Vec<String>>>> = RefCell::new(HashMap::new());
 }
 
-/// Resolves a recorded source path: as is, else relative to the current directory and each of
-/// its ancestors (a backtrace may record a path relative to the workspace root).
+/// Resolves a recorded source path: as is, else relative to the current directory or an
+/// ancestor (a backtrace may record a path relative to the workspace root).
 fn resolve(file: &str) -> Option<PathBuf> {
     let path = Path::new(file);
     if path.is_file() {
@@ -78,16 +66,9 @@ fn with_source<R>(file: &str, f: impl FnOnce(&[String]) -> Option<R>) -> Option<
     })
 }
 
-/// The name of the site at `frame`: the variable its statement binds, else the enclosing
-/// function when the call is that function's tail expression. `None` when neither applies or
-/// the source is unavailable.
-///
-/// A statement that binds nothing is named, in order of preference:
-/// - by its receiver, when it is `<name>.assert_has_consistency_of(..)`: the assertion labels
-///   `<name>` itself, so that is the collection's name (`committed.assert_has_consistency_of(..)`
-///   as a function's tail names the label `committed`);
-/// - by the enclosing function, when it is the first statement of its block or the block's tail
-///   expression (the collection is what the function returns: `splice_epoch_log`).
+/// The name of the site at `frame` (see the module docs): a statement that binds nothing is
+/// named by its receiver if it is `<name>.assert_has_consistency_of(..)`, else by the
+/// enclosing function if it is the first statement of its block or the block's tail.
 pub fn site_name(frame: &UserFrame) -> Option<String> {
     let line = frame.line as usize;
     let function = || frame.function.as_deref().and_then(function_name);
@@ -173,8 +154,7 @@ fn asserted_receiver(statement: &[String]) -> Option<String> {
 }
 
 /// Whether the statement starting at 0-based line `start` is its block's tail expression: it
-/// ends at the block's closing `}` rather than at a `;`. Comments, strings and character
-/// literals are skipped; lifetimes (`'a`) are not mistaken for character literals.
+/// ends at the block's closing `}` rather than at a `;` (comments and literals skipped).
 fn is_tail(lines: &[String], start: usize) -> bool {
     // A statement spans at most this many lines forward, for the scan.
     const MAX_LINES: usize = 200;
@@ -205,24 +185,14 @@ fn is_tail(lines: &[String], start: usize) -> bool {
                     i += 2;
                     continue;
                 }
+                // A string spanning lines is rare enough in a dataflow chain to ignore.
                 '"' => {
-                    // Skip to the closing quote (a string spanning lines is rare enough in a
-                    // dataflow chain to ignore).
-                    i += 1;
-                    while i < chars.len() && chars[i] != '"' {
-                        i += if chars[i] == '\\' { 2 } else { 1 };
-                    }
+                    i = literal_end(&chars, i);
+                    continue;
                 }
-                '\'' => {
-                    // `'x'` or `'\n'` is a character literal; `'a` is a lifetime.
-                    if chars.get(i + 1) == Some(&'\\') {
-                        i += 2;
-                        while i < chars.len() && chars[i] != '\'' {
-                            i += 1;
-                        }
-                    } else if chars.get(i + 2) == Some(&'\'') {
-                        i += 2;
-                    }
+                '\'' if is_char_literal(&chars, i) => {
+                    i = literal_end(&chars, i);
+                    continue;
                 }
                 '(' | '[' | '{' => depth += 1,
                 ')' | ']' => depth -= 1,
@@ -304,18 +274,15 @@ fn function_name(path: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// The short form of a Rust type name: its last path segment, without generics
-/// (`hydro_test::cluster::paxos::Learner` → `Learner`).
-pub fn short_type_name(type_name: &str) -> String {
+/// The last path segment of a type name, without generics (`a::b::Learner<X>` → `Learner`).
+fn short_type_name(type_name: &str) -> String {
     let base = type_name.split('<').next().unwrap_or(type_name);
     base.rsplit("::").next().unwrap_or(base).to_owned()
 }
 
-/// A `Debug` rendering made readable for reports and diagrams: module paths dropped from every
-/// path (`hydro_std_hydro_trybuild::__staged::abd::Client` → `Client`, keeping everything from
-/// the first capitalized segment, so `Kind::A` stays), and a member id
-/// (`MemberId::<…::Client>(0)`) rendered as `Client@0`, the way node names are. String and
-/// character literals are left alone. Only for display: a fact's identity is its bytes.
+/// A `Debug` rendering made readable: module paths dropped (keeping everything from the first
+/// capitalized segment, so `Kind::A` stays) and member ids as `Client@0`, the way node names
+/// are. Literals are left alone.
 pub fn short_debug(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
@@ -432,8 +399,7 @@ fn member_id_parts(chars: &[char], i: usize) -> Option<(String, String, usize)> 
         .then_some((tag, member, close + 1))
 }
 
-/// The node label of a member id's tag type, as [`crate::fault::NodeNames`] labels clusters:
-/// its short type name, or `cluster` for `()`.
+/// The node label of a member id's tag type, as [`crate::fault::NodeNames`] labels clusters.
 fn member_label(tag: &str) -> String {
     let tag = tag.trim();
     if tag == "()" || tag.is_empty() {

@@ -1,0 +1,41 @@
+feat(hydrofrac): fragile-step tags in record provenance
+
+Implements §4.1 of `docs/design/hydrofrac-races.md`. Records now carry a tag for each fragile step they passed through. A step is fragile (§3.1) when its output can exist or not depending on how the simulator batched or ordered its inputs. A derivation with no such tag is *robust*: it holds in every schedule.
+
+## What is tagged
+
+- `provenance::fragile::classify` scans the untagged IR before the rewrite runs and gives each fragile step a site: `FragileSite { index, op, site }`. `site` is `file:line`, as `choices.rs` reports it.
+- Fragile:
+  - `anti_join`, `difference`;
+  - `cross_singleton` (so `filter_if`);
+  - `cross_product` / `join` / `join_half` inside a tick;
+  - `fold` / `fold_keyed` / `reduce` / `reduce_keyed` / `scan` inside a tick;
+  - `enumerate` and `chain_first`;
+  - snapshots (a `Batch` of a singleton, optional or keyed singleton);
+  - any closure that reads state through `by_ref` / `by_mut` (for `partition`, tagged at its sides);
+  - sources other than iterators, cluster members and external networks.
+- Not fragile:
+  - **The dedup idiom** `fresh = x.filter_not_in(seen); seen = seen.chain(fresh)` over a constant initial state. It is recognised structurally, ported from the research branch's `Cones::self_difference`.
+  - **Structural steps whose inputs are all constant**, i.e. built from iterator and singleton sources by stateless operators. This keeps `use::state`'s initial value (`initial.filter_if(first_tick)`) robust.
+  - **`Counter`**, a metrics pass-through.
+  - **Opaque islands**, which stay as they were.
+- The rewrite's fragile mode (`provenance::install_fragile`) puts a `Map` after each fragile step. The `Map` adds the tag `seq = FRAGILE_BIT | index` (bit 63) to every record. The tag travels like a delivery id: unions at joins, and the send's metadata across the network.
+- To find a step again after the rewrite has moved IR nodes, the classification keys each node by the heap address of its collection-kind type (`rewrite::node_key`).
+
+## Lineage and the check
+
+- `Lineage::fragile_sites(event)` returns the sites in the backward closure of an output. It walks exactly what `derivation` walks. If the closure reaches an opaque record it also returns `OPAQUE_SITE`. The result is memoised together with the derivation, and `derivation()` is unchanged.
+- `EcCheck::instrument_fragile` and `EcCheck::fragile_sites` expose the sites for a later races engine. `EcCheck::instrument` and `run` are unchanged. The default rewrite path skips the fragile lookup entirely, so lite's code generation is the same as before. Lite's lineage already skips unknown ids.
+
+## Tests
+
+- `lineage/fragile_tests.rs`: simulator runs of
+  - `batch → map → send` (robust);
+  - a snapshot × pump (fragile at both steps);
+  - `ask_once` (member 2's value is fragile via the answer and robust via the announcement; members 0 and 1 are always robust);
+  - the dedup idiom (robust);
+  - `anti_join` against an unrelated negative side (fragile);
+  - a `flat_map` over `by_mut` state (fragile);
+  - a top-level join (robust);
+  - a tick join (fragile).
+- `check::tests::fragile_mode_leaves_the_check_unchanged`.
