@@ -22,9 +22,10 @@ have regression tests. They are recorded in §17.
 - **Program.** A Hydro dataflow program compiled for the simulator (`hydro_lang::sim`). It has *nodes*: processes,
   and members of clusters. A *label* is a collection the user marked `EventualConsistency` on a cluster. The check
   observes it through a *tap*: each member's tap emits each record of the labelled stream once, as an *output*.
-- **Harness.** The test's async body. It sends fixed inputs to the program, possibly calling `quiesce()` between
-  them. hydrofrac then runs `quiesce(); heal(); quiesce()` (`hf/check/races_engine.rs:313-318`, and the same in
-  `hf/check/brute_force.rs` `execute`).
+- **Harness.** Two async closures. The *inputs* (the fault phase) send fixed inputs to the program, and may wait for
+  its outputs, but may not place a barrier (§12). The optional *recovery* runs after the heal, and may call
+  `quiesce()`. hydrofrac runs `inputs; quiesce(); heal(); quiesce(); recovery; quiesce()` (`drive` in
+  `hf/check/engine.rs`, shared by the search and `hf/check/brute_force.rs` `execute`).
 - **Schedule.** One complete execution of the simulator for a fixed fault set. The simulator branches only at
   *hooks*: batch releases, snapshot versions, order choices and the tick to run next. `exhaustive` enumerates every
   sequence of hook decisions.
@@ -591,13 +592,40 @@ oracle).
 
 **Claim.** Faults act only before the heal: omissions while not healed (`hf/fault/mod.rs:470`), crash points firing
 only before the heal (`:487-489`), start crashes at instance start (`:438-451`). After the heal every send is
-delivered, and crashes that fired persist.
+delivered, and crashes that fired persist: a crashed node sends and outputs nothing (A11).
 
-**The harness shape** (`hf/check/races_engine.rs:313-318`): `body; quiesce(); heal(); quiesce()`. Faults are admitted
-while the body drives inputs and the work it caused settles.
+**The harness shape** (`drive`, `hf/check/engine.rs`), in two phases:
+1. **The fault phase**: the inputs closure, with barriers forbidden. Faults are admitted while it drives inputs and
+   while the work it caused settles.
+2. **The heal**, then **the recovery phase**: the recovery closure, with no faults. It models what happens after the
+   faults stop, such as timer ticks and retries. Without a recovery closure nothing runs after the heal, as before.
 
-**What this excludes.** A fault after the settle, such as an omission of a retry sent after the heal, is outside the
-model (§18). **Checked in code.**
+The run ends with a quiesce, and the specification is read on the end state.
+
+**No barrier in the fault phase.** A `quiesce()` inside the inputs would remove every interleaving across it (§18),
+so the certificate would cover less than the harness seems to say. The check forbids it: inside the inputs,
+`quiesce()` panics, and so does sending input after an observation forced the simulation to quiesce
+(`forbid_barriers`, `hydro_lang/src/sim/compiled.rs`). The panic is the harness's error, not a counterexample (the
+check re-raises it). Waiting for an output stays allowed: the work that ran was needed to produce it. **Checked in
+code**; test `a_barrier_in_the_fault_phase_panics`.
+
+**Sends after the heal.** The recovery phase sends messages after the heal. The rules for them:
+- **Never omitted, and no crash point fires on them** (`hf/fault/mod.rs:470`, `:476`).
+- **No candidate faults.** The harvest stops at the heal, in the search (`hf/check/races_engine.rs`,
+  `Revealed::of`) and in brute force (`hf/check/brute_force.rs`, `harvest`). So no omission of a post-heal message,
+  and no crash point after one, is ever proposed.
+- **Lineage.** A post-heal delivery is never omittable (`lossy = before_heal && faulty`, `hf/lineage/mod.rs`). It
+  still depends on its sender's crash. That is right, not slack: a sender whose crash fired before the heal sends
+  nothing after it, so `crash(n)` and `crash(n after m)` kill `n`'s post-heal deliveries.
+- **The crash rule** (§5) still holds. If `m` is sent before the heal in one schedule and only after it in another,
+  `crash(n after m)` does not fire in the second. Each case of §5 is about a crash that fires, so firing less keeps
+  it sound.
+- **The invariant** is "no omission and no crash firing after the heal", not "no send after the heal".
+
+**What this excludes.** A fault during the recovery phase, such as an omission of a retry, is outside the model
+(§18). A certificate says: whatever faults strike during the fault phase, once they stop and the recovery runs,
+the label holds. **Checked in code**; test `the_recovery_phase_runs_healed` (a resend in the recovery phase repairs
+every omission, and the enumeration agrees).
 
 **The invariant lineage relies on** (A15): after the heal no send is omitted and no crash fires. Sends after the heal
 are fine. Lineage marks a delivery omittable only if it was sent before the heal (`lossy = before_heal && faulty`,
@@ -672,9 +700,11 @@ argument alone.
 **Coverage.** Brute-force-covered configurations, all agreeing:
 - `hydrofrac` `check::brute_tests`: plain, lossy and echo broadcasts, relay chains, ownership exchange, provenance
   precision, S1, S2, the planted bug, the batched echo, and the two §17 regressions;
-- `hydro_test` `ec_bruteforce`: `ask_once`, CTP-3 (sampled), `reliable_broadcast_closed` 1–3 payloads, plain
+- `hydro_test` `ec_bruteforce`: `ask_once`, CTP-3 with one-shot racing timers (sampled), `reliable_broadcast_closed` 1–3 payloads, plain
   broadcasts 1–3 payloads, echo broadcast over 2 members;
-- `ec_races_targets`: URB over 2 members (thresholds 1 and 2), CTP-2 quiescing and racing;
+- `ec_races_targets`: URB over 2 members (thresholds 1 and 2), CTP-2 with timers after the faults and racing;
+- `ec_two_pc_hydrofrac`: CTP-2 with one-shot and recurring racing timers (sampled), CTP-2 with timers after the
+  faults (exhaustive), CTP-3 with recurring racing timers (sampled);
 - `ec_quorum_trust`: the planted local attestation.
 
 **Argument-only** (brute force cannot finish): URB over 3 members, echo broadcast over 3 members, ABD, G-Set gossip,
@@ -691,7 +721,7 @@ multi-Paxos.
 | A5 | The provenance rewrite over-approximates every record's dependencies and tags every fragile step's outputs; opaque operators fall back to the execution rule | TESTED (`hf/lineage/*tests*.rs`, provenance tests, every brute-force cross-check); not proved |
 | A6 | Quiescence means no tick can run (`SimTick::can_run`, `hydro_lang/src/sim/compiled.rs:2022`): a tick runs only when every one of its hooks is ready and some hook can release. A hook that is not ready blocks its tick even with input pending: a snapshot of a singleton that never got a value (`SingletonHook::is_ready`, `hydro_lang/src/sim/runtime.rs:591`; every other hook is always ready, `:78`). So a batch's pending input is released at quiescence only if its tick snapshots no singleton (§3, `batch_beside_snapshot`). Nothing else makes a tick run (§17, fix 2). Under the `hydrofrac` feature such a stuck tick no longer aborts the process: the run quiesces with that member never running the tick (`compiled.rs`, the "never became ready" check) | CHECKED IN CODE (`compiled.rs:2022`, `quiesce` at `:292`) |
 | A7 | The simulated network delivers every send that no injected omission drops; lossy channels are intercepted by the fault hook | CHECKED IN CODE (`hf/fault/mod.rs:348-353` asserts interception) |
-| A8 | The harness is deterministic: the same inputs, in the same order, in every schedule; it does not branch on outputs | ASSUMED |
+| A8 | The harness, in both phases, is deterministic: the same inputs, in the same order, in every schedule; it may wait for outputs but does not branch on them | ASSUMED |
 | A9 | The rewrite preserves the program's behaviour (records carry tags but compute the same values) | TESTED (`hf/check/tests.rs`, `hydrofrac_provenance_tests` in `hydro_test` and `hydro_std`) |
 | A10 | Messages are sent one at a time, in production order, per channel | ASSUMED (simulator `for_each(send)`); used by §6.1 |
 | A11 | A crash fires right after the first send of its message and halts the node (no further sends or outputs) | CHECKED IN CODE (`hf/fault/mod.rs:468-489`, `:516-534`) |
@@ -759,14 +789,14 @@ and fixed structurally:
 
 ## 18. Known gaps: what certificates do not cover
 
-- **Harness quiescing.** The certificate covers what the harness lets happen. A `quiesce()` between two inputs
-  removes every interleaving across it (`hydro_lang/src/sim/compiled.rs:280-291`). CTP-2 with the quiescing harness
-  is certified, but with racing timers it breaks (`races_targets_ctp2_*`).
+- **Harness quiescing.** A `quiesce()` between two inputs removes every interleaving across it
+  (`hydro_lang/src/sim/compiled.rs`, `quiesce`). The fault phase now forbids it (§12), so this is a gap only for
+  what the recovery phase does: its rounds run one after another, with no faults.
 - **2-member vacuity** (§10). In a 2-member cluster no member crash is admissible, so URB-2 certificates cover only
   source crashes.
-- **Heal before retries** (§12). Faults stop at the heal. A protocol whose correctness depends on retries is
-  certified only against faults during the settle; omissions of messages sent after it are not modelled. Without
-  timers nothing is sent after the settle, so the heal changes nothing in such programs.
+- **No faults during recovery** (§12). Faults stop at the heal. A protocol whose correctness depends on retries is
+  certified only when its retries run in the recovery phase, and only against faults during the fault phase.
+  Without timers nothing is sent after the settle, so the heal changes nothing in such programs.
 - **Liveness.** Certificates are about the end state of runs the simulator completes, and nothing here certifies
   progress.
 - **Exploration gaps.** `hydro_lang`'s exhaustive exploration missed a bug that sampling found

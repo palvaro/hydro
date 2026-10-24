@@ -324,7 +324,7 @@ tick*.
 - `committed` is fragile in the same way.
 - `crash(coordinator after commit→P0)` is one crash, proposed at bound 1.
 - It splits the participants in about 80% of schedules (`ctp2_racing_timers_split_by_direct_injection`). With
-  sampling the search finds it, as `ctp2_racing_timers_search_finds_the_crash` does today.
+  sampling the search finds it, as `ctp2_one_shot_timer_breaks_at_one_coordinator_crash` does today.
 
 ## 7. Expected cost (to be measured)
 
@@ -351,7 +351,7 @@ schedules with the same faults. "v1 sees" is what the step table of §3.1 says.
 | URB closed | no (threshold over cumulative state) | a closure over `by_mut` state, so fragile | enumeration; the probe alone is >240k schedules, too big |
 | G-Set gossip | no (barriers between rounds) | snapshot × pump, so fragile | enumeration, sampled: no certificate |
 | multi-Paxos, ABD | no, but only because the harness has one ballot / one writer | closures over state, a max over the threshold batch | enumeration, too big |
-| CTP-2, quiescing harness | no (the barrier orders decision before query) | trigger × state, so fragile | enumeration, sampled |
+| CTP-2, timers after the faults (recovery phase) | no (the heal orders decision before query) | trigger × state, so fragile | enumeration, sampled |
 | CTP-3, CTP-2 racing, `ask_once` | **yes** | fragile | counterexample (as brute force) |
 
 The lesson: in this corpus every semantically fragile step is **a one-shot trigger (a query, a timeout) meeting
@@ -494,7 +494,7 @@ cluster: the source, the broadcaster or the coordinator.
 | `ask_once`, 3 members, value ∥ timer | `known` | a single crash of member 0, right after its announcement to member 1, makes member 2 miss 7 in the schedules where 2's query reaches member 1 first | counterexample | 4 / 74 | finds it (heuristic) | 8 / 132 | `races_agree_on_ask_once` |
 | 2PC cooperative termination, 3 participants, 64 sampled schedules per set | `committed` | two crashes (coordinator after commit→P0, P0 after Decided→P1) split the participants | counterexample; sampled, so no certificate | 133 / 8,451 | — | 200 / 12,800 | `races_agree_on_two_pc_cooperative_termination` |
 | 2PC-CTP, 2 participants, racing timers, 64 sampled | `committed` | a single crash of the coordinator right after its commit to P0 makes P1 never commit | counterexample; sampled | 5 / 258 | 2 / 128 | 6 / 384 | `races_targets_ctp2_racing_sampled_races` |
-| 2PC-CTP, 2 participants, quiescing harness, exhaustive | `committed` | every admissible fault set (coordinator crashes only), every schedule | **certified** | 6 / 2,460 (= brute force) | `Exhausted`, 5 / 2,428 | 6 / 2,460 | `races_targets_ctp2_quiescing_races` |
+| 2PC-CTP, 2 participants, timers after the faults (recovery phase), exhaustive | `committed` | every admissible fault set (coordinator crashes only), every schedule | **certified** | 6 / 2,460 (= brute force) | `Exhausted`, 5 / 2,428 | 6 / 2,460 | `races_targets_ctp2_timers_after_the_faults` |
 | uniform reliable broadcast, 2 members, 1 send, threshold 1 and 2 | output, `certified` | every admissible set (source crashes only) | **certified** | 4 / 169 (= brute force) | `Exhausted`, 3 / 113 | 4 / 169 | `races_targets_urb2_threshold{1,2}_races` |
 | same | `echo`, `distinct_acks` | same | **certified** | 3 / 58 | `Exhausted` | 4 / 169 | same |
 | `hydro_test` echo reliable broadcast, 2 members, 1 payload (204 failure-free schedules) | `deliveries`, `echo`, `echoes` | same | **certified** | **2 / 2** | `Exhausted`, 3 / 215 | 4 / 419 | `both_agree_on_an_echo_broadcast_over_two_members` |
@@ -653,7 +653,7 @@ derivations alone. So:
 | `ask_once`, CTP-3, CTP-2 racing, S1 | found, as now |
 | `reliable_broadcast_closed` `new_messages`, 1–3 payloads | certified with no size bound (crash-only, finite universe), at about the cost of today's enumeration (8 / 134 / 281 sets, one schedule each) |
 | echo broadcasts (2 and 3 members) | certified, same cost as now, because fan-out literals are proved |
-| CTP-2 quiescing | certified, at brute-force cost (6 / 2,460) |
+| CTP-2, timers after the faults | certified, at brute-force cost (6 / 2,460) |
 | lossy programs (echo over a lossy first hop, relay chain) | certificates without a size bound; cost grows with the number of omission sets the robust clauses can't rule out |
 
 ### 12.7 Stage 1, measured
@@ -666,7 +666,7 @@ force. "Before" is §11 (and the trusted-`quorum` numbers for uniform broadcast)
 | `ask_once`, `known` | counterexample | 4 / 74 | 4 / 74 | 8 / 132 |
 | CTP-3 sampled, `committed` | counterexample | 133 / 8,451 | 46 / 2,881 | 200 / 12,800 |
 | CTP-2 racing sampled, `committed` | counterexample | 5 / 258 | 3 / 129 | 6 / 384 |
-| CTP-2 quiescing, `committed` | certified, Claim B | 6 / 2,460 | 6 / 2,460 | 6 / 2,460 |
+| CTP-2 timers after the faults, `committed` | certified, Claim B | 6 / 2,460 | 6 / 2,460 | 6 / 2,460 |
 | URB, 2 members, thresholds 1 and 2 | certified | 2 / 2, 3 / 3 | 2 / 2, 3 / 3 | 4 / 169 |
 | URB, 3 members, threshold 2 (races alone) | certified | 16 / 16 | **30 / 30** | infeasible |
 | echo broadcast, 2 members, `deliveries` | certified | 2 / 2 | 2 / 2 | 4 / 419 |

@@ -18,7 +18,6 @@ use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
 use std::time::Instant;
 
-use hydro_lang::sim::compiled::quiesce;
 
 use super::*;
 use crate::check::RaceNotes;
@@ -285,7 +284,7 @@ struct Search<'t> {
     sampled: bool,
 }
 
-impl<B: AsyncFnMut()> Engine<'_, B> {
+impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
     /// Runs `faults` under `policy`, giving each schedule's record to `on_record` as it
     /// finishes; `on_record` returns `true` to stop the exploration (by a panic with an
     /// [`EarlyStop`] payload from the simulator's `after` callback). Records after the stop,
@@ -321,15 +320,9 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
         };
         let outcome = {
             let healer = AssertUnwindSafe(hook.clone());
-            let mut body = AssertUnwindSafe(&mut *self.body);
-            let thunk = async || {
-                (*body)().await;
-                // Faults are admitted while the body drives inputs and
-                // while the work it caused settles; then the network heals.
-                quiesce().await;
-                healer.heal();
-                quiesce().await;
-            };
+            let mut inputs = AssertUnwindSafe(&mut *self.inputs);
+            let mut recover = AssertUnwindSafe(&mut *self.recover);
+            let thunk = async || drive(&mut *inputs, &mut *recover, &healer).await;
             let after = || {
                 if absorb(hook.drain_instances()) {
                     std::panic::resume_unwind(Box::new(EarlyStop));
@@ -358,7 +351,7 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
             Err(_) if stopped.get() => None,
             // The panicking schedule (and any replay of it) never reached `after`.
             Err(payload) => Some((
-                panic_message(&*payload),
+                program_panic(&*payload),
                 Rc::new(rest.into_iter().last().unwrap_or_default()),
             )),
         };

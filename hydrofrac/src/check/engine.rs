@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use hydro_lang::location::dynamic::LocationId;
-use hydro_lang::sim::compiled::CompiledSim;
+use hydro_lang::sim::compiled::{CompiledSim, forbid_barriers, quiesce};
 use hydro_lang::sim::flow::SimFlow;
 use hydro_lang::sim::network_hook::IrPassStage;
 
@@ -112,19 +112,69 @@ impl EcCheck {
     }
 
     /// Runs the check on `sim` (compiled from a flow passed through [`Self::instrument`]).
-    /// `body` drives the program's inputs; after it returns, the network heals and the run
-    /// quiesces.
+    /// `inputs` drives the program's inputs while faults strike; then the run quiesces, the
+    /// network heals and the run quiesces again. The same as [`Self::run_then_recover`] with
+    /// nothing to recover.
     ///
     /// # Panics
-    /// If `sim` was not instrumented by this check.
-    pub fn run(&self, sim: &CompiledSim, mut body: impl AsyncFnMut()) -> Results {
+    /// If `sim` was not instrumented by this check, or if `inputs` places a phase barrier
+    /// (see [`Self::run_then_recover`]).
+    pub fn run(&self, sim: &CompiledSim, inputs: impl AsyncFnMut()) -> Results {
+        self.run_then_recover(sim, inputs, async || {})
+    }
+
+    /// Runs the check on `sim` (compiled from a flow passed through [`Self::instrument`]), in
+    /// two phases:
+    /// 1. the **fault phase**: `inputs` drives the program's inputs while omissions and crashes
+    ///    strike. Every interleaving of the inputs with the program's work is explored, so the
+    ///    phase must not place a barrier: [`quiesce`] here (or an observation forcing
+    ///    quiescence, such as `try_next` with work pending) panics. Awaiting the program's
+    ///    outputs is allowed;
+    /// 2. the run quiesces and the network **heals**: no more omissions, no new crashes, and
+    ///    crashed nodes stay crashed. Then `recover` runs, with no faults: the place for timeout
+    ///    ticks and retry rounds, with [`quiesce`] between them if they model time passing.
+    ///
+    /// The run quiesces again and the specification is checked on what the members hold.
+    ///
+    /// # Panics
+    /// If `sim` was not instrumented by this check, or if `inputs` places a phase barrier.
+    pub fn run_then_recover(
+        &self,
+        sim: &CompiledSim,
+        mut inputs: impl AsyncFnMut(),
+        mut recover: impl AsyncFnMut(),
+    ) -> Results {
         let labels = self
             .taps
             .as_ref()
             .expect("`EcCheck::run` needs a simulation compiled from `EcCheck::instrument`")
             .labels();
-        Engine::new(self, sim, &labels, &mut body).check()
+        Engine::new(self, sim, &labels, &mut inputs, &mut recover).check()
     }
+}
+
+/// The panic of a phase barrier in the fault phase.
+const BARRIER_IN_FAULT_PHASE: &str = "hydrofrac: a phase barrier (`quiesce()`, or input after an observation that forced quiescence) inside the inputs of `EcCheck::run`. The fault phase explores every interleaving of the inputs with the program's work; a barrier there hides the interleavings it cuts. Move the rounds that come after the faults (timeouts, retries) into the recovery closure of `EcCheck::run_then_recover`, or drop the barrier.";
+
+/// One instance of a harness: the fault phase (`inputs`, with barriers forbidden), quiesce,
+/// heal, the recovery phase (`recover`, with no faults), quiesce.
+async fn drive(inputs: &mut impl AsyncFnMut(), recover: &mut impl AsyncFnMut(), hook: &FaultHook) {
+    forbid_barriers(BARRIER_IN_FAULT_PHASE, inputs()).await;
+    quiesce().await;
+    hook.heal();
+    quiesce().await;
+    recover().await;
+    quiesce().await;
+}
+
+/// The message of a run's panic, re-raised if it is the harness's mistake rather than the
+/// program's failure: a barrier in the fault phase.
+fn program_panic(payload: &(dyn std::any::Any + Send)) -> String {
+    let message = panic_message(payload);
+    if message == BARRIER_IN_FAULT_PHASE {
+        panic!("{message}");
+    }
+    message
 }
 
 /// One label's search inputs.
@@ -183,12 +233,14 @@ fn record_domain(labels: &Labels, target: &Target, record: &InstanceRecord) -> B
     learn_domain(&view, &correct_members(target, record))
 }
 
-struct Engine<'c, B> {
+struct Engine<'c, B, R> {
     sim: &'c CompiledSim,
     /// The provenance rewrite's opaque islands.
     islands: Rc<RefCell<Vec<String>>>,
     labels: &'c Labels,
-    body: &'c mut B,
+    /// The harness's fault phase and recovery phase.
+    inputs: &'c mut B,
+    recover: &'c mut R,
     tables: Tables,
     max_crashes: Option<usize>,
     sample_schedules: Option<usize>,
@@ -207,13 +259,20 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-impl<'c, B: AsyncFnMut()> Engine<'c, B> {
-    fn new(check: &EcCheck, sim: &'c CompiledSim, labels: &'c Labels, body: &'c mut B) -> Self {
+impl<'c, B: AsyncFnMut(), R: AsyncFnMut()> Engine<'c, B, R> {
+    fn new(
+        check: &EcCheck,
+        sim: &'c CompiledSim,
+        labels: &'c Labels,
+        inputs: &'c mut B,
+        recover: &'c mut R,
+    ) -> Self {
         Engine {
             sim,
             islands: check.islands.clone(),
             labels,
-            body,
+            inputs,
+            recover,
             tables: Tables::new(sim.channels(), sim.locations()),
             max_crashes: check.max_crashes,
             sample_schedules: check.sample_schedules,

@@ -27,8 +27,8 @@
 //!   and certify the claim. The search marks those derivations fragile (they pass a "trigger
 //!   meets state" step), so they protect nothing, and it finds the crash.
 //! - two-phase commit with cooperative termination and three participants (the program the
-//!   bug was found on), on sampled schedules: one coordinator crash alone takes more than
-//!   100,000 schedules to explore (see [`TWO_PC_SCHEDULES`]).
+//!   bug was found on), with racing one-shot timers, on sampled schedules (see
+//!   [`TWO_PC_SCHEDULES`]).
 //!
 //! Each agreement test on an order-sensitive program has a companion that asserts only the
 //! enumeration's side (that it finds the breaking set), so the oracle stays guarded.
@@ -45,7 +45,6 @@ use hydrofrac::EcCheck;
 use hydrofrac::check::CrossCheck;
 
 use super::reliable_broadcast::{Broadcaster, Member, Payload, broadcast};
-use super::two_pc_ctp::{Coordinator, Participant, Txn, two_pc};
 
 /// The largest fault set the enumeration covers.
 const MAX_FAULTS: usize = 2;
@@ -311,104 +310,60 @@ fn brute_force_agrees_on_ask_once() {
 }
 
 /// Schedules sampled per fault set for two-phase commit with cooperative termination. Its
-/// schedule space is too large to enumerate: with three participants, one transaction and only
-/// participant 2's timer, the failure-free run has 936 schedules, but under one coordinator
-/// crash (after its `commit` to participant 0) the exploration passed 104,000 schedules at
-/// about 400 per second without finishing; with participants 1 and 2's timers, it passed
-/// 66,000 (the failure-free run: 1,872). Bolero's random engine draws fresh seeds from the OS
-/// for every iteration (`BOLERO_RANDOM_SEED` only adds one fixed input), so the sample is not
-/// reproducible; the breaking set splits the participants in about 40% of schedules, so 64
-/// samples miss it with probability about 10^-14.
+/// schedule space is too large to enumerate: with racing timers, one racing timer over two
+/// participants passed 10 minutes of exhaustive exploration without finishing. Bolero's random
+/// engine draws fresh seeds from the OS for every iteration (`BOLERO_RANDOM_SEED` only adds one
+/// fixed input), so the sample is not reproducible.
+#[cfg(stageleft_runtime)]
 const TWO_PC_SCHEDULES: usize = 64;
 
-/// Two-phase commit (`ctp`: with cooperative termination) over `participants` participants,
-/// one transaction, every participant's timer fired once the transaction settles (the
-/// harness of `ec_two_pc_hydrofrac`). `samples`: schedules per fault set, or every schedule.
-fn two_pc_cross_check(ctp: bool, participants_count: u32, samples: Option<usize>) -> CrossCheck {
-    let mut flow = FlowBuilder::new();
-    let coordinator = flow.process::<Coordinator>();
-    let participants = flow.cluster::<Participant>();
-    let (txn_send, txns) = coordinator.sim_input::<Txn, TotalOrder, ExactlyOnce>();
-    let (timeout_send, timeouts) = participants.sim_input::<(), TotalOrder, ExactlyOnce>();
-    let _committed = two_pc(
-        &coordinator,
-        &participants,
-        participants_count as usize,
-        txns,
-        timeouts,
-        ctp,
-        nondet!(/** explored by the check */),
-        nondet!(/** explored by the check */),
-        nondet!(/** explored by the check */),
-        nondet!(/** explored by the check */),
-        nondet!(/** external input, consumed as it arrives */),
-    )
-    .sim_cluster_output();
-
-    let mut check = match samples {
-        Some(n) => EcCheck::new().sample_schedules(n),
-        None => EcCheck::new(),
-    };
-    let sim = check
-        .instrument(
-            flow.sim()
-                .with_cluster_size(&participants, participants_count as usize),
-        )
-        .compiled();
-    let cross = check.cross_check(
-        &sim,
-        async || {
-            txn_send.send(Txn(1));
-            hydro_lang::sim::compiled::quiesce().await;
-            timeout_send.send_many((0..participants_count).map(|p| (p, ())));
-        },
-        MAX_FAULTS,
-    );
-    eprintln!(
-        "=== two_pc (ctp: {ctp}, {participants_count} participants, samples: {samples:?})\nsearch:\n{}\n{cross}",
-        cross.results
-    );
-    cross
+/// Two-phase commit with cooperative termination over three participants, one transaction,
+/// every participant's timer racing it, and the timer one-shot (no recovery tick): the harness
+/// of `ec_two_pc_hydrofrac`, sampled.
+#[cfg(stageleft_runtime)]
+fn two_pc_cross_check() -> CrossCheck {
+    let check = EcCheck::new().sample_schedules(TWO_PC_SCHEDULES);
+    super::ec_two_pc_hydrofrac::TwoPc::with(check, true, 3).cross_check(true, 0, MAX_FAULTS)
 }
 
-/// The enumeration finds the two-crash violation of cooperative termination with three
-/// participants (the coordinator after its `commit` to participant 0, and participant 0 after
-/// answering participant 1) on sampled schedules. The enumeration's side alone, as above.
-/// About 36 s of enumeration (200 sets, 12,800 schedules).
+/// The enumeration finds that one crash breaks cooperative termination with three
+/// participants and a one-shot timer: the coordinator dies after its `commit` to one
+/// participant, and another, whose one query reached its peers before they decided, never
+/// commits. The enumeration's side alone, as above. About 35 s of enumeration (200 sets,
+/// 12,800 schedules).
 #[test]
 fn brute_force_finds_the_two_pc_cooperative_termination_violation() {
-    let cross = two_pc_cross_check(true, 3, Some(TWO_PC_SCHEDULES));
+    let cross = two_pc_cross_check();
     let label = claim(&cross, "committed");
     let b = cross
         .brute
         .label(label.index)
         .unwrap_or_else(|| panic!("committed was not searched:\n{cross}"));
-    assert_eq!(b.min_crashes(), Some(2), "{cross}");
-    let set = b.breaking_within(2).expect("a two-crash breaking set");
+    assert_eq!(b.min_crashes(), Some(1), "{cross}");
+    let set = b.breaking_within(1).expect("a one-crash breaking set");
     let nodes: Vec<&String> = set
         .iter()
         .filter_map(hydrofrac::search::Fault::crashed_node)
         .collect();
     assert!(
-        nodes.iter().any(|n| n.starts_with("Coordinator")),
-        "the coordinator is one of the crashes: {set:?}\n{cross}"
+        nodes.iter().all(|n| n.starts_with("Coordinator")),
+        "the coordinator is the crash: {set:?}\n{cross}"
     );
 }
 
-/// The search agrees with the enumeration on two-phase commit with cooperative termination
-/// and three participants. Molly's rule certified `committed` (after 12 hypotheses), which two
-/// crashes break: every derivation of it passes a negation, so none protects a pair, and the
-/// search finds the two crashes. Sampled, so the tolerance is not a certificate.
+/// The search agrees with the enumeration on two-phase commit with cooperative termination,
+/// three participants and a one-shot timer, and finds the one-crash split. Sampled, so the
+/// tolerance is not a certificate.
 #[test]
 fn brute_force_agrees_on_two_pc_cooperative_termination() {
-    let cross = two_pc_cross_check(true, 3, Some(TWO_PC_SCHEDULES));
-    costs("two_pc ctp (3 participants, sampled)", &cross);
+    let cross = two_pc_cross_check();
+    costs("two_pc ctp (3 participants, one-shot timer, sampled)", &cross);
     cross.assert_agrees();
     let cex = claim(&cross, "committed")
         .verdict
         .counterexample()
-        .unwrap_or_else(|| panic!("the search finds the two-crash split: {cross}"));
-    assert_eq!(cex.crashes(), 2, "{cross}");
+        .unwrap_or_else(|| panic!("the search finds the one-crash split: {cross}"));
+    assert_eq!(cex.crashes(), 1, "{cross}");
     assert!(
         !cex.tolerance_certified,
         "sampled schedules never certify: {cross}"

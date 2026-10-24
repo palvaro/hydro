@@ -132,12 +132,17 @@ struct QuiescenceState {
     tainted: Cell<bool>,
     /// Set when new input is sent after `tainted`; all further receives panic.
     poisoned: Cell<bool>,
+    /// While set (see [`forbid_barriers`]), a phase barrier — [`quiesce`], or input after an
+    /// observation forced quiescence — panics with this message.
+    barriers_forbidden: Cell<Option<&'static str>>,
 }
 
 impl QuiescenceState {
     /// Signal that new input has been sent, waking the scheduler if it was quiescent.
     fn resume(&self) {
         if self.tainted.get() {
+            // Input after a forced quiescence: the observation was a phase barrier.
+            guard_barrier_allowed(self);
             self.poisoned.set(true);
         }
         self.quiescent.set(false);
@@ -266,6 +271,29 @@ impl Drop for SettlePauseGuard {
 /// Panics if the simulation has been poisoned: an earlier observation forced the simulation
 /// to quiesce (running pending nondeterministic work), and new input has been sent since, so
 /// further observations could misattribute failures caused by the forced overrun.
+/// Panics if phase barriers are forbidden (see [`forbid_barriers`]).
+fn guard_barrier_allowed(quiescence: &QuiescenceState) {
+    if let Some(reason) = quiescence.barriers_forbidden.get() {
+        panic!("{reason}");
+    }
+}
+
+/// Runs `phase` with phase barriers forbidden: a [`quiesce`] inside it, or new input after an
+/// observation forced the simulation to quiesce (such as [`SimReceiver::try_next`] with
+/// nondeterministic work pending), panics with `reason`. Waiting for a message stays allowed.
+///
+/// For checkers that explore every interleaving of a phase: a barrier inside it would hide
+/// the interleavings it cuts.
+#[cfg(feature = "hydrofrac")]
+pub async fn forbid_barriers<T>(reason: &'static str, phase: impl Future<Output = T>) -> T {
+    let quiescence =
+        CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().quiescence.clone());
+    let outer = quiescence.barriers_forbidden.replace(Some(reason));
+    let out = phase.await;
+    quiescence.barriers_forbidden.set(outer);
+    out
+}
+
 fn guard_not_poisoned(quiescence: &QuiescenceState) {
     if quiescence.poisoned.get() {
         panic!(
@@ -293,6 +321,7 @@ pub async fn quiesce() {
     let quiescence =
         CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().quiescence.clone());
     guard_not_poisoned(&quiescence);
+    guard_barrier_allowed(&quiescence);
 
     let mut notified_fut = pin!(None);
     std::future::poll_fn(|cx| {
@@ -1046,6 +1075,7 @@ impl<'a> CompiledSimInstance<'a> {
             settle_wakers: RefCell::new(vec![]),
             tainted: Cell::new(false),
             poisoned: Cell::new(false),
+            barriers_forbidden: Cell::new(None),
         });
 
         let mut input_senders = HashMap::new();

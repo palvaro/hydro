@@ -508,3 +508,106 @@ fn message_payloads_render_by_their_debug() {
     let dot = std::fs::read_to_string(diagram.with_extension("dot")).unwrap();
     assert!(dot.contains("Order { id: 1 }"), "{dot}");
 }
+
+/// A process broadcasts its inputs to a cluster over a lossy channel (label `delivered`); the
+/// fault phase sends `1`, and, if `resend`, the recovery phase sends it again, after a barrier.
+#[cfg(stageleft_runtime)]
+fn lossy_broadcast_with_recovery(resend: bool) -> super::CrossCheck {
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let delivered = input.broadcast_closed(&members, TCP.lossy_delayed_forever().bincode());
+    let _out = delivered.sim_cluster_output();
+
+    let mut check = EcCheck::new();
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, MEMBERS))
+        .compiled();
+    check.cross_check_then_recover(
+        &sim,
+        async || send.send(1),
+        async || {
+            if resend {
+                hydro_lang::sim::compiled::quiesce().await;
+                send.send(1);
+            }
+        },
+        2,
+    )
+}
+
+/// Faults strike only in the fault phase: a resend in the recovery phase repairs every
+/// omission (the network has healed), so only a crash of the source, which stays crashed,
+/// breaks the label. Without the resend, one omission does. The enumeration agrees.
+#[cfg(stageleft_runtime)]
+#[test]
+fn the_recovery_phase_runs_healed() {
+    let without = lossy_broadcast_with_recovery(false);
+    without.assert_agrees();
+    let cex = without.results.label("delivered").verdict.counterexample();
+    let cex = cex.unwrap_or_else(|| panic!("{}", without.results));
+    assert_eq!((cex.tolerates, cex.crashes()), (None, 0), "{without}");
+
+    let with = lossy_broadcast_with_recovery(true);
+    with.assert_agrees();
+    let cex = with.results.label("delivered").verdict.counterexample();
+    let cex = cex.unwrap_or_else(|| panic!("{}", with.results));
+    assert_eq!((cex.tolerates, cex.crashes()), (Some(0), 1), "{with}");
+    let [Fault::Crash { node, .. }] = cex.faults.iter().collect::<Vec<_>>()[..] else {
+        panic!("one crash: {with}");
+    };
+    assert!(node.starts_with("process"), "{with}");
+}
+
+/// A barrier in the fault phase would hide the interleavings it cuts: it is the harness's
+/// error, not the program's counterexample.
+#[cfg(stageleft_runtime)]
+#[test]
+#[should_panic(expected = "a phase barrier (`quiesce()`, or input after an observation that forced quiescence) inside the inputs")]
+fn a_barrier_in_the_fault_phase_panics() {
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let delivered = input.broadcast_closed(&members, TCP.fail_stop().bincode());
+    delivered.for_each(q!(|_| {}));
+
+    let mut check = EcCheck::new();
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, MEMBERS))
+        .compiled();
+    check.run(&sim, async || {
+        send.send(1);
+        hydro_lang::sim::compiled::quiesce().await;
+        send.send(2);
+    });
+}
+
+/// Waiting for the program's output in the fault phase is allowed: it is causality, not a
+/// barrier.
+#[cfg(stageleft_runtime)]
+#[test]
+fn awaiting_an_output_in_the_fault_phase_is_allowed() {
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let echoed = input.map(q!(|x| x + 1));
+    let out = echoed.clone().sim_output();
+    let delivered = echoed.broadcast_closed(&members, TCP.fail_stop().bincode());
+    delivered.for_each(q!(|_| {}));
+
+    let mut check = EcCheck::new();
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, MEMBERS))
+        .compiled();
+    let results = check.run(&sim, async || {
+        send.send(1);
+        assert_eq!(out.next().await, 2);
+        send.send(2);
+    });
+    // The source's crash mid fan-out still breaks the broadcast.
+    let cex = results.label("delivered").verdict.counterexample();
+    assert!(cex.is_some_and(|c| c.crashes() == 1), "{results}");
+}
