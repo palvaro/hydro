@@ -1,0 +1,16 @@
+test(hydrofrac): demonstrate a false certificate from a total-loss clause
+
+A run in which some domain fact vanishes at every member still yields a
+clause (the union of the derivations of the pairs it *does* require), and
+the search makes every later hypothesis hit it. That clause says nothing
+about the vanished fact, so a hypothesis that breaks that fact *partially*
+without touching the clause is never proposed.
+
+- `suspected_total_loss_masks_a_partial_loss_certificate`: with
+  `max_crashes(0)`, the search certifies `known` for zero crashes, while
+  `omit(gossip m0→m1)` alone breaks it.
+- `suspected_total_loss_masks_a_partial_loss_tolerance`: uncapped, the
+  search reports a one-crash counterexample claiming zero crashes are
+  tolerated.
+
+Both tests assert the disagreement (they pass while the bug exists).

@@ -3,7 +3,8 @@ use std::rc::Rc;
 use hydro_lang::compile::ir::HydroIrOpMetadata;
 use hydro_lang::location::LocationKey;
 use hydro_lang::location::dynamic::LocationId;
-use hydro_lang::sim::network_hook::{ChannelInfo, LocationInfo, Transport};
+use hydro_lang::networking::{NetworkingInfo, TcpFault};
+use hydro_lang::sim::network_hook::{ChannelInfo, LocationInfo};
 
 use super::*;
 
@@ -14,13 +15,11 @@ fn locations() -> Vec<LocationInfo> {
             id: LocationId::Process("loc1v1".parse::<LocationKey>().unwrap()),
             name: "test::Source".to_owned(),
             members: None,
-            eager: false,
         },
         LocationInfo {
             id: LocationId::Cluster("loc2v1".parse::<LocationKey>().unwrap()),
             name: "test::Replica".to_owned(),
             members: Some(vec![0, 1, 2]),
-            eager: false,
         },
     ]
 }
@@ -32,7 +31,9 @@ fn channel(id: usize, name: Option<&str>) -> ChannelInfo {
         name: name.map(str::to_owned),
         from: l[0].id.clone(),
         to: l[1].id.clone(),
-        transport: Transport::Lossy,
+        networking: NetworkingInfo::Tcp {
+            fault: TcpFault::LossyDelayedForever,
+        },
         intercepted: true,
         op: HydroIrOpMetadata::new(),
     }
@@ -74,33 +75,6 @@ fn payloads_decode_through_facts_with_the_same_bytes() {
     );
 }
 
-/// A rendering the send carried names the payload on its channel, before facts and hex.
-#[test]
-fn payloads_decode_through_the_rendering_their_send_carried() {
-    let nodes = NodeNames::new(&locations());
-    let names = ReportNames::new(
-        &nodes,
-        &[channel(3, Some("bcast")), channel(4, Some("ack"))],
-    )
-    .with_facts([&fact(&[7, 0, 0, 0], "Item(7)")])
-    .with_messages([((3, vec![7, 0, 0, 0]), "Order { id: 7 }".to_owned())]);
-    let on_bcast = message(&nodes, 3, "Source", "Replica@1", &[7, 0, 0, 0]);
-    assert_eq!(
-        names.message(&on_bcast),
-        "bcast[Source→Replica@1]: Order { id: 7 }"
-    );
-    // Same bytes on another channel: the rendering belongs to its channel; the fact applies.
-    let on_ack = message(&nodes, 4, "Source", "Replica@1", &[7, 0, 0, 0]);
-    assert_eq!(names.message(&on_ack), "ack[Source→Replica@1]: Item(7)");
-    // Long renderings go to the legend like any other.
-    let long = "Order { id: 7, note: \"a long, long note\" }";
-    let names = ReportNames::new(&nodes, &[channel(3, Some("bcast"))])
-        .with_messages([((3, vec![7]), long.to_owned())]);
-    let m = message(&nodes, 3, "Source", "Replica@1", &[7]);
-    assert_eq!(names.message(&m), "bcast[Source→Replica@1]: ‹1›");
-    assert_eq!(names.legend(), vec![(1, long.to_owned())]);
-}
-
 #[test]
 fn unnamed_channels_fall_back_to_their_site_then_their_id() {
     let nodes = NodeNames::new(&locations());
@@ -128,11 +102,6 @@ fn faults_name_nodes_and_messages() {
         "{crash(Replica@0), crash(Source after bcast[Source→Replica@2]: Item(7)), \
          omit(bcast[Source→Replica@2]: Item(7))}"
     );
-    // The records' normalized form: no crash positions, member indices only, sorted.
-    assert_eq!(
-        names.normalized(&set),
-        "{crash(Replica@0), crash(Source), omit(bcast[→2]:Item(7))}"
-    );
 }
 
 #[test]
@@ -146,33 +115,4 @@ fn long_payloads_go_to_a_legend_once() {
     assert_eq!(names.message(&b), "w[Source→Replica@1]: ‹1›");
     assert_eq!(names.abbreviate("short".to_owned()), "short");
     assert_eq!(names.legend(), vec![(1, long.to_owned())]);
-    // The normalized form keeps the payload in full.
-    let mut set = FaultSet::new();
-    set.insert(Fault::Omit(a));
-    assert_eq!(names.normalized(&set), format!("{{omit(w[→0]:{long})}}"));
-}
-
-#[test]
-fn rows_serialize_as_tab_separated_values() {
-    let row = ReportRow {
-        test: "t".to_owned(),
-        index: 2,
-        label: "delivered (tests.rs)".to_owned(),
-        file: "tests.rs".to_owned(),
-        collection: "delivered".to_owned(),
-        occurrence: 0,
-        kind: "Stream".to_owned(),
-        verdict: "counterexample",
-        cex: "{crash(Source)}".to_owned(),
-        tolerates: "0".to_owned(),
-        merged_at: None,
-        hypotheses: 3,
-        schedules: 12,
-        wall_ms: 1.34,
-    };
-    assert_eq!(
-        row.to_tsv(),
-        "t\t2\tdelivered (tests.rs)\ttests.rs\tdelivered\t0\tStream\tcounterexample\t\
-         {crash(Source)}\t0\t-\t3\t12\t1.3"
-    );
 }

@@ -27,6 +27,8 @@ pub mod source_names;
 mod tap;
 
 #[cfg(stageleft_runtime)]
+pub(crate) use collections::ec_label;
+#[cfg(stageleft_runtime)]
 pub use collections::{EcCollection, ec_collections, kind_name};
 #[cfg(stageleft_runtime)]
 pub use plan::{LabelPlan, NotCheckedReason, plan};

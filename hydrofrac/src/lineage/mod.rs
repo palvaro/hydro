@@ -15,7 +15,7 @@
 //! The two rules mix freely: the closure applies whichever rule each record on the way admits.
 //!
 //! A delivery in a support becomes a [`Dependency`]: it is omittable if its channel is faulty
-//! (lossy, and not into an eager location) and it was sent before the network healed, and it is
+//! (lossy) and it was sent before the network healed, and it is
 //! killed by a crash of its sender if the sender can crash. A delivery that neither kind of fault
 //! can kill is dropped from the derivation, but the closure still runs through it. A
 //! [`Clause`] pairs a derivation with the run's send sequences and pre-heal send counts, which
@@ -28,7 +28,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
-use hydro_lang::sim::network_hook::{ChannelInfo, LocationInfo, Transport};
+use hydro_lang::sim::network_hook::{ChannelInfo, LocationInfo};
 
 use crate::fault::{DeliveryId, Event, EventLog, Fate, MessageId, NodeId, NodeNames};
 use crate::search::{Clause, Dependency, Derivation, PreHealSends, SendSequences};
@@ -39,10 +39,8 @@ pub use crate::provenance::RecordProv;
 /// Missing or malformed metadata is [`RecordProv::Opaque`]: the execution rule is sound for
 /// any record.
 pub fn decode_meta(meta: Option<&[u8]>) -> RecordProv {
-    // The rewrite's encoding (`provenance::split_meta`): a `RecordProv`, optionally followed by
-    // the payload's `Debug` rendering; anything else means the metadata is not the rewrite's.
-    meta.and_then(crate::provenance::split_meta)
-        .map_or(RecordProv::Opaque, |(prov, _)| prov)
+    meta.and_then(RecordProv::try_decode)
+        .unwrap_or(RecordProv::Opaque)
 }
 
 /// What the lineage needs to know about the simulation besides the log: node names, which nodes
@@ -55,20 +53,15 @@ pub struct Tables {
 
 impl Tables {
     /// The tables of a compiled simulation ([`CompiledSim::channels`] and
-    /// [`CompiledSim::locations`]). A channel is faulty if it is lossy and does not lead into an
-    /// eager location, as [`crate::fault::FaultHook`] decides.
+    /// [`CompiledSim::locations`]). A channel is faulty if it is lossy, as
+    /// [`crate::fault::FaultHook`] decides.
     ///
     /// [`CompiledSim::channels`]: hydro_lang::sim::compiled::CompiledSim::channels
     /// [`CompiledSim::locations`]: hydro_lang::sim::compiled::CompiledSim::locations
     pub fn new(channels: &[ChannelInfo], locations: &[LocationInfo]) -> Self {
-        let eager: BTreeSet<_> = locations
-            .iter()
-            .filter(|l| l.eager)
-            .map(|l| l.id.root().clone())
-            .collect();
         let faulty: Vec<usize> = channels
             .iter()
-            .filter(|c| c.transport == Transport::Lossy && !eager.contains(c.to.root()))
+            .filter(|c| crate::fault::is_lossy(&c.networking))
             .map(|c| c.id)
             .collect();
         Tables::from_parts(NodeNames::new(locations), faulty)
@@ -171,7 +164,7 @@ impl<'a> Lineage<'a> {
         for (i, event) in events.iter().enumerate() {
             match event {
                 Event::Exec { .. } => current = Some(i),
-                Event::ExecEnd { .. } => {
+                Event::ExecEnd => {
                     if let Some(start) = current.take() {
                         for slot in &mut exec_end[start..i] {
                             *slot = Some(i);

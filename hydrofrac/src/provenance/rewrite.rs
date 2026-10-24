@@ -25,8 +25,8 @@
 //!
 //! # Opaque islands
 //!
-//! Operators the pass cannot see into ([`opaque_operators`]) are left uninstrumented: their
-//! inputs are stripped of lineage and everything they emit is
+//! Operators the pass cannot see into (`ResolveFutures*`, `VersionedNetwork*`, …) are left
+//! uninstrumented: their inputs are stripped of lineage and everything they emit is
 //! [`RecordProv::Opaque`](super::RecordProv::Opaque). The same applies to a node whose item
 //! shape the pass cannot follow: a keyed-to-flat `Cast`/`ObserveNonDet` (for example
 //! `entries_partially_ordered`) whose simulator hook is typed by the node's own collection kind
@@ -132,13 +132,10 @@ fn net() -> TokenStream {
     quote!(#root::sim::network_hook::rt)
 }
 
-/// Statements appending the `Debug` rendering of `#payload` (a reference expression) to the
-/// metadata being built in `__prov_meta`, when the payload type implements `Debug`
-/// ([`super::split_meta`]'s format). The host sees only a payload's bytes, so the rendering has
-/// to be made here, where the type is known. Chosen by autoref specialization on the concrete
-/// payload type (as the label taps do), so any payload type compiles.
-fn append_payload_debug(payload: TokenStream) -> TokenStream {
-    let root = hydro_lang_crate();
+/// An `Option<String>` expression: the `Debug` rendering of `value` (a reference) if its type
+/// implements `Debug`, by autoref specialization on the concrete type (so any type compiles).
+/// Made in the simulation, where the type is known: the host only sees bytes.
+pub(crate) fn debug_of(value: TokenStream) -> TokenStream {
     quote!({
         struct __ProvWrap<'__a, __T>(&'__a __T);
         trait __ProvViaDebug {
@@ -157,11 +154,7 @@ fn append_payload_debug(payload: TokenStream) -> TokenStream {
                 ::core::option::Option::None
             }
         }
-        if let ::core::option::Option::Some(__prov_debug) =
-            (&__ProvWrap(#payload)).__prov_debug()
-        {
-            __prov_meta.extend(#root::runtime_support::bincode::serialize(&__prov_debug).unwrap());
-        }
+        (&__ProvWrap(#value)).__prov_debug()
     })
 }
 
@@ -422,7 +415,8 @@ struct Body {
 /// inside `call`. Reference shadows, lineage absorption and write-back are spliced around it.
 fn wrap_closure(f: &ClosureExpr, build: impl FnOnce(&RefShadow) -> Body) -> ClosureExpr {
     let shadow = ref_shadow(f);
-    let orig = &f.expr().0;
+    let (orig, refs) = f.clone().into_parts();
+    let orig = &orig.0;
     let per_run = &shadow.per_run;
     let per_item = &shadow.per_item;
     let absorb = &shadow.absorb;
@@ -470,7 +464,7 @@ fn wrap_closure(f: &ClosureExpr, build: impl FnOnce(&RefShadow) -> Body) -> Clos
             }
         })
     };
-    ClosureExpr::new(DebugExpr::from(expr), f.clone().into_parts().1)
+    ClosureExpr::new(DebugExpr::from(expr), refs)
 }
 
 fn wrap_map(f: &ClosureExpr, in_repr: Repr, in_ty: &syn::Type, out_repr: Repr) -> ClosureExpr {
@@ -1043,14 +1037,14 @@ fn transform_node(node: &mut HydroNode, ctx: &Ctx) {
             let untag = untag(in_repr, quote!(__prov_item));
             let orig_ser = &ser.0;
             let call_ser = apply1(quote!(#orig_ser), quote!(__prov_x));
-            // A send to a cluster is a demux: its item is `(destination, payload)` and only the
-            // payload goes on the wire (`serialize_bincode_with_type(true, ..)`).
+            // A send to a cluster is a demux: only the payload of `(destination, payload)` goes
+            // on the wire.
             let payload = if matches!(metadata.location_id.root(), LocationId::Cluster(_)) {
-                quote!(&__prov_x.1)
+                debug_of(quote!(&__prov_x.1))
             } else {
-                quote!(&__prov_x)
+                debug_of(quote!(&__prov_x))
             };
-            let append_debug = append_payload_debug(payload);
+            let root = hydro_lang_crate();
             // The record's lineage becomes the metadata of the send that immediately follows,
             // followed by the payload's `Debug` rendering for reports (`super::split_meta`).
             let wrapped_ser: syn::Expr = parse_quote!(
@@ -1058,7 +1052,11 @@ fn transform_node(node: &mut HydroNode, ctx: &Ctx) {
                     let (__prov_t, __prov_c, __prov_x) = #untag;
                     let _ = __prov_c;
                     let mut __prov_meta: ::std::vec::Vec<u8> = #meta;
-                    #append_debug
+                    if let ::core::option::Option::Some(__prov_debug) = #payload {
+                        __prov_meta.extend(
+                            #root::runtime_support::bincode::serialize(&__prov_debug).unwrap(),
+                        );
+                    }
                     #net::set_send_meta(__prov_meta);
                     #call_ser
                 }
@@ -1339,18 +1337,4 @@ pub fn install<'a>(
             }
         },
     )
-}
-
-/// The operators the rewrite leaves as opaque islands, by IR node name.
-pub fn opaque_operators() -> &'static [&'static str] {
-    &[
-        "ResolveFutures",
-        "ResolveFuturesBlocking",
-        "ResolveFuturesOrdered",
-        "FlatMapStreamBlocking",
-        "ScanAsyncBlocking",
-        "ReduceKeyedWatermark",
-        "VersionedNetworkFork",
-        "VersionedNetwork",
-    ]
 }
