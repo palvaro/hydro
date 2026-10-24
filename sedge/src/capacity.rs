@@ -152,6 +152,32 @@ pub struct CpuStat {
     pub throttled_ns: u64,
 }
 
+/// The kernel's per-process accounting for one node (summed over the processes in its
+/// container), cumulative since each process started: bytes passed to `read`/`write` syscalls
+/// (sockets included: every message a node actually hands to the kernel), syscall counts, and
+/// resident memory. Read from `/proc/<pid>/io` and `/proc/<pid>/status` from *outside* the node,
+/// so it is measured even when the node is too starved to report anything itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProcIo {
+    pub rchar: u64,
+    pub wchar: u64,
+    pub syscr: u64,
+    pub syscw: u64,
+    /// Resident set size now (not cumulative), in KiB.
+    pub rss_kb: u64,
+}
+
+/// How a node's process ended, if it has: read once the run is over, so that a node that died
+/// mid-run (killed at its memory limit, or crashed) invalidates the trial instead of reading as an
+/// overloaded program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeExit {
+    /// Killed by the kernel's OOM killer at the node's memory limit.
+    pub oom_killed: bool,
+    /// The process's exit code.
+    pub exit_code: i64,
+}
+
 /// One launched node.
 #[derive(Debug)]
 pub struct Handle {
@@ -190,7 +216,125 @@ pub trait CapacityBackend: Send + Sync + fmt::Debug {
     /// Removes every node this backend started whose name begins with `prefix`, for cleaning up
     /// after an earlier run that was killed.
     fn remove_prefix(&self, prefix: &str);
+
+    /// `Some` if the node is no longer running: how it ended. `None` while it runs (or if it
+    /// cannot be told).
+    fn exit(&self, _h: &Handle) -> Option<NodeExit> {
+        None
+    }
+
+    /// The host pids of the node's processes, or empty if they cannot be found (yet).
+    fn pids(&self, _h: &Handle) -> Vec<u32> {
+        Vec::new()
+    }
+
+    /// Starts a sampler of the nodes' `/proc` accounting ([`ProcIo`]), running outside the nodes
+    /// on `cpuset`, or `None` if this backend has none.
+    fn proc_sampler(&self, _name: &str, _dir: &Path, _cpuset: Option<&str>) -> Option<ProcSampler> {
+        None
+    }
 }
+
+/// A sampler of the nodes' `/proc/<pid>/io` and `/proc/<pid>/status`, outside the nodes.
+///
+/// The harness usually cannot read another process's `/proc/<pid>/io` (it is guarded by a
+/// ptrace check, which fails across user namespaces), so the sampler is a small container in the
+/// host's pid namespace, as the invoking user, pinned to the harness's cores. It reads the pid
+/// lists the harness writes to `<dir>/pids` (one line per node: `index pid…`) and rewrites
+/// `<dir>/snap` (one line per node: `index rchar wchar syscr syscw rss_kb`) four times a second.
+/// It uses only shell builtins between snapshots, so it costs the harness's cores almost nothing,
+/// and the nodes' cores nothing.
+#[derive(Debug)]
+pub struct ProcSampler {
+    pub name: String,
+    pub dir: PathBuf,
+    last_pids: Mutex<String>,
+}
+
+impl ProcSampler {
+    /// Writes the nodes' pid lists (index = position in `pids`), if they changed.
+    pub fn set_pids(&self, pids: &[Vec<u32>]) {
+        let text: String = pids
+            .iter()
+            .enumerate()
+            .map(|(i, ps)| {
+                let ps: Vec<String> = ps.iter().map(|p| p.to_string()).collect();
+                format!("{i} {}\n", ps.join(" "))
+            })
+            .collect();
+        let mut last = self.last_pids.lock().unwrap();
+        if *last == text {
+            return;
+        }
+        let tmp = self.dir.join("pids.tmp");
+        if fs::write(&tmp, &text).is_ok() && fs::rename(&tmp, self.dir.join("pids")).is_ok() {
+            *last = text;
+        }
+    }
+
+    /// The latest snapshot, one entry per node index (`None` where the node has no sample).
+    pub fn read(&self, nodes: usize) -> Vec<Option<ProcIo>> {
+        let mut out = vec![None; nodes];
+        let Ok(text) = fs::read_to_string(self.dir.join("snap")) else {
+            return out;
+        };
+        for line in text.lines() {
+            let v: Vec<u64> = line
+                .split_whitespace()
+                .filter_map(|f| f.parse().ok())
+                .collect();
+            if let [i, rchar, wchar, syscr, syscw, rss_kb] = v[..]
+                && (i as usize) < nodes
+            {
+                out[i as usize] = Some(ProcIo {
+                    rchar,
+                    wchar,
+                    syscr,
+                    syscw,
+                    rss_kb,
+                });
+            }
+        }
+        out
+    }
+}
+
+impl Drop for ProcSampler {
+    fn drop(&mut self) {
+        let _ = Command::new("docker")
+            .args(["rm", "-f", &self.name])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+/// The sampler's loop: bash builtins only, except `mv` and `sleep`.
+const PROC_SAMPLER_SCRIPT: &str = r#"dir=$1
+while :; do
+  out=""
+  if [[ -f $dir/pids ]]; then
+    while read -r idx rest; do
+      r=0; w=0; sr=0; sw=0; rss=0
+      for p in $rest; do
+        while read -r k v; do
+          case $k in
+            rchar:) r=$((r+v));; wchar:) w=$((w+v));;
+            syscr:) sr=$((sr+v));; syscw:) sw=$((sw+v));;
+          esac
+        done 2>/dev/null < /proc/$p/io
+        while read -r k v u; do
+          [[ $k == VmRSS: ]] && rss=$((rss+v))
+        done 2>/dev/null < /proc/$p/status
+      done
+      out+="$idx $r $w $sr $sw $rss"$'
+'
+    done < "$dir/pids"
+  fi
+  printf '%s' "$out" > "$dir/snap.tmp" && mv -f "$dir/snap.tmp" "$dir/snap"
+  sleep 0.25
+done
+"#;
 
 /// Runs each node in a Docker container on the host network, as the invoking user, with the
 /// binary, its shared libraries and `$TMPDIR` bind-mounted at their own paths.
@@ -348,7 +492,7 @@ add "$tmp" rw
 add "$(dirname "$real")" ro
 IFS=: read -ra libs <<< "${{LD_LIBRARY_PATH:-}}"
 for d in "${{libs[@]}}"; do add "$d" ro; done
-exec docker run --rm -i --init --name {name} --network host --user {user} \
+exec docker run -i --init --name {name} --network host --user {user} \
   {limits} \
   -e LD_LIBRARY_PATH -e TMPDIR="$tmp" -e RUST_BACKTRACE -e RUST_LOG -e RUST_MIN_STACK -e HYDRO_DEPLOY_SEND_BUFFER \
   "${{mounts[@]}}" {image} "$real" "$@"
@@ -402,6 +546,76 @@ exec docker run --rm -i --init --name {name} --network host --user {user} \
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
+    }
+
+    fn exit(&self, h: &Handle) -> Option<NodeExit> {
+        let out = Command::new("docker")
+            .args([
+                "inspect",
+                "-f",
+                "{{.State.Running}} {{.State.OOMKilled}} {{.State.ExitCode}}",
+                &h.name,
+            ])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let f: Vec<&str> = text.split_whitespace().collect();
+        match f.as_slice() {
+            ["false", oom, code] => Some(NodeExit {
+                oom_killed: *oom == "true",
+                exit_code: code.parse().unwrap_or(-1),
+            }),
+            _ => None,
+        }
+    }
+
+    fn pids(&self, h: &Handle) -> Vec<u32> {
+        let Some(id) = self.container_id(h) else {
+            return Vec::new();
+        };
+        for dir in [
+            format!("/sys/fs/cgroup/cpu,cpuacct/docker/{id}"),
+            format!("/sys/fs/cgroup/cpu/docker/{id}"),
+            format!("/sys/fs/cgroup/cpu,cpuacct/system.slice/docker-{id}.scope"),
+            format!("/sys/fs/cgroup/system.slice/docker-{id}.scope"),
+            format!("/sys/fs/cgroup/docker/{id}"),
+        ] {
+            if let Ok(text) = fs::read_to_string(format!("{dir}/cgroup.procs")) {
+                return text.lines().filter_map(|l| l.trim().parse().ok()).collect();
+            }
+        }
+        Vec::new()
+    }
+
+    fn proc_sampler(&self, name: &str, dir: &Path, cpuset: Option<&str>) -> Option<ProcSampler> {
+        fs::create_dir_all(dir).ok()?;
+        let _ = fs::remove_file(dir.join("snap"));
+        let _ = fs::remove_file(dir.join("pids"));
+        let d = dir.display().to_string();
+        let mut cmd = Command::new("docker");
+        cmd.args(["run", "-d", "--rm", "--init", "--name", name, "--pid", "host"])
+            .args(["--network", "none", "--user", &uid_gid()])
+            .args(["-v", &format!("{d}:{d}:rw")]);
+        if let Some(c) = cpuset {
+            cmd.args(["--cpuset-cpus", c]);
+        }
+        cmd.args([&self.image, "bash", "-c", PROC_SAMPLER_SCRIPT, "sampler", &d]);
+        let out = cmd.output().ok()?;
+        if !out.status.success() {
+            eprintln!(
+                "  (proc sampler did not start: {})",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            return None;
+        }
+        Some(ProcSampler {
+            name: name.to_owned(),
+            dir: dir.to_owned(),
+            last_pids: Mutex::new(String::new()),
+        })
     }
 
     fn remove_prefix(&self, prefix: &str) {

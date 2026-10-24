@@ -5,9 +5,9 @@
 //! Every search uses the generated specification for every `EventualConsistency` label
 //! (`Spec::all_labels`). There are two labels, both on `Cluster<Member>`:
 //!
-//! - `initial`, the source's `broadcast_closed` over `fail_stop` (`relay_broadcast.rs:473`).
+//! - `initial`, the source's `broadcast_closed` over `fail_stop` (`relay_broadcast.rs:562`).
 //! - `delivered`, the merge of `initial` with the relays, labelled with a `manual_proof!`
-//!   (`relay_broadcast.rs:487`). This is the claim under test.
+//!   (`relay_broadcast.rs:576`). This is the claim under test.
 //!
 //! Setup: three members, two request ids, and the source and every member crashable. The body
 //! sends the requests and quiesces. Then it declares the end of finite failures (no new crash
@@ -57,16 +57,19 @@ mod tests {
 
     const MEMBERS: u32 = 3;
     /// Where `delivered` gets its label (the `assert_has_consistency_of`).
-    const DELIVERED: &str = "relay_broadcast.rs:487";
+    const DELIVERED: &str = "relay_broadcast.rs:576";
     /// Where `initial` gets its label (the source's `broadcast_closed`).
-    const INITIAL: &str = "relay_broadcast.rs:473";
+    const INITIAL: &str = "relay_broadcast.rs:562";
 
     /// Timer rounds after the cut: enough for the oldest echo to pass `ack_timeout_ticks`,
     /// be re-sent, and be merged and acknowledged.
     fn rounds_after_cut(policy: RelayPolicy) -> u64 {
         let timeout = match policy {
             RelayPolicy::EchoResend { ack_timeout_ticks }
-            | RelayPolicy::ReliableResend { ack_timeout_ticks } => ack_timeout_ticks,
+            | RelayPolicy::ReliableResend { ack_timeout_ticks }
+            | RelayPolicy::ReliableResendPerEntry {
+                ack_timeout_ticks, ..
+            } => ack_timeout_ticks,
             RelayPolicy::None | RelayPolicy::Echo => 0,
         };
         timeout + 3
@@ -77,6 +80,17 @@ mod tests {
     fn search(
         policy: RelayPolicy,
         channel: RelayChannel,
+        configure: impl FnOnce(Ldfi) -> Ldfi,
+    ) -> LabelResults {
+        search_with_rounds_before_cut(policy, channel, 0, configure)
+    }
+
+    /// [`search`], with `before` timer rounds fired *before* the cut, so that re-sends happen
+    /// while omissions are still possible and HydroFrac can omit them too.
+    fn search_with_rounds_before_cut(
+        policy: RelayPolicy,
+        channel: RelayChannel,
+        before: u64,
         configure: impl FnOnce(Ldfi) -> Ldfi,
     ) -> LabelResults {
         let mut flow = FlowBuilder::new();
@@ -127,6 +141,10 @@ mod tests {
             request.send(Request::new(1));
             request.send(Request::new(2));
             hydro_lang::sim::quiesce().await;
+            for _ in 0..before {
+                timer.send_many((0..MEMBERS).map(|m| (m, ())));
+                hydro_lang::sim::quiesce().await;
+            }
             run.end_of_finite_failures();
             for _ in 0..rounds {
                 timer.send_many((0..MEMBERS).map(|m| (m, ())));
@@ -134,7 +152,7 @@ mod tests {
             }
         });
         eprintln!(
-            "relay_broadcast {policy:?} over {channel:?}: {:.1}s\n{results}",
+            "relay_broadcast {policy:?} over {channel:?}, {before} timer rounds before the cut: {:.1}s\n{results}",
             start.elapsed().as_secs_f64()
         );
         results
@@ -239,6 +257,12 @@ mod tests {
         ack_timeout_ticks: 3,
     };
 
+    /// The hypothesis budget for the searches with crashes unbounded. The outstanding table and
+    /// the receipt dedup live in one persistent `scan`, which provenance sees as one opaque
+    /// state: each relay's lineage then includes every earlier receipt at its member, and the
+    /// searches need more fault sets (about 250) than the default budget of 256 safely covers.
+    const HYPOTHESES: usize = 1024;
+
     /// The final repair, reliable broadcast with retransmission: a member relays every id on
     /// its first receipt from any sender, so a relayer crashing part-way through its fan-out
     /// is covered by any peer it reached. Under one crash, `delivered` holds.
@@ -267,7 +291,9 @@ mod tests {
     /// relays the id onward.
     #[test]
     fn relay_reliable_resend_lossy_holds_under_unbounded_crashes() {
-        let results = search(RELIABLE, RelayChannel::LossyDelayedForever, |l| l);
+        let results = search(RELIABLE, RelayChannel::LossyDelayedForever, |l| {
+            l.max_hypotheses(HYPOTHESES)
+        });
         assert!(
             matches!(
                 row(&results, DELIVERED).outcome(),
@@ -279,6 +305,90 @@ mod tests {
             results
                 .counterexamples()
                 .all(|(r, _)| r.label().contains(INITIAL)),
+            "{results}"
+        );
+    }
+
+    /// `ReliableResendPerEntry` under unbounded crashes, timers only after the cut (as for the
+    /// other policies): every re-send happens once no omission is possible any more, so one
+    /// re-send repairs any omitted relay, and a retry limit of at least two attempts is never
+    /// reached in a run that matters.
+    fn per_entry_certifies(max_attempts: Option<u32>) {
+        let policy = RelayPolicy::ReliableResendPerEntry {
+            ack_timeout_ticks: 3,
+            max_attempts,
+        };
+        let results = search(policy, RelayChannel::LossyDelayedForever, |l| {
+            l.max_hypotheses(HYPOTHESES)
+        });
+        assert!(
+            matches!(
+                row(&results, DELIVERED).outcome(),
+                Some(Outcome::Certificate { .. })
+            ),
+            "{results}"
+        );
+        assert!(
+            results
+                .counterexamples()
+                .all(|(r, _)| r.label().contains(INITIAL)),
+            "{results}"
+        );
+    }
+
+    #[test]
+    fn relay_per_entry_unbounded_holds_under_unbounded_crashes() {
+        per_entry_certifies(None);
+    }
+
+    #[test]
+    fn relay_per_entry_5_holds_under_unbounded_crashes() {
+        per_entry_certifies(Some(5));
+    }
+
+    #[test]
+    fn relay_per_entry_3_holds_under_unbounded_crashes() {
+        per_entry_certifies(Some(3));
+    }
+
+    /// With timer rounds *before* the cut, HydroFrac can omit re-sends as well as first sends.
+    /// A retry limit is then a real bound: omit all `max_attempts` sends of one relay, plus a
+    /// source crash so that no other path delivers it, and the relay is given up. Without a
+    /// limit, the re-send after the cut still repairs it. `before` is long enough for every
+    /// attempt to happen before the cut. Crashes are unbounded.
+    fn per_entry_with_retries_before_cut(max_attempts: Option<u32>) -> LabelResults {
+        let policy = RelayPolicy::ReliableResendPerEntry {
+            ack_timeout_ticks: 3,
+            max_attempts,
+        };
+        let before = 3 * u64::from(max_attempts.unwrap_or(3)) + 1;
+        search_with_rounds_before_cut(policy, RelayChannel::LossyDelayedForever, before, |l| {
+            l.max_hypotheses(HYPOTHESES)
+        })
+    }
+
+    #[test]
+    fn relay_per_entry_3_diverges_when_every_attempt_is_omitted() {
+        let results = per_entry_with_retries_before_cut(Some(3));
+        let faults = counterexample(row(&results, DELIVERED), &results);
+        assert!(omits_relay(&faults), "{results}");
+    }
+
+    #[test]
+    fn relay_per_entry_5_diverges_when_every_attempt_is_omitted() {
+        let results = per_entry_with_retries_before_cut(Some(5));
+        let faults = counterexample(row(&results, DELIVERED), &results);
+        assert!(omits_relay(&faults), "{results}");
+    }
+
+    #[test]
+    fn relay_per_entry_unbounded_holds_when_retries_precede_the_cut() {
+        let results = per_entry_with_retries_before_cut(None);
+        assert!(
+            matches!(
+                row(&results, DELIVERED).outcome(),
+                Some(Outcome::Certificate { .. })
+            ),
             "{results}"
         );
     }
