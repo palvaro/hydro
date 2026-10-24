@@ -729,3 +729,219 @@ fn races_find_a_broadcast_whose_members_do_not_re_forward() {
     )));
     assert_eq!(notes.enumerated_sets, 0, "found by the sweep: {cross}");
 }
+
+// Suspected soundness bug S2: a crash point's meaning moves with the sender's send order, which a
+// fault elsewhere can change (docs/design/hydrofrac-lite.md §4.5).
+
+/// The S2 relay: a fact `y` reaches the relay `n` twice. `direct` (lossy, one hop from `s`) asks
+/// `n` to forward `y` to `m0` only; the slower copy (two `fail_stop` hops, through `r1` and,
+/// redundantly, `r2`) asks it to forward `y` to `m1`, then to `m0`. `m1` echoes what it gets to
+/// `m0`. Returns the cross-check, enumerating sets of at most `max_faults` faults.
+#[cfg(stageleft_runtime)]
+fn positional_crash_order_relay(check: EcCheck, max_faults: usize) -> CrossCheck {
+    positional_crash_order_relay_in(check, max_faults, None)
+}
+
+/// [`positional_crash_order_relay`], with the search capped at `max_crashes` crashes if given.
+#[cfg(stageleft_runtime)]
+fn positional_crash_order_relay_in(
+    mut check: EcCheck,
+    max_faults: usize,
+    max_crashes: Option<usize>,
+) -> CrossCheck {
+    use hydro_lang::location::cluster::CLUSTER_SELF_ID;
+
+    let mut flow = FlowBuilder::new();
+    let fast_source = flow.process::<()>();
+    let s1 = flow.process::<()>();
+    let s2 = flow.process::<()>();
+    let r1 = flow.process::<()>();
+    let r2 = flow.process::<()>();
+    let relay = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send_fast, fast) = fast_source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let (send_1, in_1) = s1.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let (send_2, in_2) = s2.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    // Two independent slow paths, so one crash never leaves only the fast copy.
+    let via_r1 = in_1
+        .send(&r1, TCP.fail_stop().name("to_r1").bincode())
+        .send(&relay, TCP.fail_stop().name("r1_n").bincode());
+    let via_r2 = in_2
+        .send(&r2, TCP.fail_stop().name("to_r2").bincode())
+        .send(&relay, TCP.fail_stop().name("r2_n").bincode());
+    let direct = fast.send(&relay, TCP.lossy_delayed_forever().name("direct").bincode());
+    let slow = via_r1
+        .weaken_ordering::<NoOrder>()
+        .merge_unordered(via_r2.weaken_ordering::<NoOrder>())
+        .map(q!(|y| (y, true)));
+    let fanout = direct
+        .map(q!(|y| (y, false)))
+        .merge_unordered(slow)
+        .flat_map_ordered(q!(|(y, slow)| if slow {
+            vec![(1u32, y), (0u32, y)]
+        } else {
+            vec![(0u32, y)]
+        }))
+        .map(q!(|(to, y)| (
+            hydro_lang::location::MemberId::<()>::from_raw_id(to),
+            y
+        )))
+        .demux(&members, TCP.fail_stop().name("fanout").bincode())
+        .weaken_consistency();
+    let echoed = fanout
+        .clone()
+        .filter(q!(move |_| CLUSTER_SELF_ID.get_raw_id() == 1))
+        .map(q!(|y| (
+            hydro_lang::location::MemberId::<()>::from_raw_id(0),
+            y
+        )))
+        .demux(&members, TCP.fail_stop().name("echo").bincode())
+        .values()
+        .weaken_consistency();
+    let known = fanout
+        .weaken_ordering::<NoOrder>()
+        .merge_unordered(echoed.weaken_ordering::<NoOrder>())
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed (wrongly): `m0` hears from `n` or from `m1`'s echo */
+        ));
+    let _out = known.sim_cluster_output();
+
+    if let Some(n) = max_crashes {
+        check = check.max_crashes(n);
+    }
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 2))
+        .compiled();
+    check.cross_check(
+        &sim,
+        async || {
+            send_fast.send(7);
+            send_1.send(7);
+            send_2.send(7);
+        },
+        max_faults,
+    )
+}
+
+/// The fault set that breaks the relay with one crash (up to its payload's rendering): `n`
+/// crashes right after its first send to `m0`.
+#[cfg(stageleft_runtime)]
+const RELAY_BREAK: &str = "crash(process#5 after fanout[process#5→cluster@0]: ";
+
+/// Suspected soundness bug S2, uncapped: the search reports a counterexample with two crashes and
+/// claims (as certified) that the label tolerates one, while one crash breaks it.
+///
+/// The program ([`positional_crash_order_relay`]): two members `m0`, `m1`, label `known`, one
+/// fact `7`. The relay `n` (`process#5`) gets `7` twice: first over the lossy one-hop `direct`,
+/// which asks it to forward to `m0` only; then over two redundant `fail_stop` two-hop paths
+/// (through `r1`, `r2`), which ask it to forward to `m1`, then `m0`. `m1` echoes to `m0`. There
+/// is no `nondet!`: one execution per fault set.
+///
+/// - **Probe:** `n` sends `→m0, →m1, →m0, …`. The clause names `→m0` (position 0) and `→m1`
+///   (position 1).
+/// - **`{omit(direct)}`** (tried at zero crashes): only the slow copies arrive, so `n` sends
+///   `→m1, →m0, …`. The label holds; the clause names `→m1` at position 0 and `→m0` at
+///   position 1.
+/// - **`H = {crash(n after →m0)}`:** without the omission, `n` sends `→m0` first, as in the
+///   probe, and dies before `→m1`. `m0` holds `7`, `m1` never does: the label breaks with one
+///   crash. But in `{omit(direct)}`'s run `→m0` came *after* `→m1`, so the kill relation
+///   (`Dependency::killed_by`, read in the clause's own run) says `H` kills nothing there: `m1`'s
+///   old derivation "survives" `H`, and `H` is never proposed.
+/// - Every other one-crash set either holds (the echo covers `{omit(direct), crash(n after
+///   →m1)}`; the redundant paths cover `r1`, `r2` and the sources) or hits no clause. So bound 1
+///   is declared exhausted (the completion adds only `crash(n)`, which is vacuous), and the search
+///   breaks at 2 with `{crash(s1), crash(s2)}`.
+///
+/// The breaking pair `(m1, 7)` is held in the run whose clause excludes `H`, with a derivation
+/// through `n`'s `→m1`: this is the send-order flip (S2), not a fact lost everywhere (S1).
+#[cfg(stageleft_runtime)]
+#[test]
+fn suspected_positional_crash_order_tolerance() {
+    for max_faults in [2, 3, 4] {
+        let start = std::time::Instant::now();
+        let cross = positional_crash_order_relay(EcCheck::new(), max_faults);
+        eprintln!(
+            "=== S2 relay (uncapped, {max_faults} faults), {:?}\n{cross}\nsearch:\n{}",
+            start.elapsed(),
+            cross.results
+        );
+        assert!(
+            cross.results.choices.is_empty(),
+            "not choice-free: {:?}",
+            cross.results.choices
+        );
+        let label = cross.results.label("known");
+        let cex = label
+            .verdict
+            .counterexample()
+            .unwrap_or_else(|| panic!("expected a counterexample: {cross}"));
+        assert_eq!(cex.tolerates, Some(1), "{cross}");
+        assert!(cex.tolerance_certified, "{cross}");
+        assert_eq!(cex.crashes(), 2, "{cross}");
+        let b = cross.brute.label(label.index).expect("searched");
+        assert_eq!(b.min_crashes(), Some(1), "{cross}");
+        assert_eq!(b.breaking[0].len(), 1, "{cross}");
+        assert!(
+            cross
+                .results
+                .report_names()
+                .fault_set(&b.breaking[0])
+                .starts_with(&format!("{{{RELAY_BREAK}")),
+            "{cross}"
+        );
+        assert!(
+            cross
+                .disagreements
+                .iter()
+                .any(|d| d.starts_with("known") && d.contains("tolerates 1 crash")),
+            "expected the search to disagree with the enumeration on `known`:\n{cross}"
+        );
+    }
+}
+
+/// S2 with the search capped at one crash: a false certificate ("holds with up to 1 crash")
+/// where `{crash(n after →m0)}` breaks the label. See
+/// [`suspected_positional_crash_order_tolerance`].
+#[cfg(stageleft_runtime)]
+#[test]
+fn suspected_positional_crash_order_certificate() {
+    let start = std::time::Instant::now();
+    let cross = positional_crash_order_relay_in(EcCheck::new(), 3, Some(1));
+    eprintln!(
+        "=== S2 relay (max_crashes 1, 3 faults), {:?}\n{cross}\nsearch:\n{}",
+        start.elapsed(),
+        cross.results
+    );
+    let label = cross.results.label("known");
+    assert!(
+        matches!(
+            label.verdict,
+            Verdict::Certified {
+                tolerates: Tolerance::UpTo(1)
+            }
+        ),
+        "{cross}"
+    );
+    assert!(
+        cross
+            .disagreements
+            .iter()
+            .any(|d| d.starts_with("known") && d.contains(RELAY_BREAK)),
+        "expected the search to disagree with the enumeration on `known`:\n{cross}"
+    );
+}
+
+/// The races mode on the S2 relay agrees with the enumeration (up to 4 faults): it finds
+/// `{crash(n after →m0)}` at one crash.
+#[cfg(stageleft_runtime)]
+#[test]
+fn races_on_the_positional_crash_order_relay() {
+    for (cap, max_faults) in [(None, 3), (Some(1), 3), (None, 4)] {
+        let cross = positional_crash_order_relay_in(EcCheck::races(), max_faults, cap);
+        eprintln!(
+            "=== races: S2 relay (max_crashes {cap:?}, {max_faults} faults)\nsearch:\n{}\n{cross}",
+            cross.results
+        );
+        cross.assert_agrees();
+    }
+}
