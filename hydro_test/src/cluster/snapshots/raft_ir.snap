@@ -1,6 +1,5 @@
 ---
 source: hydro_test/src/cluster/raft.rs
-assertion_line: 2772
 expression: built.ir()
 ---
 [
@@ -10,7 +9,7 @@ expression: built.ir()
                 value: { use crate :: __staged :: __deps :: * ; use crate :: __staged :: cluster :: raft :: * ; crate :: __staged :: __stageleft_quote_src_cluster_raft_rs_LINE_COL ! ([CLUSTER_SELF_ID__free = hydro_lang :: __staged :: location :: MemberId :: < hydro_test :: __staged :: cluster :: raft :: Replica > :: from_tagless ((__hydro_lang_cluster_self_id_loc1v1) . clone ()) , cluster_members__free = __hydro_lang_cluster_ids_loc1v1 ,] [cluster_members__free . iter () . map (| id | MemberId :: from_tagless (id . clone ())) . filter (| member | * member != CLUSTER_SELF_ID__free) . collect :: < Vec < _ > > ()]) },
                 first_tick_only: false,
                 metadata: HydroIrMetadata {
-                    location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                    location_id: Tick(0, Cluster(loc1v1)),
                     collection_kind: Singleton {
                         bound: Bounded,
                         element_type: std :: vec :: Vec < hydro_test :: __staged :: __deps :: hydro_lang :: location :: member_id :: MemberId < hydro_test :: __staged :: cluster :: raft :: Replica > >,
@@ -24,7 +23,7 @@ expression: built.ir()
                 },
             ),
             metadata: HydroIrMetadata {
-                location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                location_id: Tick(0, Cluster(loc1v1)),
                 collection_kind: Singleton {
                     bound: Bounded,
                     element_type: std :: vec :: Vec < hydro_test :: __staged :: __deps :: hydro_lang :: location :: member_id :: MemberId < hydro_test :: __staged :: cluster :: raft :: Replica > >,
@@ -54,7 +53,7 @@ expression: built.ir()
                         },
                     },
                     metadata: HydroIrMetadata {
-                        location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                        location_id: Tick(0, Cluster(loc1v1)),
                         collection_kind: Stream {
                             bound: Bounded,
                             order: NoOrder,
@@ -64,7 +63,7 @@ expression: built.ir()
                     },
                 },
                 metadata: HydroIrMetadata {
-                    location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                    location_id: Tick(0, Cluster(loc1v1)),
                     collection_kind: Singleton {
                         bound: Bounded,
                         element_type: std :: vec :: Vec < (hydro_test :: __staged :: __deps :: hydro_lang :: location :: member_id :: MemberId < hydro_test :: __staged :: cluster :: raft :: Replica > , hydro_test :: __staged :: cluster :: raft :: RaftRpc < std :: string :: String , hydro_test :: __staged :: cluster :: raft :: Replica >) >,
@@ -78,7 +77,7 @@ expression: built.ir()
                 },
             ),
             metadata: HydroIrMetadata {
-                location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                location_id: Tick(0, Cluster(loc1v1)),
                 collection_kind: Singleton {
                     bound: Bounded,
                     element_type: std :: vec :: Vec < (hydro_test :: __staged :: __deps :: hydro_lang :: location :: member_id :: MemberId < hydro_test :: __staged :: cluster :: raft :: Replica > , hydro_test :: __staged :: cluster :: raft :: RaftRpc < std :: string :: String , hydro_test :: __staged :: cluster :: raft :: Replica >) >,
@@ -120,7 +119,7 @@ expression: built.ir()
                         },
                     },
                     metadata: HydroIrMetadata {
-                        location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                        location_id: Tick(0, Cluster(loc1v1)),
                         collection_kind: Stream {
                             bound: Bounded,
                             order: TotalOrder,
@@ -130,7 +129,7 @@ expression: built.ir()
                     },
                 },
                 metadata: HydroIrMetadata {
-                    location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                    location_id: Tick(0, Cluster(loc1v1)),
                     collection_kind: Singleton {
                         bound: Bounded,
                         element_type: std :: vec :: Vec < std :: string :: String >,
@@ -144,7 +143,7 @@ expression: built.ir()
                 },
             ),
             metadata: HydroIrMetadata {
-                location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                location_id: Tick(0, Cluster(loc1v1)),
                 collection_kind: Singleton {
                     bound: Bounded,
                     element_type: std :: vec :: Vec < std :: string :: String >,
@@ -176,7 +175,7 @@ expression: built.ir()
                             },
                         },
                         metadata: HydroIrMetadata {
-                            location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                            location_id: Tick(0, Cluster(loc1v1)),
                             collection_kind: Stream {
                                 bound: Bounded,
                                 order: TotalOrder,
@@ -186,7 +185,7 @@ expression: built.ir()
                         },
                     },
                     metadata: HydroIrMetadata {
-                        location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                        location_id: Tick(0, Cluster(loc1v1)),
                         collection_kind: Singleton {
                             bound: Bounded,
                             element_type: usize,
@@ -194,7 +193,7 @@ expression: built.ir()
                     },
                 },
                 metadata: HydroIrMetadata {
-                    location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                    location_id: Tick(0, Cluster(loc1v1)),
                     collection_kind: Singleton {
                         bound: Bounded,
                         element_type: bool,
@@ -208,7 +207,7 @@ expression: built.ir()
                 },
             ),
             metadata: HydroIrMetadata {
-                location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                location_id: Tick(0, Cluster(loc1v1)),
                 collection_kind: Singleton {
                     bound: Bounded,
                     element_type: bool,
@@ -240,7 +239,7 @@ expression: built.ir()
                             },
                         },
                         metadata: HydroIrMetadata {
-                            location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                            location_id: Tick(0, Cluster(loc1v1)),
                             collection_kind: Stream {
                                 bound: Bounded,
                                 order: TotalOrder,
@@ -250,7 +249,7 @@ expression: built.ir()
                         },
                     },
                     metadata: HydroIrMetadata {
-                        location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                        location_id: Tick(0, Cluster(loc1v1)),
                         collection_kind: Singleton {
                             bound: Bounded,
                             element_type: usize,
@@ -258,7 +257,7 @@ expression: built.ir()
                     },
                 },
                 metadata: HydroIrMetadata {
-                    location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                    location_id: Tick(0, Cluster(loc1v1)),
                     collection_kind: Singleton {
                         bound: Bounded,
                         element_type: bool,
@@ -272,7 +271,7 @@ expression: built.ir()
                 },
             ),
             metadata: HydroIrMetadata {
-                location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                location_id: Tick(0, Cluster(loc1v1)),
                 collection_kind: Singleton {
                     bound: Bounded,
                     element_type: bool,
@@ -294,7 +293,7 @@ expression: built.ir()
                                 1,
                             ),
                             metadata: HydroIrMetadata {
-                                location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                                location_id: Tick(0, Cluster(loc1v1)),
                                 collection_kind: Singleton {
                                     bound: Bounded,
                                     element_type: hydro_test :: __staged :: cluster :: raft :: RaftServerState < std :: string :: String , hydro_test :: __staged :: cluster :: raft :: Replica >,
@@ -302,7 +301,7 @@ expression: built.ir()
                             },
                         },
                         metadata: HydroIrMetadata {
-                            location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                            location_id: Tick(0, Cluster(loc1v1)),
                             collection_kind: Optional {
                                 bound: Bounded,
                                 element_type: hydro_test :: __staged :: cluster :: raft :: RaftServerState < std :: string :: String , hydro_test :: __staged :: cluster :: raft :: Replica >,
@@ -314,7 +313,7 @@ expression: built.ir()
                             value: { use crate :: __staged :: __deps :: * ; use crate :: __staged :: cluster :: raft :: * ; crate :: __staged :: __stageleft_quote_src_cluster_raft_rs_LINE_COL ! ([] [RaftServerState :: new ()]) },
                             first_tick_only: false,
                             metadata: HydroIrMetadata {
-                                location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                                location_id: Tick(0, Cluster(loc1v1)),
                                 collection_kind: Singleton {
                                     bound: Bounded,
                                     element_type: hydro_test :: __staged :: cluster :: raft :: RaftServerState < std :: string :: String , hydro_test :: __staged :: cluster :: raft :: Replica >,
@@ -322,7 +321,7 @@ expression: built.ir()
                             },
                         },
                         metadata: HydroIrMetadata {
-                            location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                            location_id: Tick(0, Cluster(loc1v1)),
                             collection_kind: Optional {
                                 bound: Bounded,
                                 element_type: hydro_test :: __staged :: cluster :: raft :: RaftServerState < std :: string :: String , hydro_test :: __staged :: cluster :: raft :: Replica >,
@@ -330,7 +329,7 @@ expression: built.ir()
                         },
                     },
                     metadata: HydroIrMetadata {
-                        location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                        location_id: Tick(0, Cluster(loc1v1)),
                         collection_kind: Optional {
                             bound: Bounded,
                             element_type: hydro_test :: __staged :: cluster :: raft :: RaftServerState < std :: string :: String , hydro_test :: __staged :: cluster :: raft :: Replica >,
@@ -338,7 +337,7 @@ expression: built.ir()
                     },
                 },
                 metadata: HydroIrMetadata {
-                    location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                    location_id: Tick(0, Cluster(loc1v1)),
                     collection_kind: Singleton {
                         bound: Bounded,
                         element_type: hydro_test :: __staged :: cluster :: raft :: RaftServerState < std :: string :: String , hydro_test :: __staged :: cluster :: raft :: Replica >,
@@ -352,7 +351,7 @@ expression: built.ir()
                 },
             ),
             metadata: HydroIrMetadata {
-                location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                location_id: Tick(0, Cluster(loc1v1)),
                 collection_kind: Singleton {
                     bound: Bounded,
                     element_type: hydro_test :: __staged :: cluster :: raft :: RaftServerState < std :: string :: String , hydro_test :: __staged :: cluster :: raft :: Replica >,
@@ -385,13 +384,13 @@ expression: built.ir()
                 input: Cast {
                     inner: YieldConcat {
                         inner: FlatMap {
-                            f: stageleft :: runtime_support :: fnmut1_type_hint :: < () , std :: vec :: Vec < (hydro_test :: __staged :: __deps :: hydro_lang :: location :: member_id :: MemberId < hydro_test :: __staged :: cluster :: raft :: Replica > , hydro_test :: __staged :: cluster :: raft :: RaftRpc < std :: string :: String , hydro_test :: __staged :: cluster :: raft :: Replica >) > > ({ use crate :: __staged :: __deps :: * ; use crate :: __staged :: cluster :: raft :: * ; crate :: __staged :: __stageleft_quote_src_cluster_raft_rs_LINE_COL ! ([__sl_p0 = crate :: __staged , CLUSTER_SELF_ID__free = hydro_lang :: __staged :: location :: MemberId :: < hydro_test :: __staged :: cluster :: raft :: Replica > :: from_tagless ((__hydro_lang_cluster_self_id_loc1v1) . clone ()) , cluster_size__free = 3usize , committed_ref__free = __hydro_singleton_ref_0 , election_fired_ref__free = __hydro_singleton_ref_1 , election_restriction_ignores_term__free = false , heartbeat_fired_ref__free = __hydro_singleton_ref_2 , message_vec_ref__free = __hydro_singleton_ref_3 , other_members_ref__free = __hydro_singleton_ref_4 , redirected_ref__free = __hydro_singleton_ref_5 , request_vec_ref__free = __hydro_singleton_ref_6 , state_ref__free = __hydro_singleton_ref_7 , view_transitions_ref__free = __hydro_singleton_ref_8 ,] [move | _ | { let output = __sl_p0 :: cluster :: raft :: raft_step (& mut * state_ref__free , RaftStepInput { me : CLUSTER_SELF_ID__free . clone () , other_members : other_members_ref__free . clone () , cluster_size : { cluster_size__free } , election_restriction_ignores_term : { election_restriction_ignores_term__free } , election_timer_fired : * election_fired_ref__free , heartbeat_timer_fired : * heartbeat_fired_ref__free , requests : request_vec_ref__free . clone () , messages : message_vec_ref__free . clone () , } ,) ; for entry in output . committed { committed_ref__free . push (entry) ; } for redirect in output . redirected { redirected_ref__free . push (redirect) ; } if let Some (view) = output . view_transition { view_transitions_ref__free . push (view) ; } output . outbound }]) }),
+                            f: stageleft :: runtime_support :: fnmut1_type_hint :: < () , std :: vec :: Vec < (hydro_test :: __staged :: __deps :: hydro_lang :: location :: member_id :: MemberId < hydro_test :: __staged :: cluster :: raft :: Replica > , hydro_test :: __staged :: cluster :: raft :: RaftRpc < std :: string :: String , hydro_test :: __staged :: cluster :: raft :: Replica >) > > ({ use crate :: __staged :: __deps :: * ; use crate :: __staged :: cluster :: raft :: * ; crate :: __staged :: __stageleft_quote_src_cluster_raft_rs_LINE_COL ! ([__sl_p0 = crate :: __staged , CLUSTER_SELF_ID__free = hydro_lang :: __staged :: location :: MemberId :: < hydro_test :: __staged :: cluster :: raft :: Replica > :: from_tagless ((__hydro_lang_cluster_self_id_loc1v1) . clone ()) , cluster_size__free = 3usize , committed_ref__free = __hydro_singleton_ref_0 , election_fired_ref__free = __hydro_singleton_ref_1 , heartbeat_fired_ref__free = __hydro_singleton_ref_2 , message_vec_ref__free = __hydro_singleton_ref_3 , other_members_ref__free = __hydro_singleton_ref_4 , redirected_ref__free = __hydro_singleton_ref_5 , request_vec_ref__free = __hydro_singleton_ref_6 , state_ref__free = __hydro_singleton_ref_7 , view_transitions_ref__free = __hydro_singleton_ref_8 ,] [move | _ | { let output = __sl_p0 :: cluster :: raft :: raft_step (& mut * state_ref__free , RaftStepInput { me : CLUSTER_SELF_ID__free . clone () , other_members : other_members_ref__free . clone () , cluster_size : { cluster_size__free } , election_timer_fired : * election_fired_ref__free , heartbeat_timer_fired : * heartbeat_fired_ref__free , requests : request_vec_ref__free . clone () , messages : message_vec_ref__free . clone () , } ,) ; for entry in output . committed { committed_ref__free . push (entry) ; } for redirect in output . redirected { redirected_ref__free . push (redirect) ; } if let Some (view) = output . view_transition { view_transitions_ref__free . push (view) ; } output . outbound }]) }),
                             input: Cast {
                                 inner: SingletonSource {
                                     value: { use crate :: __staged :: __deps :: * ; use crate :: __staged :: cluster :: raft :: * ; crate :: __staged :: __stageleft_quote_src_cluster_raft_rs_LINE_COL ! ([] [()]) },
                                     first_tick_only: false,
                                     metadata: HydroIrMetadata {
-                                        location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                                        location_id: Tick(0, Cluster(loc1v1)),
                                         collection_kind: Singleton {
                                             bound: Bounded,
                                             element_type: (),
@@ -399,7 +398,7 @@ expression: built.ir()
                                     },
                                 },
                                 metadata: HydroIrMetadata {
-                                    location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                                    location_id: Tick(0, Cluster(loc1v1)),
                                     collection_kind: Stream {
                                         bound: Bounded,
                                         order: TotalOrder,
@@ -409,7 +408,7 @@ expression: built.ir()
                                 },
                             },
                             metadata: HydroIrMetadata {
-                                location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                                location_id: Tick(0, Cluster(loc1v1)),
                                 collection_kind: Stream {
                                     bound: Bounded,
                                     order: TotalOrder,
@@ -470,7 +469,7 @@ expression: built.ir()
                         stageleft :: runtime_support :: type_hint :: < std :: vec :: Vec < hydro_test :: __staged :: cluster :: raft :: LeaderView < hydro_test :: __staged :: cluster :: raft :: Replica > > > ({ use crate :: __staged :: __deps :: * ; use crate :: __staged :: cluster :: raft :: * ; crate :: __staged :: __stageleft_quote_src_cluster_raft_rs_LINE_COL ! ([] [Vec :: new ()]) }),
                     ),
                     metadata: HydroIrMetadata {
-                        location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                        location_id: Tick(0, Cluster(loc1v1)),
                         collection_kind: Stream {
                             bound: Bounded,
                             order: TotalOrder,
@@ -486,7 +485,7 @@ expression: built.ir()
                     },
                 ),
                 metadata: HydroIrMetadata {
-                    location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                    location_id: Tick(0, Cluster(loc1v1)),
                     collection_kind: Stream {
                         bound: Bounded,
                         order: TotalOrder,
@@ -520,7 +519,7 @@ expression: built.ir()
                                         stageleft :: runtime_support :: type_hint :: < std :: vec :: Vec < hydro_test :: __staged :: cluster :: raft :: LogEntry < std :: string :: String > > > ({ use crate :: __staged :: __deps :: * ; use crate :: __staged :: cluster :: raft :: * ; crate :: __staged :: __stageleft_quote_src_cluster_raft_rs_LINE_COL ! ([] [Vec :: new ()]) }),
                                     ),
                                     metadata: HydroIrMetadata {
-                                        location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                                        location_id: Tick(0, Cluster(loc1v1)),
                                         collection_kind: Stream {
                                             bound: Bounded,
                                             order: TotalOrder,
@@ -536,7 +535,7 @@ expression: built.ir()
                                     },
                                 ),
                                 metadata: HydroIrMetadata {
-                                    location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                                    location_id: Tick(0, Cluster(loc1v1)),
                                     collection_kind: Stream {
                                         bound: Bounded,
                                         order: TotalOrder,
@@ -567,7 +566,7 @@ expression: built.ir()
                         },
                     },
                     metadata: HydroIrMetadata {
-                        location_id: Atomic(Tick(Some(ClockId(1)), Cluster(loc1v1))),
+                        location_id: Atomic(Tick(1, Cluster(loc1v1))),
                         collection_kind: Stream {
                             bound: Unbounded,
                             order: TotalOrder,
@@ -607,7 +606,7 @@ expression: built.ir()
                         stageleft :: runtime_support :: type_hint :: < std :: vec :: Vec < (std :: string :: String , core :: option :: Option < hydro_test :: __staged :: __deps :: hydro_lang :: location :: member_id :: MemberId < hydro_test :: __staged :: cluster :: raft :: Replica > >) > > ({ use crate :: __staged :: __deps :: * ; use crate :: __staged :: cluster :: raft :: * ; crate :: __staged :: __stageleft_quote_src_cluster_raft_rs_LINE_COL ! ([] [Vec :: new ()]) }),
                     ),
                     metadata: HydroIrMetadata {
-                        location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                        location_id: Tick(0, Cluster(loc1v1)),
                         collection_kind: Stream {
                             bound: Bounded,
                             order: TotalOrder,
@@ -623,7 +622,7 @@ expression: built.ir()
                     },
                 ),
                 metadata: HydroIrMetadata {
-                    location_id: Tick(Some(ClockId(0)), Cluster(loc1v1)),
+                    location_id: Tick(0, Cluster(loc1v1)),
                     collection_kind: Stream {
                         bound: Bounded,
                         order: TotalOrder,

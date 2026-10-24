@@ -1,0 +1,2860 @@
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, VecDeque};
+use std::fmt::Debug;
+use std::hash::Hash;
+use std::rc::Rc;
+
+use bolero::generator::bolero_generator::driver::object::Borrowed;
+use bolero::{ValueGenerator, produce};
+use colored::Colorize;
+use dfir_rs::rustc_hash::FxHashMap;
+use dfir_rs::util::unsync::mpsc::Sender;
+
+use crate::live_collections::stream::{NoOrder, Ordering, TotalOrder};
+
+pub type Hooks<Key> = HashMap<(Key, Option<u32>), Vec<Box<dyn SimHook>>>;
+pub type InlineHooks<Key> = HashMap<(Key, Option<u32>), Vec<Box<dyn SimInlineHook>>>;
+
+#[doc(hidden)]
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __maybe_debug__ {
+    ($type:ty) => {{
+        // Inherent-shadows-trait trick (same as `impls` crate), but for
+        // a function pointer. The const is stored as a raw `*const ()` to
+        // avoid mentioning the type in the const type (which would force
+        // bound resolution and break the trick). We transmute back at the end.
+
+        #[expect(clippy::allow_attributes, reason = "macro codegen")]
+        #[allow(dead_code, reason = "shadowing trick")]
+        fn no_debug<T>(_: &T) -> Option<String> {
+            None
+        }
+        fn yes_debug<T: std::fmt::Debug>(v: &T) -> Option<String> {
+            Some(format!("{:?}", v))
+        }
+
+        trait __Fallback {
+            const MAYBE_DEBUG_FN: *const () = no_debug::<()> as *const ();
+        }
+        impl<T: ?Sized> __Fallback for T {}
+
+        struct __Wrap<T>(std::marker::PhantomData<T>);
+
+        #[expect(clippy::allow_attributes, reason = "macro codegen")]
+        #[allow(dead_code, reason = "shadowing trick")]
+        impl<T: std::fmt::Debug> __Wrap<T> {
+            const MAYBE_DEBUG_FN: *const () = yes_debug::<T> as *const ();
+        }
+
+        // SAFETY: The pointer is either `no_debug::<()>` or `yes_debug::<$type>`.
+        // `no_debug` ignores its argument entirely, so the ABI is compatible
+        // regardless of the concrete type.
+        unsafe {
+            std::mem::transmute::<*const (), fn(&$type) -> Option<String>>(
+                <__Wrap<$type>>::MAYBE_DEBUG_FN,
+            )
+        }
+    }};
+}
+
+pub trait SimHook {
+    fn current_decision(&self) -> Option<bool>;
+    fn can_make_nontrivial_decision(&self) -> bool;
+    fn autonomous_decision<'a>(
+        &mut self,
+        driver: &mut Borrowed<'a>,
+        force_nontrivial: bool,
+    ) -> bool;
+
+    /// Release the decision that was made, logging to `log_writer`. A `None`
+    /// writer means logging is disabled, allowing the hook to skip formatting
+    /// entirely.
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>);
+
+    /// Whether this hook is ready to participate in a tick. Returns false if the
+    /// hook has never received any input and cannot produce a value (e.g. a
+    /// singleton whose producing tick hasn't run yet).
+    fn is_ready(&self) -> bool {
+        true
+    }
+
+    /// Whether this hook has just decided that its location crashed. The scheduler
+    /// checks this after releasing decisions and permanently halts the location
+    /// (its async DFIR, tick DFIRs, and observations). Consumed on read; the
+    /// default implementation (for all non-crash hooks) never signals a halt.
+    fn take_halt(&mut self) -> bool {
+        false
+    }
+}
+
+/// A hook that can make inline decisions during the execution of a tick.
+///
+/// Primarily used for `ObserveNonDet` IR nodes.
+pub trait SimInlineHook {
+    /// Whether there are pending inputs that require a decision to be made.
+    fn pending_decision(&self) -> bool;
+
+    /// Whether a decision has already been made and is ready to be released.
+    fn has_decision(&self) -> bool;
+
+    /// Make an autonomous decision.
+    fn autonomous_decision<'a>(&mut self, driver: &mut Borrowed<'a>);
+
+    /// Release the decision that was made, logging to `log_writer`. A `None`
+    /// writer means logging is disabled, allowing the hook to skip formatting
+    /// entirely.
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>);
+}
+
+struct ManualDebug<'a, T>(&'a T, fn(&T) -> Option<String>);
+impl<'a, T> Debug for ManualDebug<'a, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self(v, debug_fn) = self;
+        if let Some(s) = debug_fn(v) {
+            write!(f, "{}", s)
+        } else {
+            write!(f, "?")
+        }
+    }
+}
+
+struct LabeledDebug<'a, T>(&'static str, &'a T, fn(&T) -> Option<String>);
+impl<'a, T> Debug for LabeledDebug<'a, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self(label, v, debug_fn) = self;
+        let value = debug_fn(v).unwrap_or_else(|| "?".to_owned());
+        let color = if *label == "l" {
+            colored::Color::Magenta
+        } else {
+            colored::Color::Yellow
+        };
+        write!(f, "{}", format!("{}: {}", label, value).color(color))
+    }
+}
+
+struct TruncatedVecDebug<'a, T: 'a, I: Iterator<Item = &'a T>>(
+    RefCell<Option<I>>,
+    usize,
+    fn(&T) -> Option<String>,
+);
+impl<'a, T, I: Iterator<Item = &'a T>> Debug for TruncatedVecDebug<'a, T, I> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self(iter, max, elem_debug) = self;
+        let iter = iter.take().unwrap();
+        if let Some(length) = iter.size_hint().1
+            && length > *max
+        {
+            f.debug_list()
+                .entries(iter.take(*max).map(|v| ManualDebug(v, *elem_debug)))
+                .finish_non_exhaustive()?;
+            write!(f, " ({} total)", length)
+        } else {
+            f.debug_list()
+                .entries(iter.map(|v| ManualDebug(v, *elem_debug)))
+                .finish()
+        }
+    }
+}
+
+struct TruncatedLabeledVecDebug<'a, T: 'a, I: Iterator<Item = (&'static str, &'a T)>>(
+    RefCell<Option<I>>,
+    usize,
+    fn(&T) -> Option<String>,
+);
+impl<'a, T, I: Iterator<Item = (&'static str, &'a T)>> Debug
+    for TruncatedLabeledVecDebug<'a, T, I>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self(iter, max, elem_debug) = self;
+        let iter = iter.take().unwrap();
+        if let Some(length) = iter.size_hint().1
+            && length > *max
+        {
+            f.debug_list()
+                .entries(
+                    iter.take(*max)
+                        .map(|(l, v)| LabeledDebug(l, v, *elem_debug)),
+                )
+                .finish_non_exhaustive()?;
+            write!(f, " ({} total)", length)
+        } else {
+            f.debug_list()
+                .entries(iter.map(|(l, v)| LabeledDebug(l, v, *elem_debug)))
+                .finish()
+        }
+    }
+}
+
+type HookLocationMeta = (&'static str, &'static str, &'static str);
+
+pub struct StreamHook<T, Order: Ordering> {
+    pub input: Rc<RefCell<VecDeque<T>>>,
+    pub to_release: Option<Vec<T>>,
+    pub output: Sender<T>,
+    pub batch_location: HookLocationMeta,
+    pub format_item_debug: fn(&T) -> Option<String>,
+    pub _order: std::marker::PhantomData<Order>,
+}
+
+impl<T> SimHook for StreamHook<T, TotalOrder> {
+    fn current_decision(&self) -> Option<bool> {
+        self.to_release.as_ref().map(|v| !v.is_empty())
+    }
+
+    fn can_make_nontrivial_decision(&self) -> bool {
+        !self.input.borrow().is_empty()
+    }
+
+    fn autonomous_decision<'a>(
+        &mut self,
+        driver: &mut Borrowed<'a>,
+        force_nontrivial: bool,
+    ) -> bool {
+        let mut current_input = self.input.borrow_mut();
+        let count = ((if force_nontrivial { 1 } else { 0 })..=current_input.len())
+            .generate(driver)
+            .unwrap();
+
+        self.to_release = Some(current_input.drain(0..count).collect());
+        count > 0
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        if let Some(to_release) = self.to_release.take() {
+            if let Some(log_writer) = log_writer {
+                let (batch_location, line, caret_indent) = self.batch_location;
+                let note_str = if to_release.is_empty() {
+                    "^ releasing no items".to_owned()
+                } else {
+                    format!(
+                        "^ releasing items: {:?}",
+                        TruncatedVecDebug(
+                            RefCell::new(Some(to_release.iter())),
+                            8,
+                            self.format_item_debug
+                        )
+                    )
+                };
+
+                let _ = writeln!(
+                    log_writer,
+                    "{} {}",
+                    "-->".color(colored::Color::Blue),
+                    batch_location
+                );
+
+                let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+
+                let _ = writeln!(
+                    log_writer,
+                    " {}{}{}",
+                    "|".color(colored::Color::Blue),
+                    caret_indent,
+                    note_str.color(colored::Color::Green)
+                );
+            }
+
+            for item in to_release {
+                self.output.try_send(item).unwrap();
+            }
+        } else {
+            panic!("No decision to release");
+        }
+    }
+}
+
+impl<T> SimHook for StreamHook<T, NoOrder> {
+    fn current_decision(&self) -> Option<bool> {
+        self.to_release.as_ref().map(|v| !v.is_empty())
+    }
+
+    fn can_make_nontrivial_decision(&self) -> bool {
+        !self.input.borrow().is_empty()
+    }
+
+    fn autonomous_decision<'a>(
+        &mut self,
+        driver: &mut Borrowed<'a>,
+        force_nontrivial: bool,
+    ) -> bool {
+        let mut current_input = self.input.borrow_mut();
+        let mut out = vec![];
+        let mut min_index = 0;
+        while !current_input.is_empty() {
+            let must_release = force_nontrivial && out.is_empty();
+            if !must_release && produce().generate(driver).unwrap() {
+                break;
+            }
+
+            let idx = (min_index..current_input.len()).generate(driver).unwrap();
+            let item = current_input.remove(idx).unwrap();
+            out.push(item);
+
+            min_index = idx;
+            // Next time, only consider items at or after this index. The reason this is safe is
+            // because batching a `NoOrder` streams results in batches with a `NoOrder` guarantee.
+            // Therefore, simulating different order of elements _within_ a batch is redundant.
+
+            if min_index == current_input.len() {
+                break;
+            }
+        }
+
+        let was_nontrivial = !out.is_empty();
+        self.to_release = Some(out);
+        was_nontrivial
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        if let Some(to_release) = self.to_release.take() {
+            if let Some(log_writer) = log_writer {
+                let (batch_location, line, caret_indent) = self.batch_location;
+                let note_str = if to_release.is_empty() {
+                    "^ releasing no items".to_owned()
+                } else {
+                    format!(
+                        "^ releasing unordered items: {:?}",
+                        TruncatedVecDebug(
+                            RefCell::new(Some(to_release.iter())),
+                            8,
+                            self.format_item_debug
+                        )
+                    )
+                };
+
+                let _ = writeln!(
+                    log_writer,
+                    "{} {}",
+                    "-->".color(colored::Color::Blue),
+                    batch_location
+                );
+
+                let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+
+                let _ = writeln!(
+                    log_writer,
+                    " {}{}{}",
+                    "|".color(colored::Color::Blue),
+                    caret_indent,
+                    note_str.color(colored::Color::Green)
+                );
+            }
+
+            for item in to_release {
+                self.output.try_send(item).unwrap();
+            }
+        } else {
+            panic!("No decision to release");
+        }
+    }
+}
+
+pub struct KeyedStreamHook<K: Hash + Eq + Clone, V, Order: Ordering> {
+    pub input: Rc<RefCell<FxHashMap<K, VecDeque<V>>>>, // FxHasher is deterministic
+    pub to_release: Option<Vec<(K, V)>>,
+    pub output: Sender<(K, V)>,
+    pub batch_location: HookLocationMeta,
+    pub format_item_debug: fn(&(K, V)) -> Option<String>,
+    pub _order: std::marker::PhantomData<Order>,
+}
+
+impl<K: Hash + Eq + Clone, V> SimHook for KeyedStreamHook<K, V, TotalOrder> {
+    fn current_decision(&self) -> Option<bool> {
+        self.to_release.as_ref().map(|v| !v.is_empty())
+    }
+
+    fn can_make_nontrivial_decision(&self) -> bool {
+        #[expect(clippy::disallowed_methods, reason = "FxHasher is deterministic")]
+        !self.input.borrow().values().all(|q| q.is_empty())
+    }
+
+    fn autonomous_decision<'a>(
+        &mut self,
+        driver: &mut Borrowed<'a>,
+        mut force_nontrivial: bool,
+    ) -> bool {
+        let mut current_input = self.input.borrow_mut();
+        self.to_release = Some(vec![]);
+        #[expect(clippy::disallowed_methods, reason = "FxHasher is deterministic")]
+        let nonempty_key_count = current_input.values().filter(|q| !q.is_empty()).count();
+
+        let mut remaining_nonempty_keys = nonempty_key_count;
+        #[expect(clippy::disallowed_methods, reason = "FxHasher is deterministic")]
+        for (key, queue) in current_input.iter_mut() {
+            if queue.is_empty() {
+                continue;
+            }
+
+            remaining_nonempty_keys -= 1;
+
+            let count = ((if force_nontrivial && remaining_nonempty_keys == 0 {
+                1
+            } else {
+                0
+            })..=queue.len())
+                .generate(driver)
+                .unwrap();
+
+            let items: Vec<(K, V)> = queue.drain(0..count).map(|v| (key.clone(), v)).collect();
+            self.to_release.as_mut().unwrap().extend(items);
+
+            if count > 0 {
+                force_nontrivial = false;
+            }
+        }
+
+        !self.to_release.as_ref().unwrap().is_empty()
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        if let Some(to_release) = self.to_release.take() {
+            if let Some(log_writer) = log_writer {
+                let (batch_location, line, caret_indent) = self.batch_location;
+                let note_str = if to_release.is_empty() {
+                    "^ releasing no items".to_owned()
+                } else {
+                    format!(
+                        "^ releasing items: {:?}",
+                        TruncatedVecDebug(
+                            RefCell::new(Some(to_release.iter())),
+                            8,
+                            self.format_item_debug
+                        )
+                    )
+                };
+
+                let _ = writeln!(
+                    log_writer,
+                    "{} {}",
+                    "-->".color(colored::Color::Blue),
+                    batch_location
+                );
+
+                let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+
+                let _ = writeln!(
+                    log_writer,
+                    " {}{}{}",
+                    "|".color(colored::Color::Blue),
+                    caret_indent,
+                    note_str.color(colored::Color::Green)
+                );
+            }
+
+            for item in to_release {
+                self.output.try_send(item).unwrap();
+            }
+        } else {
+            panic!("No decision to release");
+        }
+    }
+}
+
+impl<K: Hash + Eq + Clone, V> SimHook for KeyedStreamHook<K, V, NoOrder> {
+    fn current_decision(&self) -> Option<bool> {
+        self.to_release.as_ref().map(|v| !v.is_empty())
+    }
+
+    fn can_make_nontrivial_decision(&self) -> bool {
+        #[expect(clippy::disallowed_methods, reason = "FxHasher is deterministic")]
+        !self.input.borrow().values().all(|q| q.is_empty())
+    }
+
+    fn autonomous_decision<'a>(
+        &mut self,
+        driver: &mut Borrowed<'a>,
+        mut force_nontrivial: bool,
+    ) -> bool {
+        let mut current_input = self.input.borrow_mut();
+        self.to_release = Some(vec![]);
+        #[expect(clippy::disallowed_methods, reason = "FxHasher is deterministic")]
+        let nonempty_key_count = current_input.values().filter(|q| !q.is_empty()).count();
+
+        let mut remaining_nonempty_keys = nonempty_key_count;
+        #[expect(clippy::disallowed_methods, reason = "FxHasher is deterministic")]
+        for (key, queue) in current_input.iter_mut() {
+            if queue.is_empty() {
+                continue;
+            }
+
+            remaining_nonempty_keys -= 1;
+
+            let mut min_index = 0;
+            while !queue.is_empty() {
+                let must_release = force_nontrivial && remaining_nonempty_keys == 0;
+                if !must_release && produce().generate(driver).unwrap() {
+                    break;
+                }
+
+                let idx = (min_index..queue.len()).generate(driver).unwrap();
+                let item = queue.remove(idx).unwrap();
+                self.to_release.as_mut().unwrap().push((key.clone(), item));
+                force_nontrivial = false;
+
+                min_index = idx;
+                // Next time, only consider items at or after this index. The reason this is safe is
+                // because batching a `NoOrder` stream results in batches with a `NoOrder` guarantee.
+                // Therefore, simulating different order of elements _within_ a batch is redundant.
+
+                if min_index == queue.len() {
+                    break;
+                }
+            }
+        }
+
+        !self.to_release.as_ref().unwrap().is_empty()
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        if let Some(to_release) = self.to_release.take() {
+            if let Some(log_writer) = log_writer {
+                let (batch_location, line, caret_indent) = self.batch_location;
+                let note_str = if to_release.is_empty() {
+                    "^ releasing no items".to_owned()
+                } else {
+                    format!(
+                        "^ releasing unordered items: {:?}",
+                        TruncatedVecDebug(
+                            RefCell::new(Some(to_release.iter())),
+                            8,
+                            self.format_item_debug
+                        )
+                    )
+                };
+
+                let _ = writeln!(
+                    log_writer,
+                    "{} {}",
+                    "-->".color(colored::Color::Blue),
+                    batch_location
+                );
+
+                let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+
+                let _ = writeln!(
+                    log_writer,
+                    " {}{}{}",
+                    "|".color(colored::Color::Blue),
+                    caret_indent,
+                    note_str.color(colored::Color::Green)
+                );
+            }
+
+            for item in to_release {
+                self.output.try_send(item).unwrap();
+            }
+        } else {
+            panic!("No decision to release");
+        }
+    }
+}
+
+pub struct SingletonHook<T> {
+    input: Rc<RefCell<VecDeque<T>>>,
+    to_release: Option<(T, bool)>, // (data, is new)
+    last_released: Option<T>,
+    skipped_states: Vec<T>,
+    output: Sender<T>,
+    batch_location: HookLocationMeta,
+    format_item_debug: fn(&T) -> Option<String>,
+}
+
+impl<T: Clone> SingletonHook<T> {
+    pub fn new(
+        input: Rc<RefCell<VecDeque<T>>>,
+        output: Sender<T>,
+        batch_location: HookLocationMeta,
+        format_item_debug: fn(&T) -> Option<String>,
+    ) -> Self {
+        Self {
+            input,
+            to_release: None,
+            last_released: None,
+            skipped_states: vec![],
+            output,
+            batch_location,
+            format_item_debug,
+        }
+    }
+}
+
+impl<T: Clone> SimHook for SingletonHook<T> {
+    fn current_decision(&self) -> Option<bool> {
+        self.to_release.as_ref().map(|t| t.1)
+    }
+
+    fn can_make_nontrivial_decision(&self) -> bool {
+        !self.input.borrow().is_empty()
+    }
+
+    fn is_ready(&self) -> bool {
+        !self.input.borrow().is_empty() || self.last_released.is_some()
+    }
+
+    fn autonomous_decision<'a>(
+        &mut self,
+        driver: &mut Borrowed<'a>,
+        force_nontrivial: bool,
+    ) -> bool {
+        let mut current_input = self.input.borrow_mut();
+        if current_input.is_empty() {
+            if force_nontrivial {
+                panic!("Cannot make nontrivial decision when there is no input");
+            }
+
+            if let Some(last) = &self.last_released {
+                // Re-release the last item
+                self.to_release = Some((last.clone(), false));
+                false
+            } else {
+                panic!("No input and no last released item to re-release");
+            }
+        } else if !force_nontrivial
+            && let Some(last) = &self.last_released
+            && produce().generate(driver).unwrap()
+        {
+            // Re-release the last item
+            self.to_release = Some((last.clone(), false));
+            false
+        } else {
+            // Release a new item
+            let idx_to_release = (0..current_input.len()).generate(driver).unwrap();
+            self.skipped_states = current_input.drain(0..idx_to_release).collect(); // Drop earlier items
+            let item = current_input.pop_front().unwrap();
+            self.to_release = Some((item, true));
+            true
+        }
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        if let Some((to_release, is_new)) = self.to_release.take() {
+            self.last_released = Some(to_release.clone());
+
+            if let Some(log_writer) = log_writer {
+                let (batch_location, line, caret_indent) = self.batch_location;
+                let note_str = if self.skipped_states.is_empty() {
+                    if is_new {
+                        format!(
+                            "^ releasing snapshot: {:?}",
+                            ManualDebug(&to_release, self.format_item_debug)
+                        )
+                    } else {
+                        format!(
+                            "^ releasing unchanged snapshot: {:?}",
+                            ManualDebug(&to_release, self.format_item_debug)
+                        )
+                    }
+                } else {
+                    format!(
+                        "^ releasing snapshot: {:?} (skipping earlier states: {:?})",
+                        ManualDebug(&to_release, self.format_item_debug),
+                        self.skipped_states
+                            .iter()
+                            .map(|s| ManualDebug(s, self.format_item_debug))
+                            .collect::<Vec<_>>()
+                    )
+                };
+
+                let _ = writeln!(
+                    log_writer,
+                    "{} {}",
+                    "-->".color(colored::Color::Blue),
+                    batch_location
+                );
+
+                let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+
+                let _ = writeln!(
+                    log_writer,
+                    " {}{}{}",
+                    "|".color(colored::Color::Blue),
+                    caret_indent,
+                    note_str.color(colored::Color::Green)
+                );
+            }
+
+            self.output.try_send(to_release).unwrap();
+        } else {
+            panic!("No decision to release");
+        }
+    }
+}
+
+/// A passthrough singleton hook for fold outputs that are already controlled by a
+/// `TopLevelFoldHook`. Always releases the latest value without any non-deterministic
+/// decisions, since the fold hook already made the only meaningful choice (which subset
+/// of inputs to process).
+pub struct PassthroughSingletonHook<T> {
+    input: Rc<RefCell<VecDeque<T>>>,
+    to_release: Option<T>,
+    output: Sender<T>,
+    batch_location: HookLocationMeta,
+    format_item_debug: fn(&T) -> Option<String>,
+}
+
+impl<T> PassthroughSingletonHook<T> {
+    pub fn new(
+        input: Rc<RefCell<VecDeque<T>>>,
+        output: Sender<T>,
+        batch_location: HookLocationMeta,
+        format_item_debug: fn(&T) -> Option<String>,
+    ) -> Self {
+        Self {
+            input,
+            to_release: None,
+            output,
+            batch_location,
+            format_item_debug,
+        }
+    }
+}
+
+impl<T> SimHook for PassthroughSingletonHook<T> {
+    fn current_decision(&self) -> Option<bool> {
+        self.to_release.as_ref().map(|_| true)
+    }
+
+    fn can_make_nontrivial_decision(&self) -> bool {
+        !self.input.borrow().is_empty()
+    }
+
+    fn autonomous_decision<'a>(
+        &mut self,
+        _driver: &mut Borrowed<'a>,
+        _force_nontrivial: bool,
+    ) -> bool {
+        let mut current_input = self.input.borrow_mut();
+        // Always take the last (most recent) value, discard intermediates.
+        if let Some(item) = current_input.pop_back() {
+            current_input.clear();
+            self.to_release = Some(item);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        if let Some(to_release) = self.to_release.take() {
+            if let Some(log_writer) = log_writer {
+                let (batch_location, line, caret_indent) = self.batch_location;
+                let note_str = format!(
+                    "^ releasing snapshot: {:?}",
+                    ManualDebug(&to_release, self.format_item_debug)
+                );
+
+                let _ = writeln!(
+                    log_writer,
+                    "{} {}",
+                    "-->".color(colored::Color::Blue),
+                    batch_location
+                );
+
+                let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+
+                let _ = writeln!(
+                    log_writer,
+                    " {}{}{}",
+                    "|".color(colored::Color::Blue),
+                    caret_indent,
+                    note_str.color(colored::Color::Green)
+                );
+            }
+
+            self.output.try_send(to_release).unwrap();
+        } else {
+            panic!("No decision to release");
+        }
+    }
+}
+
+/// A snapshot hook for a top-level unbounded `Optional`, which the simulator represents as a
+/// stream of versions (`singleton_intermediates`): null until the first version arrives, then
+/// some version.
+///
+/// Like [`SingletonHook`], each snapshot either keeps the last released state (which may be
+/// null) or moves forward to one of the versions produced since. With `passthrough`, used when
+/// a `TopLevelFoldHook` already chose which inputs the aggregate saw, the snapshot always moves
+/// to the latest version and makes no decision of its own.
+pub struct OptionalHook<T> {
+    input: Rc<RefCell<VecDeque<T>>>,
+    /// The decision made: the state to release (`None` is a null snapshot) and whether it is
+    /// new.
+    decision: Option<(Option<T>, bool)>,
+    last_released: Option<T>,
+    skipped_states: Vec<T>,
+    passthrough: bool,
+    output: Sender<T>,
+    batch_location: HookLocationMeta,
+    format_item_debug: fn(&T) -> Option<String>,
+}
+
+impl<T: Clone> OptionalHook<T> {
+    pub fn new(
+        input: Rc<RefCell<VecDeque<T>>>,
+        output: Sender<T>,
+        passthrough: bool,
+        batch_location: HookLocationMeta,
+        format_item_debug: fn(&T) -> Option<String>,
+    ) -> Self {
+        Self {
+            input,
+            decision: None,
+            last_released: None,
+            skipped_states: vec![],
+            passthrough,
+            output,
+            batch_location,
+            format_item_debug,
+        }
+    }
+}
+
+impl<T: Clone> SimHook for OptionalHook<T> {
+    fn current_decision(&self) -> Option<bool> {
+        self.decision.as_ref().map(|d| d.1)
+    }
+
+    fn can_make_nontrivial_decision(&self) -> bool {
+        !self.input.borrow().is_empty()
+    }
+
+    fn autonomous_decision<'a>(
+        &mut self,
+        driver: &mut Borrowed<'a>,
+        force_nontrivial: bool,
+    ) -> bool {
+        let mut current_input = self.input.borrow_mut();
+        if current_input.is_empty() {
+            if force_nontrivial {
+                panic!("Cannot make nontrivial decision when there is no input");
+            }
+            // Re-release the last state, which is null before the first version.
+            self.decision = Some((self.last_released.clone(), false));
+            false
+        } else if self.passthrough {
+            // Always the latest version; earlier ones are intermediates.
+            let item = current_input.pop_back().unwrap();
+            self.skipped_states.clear();
+            current_input.clear();
+            self.decision = Some((Some(item), true));
+            true
+        } else if !force_nontrivial && produce().generate(driver).unwrap() {
+            // Keep the last state (possibly null): the snapshot lags.
+            self.decision = Some((self.last_released.clone(), false));
+            false
+        } else {
+            let idx_to_release = (0..current_input.len()).generate(driver).unwrap();
+            self.skipped_states = current_input.drain(0..idx_to_release).collect();
+            let item = current_input.pop_front().unwrap();
+            self.decision = Some((Some(item), true));
+            true
+        }
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        let Some((to_release, is_new)) = self.decision.take() else {
+            panic!("No decision to release");
+        };
+
+        if let Some(log_writer) = log_writer {
+            let (batch_location, line, caret_indent) = self.batch_location;
+            let state = to_release
+                .as_ref()
+                .map(|t| format!("{:?}", ManualDebug(t, self.format_item_debug)))
+                .unwrap_or_else(|| "null".to_owned());
+            let note_str = match (is_new, self.skipped_states.is_empty()) {
+                (false, _) => format!("^ releasing unchanged snapshot: {state}"),
+                (true, true) => format!("^ releasing snapshot: {state}"),
+                (true, false) => format!(
+                    "^ releasing snapshot: {state} (skipping earlier states: {:?})",
+                    self.skipped_states
+                        .iter()
+                        .map(|s| ManualDebug(s, self.format_item_debug))
+                        .collect::<Vec<_>>()
+                ),
+            };
+
+            let _ = writeln!(
+                log_writer,
+                "{} {}",
+                "-->".color(colored::Color::Blue),
+                batch_location
+            );
+            let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+            let _ = writeln!(
+                log_writer,
+                " {}{}{}",
+                "|".color(colored::Color::Blue),
+                caret_indent,
+                note_str.color(colored::Color::Green)
+            );
+        }
+
+        if let Some(item) = to_release {
+            self.last_released = Some(item.clone());
+            self.output.try_send(item).unwrap();
+        }
+    }
+}
+
+pub struct KeyedSingletonHook<K: Hash + Eq + Clone, V: Clone> {
+    input: Rc<RefCell<FxHashMap<K, VecDeque<V>>>>, // FxHasher is deterministic
+    to_release: Option<Vec<(K, V, bool)>>,         // (key, data, is new)
+    last_released: FxHashMap<K, V>,
+    skipped_states: FxHashMap<K, Vec<V>>,
+    output: Sender<(K, V)>,
+    batch_location: HookLocationMeta,
+    format_key_debug: fn(&K) -> Option<String>,
+    format_value_debug: fn(&V) -> Option<String>,
+}
+
+impl<K: Hash + Eq + Clone, V: Clone> KeyedSingletonHook<K, V> {
+    pub fn new(
+        input: Rc<RefCell<FxHashMap<K, VecDeque<V>>>>,
+        output: Sender<(K, V)>,
+        batch_location: HookLocationMeta,
+        format_key_debug: fn(&K) -> Option<String>,
+        format_value_debug: fn(&V) -> Option<String>,
+    ) -> Self {
+        Self {
+            input,
+            to_release: None,
+            last_released: FxHashMap::default(),
+            skipped_states: FxHashMap::default(),
+            output,
+            batch_location,
+            format_key_debug,
+            format_value_debug,
+        }
+    }
+}
+
+impl<K: Hash + Eq + Clone, V: Clone> SimHook for KeyedSingletonHook<K, V> {
+    fn current_decision(&self) -> Option<bool> {
+        self.to_release
+            .as_ref()
+            .map(|v| v.iter().any(|(_, _, is_new)| *is_new))
+    }
+
+    fn can_make_nontrivial_decision(&self) -> bool {
+        #[expect(clippy::disallowed_methods, reason = "FxHasher is deterministic")]
+        !self.input.borrow().values().all(|q| q.is_empty())
+    }
+
+    fn autonomous_decision<'a>(
+        &mut self,
+        driver: &mut Borrowed<'a>,
+        mut force_nontrivial: bool,
+    ) -> bool {
+        let mut current_input = self.input.borrow_mut();
+        self.to_release = Some(vec![]);
+        #[expect(clippy::disallowed_methods, reason = "FxHasher is deterministic")]
+        let nonempty_key_count = current_input.values().filter(|q| !q.is_empty()).count();
+
+        let mut remaining_nonempty_keys = nonempty_key_count;
+        let mut any_nontrivial = false;
+        #[expect(clippy::disallowed_methods, reason = "FxHasher is deterministic")]
+        for (key, queue) in current_input.iter_mut() {
+            if queue.is_empty() {
+                self.to_release.as_mut().unwrap().push((
+                    key.clone(),
+                    self.last_released.get(key).unwrap().clone(),
+                    false,
+                ));
+
+                continue;
+            }
+
+            remaining_nonempty_keys -= 1;
+
+            let do_nontrivial = force_nontrivial && remaining_nonempty_keys == 0;
+
+            if !do_nontrivial
+                && self.last_released.contains_key(key)
+                && produce().generate(driver).unwrap()
+            {
+                // Re-release the last item for this key
+                let last = self.last_released.get(key).unwrap().clone();
+                self.to_release
+                    .as_mut()
+                    .unwrap()
+                    .push((key.clone(), last, false));
+            } else {
+                let allow_null_release = !do_nontrivial && !self.last_released.contains_key(key);
+                if allow_null_release && produce().generate(driver).unwrap() {
+                    // Don't emit anything, this key is not yet added to the snapshot
+                    continue;
+                } else {
+                    // Release a new item for this key
+                    let idx_to_release = (0..queue.len()).generate(driver).unwrap();
+                    let skipped: Vec<V> = queue.drain(0..idx_to_release).collect();
+                    let item = queue.pop_front().unwrap();
+                    self.skipped_states.insert(key.clone(), skipped);
+                    self.to_release
+                        .as_mut()
+                        .unwrap()
+                        .push((key.clone(), item.clone(), true));
+                    self.last_released.insert(key.clone(), item);
+
+                    any_nontrivial |= true;
+                    force_nontrivial = false;
+                }
+            }
+        }
+
+        any_nontrivial
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        if let Some(to_release) = self.to_release.take() {
+            if let Some(log_writer) = log_writer {
+                let (batch_location, line, caret_indent) = self.batch_location;
+                let note_str = if to_release.is_empty() {
+                    "^ releasing no items".to_owned()
+                } else {
+                    let mut mapping_text = String::new();
+                    for (key, value, is_new) in &to_release {
+                        let entry_text = if *is_new {
+                            format!(
+                                "{:?}: {:?}",
+                                ManualDebug(key, self.format_key_debug),
+                                ManualDebug(value, self.format_value_debug)
+                            )
+                        } else {
+                            format!(
+                                "{:?}: {:?} (unchanged)",
+                                ManualDebug(key, self.format_key_debug),
+                                ManualDebug(value, self.format_value_debug)
+                            )
+                        };
+                        if !mapping_text.is_empty() {
+                            mapping_text.push_str(", ");
+                        }
+                        mapping_text.push_str(&entry_text);
+                    }
+                    format!("^ releasing items: {{ {} }}", mapping_text)
+                };
+
+                let _ = writeln!(
+                    log_writer,
+                    "{} {}",
+                    "-->".color(colored::Color::Blue),
+                    batch_location
+                );
+
+                let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+
+                let _ = writeln!(
+                    log_writer,
+                    " {}{}{}",
+                    "|".color(colored::Color::Blue),
+                    caret_indent,
+                    note_str.color(colored::Color::Green)
+                );
+            }
+
+            for (key, value, _) in to_release {
+                self.output.try_send((key, value)).unwrap();
+            }
+        } else {
+            panic!("No decision to release");
+        }
+    }
+}
+
+pub struct StreamOrderHook<T> {
+    input: Rc<RefCell<Option<Vec<T>>>>,
+    to_release: Option<Vec<T>>,
+    output: Sender<Vec<T>>,
+    batch_location: HookLocationMeta,
+    format_debug: fn(&T) -> Option<String>,
+}
+
+impl<T> StreamOrderHook<T> {
+    pub fn new(
+        input: Rc<RefCell<Option<Vec<T>>>>,
+        output: Sender<Vec<T>>,
+        batch_location: HookLocationMeta,
+        format_debug: fn(&T) -> Option<String>,
+    ) -> Self {
+        Self {
+            input,
+            to_release: None,
+            output,
+            batch_location,
+            format_debug,
+        }
+    }
+}
+
+impl<T> SimInlineHook for StreamOrderHook<T> {
+    fn pending_decision(&self) -> bool {
+        self.input.borrow().is_some()
+    }
+
+    fn has_decision(&self) -> bool {
+        self.to_release.is_some()
+    }
+
+    fn autonomous_decision<'a>(&mut self, driver: &mut Borrowed<'a>) {
+        let mut inputs = self.input.borrow_mut().take().unwrap();
+
+        // from Bolero
+        let max_dst = inputs.len().saturating_sub(1);
+        for src in 0..max_dst {
+            let dst = (src..=max_dst).generate(driver).unwrap();
+            inputs.swap(src, dst);
+        }
+
+        self.to_release = Some(inputs);
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        if let Some(to_release) = self.to_release.take() {
+            if !to_release.is_empty()
+                && let Some(log_writer) = log_writer
+            {
+                let (batch_location, line, caret_indent) = self.batch_location;
+                let note_str = format!(
+                    "^ observed non-deterministic order: {:?}",
+                    TruncatedVecDebug(RefCell::new(Some(to_release.iter())), 8, self.format_debug)
+                );
+
+                let _ = writeln!(
+                    log_writer,
+                    "{} {}",
+                    "-->".color(colored::Color::Blue),
+                    batch_location
+                );
+
+                let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+
+                let _ = writeln!(
+                    log_writer,
+                    " {}{}{}",
+                    "|".color(colored::Color::Blue),
+                    caret_indent,
+                    note_str.color(colored::Color::Cyan)
+                );
+            }
+
+            self.output.try_send(to_release).unwrap();
+        } else {
+            panic!("No decision to release");
+        }
+    }
+}
+
+pub struct MergeOrderedHook<T> {
+    first: Rc<RefCell<Option<Vec<T>>>>,
+    second: Rc<RefCell<Option<Vec<T>>>>,
+    to_release: Option<Vec<T>>,
+    release_sources: Option<Vec<bool>>,
+    output: Sender<Vec<T>>,
+    batch_location: HookLocationMeta,
+    format_debug: fn(&T) -> Option<String>,
+}
+
+impl<T> MergeOrderedHook<T> {
+    pub fn new(
+        first: Rc<RefCell<Option<Vec<T>>>>,
+        second: Rc<RefCell<Option<Vec<T>>>>,
+        output: Sender<Vec<T>>,
+        batch_location: HookLocationMeta,
+        format_debug: fn(&T) -> Option<String>,
+    ) -> Self {
+        Self {
+            first,
+            second,
+            to_release: None,
+            release_sources: None,
+            output,
+            batch_location,
+            format_debug,
+        }
+    }
+}
+
+impl<T> SimInlineHook for MergeOrderedHook<T> {
+    fn pending_decision(&self) -> bool {
+        self.first.borrow().is_some() && self.second.borrow().is_some()
+    }
+
+    fn has_decision(&self) -> bool {
+        self.to_release.is_some()
+    }
+
+    fn autonomous_decision<'a>(&mut self, driver: &mut Borrowed<'a>) {
+        let first_input = self.first.borrow_mut().take().unwrap();
+        let second_input = self.second.borrow_mut().take().unwrap();
+
+        let first_len = first_input.len();
+        let second_len = second_input.len();
+
+        // Generate a valid interleaving preserving per-input order.
+        let mut result = Vec::with_capacity(first_len + second_len);
+        let mut sources = Vec::with_capacity(first_len + second_len);
+        let mut first_iter = first_input.into_iter();
+        let mut second_iter = second_input.into_iter();
+        let mut first_remaining = first_len;
+        let mut second_remaining = second_len;
+
+        while first_remaining > 0 && second_remaining > 0 {
+            let take_second: bool = produce().generate(driver).unwrap();
+            if take_second {
+                result.push(second_iter.next().unwrap());
+                sources.push(true);
+                second_remaining -= 1;
+            } else {
+                result.push(first_iter.next().unwrap());
+                sources.push(false);
+                first_remaining -= 1;
+            }
+        }
+
+        for item in first_iter {
+            result.push(item);
+            sources.push(false);
+        }
+        for item in second_iter {
+            result.push(item);
+            sources.push(true);
+        }
+
+        self.to_release = Some(result);
+        self.release_sources = Some(sources);
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        if let Some(to_release) = self.to_release.take() {
+            let sources = self.release_sources.take().unwrap();
+            if !to_release.is_empty()
+                && let Some(log_writer) = log_writer
+            {
+                let (batch_location, line, caret_indent) = self.batch_location;
+
+                let labeled_iter =
+                    sources
+                        .iter()
+                        .zip(to_release.iter())
+                        .map(|(is_second, item)| {
+                            let label: &'static str = if *is_second { "r" } else { "l" };
+                            (label, item)
+                        });
+
+                let note_str = format!(
+                    "^ observed non-deterministic merge order: {:?}",
+                    TruncatedLabeledVecDebug(
+                        RefCell::new(Some(labeled_iter)),
+                        8,
+                        self.format_debug
+                    )
+                );
+
+                let _ = writeln!(
+                    log_writer,
+                    "{} {}",
+                    "-->".color(colored::Color::Blue),
+                    batch_location
+                );
+
+                let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+
+                let _ = writeln!(
+                    log_writer,
+                    " {}{}{}",
+                    "|".color(colored::Color::Blue),
+                    caret_indent,
+                    note_str.color(colored::Color::Cyan)
+                );
+            }
+
+            self.output.try_send(to_release).unwrap();
+        } else {
+            panic!("No decision to release");
+        }
+    }
+}
+
+type KeyedStreamOrderHookInput<K, V> = Rc<RefCell<Option<Vec<(K, V)>>>>;
+
+pub struct KeyedStreamOrderHook<K: Hash + Eq + Clone, V> {
+    input: KeyedStreamOrderHookInput<K, V>,
+    to_release: Option<FxHashMap<K, Vec<V>>>,
+    output: Sender<Vec<(K, V)>>,
+    batch_location: HookLocationMeta,
+    format_key_debug: fn(&K) -> Option<String>,
+    format_value_debug: fn(&V) -> Option<String>,
+}
+
+impl<K: Hash + Eq + Clone, V> KeyedStreamOrderHook<K, V> {
+    pub fn new(
+        input: KeyedStreamOrderHookInput<K, V>,
+        output: Sender<Vec<(K, V)>>,
+        batch_location: HookLocationMeta,
+        format_key_debug: fn(&K) -> Option<String>,
+        format_value_debug: fn(&V) -> Option<String>,
+    ) -> Self {
+        Self {
+            input,
+            to_release: None,
+            output,
+            batch_location,
+            format_key_debug,
+            format_value_debug,
+        }
+    }
+}
+
+impl<K: Hash + Eq + Clone, V> SimInlineHook for KeyedStreamOrderHook<K, V> {
+    fn pending_decision(&self) -> bool {
+        self.input.borrow().is_some()
+    }
+
+    fn has_decision(&self) -> bool {
+        self.to_release.is_some()
+    }
+
+    fn autonomous_decision<'a>(&mut self, driver: &mut Borrowed<'a>) {
+        let mut inputs = self.input.borrow_mut().take().unwrap();
+        let mut grouped = FxHashMap::default();
+        for (k, v) in inputs.drain(..) {
+            grouped.entry(k).or_insert_with(Vec::new).push(v);
+        }
+
+        let mut out = FxHashMap::default();
+        for (key, mut values) in grouped {
+            // from Bolero
+            let max_dst = values.len().saturating_sub(1);
+            for src in 0..max_dst {
+                let dst = (src..=max_dst).generate(driver).unwrap();
+                values.swap(src, dst);
+            }
+
+            out.insert(key, values);
+        }
+
+        self.to_release = Some(out);
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        if let Some(to_release) = self.to_release.take() {
+            if !to_release.is_empty()
+                && let Some(log_writer) = log_writer
+            {
+                let (batch_location, line, caret_indent) = self.batch_location;
+                let mut note_str = String::new();
+                for (key, values) in &to_release {
+                    let entry_text = format!(
+                        "{:?}: {:?}",
+                        ManualDebug(key, self.format_key_debug),
+                        TruncatedVecDebug(
+                            RefCell::new(Some(values.iter())),
+                            8,
+                            self.format_value_debug
+                        )
+                    );
+                    if !note_str.is_empty() {
+                        note_str.push_str(", ");
+                    }
+                    note_str.push_str(&entry_text);
+                }
+                note_str = format!("^ observed non-deterministic order: {{ {} }}", note_str);
+
+                let _ = writeln!(
+                    log_writer,
+                    "{} {}",
+                    "-->".color(colored::Color::Blue),
+                    batch_location
+                );
+
+                let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+
+                let _ = writeln!(
+                    log_writer,
+                    " {}{}{}",
+                    "|".color(colored::Color::Blue),
+                    caret_indent,
+                    note_str.color(colored::Color::Cyan)
+                );
+            }
+
+            let mut flat_out = vec![];
+            for (k, vs) in to_release {
+                for v in vs {
+                    flat_out.push((k.clone(), v));
+                }
+            }
+            self.output.try_send(flat_out).unwrap();
+        } else {
+            panic!("No decision to release");
+        }
+    }
+}
+
+/// Inline hook for `entries_partially_ordered` on bounded/not-root keyed streams.
+/// Produces a random interleaving of key-value pairs that preserves within-key order.
+pub struct PartiallyOrderedStreamHook<K: Hash + Eq + Clone, V> {
+    input: KeyedStreamOrderHookInput<K, V>,
+    to_release: Option<Vec<(K, V)>>,
+    output: Sender<Vec<(K, V)>>,
+    batch_location: HookLocationMeta,
+    format_key_debug: fn(&K) -> Option<String>,
+    format_value_debug: fn(&V) -> Option<String>,
+}
+
+impl<K: Hash + Eq + Clone, V> PartiallyOrderedStreamHook<K, V> {
+    pub fn new(
+        input: KeyedStreamOrderHookInput<K, V>,
+        output: Sender<Vec<(K, V)>>,
+        batch_location: HookLocationMeta,
+        format_key_debug: fn(&K) -> Option<String>,
+        format_value_debug: fn(&V) -> Option<String>,
+    ) -> Self {
+        Self {
+            input,
+            to_release: None,
+            output,
+            batch_location,
+            format_key_debug,
+            format_value_debug,
+        }
+    }
+}
+
+impl<K: Hash + Eq + Clone, V> SimInlineHook for PartiallyOrderedStreamHook<K, V> {
+    fn pending_decision(&self) -> bool {
+        self.input.borrow().is_some()
+    }
+
+    fn has_decision(&self) -> bool {
+        self.to_release.is_some()
+    }
+
+    fn autonomous_decision<'a>(&mut self, driver: &mut Borrowed<'a>) {
+        let inputs = self.input.borrow_mut().take().unwrap();
+        // Group by key, preserving within-key order
+        let mut grouped: Vec<(K, VecDeque<V>)> = Vec::new();
+        let mut key_indices: FxHashMap<K, usize> = FxHashMap::default();
+        for (k, v) in inputs {
+            if let Some(&idx) = key_indices.get(&k) {
+                grouped[idx].1.push_back(v);
+            } else {
+                let idx = grouped.len();
+                key_indices.insert(k.clone(), idx);
+                grouped.push((k, VecDeque::from([v])));
+            }
+        }
+
+        // Interleave: repeatedly pick a random non-empty key and take its front element
+        let mut out = Vec::new();
+        loop {
+            let nonempty: Vec<usize> = grouped
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, q))| !q.is_empty())
+                .map(|(i, _)| i)
+                .collect();
+            if nonempty.is_empty() {
+                break;
+            }
+            let pick = nonempty[(0..nonempty.len()).generate(driver).unwrap()];
+            let (k, q) = &mut grouped[pick];
+            out.push((k.clone(), q.pop_front().unwrap()));
+        }
+
+        self.to_release = Some(out);
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        if let Some(to_release) = self.to_release.take() {
+            if !to_release.is_empty()
+                && let Some(log_writer) = log_writer
+            {
+                let (batch_location, line, caret_indent) = self.batch_location;
+                let mut note_str = String::new();
+                for (key, value) in &to_release {
+                    let entry_text = format!(
+                        "({:?}, {:?})",
+                        ManualDebug(key, self.format_key_debug),
+                        ManualDebug(value, self.format_value_debug)
+                    );
+                    if !note_str.is_empty() {
+                        note_str.push_str(", ");
+                    }
+                    note_str.push_str(&entry_text);
+                }
+                note_str = format!("^ observed partially-ordered interleaving: [{}]", note_str);
+
+                let _ = writeln!(
+                    log_writer,
+                    "{} {}",
+                    "-->".color(colored::Color::Blue),
+                    batch_location
+                );
+
+                let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+
+                let _ = writeln!(
+                    log_writer,
+                    " {}{}{}",
+                    "|".color(colored::Color::Blue),
+                    caret_indent,
+                    note_str.color(colored::Color::Cyan)
+                );
+            }
+
+            self.output.try_send(to_release).unwrap();
+        } else {
+            panic!("No decision to release");
+        }
+    }
+}
+
+/// Top-level (outside-tick) `assume_ordering` hooks release elements **one at a
+/// time** rather than shuffling the entire batch. This is the key mechanism for
+/// simulating causality in feedback cycles: when data flows through a network hop
+/// and cycles back (e.g. via `forward_ref`), the cycled-back result can arrive
+/// and interleave with elements that are still pending in the input queue.
+///
+/// For example, given input `[1, 2, 3]` where each element is mapped and sent
+/// through a network cycle, the simulator can explore orderings like
+/// `[1, map(1), 2, map(2), 3, ...]` -- the cycled-back `map(1)` arrives before `2`.
+///
+/// This is the only place where such causality is observable, because top-level
+/// unbounded streams are "maximally async" -- any non-atomic stream can be
+/// arbitrarily decoupled. The in-tick variants (`StreamOrderHook`,
+/// `KeyedStreamOrderHook`) shuffle the full batch instead, since within a tick
+/// all data is available simultaneously.
+///
+/// The `sim_top_level_assume_ordering_*` tests are regression tests ensuring
+/// this one-at-a-time release behavior correctly explores causal interleavings.
+pub struct TopLevelStreamOrderHook<T> {
+    pub input: Rc<RefCell<VecDeque<T>>>,
+    pub to_release: Option<Vec<T>>,
+    pub output: Sender<T>,
+    pub location: HookLocationMeta,
+    pub format_item_debug: fn(&T) -> Option<String>,
+}
+
+impl<T> SimHook for TopLevelStreamOrderHook<T> {
+    fn current_decision(&self) -> Option<bool> {
+        self.to_release.as_ref().map(|v| !v.is_empty())
+    }
+
+    fn can_make_nontrivial_decision(&self) -> bool {
+        !self.input.borrow().is_empty()
+    }
+
+    fn autonomous_decision<'a>(
+        &mut self,
+        driver: &mut Borrowed<'a>,
+        force_nontrivial: bool,
+    ) -> bool {
+        let mut current_input = self.input.borrow_mut();
+        let mut out = vec![];
+
+        // instead of a full shuffle, we only release one element at a time
+        // in order to handle possible feedback cycles
+        if !current_input.is_empty() {
+            let must_release = force_nontrivial && out.is_empty();
+            if !must_release && produce().generate(driver).unwrap() {
+                // don't release anything
+            } else {
+                let idx = (0..current_input.len()).generate(driver).unwrap();
+                let item = current_input.remove(idx).unwrap();
+                out.push(item);
+            }
+        }
+
+        let was_nontrivial = !out.is_empty();
+        self.to_release = Some(out);
+        was_nontrivial
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        if let Some(to_release) = self.to_release.take() {
+            if !to_release.is_empty()
+                && let Some(log_writer) = log_writer
+            {
+                let (batch_location, line, caret_indent) = self.location;
+                let note_str = format!(
+                    "^ observered non-deterministic order: {:?}",
+                    TruncatedVecDebug(
+                        RefCell::new(Some(to_release.iter())),
+                        8,
+                        self.format_item_debug
+                    )
+                );
+
+                let _ = writeln!(
+                    log_writer,
+                    "\n{} {}",
+                    "-->".color(colored::Color::Blue),
+                    batch_location
+                );
+
+                let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+
+                let _ = writeln!(
+                    log_writer,
+                    " {}{}{}",
+                    "|".color(colored::Color::Blue),
+                    caret_indent,
+                    note_str.color(colored::Color::Green)
+                );
+            }
+
+            for item in to_release {
+                self.output.try_send(item).unwrap();
+            }
+        } else {
+            panic!("No decision to release");
+        }
+    }
+}
+
+/// Simulation hook for **dynamic cluster membership**.
+///
+/// The simulator sources cluster membership from an eager
+/// `futures::stream::iter([Joined, Joined, ...])` (see
+/// `deploy_runtime::cluster_membership_stream`), which the scheduler drains to
+/// completion *before* reaching its nondeterministic fork point — so every
+/// member appears to join at once and joins cannot interleave with message flow.
+///
+/// This hook makes join *timing* a nondeterministic decision the exhaustive
+/// engine forks on by treating cluster membership as an ordinary **unordered,
+/// unbounded stream** whose elements are the joining members. It is a direct
+/// analog of [`TopLevelStreamOrderHook`]: each round it either releases the next
+/// pending join or defers it, which is exactly what explores "does this member
+/// join now, or after more messages have flowed?".
+///
+/// # Why release order is fixed (the fix for the historical blowup)
+///
+/// An earlier version forked on *which* member to release each round (a random
+/// index into the queue). Because membership is an *unordered* set, that order
+/// is not observable: releasing `{m0, m1}` versus `{m1, m0}` into a symmetric
+/// fan-out is the *same* execution. Forking on it multiplied the genuine
+/// join-vs-message timing interleavings by every permutation of the members,
+/// which — compounded across the multiple observers of a broadcast echo cycle —
+/// produced millions of executions for a state space of a couple dozen genuine
+/// behaviors.
+///
+/// The fix is to treat membership like any normal unordered stream: release in
+/// fixed (front) order, one at a time, and fork only on *timing*. This preserves
+/// every genuine join-vs-action interleaving (each member can still join early
+/// or late relative to message flow) while dropping the unobservable
+/// member-order permutations.
+///
+/// `Left` events are deliberately out of scope (they make the membership
+/// relation non-monotone). They would be pushed into the same queue.
+pub struct MembershipHook<T> {
+    /// Pending membership events, pre-seeded at construction. Released one at a
+    /// time to let the engine explore join timing against message flow.
+    pub input: Rc<RefCell<VecDeque<T>>>,
+    pub to_release: Option<Vec<T>>,
+    pub output: Sender<T>,
+    pub location: HookLocationMeta,
+    pub format_item_debug: fn(&T) -> Option<String>,
+}
+
+impl<T> MembershipHook<T> {
+    /// Create a membership hook whose queue is pre-seeded with `events` (e.g. one
+    /// `(member_id, MembershipEvent::Joined)` per member of the cluster).
+    pub fn new(
+        events: impl IntoIterator<Item = T>,
+        output: Sender<T>,
+        location: HookLocationMeta,
+        format_item_debug: fn(&T) -> Option<String>,
+    ) -> Self {
+        Self::new_from_buffer(
+            Rc::new(RefCell::new(events.into_iter().collect())),
+            output,
+            location,
+            format_item_debug,
+        )
+    }
+
+    /// Create a membership hook from an already-constructed buffer of pending
+    /// events. Used by generated simulator code, which builds the `VecDeque`
+    /// inline.
+    pub fn new_from_buffer(
+        input: Rc<RefCell<VecDeque<T>>>,
+        output: Sender<T>,
+        location: HookLocationMeta,
+        format_item_debug: fn(&T) -> Option<String>,
+    ) -> Self {
+        Self {
+            input,
+            to_release: None,
+            output,
+            location,
+            format_item_debug,
+        }
+    }
+}
+
+impl<T> SimHook for MembershipHook<T> {
+    fn current_decision(&self) -> Option<bool> {
+        self.to_release.as_ref().map(|v| !v.is_empty())
+    }
+
+    fn can_make_nontrivial_decision(&self) -> bool {
+        !self.input.borrow().is_empty()
+    }
+
+    fn autonomous_decision<'a>(
+        &mut self,
+        driver: &mut Borrowed<'a>,
+        force_nontrivial: bool,
+    ) -> bool {
+        let mut current_input = self.input.borrow_mut();
+        let mut out = vec![];
+
+        // Release at most one event per round, exactly like
+        // `TopLevelStreamOrderHook`: either emit the next pending join or defer
+        // it to a later round, which is what forks the search over join *timing*
+        // (does this member join now, or after more message flow?).
+        //
+        // Crucially we release in FIXED (front) order and do NOT fork on which
+        // member to release. Membership is an *unordered* stream, so the order in
+        // which members are released is not observable — releasing {m0, m1} vs
+        // {m1, m0} into a symmetric fan-out yields the same execution. Forking on
+        // member identity here was the dominant source of the historical blowup
+        // (it multiplied the genuine timing interleavings by every permutation of
+        // members); dropping it is what makes the search tractable while still
+        // exploring every genuine join-vs-message interleaving.
+        if !current_input.is_empty() {
+            if !force_nontrivial && produce().generate(driver).unwrap() {
+                // Defer: this member joins later.
+            } else {
+                out.push(current_input.pop_front().unwrap());
+            }
+        }
+
+        let was_nontrivial = !out.is_empty();
+        self.to_release = Some(out);
+        was_nontrivial
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        if let Some(to_release) = self.to_release.take() {
+            if !to_release.is_empty()
+                && let Some(log_writer) = log_writer
+            {
+                let (batch_location, line, caret_indent) = self.location;
+                let note_str = format!(
+                    "^ observed non-deterministic membership timing: {:?}",
+                    TruncatedVecDebug(
+                        RefCell::new(Some(to_release.iter())),
+                        8,
+                        self.format_item_debug
+                    )
+                );
+
+                let _ = writeln!(
+                    log_writer,
+                    "\n{} {}",
+                    "-->".color(colored::Color::Blue),
+                    batch_location
+                );
+                let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+                let _ = writeln!(
+                    log_writer,
+                    " {}{}{}",
+                    "|".color(colored::Color::Blue),
+                    caret_indent,
+                    note_str.color(colored::Color::Green)
+                );
+            }
+
+            for item in to_release {
+                self.output.try_send(item).unwrap();
+            }
+        } else {
+            panic!("No decision to release");
+        }
+    }
+
+    /// Once all pre-seeded events have been released, the hook is exhausted and
+    /// need not participate in further ticks.
+    fn is_ready(&self) -> bool {
+        true
+    }
+}
+
+/// An outgoing network channel of a crashable location whose sends are *staged*
+/// (buffered per-recipient) instead of delivered immediately.
+///
+/// Staging exists so that a crash can cut a per-recipient **suffix** of the
+/// location's sends: messages a real crashed process would never have gotten onto
+/// the wire. Delivery of staged sends is otherwise deterministic and prompt (the
+/// [`CrashHook`] flushes every staged message whenever it is serviced and no
+/// crash fires), so staging adds no nondeterminism of its own to crash-free
+/// executions.
+///
+/// Sends within one DFIR run of the sender are atomic today (direct
+/// `try_send` into recipient queues), which makes the classical partial-broadcast
+/// crash state — reached recipient A but not B — unrepresentable without this
+/// interposition. See the crash-injection design discussion in
+/// `design_docs/2026-08_research_agenda.md` §2 (crash injection as the missing
+/// oracle).
+pub trait StagedNetChannel {
+    /// `(recipient index, staged message count)` for every recipient with staged
+    /// messages. Single-recipient channels use index 0.
+    fn staged_counts(&self) -> Vec<(usize, usize)>;
+
+    /// Deliver every staged message, in per-recipient FIFO order.
+    fn deliver_all(&mut self);
+
+    /// Deliver the first `prefix` staged messages to `recipient` and discard the
+    /// remainder for that recipient (the crash cut).
+    fn deliver_prefix(&mut self, recipient: usize, prefix: usize);
+}
+
+/// The concrete [`StagedNetChannel`]: per-recipient FIFO buffers plus a delivery
+/// closure that performs the real `try_send` into the recipient's queue.
+pub struct StagedChannel<T> {
+    /// Staged messages, indexed by recipient (index 0 for single-recipient
+    /// channels). Grown on demand by [`stage_push`].
+    pub buffers: Rc<RefCell<Vec<VecDeque<T>>>>,
+    /// Delivers one message to one recipient (the original network send).
+    pub deliver: Box<dyn Fn(usize, T)>,
+}
+
+impl<T> StagedNetChannel for StagedChannel<T> {
+    fn staged_counts(&self) -> Vec<(usize, usize)> {
+        self.buffers
+            .borrow()
+            .iter()
+            .enumerate()
+            .filter(|(_, buf)| !buf.is_empty())
+            .map(|(i, buf)| (i, buf.len()))
+            .collect()
+    }
+
+    fn deliver_all(&mut self) {
+        let mut buffers = self.buffers.borrow_mut();
+        for (i, buf) in buffers.iter_mut().enumerate() {
+            while let Some(item) = buf.pop_front() {
+                (self.deliver)(i, item);
+            }
+        }
+    }
+
+    fn deliver_prefix(&mut self, recipient: usize, prefix: usize) {
+        let mut buffers = self.buffers.borrow_mut();
+        if let Some(buf) = buffers.get_mut(recipient) {
+            for _ in 0..prefix {
+                if let Some(item) = buf.pop_front() {
+                    (self.deliver)(recipient, item);
+                }
+            }
+            buf.clear();
+        }
+    }
+}
+
+/// Stages a send on a crashable location's outgoing channel. Called by generated
+/// simulator code in place of the direct `try_send`.
+pub fn stage_push<T>(buffers: &Rc<RefCell<Vec<VecDeque<T>>>>, recipient: usize, item: T) {
+    let mut buffers = buffers.borrow_mut();
+    if buffers.len() <= recipient {
+        buffers.resize_with(recipient + 1, VecDeque::new);
+    }
+    buffers[recipient].push_back(item);
+}
+
+/// The decision a [`CrashHook`] makes when serviced with staged sends pending.
+enum CrashDecision {
+    /// No crash this round: flush every staged message (deterministic delivery).
+    Flush,
+    /// Crash: per channel, per recipient, deliver this prefix and discard the
+    /// rest; then halt the location permanently.
+    Crash(Vec<Vec<(usize, usize)>>),
+}
+
+/// Simulation hook for **crash-fault injection** on a location.
+///
+/// Crash points exist only at *send boundaries*: a crash between two points at
+/// which the location produced no output is observationally equivalent to
+/// crashing at the next boundary with an empty cut, so forking anywhere else
+/// would only dilate the search (the `MembershipHook` blowup lesson). The hook is
+/// therefore fork-eligible exactly while its location has staged, undelivered
+/// sends — it drains and drops out of the scheduler's ready set like any
+/// ordinary stream hook.
+///
+/// At each boundary the decision is: crash now, or flush? A flush delivers every
+/// staged message deterministically (no delivery-timing nondeterminism is
+/// added). A crash chooses, independently per outgoing channel and recipient, a
+/// prefix of the staged FIFO to deliver — the in-flight suffix a real crash
+/// would lose — then signals the scheduler (via [`SimHook::take_halt`]) to
+/// permanently halt the location's DFIRs. The crashed location's inbound
+/// channels stay open (senders to it are unaffected; their messages are simply
+/// never consumed), matching `fail_stop`'s "sends to failed members are wasted,
+/// not wrong" semantics.
+pub struct CrashHook {
+    /// The location's staged outgoing channels, registered by generated code as
+    /// each network edge is wired.
+    pub channels: Rc<RefCell<Vec<Box<dyn StagedNetChannel>>>>,
+    /// Remaining crash budget, shared among all crash hooks of the same fault
+    /// domain (every member of a crashable cluster shares one budget; a
+    /// crashable process has its own). Once spent, hooks only ever flush — and
+    /// stop drawing the crash coin, so they no longer fork the search.
+    pub budget: Rc<Cell<usize>>,
+    /// False after the crash has fired; the location is halted so no further
+    /// sends can be staged, but the hook stays registered.
+    alive: bool,
+    decision: Option<(CrashDecision, bool)>,
+    halt_pending: bool,
+    pub location: HookLocationMeta,
+}
+
+impl CrashHook {
+    /// Creates a crash hook drawing on the given shared crash budget.
+    pub fn new(
+        channels: Rc<RefCell<Vec<Box<dyn StagedNetChannel>>>>,
+        budget: Rc<Cell<usize>>,
+        location: HookLocationMeta,
+    ) -> Self {
+        Self {
+            channels,
+            budget,
+            alive: true,
+            decision: None,
+            halt_pending: false,
+            location,
+        }
+    }
+
+    fn any_staged(&self) -> bool {
+        self.channels
+            .borrow()
+            .iter()
+            .any(|c| !c.staged_counts().is_empty())
+    }
+}
+
+impl SimHook for CrashHook {
+    fn current_decision(&self) -> Option<bool> {
+        self.decision.as_ref().map(|(_, nontrivial)| *nontrivial)
+    }
+
+    fn can_make_nontrivial_decision(&self) -> bool {
+        self.alive && self.any_staged()
+    }
+
+    fn autonomous_decision<'a>(
+        &mut self,
+        driver: &mut Borrowed<'a>,
+        _force_nontrivial: bool,
+    ) -> bool {
+        if !self.alive || !self.any_staged() {
+            // Nothing staged: trivially flush (a no-op). No driver entropy is
+            // consumed, so this cannot fork the search.
+            self.decision = Some((CrashDecision::Flush, false));
+            return false;
+        }
+
+        // Fork: crash at this send boundary, or not? Only draw the coin while
+        // the shared budget remains, so exhausted fault domains never fork.
+        let do_crash = self.budget.get() > 0 && produce().generate(driver).unwrap();
+
+        if do_crash {
+            // Fork, independently per channel and recipient, the prefix of the
+            // staged FIFO that made it onto the wire before the crash.
+            let cuts = self
+                .channels
+                .borrow()
+                .iter()
+                .map(|channel| {
+                    channel
+                        .staged_counts()
+                        .into_iter()
+                        .map(|(recipient, count)| {
+                            let prefix = (0..=count).generate(driver).unwrap();
+                            (recipient, prefix)
+                        })
+                        .collect()
+                })
+                .collect();
+            self.decision = Some((CrashDecision::Crash(cuts), true));
+        } else {
+            // Releasing staged messages is a nontrivial action (it is what lets
+            // downstream locations make progress), mirroring the stream hooks.
+            self.decision = Some((CrashDecision::Flush, true));
+        }
+        true
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        let Some((decision, _)) = self.decision.take() else {
+            panic!("No decision to release");
+        };
+
+        match decision {
+            CrashDecision::Flush => {
+                for channel in self.channels.borrow_mut().iter_mut() {
+                    channel.deliver_all();
+                }
+            }
+            CrashDecision::Crash(cuts) => {
+                if let Some(log_writer) = log_writer {
+                    let (batch_location, line, caret_indent) = self.location;
+                    let note_str = format!(
+                        "^ CRASH: location halts; per-(channel, recipient) delivered prefixes: {:?}",
+                        cuts
+                    );
+
+                    let _ = writeln!(
+                        log_writer,
+                        "\n{} {}",
+                        "-->".color(colored::Color::Blue),
+                        batch_location
+                    );
+                    let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+                    let _ = writeln!(
+                        log_writer,
+                        " {}{}{}",
+                        "|".color(colored::Color::Blue),
+                        caret_indent,
+                        note_str.color(colored::Color::Red)
+                    );
+                }
+
+                let mut channels = self.channels.borrow_mut();
+                for (channel, channel_cuts) in channels.iter_mut().zip(cuts) {
+                    for (recipient, prefix) in channel_cuts {
+                        channel.deliver_prefix(recipient, prefix);
+                    }
+                }
+
+                self.alive = false;
+                self.budget.set(self.budget.get().saturating_sub(1));
+                self.halt_pending = true;
+            }
+        }
+    }
+
+    fn take_halt(&mut self) -> bool {
+        std::mem::take(&mut self.halt_pending)
+    }
+}
+
+/// Hook for top-level folds. Selects a non-empty subset of buffered inputs to release,
+/// always permuting them to explore all orderings. Unselected elements remain
+/// in the buffer for future releases (modeling delayed/lossy inputs).
+pub struct TopLevelFoldHook<T> {
+    pub input: Rc<RefCell<VecDeque<T>>>,
+    pub to_release: Option<Vec<T>>,
+    pub output: Sender<Vec<T>>,
+    pub location: HookLocationMeta,
+    pub format_item_debug: fn(&T) -> Option<String>,
+}
+
+impl<T> SimHook for TopLevelFoldHook<T> {
+    fn current_decision(&self) -> Option<bool> {
+        self.to_release.as_ref().map(|v| !v.is_empty())
+    }
+
+    fn can_make_nontrivial_decision(&self) -> bool {
+        !self.input.borrow().is_empty()
+    }
+
+    fn autonomous_decision<'a>(
+        &mut self,
+        driver: &mut Borrowed<'a>,
+        force_nontrivial: bool,
+    ) -> bool {
+        let mut current_input = self.input.borrow_mut();
+
+        if current_input.is_empty() {
+            if force_nontrivial {
+                panic!("Cannot make nontrivial decision when there is no input");
+            }
+            self.to_release = Some(vec![]);
+            return false;
+        }
+
+        // Select a non-empty subset: for each element, decide include/exclude.
+        // Only force inclusion on the last element if nothing was selected yet.
+        let mut selected = Vec::new();
+        let mut remaining = VecDeque::new();
+
+        let len = current_input.len();
+        for (i, item) in current_input.drain(..).enumerate() {
+            let is_last = i == len - 1;
+            let must_include = is_last && selected.is_empty();
+            if must_include || produce().generate(driver).unwrap() {
+                selected.push(item);
+            } else {
+                remaining.push_back(item);
+            }
+        }
+
+        // Put unselected elements back
+        *current_input = remaining;
+
+        // Always permute selected elements (Fisher-Yates) to explore all orderings.
+        // Even if commutativity is claimed via manual_proof!, the simulator is
+        // conservative and does not trust it — it still explores permutations.
+        {
+            let slen = selected.len();
+            for i in (1..slen).rev() {
+                let j = (0..=i).generate(driver).unwrap();
+                selected.swap(i, j);
+            }
+        }
+
+        self.to_release = Some(selected);
+        true
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        if let Some(to_release) = self.to_release.take() {
+            // An empty (trivial) decision releases nothing. Crucially, do NOT
+            // send an empty batch downstream: the generated `scan` wrapping the
+            // fold treats an empty batch as scan termination (its closure
+            // returns `None`, which `scan` interprets as "the accumulator is
+            // done"), so an empty batch would permanently kill the fold state
+            // and silently drop every later element.
+            if to_release.is_empty() {
+                return;
+            }
+
+            if let Some(log_writer) = log_writer {
+                let (batch_location, line, caret_indent) = self.location;
+                let note_str = format!(
+                    "^ fold input batch (permuted): {:?}",
+                    TruncatedVecDebug(
+                        RefCell::new(Some(to_release.iter())),
+                        8,
+                        self.format_item_debug
+                    )
+                );
+
+                let _ = writeln!(
+                    log_writer,
+                    "\n{} {}",
+                    "-->".color(colored::Color::Blue),
+                    batch_location
+                );
+
+                let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+
+                let _ = writeln!(
+                    log_writer,
+                    " {}{}{}",
+                    "|".color(colored::Color::Blue),
+                    caret_indent,
+                    note_str.color(colored::Color::Green)
+                );
+            }
+
+            self.output.try_send(to_release).unwrap();
+        } else {
+            panic!("No decision to release");
+        }
+    }
+}
+
+/// Keyed variant of [`TopLevelStreamOrderHook`]. Same one-at-a-time release
+/// strategy to simulate causal interleavings -- see the comment on
+/// [`TopLevelStreamOrderHook`] for the full explanation.
+pub struct TopLevelKeyedStreamOrderHook<K: Hash + Eq + Clone, V> {
+    pub input: Rc<RefCell<FxHashMap<K, VecDeque<V>>>>,
+    pub to_release: Option<Vec<(K, V)>>,
+    pub output: Sender<(K, V)>,
+    pub location: HookLocationMeta,
+    pub format_item_debug: fn(&(K, V)) -> Option<String>,
+}
+
+impl<K: Hash + Eq + Clone, V> SimHook for TopLevelKeyedStreamOrderHook<K, V> {
+    fn current_decision(&self) -> Option<bool> {
+        self.to_release.as_ref().map(|v| !v.is_empty())
+    }
+
+    fn can_make_nontrivial_decision(&self) -> bool {
+        #[expect(clippy::disallowed_methods, reason = "FxHasher is deterministic")]
+        !self.input.borrow().values().all(|q| q.is_empty())
+    }
+
+    fn autonomous_decision<'a>(
+        &mut self,
+        driver: &mut Borrowed<'a>,
+        force_nontrivial: bool,
+    ) -> bool {
+        let mut current_input = self.input.borrow_mut();
+
+        // Collect non-empty keys with their queue lengths
+        #[expect(clippy::disallowed_methods, reason = "FxHasher is deterministic")]
+        let nonempty_keys: Vec<(K, usize)> = current_input
+            .iter()
+            .filter(|(_, q)| !q.is_empty())
+            .map(|(k, q)| (k.clone(), q.len()))
+            .collect();
+
+        if nonempty_keys.is_empty() {
+            self.to_release = Some(vec![]);
+            return false;
+        }
+
+        // Decide whether to release anything
+        if !force_nontrivial && produce().generate(driver).unwrap() {
+            self.to_release = Some(vec![]);
+            return false;
+        }
+
+        // Pick which key to release from
+        let key_idx = (0..nonempty_keys.len()).generate(driver).unwrap();
+        let (key, queue_len) = &nonempty_keys[key_idx];
+
+        // Pick which item from that key's queue
+        let item_idx = (0..*queue_len).generate(driver).unwrap();
+        let item = current_input
+            .get_mut(key)
+            .unwrap()
+            .remove(item_idx)
+            .unwrap();
+
+        self.to_release = Some(vec![(key.clone(), item)]);
+        true
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        if let Some(to_release) = self.to_release.take() {
+            if !to_release.is_empty()
+                && let Some(log_writer) = log_writer
+            {
+                let (batch_location, line, caret_indent) = self.location;
+                let note_str = format!(
+                    "^ observed non-deterministic order: {:?}",
+                    TruncatedVecDebug(
+                        RefCell::new(Some(to_release.iter())),
+                        8,
+                        self.format_item_debug
+                    )
+                );
+
+                let _ = writeln!(
+                    log_writer,
+                    "\n{} {}",
+                    "-->".color(colored::Color::Blue),
+                    batch_location
+                );
+
+                let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+
+                let _ = writeln!(
+                    log_writer,
+                    " {}{}{}",
+                    "|".color(colored::Color::Blue),
+                    caret_indent,
+                    note_str.color(colored::Color::Green)
+                );
+            }
+
+            for item in to_release {
+                self.output.try_send(item).unwrap();
+            }
+        } else {
+            panic!("No decision to release");
+        }
+    }
+}
+
+/// Top-level variant of [`PartiallyOrderedStreamHook`]. Same one-at-a-time release
+/// strategy as [`TopLevelKeyedStreamOrderHook`], but always takes from the FRONT
+/// of the chosen key's queue to preserve within-key order.
+pub struct TopLevelPartiallyOrderedStreamHook<K: Hash + Eq + Clone, V> {
+    pub input: Rc<RefCell<FxHashMap<K, VecDeque<V>>>>,
+    pub to_release: Option<Vec<(K, V)>>,
+    pub output: Sender<(K, V)>,
+    pub location: HookLocationMeta,
+    pub format_item_debug: fn(&(K, V)) -> Option<String>,
+}
+
+impl<K: Hash + Eq + Clone, V> SimHook for TopLevelPartiallyOrderedStreamHook<K, V> {
+    fn current_decision(&self) -> Option<bool> {
+        self.to_release.as_ref().map(|v| !v.is_empty())
+    }
+
+    fn can_make_nontrivial_decision(&self) -> bool {
+        #[expect(clippy::disallowed_methods, reason = "FxHasher is deterministic")]
+        !self.input.borrow().values().all(|q| q.is_empty())
+    }
+
+    fn autonomous_decision<'a>(
+        &mut self,
+        driver: &mut Borrowed<'a>,
+        force_nontrivial: bool,
+    ) -> bool {
+        let mut current_input = self.input.borrow_mut();
+
+        #[expect(clippy::disallowed_methods, reason = "FxHasher is deterministic")]
+        let nonempty_keys: Vec<K> = current_input
+            .iter()
+            .filter(|(_, q)| !q.is_empty())
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        if nonempty_keys.is_empty() {
+            self.to_release = Some(vec![]);
+            return false;
+        }
+
+        if !force_nontrivial && produce().generate(driver).unwrap() {
+            self.to_release = Some(vec![]);
+            return false;
+        }
+
+        // Pick which key to release from
+        let key_idx = (0..nonempty_keys.len()).generate(driver).unwrap();
+        let key = &nonempty_keys[key_idx];
+
+        // Always take from the front to preserve within-key order
+        let item = current_input.get_mut(key).unwrap().pop_front().unwrap();
+
+        self.to_release = Some(vec![(key.clone(), item)]);
+        true
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        if let Some(to_release) = self.to_release.take() {
+            if !to_release.is_empty()
+                && let Some(log_writer) = log_writer
+            {
+                let (batch_location, line, caret_indent) = self.location;
+                let note_str = format!(
+                    "^ observed partially-ordered interleaving: {:?}",
+                    TruncatedVecDebug(
+                        RefCell::new(Some(to_release.iter())),
+                        8,
+                        self.format_item_debug
+                    )
+                );
+
+                let _ = writeln!(
+                    log_writer,
+                    "\n{} {}",
+                    "-->".color(colored::Color::Blue),
+                    batch_location
+                );
+
+                let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+
+                let _ = writeln!(
+                    log_writer,
+                    " {}{}{}",
+                    "|".color(colored::Color::Blue),
+                    caret_indent,
+                    note_str.color(colored::Color::Green)
+                );
+            }
+
+            for item in to_release {
+                self.output.try_send(item).unwrap();
+            }
+        } else {
+            panic!("No decision to release");
+        }
+    }
+}
+
+/// Top-level merge-ordered hook. Releases one element at a time, picking from
+/// the front of either the first or second input queue. This preserves per-input
+/// order while allowing feedback cycles to deliver elements between releases.
+pub struct TopLevelMergeOrderedHook<T> {
+    pub first: Rc<RefCell<VecDeque<T>>>,
+    pub second: Rc<RefCell<VecDeque<T>>>,
+    pub to_release: Option<Vec<T>>,
+    pub release_source: Option<&'static str>,
+    pub output: Sender<T>,
+    pub location: HookLocationMeta,
+    pub format_item_debug: fn(&T) -> Option<String>,
+}
+
+impl<T> SimHook for TopLevelMergeOrderedHook<T> {
+    fn current_decision(&self) -> Option<bool> {
+        self.to_release.as_ref().map(|v| !v.is_empty())
+    }
+
+    fn can_make_nontrivial_decision(&self) -> bool {
+        !self.first.borrow().is_empty() || !self.second.borrow().is_empty()
+    }
+
+    fn autonomous_decision<'a>(
+        &mut self,
+        driver: &mut Borrowed<'a>,
+        force_nontrivial: bool,
+    ) -> bool {
+        let first_empty = self.first.borrow().is_empty();
+        let second_empty = self.second.borrow().is_empty();
+
+        if first_empty && second_empty {
+            self.to_release = Some(vec![]);
+            self.release_source = None;
+            return false;
+        }
+
+        if !force_nontrivial && produce().generate(driver).unwrap() {
+            // don't release anything
+            self.to_release = Some(vec![]);
+            self.release_source = None;
+            return false;
+        }
+
+        let (item, source) = if first_empty {
+            (self.second.borrow_mut().pop_front().unwrap(), "r")
+        } else if second_empty {
+            (self.first.borrow_mut().pop_front().unwrap(), "l")
+        } else {
+            let take_second: bool = produce().generate(driver).unwrap();
+            if take_second {
+                (self.second.borrow_mut().pop_front().unwrap(), "r")
+            } else {
+                (self.first.borrow_mut().pop_front().unwrap(), "l")
+            }
+        };
+
+        self.to_release = Some(vec![item]);
+        self.release_source = Some(source);
+        true
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        if let Some(to_release) = self.to_release.take() {
+            let source = self.release_source.take();
+            if !to_release.is_empty()
+                && let Some(log_writer) = log_writer
+            {
+                let (batch_location, line, caret_indent) = self.location;
+                let source_label = source.unwrap_or("?");
+
+                let labeled_iter = to_release.iter().map(|item| (source_label, item));
+
+                let note_str = format!(
+                    "^ observed non-deterministic merge order: {:?}",
+                    TruncatedLabeledVecDebug(
+                        RefCell::new(Some(labeled_iter)),
+                        8,
+                        self.format_item_debug
+                    )
+                );
+
+                let _ = writeln!(
+                    log_writer,
+                    "\n{} {}",
+                    "-->".color(colored::Color::Blue),
+                    batch_location
+                );
+
+                let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+
+                let _ = writeln!(
+                    log_writer,
+                    " {}{}{}",
+                    "|".color(colored::Color::Blue),
+                    caret_indent,
+                    note_str.color(colored::Color::Green)
+                );
+            }
+
+            for item in to_release {
+                self.output.try_send(item).unwrap();
+            }
+        } else {
+            panic!("No decision to release");
+        }
+    }
+}
+
+type KeyedMergeOrderedInput<K, V> = Rc<RefCell<Option<Vec<(K, V)>>>>;
+
+/// Keyed variant of [`MergeOrderedHook`], used for bounded / non-root keyed
+/// streams. Both inputs are fully materialized batches. Interleaves the two
+/// batches *independently within each key*, preserving per-input order within
+/// each key. The interleaving across different keys is irrelevant because a
+/// [`crate::live_collections::keyed_stream::KeyedStream`] carries no ordering
+/// guarantee across keys.
+pub struct KeyedMergeOrderedHook<K: Hash + Eq + Clone, V> {
+    first: KeyedMergeOrderedInput<K, V>,
+    second: KeyedMergeOrderedInput<K, V>,
+    to_release: Option<Vec<(K, V)>>,
+    release_sources: Option<Vec<bool>>,
+    output: Sender<Vec<(K, V)>>,
+    batch_location: HookLocationMeta,
+    format_item_debug: fn(&(K, V)) -> Option<String>,
+}
+
+impl<K: Hash + Eq + Clone, V> KeyedMergeOrderedHook<K, V> {
+    pub fn new(
+        first: KeyedMergeOrderedInput<K, V>,
+        second: KeyedMergeOrderedInput<K, V>,
+        output: Sender<Vec<(K, V)>>,
+        batch_location: HookLocationMeta,
+        format_item_debug: fn(&(K, V)) -> Option<String>,
+    ) -> Self {
+        Self {
+            first,
+            second,
+            to_release: None,
+            release_sources: None,
+            output,
+            batch_location,
+            format_item_debug,
+        }
+    }
+}
+
+impl<K: Hash + Eq + Clone, V> SimInlineHook for KeyedMergeOrderedHook<K, V> {
+    fn pending_decision(&self) -> bool {
+        self.first.borrow().is_some() && self.second.borrow().is_some()
+    }
+
+    fn has_decision(&self) -> bool {
+        self.to_release.is_some()
+    }
+
+    fn autonomous_decision<'a>(&mut self, driver: &mut Borrowed<'a>) {
+        let first_input = self.first.borrow_mut().take().unwrap();
+        let second_input = self.second.borrow_mut().take().unwrap();
+
+        // Group each input by key, preserving per-input order within each key
+        // and recording the order in which keys are first seen so that output
+        // is deterministic given the same random choices.
+        let mut key_order: Vec<K> = Vec::new();
+        let mut first_grouped: FxHashMap<K, VecDeque<V>> = FxHashMap::default();
+        let mut second_grouped: FxHashMap<K, VecDeque<V>> = FxHashMap::default();
+
+        for (k, v) in first_input {
+            if !first_grouped.contains_key(&k) && !second_grouped.contains_key(&k) {
+                key_order.push(k.clone());
+            }
+            first_grouped.entry(k).or_default().push_back(v);
+        }
+        for (k, v) in second_input {
+            if !first_grouped.contains_key(&k) && !second_grouped.contains_key(&k) {
+                key_order.push(k.clone());
+            }
+            second_grouped.entry(k).or_default().push_back(v);
+        }
+
+        let mut result = Vec::new();
+        let mut sources = Vec::new();
+
+        for key in key_order {
+            let mut first_q = first_grouped.remove(&key).unwrap_or_default();
+            let mut second_q = second_grouped.remove(&key).unwrap_or_default();
+
+            // Generate a valid interleaving of this key's two sub-sequences,
+            // preserving per-input order.
+            while !first_q.is_empty() && !second_q.is_empty() {
+                let take_second: bool = produce().generate(driver).unwrap();
+                if take_second {
+                    result.push((key.clone(), second_q.pop_front().unwrap()));
+                    sources.push(true);
+                } else {
+                    result.push((key.clone(), first_q.pop_front().unwrap()));
+                    sources.push(false);
+                }
+            }
+            for v in first_q {
+                result.push((key.clone(), v));
+                sources.push(false);
+            }
+            for v in second_q {
+                result.push((key.clone(), v));
+                sources.push(true);
+            }
+        }
+
+        self.to_release = Some(result);
+        self.release_sources = Some(sources);
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        if let Some(to_release) = self.to_release.take() {
+            let sources = self.release_sources.take().unwrap();
+            if !to_release.is_empty()
+                && let Some(log_writer) = log_writer
+            {
+                let (batch_location, line, caret_indent) = self.batch_location;
+
+                let labeled_iter =
+                    sources
+                        .iter()
+                        .zip(to_release.iter())
+                        .map(|(is_second, item)| {
+                            let label: &'static str = if *is_second { "r" } else { "l" };
+                            (label, item)
+                        });
+
+                let note_str = format!(
+                    "^ observed non-deterministic merge order: {:?}",
+                    TruncatedLabeledVecDebug(
+                        RefCell::new(Some(labeled_iter)),
+                        8,
+                        self.format_item_debug
+                    )
+                );
+
+                let _ = writeln!(
+                    log_writer,
+                    "{} {}",
+                    "-->".color(colored::Color::Blue),
+                    batch_location
+                );
+
+                let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+
+                let _ = writeln!(
+                    log_writer,
+                    " {}{}{}",
+                    "|".color(colored::Color::Blue),
+                    caret_indent,
+                    note_str.color(colored::Color::Cyan)
+                );
+            }
+
+            self.output.try_send(to_release).unwrap();
+        } else {
+            panic!("No decision to release");
+        }
+    }
+}
+
+/// Keyed variant of [`TopLevelMergeOrderedHook`]. Releases one element at a
+/// time, picking from the front of some key's queue in either the first or the
+/// second input. This preserves per-input order within each key while allowing
+/// arbitrary interleaving both across the two inputs and across keys (which is
+/// unconstrained for keyed streams), and lets feedback cycles deliver elements
+/// between releases.
+pub struct TopLevelKeyedMergeOrderedHook<K: Hash + Eq + Clone, V> {
+    pub first: Rc<RefCell<FxHashMap<K, VecDeque<V>>>>,
+    pub second: Rc<RefCell<FxHashMap<K, VecDeque<V>>>>,
+    pub to_release: Option<Vec<(K, V)>>,
+    pub release_source: Option<&'static str>,
+    pub output: Sender<(K, V)>,
+    pub location: HookLocationMeta,
+    pub format_item_debug: fn(&(K, V)) -> Option<String>,
+}
+
+impl<K: Hash + Eq + Clone, V> SimHook for TopLevelKeyedMergeOrderedHook<K, V> {
+    fn current_decision(&self) -> Option<bool> {
+        self.to_release.as_ref().map(|v| !v.is_empty())
+    }
+
+    fn can_make_nontrivial_decision(&self) -> bool {
+        #[expect(clippy::disallowed_methods, reason = "FxHasher is deterministic")]
+        let first_nonempty = !self.first.borrow().values().all(|q| q.is_empty());
+        #[expect(clippy::disallowed_methods, reason = "FxHasher is deterministic")]
+        let second_nonempty = !self.second.borrow().values().all(|q| q.is_empty());
+        first_nonempty || second_nonempty
+    }
+
+    fn autonomous_decision<'a>(
+        &mut self,
+        driver: &mut Borrowed<'a>,
+        force_nontrivial: bool,
+    ) -> bool {
+        // Collect candidates: for each non-empty key queue in either input, we
+        // can release its front element. `false` = first input, `true` = second.
+        let mut candidates: Vec<(bool, K)> = Vec::new();
+        {
+            #[expect(clippy::disallowed_methods, reason = "FxHasher is deterministic")]
+            for (k, q) in self.first.borrow().iter() {
+                if !q.is_empty() {
+                    candidates.push((false, k.clone()));
+                }
+            }
+            #[expect(clippy::disallowed_methods, reason = "FxHasher is deterministic")]
+            for (k, q) in self.second.borrow().iter() {
+                if !q.is_empty() {
+                    candidates.push((true, k.clone()));
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            self.to_release = Some(vec![]);
+            self.release_source = None;
+            return false;
+        }
+
+        if !force_nontrivial && produce().generate(driver).unwrap() {
+            // don't release anything
+            self.to_release = Some(vec![]);
+            self.release_source = None;
+            return false;
+        }
+
+        let idx = (0..candidates.len()).generate(driver).unwrap();
+        let (take_second, key) = &candidates[idx];
+        let take_second = *take_second;
+
+        let item = if take_second {
+            self.second
+                .borrow_mut()
+                .get_mut(key)
+                .unwrap()
+                .pop_front()
+                .unwrap()
+        } else {
+            self.first
+                .borrow_mut()
+                .get_mut(key)
+                .unwrap()
+                .pop_front()
+                .unwrap()
+        };
+
+        self.to_release = Some(vec![(key.clone(), item)]);
+        self.release_source = Some(if take_second { "r" } else { "l" });
+        true
+    }
+
+    fn release_decision(&mut self, log_writer: Option<&mut dyn std::fmt::Write>) {
+        if let Some(to_release) = self.to_release.take() {
+            let source = self.release_source.take();
+            if !to_release.is_empty()
+                && let Some(log_writer) = log_writer
+            {
+                let (batch_location, line, caret_indent) = self.location;
+                let source_label = source.unwrap_or("?");
+
+                let labeled_iter = to_release.iter().map(|item| (source_label, item));
+
+                let note_str = format!(
+                    "^ observed non-deterministic merge order: {:?}",
+                    TruncatedLabeledVecDebug(
+                        RefCell::new(Some(labeled_iter)),
+                        8,
+                        self.format_item_debug
+                    )
+                );
+
+                let _ = writeln!(
+                    log_writer,
+                    "\n{} {}",
+                    "-->".color(colored::Color::Blue),
+                    batch_location
+                );
+
+                let _ = writeln!(log_writer, " {}{}", "|".color(colored::Color::Blue), line);
+
+                let _ = writeln!(
+                    log_writer,
+                    " {}{}{}",
+                    "|".color(colored::Color::Blue),
+                    caret_indent,
+                    note_str.color(colored::Color::Green)
+                );
+            }
+
+            for item in to_release {
+                self.output.try_send(item).unwrap();
+            }
+        } else {
+            panic!("No decision to release");
+        }
+    }
+}
+
+#[cfg(test)]
+mod maybe_debug_tests {
+    struct NotDebuggable;
+
+    #[derive(Debug)]
+    struct Debuggable;
+
+    #[test]
+    fn test_non_debug_type_returns_none() {
+        let fmt_fn: fn(&NotDebuggable) -> Option<String> = crate::__maybe_debug__!(NotDebuggable);
+        assert_eq!(fmt_fn(&NotDebuggable), None);
+    }
+
+    #[test]
+    fn test_debug_type_returns_some() {
+        let fmt_fn: fn(&Debuggable) -> Option<String> = crate::__maybe_debug__!(Debuggable);
+        assert_eq!(fmt_fn(&Debuggable), Some("Debuggable".to_owned()));
+    }
+
+    #[test]
+    fn test_primitive_debug() {
+        let fmt_fn: fn(&i32) -> Option<String> = crate::__maybe_debug__!(i32);
+        assert_eq!(fmt_fn(&42), Some("42".to_owned()));
+    }
+}
+
+#[cfg(test)]
+mod membership_hook_tests {
+    use std::collections::VecDeque;
+    use std::task::{Context, Poll};
+
+    use dfir_rs::util::unsync::mpsc;
+    use futures::task::noop_waker_ref;
+
+    use super::{MembershipHook, SimHook};
+
+    fn drain<T>(recv: &mut mpsc::Receiver<T>) -> Vec<T> {
+        let mut out = Vec::new();
+        let cx = Context::from_waker(noop_waker_ref());
+        while let Poll::Ready(Some(item)) = recv.poll_recv(&cx) {
+            out.push(item);
+        }
+        out
+    }
+
+    /// The hook is pre-seeded from the member set (no upstream DFIR), reports it
+    /// can make nontrivial decisions while events remain, and reports exhaustion
+    /// once drained.
+    #[test]
+    fn preseeded_and_reports_readiness() {
+        let (send, _recv) = mpsc::unbounded::<u32>();
+        let hook = MembershipHook::new(
+            [10u32, 11, 12],
+            send,
+            ("loc", "line", "  "),
+            crate::__maybe_debug__!(u32),
+        );
+
+        assert_eq!(hook.input.borrow().len(), 3);
+        assert!(
+            hook.can_make_nontrivial_decision(),
+            "should be able to release while events remain"
+        );
+
+        // Drain the queue directly; when empty, no nontrivial decision remains.
+        hook.input.borrow_mut().clear();
+        assert!(!hook.can_make_nontrivial_decision());
+    }
+
+    /// `release_decision` forwards the staged events to the output channel — the
+    /// wiring that a `source_stream` would read from in real codegen.
+    #[test]
+    fn release_forwards_to_output_channel() {
+        let (send, mut recv) = mpsc::unbounded::<u32>();
+        let mut hook = MembershipHook::new(
+            VecDeque::from([10u32, 11, 12]),
+            send,
+            ("loc", "line", "  "),
+            crate::__maybe_debug__!(u32),
+        );
+
+        // Simulate the engine having chosen to release event `10` this round.
+        hook.to_release = Some(vec![10]);
+        assert_eq!(hook.current_decision(), Some(true));
+        hook.release_decision(None);
+        assert_eq!(drain(&mut recv), vec![10]);
+
+        // A round that releases nothing is a valid (trivial) decision: the member
+        // simply joins later.
+        hook.to_release = Some(vec![]);
+        assert_eq!(hook.current_decision(), Some(false));
+        hook.release_decision(None);
+        assert_eq!(drain(&mut recv), Vec::<u32>::new());
+    }
+}

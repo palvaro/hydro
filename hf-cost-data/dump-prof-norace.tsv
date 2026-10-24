@@ -1,0 +1,8 @@
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	initial (crdt_gossip.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	2	9	198356
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	all_elements (crdt_gossip.rs)	EXH(All)	10	80	942120
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	gset_state (crdt_gossip.rs)	NC	0	0	0
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	echo (crdt_gossip.rs)	EXH(All)	13	104	948892
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	fan_out (fan_out.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	3	17	528827
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	all_elements (crdt_gossip.rs)	EXH(All)	13	104	2118335
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	gset_state (crdt_gossip.rs)	NC	0	0	0
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	fan_out (fan_out.rs #1)	EXH(All)	13	104	1948628

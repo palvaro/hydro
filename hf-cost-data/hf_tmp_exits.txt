@@ -1,0 +1,24 @@
+/tmp/.tmpIvyCs0/timing-lite-1.log:test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 103 filtered out; finished in 13.90s
+/tmp/.tmpIvyCs0/timing-lite-1.log:EXIT 0
+/tmp/.tmpIvyCs0/timing-lite-1.log:test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 216 filtered out; finished in 105.83s
+/tmp/.tmpIvyCs0/timing-lite-1.log:EXIT 0
+/tmp/.tmpIvyCs0/timing-lite-2.log:test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 103 filtered out; finished in 9.39s
+/tmp/.tmpIvyCs0/timing-lite-2.log:EXIT 0
+/tmp/.tmpIvyCs0/timing-lite-2.log:test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 216 filtered out; finished in 65.14s
+/tmp/.tmpIvyCs0/timing-lite-2.log:EXIT 0
+/tmp/.tmpIvyCs0/timing-lite-3.log:test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 103 filtered out; finished in 8.15s
+/tmp/.tmpIvyCs0/timing-lite-3.log:EXIT 0
+/tmp/.tmpIvyCs0/timing-lite-3.log:test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 216 filtered out; finished in 61.83s
+/tmp/.tmpIvyCs0/timing-lite-3.log:EXIT 0
+/tmp/.tmpIvyCs0/timing-races-1.log:test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 106 filtered out; finished in 25.59s
+/tmp/.tmpIvyCs0/timing-races-1.log:EXIT 0
+/tmp/.tmpIvyCs0/timing-races-1.log:test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 234 filtered out; finished in 378.22s
+/tmp/.tmpIvyCs0/timing-races-1.log:EXIT 0
+/tmp/.tmpIvyCs0/timing-races-2.log:test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 106 filtered out; finished in 28.24s
+/tmp/.tmpIvyCs0/timing-races-2.log:EXIT 0
+/tmp/.tmpIvyCs0/timing-races-2.log:test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 234 filtered out; finished in 440.54s
+/tmp/.tmpIvyCs0/timing-races-2.log:EXIT 0
+/tmp/.tmpIvyCs0/timing-races-3.log:test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 106 filtered out; finished in 25.51s
+/tmp/.tmpIvyCs0/timing-races-3.log:EXIT 0
+/tmp/.tmpIvyCs0/timing-races-3.log:test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 234 filtered out; finished in 367.32s
+/tmp/.tmpIvyCs0/timing-races-3.log:EXIT 0

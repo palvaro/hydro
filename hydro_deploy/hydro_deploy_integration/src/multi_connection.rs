@@ -145,8 +145,9 @@ impl<
                     Poll::Ready(Err(e)) => {
                         if !me.active_connections.iter().any(|conn| conn.is_some()) {
                             return Poll::Ready(Some(Err(e.into())));
+                        } else {
+                            break;
                         }
-                        break;
                     }
                     Poll::Pending => {
                         break;
@@ -184,8 +185,9 @@ impl<
                     Poll::Ready(Err(e)) => {
                         if !me.active_connections.iter().any(|conn| conn.is_some()) {
                             return Poll::Ready(Some(Err(e.into())));
+                        } else {
+                            break;
                         }
-                        break;
                     }
                     Poll::Pending => {
                         break;
@@ -215,7 +217,7 @@ impl<
                         out = Poll::Ready(Some(Ok((connection_id, data))));
                         break;
                     }
-                    Poll::Ready(Some(Err(_)) | None) => {
+                    Poll::Ready(Some(Err(_))) | Poll::Ready(None) => {
                         let _ = me.membership_sender.send((connection_id, false));
                         *id_and_stream = None; // Mark connection as removed
                         any_removed = true;
@@ -268,8 +270,9 @@ impl<O, C: Encoder<O>> Sink<(u64, O)> for MultiConnectionSink<O, C> {
                             "No additional sinks are available (was the stream dropped)?",
                         )
                         .into()));
+                    } else {
+                        break;
                     }
-                    break;
                 }
                 Poll::Pending => {
                     break;
@@ -355,7 +358,7 @@ pub struct TcpMultiConnectionSource<C: Decoder> {
     pub active_connections: Vec<Option<(u64, FramedRead<OwnedReadHalf, C>)>>,
     /// Cursor for fair round-robin polling
     pub poll_cursor: usize,
-    /// Channel to send new sinks to the `TcpMultiConnectionSink`
+    /// Channel to send new sinks to the TcpMultiConnectionSink
     pub new_sink_sender: mpsc::UnboundedSender<(u64, FramedWrite<OwnedWriteHalf, C>)>,
     /// Channel to send membership events
     pub membership_sender: mpsc::UnboundedSender<(u64, bool)>,
@@ -388,8 +391,9 @@ where
                 Poll::Ready(Err(e)) => {
                     if !me.active_connections.iter().any(|c| c.is_some()) {
                         return Poll::Ready(Some(Err(e.into())));
+                    } else {
+                        break;
                     }
-                    break;
                 }
                 Poll::Pending => {
                     break;
@@ -418,7 +422,7 @@ where
                         out = Poll::Ready(Some(Ok((connection_id, data))));
                         break;
                     }
-                    Poll::Ready(Some(Err(_)) | None) => {
+                    Poll::Ready(Some(Err(_))) | Poll::Ready(None) => {
                         let _ = me.membership_sender.send((connection_id, false));
                         *id_and_stream = None; // Mark connection as removed
                         any_removed = true;
@@ -456,11 +460,11 @@ where
 }
 
 /// TCP-only multi-connection sink using concrete types (no boxing).
-/// Routes (`connection_id`, data) to the appropriate connection.
+/// Routes (connection_id, data) to the appropriate connection.
 pub struct TcpMultiConnectionSink<I, C: Encoder<I>> {
     /// Map of connection IDs to their framed writers
     pub connection_sinks: HashMap<u64, FramedWrite<OwnedWriteHalf, C>>,
-    /// Channel to receive new sinks from `TcpMultiConnectionSource`
+    /// Channel to receive new sinks from TcpMultiConnectionSource
     pub new_sink_receiver: mpsc::UnboundedReceiver<(u64, FramedWrite<OwnedWriteHalf, C>)>,
     _marker: std::marker::PhantomData<fn(I) -> I>, /* fn(I) -> I instead of just I to keep the struct invariant over I, which keeps it Unpin. */
 }

@@ -1,0 +1,6 @@
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	initial (crdt_gossip.rs)	sets=2	sched=9	wall_us=198356	next_us=1498	explore_us=16117	callback_us=454	callbacks=1
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	all_elements (crdt_gossip.rs)	sets=10	sched=80	wall_us=942120	next_us=139331	explore_us=607214	callback_us=153995	callbacks=72
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	echo (crdt_gossip.rs)	sets=13	sched=104	wall_us=948892	next_us=78356	explore_us=686601	callback_us=92179	callbacks=96
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	fan_out (fan_out.rs)	sets=3	sched=17	wall_us=528827	next_us=2980	explore_us=161777	callback_us=6009	callbacks=9
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	all_elements (crdt_gossip.rs)	sets=13	sched=104	wall_us=2118335	next_us=167966	explore_us=1576347	callback_us=218963	callbacks=96
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	fan_out (fan_out.rs #1)	sets=13	sched=104	wall_us=1948628	next_us=68359	explore_us=1512797	callback_us=106067	callbacks=96

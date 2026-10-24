@@ -1,0 +1,46 @@
+ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register	phase2_fwd (abd.rs)	EXH(All)	176	1408	9422364
+ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register	abd_register_state (abd.rs)	EXH(All)	176	1408	9597946
+ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register	abd_register_state (abd.rs #1)	NC	0	0	0
+ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register	queries (abd.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	5	33	333716
+ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register	initial (reliable_broadcast.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	3	17	269026
+ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register	echo (reliable_broadcast.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	12	89	783538
+ec_inference_demos::ec_abd_hydrofrac::the_register_breaks_when_the_client_crashes_mid_phase_two	phase2_fwd (abd.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	3	17	81304
+ec_inference_demos::ec_abd_hydrofrac::the_register_breaks_when_the_client_crashes_mid_phase_two	abd_register_state (abd.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	3	17	78458
+ec_inference_demos::ec_abd_hydrofrac::the_register_breaks_when_the_client_crashes_mid_phase_two	abd_register_state (abd.rs #1)	NC	0	0	0
+ec_inference_demos::ec_abd_hydrofrac::the_register_breaks_when_the_client_crashes_mid_phase_two	queries (abd.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	5	33	124141
+ec_inference_demos::ec_abd_hydrofrac::the_register_breaks_when_the_client_crashes_mid_phase_two	phase2 (abd.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	3	17	81283
+cluster::ec_bruteforce::brute_force_agrees_on_reliable_broadcast_closed_with_three_payloads	initial (reliable_broadcast.rs)	CEX(1 crashes, 1 faults; tol=Some(0) cert)	3	3	16633
+cluster::ec_bruteforce::brute_force_agrees_on_reliable_broadcast_closed_with_three_payloads	echo (reliable_broadcast.rs)	CEX(1 crashes, 1 faults; tol=Some(0) cert)	3	3	20330
+cluster::ec_bruteforce::brute_force_agrees_on_reliable_broadcast_closed_with_three_payloads	new_messages (reliable_broadcast.rs)	CERT(All)	281	281	12743254
+cluster::ec_bruteforce::brute_force_agrees_on_reliable_broadcast_closed_with_two_payloads	initial (reliable_broadcast.rs)	CEX(1 crashes, 1 faults; tol=Some(0) cert)	3	3	10781
+cluster::ec_bruteforce::brute_force_agrees_on_reliable_broadcast_closed_with_two_payloads	echo (reliable_broadcast.rs)	CEX(1 crashes, 1 faults; tol=Some(0) cert)	3	3	18697
+cluster::ec_bruteforce::brute_force_agrees_on_reliable_broadcast_closed_with_two_payloads	new_messages (reliable_broadcast.rs)	CERT(All)	134	134	1818395
+cluster::ec_bruteforce::brute_force_agrees_on_two_pc_cooperative_termination	prepares (two_pc_ctp.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	5	257	1123294
+cluster::ec_bruteforce::brute_force_agrees_on_two_pc_cooperative_termination	commits (two_pc_ctp.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	3	129	664987
+cluster::ec_bruteforce::brute_force_agrees_on_two_pc_cooperative_termination	peer_in (two_pc_ctp.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	10	590	2133550
+cluster::ec_bruteforce::brute_force_agrees_on_two_pc_cooperative_termination	peer (two_pc_ctp.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	10	583	2737138
+cluster::ec_bruteforce::brute_force_agrees_on_two_pc_cooperative_termination	committed (two_pc_ctp.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	3	129	897178
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	initial (crdt_gossip.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	26	201	7201998
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	all_elements (crdt_gossip.rs)	EXH(All)	82	656	163929314
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	gset_state (crdt_gossip.rs)	NC	0	0	0
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	echo (crdt_gossip.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	10	73	3172279
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	fan_out (fan_out.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	27	209	10438244
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	all_elements (crdt_gossip.rs)	EXH(All)	85	680	148689582
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	gset_state (crdt_gossip.rs)	NC	0	0	0
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	fan_out (fan_out.rs #1)	CEX(1 crashes, 1 faults; tol=Some(0))	10	76	4604147
+cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	prepares (multi_paxos.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	16	121	1103147
+cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	accepts_fwd (multi_paxos.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	11	81	974441
+cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	accepts (multi_paxos.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	11	81	976663
+cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	learned_at_proposers (multi_paxos.rs)	VAC(SingleMember)	0	0	0
+cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	learned_at_proposers (multi_paxos.rs #1)	VAC(SingleMember)	0	0	0
+cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	initial (multi_paxos.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	6	41	667259
+cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	echo (multi_paxos.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	5	33	750873
+cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	learned (multi_paxos.rs)	EXH(UpTo(1))	61	488	9409038
+cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	facts (multi_paxos.rs)	EXH(UpTo(1))	61	488	13169536
+cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	splice_epoch_log (epoch_splice.rs)	NC	0	0	0
+cluster::ec_demos_hydrofrac::ec_demo_reliable_broadcast_certifies	initial (reliable_broadcast.rs)	CEX(1 crashes, 1 faults; tol=Some(0) cert)	3	3	20798
+cluster::ec_demos_hydrofrac::ec_demo_reliable_broadcast_certifies	echo (reliable_broadcast.rs)	CEX(1 crashes, 1 faults; tol=Some(0) cert)	3	3	21822
+cluster::ec_demos_hydrofrac::ec_demo_reliable_broadcast_certifies	new_messages (reliable_broadcast.rs)	CERT(All)	134	134	1825058
+cluster::ec_demos_hydrofrac::ec_demo_reliable_broadcast_certifies	fan_out_from_process (fan_out.rs)	CEX(1 crashes, 1 faults; tol=Some(0) cert)	3	3	12744
+cluster::ec_demos_hydrofrac::ec_demo_reliable_broadcast_certifies	new_messages (reliable_broadcast.rs)	CERT(All)	134	134	1823060
+cluster::ec_demos_hydrofrac::ec_demo_reliable_broadcast_certifies	fan_out (fan_out.rs)	CEX(1 crashes, 1 faults; tol=Some(0) cert)	3	3	24102

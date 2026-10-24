@@ -113,8 +113,6 @@ impl<'a, C, Con: Consistency> super::dynamic::DynLocation for Cluster<'a, C, Con
 impl<'a, C, Con: Consistency> Location<'a> for Cluster<'a, C, Con> {
     type Root = Cluster<'a, C, Con>;
 
-    type SimHookScope = crate::sim_hooks::OnCluster<C>;
-
     type DropConsistency = Cluster<'a, C, NoConsistency>;
 
     fn consistency() -> Option<ClusterConsistency> {
@@ -146,11 +144,10 @@ impl<'a, C, Con: Consistency> TopLevel<'a> for Cluster<'a, C, Con> {}
 
 #[cfg(feature = "sim")]
 impl<'a, C> Cluster<'a, C> {
-    /// Sets up a bincode-encoded simulated input port on this cluster for testing.
+    /// Sets up a simulated input port on this cluster for testing.
     ///
     /// Returns a `SimClusterSender` that sends `(member_id, T)` messages targeting
-    /// specific cluster members, and a `Stream<T>` received by each member. Use
-    /// [`Cluster::sim_input_with`] to select another codec.
+    /// specific cluster members, and a `Stream<T>` received by each member.
     ///
     /// This method is generic over the [`Ordering`](crate::live_collections::stream::Ordering)
     /// and [`Retries`](crate::live_collections::stream::Retries) guarantees of the produced
@@ -177,19 +174,25 @@ impl<'a, C> Cluster<'a, C> {
     where
         T: serde::Serialize + serde::de::DeserializeOwned,
     {
-        self.sim_input_with::<crate::sim::codec::BincodeCodec, T, O, R>()
+        use crate::location::Location;
+
+        let external_location: crate::location::External<'a, ()> = crate::location::External {
+            key: LocationKey::FIRST,
+            flow_state: self.flow_state.clone(),
+            _phantom: PhantomData,
+        };
+
+        let (external, stream) = self.source_external_bincode(&external_location);
+
+        (
+            crate::sim::SimClusterSender(external.port_id, PhantomData),
+            stream,
+        )
     }
 
-    /// Sets up a simulated input port on this cluster using the codec `Codec`.
-    ///
-    /// Returns a `SimClusterSender` that sends `(member_id, T)` messages targeting
-    /// specific cluster members, and a `Stream<T>` received by each member. The codec is a
-    /// type parameter; the message, ordering and retries types are usually inferred:
-    /// `cluster.sim_input_with::<MyCodec, _, _, _>()`. Custom codecs implement
-    /// [`SimCodec`](crate::sim::codec::SimCodec), which documents where they must be
-    /// defined. See [`Cluster::sim_input`] for the ordering and retries guarantees.
-    pub fn sim_input_with<
-        Codec: crate::sim::codec::SimCodec<T>,
+    /// Like [`Cluster::sim_input`], but declares the input to be an operational stimulus (see
+    /// [`Location::sim_input_operational`](crate::location::Location::sim_input_operational)).
+    pub fn sim_input_operational<
         T,
         O: crate::live_collections::stream::Ordering,
         R: crate::live_collections::stream::Retries,
@@ -204,23 +207,16 @@ impl<'a, C> Cluster<'a, C> {
             O,
             R,
         >,
-    ) {
-        let external_location: crate::location::External<'a, ()> = crate::location::External {
-            key: LocationKey::FIRST,
-            flow_state: self.flow_state.clone(),
-            _phantom: PhantomData,
-        };
-
-        let (external_port_id, stream) = super::register_serialized_external_input(
-            self,
-            &external_location,
-            crate::sim::codec::staged_deserialize::<T, Codec>(),
-        );
-
-        (
-            crate::sim::SimClusterSender(external_port_id, PhantomData, Codec::encode),
-            stream.weaken_ordering().weaken_retries(),
-        )
+    )
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let (sender, stream) = self.sim_input::<T, O, R>();
+        self.flow_state
+            .borrow_mut()
+            .operational_sim_ports
+            .insert(sender.0);
+        (sender, stream)
     }
 }
 

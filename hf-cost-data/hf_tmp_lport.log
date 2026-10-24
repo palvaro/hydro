@@ -1,0 +1,48 @@
+warning: variable does not need to be mutable
+    --> hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     |
+1383 |     let mut observe = |history: &mut Vec<EmissionRecord>,
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `hydro_lang` (lib) generated 1 warning (run `cargo fix --lib -p hydro_lang` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.59s
+     Running unittests src/lib.rs (/tmp/.tmpIvyCs0/t-lite/debug/deps/hydro_test-f47ad3b347454227)
+
+running 9 tests
+warning: profile package spec `website_playground` in profile `dev` did not match any packages
+warning: profile package spec `website_playground` in profile `release` did not match any packages
+warning: variable does not need to be mutable
+    --> /tmp/.tmpIvyCs0/lite/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     |
+1383 |     let mut observe = |history: &mut Vec<EmissionRecord>,
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling hydro_test v0.0.0 (/tmp/.tmpIvyCs0/lite/hydro_test)
+warning: `hydro_lang` (lib) generated 1 warning (run `cargo fix --lib -p hydro_lang` to apply 1 suggestion)
+   Compiling hydro_test-hydro-trybuild v0.0.0 (/tmp/.tmpIvyCs0/t-lite/hydro_trybuild/hydro_test)
+   Compiling hydro_test-hydro-trybuild-dylib v0.0.0 (/tmp/.tmpIvyCs0/t-lite/hydro_trybuild/hydro_test/dylib)
+   Compiling hydro_test-hydro-trybuild-dylib-examples v0.0.0 (/tmp/.tmpIvyCs0/t-lite/hydro_trybuild/hydro_test/dylib-examples)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 28.00s
+test cluster::paxos::tests::proposer_indexes_payloads ... ok
+test cluster::paxos::tests::proposer_indexes_payloads_jumps_on_new_max ... ok
+test cluster::kv_replica::sequence_payloads::tests::sequence_payloads_sequences_all ... ok
+test cluster::ec_bruteforce::brute_force_agrees_on_reliable_broadcast_closed_with_three_payloads ... ok
+test cluster::ec_bruteforce::brute_force_agrees_on_reliable_broadcast_closed_with_two_payloads ... ok
+test cluster::ec_bruteforce::brute_force_agrees_on_an_echo_broadcast_over_two_members ... ok
+test cluster::ec_bruteforce::brute_force_agrees_on_a_plain_broadcast_with_two_payloads ... ok
+test cluster::ec_bruteforce::brute_force_agrees_on_a_plain_broadcast_with_three_payloads ... ok
+test cluster::ec_bruteforce::search_alone_on_an_echo_broadcast_over_three_members has been running for over 60 seconds
+error: test failed, to rerun pass `-p hydro_test --lib`
+
+Caused by:
+  process didn't exit successfully: `/tmp/.tmpIvyCs0/t-lite/debug/deps/hydro_test-f47ad3b347454227 payloads over_two_members over_three_members` (signal: 15, SIGTERM: termination signal)
+error: 1 target failed:
+    `-p hydro_test --lib`

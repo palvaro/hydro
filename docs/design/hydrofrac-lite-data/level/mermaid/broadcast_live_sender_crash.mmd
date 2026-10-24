@@ -1,0 +1,15 @@
+---
+title: goal violated by {crash(source after bcast[→1]:2)}
+---
+sequenceDiagram
+    participant p0 as source
+    participant p1 as member@0
+    participant p2 as member@1
+    participant p3 as member@2
+    p0->>p1: bcast: 1
+    p0->>p1: bcast: 2
+    p0->>p2: bcast: 1
+    p0->>p2: bcast: 2
+    Note over p0: 💀 crashed
+    p0--xp3: bcast: 2 (lost: sender crashed)
+    p0->>p3: bcast: 1

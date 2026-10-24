@@ -1,0 +1,11 @@
+ .../src/ec_inference_demos/ec_abd_hydrofrac.rs     |  60 ++-
+ .../src/ec_inference_demos/ec_abd_kv_hydrofrac.rs  | 168 ++++++++
+ hydro_std/src/ec_inference_demos/mod.rs            |   2 +
+ hydro_test/src/cluster/ec_bruteforce.rs            | 412 ++++++++++++++-----
+ hydro_test/src/cluster/ec_demos_hydrofrac.rs       |  62 +--
+ hydro_test/src/cluster/ec_hydrofrac.rs             |  17 +-
+ hydro_test/src/cluster/ec_quorum_trust.rs          | 377 ++++++++++++++++++
+ hydro_test/src/cluster/ec_races_targets.rs         | 437 +++++++++++++++++++++
+ hydro_test/src/cluster/ec_two_pc_hydrofrac.rs      | 402 ++++++++++---------
+ hydro_test/src/cluster/mod.rs                      |   6 +
+ 10 files changed, 1614 insertions(+), 329 deletions(-)

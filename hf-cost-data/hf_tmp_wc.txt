@@ -1,0 +1,8 @@
+   630 hydrofrac/src/check/races_engine.rs
+   345 hydrofrac/src/races/clause.rs
+   256 hydrofrac/src/races/ilp.rs
+   114 hydrofrac/src/races/literals.rs
+    21 hydrofrac/src/races/mod.rs
+   321 hydrofrac/src/races/sweep.rs
+   960 hydrofrac/src/races/tests.rs
+  2647 total

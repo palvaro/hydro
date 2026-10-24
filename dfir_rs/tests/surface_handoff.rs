@@ -2,6 +2,28 @@
 
 use dfir_rs::assert_graphvis_snapshots;
 
+/// Existing runtime counters can be joined back to producer/consumer stages.
+#[dfir_rs::test]
+pub async fn test_stage_metrics_correlate_handoff_inputs_and_outputs() {
+    let mut flow = dfir_rs::dfir_syntax! {
+        source_iter(0..5_i32) -> handoff() -> map(|x| x * 2) -> null();
+    };
+    flow.run_available().await;
+
+    let graph = flow.meta_graph().expect("meta graph enabled in tests");
+    let stages = flow.metrics().by_stage(graph);
+    let consumer = stages
+        .iter()
+        .find(|stage| stage.inputs.iter().any(|input| input.items == 5))
+        .expect("consumer stage should observe all five handoff items");
+    let input = consumer.inputs.iter().find(|input| input.items == 5).unwrap();
+    assert_eq!(consumer.input_items(), 5);
+    assert_eq!(consumer.feedback_input_items(), 0);
+    assert!(stages.iter().any(|stage| stage.outputs.iter().any(|output| {
+        output.handoff_id == input.handoff_id && output.items == 5
+    })));
+}
+
 /// Test: `handoff()` pseudo-operator forces a subgraph boundary.
 #[dfir_rs::test]
 pub async fn test_handoff_basic() {
@@ -256,7 +278,7 @@ pub async fn test_handoff_reference() {
     let mut flow = dfir_rs::dfir_syntax! {
         my_buf = source_iter(1..=5_i32) -> handoff();
         my_buf -> for_each(|_| {});
-        source_iter([()]) -> map(|()| #my_buf.len()) -> for_each(|v: usize| out.push(v));
+        source_iter([()]) -> map(|_| #my_buf.len()) -> for_each(|v: usize| out.push(v));
     };
     flow.run_tick().await;
     drop(flow);
@@ -270,7 +292,7 @@ pub async fn test_handoff_reference_only() {
     let out = &mut output;
     let mut flow = dfir_rs::dfir_syntax! {
         my_buf = source_iter(1..=5_i32) -> handoff();
-        source_iter([()]) -> map(|()| #my_buf.len()) -> for_each(|v: usize| out.push(v));
+        source_iter([()]) -> map(|_| #my_buf.len()) -> for_each(|v: usize| out.push(v));
     };
     flow.run_tick().await;
     drop(flow);
@@ -286,7 +308,7 @@ pub async fn test_handoff_mut_reference() {
         my_buf = source_iter(1..=5_i32) -> handoff();
         my_buf -> for_each(|v: i32| out.push(v));
         // Mutably reference the buffer to retain only items > 3 before the pipe consumer drains.
-        source_iter([()]) -> map(|()| { #mut my_buf.retain(|x| *x > 3); }) -> for_each(|()| {});
+        source_iter([()]) -> map(|_| { #mut my_buf.retain(|x| *x > 3); }) -> for_each(|_| {});
     };
     flow.run_tick().await;
     drop(flow);

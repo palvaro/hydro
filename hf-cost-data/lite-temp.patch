@@ -1,0 +1,141 @@
+diff --git a/hydro_test/src/cluster/ec_bruteforce.rs b/hydro_test/src/cluster/ec_bruteforce.rs
+index a74c479fe5..edc6511772 100644
+--- a/hydro_test/src/cluster/ec_bruteforce.rs
++++ b/hydro_test/src/cluster/ec_bruteforce.rs
+@@ -398,3 +398,79 @@ fn brute_force_agrees_on_two_pc_cooperative_termination() {
+         .unwrap_or_else(|| panic!("the search finds the two-crash split: {cross}"));
+     assert_eq!(cex.crashes(), 2, "{cross}");
+ }
++
++// ---- TEMPORARY port of the races branch's multi-payload tests (cost-table baseline only) ----
++
++fn bench_closed_with(payloads: &[u32]) {
++    use hydro_std::ec_inference_demos::reliable_broadcast::reliable_broadcast_closed;
++    let mut check = EcCheck::new();
++    let mut flow = FlowBuilder::new();
++    let source = flow.process::<()>();
++    let members = flow.cluster::<()>();
++    let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
++    let _out = reliable_broadcast_closed(input, &members).sim_cluster_output();
++    let sim = check
++        .instrument(flow.sim().with_cluster_size(&members, 3))
++        .compiled();
++    let results = check.run(&sim, async || {
++        for p in payloads {
++            send.send(*p);
++        }
++    });
++    eprintln!("{results}");
++}
++
++fn bench_broadcast_with(echo: bool, members_count: usize, payloads: &[u32]) {
++    let mut check = EcCheck::new();
++    let mut flow = FlowBuilder::new();
++    let broadcaster = flow.process::<Broadcaster>();
++    let members = flow.cluster::<Member>();
++    let (send, source) = broadcaster.sim_input::<Payload, TotalOrder, ExactlyOnce>();
++    let _out = broadcast(
++        &members,
++        source,
++        echo,
++        nondet!(/** test */),
++        nondet!(/** test */),
++    )
++    .sim_cluster_output();
++    let sim = check
++        .instrument(flow.sim().with_cluster_size(&members, members_count))
++        .compiled();
++    let results = check.run(&sim, async || {
++        for p in payloads {
++            send.send(Payload(*p));
++        }
++    });
++    eprintln!("{results}");
++}
++
++#[test]
++fn brute_force_agrees_on_reliable_broadcast_closed_with_two_payloads() {
++    bench_closed_with(&[1, 2]);
++}
++
++#[test]
++fn brute_force_agrees_on_a_plain_broadcast_with_two_payloads() {
++    bench_broadcast_with(false, 3, &[1, 2]);
++}
++
++#[test]
++fn brute_force_agrees_on_reliable_broadcast_closed_with_three_payloads() {
++    bench_closed_with(&[1, 2, 3]);
++}
++
++#[test]
++fn brute_force_agrees_on_a_plain_broadcast_with_three_payloads() {
++    bench_broadcast_with(false, 3, &[1, 2, 3]);
++}
++
++#[test]
++fn brute_force_agrees_on_an_echo_broadcast_over_two_members() {
++    bench_broadcast_with(true, 2, &[1]);
++}
++
++#[test]
++fn search_alone_on_an_echo_broadcast_over_three_members() {
++    bench_broadcast_with(true, 3, &[42]);
++}
+diff --git a/hydrofrac/src/check/engine.rs b/hydrofrac/src/check/engine.rs
+index da23cb42bc..1313a63fce 100644
+--- a/hydrofrac/src/check/engine.rs
++++ b/hydrofrac/src/check/engine.rs
+@@ -102,7 +102,9 @@ impl EcCheck {
+             .expect("`EcCheck::run` needs a simulation compiled from `EcCheck::instrument`")
+             .labels();
+         let mut engine = Engine::new(self, sim, &labels, &mut body);
+-        engine.check()
++        let r = engine.check();
++        super::results::hf_dump(&r);
++        r
+     }
+ }
+ 
+diff --git a/hydrofrac/src/check/results.rs b/hydrofrac/src/check/results.rs
+index 93fac7bf9d..3a277d0410 100644
+--- a/hydrofrac/src/check/results.rs
++++ b/hydrofrac/src/check/results.rs
+@@ -492,3 +492,37 @@ impl Display for Results {
+         Ok(())
+     }
+ }
++
++/// TEMPORARY (cost table measurement; not to be committed).
++pub(crate) fn hf_dump(results: &Results) {
++    use std::io::Write;
++    let Ok(path) = std::env::var("HF_DUMP") else { return };
++    let test = std::thread::current().name().unwrap_or("?").to_owned();
++    let mut out = String::new();
++    for l in &results.labels {
++        let v = match &l.verdict {
++            Verdict::Certified { tolerates } => format!("CERT({tolerates:?})"),
++            Verdict::Counterexample(c) => format!(
++                "CEX({} crashes, {} faults; tol={:?}{})",
++                c.crashes(),
++                c.faults.len(),
++                c.tolerates,
++                if c.tolerance_certified { " cert" } else { "" }
++            ),
++            Verdict::Vacuous(r) => format!("VAC({r:?})"),
++            Verdict::Budget { tolerates } => format!("BUDGET(tol={tolerates:?})"),
++            Verdict::Exhausted { tolerates, .. } => format!("EXH({tolerates:?})"),
++            Verdict::NotChecked(_) => "NC".to_owned(),
++            Verdict::CoveredBy(i) => format!("COV({i})"),
++        };
++        out.push_str(&format!(
++            "{test}\t{}\t{v}\t{}\t{}\t{}\n",
++            l.name(),
++            l.stats.hypotheses,
++            l.stats.schedules,
++            l.stats.wall.as_micros()
++        ));
++    }
++    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
++    f.write_all(out.as_bytes()).unwrap();
++}

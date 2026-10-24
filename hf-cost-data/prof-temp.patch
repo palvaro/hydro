@@ -1,0 +1,172 @@
+diff --git a/hydro_test/src/cluster/ec_demos_hydrofrac.rs b/hydro_test/src/cluster/ec_demos_hydrofrac.rs
+index 34972a8623..69c30c1699 100644
+--- a/hydro_test/src/cluster/ec_demos_hydrofrac.rs
++++ b/hydro_test/src/cluster/ec_demos_hydrofrac.rs
+@@ -163,7 +163,9 @@ fn gossip_check(live: bool) -> Results {
+             for m in 0..MEMBERS as u32 {
+                 update.send(m, 10 + m);
+             }
+-            tick.send_many(every());
++            if std::env::var("HF_NO_RACING_TICK").is_err() {
++                tick.send_many(every());
++            }
+         },
+         async || {
+             for _ in 0..ROUNDS {
+diff --git a/hydrofrac/src/check/engine.rs b/hydrofrac/src/check/engine.rs
+index a591675dd0..9d691cf2cb 100644
+--- a/hydrofrac/src/check/engine.rs
++++ b/hydrofrac/src/check/engine.rs
+@@ -149,7 +149,9 @@ impl EcCheck {
+             .as_ref()
+             .expect("`EcCheck::run` needs a simulation compiled from `EcCheck::instrument`")
+             .labels();
+-        Engine::new(self, sim, &labels, &mut inputs, &mut recover).check()
++        let r = Engine::new(self, sim, &labels, &mut inputs, &mut recover).check();
++        super::results::hf_dump(&r);
++        r
+     }
+ }
+ 
+diff --git a/hydrofrac/src/check/races_engine.rs b/hydrofrac/src/check/races_engine.rs
+index 91c35946b6..61bc01656a 100644
+--- a/hydrofrac/src/check/races_engine.rs
++++ b/hydrofrac/src/check/races_engine.rs
+@@ -494,11 +494,18 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
+         if probe_in_full {
+             sweep.explored_in_full(FaultSet::new());
+         }
++        PROF.with(|p| p.set([0; 4]));
++        crate::races::ilp::ILPPROF.with(|p| p.set([0; 6]));
+         let verdict = loop {
+-            match sweep.next(&search.pairs.pairs) {
++            let t0 = Instant::now();
++            let next = sweep.next(&search.pairs.pairs);
++            prof_add(0, t0);
++            match next {
+                 races::Next::Try { set, in_full } => {
++                    let t1 = Instant::now();
+                     let failure =
+                         self.explore_set(&mut search, &mut sweep, world, &set, shape, in_full);
++                    prof_add(1, t1);
+                     if let Some(failure) = failure {
+                         break counterexample(
+                             set,
+@@ -531,6 +538,7 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
+                 || search.notes.early_stops == 0 && sweep.covers_everything(&search.pairs.pairs));
+         search.stats.races = Some(search.notes);
+         search.stats.wall += start.elapsed();
++        prof_dump(&crate::check::results::label_name(&self.labels.plans[target.label]), &search.stats);
+         (verdict, search.stats)
+     }
+ 
+@@ -564,6 +572,8 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
+         let mut pruned = false;
+         let mut held_somewhere: BTreeSet<Fact> = BTreeSet::new();
+         let explored = self.explore_races(set, policy, |tables, record| {
++            let tcb = Instant::now();
++            let _g = ProfGuard(tcb);
+             let revealed = Revealed::of(&record, tables);
+             revealed.tell(sweep);
+             world.push(revealed);
+@@ -628,3 +638,22 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
+         failure
+     }
+ }
++
++
++// TEMPORARY profiling (cost-table measurement; not to be committed).
++thread_local! { static PROF: std::cell::Cell<[u128; 4]> = const { std::cell::Cell::new([0; 4]) }; }
++fn prof_add(i: usize, t: Instant) {
++    PROF.with(|p| { let mut a = p.get(); a[i] += t.elapsed().as_micros(); if i == 2 { a[3] += 1; } p.set(a); });
++}
++struct ProfGuard(Instant);
++impl Drop for ProfGuard { fn drop(&mut self) { prof_add(2, self.0); } }
++fn prof_dump(label: &str, stats: &Stats) {
++    use std::io::Write;
++    let Ok(path) = std::env::var("HF_PROF") else { return };
++    let a = PROF.with(|p| p.get());
++    let b = crate::races::ilp::ILPPROF.with(|p| p.get());
++    let test = std::thread::current().name().unwrap_or("?").to_owned();
++    let line = format!("{test}\t{label}\tsets={}\tsched={}\twall_us={}\tnext_us={}\texplore_us={}\tcallback_us={}\tcallbacks={}\tpropose_calls={}\tbuild_us={}\tsolve_us={}\tconstraints_total={}\tmax_universe={}\tmax_tried={}\n",
++        stats.hypotheses, stats.schedules, stats.wall.as_micros(), a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3], b[4], b[5]);
++    std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap().write_all(line.as_bytes()).unwrap();
++}
+diff --git a/hydrofrac/src/check/results.rs b/hydrofrac/src/check/results.rs
+index 511b68a8cc..7d09c2639e 100644
+--- a/hydrofrac/src/check/results.rs
++++ b/hydrofrac/src/check/results.rs
+@@ -517,3 +517,37 @@ impl Display for Results {
+         Ok(())
+     }
+ }
++
++/// TEMPORARY (cost table measurement; not to be committed).
++pub(crate) fn hf_dump(results: &Results) {
++    use std::io::Write;
++    let Ok(path) = std::env::var("HF_DUMP") else { return };
++    let test = std::thread::current().name().unwrap_or("?").to_owned();
++    let mut out = String::new();
++    for l in &results.labels {
++        let v = match &l.verdict {
++            Verdict::Certified { tolerates } => format!("CERT({tolerates:?})"),
++            Verdict::Counterexample(c) => format!(
++                "CEX({} crashes, {} faults; tol={:?}{})",
++                c.crashes(),
++                c.faults.len(),
++                c.tolerates,
++                if c.tolerance_certified { " cert" } else { "" }
++            ),
++            Verdict::Vacuous(r) => format!("VAC({r:?})"),
++            Verdict::Budget { tolerates } => format!("BUDGET(tol={tolerates:?})"),
++            Verdict::Exhausted { tolerates, .. } => format!("EXH({tolerates:?})"),
++            Verdict::NotChecked(_) => "NC".to_owned(),
++            Verdict::CoveredBy(i) => format!("COV({i})"),
++        };
++        out.push_str(&format!(
++            "{test}\t{}\t{v}\t{}\t{}\t{}\n",
++            l.name(),
++            l.stats.hypotheses,
++            l.stats.schedules,
++            l.stats.wall.as_micros()
++        ));
++    }
++    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
++    f.write_all(out.as_bytes()).unwrap();
++}
+diff --git a/hydrofrac/src/races/ilp.rs b/hydrofrac/src/races/ilp.rs
+index d838e54059..21213bbc8c 100644
+--- a/hydrofrac/src/races/ilp.rs
++++ b/hydrofrac/src/races/ilp.rs
+@@ -140,6 +140,7 @@ pub fn propose<P: PairKey, M: Ord + Clone>(
+     scope: Scope,
+     order: &dyn SendOrder<M>,
+ ) -> Option<Proposal<M>> {
++    let t_build = std::time::Instant::now();
+     let index: BTreeMap<&Candidate<M>, usize> =
+         universe.iter().enumerate().map(|(i, c)| (c, i)).collect();
+     let pair_rows: Vec<PairRows> = if scope == Scope::Any {
+@@ -232,11 +233,16 @@ pub fn propose<P: PairKey, M: Ord + Clone>(
+         constraints.push(no_good.leq(inside.len() as f64 - 1.0));
+     }
+ 
++    let n_constraints = constraints.len();
+     let mut model = vars.minimise(objective).using(good_lp::microlp);
+     for c in constraints {
+         model.add_constraint(c);
+     }
+-    let chosen = read(model.solve(), &x)?;
++    let build_us = t_build.elapsed().as_micros();
++    let t_solve = std::time::Instant::now();
++    let solved = model.solve();
++    ILPPROF.with(|p| { let mut a = p.get(); a[0] += 1; a[1] += build_us; a[2] += t_solve.elapsed().as_micros(); a[3] += n_constraints as u128; a[4] = a[4].max(universe.len() as u128); a[5] = a[5].max(tried.len() as u128); p.set(a); });
++    let chosen = read(solved, &x)?;
+     Some(chosen.into_iter().map(|i| universe[i].clone()).collect())
+ }
+ 
+@@ -254,3 +260,5 @@ fn read<S: Solution>(solved: Result<S, ResolutionError>, x: &[Variable]) -> Opti
+         Err(error) => panic!("hitting-set ILP failed: {error}"),
+     }
+ }
++
++thread_local! { pub static ILPPROF: std::cell::Cell<[u128; 6]> = const { std::cell::Cell::new([0; 6]) }; }

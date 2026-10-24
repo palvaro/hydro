@@ -1,0 +1,33 @@
+reliable_phase_two_certifies_the_register | phase2_fwd (abd.rs) | 176/1408 | wall 8215ms | ILP(next) 4484ms | explore 3664ms (sim 3348, per-schedule read 316, 1400 reads) | probe+other 67ms
+reliable_phase_two_certifies_the_register | abd_register_state (abd.rs) | 176/1408 | wall 8148ms | ILP(next) 4427ms | explore 3641ms (sim 3347, per-schedule read 294, 1400 reads) | probe+other 80ms
+reliable_phase_two_certifies_the_register | queries (abd.rs) | 5/33 | wall 199ms | ILP(next) 5ms | explore 102ms (sim 94, per-schedule read 8, 25 reads) | probe+other 93ms
+reliable_phase_two_certifies_the_register | initial (reliable_broadcast.rs) | 3/17 | wall 140ms | ILP(next) 4ms | explore 42ms (sim 39, per-schedule read 4, 9 reads) | probe+other 93ms
+reliable_phase_two_certifies_the_register | echo (reliable_broadcast.rs) | 12/89 | wall 468ms | ILP(next) 74ms | explore 300ms (sim 262, per-schedule read 37, 81 reads) | probe+other 94ms
+brute_force_agrees_on_reliable_broadcast_closed_with_three_payloads | initial (reliable_broadcast.rs) | 3/3 | wall 12ms | ILP(next) 3ms | explore 5ms (sim 4, per-schedule read 1, 2 reads) | probe+other 3ms
+brute_force_agrees_on_reliable_broadcast_closed_with_three_payloads | echo (reliable_broadcast.rs) | 3/3 | wall 19ms | ILP(next) 10ms | explore 5ms (sim 4, per-schedule read 1, 2 reads) | probe+other 4ms
+brute_force_agrees_on_reliable_broadcast_closed_with_three_payloads | new_messages (reliable_broadcast.rs) | 281/281 | wall 12180ms | ILP(next) 11646ms | explore 529ms (sim 411, per-schedule read 118, 280 reads) | probe+other 4ms
+ec_demo_g_set_gossip_certifies | initial (crdt_gossip.rs) | 23/177 | wall 2717ms | ILP(next) 132ms | explore 2375ms (sim 2206, per-schedule read 169, 169 reads) | probe+other 210ms
+ec_demo_g_set_gossip_certifies | all_elements (crdt_gossip.rs) | 82/656 | wall 105741ms | ILP(next) 90912ms | explore 14607ms (sim 8189, per-schedule read 6417, 648 reads) | probe+other 223ms
+ec_demo_g_set_gossip_certifies | echo (crdt_gossip.rs) | 10/73 | wall 2116ms | ILP(next) 774ms | explore 1108ms (sim 847, per-schedule read 261, 65 reads) | probe+other 234ms
+ec_demo_g_set_gossip_certifies | fan_out (fan_out.rs) | 27/209 | wall 8767ms | ILP(next) 160ms | explore 8163ms (sim 7947, per-schedule read 216, 201 reads) | probe+other 444ms
+ec_demo_g_set_gossip_certifies | all_elements (crdt_gossip.rs) | 85/680 | wall 122369ms | ILP(next) 89972ms | explore 31939ms (sim 25370, per-schedule read 6569, 672 reads) | probe+other 459ms
+ec_demo_g_set_gossip_certifies | fan_out (fan_out.rs #1) | 10/74 | wall 4172ms | ILP(next) 649ms | explore 3044ms (sim 2745, per-schedule read 299, 66 reads) | probe+other 479ms
+ec_demo_multi_paxos_all_labels | prepares (multi_paxos.rs) | 16/121 | wall 983ms | ILP(next) 32ms | explore 805ms (sim 748, per-schedule read 58, 113 reads) | probe+other 146ms
+ec_demo_multi_paxos_all_labels | accepts_fwd (multi_paxos.rs) | 11/81 | wall 869ms | ILP(next) 51ms | explore 669ms (sim 599, per-schedule read 69, 73 reads) | probe+other 149ms
+ec_demo_multi_paxos_all_labels | accepts (multi_paxos.rs) | 11/81 | wall 903ms | ILP(next) 64ms | explore 688ms (sim 613, per-schedule read 75, 73 reads) | probe+other 152ms
+ec_demo_multi_paxos_all_labels | initial (multi_paxos.rs) | 6/41 | wall 595ms | ILP(next) 74ms | explore 367ms (sim 328, per-schedule read 39, 33 reads) | probe+other 154ms
+ec_demo_multi_paxos_all_labels | echo (multi_paxos.rs) | 7/49 | wall 1001ms | ILP(next) 303ms | explore 541ms (sim 446, per-schedule read 95, 41 reads) | probe+other 157ms
+ec_demo_multi_paxos_all_labels | learned (multi_paxos.rs) | 61/488 | wall 9064ms | ILP(next) 4099ms | explore 4806ms (sim 4292, per-schedule read 514, 480 reads) | probe+other 158ms
+ec_demo_multi_paxos_all_labels | facts (multi_paxos.rs) | 61/488 | wall 12802ms | ILP(next) 7488ms | explore 5135ms (sim 4381, per-schedule read 755, 480 reads) | probe+other 179ms
+NORACE
+ec_demo_g_set_gossip_certifies	initial (crdt_gossip.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	2	9	198356
+ec_demo_g_set_gossip_certifies	all_elements (crdt_gossip.rs)	EXH(All)	10	80	942120
+ec_demo_g_set_gossip_certifies	gset_state (crdt_gossip.rs)	NC	0	0	0
+ec_demo_g_set_gossip_certifies	echo (crdt_gossip.rs)	EXH(All)	13	104	948892
+ec_demo_g_set_gossip_certifies	fan_out (fan_out.rs)	CEX(1 crashes, 1 faults; tol=Some(0))	3	17	528827
+ec_demo_g_set_gossip_certifies	all_elements (crdt_gossip.rs)	EXH(All)	13	104	2118335
+ec_demo_g_set_gossip_certifies	gset_state (crdt_gossip.rs)	NC	0	0	0
+ec_demo_g_set_gossip_certifies	fan_out (fan_out.rs #1)	EXH(All)	13	104	1948628
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 107 filtered out; finished in 48.28s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 237 filtered out; finished in 342.58s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 9.26s

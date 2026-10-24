@@ -76,19 +76,11 @@ macro_rules! __sliced_parse_uses__ {
             );
 
             let __tick = $crate::live_collections::sliced::Slicable::create_tick(&__styled.0);
-            // Each backtrace also carries the position of the user's `use` expression, read
-            // from its span while this macro expands. A runtime backtrace cannot recover it:
-            // rustc collapses debug-info locations of code expanded from an external macro to
-            // the `sliced!` call site, so the backtrace's first frame names this invocation,
-            // not the `use::batch(...)` inside it.
             let __backtraces = {
-                use $crate::compile::ir::backtrace::__macro_get_backtrace_at;
+                use $crate::compile::ir::backtrace::__macro_get_backtrace;
                 (
                     $($crate::macro_support::copy_span::copy_span!($($invocation_spans,)* {
-                        __macro_get_backtrace_at(
-                            1,
-                            $crate::macro_support::copy_span::span_location!($($invocation_spans),*),
-                        )
+                        __macro_get_backtrace(1)
                     }),)+
                 )
             };
@@ -211,7 +203,7 @@ pub fn yield_atomic<T>(t: T) -> style::Atomic<T> {
     style::Atomic {
         collection: t,
         // yield_atomic doesn't need a nondet since it's for output, not input
-        nondet: crate::nondet::NonDet::unhooked(),
+        nondet: crate::nondet::NonDet,
     }
 }
 
@@ -459,7 +451,7 @@ impl<'a, T, L: Location<'a>, O: Ordering, R: Retries> Unslicable
 }
 
 impl<'a, T, L: Location<'a>> Unslicable for super::Singleton<T, Tick<L>, Bounded> {
-    type Unsliced = super::Optional<T, L, crate::live_collections::optional::InitNone>;
+    type Unsliced = super::Singleton<T, L, Unbounded>;
 
     fn unslice(self) -> Self::Unsliced {
         self.latest()
@@ -496,8 +488,7 @@ impl<'a, T, L: Location<'a>, O: Ordering, R: Retries> Unslicable
 }
 
 impl<'a, T, L: Location<'a>> Unslicable for style::Atomic<super::Singleton<T, Tick<L>, Bounded>> {
-    type Unsliced =
-        super::Optional<T, crate::location::Atomic<L>, crate::live_collections::optional::InitNone>;
+    type Unsliced = super::Singleton<T, crate::location::Atomic<L>, Unbounded>;
 
     fn unslice(self) -> Self::Unsliced {
         self.collection.latest_atomic()

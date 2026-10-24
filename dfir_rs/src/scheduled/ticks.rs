@@ -64,7 +64,7 @@ pub struct TickDuration {
 }
 
 impl TickInstant {
-    /// Create a new `TickInstant`
+    /// Create a new TickInstant
     ///
     /// The specified parameter indicates the number of ticks that have elapsed on the process,
     /// prior to this one.
@@ -164,7 +164,9 @@ impl Sub for TickInstant {
         let minuend = (self.0 as i64).wrapping_add(i64::MIN);
         let subtrahend = (rhs.0 as i64).wrapping_add(i64::MIN);
         let (difference, overflowed) = minuend.overflowing_sub(subtrahend);
-        assert!(!overflowed, "overflow while subtracting two TickInstants.");
+        if overflowed {
+            panic!("overflow while subtracting two TickInstants.")
+        }
         TickDuration { ticks: difference }
     }
 }

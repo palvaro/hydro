@@ -1,0 +1,314 @@
+	check::brute_tests::brute_force_agrees_on_a_lossy_broadcast	delivered (brute_tests.rs)#0	lite CEX(0 crashes, 1 faults; tol=None cert) 2/2 2ms	races CEX(0 crashes, 1 faults; tol=None cert) 2/2 3ms	1.00	1.00
+	check::brute_tests::brute_force_agrees_on_a_lossy_relay_chain	relayed (brute_tests.rs)#0	lite CEX(1 crashes, 2 faults; tol=Some(0) cert) 8/8 12ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 8/8 63ms	1.00	1.00
+RACES-ONLY	check::brute_tests::deferred_records_are_fragile	delayed (brute_tests.rs)#0	CERT(UpTo(0))	1/14
+RACES-ONLY	check::brute_tests::deferred_records_are_fragile	delayed (brute_tests.rs #1)#0	CEX(0 crashes, 0 faults; tol=None cert)	1/14
+RACES-ONLY	check::brute_tests::races_certify_a_batched_echo	initial (brute_tests.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	2/2
+RACES-ONLY	check::brute_tests::races_certify_a_batched_echo	echoed (brute_tests.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	2/2
+RACES-ONLY	check::brute_tests::races_certify_a_batched_echo	echoed (brute_tests.rs #1)#0	CERT(UpTo(1))	2/2
+RACES-ONLY	check::brute_tests::races_certify_a_batched_echo	delivered (brute_tests.rs)#0	CERT(UpTo(1))	2/2
+	check::brute_tests::brute_force_agrees_on_a_two_member_exchange	echo_broadcast (brute_tests.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 3ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 5ms	1.00	1.00
+	check::brute_tests::brute_force_agrees_on_a_two_member_exchange	echoed (brute_tests.rs)#0	lite CERT(All) 3/3 3ms	races CERT(All) 3/3 7ms	1.00	1.00
+	check::brute_tests::brute_force_agrees_on_a_two_member_exchange	echoed (brute_tests.rs #1)#0	lite CERT(All) 2/2 2ms	races CERT(All) 2/2 5ms	1.00	1.00
+	check::brute_tests::brute_force_agrees_on_a_two_member_exchange	delivered (brute_tests.rs)#0	lite CERT(All) 3/3 3ms	races CERT(All) 2/2 5ms	0.67	0.67
+RACES-ONLY	check::brute_tests::races_find_a_broadcast_whose_members_do_not_re_forward	initial (brute_tests.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	2/2
+RACES-ONLY	check::brute_tests::races_find_a_broadcast_whose_members_do_not_re_forward	echoed (brute_tests.rs)#0	VAC(EmptyDomain)	1/1
+RACES-ONLY	check::brute_tests::races_find_a_broadcast_whose_members_do_not_re_forward	echoed (brute_tests.rs #1)#0	VAC(EmptyDomain)	1/1
+RACES-ONLY	check::brute_tests::races_find_a_broadcast_whose_members_do_not_re_forward	delivered (brute_tests.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	2/2
+RACES-ONLY	check::brute_tests::a_time_bounded_exhaustive_run_is_refused	delivered (brute_tests.rs)#0	CEX(0 crashes, 1 faults; tol=None cert)	2/2
+RACES-ONLY	check::brute_tests::a_top_level_scan_over_a_chosen_order_is_fragile	from_a (brute_tests.rs)#0	CERT(UpTo(0))	1/24
+RACES-ONLY	check::brute_tests::a_top_level_scan_over_a_chosen_order_is_fragile	from_b (brute_tests.rs)#0	CERT(UpTo(0))	1/24
+RACES-ONLY	check::brute_tests::a_top_level_scan_over_a_chosen_order_is_fragile	firsts (brute_tests.rs)#0	CERT(UpTo(0))	1/24
+RACES-ONLY	check::brute_tests::a_top_level_scan_over_a_chosen_order_is_fragile	a_top_level_scan_over_a_chosen_order_is_fragile (brute_tests.rs)#0	CEX(0 crashes, 0 faults; tol=None cert)	1/24
+	check::brute_tests::brute_force_agrees_on_an_ownership_exchange	owned (brute_tests.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 5ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/3 31ms	1.50	1.50
+	check::brute_tests::brute_force_agrees_on_an_ownership_exchange	heard (brute_tests.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 4ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 8ms	1.00	1.00
+	check::brute_tests::brute_force_agrees_on_an_ownership_exchange	heard (brute_tests.rs #1)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 3ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 7ms	1.00	1.00
+	check::brute_tests::brute_force_agrees_on_an_ownership_exchange	known (brute_tests.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 3ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 6ms	1.00	1.00
+	check::brute_tests::brute_force_agrees_on_an_echo_broadcast	echo_broadcast (brute_tests.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 9ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 44ms	1.00	1.00
+	check::brute_tests::brute_force_agrees_on_an_echo_broadcast	echoed (brute_tests.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 5ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 59ms	1.00	1.00
+	check::brute_tests::brute_force_agrees_on_an_echo_broadcast	echoed (brute_tests.rs #1)#0	lite CEX(2 crashes, 2 faults; tol=Some(1) cert) 6/6 49ms	races CEX(2 crashes, 2 faults; tol=Some(1) cert) 3/3 26ms	0.50	0.50
+	check::brute_tests::brute_force_agrees_on_an_echo_broadcast	delivered (brute_tests.rs)#0	lite CEX(2 crashes, 2 faults; tol=Some(1) cert) 7/7 10ms	races CEX(2 crashes, 2 faults; tol=Some(1) cert) 3/3 22ms	0.43	0.43
+RACES-ONLY	check::brute_tests::one_labelling_line_twice_is_two_labels	a (brute_tests.rs)#0	CERT(UpTo(0))	1/1
+RACES-ONLY	check::brute_tests::one_labelling_line_twice_is_two_labels	s (brute_tests.rs)#0	CERT(UpTo(0))	1/1
+RACES-ONLY	check::brute_tests::one_labelling_line_twice_is_two_labels	b (brute_tests.rs)#0	CEX(0 crashes, 1 faults; tol=None cert)	2/2
+RACES-ONLY	check::brute_tests::one_labelling_line_twice_is_two_labels	s (brute_tests.rs #1)#0	CEX(0 crashes, 1 faults; tol=None cert)	2/2
+	check::brute_tests::brute_force_agrees_on_an_echo_over_a_lossy_first_hop	echo_broadcast (brute_tests.rs)#0	lite CEX(0 crashes, 1 faults; tol=None cert) 2/2 5ms	races CEX(0 crashes, 1 faults; tol=None cert) 2/2 56ms	1.00	1.00
+	check::brute_tests::brute_force_agrees_on_an_echo_over_a_lossy_first_hop	echoed (brute_tests.rs)#0	lite CEX(1 crashes, 3 faults; tol=Some(0) cert) 11/11 47ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 5/5 122ms	0.45	0.45
+	check::brute_tests::brute_force_agrees_on_an_echo_over_a_lossy_first_hop	echoed (brute_tests.rs #1)#0	lite CEX(1 crashes, 3 faults; tol=Some(0) cert) 7/7 6ms	races CEX(1 crashes, 3 faults; tol=Some(0) cert) 5/5 13ms	0.71	0.71
+	check::brute_tests::brute_force_agrees_on_an_echo_over_a_lossy_first_hop	delivered (brute_tests.rs)#0	lite CEX(1 crashes, 3 faults; tol=Some(0) cert) 11/11 8ms	races CEX(1 crashes, 3 faults; tol=Some(0) cert) 5/5 12ms	0.45	0.45
+	check::brute_tests::brute_force_agrees_on_a_plain_broadcast	delivered (brute_tests.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 2ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 4ms	1.00	1.00
+	check::brute_tests::brute_force_agrees_where_provenance_precision_matters	a (brute_tests.rs)#0	lite CEX(0 crashes, 1 faults; tol=None cert) 2/2 4ms	races CEX(0 crashes, 1 faults; tol=None cert) 2/2 151ms	1.00	1.00
+	check::brute_tests::brute_force_agrees_where_provenance_precision_matters	echoed (brute_tests.rs)#0	lite CEX(1 crashes, 3 faults; tol=Some(0) cert) 11/11 47ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 5/5 113ms	0.45	0.45
+	check::brute_tests::brute_force_agrees_where_provenance_precision_matters	echoed (brute_tests.rs #1)#0	lite CEX(1 crashes, 3 faults; tol=Some(0) cert) 7/7 15ms	races CEX(1 crashes, 3 faults; tol=Some(0) cert) 5/5 118ms	0.71	0.71
+	check::brute_tests::brute_force_agrees_where_provenance_precision_matters	facts (brute_tests.rs)#0	lite CEX(1 crashes, 3 faults; tol=Some(0) cert) 11/11 8ms	races CEX(1 crashes, 3 faults; tol=Some(0) cert) 5/5 152ms	0.45	0.45
+	check::brute_tests::brute_force_agrees_where_provenance_precision_matters	b (brute_tests.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 22ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 98ms	1.00	1.00
+	check::brute_tests::the_cross_check_catches_wrong_verdicts	delivered (brute_tests.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 2ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 3ms	1.00	1.00
+RACES-ONLY	check::brute_tests::a_dedup_state_read_elsewhere_is_fragile	arrived (brute_tests.rs)#0	CERT(UpTo(0))	1/1130
+RACES-ONLY	check::brute_tests::a_dedup_state_read_elsewhere_is_fragile	leaked (brute_tests.rs)#0	CEX(0 crashes, 0 faults; tol=None cert)	1/1130
+	check::tests::a_lossy_broadcast_breaks_by_omission_alone	delivered (tests.rs)#0	lite CEX(0 crashes, 1 faults; tol=None cert) 2/2 2ms	races CEX(0 crashes, 1 faults; tol=None cert) 2/2 3ms	1.00	1.00
+RACES-ONLY	check::brute_tests::review_batch_beside_an_unready_snapshot	y (brute_tests.rs)#0	CERT(UpTo(0))	1/46
+RACES-ONLY	check::brute_tests::review_batch_beside_an_unready_snapshot	facts (brute_tests.rs)#0	CEX(0 crashes, 1 faults; tol=None cert)	2/47
+RACES-ONLY	check::brute_tests::review_batch_beside_an_unready_snapshot	x (brute_tests.rs)#0	CEX(0 crashes, 1 faults; tol=None cert)	2/47
+	check::tests::an_echo_broadcast_tolerates_one_crash_and_breaks_at_two	initial (tests.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 34ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 7ms	1.00	1.00
+	check::tests::an_echo_broadcast_tolerates_one_crash_and_breaks_at_two	echoed (tests.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 34ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 27ms	1.00	1.00
+	check::tests::an_echo_broadcast_tolerates_one_crash_and_breaks_at_two	echoed (tests.rs #1)#0	lite CEX(2 crashes, 2 faults; tol=Some(1) cert) 6/6 90ms	races CEX(2 crashes, 2 faults; tol=Some(1) cert) 3/3 12ms	0.50	0.50
+	check::tests::an_echo_broadcast_tolerates_one_crash_and_breaks_at_two	delivered (tests.rs)#0	lite CEX(2 crashes, 2 faults; tol=Some(1) cert) 7/7 38ms	races CEX(2 crashes, 2 faults; tol=Some(1) cert) 3/3 10ms	0.43	0.43
+	check::tests::a_label_that_sees_nothing_without_faults_is_vacuous	delivered (tests.rs)#0	lite VAC(EmptyDomain) 1/1 1ms	races VAC(EmptyDomain) 1/1 2ms	1.00	1.00
+	check::tests::a_plain_broadcast_tolerates_no_crash_and_breaks_at_a_mid_fan_out_crash	delivered (tests.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 3ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 35ms	1.00	1.00
+RACES-ONLY	check::tests::awaiting_an_output_in_the_fault_phase_is_allowed	delivered (tests.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	3/3
+	check::tests::assert_holds_panics_with_the_report	delivered (tests.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 3ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 5ms	1.00	1.00
+RACES-ONLY	check::brute_tests::suspected_positional_crash_order_tolerance	known (brute_tests.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	2/2
+RACES-ONLY	check::brute_tests::suspected_positional_crash_order_tolerance	known (brute_tests.rs)#1	CEX(1 crashes, 1 faults; tol=Some(0) cert)	2/2
+RACES-ONLY	check::brute_tests::suspected_positional_crash_order_tolerance	known (brute_tests.rs)#2	CEX(1 crashes, 1 faults; tol=Some(0) cert)	2/2
+RACES-ONLY	check::tests::a_schedule_choice_with_robust_derivations_is_certified	initial (tests.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	2/2
+RACES-ONLY	check::tests::a_schedule_choice_with_robust_derivations_is_certified	echoed (tests.rs)#0	CERT(All)	3/3
+RACES-ONLY	check::tests::a_schedule_choice_with_robust_derivations_is_certified	echoed (tests.rs #1)#0	CERT(All)	2/2
+RACES-ONLY	check::tests::a_schedule_choice_with_robust_derivations_is_certified	delivered (tests.rs)#0	CERT(All)	2/2
+RACES-ONLY	check::brute_tests::tick_constants_are_fragile	AssertIsConsistent (brute_tests.rs)#0	CEX(0 crashes, 1 faults; tol=None cert)	2/7
+RACES-ONLY	check::brute_tests::tick_constants_are_fragile	y (brute_tests.rs)#0	CERT(UpTo(0))	1/6
+RACES-ONLY	check::brute_tests::tick_constants_are_fragile	nine (brute_tests.rs)#0	CEX(0 crashes, 1 faults; tol=None cert)	2/7
+RACES-ONLY	check::brute_tests::suspected_total_loss_masks_a_partial_loss_certificate	owned (brute_tests.rs)#0	CEX(0 crashes, 1 faults; tol=None cert)	2/2
+RACES-ONLY	check::brute_tests::suspected_total_loss_masks_a_partial_loss_certificate	heard (brute_tests.rs)#0	CEX(0 crashes, 1 faults; tol=None cert)	3/3
+RACES-ONLY	check::brute_tests::suspected_total_loss_masks_a_partial_loss_certificate	heard (brute_tests.rs #1)#0	CEX(0 crashes, 1 faults; tol=None cert)	3/3
+RACES-ONLY	check::brute_tests::suspected_total_loss_masks_a_partial_loss_certificate	g (brute_tests.rs)#0	CERT(UpTo(0))	1/1
+RACES-ONLY	check::brute_tests::suspected_total_loss_masks_a_partial_loss_certificate	known (brute_tests.rs)#0	CEX(0 crashes, 1 faults; tol=None cert)	3/3
+	check::tests::counterexamples_write_their_lamport_diagram	delivered (tests.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 4ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 3ms	1.00	1.00
+	check::tests::members_that_disagree_without_faults_break_at_the_probe	tagged (tests.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 4ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 4ms	1.00	1.00
+	check::tests::members_that_disagree_without_faults_break_at_the_probe	tagged (tests.rs #1)#0	lite CEX(0 crashes, 0 faults; tol=None cert) 1/1 3ms	races CEX(0 crashes, 0 faults; tol=None cert) 1/1 2ms	1.00	1.00
+RACES-ONLY	check::brute_tests::suspected_positional_crash_order_certificate	known (brute_tests.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	2/2
+RACES-ONLY	check::tests::assert_holds_rejects_a_sampled_search	initial (tests.rs)#0	CERT(UpTo(0))	1/1
+RACES-ONLY	check::tests::assert_holds_rejects_a_sampled_search	echoed (tests.rs)#0	CERT(UpTo(0))	1/1
+RACES-ONLY	check::tests::assert_holds_rejects_a_sampled_search	echoed (tests.rs #1)#0	CERT(UpTo(0))	1/1
+RACES-ONLY	check::tests::assert_holds_rejects_a_sampled_search	delivered (tests.rs)#0	CERT(UpTo(0))	1/1
+RACES-ONLY	check::brute_tests::suspected_total_loss_masks_a_partial_loss_tolerance	owned (brute_tests.rs)#0	CEX(0 crashes, 1 faults; tol=None cert)	2/2
+RACES-ONLY	check::brute_tests::suspected_total_loss_masks_a_partial_loss_tolerance	heard (brute_tests.rs)#0	CEX(0 crashes, 1 faults; tol=None cert)	3/3
+RACES-ONLY	check::brute_tests::suspected_total_loss_masks_a_partial_loss_tolerance	heard (brute_tests.rs #1)#0	CEX(0 crashes, 1 faults; tol=None cert)	3/3
+RACES-ONLY	check::brute_tests::suspected_total_loss_masks_a_partial_loss_tolerance	g (brute_tests.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	2/2
+RACES-ONLY	check::brute_tests::suspected_total_loss_masks_a_partial_loss_tolerance	known (brute_tests.rs)#0	CEX(0 crashes, 1 faults; tol=None cert)	3/3
+	check::tests::a_body_that_panics_is_a_counterexample	delivered (tests.rs)#0	lite CEX(0 crashes, 0 faults; tol=None cert) 1/2 39ms	races CEX(0 crashes, 0 faults; tol=None cert) 1/0 258ms	1.00	0.00
+	check::tests::the_report_states_omission_only_counterexamples	delivered (tests.rs)#0	lite CEX(0 crashes, 1 faults; tol=None cert) 2/2 4ms	races CEX(0 crashes, 1 faults; tol=None cert) 2/2 3ms	1.00	1.00
+	check::tests::message_payloads_render_by_their_debug	orders (tests.rs)#0	lite CEX(0 crashes, 1 faults; tol=None cert) 2/2 2ms	races CEX(0 crashes, 1 faults; tol=None cert) 2/2 3ms	1.00	1.00
+RACES-ONLY	check::tests::the_recovery_phase_runs_healed	delivered (tests.rs)#0	CEX(0 crashes, 1 faults; tol=None cert)	2/2
+RACES-ONLY	check::tests::the_recovery_phase_runs_healed	delivered (tests.rs)#1	CEX(1 crashes, 1 faults; tol=Some(0) cert)	2/2
+	check::tests::the_crash_cap_ends_the_sweep_with_a_bounded_certificate	initial (tests.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 4ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 8ms	1.00	1.00
+	check::tests::the_crash_cap_ends_the_sweep_with_a_bounded_certificate	echoed (tests.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 27ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 9ms	1.00	1.00
+	check::tests::the_crash_cap_ends_the_sweep_with_a_bounded_certificate	echoed (tests.rs #1)#0	lite CERT(UpTo(1)) 5/5 10ms	races CERT(UpTo(1)) 2/2 9ms	0.40	0.40
+	check::tests::the_crash_cap_ends_the_sweep_with_a_bounded_certificate	delivered (tests.rs)#0	lite CERT(UpTo(1)) 4/4 5ms	races CERT(UpTo(1)) 2/2 20ms	0.50	0.50
+	check::tests::sampled_schedules_find_the_same_counterexample	delivered (tests.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/8 9ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 9ms	1.00	0.25
+RACES-ONLY	check::tests::the_echo_broadcast_has_no_fragile_step	initial (tests.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	2/2
+RACES-ONLY	check::tests::the_echo_broadcast_has_no_fragile_step	echoed (tests.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	2/2
+RACES-ONLY	check::tests::the_echo_broadcast_has_no_fragile_step	echoed (tests.rs #1)#0	CEX(2 crashes, 2 faults; tol=Some(1) cert)	3/3
+RACES-ONLY	check::tests::the_echo_broadcast_has_no_fragile_step	delivered (tests.rs)#0	CEX(2 crashes, 2 faults; tol=Some(1) cert)	3/3
+	check::tests::the_check_tracks_record_provenance_precisely	delivered (tests.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 2ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 4ms	1.00	1.00
+	check::tests::the_check_tracks_record_provenance_precisely	delivered (tests.rs)#1	lite CEX(0 crashes, 1 faults; tol=None cert) 2/2 2ms	races CEX(0 crashes, 1 faults; tol=None cert) 2/2 3ms	1.00	1.00
+	check::tests::the_check_tracks_record_provenance_precisely	delivered (tests.rs)#2	lite CEX(2 crashes, 2 faults; tol=Some(1) cert) 7/7 43ms	races CEX(2 crashes, 2 faults; tol=Some(1) cert) 3/3 10ms	0.43	0.43
+	check::tests::the_report_is_in_source_names	initial (tests.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 5ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 8ms	1.00	1.00
+	check::tests::the_report_is_in_source_names	echoed (tests.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 5ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 9ms	1.00	1.00
+	check::tests::the_report_is_in_source_names	echoed (tests.rs #1)#0	lite CEX(2 crashes, 2 faults; tol=Some(1) cert) 6/6 10ms	races CEX(2 crashes, 2 faults; tol=Some(1) cert) 3/3 15ms	0.50	0.50
+	check::tests::the_report_is_in_source_names	delivered (tests.rs)#0	lite CEX(2 crashes, 2 faults; tol=Some(1) cert) 7/7 9ms	races CEX(2 crashes, 2 faults; tol=Some(1) cert) 3/3 18ms	0.43	0.43
+	check::tests::the_check_tracks_record_provenance_precisely	initial (tests.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 4ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 6ms	1.00	1.00
+	check::tests::the_check_tracks_record_provenance_precisely	echoed (tests.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 7ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 7ms	1.00	1.00
+	check::tests::the_check_tracks_record_provenance_precisely	echoed (tests.rs #1)#0	lite CEX(2 crashes, 2 faults; tol=Some(1) cert) 6/6 28ms	races CEX(2 crashes, 2 faults; tol=Some(1) cert) 3/3 10ms	0.50	0.50
+	ec_inference_demos::ec_abd_hydrofrac::the_register_breaks_when_the_client_crashes_mid_phase_two	phase2_fwd (abd.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/16 203ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 3/17 277ms	1.50	1.06
+	ec_inference_demos::ec_abd_hydrofrac::the_register_breaks_when_the_client_crashes_mid_phase_two	abd_register_state (abd.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/16 137ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 3/17 193ms	1.50	1.06
+	ec_inference_demos::ec_abd_hydrofrac::the_register_breaks_when_the_client_crashes_mid_phase_two	abd_register_state (abd.rs #1)#0	lite COV(1) 0/0 0ms	races NC 0/0 0ms	nan	nan
+**	ec_inference_demos::ec_abd_hydrofrac::the_register_breaks_when_the_client_crashes_mid_phase_two	queries (abd.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/16 148ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 5/33 280ms	2.50	2.06
+	ec_inference_demos::ec_abd_hydrofrac::the_register_breaks_when_the_client_crashes_mid_phase_two	phase2 (abd.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/16 137ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 3/17 260ms	1.50	1.06
+**	ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register	phase2_fwd (abd.rs)#0	lite EXH(All) 21/168 1191ms	races EXH(All) 176/1408 16159ms	8.38	8.38
+**	ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register	abd_register_state (abd.rs)#0	lite EXH(All) 21/168 170ms	races EXH(All) 176/1408 16517ms	8.38	8.38
+	ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register	abd_register_state (abd.rs #1)#0	lite COV(1) 0/0 0ms	races NC 0/0 0ms	nan	nan
+**	ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register	queries (abd.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/16 97ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 5/33 536ms	2.50	2.06
+	ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register	initial (reliable_broadcast.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/16 97ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 3/17 364ms	1.50	1.06
+	ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register	echo (reliable_broadcast.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 9/72 274ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 12/89 1076ms	1.33	1.24
+	cluster::ec_demos_hydrofrac::ec_demo_leader_merge_breaks_under_a_leader_crash	leader_merge_broadcast (leader_merge.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 4/8 42ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/4 22ms	0.75	0.50
+	cluster::ec_bruteforce::brute_force_agrees_on_reliable_broadcast_closed	initial (reliable_broadcast.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 13ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 6ms	1.00	1.00
+	cluster::ec_bruteforce::brute_force_agrees_on_reliable_broadcast_closed	echo (reliable_broadcast.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 4ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 25ms	1.00	1.00
+	cluster::ec_bruteforce::brute_force_agrees_on_reliable_broadcast_closed	new_messages (reliable_broadcast.rs)#0	lite CERT(All) 10/10 19ms	races CERT(All) 8/8 20ms	0.80	0.80
+	cluster::ec_demos_hydrofrac::ec_demo_broadcast_live_breaks_under_a_sender_crash	fan_out_from_process (fan_out.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 3ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/3 8ms	1.50	1.50
+	cluster::ec_bruteforce::brute_force_finds_the_ask_once_race	known (ec_bruteforce.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/43 132ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 4/74 226ms	2.00	1.72
+	cluster::ec_bruteforce::brute_force_agrees_on_reliable_broadcast_closed_with_two_payloads	initial (reliable_broadcast.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 7ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/3 14ms	1.50	1.50
+	cluster::ec_bruteforce::brute_force_agrees_on_reliable_broadcast_closed_with_two_payloads	echo (reliable_broadcast.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 6ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/3 60ms	1.50	1.50
+**	cluster::ec_bruteforce::brute_force_agrees_on_reliable_broadcast_closed_with_two_payloads	new_messages (reliable_broadcast.rs)#0	lite CERT(All) 25/25 95ms	races CERT(All) 134/134 3630ms	5.36	5.36
+	cluster::ec_bruteforce::brute_force_agrees_on_ask_once	known (ec_bruteforce.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/43 137ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 4/74 196ms	2.00	1.72
+	cluster::ec_bruteforce::brute_force_agrees_on_an_echo_broadcast_over_two_members	initial (reliable_broadcast.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/214 411ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 7ms	1.00	0.01
+	cluster::ec_bruteforce::brute_force_agrees_on_an_echo_broadcast_over_two_members	echoes (reliable_broadcast.rs)#0	lite EXH(All) 3/215 400ms	races CERT(All) 2/2 7ms	0.67	0.01
+	cluster::ec_bruteforce::brute_force_agrees_on_an_echo_broadcast_over_two_members	echo (reliable_broadcast.rs)#0	lite EXH(All) 3/215 399ms	races CERT(All) 2/2 7ms	0.67	0.01
+	cluster::ec_bruteforce::brute_force_agrees_on_an_echo_broadcast_over_two_members	deliveries (reliable_broadcast.rs)#0	lite EXH(All) 3/215 400ms	races CERT(All) 2/2 9ms	0.67	0.01
+RACES-ONLY	cluster::ec_bruteforce::search_alone_on_an_echo_broadcast_over_three_members	initial (reliable_broadcast.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	2/2
+RACES-ONLY	cluster::ec_bruteforce::search_alone_on_an_echo_broadcast_over_three_members	echoes (reliable_broadcast.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	3/3
+RACES-ONLY	cluster::ec_bruteforce::search_alone_on_an_echo_broadcast_over_three_members	echo (reliable_broadcast.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	3/3
+RACES-ONLY	cluster::ec_bruteforce::search_alone_on_an_echo_broadcast_over_three_members	deliveries (reliable_broadcast.rs)#0	CERT(All)	6/6
+	cluster::ec_bruteforce::brute_force_agrees_on_a_plain_broadcast	initial (reliable_broadcast.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/8 24ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 5ms	1.00	0.25
+	cluster::ec_bruteforce::brute_force_agrees_on_a_plain_broadcast	echoes (reliable_broadcast.rs)#0	lite VAC(EmptyDomain) 1/6 21ms	races VAC(EmptyDomain) 1/1 2ms	1.00	0.17
+	cluster::ec_bruteforce::brute_force_agrees_on_a_plain_broadcast	echo (reliable_broadcast.rs)#0	lite VAC(EmptyDomain) 1/6 21ms	races VAC(EmptyDomain) 1/1 2ms	1.00	0.17
+	cluster::ec_bruteforce::brute_force_agrees_on_a_plain_broadcast	deliveries (reliable_broadcast.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/8 21ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 4ms	1.00	0.25
+	cluster::ec_bruteforce::brute_force_agrees_on_a_plain_broadcast_with_two_payloads	initial (reliable_broadcast.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/282 637ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/224 811ms	1.50	0.79
+	cluster::ec_bruteforce::brute_force_agrees_on_a_plain_broadcast_with_two_payloads	echoes (reliable_broadcast.rs)#0	lite VAC(EmptyDomain) 1/222 538ms	races VAC(EmptyDomain) 1/1 3ms	1.00	0.00
+	cluster::ec_bruteforce::brute_force_agrees_on_a_plain_broadcast_with_two_payloads	echo (reliable_broadcast.rs)#0	lite VAC(EmptyDomain) 1/222 538ms	races VAC(EmptyDomain) 1/1 3ms	1.00	0.00
+	cluster::ec_bruteforce::brute_force_agrees_on_a_plain_broadcast_with_two_payloads	deliveries (reliable_broadcast.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/282 539ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/224 679ms	1.50	0.79
+	cluster::ec_hydrofrac::tests::ec_broadcast_closed_all_labels	at_members (ec_hydrofrac.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 18ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/3 18ms	1.50	1.50
+	cluster::ec_hydrofrac::tests::ec_broadcast_closed_all_labels_writes_diagrams	at_members (ec_hydrofrac.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 4ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/3 7ms	1.50	1.50
+	cluster::ec_hydrofrac::tests::ec_broadcast_closed_cluster_to_cluster_breaks_under_a_source_crash	at_members (ec_hydrofrac.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 3ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 5ms	1.00	1.00
+	cluster::ec_hydrofrac::tests::ec_broadcast_closed_cluster_to_cluster_breaks_under_a_source_crash	at_members (ec_hydrofrac.rs #1)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 2ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 5ms	1.00	1.00
+	cluster::ec_hydrofrac::tests::ec_broadcast_closed_lossy_delayed_forever_breaks_under_one_omission	at_members (ec_hydrofrac.rs)#0	lite CEX(0 crashes, 1 faults; tol=None cert) 2/2 2ms	races CEX(0 crashes, 1 faults; tol=None cert) 2/2 91ms	1.00	1.00
+	cluster::ec_hydrofrac::tests::ec_broadcast_closed_fail_stop_breaks_under_a_sender_crash	at_members (ec_hydrofrac.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 3ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/3 18ms	1.50	1.50
+	cluster::ec_hydrofrac::tests::ec_generated_spec_separates_plain_from_reliable_broadcast	initial (reliable_broadcast.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/8 14ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 5ms	1.00	0.25
+	cluster::ec_hydrofrac::tests::ec_generated_spec_separates_plain_from_reliable_broadcast	initial (reliable_broadcast.rs)#1	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/128 1009ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 30ms	1.00	0.02
+	cluster::ec_hydrofrac::tests::ec_generated_spec_separates_plain_from_reliable_broadcast	echoes (reliable_broadcast.rs)#0	lite VAC(EmptyDomain) 1/6 11ms	races VAC(EmptyDomain) 1/1 2ms	1.00	0.17
+	cluster::ec_hydrofrac::tests::ec_generated_spec_separates_plain_from_reliable_broadcast	echoes (reliable_broadcast.rs)#1	lite CEX(1 crashes, 1 faults; tol=Some(0)) 5/320 1476ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/3 13ms	0.60	0.01
+	cluster::ec_hydrofrac::tests::ec_generated_spec_separates_plain_from_reliable_broadcast	echo (reliable_broadcast.rs)#0	lite VAC(EmptyDomain) 1/6 11ms	races VAC(EmptyDomain) 1/1 2ms	1.00	0.17
+	cluster::ec_hydrofrac::tests::ec_generated_spec_separates_plain_from_reliable_broadcast	echo (reliable_broadcast.rs)#1	lite CEX(1 crashes, 1 faults; tol=Some(0)) 5/320 582ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/3 12ms	0.60	0.01
+	cluster::ec_hydrofrac::tests::ec_generated_spec_separates_plain_from_reliable_broadcast	deliveries (reliable_broadcast.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/8 11ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 4ms	1.00	0.25
+	cluster::ec_hydrofrac::tests::ec_generated_spec_separates_plain_from_reliable_broadcast	deliveries (reliable_broadcast.rs)#1	lite EXH(All) 27/1728 5163ms	races CERT(All) 6/6 41ms	0.22	0.00
+	cluster::ec_demos_hydrofrac::ec_demo_reliable_broadcast_all_labels	initial (reliable_broadcast.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 7ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/3 43ms	1.50	1.50
+	cluster::ec_demos_hydrofrac::ec_demo_reliable_broadcast_all_labels	echo (reliable_broadcast.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 7ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/3 46ms	1.50	1.50
+**	cluster::ec_demos_hydrofrac::ec_demo_reliable_broadcast_all_labels	new_messages (reliable_broadcast.rs)#0	lite CERT(All) 25/25 218ms	races CERT(All) 134/134 5100ms	5.36	5.36
+	cluster::ec_demos_hydrofrac::ec_demo_reliable_broadcast_certifies	initial (reliable_broadcast.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 15ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/3 11ms	1.50	1.50
+	cluster::ec_demos_hydrofrac::ec_demo_reliable_broadcast_certifies	echo (reliable_broadcast.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 9ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/3 36ms	1.50	1.50
+**	cluster::ec_demos_hydrofrac::ec_demo_reliable_broadcast_certifies	new_messages (reliable_broadcast.rs)#0	lite CERT(All) 25/25 334ms	races CERT(All) 134/134 4930ms	5.36	5.36
+**	cluster::ec_demos_hydrofrac::ec_demo_reliable_broadcast_certifies	new_messages (reliable_broadcast.rs)#1	lite CERT(All) 25/25 147ms	races CERT(All) 134/134 3737ms	5.36	5.36
+	cluster::ec_hydrofrac_classes::tests::a_label_inside_a_tick_is_reported_not_checked	at_members (ec_hydrofrac_classes.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/282 1543ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/224 584ms	1.50	0.79
+	cluster::ec_hydrofrac_classes::tests::a_label_inside_a_tick_is_reported_not_checked	in_tick (ec_hydrofrac_classes.rs)#0	lite NC 0/0 0ms	races NC 0/0 0ms	nan	nan
+	cluster::ec_hydrofrac_classes::tests::a_label_inside_a_tick_is_reported_not_checked	out (ec_hydrofrac_classes.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/282 1375ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/224 659ms	1.50	0.79
+RACES-ONLY	cluster::ec_quorum_trust::races_planted_local_attestation	attestations (ec_quorum_trust.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	2/2
+RACES-ONLY	cluster::ec_quorum_trust::races_planted_local_attestation	distinct_acks (quorum.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	2/2
+RACES-ONLY	cluster::ec_quorum_trust::races_planted_local_attestation	certified (quorum.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	2/2
+RACES-ONLY	cluster::ec_quorum_trust::races_planted_local_attestation	out (ec_quorum_trust.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	2/2
+**	cluster::ec_bruteforce::brute_force_finds_the_two_pc_cooperative_termination_violation	prepares (two_pc_ctp.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/128 1386ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 5/257 2714ms	2.50	2.01
+	cluster::ec_bruteforce::brute_force_finds_the_two_pc_cooperative_termination_violation	commits (two_pc_ctp.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/128 2147ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 3/129 1771ms	1.50	1.01
+**	cluster::ec_bruteforce::brute_force_finds_the_two_pc_cooperative_termination_violation	peer_in (two_pc_ctp.rs)#0	lite VAC(EmptyDomain) 1/64 805ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 10/580 5200ms	10.00	9.06
+**	cluster::ec_bruteforce::brute_force_finds_the_two_pc_cooperative_termination_violation	peer (two_pc_ctp.rs)#0	lite VAC(EmptyDomain) 1/64 805ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 10/582 4862ms	10.00	9.09
+	cluster::ec_bruteforce::brute_force_finds_the_two_pc_cooperative_termination_violation	committed (two_pc_ctp.rs)#0	lite CEX(2 crashes, 2 faults; tol=Some(1)) 13/832 6861ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 3/131 1394ms	0.23	0.16
+**	cluster::ec_bruteforce::brute_force_agrees_on_two_pc_cooperative_termination	prepares (two_pc_ctp.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/128 1085ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 5/257 2971ms	2.50	2.01
+	cluster::ec_bruteforce::brute_force_agrees_on_two_pc_cooperative_termination	commits (two_pc_ctp.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/128 1901ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 3/129 1328ms	1.50	1.01
+**	cluster::ec_bruteforce::brute_force_agrees_on_two_pc_cooperative_termination	peer_in (two_pc_ctp.rs)#0	lite VAC(EmptyDomain) 1/64 714ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 10/578 5300ms	10.00	9.03
+**	cluster::ec_bruteforce::brute_force_agrees_on_two_pc_cooperative_termination	peer (two_pc_ctp.rs)#0	lite VAC(EmptyDomain) 1/64 714ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 10/581 4571ms	10.00	9.08
+	cluster::ec_bruteforce::brute_force_agrees_on_two_pc_cooperative_termination	committed (two_pc_ctp.rs)#0	lite CEX(2 crashes, 2 faults; tol=Some(1)) 13/832 6474ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 3/129 1456ms	0.23	0.16
+RACES-ONLY	cluster::ec_quorum_trust::races_urb3_threshold2	initial (reliable_broadcast.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	2/2
+RACES-ONLY	cluster::ec_quorum_trust::races_urb3_threshold2	echo (reliable_broadcast.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	2/2
+RACES-ONLY	cluster::ec_quorum_trust::races_urb3_threshold2	distinct_acks (quorum.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	2/2
+RACES-ONLY	cluster::ec_quorum_trust::races_urb3_threshold2	certified (quorum.rs)#0	CERT(All)	18/18
+RACES-ONLY	cluster::ec_quorum_trust::races_urb3_threshold2	uniform_reliable_broadcast_closed (uniform_broadcast.rs)#0	CERT(All)	18/18
+	cluster::ec_demos_hydrofrac::ec_demo_reliable_broadcast_certifies	fan_out_from_process (fan_out.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 7ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/3 26ms	1.50	1.50
+	cluster::ec_demos_hydrofrac::ec_demo_reliable_broadcast_certifies	fan_out (fan_out.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 7ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/3 24ms	1.50	1.50
+RACES-ONLY	cluster::ec_races_targets::races_targets_urb2_threshold1	initial (reliable_broadcast.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	2/2
+RACES-ONLY	cluster::ec_races_targets::races_targets_urb2_threshold1	echo (reliable_broadcast.rs)#0	CERT(All)	3/3
+RACES-ONLY	cluster::ec_races_targets::races_targets_urb2_threshold1	distinct_acks (quorum.rs)#0	CERT(All)	3/3
+RACES-ONLY	cluster::ec_races_targets::races_targets_urb2_threshold1	certified (quorum.rs)#0	CERT(All)	2/2
+RACES-ONLY	cluster::ec_races_targets::races_targets_urb2_threshold1	uniform_reliable_broadcast_closed (uniform_broadcast.rs)#0	CERT(All)	2/2
+RACES-ONLY	cluster::ec_races_targets::races_targets_urb2_threshold2	initial (reliable_broadcast.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	2/2
+RACES-ONLY	cluster::ec_races_targets::races_targets_urb2_threshold2	echo (reliable_broadcast.rs)#0	CERT(All)	3/3
+RACES-ONLY	cluster::ec_races_targets::races_targets_urb2_threshold2	distinct_acks (quorum.rs)#0	CERT(All)	3/3
+RACES-ONLY	cluster::ec_races_targets::races_targets_urb2_threshold2	certified (quorum.rs)#0	CERT(All)	3/3
+RACES-ONLY	cluster::ec_races_targets::races_targets_urb2_threshold2	uniform_reliable_broadcast_closed (uniform_broadcast.rs)#0	CERT(All)	3/3
+	cluster::ec_bruteforce::brute_force_agrees_on_reliable_broadcast_closed_with_three_payloads	initial (reliable_broadcast.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 7ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/3 48ms	1.50	1.50
+	cluster::ec_bruteforce::brute_force_agrees_on_reliable_broadcast_closed_with_three_payloads	echo (reliable_broadcast.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0) cert) 2/2 8ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/3 71ms	1.50	1.50
+**	cluster::ec_bruteforce::brute_force_agrees_on_reliable_broadcast_closed_with_three_payloads	new_messages (reliable_broadcast.rs)#0	lite CERT(All) 46/46 289ms	races CERT(All) 281/281 31593ms	6.11	6.11
+	cluster::ec_demos_hydrofrac::ec_demo_uniform_broadcast	initial (reliable_broadcast.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/16 152ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 3/10 70ms	1.50	0.62
+	cluster::ec_demos_hydrofrac::ec_demo_uniform_broadcast	initial (reliable_broadcast.rs)#1	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/16 98ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 3/10 113ms	1.50	0.62
+	cluster::ec_demos_hydrofrac::ec_demo_uniform_broadcast	echo (reliable_broadcast.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/16 142ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 3/10 138ms	1.50	0.62
+	cluster::ec_demos_hydrofrac::ec_demo_uniform_broadcast	echo (reliable_broadcast.rs)#1	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/16 79ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 3/10 53ms	1.50	0.62
+	cluster::ec_demos_hydrofrac::ec_demo_uniform_broadcast	distinct_acks (quorum.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/16 84ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 3/10 108ms	1.50	0.62
+	cluster::ec_demos_hydrofrac::ec_demo_uniform_broadcast	distinct_acks (quorum.rs)#1	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/16 55ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 3/10 57ms	1.50	0.62
+	cluster::ec_demos_hydrofrac::ec_demo_uniform_broadcast	certified (quorum.rs)#0	lite EXH(All) 84/672 16904ms	races EXH(All) 140/1106 11807ms	1.67	1.65
+	cluster::ec_demos_hydrofrac::ec_demo_uniform_broadcast	certified (quorum.rs)#1	lite EXH(All) 84/672 4376ms	races EXH(All) 141/1109 10164ms	1.68	1.65
+	cluster::ec_demos_hydrofrac::ec_demo_uniform_broadcast	uniform_reliable_broadcast_closed (uniform_broadcast.rs)#0	lite EXH(All) 84/672 8128ms	races EXH(All) 140/1106 8918ms	1.67	1.65
+	cluster::ec_demos_hydrofrac::ec_demo_uniform_broadcast	uniform_reliable_broadcast_closed (uniform_broadcast.rs)#1	lite EXH(All) 84/672 2647ms	races EXH(All) 142/1108 8470ms	1.69	1.65
+RACES-ONLY	cluster::ec_races_targets::races_targets_ctp2_racing_sampled	prepares (two_pc_ctp.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0))	4/193
+RACES-ONLY	cluster::ec_races_targets::races_targets_ctp2_racing_sampled	commits (two_pc_ctp.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0))	3/129
+RACES-ONLY	cluster::ec_races_targets::races_targets_ctp2_racing_sampled	peer_in (two_pc_ctp.rs)#0	EXH(All)	6/384
+RACES-ONLY	cluster::ec_races_targets::races_targets_ctp2_racing_sampled	peer (two_pc_ctp.rs)#0	EXH(All)	6/384
+RACES-ONLY	cluster::ec_races_targets::races_targets_ctp2_racing_sampled	committed (two_pc_ctp.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0))	3/129
+RACES-ONLY	cluster::ec_two_pc_hydrofrac::ctp2_one_shot_timer_breaks_at_one_coordinator_crash	prepares (two_pc_ctp.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0))	4/193
+RACES-ONLY	cluster::ec_two_pc_hydrofrac::ctp2_one_shot_timer_breaks_at_one_coordinator_crash	commits (two_pc_ctp.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0))	3/129
+RACES-ONLY	cluster::ec_two_pc_hydrofrac::ctp2_one_shot_timer_breaks_at_one_coordinator_crash	peer_in (two_pc_ctp.rs)#0	EXH(All)	6/384
+RACES-ONLY	cluster::ec_two_pc_hydrofrac::ctp2_one_shot_timer_breaks_at_one_coordinator_crash	peer (two_pc_ctp.rs)#0	EXH(All)	6/384
+RACES-ONLY	cluster::ec_two_pc_hydrofrac::ctp2_one_shot_timer_breaks_at_one_coordinator_crash	committed (two_pc_ctp.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0))	3/129
+RACES-ONLY	cluster::ec_two_pc_hydrofrac::ctp2_with_a_recurring_timer_survives_the_coordinators_crash	prepares (two_pc_ctp.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0))	4/193
+RACES-ONLY	cluster::ec_two_pc_hydrofrac::ctp2_with_a_recurring_timer_survives_the_coordinators_crash	commits (two_pc_ctp.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0))	3/129
+RACES-ONLY	cluster::ec_two_pc_hydrofrac::ctp2_with_a_recurring_timer_survives_the_coordinators_crash	peer_in (two_pc_ctp.rs)#0	EXH(All)	6/384
+RACES-ONLY	cluster::ec_two_pc_hydrofrac::ctp2_with_a_recurring_timer_survives_the_coordinators_crash	peer (two_pc_ctp.rs)#0	EXH(All)	6/384
+RACES-ONLY	cluster::ec_two_pc_hydrofrac::ctp2_with_a_recurring_timer_survives_the_coordinators_crash	committed (two_pc_ctp.rs)#0	EXH(All)	6/384
+	cluster::ec_two_pc_hydrofrac::plain_two_pc_breaks_at_one_coordinator_crash	prepares (two_pc_ctp.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/16 46ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 4/25 120ms	2.00	1.56
+	cluster::ec_two_pc_hydrofrac::plain_two_pc_breaks_at_one_coordinator_crash	commits (two_pc_ctp.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/16 54ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 3/17 75ms	1.50	1.06
+	cluster::ec_two_pc_hydrofrac::plain_two_pc_breaks_at_one_coordinator_crash	peer_in (two_pc_ctp.rs)#0	lite VAC(EmptyDomain) 1/8 36ms	races VAC(EmptyDomain) 1/8 45ms	1.00	1.00
+	cluster::ec_two_pc_hydrofrac::plain_two_pc_breaks_at_one_coordinator_crash	peer (two_pc_ctp.rs)#0	lite VAC(EmptyDomain) 1/8 36ms	races VAC(EmptyDomain) 1/8 45ms	1.00	1.00
+	cluster::ec_two_pc_hydrofrac::plain_two_pc_breaks_at_one_coordinator_crash	committed (two_pc_ctp.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/16 37ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 3/17 74ms	1.50	1.06
+RACES-ONLY	cluster::ec_races_targets::races_targets_ctp2_timers_after_the_faults	prepares (two_pc_ctp.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	4/2177
+RACES-ONLY	cluster::ec_races_targets::races_targets_ctp2_timers_after_the_faults	commits (two_pc_ctp.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	3/65
+RACES-ONLY	cluster::ec_races_targets::races_targets_ctp2_timers_after_the_faults	peer_in (two_pc_ctp.rs)#0	VAC(EmptyDomain)	1/32
+RACES-ONLY	cluster::ec_races_targets::races_targets_ctp2_timers_after_the_faults	peer (two_pc_ctp.rs)#0	VAC(EmptyDomain)	1/32
+RACES-ONLY	cluster::ec_races_targets::races_targets_ctp2_timers_after_the_faults	committed (two_pc_ctp.rs)#0	CERT(All)	6/2460
+RACES-ONLY	cluster::ec_two_pc_hydrofrac::ctp2_with_timers_after_the_faults_is_certified	prepares (two_pc_ctp.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	4/2177
+RACES-ONLY	cluster::ec_two_pc_hydrofrac::ctp2_with_timers_after_the_faults_is_certified	commits (two_pc_ctp.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0) cert)	3/65
+RACES-ONLY	cluster::ec_two_pc_hydrofrac::ctp2_with_timers_after_the_faults_is_certified	peer_in (two_pc_ctp.rs)#0	VAC(EmptyDomain)	1/32
+RACES-ONLY	cluster::ec_two_pc_hydrofrac::ctp2_with_timers_after_the_faults_is_certified	peer (two_pc_ctp.rs)#0	VAC(EmptyDomain)	1/32
+RACES-ONLY	cluster::ec_two_pc_hydrofrac::ctp2_with_timers_after_the_faults_is_certified	committed (two_pc_ctp.rs)#0	CERT(All)	6/2460
+**	cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_learned_under_one_crash	prepares (multi_paxos.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/16 572ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 16/121 1843ms	8.00	7.56
+	cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_learned_under_one_crash	accepts_fwd (multi_paxos.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 6/48 1710ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 11/81 1637ms	1.83	1.69
+	cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_learned_under_one_crash	accepts (multi_paxos.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 6/48 521ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 11/81 1774ms	1.83	1.69
+	cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_learned_under_one_crash	learned_at_proposers (multi_paxos.rs)#0	lite VAC(SingleMember) 0/0 0ms	races VAC(SingleMember) 0/0 0ms	nan	nan
+	cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_learned_under_one_crash	learned_at_proposers (multi_paxos.rs #1)#0	lite VAC(SingleMember) 0/0 0ms	races VAC(SingleMember) 0/0 0ms	nan	nan
+	cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_learned_under_one_crash	initial (multi_paxos.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 16/128 5061ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 6/41 1020ms	0.38	0.32
+	cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_learned_under_one_crash	echo (multi_paxos.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 16/128 2214ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 5/33 1136ms	0.31	0.26
+	cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_learned_under_one_crash	learned (multi_paxos.rs)#0	lite EXH(UpTo(1)) 31/248 3820ms	races EXH(UpTo(1)) 61/488 18034ms	1.97	1.97
+	cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_learned_under_one_crash	facts (multi_paxos.rs)#0	lite EXH(UpTo(1)) 31/248 2176ms	races EXH(UpTo(1)) 61/488 19166ms	1.97	1.97
+	cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_learned_under_one_crash	splice_epoch_log (epoch_splice.rs)#0	lite COV(8) 0/0 0ms	races NC 0/0 0ms	nan	nan
+**	cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	prepares (multi_paxos.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/16 250ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 16/121 1976ms	8.00	7.56
+	cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	accepts_fwd (multi_paxos.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 6/48 993ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 11/81 2052ms	1.83	1.69
+	cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	accepts (multi_paxos.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 6/48 241ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 11/81 1980ms	1.83	1.69
+	cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	learned_at_proposers (multi_paxos.rs)#0	lite VAC(SingleMember) 0/0 0ms	races VAC(SingleMember) 0/0 0ms	nan	nan
+	cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	learned_at_proposers (multi_paxos.rs #1)#0	lite VAC(SingleMember) 0/0 0ms	races VAC(SingleMember) 0/0 0ms	nan	nan
+	cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	initial (multi_paxos.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 16/128 4197ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 5/33 1339ms	0.31	0.26
+	cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	echo (multi_paxos.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 16/128 2599ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 8/57 2399ms	0.50	0.45
+	cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	learned (multi_paxos.rs)#0	lite EXH(UpTo(1)) 31/248 3533ms	races EXH(UpTo(1)) 61/488 17927ms	1.97	1.97
+	cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	facts (multi_paxos.rs)#0	lite EXH(UpTo(1)) 31/248 1735ms	races EXH(UpTo(1)) 61/488 19537ms	1.97	1.97
+	cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	splice_epoch_log (epoch_splice.rs)#0	lite COV(8) 0/0 0ms	races NC 0/0 0ms	nan	nan
+	cluster::ec_bruteforce::brute_force_agrees_on_a_plain_broadcast_with_three_payloads	initial (reliable_broadcast.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/12524 23929ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/9920 29168ms	1.50	0.79
+	cluster::ec_bruteforce::brute_force_agrees_on_a_plain_broadcast_with_three_payloads	echoes (reliable_broadcast.rs)#0	lite VAC(EmptyDomain) 1/9918 20219ms	races VAC(EmptyDomain) 1/1 4ms	1.00	0.00
+	cluster::ec_bruteforce::brute_force_agrees_on_a_plain_broadcast_with_three_payloads	echo (reliable_broadcast.rs)#0	lite VAC(EmptyDomain) 1/9918 20219ms	races VAC(EmptyDomain) 1/1 4ms	1.00	0.00
+	cluster::ec_bruteforce::brute_force_agrees_on_a_plain_broadcast_with_three_payloads	deliveries (reliable_broadcast.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/12524 20219ms	races CEX(1 crashes, 1 faults; tol=Some(0) cert) 3/9920 21456ms	1.50	0.79
+RACES-ONLY	cluster::ec_two_pc_hydrofrac::ctp3_with_a_recurring_timer_survives_two_crashes	prepares (two_pc_ctp.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0))	5/257
+RACES-ONLY	cluster::ec_two_pc_hydrofrac::ctp3_with_a_recurring_timer_survives_two_crashes	commits (two_pc_ctp.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0))	3/129
+RACES-ONLY	cluster::ec_two_pc_hydrofrac::ctp3_with_a_recurring_timer_survives_two_crashes	peer_in (two_pc_ctp.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0))	10/579
+RACES-ONLY	cluster::ec_two_pc_hydrofrac::ctp3_with_a_recurring_timer_survives_two_crashes	peer (two_pc_ctp.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0))	10/584
+RACES-ONLY	cluster::ec_two_pc_hydrofrac::ctp3_with_a_recurring_timer_survives_two_crashes	committed (two_pc_ctp.rs)#0	EXH(All)	200/12800
+**	cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_all_labels	initial (crdt_gossip.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/16 625ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 26/201 7613ms	13.00	12.56
+**	cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_all_labels	all_elements (crdt_gossip.rs)#0	lite EXH(All) 10/80 1660ms	races EXH(All) 82/656 146250ms	8.20	8.20
+**	cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_all_labels	all_elements (crdt_gossip.rs)#1	lite EXH(All) 10/80 2950ms	races EXH(All) 85/680 150504ms	8.50	8.50
+	cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_all_labels	gset_state (crdt_gossip.rs)#0	lite COV(1) 0/0 0ms	races NC 0/0 0ms	nan	nan
+	cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_all_labels	gset_state (crdt_gossip.rs)#1	lite COV(1) 0/0 0ms	races NC 0/0 0ms	nan	nan
+**	cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_all_labels	echo (crdt_gossip.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/16 552ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 10/74 3033ms	5.00	4.62
+**	cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	initial (crdt_gossip.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/16 553ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 26/201 7786ms	13.00	12.56
+**	cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	all_elements (crdt_gossip.rs)#0	lite EXH(All) 10/80 1548ms	races EXH(All) 82/656 147559ms	8.20	8.20
+**	cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	all_elements (crdt_gossip.rs)#1	lite EXH(All) 10/80 3577ms	races EXH(All) 85/680 156191ms	8.50	8.50
+	cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	gset_state (crdt_gossip.rs)#0	lite COV(1) 0/0 0ms	races NC 0/0 0ms	nan	nan
+	cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	gset_state (crdt_gossip.rs)#1	lite COV(1) 0/0 0ms	races NC 0/0 0ms	nan	nan
+**	cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	echo (crdt_gossip.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/16 607ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 10/73 2846ms	5.00	4.56
+**	cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_all_labels	fan_out (fan_out.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/16 907ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 27/209 9779ms	13.50	13.06
+RACES-ONLY	cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_all_labels	fan_out (fan_out.rs #1)#0	CEX(1 crashes, 1 faults; tol=Some(0))	10/73
+**	cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	fan_out (fan_out.rs)#0	lite CEX(1 crashes, 1 faults; tol=Some(0)) 2/16 1342ms	races CEX(1 crashes, 1 faults; tol=Some(0)) 27/209 9595ms	13.50	13.06
+RACES-ONLY	cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	fan_out (fan_out.rs #1)#0	CEX(1 crashes, 1 faults; tol=Some(0))	10/73
+LITE-ONLY	check::tests::a_program_with_a_schedule_choice_is_exhausted_not_certified	initial (tests.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0))
+LITE-ONLY	check::tests::a_program_with_a_schedule_choice_is_exhausted_not_certified	echoed (tests.rs)#0	EXH(All)
+LITE-ONLY	check::tests::a_program_with_a_schedule_choice_is_exhausted_not_certified	echoed (tests.rs #1)#0	EXH(All)
+LITE-ONLY	check::tests::a_program_with_a_schedule_choice_is_exhausted_not_certified	delivered (tests.rs)#0	EXH(All)
+LITE-ONLY	check::tests::assert_holds_rejects_an_exhausted_search	initial (tests.rs)#0	EXH(UpTo(0))
+LITE-ONLY	check::tests::assert_holds_rejects_an_exhausted_search	echoed (tests.rs)#0	EXH(UpTo(0))
+LITE-ONLY	check::tests::assert_holds_rejects_an_exhausted_search	echoed (tests.rs #1)#0	EXH(UpTo(0))
+LITE-ONLY	check::tests::assert_holds_rejects_an_exhausted_search	delivered (tests.rs)#0	EXH(UpTo(0))
+LITE-ONLY	cluster::ec_two_pc_hydrofrac::two_pc_with_cooperative_termination_survives_the_coordinators_crash	prepares (two_pc_ctp.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0))
+LITE-ONLY	cluster::ec_two_pc_hydrofrac::two_pc_with_cooperative_termination_survives_the_coordinators_crash	commits (two_pc_ctp.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0))
+LITE-ONLY	cluster::ec_two_pc_hydrofrac::two_pc_with_cooperative_termination_survives_the_coordinators_crash	peer_in (two_pc_ctp.rs)#0	VAC(EmptyDomain)
+LITE-ONLY	cluster::ec_two_pc_hydrofrac::two_pc_with_cooperative_termination_survives_the_coordinators_crash	peer (two_pc_ctp.rs)#0	VAC(EmptyDomain)
+LITE-ONLY	cluster::ec_two_pc_hydrofrac::two_pc_with_cooperative_termination_survives_the_coordinators_crash	committed (two_pc_ctp.rs)#0	EXH(All)
+LITE-ONLY	cluster::ec_two_pc_hydrofrac::ctp2_racing_timers_search_finds_the_crash	prepares (two_pc_ctp.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0))
+LITE-ONLY	cluster::ec_two_pc_hydrofrac::ctp2_racing_timers_search_finds_the_crash	commits (two_pc_ctp.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0))
+LITE-ONLY	cluster::ec_two_pc_hydrofrac::ctp2_racing_timers_search_finds_the_crash	peer_in (two_pc_ctp.rs)#0	EXH(All)
+LITE-ONLY	cluster::ec_two_pc_hydrofrac::ctp2_racing_timers_search_finds_the_crash	peer (two_pc_ctp.rs)#0	EXH(All)
+LITE-ONLY	cluster::ec_two_pc_hydrofrac::ctp2_racing_timers_search_finds_the_crash	committed (two_pc_ctp.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0))
+LITE-ONLY	cluster::ec_two_pc_hydrofrac::two_pc_with_cooperative_termination_breaks_at_two_crashes_with_three_participants	prepares (two_pc_ctp.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0))
+LITE-ONLY	cluster::ec_two_pc_hydrofrac::two_pc_with_cooperative_termination_breaks_at_two_crashes_with_three_participants	commits (two_pc_ctp.rs)#0	CEX(1 crashes, 1 faults; tol=Some(0))
+LITE-ONLY	cluster::ec_two_pc_hydrofrac::two_pc_with_cooperative_termination_breaks_at_two_crashes_with_three_participants	peer_in (two_pc_ctp.rs)#0	VAC(EmptyDomain)
+LITE-ONLY	cluster::ec_two_pc_hydrofrac::two_pc_with_cooperative_termination_breaks_at_two_crashes_with_three_participants	peer (two_pc_ctp.rs)#0	VAC(EmptyDomain)
+LITE-ONLY	cluster::ec_two_pc_hydrofrac::two_pc_with_cooperative_termination_breaks_at_two_crashes_with_three_participants	committed (two_pc_ctp.rs)#0	CEX(2 crashes, 2 faults; tol=Some(1))
+TOTAL sets 1205 2928 2.429875518672199 sched 58290 39218 0.6728083719334362

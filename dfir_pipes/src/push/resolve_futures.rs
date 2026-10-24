@@ -84,14 +84,13 @@ impl<Psh, Queue, QueueInner> ResolveFutures<Psh, Queue, QueueInner> {
                     return PushStep::Done;
                 }
                 Poll::Pending => {
-                    return if this.subgraph_waker.is_some() {
-                        // We will be re-woken on a future tick.
-                        PushStep::Done
+                    if this.subgraph_waker.is_some() {
+                        return PushStep::Done; // We will be re-woken on a future tick
                     } else {
                         // We will pend until the queue is emptied.
                         // TODO(mingwei): Does this mean only one item may be sent at a time?
-                        PushStep::Pending(Yes)
-                    };
+                        return PushStep::Pending(Yes);
+                    }
                 }
             }
         }

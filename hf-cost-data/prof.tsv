@@ -1,0 +1,21 @@
+ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register	phase2_fwd (abd.rs)	sets=176	sched=1408	wall_us=8214550	next_us=4484308	explore_us=3663657	callback_us=316038	callbacks=1400
+ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register	abd_register_state (abd.rs)	sets=176	sched=1408	wall_us=8147728	next_us=4426844	explore_us=3640860	callback_us=294059	callbacks=1400
+ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register	queries (abd.rs)	sets=5	sched=33	wall_us=198877	next_us=4517	explore_us=101852	callback_us=7856	callbacks=25
+ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register	initial (reliable_broadcast.rs)	sets=3	sched=17	wall_us=139746	next_us=4146	explore_us=42494	callback_us=3587	callbacks=9
+ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register	echo (reliable_broadcast.rs)	sets=12	sched=89	wall_us=467504	next_us=73538	explore_us=299829	callback_us=37372	callbacks=81
+cluster::ec_bruteforce::brute_force_agrees_on_reliable_broadcast_closed_with_three_payloads	initial (reliable_broadcast.rs)	sets=3	sched=3	wall_us=12107	next_us=3385	explore_us=5237	callback_us=891	callbacks=2
+cluster::ec_bruteforce::brute_force_agrees_on_reliable_broadcast_closed_with_three_payloads	echo (reliable_broadcast.rs)	sets=3	sched=3	wall_us=19097	next_us=10317	explore_us=5195	callback_us=1248	callbacks=2
+cluster::ec_bruteforce::brute_force_agrees_on_reliable_broadcast_closed_with_three_payloads	new_messages (reliable_broadcast.rs)	sets=281	sched=281	wall_us=12179891	next_us=11646120	explore_us=529281	callback_us=118303	callbacks=280
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	initial (crdt_gossip.rs)	sets=23	sched=177	wall_us=2717391	next_us=132189	explore_us=2375313	callback_us=169074	callbacks=169
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	all_elements (crdt_gossip.rs)	sets=82	sched=656	wall_us=105741056	next_us=90911612	explore_us=14606641	callback_us=6417160	callbacks=648
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	echo (crdt_gossip.rs)	sets=10	sched=73	wall_us=2116119	next_us=773808	explore_us=1108104	callback_us=261129	callbacks=65
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	fan_out (fan_out.rs)	sets=27	sched=209	wall_us=8766917	next_us=160342	explore_us=8162781	callback_us=215924	callbacks=201
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	all_elements (crdt_gossip.rs)	sets=85	sched=680	wall_us=122369314	next_us=89971711	explore_us=31938896	callback_us=6569249	callbacks=672
+cluster::ec_demos_hydrofrac::ec_demo_g_set_gossip_certifies	fan_out (fan_out.rs #1)	sets=10	sched=74	wall_us=4172106	next_us=648823	explore_us=3043971	callback_us=299406	callbacks=66
+cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	prepares (multi_paxos.rs)	sets=16	sched=121	wall_us=983045	next_us=31932	explore_us=805313	callback_us=57695	callbacks=113
+cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	accepts_fwd (multi_paxos.rs)	sets=11	sched=81	wall_us=868670	next_us=50891	explore_us=668654	callback_us=69392	callbacks=73
+cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	accepts (multi_paxos.rs)	sets=11	sched=81	wall_us=903276	next_us=63871	explore_us=687709	callback_us=74655	callbacks=73
+cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	initial (multi_paxos.rs)	sets=6	sched=41	wall_us=595360	next_us=73560	explore_us=367388	callback_us=39263	callbacks=33
+cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	echo (multi_paxos.rs)	sets=7	sched=49	wall_us=1001012	next_us=303457	explore_us=540947	callback_us=95261	callbacks=41
+cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	learned (multi_paxos.rs)	sets=61	sched=488	wall_us=9063798	next_us=4099262	explore_us=4806369	callback_us=514392	callbacks=480
+cluster::ec_demos_hydrofrac::ec_demo_multi_paxos_all_labels	facts (multi_paxos.rs)	sets=61	sched=488	wall_us=12801965	next_us=7488082	explore_us=5135368	callback_us=754736	callbacks=480
