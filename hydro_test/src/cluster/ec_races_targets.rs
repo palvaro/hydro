@@ -387,7 +387,8 @@ fn label<'c>(cross: &'c CrossCheck, name: &str) -> &'c hydrofrac::check::LabelRe
         .unwrap_or_else(|| panic!("no searched label `{name}`:\n{}", cross.results))
 }
 
-/// The searched label `name` is certified up to [`MAX_FAULTS`] crashes, Claim B included.
+/// The searched label `name` is certified (up to [`MAX_FAULTS`] crashes, or for every admissible
+/// set when no admissible set can crash more nodes than that), Claim B included.
 fn assert_certified(cross: &CrossCheck, name: &str) {
     let l = label(cross, name);
     assert!(
@@ -395,6 +396,7 @@ fn assert_certified(cross: &CrossCheck, name: &str) {
             l.verdict,
             Verdict::Certified {
                 tolerates: hydrofrac::search::Tolerance::UpTo(MAX_FAULTS)
+                    | hydrofrac::search::Tolerance::All
             }
         ),
         "{name}: {}\n{}",
