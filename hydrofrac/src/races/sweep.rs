@@ -96,33 +96,59 @@ impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
         self.tried.insert(set);
     }
 
+    /// Whether `crash(node after m)` is *exact*: the runs have shown every message `node` can
+    /// send ([`Self::sends_complete`]), and every one of them lies in `m`'s chain of the send
+    /// order (it is `m`, precedes `m`, or follows `m`). Then in every run the crash cuts exactly
+    /// the messages that follow `m` in the chain: those before `m` are sent before it, and one
+    /// after it is only ever sent after it.
+    pub fn is_exact(&self, node: &Node, m: &M) -> bool {
+        self.sends_complete
+            && self.sends.get(node).is_none_or(|sent| {
+                sent.iter()
+                    .all(|w| w == m || self.order.precedes(w, m) || self.order.precedes(m, w))
+            })
+    }
+
     /// Records that `fact` is dead under `set`: no correct member holds it, in any schedule
     /// of `set`. From then on `set` and every superset of it are admissible for no pair of
     /// `fact` ([`excused`](super::excused)).
     ///
     /// **Preconditions** (the engine checks them; only the second is checked here):
     /// - it has verified the loss in every schedule of `set`;
-    /// - every crash of `set` is a start crash (`crash(n)`, before any send);
+    /// - every crash of `set` is a start crash (`crash(n)`, before any send), or an
+    ///   [exact](Self::is_exact) `crash(n after m)` of a node `n` that is not a member of the
+    ///   label's cluster;
     /// - the program is fragile-free.
     ///
-    /// **Why sound.** With only omissions and start crashes, the crash rule (§4.2) is exact for
-    /// `set`: it kills a delivery iff `set` prevents it in every schedule. Suppose a superset
-    /// `H ⊇ set` gave some correct member `m` a derivation of `fact` in some schedule. In a
-    /// fragile-free program it is robust, and it survived `H`, so it survives `set` too. `m` is
-    /// not crashed by `set` (its start crashes are also in `H`, and `m` is correct under `H`),
-    /// so by Lemma R `m` holds `fact` in every schedule of `set`: a contradiction. In a program
-    /// with fragile steps a superset can create `fact`, so the engine must not call this there.
+    /// **Why sound.** Suppose a superset `H ⊇ set` gave some correct member `c` a derivation
+    /// `D` of `fact` in some schedule. In a fragile-free program `D` is robust. It survives
+    /// `set` under the crash rule (§4.2):
+    /// - an omission of `set` is in `H`, and `D`'s deliveries were not omitted;
+    /// - a start crash of `set` is in `H`, so its node sent nothing, and `D` has no delivery
+    ///   from it;
+    /// - for an exact `crash(n after m)` of `set` (also in `H`), every delivery `d` of `D` from
+    ///   `n` lies in `m`'s chain. If `d` followed `m`, sending it would have sent `m` first,
+    ///   and the crash would have cut `d`. So `d` is `m` or precedes it, and the rule spares
+    ///   it.
+    ///
+    /// `c` is not crashed by `set` in any schedule: its start crashes are in `H` too, where `c`
+    /// is correct, and its other crashes are of nodes outside the cluster. So by Lemma R `c`
+    /// holds `fact` in every schedule of `set`: a contradiction. In a program with fragile
+    /// steps a superset can create `fact`, so the engine must not call this there.
     pub fn mark_dead(&mut self, set: FaultSet<M>, fact: F) {
         assert!(
-            set.iter().all(|f| matches!(
-                f,
+            set.iter().all(|f| match f {
                 Fault::Omit(_)
-                    | Fault::Crash {
-                        at: CrashAt::BeforeAnySend,
-                        ..
-                    }
-            )),
-            "a dead set holds only omissions and start crashes"
+                | Fault::Crash {
+                    at: CrashAt::BeforeAnySend,
+                    ..
+                } => true,
+                Fault::Crash {
+                    node,
+                    at: CrashAt::After(m),
+                } => self.is_exact(node, m),
+            }),
+            "a dead set holds only omissions, start crashes and exact crash points"
         );
         self.dead.push((set, fact));
     }

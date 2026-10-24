@@ -320,10 +320,17 @@ impl<M: Ord> Candidate<M> {
 /// no replacement when there is no such `w`: a crash after a message `n` never sends never
 /// fires, so a set holding it runs exactly as the set without it.
 ///
+/// For every node `n` whose crash after a message is part of a dead set, also every crash of
+/// `n` after a message in `sends[n]` (and [`Candidate::Unnamed`] unless `sends_complete`):
+/// mapping a crash of `n` to another crash point could land on the dead set's and excuse a
+/// pair the original crash does not, so these crashes map to themselves.
+///
 /// **Completion with exemptions.** Map a fault set `H` admissible for a pair `p` as in
 /// [universe], but where [universe] would replace a crash of an exempting node `n` after an
 /// unnamed message by `crash(n)` (no named message precedes it), use this candidate instead. It
-/// kills every named delivery from `n`, as the crash it replaces does. The image holds `crash(n)` only where `H` does, and dead sets hold only
+/// kills every named delivery from `n`, as the crash it replaces does. And keep a crash of a
+/// node with a crash point in a dead set as it is: it is a candidate if `n` can send its
+/// message, and otherwise it never fires (`sends_complete`), so `H` runs as `H` without it. The image holds `crash(n)` only where `H` does, and dead sets hold only
 /// omissions and start crashes, so the image excuses `p` only if `H` does: it is still
 /// admissible for `p`.
 pub fn candidates<P: PairKey, M: Ord + Clone>(
@@ -346,6 +353,18 @@ pub fn candidates<P: PairKey, M: Ord + Clone>(
                 .flat_map(|(set, _)| set.iter().filter_map(Fault::crashed_node)),
         )
         .collect();
+    // The nodes with a crash point (after a message) in a dead set.
+    let pinned: BTreeSet<&Node> = dead
+        .iter()
+        .flat_map(|(set, _)| set.iter())
+        .filter_map(|f| match f {
+            Fault::Crash {
+                node,
+                at: CrashAt::After(_),
+            } => Some(node),
+            _ => None,
+        })
+        .collect();
     let mut out = vec![];
     for fault in universe(pairs.values().flatten()) {
         let replacement = match &fault {
@@ -365,8 +384,30 @@ pub fn candidates<P: PairKey, M: Ord + Clone>(
             },
             _ => None,
         };
+        let every_point = match &fault {
+            Fault::Crash {
+                node,
+                at: CrashAt::BeforeAnySend,
+            } if pinned.contains(node) => {
+                let mut points: Vec<Candidate<M>> = sends
+                    .get(node)
+                    .into_iter()
+                    .flatten()
+                    .map(|w| Candidate::Fault(Fault::crash_after(node.clone(), Some(w.clone()))))
+                    .collect();
+                if !sends_complete {
+                    points.push(Candidate::Unnamed(node.clone()));
+                }
+                points
+            }
+            _ => vec![],
+        };
         out.push(Candidate::Fault(fault));
         out.extend(replacement);
+        out.extend(every_point);
     }
+    // A point listed twice (named, and again as one of every point) is one candidate.
+    let mut seen = BTreeSet::new();
+    out.retain(|c| seen.insert(c.clone()));
     out
 }

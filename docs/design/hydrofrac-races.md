@@ -190,6 +190,16 @@ that is always sent before `m`. One case is known for sure: `broadcast_closed`.
   - If no named message precedes `x`, the image is `crash(n)`, as before.
   - The stand-in for `crash(n)` used with exemptions must be a crash after an unnamed message
     that no named message precedes.
+- **Exact crash points.** Suppose the program is fragile-free, so the probe has seen every
+  message any node can send, and every message `n` can send lies in `m`'s chain. Then
+  `crash(n after m)` cuts exactly the chain after `m`, in every run.
+  - Such a set's facts are the same in every schedule. It is run on one schedule.
+  - If `n` is not a member of the label's cluster, a fact the set loses everywhere is dead
+    (`Sweep::mark_dead`). The argument is the start-crash one: a derivation under a superset
+    sends from `n` only messages up to `m`, which the rule spares.
+  - For completion, every crash point of such an `n` is a candidate. Mapping a crash after an
+    unnamed message onto the dead set's crash point would excuse a pair the original crash
+    does not.
 
 ### 4.3 Clauses per pair
 

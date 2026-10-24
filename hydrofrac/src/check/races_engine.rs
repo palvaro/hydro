@@ -203,16 +203,15 @@ fn read_schedule(
     }
 }
 
-/// Whether every crash of `set` is a start crash (`crash(n)`, before any send).
-fn start_crashes_only(set: &FaultSet<MessageId>) -> bool {
-    set.iter().all(|f| {
-        !matches!(
-            f,
-            Fault::Crash {
-                at: CrashAt::After(_),
-                ..
-            }
-        )
+/// Whether every crash of `set` is a start crash (`crash(n)`, before any send), or a crash
+/// point `allowed` accepts.
+fn crashes_all(set: &FaultSet<MessageId>, allowed: impl Fn(&Node, &MessageId) -> bool) -> bool {
+    set.iter().all(|f| match f {
+        Fault::Crash {
+            node,
+            at: CrashAt::After(m),
+        } => allowed(node, m),
+        _ => true,
     })
 }
 
@@ -261,13 +260,18 @@ struct Shape {
 }
 
 impl Shape {
-    /// Every run of `set` has the same facts (Lemma R both ways): explore one schedule.
-    fn policy(self, set: &FaultSet<MessageId>) -> Policy {
-        if (self.fragile_free || self.choice_free) && start_crashes_only(set) {
-            Policy::One
-        } else {
-            Policy::All
-        }
+    /// Every run of `set` has the same facts (Lemma R both ways), so explore one schedule, if
+    /// the program has no choices, or is fragile-free and every crash of `set` is a start crash
+    /// or `exact` (`races::Sweep::is_exact`): then the crash rule is exact for `set`, so a
+    /// derivation one run shows survives the rule, and holds in every run.
+    fn policy(
+        self,
+        set: &FaultSet<MessageId>,
+        exact: impl Fn(&Node, &MessageId) -> bool,
+    ) -> Policy {
+        let one = self.choice_free && crashes_all(set, |_, _| false)
+            || self.fragile_free && crashes_all(set, exact);
+        if one { Policy::One } else { Policy::All }
     }
 }
 
@@ -390,7 +394,7 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
         let mut world = World::default();
 
         // Hypothesis 0: the failure-free probe, one schedule if every run has the same facts.
-        let policy = shape.policy(&FaultSet::new());
+        let policy = shape.policy(&FaultSet::new(), |_, _| false);
         let mut domains: BTreeMap<usize, BTreeSet<Fact>> = BTreeMap::new();
         let mut learned: BTreeMap<usize, Vec<(Pair, PairClause<MessageId>)>> = BTreeMap::new();
         let mut failures: BTreeMap<usize, Failure> = BTreeMap::new();
@@ -551,9 +555,15 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
         set: &FaultSet<MessageId>,
         shape: Shape,
     ) -> SetOutcome {
-        let policy = shape.policy(set);
+        let policy = shape.policy(set, |n, m| sweep.is_exact(n, m));
         let labels = self.labels;
         let target = search.target;
+        let names = self.tables.names();
+        let members: BTreeSet<Node> = target
+            .members
+            .iter()
+            .map(|m| names.name(&NodeId::new(&target.cluster, Some(*m))))
+            .collect();
         let pairs = &mut search.pairs;
         let mut failure = None;
         let mut pruned = false;
@@ -605,10 +615,11 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
         {
             search.sampled = true;
         }
-        // A fragile-free program, a set of omissions and start crashes, its one schedule read in
-        // full: a domain fact no correct member holds is held by none under any superset either
-        // (`races::Sweep::mark_dead`).
-        if failure.is_none() && policy == Policy::One && shape.fragile_free {
+        // A fragile-free program, a set of omissions, start crashes and exact crash points of
+        // nodes outside the cluster, its one schedule read in full: a domain fact no correct
+        // member holds is held by none under any superset either (`races::Sweep::mark_dead`).
+        let deadly = crashes_all(set, |n, m| !members.contains(n) && sweep.is_exact(n, m));
+        if failure.is_none() && policy == Policy::One && shape.fragile_free && deadly {
             for fact in &target.domain {
                 if !held_somewhere.contains(fact) {
                     sweep.mark_dead(set.clone(), fact.clone());
@@ -700,7 +711,29 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
                 && (tolerates.is_none() || !shape.lossy || sweep.tolerated() >= tolerates);
             counterexample(set, tolerates, certified, hypothesis, &failure)
         } else {
-            let tolerates = Tolerance::UpTo(sweep.tolerated().map_or(cap, |t| t.max(cap)));
+            // With no lossy channel every fault is a crash. If no admissible set can crash more
+            // than `FALLBACK_FAULTS` nodes, the enumeration covered every admissible set.
+            let names = self.tables.names();
+            let crashable = names.crashable().len();
+            let most = match &bounds.checked {
+                Some(checked) => {
+                    let inside = names
+                        .crashable()
+                        .iter()
+                        .filter(|n| checked.nodes.contains(&names.name(n)))
+                        .count();
+                    crashable - inside + inside.min(checked.cap)
+                }
+                None => crashable,
+            };
+            // Never every node (the vacuity bound); the `max_crashes` cap is not counted, so
+            // that `All` means what it means for the sweep.
+            let most = most.min(bounds.nodes.saturating_sub(1));
+            let tolerates = if !shape.lossy && most <= FALLBACK_FAULTS {
+                Tolerance::All
+            } else {
+                Tolerance::UpTo(sweep.tolerated().map_or(cap, |t| t.max(cap)))
+            };
             if shape.lossy || search.sampled {
                 Verdict::Exhausted {
                     tolerates,
