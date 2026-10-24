@@ -8,7 +8,6 @@ use stageleft::q;
 
 use crate::location::Location;
 use crate::networking::TCP;
-use crate::nondet::nondet;
 use crate::prelude::FlowBuilder;
 
 #[cfg(stageleft_runtime)]
@@ -24,7 +23,8 @@ mod support {
         DebugExpr, HydroNode, HydroRoot, NetworkRecv, NetworkSend,
     };
     pub(super) use crate::location::dynamic::LocationId;
-    pub(super) use crate::sim::network_hook::{ExecKind, IrPassStage, SimNetworkHook, Transport};
+    pub(super) use crate::networking::{NetworkingInfo, TcpFault};
+    pub(super) use crate::sim::network_hook::{IrPassStage, SimNetworkHook};
 
     /// Applies `f` to every `Network` node in `ir`.
     pub(super) fn for_each_network(ir: &mut [HydroRoot], mut f: impl FnMut(&mut HydroNode)) {
@@ -56,11 +56,14 @@ mod support {
         /// Meta handed to `on_send`, per delivered send, with the payload it came with.
         pub(super) metas: RefCell<Vec<(Option<u32>, Vec<u8>, Vec<u8>)>>,
         pub(super) outputs: RefCell<Vec<(usize, Option<u32>)>>,
-        pub(super) execs: RefCell<Vec<(LocationId, Option<u32>, ExecKind, Option<bool>)>>,
+        /// `(location, member, ended)` per execution.
+        pub(super) execs: RefCell<Vec<(LocationId, Option<u32>, bool)>>,
         pub(super) instances: RefCell<usize>,
         /// After this many delivered sends, ask the scheduler to halt the sender.
         pub(super) halt_after: Option<(usize, LocationId)>,
         pub(super) halts: RefCell<Vec<(LocationId, Option<u32>)>>,
+        /// The execution in which the halt was requested.
+        pub(super) halted_in: RefCell<Option<usize>>,
     }
 
     impl SimNetworkHook for RecordingHook {
@@ -102,6 +105,7 @@ mod support {
                 && self.sent.borrow().len() == *n
             {
                 self.halts.borrow_mut().push((loc.clone(), from_member));
+                *self.halted_in.borrow_mut() = Some(self.execs.borrow().len() - 1);
             }
             Some(tag)
         }
@@ -121,17 +125,17 @@ mod support {
             true
         }
 
-        fn on_exec_begin(&self, location: &LocationId, member: Option<u32>, kind: ExecKind) {
+        fn on_exec_begin(&self, location: &LocationId, member: Option<u32>) {
             self.execs
                 .borrow_mut()
-                .push((location.clone(), member, kind, None));
+                .push((location.clone(), member, false));
         }
 
-        fn on_exec_end(&self, progressed: bool) {
+        fn on_exec_end(&self) {
             let mut execs = self.execs.borrow_mut();
             let last = execs.last_mut().expect("on_exec_end without on_exec_begin");
-            assert!(last.3.is_none(), "on_exec_end twice for one execution");
-            last.3 = Some(progressed);
+            assert!(!last.2, "on_exec_end twice for one execution");
+            last.2 = true;
         }
 
         fn take_halts(&self) -> Vec<(LocationId, Option<u32>)> {
@@ -140,74 +144,8 @@ mod support {
     }
 }
 
-/// E4: the channel table and location table describe the program's networks and nodes.
-#[cfg(stageleft_runtime)]
-#[test]
-fn channel_and_location_tables() {
-    let mut flow = FlowBuilder::new();
-    let leader = flow.process::<()>();
-    let workers = flow.cluster::<()>();
-    let collector = flow.process::<()>();
-
-    let (in_send, input) = leader.sim_input::<i32, _, _>();
-    let out = input
-        .broadcast_closed(&workers, TCP.fail_stop().bincode().name("fanout"))
-        .send(
-            &collector,
-            TCP.lossy_delayed_forever().bincode().name("results"),
-        )
-        .values()
-        .sim_output();
-
-    let compiled = flow
-        .sim()
-        .with_cluster_size(&workers, 2)
-        .test_safety_only()
-        .with_network_hook_points()
-        .compiled();
-
-    let channels = compiled.channels();
-    let fanout = channels
-        .iter()
-        .find(|c| c.name.as_deref() == Some("fanout"))
-        .unwrap();
-    assert_eq!(fanout.from, leader.id());
-    assert_eq!(fanout.to, workers.id());
-    assert_eq!(fanout.transport, Transport::FailStop);
-    assert!(fanout.intercepted);
-    let results = channels
-        .iter()
-        .find(|c| c.name.as_deref() == Some("results"))
-        .unwrap();
-    assert_eq!(results.from, workers.id());
-    assert_eq!(results.to, collector.id());
-    assert_eq!(results.transport, Transport::Lossy);
-    assert_ne!(fanout.id, results.id);
-
-    let locations = compiled.locations();
-    assert_eq!(locations.len(), 3);
-    let w = locations.iter().find(|l| l.id == workers.id()).unwrap();
-    assert_eq!(w.members.as_deref(), Some(&[0u32, 1][..]));
-    assert!(locations.iter().all(|l| !l.eager));
-    assert_eq!(compiled.node_count(), 4);
-
-    let output = compiled
-        .outputs()
-        .iter()
-        .find(|o| o.port == out.port_id())
-        .unwrap();
-    assert_eq!(output.location, collector.id());
-
-    // Without a hook installed, hook points deliver everything.
-    compiled.exhaustive(async || {
-        in_send.send(7);
-        let got: Vec<i32> = out.collect_sorted().await;
-        assert_eq!(got, vec![7, 7]);
-    });
-}
-
 /// E1 + E5: a hook that drops every message on one channel; delivered messages carry the hook's
-/// tag to the receiver.
+/// tag to the receiver. E4: the channel and location tables describe the program.
 #[cfg(stageleft_runtime)]
 #[test]
 fn hook_drops_one_channel_and_tags_round_trip() {
@@ -227,12 +165,22 @@ fn hook_drops_one_channel_and_tags_round_trip() {
     let out = a.merge_unordered(b).sim_output();
 
     let compiled = flow.sim().with_network_hook_points().compiled();
-    let a_id = compiled
-        .channels()
-        .iter()
-        .find(|c| c.name.as_deref() == Some("a"))
-        .unwrap()
-        .id;
+    let [a, b] = compiled.channels() else {
+        panic!("expected two channels")
+    };
+    let fail_stop = NetworkingInfo::Tcp {
+        fault: TcpFault::FailStop,
+    };
+    assert_eq!(
+        (a.name.as_deref(), &a.from, &a.to, &a.networking, a.intercepted),
+        (Some("a"), &p1.id(), &p2.id(), &fail_stop, true)
+    );
+    assert_eq!(b.name.as_deref(), Some("b"));
+    assert_ne!(a.id, b.id);
+    let locations: Vec<_> = compiled.locations().iter().map(|l| &l.id).collect();
+    assert_eq!(locations, [&p1.id(), &p2.id()]);
+    assert!(compiled.locations().iter().all(|l| l.members.is_none()));
+    let a_id = a.id;
     let hook = Rc::new(RecordingHook {
         drop: vec![a_id],
         ..Default::default()
@@ -253,14 +201,9 @@ fn hook_drops_one_channel_and_tags_round_trip() {
     assert_eq!(sent, received);
     assert!(sent.values().all(|c| *c != a_id));
     assert!(!hook.outputs.borrow().is_empty());
-    // Execution boundaries are reported in pairs, with sends inside asynchronous runs.
-    assert!(hook.execs.borrow().iter().all(|e| e.3.is_some()));
-    assert!(
-        hook.execs
-            .borrow()
-            .iter()
-            .any(|e| e.0 == p1.id() && e.2 == ExecKind::Async && e.3 == Some(true))
-    );
+    // Execution boundaries are reported in pairs.
+    assert!(hook.execs.borrow().iter().all(|e| e.2));
+    assert!(hook.execs.borrow().iter().any(|e| e.0 == p1.id()));
 }
 
 /// E5 meta slot: a PostNetwork pass wraps a broadcast's serialize to attach the item it is
@@ -343,6 +286,8 @@ fn send_meta_pairs_with_its_own_message_across_a_broadcast() {
             });
         })
         .compiled();
+    let w = compiled.locations().iter().find(|l| l.id == workers.id());
+    assert_eq!(w.unwrap().members.as_deref(), Some(&[0u32, 1, 2][..]));
 
     let hook = Rc::new(RecordingHook::default());
     compiled.set_network_hook(hook.clone());
@@ -412,11 +357,8 @@ fn halt_requested_by_hook_stops_further_sends() {
     assert_eq!(hook.sent.borrow().len(), 1);
     // The halted process ran no execution after its halt.
     let execs = hook.execs.borrow();
-    let first_send_exec = execs
-        .iter()
-        .position(|e| e.0 == p1.id() && e.3 == Some(true))
-        .unwrap();
-    assert!(execs[first_send_exec + 1..].iter().all(|e| e.0 != p1.id()));
+    let halted_in = hook.halted_in.borrow().unwrap();
+    assert!(execs[halted_in + 1..].iter().all(|e| e.0 != p1.id()));
 }
 
 /// E2: passes run at their stage, in registration order, and can rewrite the program.
@@ -454,13 +396,14 @@ fn ir_passes_run_in_stage_and_registration_order() {
             // Rewrite: add 100 to everything the program outputs.
             let plus_100: syn::Expr = syn::parse_quote!(|x: i32| x + 100);
             for root in ir.iter_mut() {
-                if let HydroRoot::SendExternal { to_port_id, .. } = root
+                if let HydroRoot::SendExternal {
+                    to_port_id, input, ..
+                } = root
                     && to_port_id.into_inner() == out_port
                 {
-                    let input = root.input_mut();
                     let metadata = input.metadata().clone();
-                    let inner = std::mem::replace(input, HydroNode::Placeholder);
-                    *input = HydroNode::Map {
+                    let inner = std::mem::replace(&mut **input, HydroNode::Placeholder);
+                    **input = HydroNode::Map {
                         f: plus_100.clone().into(),
                         input: Box::new(inner),
                         metadata,
@@ -491,57 +434,8 @@ fn ir_passes_run_in_stage_and_registration_order() {
     });
 }
 
-/// E3: an eager observer adds no schedules; the same observer explored normally does.
-#[cfg(stageleft_runtime)]
-#[test]
-fn eager_observer_adds_no_schedules() {
-    fn build(observer: bool, eager: bool) -> usize {
-        let mut flow = FlowBuilder::new();
-        let p1 = flow.process::<()>();
-        let obs = flow.process::<()>();
-
-        let (in_send, input) = p1.sim_input::<i32, _, _>();
-        let input = input.weaken_ordering();
-        if observer {
-            let tick = obs.tick();
-            input
-                .clone()
-                .send(&obs, TCP.fail_stop().bincode())
-                .batch(&tick, nondet!(/** test */))
-                .count()
-                .all_ticks()
-                .for_each(q!(|_| {}));
-        }
-        let out = input.map(q!(|x| x + 1)).sim_output();
-
-        let mut sim = flow.sim();
-        if eager {
-            sim = sim.with_eager_location(&obs);
-        }
-        let compiled = sim.compiled();
-        if observer && eager {
-            assert_eq!(compiled.node_count(), 1);
-        }
-        compiled.exhaustive(async || {
-            in_send.send_many_unordered([1, 2, 3]);
-            let mut got: Vec<i32> = out.collect().await;
-            got.sort();
-            assert_eq!(got, vec![2, 3, 4]);
-        })
-    }
-
-    let base = build(false, false);
-    let explored = build(true, false);
-    let eager = build(true, true);
-    assert!(
-        explored > base,
-        "observer should add schedules ({explored} vs {base})"
-    );
-    assert_eq!(eager, base);
-}
-
-/// `with_provenance` is now an in-tree PostNetwork pass; it still works, and composes with hook
-/// points and a user pass (its frame travels inside the intercepted payload).
+/// `with_provenance` composes with hook points and a user pass (its frame travels inside the
+/// intercepted payload).
 #[cfg(stageleft_runtime)]
 #[test]
 fn with_provenance_composes_with_hook_points() {
@@ -638,4 +532,55 @@ fn hook_points_are_opt_in_at_codegen() {
     ] {
         assert!(hooked.contains(call), "hook points must emit `{call}`");
     }
+}
+
+/// A network hook that panics when it sees a message whose payload is `7` (as bincode).
+#[cfg(stageleft_runtime)]
+struct PanickingHook;
+
+#[cfg(stageleft_runtime)]
+impl SimNetworkHook for PanickingHook {
+    fn on_send(
+        &self,
+        _channel: usize,
+        _from_member: Option<u32>,
+        _to_member: Option<u32>,
+        payload: &[u8],
+        _meta: Option<Vec<u8>>,
+    ) -> Option<u64> {
+        if payload == 7u32.to_le_bytes() {
+            panic!("hook panicked on a send");
+        }
+        Some(1)
+    }
+}
+
+/// A host hook's panic inside a callback the dylib makes mid-tick reaches the host with its
+/// original payload, instead of unwinding into the dylib's guard.
+#[cfg(stageleft_runtime)]
+#[test]
+fn a_hook_panic_inside_a_dylib_callback_is_caught_on_the_host() {
+    let mut flow = FlowBuilder::new();
+    let p1 = flow.process::<()>();
+    let p2 = flow.process::<()>();
+    let (in_send, input) = p1.sim_input::<u32, _, _>();
+    let out = input.send(&p2, TCP.fail_stop().bincode()).sim_output();
+    let sim = flow.sim().with_network_hook_points().compiled();
+    sim.set_network_hook(Rc::new(PanickingHook));
+
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        sim.exhaustive(async || {
+            in_send.send(7);
+            out.assert_yields_only(Vec::<u32>::new()).await;
+        });
+    }));
+    let payload = caught.expect_err("the hook's panic must propagate to the host");
+    let msg = payload.downcast_ref::<&str>().copied().unwrap_or_default();
+    assert!(msg.contains("hook panicked on a send"), "{msg}");
+
+    // Messages the hook accepts still flow, in a fresh search on the same compiled simulation.
+    sim.exhaustive(async || {
+        in_send.send(1);
+        out.assert_yields_only([1]).await;
+    });
 }

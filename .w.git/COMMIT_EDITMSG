@@ -1,0 +1,6 @@
+docs(hydro_lang): exhaustive simulation misses an ABD-KV liveness bug that sampling finds
+
+Adds `docs/design/sim-exhaustive-misses-abd-kv.md`: measured rates (`fuzz_bounded` 261/10,000
+failing vs `exhaustive` 0/195,579 in 14 min), why bolero's depth-first order cannot reach the
+bad interleaving (every failure needs a non-default choice at index <= 32; the all-default
+subtree below it holds ~1e20-1e21 schedules), and suggested exploration-order changes.

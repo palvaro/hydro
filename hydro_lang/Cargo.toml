@@ -50,9 +50,7 @@ sim = [
     "dfir_rs/meta",
 ]
 
-# Extension points for external simulator tooling (fault injection, network tracing, IR passes):
-# `SimNetworkHook`, `SimFlow::with_ir_pass`, eager locations, and the channel table. With this
-# feature off, simulator codegen and runtime are unchanged.
+# Simulator extension points for external tooling (see `sim::network_hook`).
 hydrofrac = ["sim"]
 
 docker_deploy = [

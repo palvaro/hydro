@@ -158,22 +158,14 @@ impl ClosureExpr {
         self.singleton_refs.iter().any(|(_, is_mut)| *is_mut)
     }
 
-    /// The closure's expression. For IR passes outside this crate.
-    #[doc(hidden)]
-    pub fn expr(&self) -> &DebugExpr {
-        &self.expr
-    }
-
     /// The singleton references the closure captures, as `(HydroNode::Reference, is_mut)`; the
-    /// index of each names its local via [`crate::handoff_ref::handoff_ref_ident`]. For IR passes
-    /// outside this crate.
+    /// index of each names its local via [`crate::handoff_ref::handoff_ref_ident`].
     #[doc(hidden)]
     pub fn singleton_refs(&self) -> &[(HydroNode, bool)] {
         &self.singleton_refs
     }
 
-    /// Splits the closure into its expression and captured references (see
-    /// [`Self::singleton_refs`]). For IR passes outside this crate.
+    /// Splits the closure into its expression and its captured references.
     #[doc(hidden)]
     pub fn into_parts(self) -> (DebugExpr, Vec<(HydroNode, bool)>) {
         (self.expr, self.singleton_refs)
@@ -586,9 +578,8 @@ pub trait DfirBuilder {
         operator_tag: Option<&str>,
     );
 
-    /// Called once per [`HydroNode::Network`], just before [`Self::create_network`] for the same
-    /// `tag_id`, with the channel's user-facing name (if any) and the receiving node's metadata.
-    /// Builders that keep a channel table (the simulator) override this; the default ignores it.
+    /// Called just before [`Self::create_network`] for the same `tag_id`, with the channel's
+    /// name and the receiving node's metadata. The default ignores it.
     fn network_metadata(
         &mut self,
         _tag_id: StmtId,
@@ -597,8 +588,7 @@ pub trait DfirBuilder {
     ) {
     }
 
-    /// Called once per [`HydroRoot::SendExternal`], just before [`Self::create_external_output`]
-    /// for the same `tag_id`, with the external port it sends on. The default ignores it.
+    /// Called just before [`Self::create_external_output`] for the same `tag_id`, with its port.
     fn external_output_metadata(&mut self, _tag_id: StmtId, _port: ExternalPortId) {}
 
     #[expect(clippy::too_many_arguments, reason = "TODO")]
@@ -1929,19 +1919,6 @@ impl HydroRoot {
 
     pub fn input_metadata(&self) -> &HydroIrMetadata {
         self.input().metadata()
-    }
-
-    /// Mutable access to the root's input node, for IR passes that rewrite or wrap it (see
-    /// `SimFlow::with_ir_pass`).
-    pub fn input_mut(&mut self) -> &mut HydroNode {
-        match self {
-            HydroRoot::ForEach { input, .. }
-            | HydroRoot::SendExternal { input, .. }
-            | HydroRoot::DestSink { input, .. }
-            | HydroRoot::CycleSink { input, .. }
-            | HydroRoot::EmbeddedOutput { input, .. }
-            | HydroRoot::Null { input, .. } => input,
-        }
     }
 
     pub fn print_root(&self) -> String {
