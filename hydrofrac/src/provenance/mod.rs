@@ -24,6 +24,11 @@ use serde::{Deserialize, Serialize};
 #[cfg(stageleft_runtime)]
 #[doc(hidden)]
 pub mod check;
+/// The program's schedule choices (docs/design/hydrofrac-lite.md §4.9): no label of a program
+/// with one is certified.
+#[cfg(stageleft_runtime)]
+#[doc(hidden)]
+pub mod choices;
 pub mod rewrite;
 
 pub use rewrite::{install, rewrite};
