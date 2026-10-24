@@ -127,6 +127,73 @@ impl<'a> SimFlow<'a> {
         self
     }
 
+    /// An independent copy of this flow, to compile a second program from the same user IR (a
+    /// test oracle compiling its own variant of the program, say). The IR is deep-cloned (shared
+    /// nodes stay shared within the copy); the port counters and the external port registry are
+    /// copied into fresh cells, so compiling one flow does not touch the other; every other field
+    /// is cloned.
+    ///
+    /// Returns `None` if IR passes are registered: they are `FnOnce` closures, which cannot be
+    /// copied. Without them, nothing in a flow borrows for `'a` (the lifetime only ties the flow to
+    /// its builder's locations), so the copy is `'static`.
+    #[cfg(feature = "hydrofrac")]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "order-free: every node shares one counter, and the maps are rebuilt by key"
+    )]
+    pub fn try_fork(&self) -> Option<SimFlow<'static>> {
+        if !self.ir_passes.is_empty() {
+            return None;
+        }
+        // The process and cluster nodes share one port counter, and the externals one registry:
+        // the copy gets its own of each, starting where this flow's are.
+        let counter = self
+            .processes
+            .values()
+            .chain(self.clusters.values())
+            .next()
+            .map(|node| *node.shared_port_counter.borrow())
+            .unwrap_or_default();
+        let counter = Rc::new(RefCell::new(counter));
+        let node = || SimNode {
+            shared_port_counter: counter.clone(),
+        };
+        let registry = Rc::new(RefCell::new(self.externals_port_registry.borrow().clone()));
+        Some(SimFlow {
+            ir: crate::compile::ir::deep_clone(&self.ir),
+            processes: self.processes.iter().map(|(k, _)| (k, node())).collect(),
+            clusters: self.clusters.iter().map(|(k, _)| (k, node())).collect(),
+            externals: self
+                .externals
+                .iter()
+                .map(|(k, _)| {
+                    (
+                        k,
+                        SimExternal {
+                            shared_inner: registry.clone(),
+                        },
+                    )
+                })
+                .collect(),
+            cluster_max_sizes: self.cluster_max_sizes.clone(),
+            dynamic_membership: self.dynamic_membership.clone(),
+            crashable: self.crashable.clone(),
+            externals_port_registry: registry,
+            location_version: self.location_version.clone(),
+            location_version_group_root: self.location_version_group_root.clone(),
+            test_safety_only: self.test_safety_only,
+            skip_consistency_assertions: self.skip_consistency_assertions,
+            unit_test_fuzz_iterations: self.unit_test_fuzz_iterations,
+            provenance: self.provenance,
+            operational_ports: self.operational_ports.clone(),
+            ir_passes: Vec::new(),
+            network_hooks: self.network_hooks,
+            location_names: self.location_names.clone(),
+            refuse_sim_faults: self.refuse_sim_faults,
+            _phantom: std::marker::PhantomData,
+        })
+    }
+
     /// Emits network hook points, which call the hook installed with
     /// [`CompiledSim::set_network_hook`] (see [`super::network_hook`]). Without this call, the
     /// generated code has none.
