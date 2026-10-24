@@ -535,7 +535,7 @@ fn compare(name: &str, build: impl Fn(EcCheck) -> (CrossCheck, usize)) {
         let notes = r.stats.races.unwrap_or_default();
         eprintln!(
             "TABLE {name} | {} | races: {} — {} sets / {} schedules (one-schedule {}, early stops \
-             {}, enumerated {}) | lite: {} — {} sets / {} schedules | brute force: {} sets / {} \
+             {}) | lite: {} — {} sets / {} schedules | brute force: {} sets / {} \
              schedules, min crashes {:?} | failure-free schedules {schedules}",
             r.name(),
             verdict_summary(&r.verdict),
@@ -543,7 +543,6 @@ fn compare(name: &str, build: impl Fn(EcCheck) -> (CrossCheck, usize)) {
             r.stats.schedules,
             notes.single_schedule_sets,
             notes.early_stops,
-            notes.enumerated_sets,
             verdict_summary(&l.verdict),
             l.stats.hypotheses,
             l.stats.schedules,

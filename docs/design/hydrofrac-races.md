@@ -662,3 +662,28 @@ derivations alone. So:
 | echo broadcasts (2 and 3 members) | certified, same cost as now, because fan-out literals are proved |
 | CTP-2 quiescing | certified, at brute-force cost (6 / 2,460) |
 | lossy programs (echo over a lossy first hop, relay chain) | certificates without a size bound; cost grows with the number of omission sets the robust clauses can't rule out |
+
+### 12.7 Stage 1, measured
+
+Branch `hydrofrac-races`, stage 1 of §12: order in the formula, no fallback, no dead sets. Every row agrees with brute
+force. "Before" is §11 (and the trusted-`quorum` numbers for uniform broadcast). Cost is fault sets / schedules.
+
+| program, label | verdict | before | now | brute force |
+|---|---|---|---|---|
+| `ask_once`, `known` | counterexample | 4 / 74 | 4 / 74 | 8 / 132 |
+| CTP-3 sampled, `committed` | counterexample | 133 / 8,451 | 46 / 2,881 | 200 / 12,800 |
+| CTP-2 racing sampled, `committed` | counterexample | 5 / 258 | 3 / 129 | 6 / 384 |
+| CTP-2 quiescing, `committed` | certified, Claim B | 6 / 2,460 | 6 / 2,460 | 6 / 2,460 |
+| URB, 2 members, thresholds 1 and 2 | certified | 2 / 2, 3 / 3 | 2 / 2, 3 / 3 | 4 / 169 |
+| URB, 3 members, threshold 2 (races alone) | certified | 16 / 16 | **30 / 30** | infeasible |
+| echo broadcast, 2 members, `deliveries` | certified | 2 / 2 | 2 / 2 | 4 / 419 |
+| echo broadcast, 3 members, `deliveries` (races alone) | certified | 6 / 6 | **18 / 18** | infeasible |
+| `reliable_broadcast_closed` `new_messages`, 1 / 2 / 3 payloads | certified | 8 / 8, 134 / 134, 281 / 281 | **20 / 20**, 155 / 155, 311 / 311 | 65, 176, 341 |
+| plain broadcast, 1 / 2 / 3 payloads | counterexample | 2 / 2, 4 / 225, 4 / 9,921 | 2 / 2, 3 / 224, 3 / 9,920 | 20 / 38, 32 / 668, 44 / 24,484 |
+| planted bugs (re-forwarding, local attestation), S1, S2 | found | — | found | agrees |
+
+**What grew, and why.** All of it is the deleted dead sets. `crash(source)` loses the fact at every member, and no
+robust derivation survives it, so every superset of it stays admissible: the solver proposes `crash(source)` plus
+each crash point of each member, one schedule each. Example: `new_messages` with one payload runs 12 such
+supersets. The echo broadcast over three members (3×) and `new_messages` with one payload (2.5×) are past the 2×
+gate.

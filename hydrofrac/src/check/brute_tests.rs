@@ -715,7 +715,7 @@ fn races_find_a_broadcast_whose_members_do_not_re_forward() {
         MAX_FAULTS,
     );
     races_agree("broadcast without re-forwarding", &cross);
-    let (verdict, notes) = races_label(&cross, "delivered");
+    let (verdict, _) = races_label(&cross, "delivered");
     let cex = verdict
         .counterexample()
         .unwrap_or_else(|| panic!("a mid fan-out crash of the source breaks it: {cross}"));
@@ -727,7 +727,6 @@ fn races_find_a_broadcast_whose_members_do_not_re_forward() {
             ..
         }
     )));
-    assert_eq!(notes.enumerated_sets, 0, "found by the sweep: {cross}");
 }
 
 // Suspected soundness bug S2: a crash point's meaning moves with the sender's send order, which a

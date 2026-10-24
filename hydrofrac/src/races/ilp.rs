@@ -1,10 +1,11 @@
-//! The hitting-set integer program over pairs (docs/design/hydrofrac-races.md §4.3).
+//! The hitting-set integer program over pairs (docs/design/hydrofrac-races.md §4.3, §12.1).
 //!
-//! Lite asks for a set that hits every clause. Here a set is worth running if it is admissible
-//! for *some* pair: it kills every robust clause of that pair. So the program has one indicator
-//! per pair, needs at least one of them, and makes each pair's cover rows conditional on its
-//! indicator. A pair's exemptions ([`super::excused`]) bound its indicator from above. The rest
-//! is lite's model (`search/ilp.rs`): crash bounds, no-goods, tie-breaks.
+//! A set is worth running if it is admissible for *some* pair: it kills every robust clause of
+//! that pair, and does not excuse it. So the program has one indicator per pair, needs at least one
+//! of them, and makes each pair's rows conditional on its indicator. Free literals are substituted
+//! their adversarial values ([`super::literals`]): a free crash literal makes the crash kill, and
+//! a clause with a free premise imposes nothing. The rest is lite's model (`search/ilp.rs`): crash
+//! bounds, no-goods, tie-breaks.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -12,24 +13,30 @@ use good_lp::{
     Expression, ProblemVariables, ResolutionError, Solution, SolverModel, Variable, variable,
 };
 
-use super::clause::{Candidate, Dead, PairClause, PairKey, Pairs, SendOrder};
-use crate::search::{Backend, CrashBounds, Fault, FaultSet, Node, weights};
+use super::clause::{Candidate, PairClause, PairKey, Pairs, Proposal};
+use super::literals::SendOrder;
+use crate::search::{Backend, CrashBounds, Fault, Node, weights};
 
-/// Which clauses of a pair a proposal must kill.
+/// Which rows a proposal must satisfy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
-    /// The robust ones: the admissibility rule, the only one a certificate rests on.
+    /// Kill the robust clauses of some pair: the admissibility rule, the only one a certificate
+    /// rests on.
     RobustOnly,
-    /// Every one seen, robust or fragile: Molly's heuristic, which aims where a counterexample
-    /// is likeliest (§4.4, step 2). Its proposals are admissible too, since it asks for more.
+    /// Kill every clause seen of some pair, robust or not, as if every premise held: Molly's
+    /// heuristic, which aims where a counterexample is likeliest (§4.4, step 2). Its proposals are
+    /// admissible too, since it asks for more.
     AllKnown,
+    /// Any untried set within the bounds: whether everything was tried (Claim B, §2).
+    Any,
 }
 
 impl Scope {
     fn includes<M>(self, clause: &PairClause<M>) -> bool {
         match self {
-            Scope::RobustOnly => clause.robust,
+            Scope::RobustOnly => clause.is_robust(),
             Scope::AllKnown => true,
+            Scope::Any => false,
         }
     }
 }
@@ -37,32 +44,30 @@ impl Scope {
 /// One cover row: the positions of the candidates that kill some delivery of a clause.
 type Row = BTreeSet<usize>;
 
-/// What the program needs of one pair: its cover rows (none: every set it does not excuse is
-/// admissible for it), and its exemptions, each a set `E` of positions such that selecting all
-/// of `E` excuses the pair.
+/// What the program needs of one pair: its cover rows (none: every set that does not excuse it is
+/// admissible for it), and the position of `crash(member)`, which excuses it.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct PairRows {
     rows: Vec<Row>,
-    exemptions: BTreeSet<Row>,
+    excusal: Option<usize>,
 }
 
 impl PairRows {
     /// Whether the set at these positions is admissible for the pair.
     fn admits(&self, inside: &BTreeSet<usize>) -> bool {
         self.rows.iter().all(|row| !row.is_disjoint(inside))
-            && !self.exemptions.iter().any(|e| e.is_subset(inside))
+            && self.excusal.is_none_or(|e| !inside.contains(&e))
     }
 }
 
 /// The cover rows of one pair's in-scope clauses over `universe`, without those another row
-/// implies (`A ⊆ B`: hitting `A` hits `B`), and its exemptions over `universe`. `None` if some
-/// row is empty: no set over the universe kills that clause, so the pair can never be chosen.
+/// implies (`A ⊆ B`: hitting `A` hits `B`). `None` if some row is empty: no set over the universe
+/// kills that clause, so the pair can never be chosen.
 fn pair_rows<P: PairKey, M: Ord + Clone>(
     universe: &[Candidate<M>],
-    index: &BTreeMap<&Fault<M>, usize>,
+    index: &BTreeMap<&Candidate<M>, usize>,
     pair: &P,
     clauses: &[PairClause<M>],
-    dead: &Dead<M, P::Fact>,
     scope: Scope,
     order: &dyn SendOrder<M>,
 ) -> Option<PairRows> {
@@ -86,73 +91,56 @@ fn pair_rows<P: PairKey, M: Ord + Clone>(
             kept.push(row);
         }
     }
-    // An exemption with a fault outside the universe can never be fully selected.
-    let inside =
-        |set: &FaultSet<M>| -> Option<Row> { set.iter().map(|f| index.get(f).copied()).collect() };
-    let crashed = FaultSet::from([Fault::crash_after(pair.member().clone(), None)]);
-    let exemptions = std::iter::once(&crashed)
-        .chain(
-            dead.iter()
-                .filter(|(_, fact)| fact == pair.fact())
-                .map(|(set, _)| set),
-        )
-        .filter_map(inside)
-        .collect();
+    let excusal = index
+        .get(&Candidate::Fault(Fault::crash_after(
+            pair.member().clone(),
+            None,
+        )))
+        .copied();
     Some(PairRows {
         rows: kept,
-        exemptions,
+        excusal,
     })
 }
 
 /// The next hypothesis: a minimum-weight subset of `universe` (weakest first, see
-/// [`super::candidates`]) that is admissible for some pair (kills every in-scope clause of it,
-/// and does not [excuse](super::excused) it), keeps crashes within `bounds` and at most one per
-/// node, and is not in `tried`. `None` when no such set exists (proven: the solver closes the
-/// gap).
+/// [`super::candidates`]) that satisfies `scope` for some pair, keeps crashes within `bounds` and
+/// at most one per node, and is not in `tried`. `None` when no such set exists (proven: the solver
+/// closes the gap).
 ///
-/// The program, with a binary `x_f` per candidate and `z_p` per pair, minimizing `Σ w_f x_f`
+/// The program, with a binary `x_c` per candidate and `z_p` per pair, minimizing `Σ w_c x_c`
 /// ([`weights`]):
-/// - `Σ_p z_p ≥ 1`;
-/// - per pair `p` and in-scope clause `c` of `p`: `Σ { x_f : f kills c } ≥ z_p`;
+/// - `Σ_p z_p ≥ 1` (not for [`Scope::Any`]);
+/// - per pair `p` and in-scope clause `D` of `p`: `Σ { x_c : c kills a delivery of D } ≥ z_p`;
 /// - per pair `p` of member `m`: `z_p + x_{crash(m)} ≤ 1`;
-/// - per pair `p` of fact `f` and dead set `D` of `f`: `z_p + Σ_{g ∈ D} x_g ≤ |D|`;
-/// - at most one crash per node; `Σ_{crash} x_f ≤ min(cap, N − 1)`; at most the checked
+/// - at most one crash per node; `Σ_{crash} x_c ≤ min(cap, N − 1)`; at most the checked
 ///   cluster's cap among its members;
-/// - a no-good per tried set `T`: `Σ_{f ∈ T} x_f − Σ_{f ∉ T} x_f ≤ |T| − 1`.
+/// - a no-good per tried set `T`: `Σ_{c ∈ T} x_c − Σ_{c ∉ T} x_c ≤ |T| − 1`.
 ///
-/// The no-good of a tried set that no pair admits is left out, exactly, as in lite: the other
-/// rows already exclude it.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the program's inputs, each distinct; the sweep is the usual caller"
-)]
+/// The no-good of a tried set that no pair admits is left out, exactly: the other rows already
+/// exclude it.
 pub fn propose<P: PairKey, M: Ord + Clone>(
     universe: &[Candidate<M>],
     pairs: &Pairs<P, M>,
-    dead: &Dead<M, P::Fact>,
-    tried: &BTreeSet<FaultSet<M>>,
+    tried: &BTreeSet<Proposal<M>>,
     bounds: &CrashBounds,
     scope: Scope,
     backend: Backend,
     order: &dyn SendOrder<M>,
-) -> Option<BTreeSet<Candidate<M>>> {
-    let index: BTreeMap<&Fault<M>, usize> = universe
-        .iter()
-        .enumerate()
-        .filter_map(|(i, c)| match c {
-            Candidate::Fault(f) => Some((f, i)),
-            Candidate::Unnamed(_) => None,
-        })
-        .collect();
-    let pair_rows: Vec<PairRows> = pairs
-        .iter()
-        .filter_map(|(pair, clauses)| {
-            pair_rows(universe, &index, pair, clauses, dead, scope, order)
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    if pair_rows.is_empty() {
+) -> Option<Proposal<M>> {
+    let index: BTreeMap<&Candidate<M>, usize> =
+        universe.iter().enumerate().map(|(i, c)| (c, i)).collect();
+    let pair_rows: Vec<PairRows> = if scope == Scope::Any {
+        vec![]
+    } else {
+        pairs
+            .iter()
+            .filter_map(|(pair, clauses)| pair_rows(universe, &index, pair, clauses, scope, order))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    };
+    if scope != Scope::Any && pair_rows.is_empty() {
         return None;
     }
 
@@ -170,24 +158,26 @@ pub fn propose<P: PairKey, M: Ord + Clone>(
 
     let sum =
         |positions: &Row| -> Expression { positions.iter().map(|&i| Expression::from(x[i])).sum() };
-    let mut any = Expression::from(0.0);
-    for pair in &pair_rows {
-        let z = vars.add(variable().binary());
-        for row in &pair.rows {
-            constraints.push(sum(row).geq(z));
+    if scope != Scope::Any {
+        let mut any = Expression::from(0.0);
+        for pair in &pair_rows {
+            let z = vars.add(variable().binary());
+            for row in &pair.rows {
+                constraints.push(sum(row).geq(z));
+            }
+            if let Some(e) = pair.excusal {
+                constraints.push((x[e] + z).leq(1.0));
+            }
+            any += z;
         }
-        for exemption in &pair.exemptions {
-            constraints.push((sum(exemption) + z).leq(exemption.len() as f64));
-        }
-        any += z;
+        constraints.push(any.geq(1.0));
     }
-    constraints.push(any.geq(1.0));
 
     let crash_sum = |pick: &dyn Fn(&Node) -> bool| -> Expression {
         universe
             .iter()
             .zip(&x)
-            .filter(|(f, _)| f.crashed_node().is_some_and(pick))
+            .filter(|(c, _)| c.crashed_node().is_some_and(pick))
             .map(|(_, &v)| Expression::from(v))
             .sum()
     };
@@ -208,13 +198,13 @@ pub fn propose<P: PairKey, M: Ord + Clone>(
     for set in tried {
         let Some(inside) = set
             .iter()
-            .map(|f| index.get(f).copied())
+            .map(|c| index.get(c).copied())
             .collect::<Option<BTreeSet<usize>>>()
         else {
-            // A set with a fault outside the universe can never be selected.
+            // A set with a candidate outside the universe can never be selected.
             continue;
         };
-        if !pair_rows.iter().any(|pair| pair.admits(&inside)) {
+        if scope != Scope::Any && !pair_rows.iter().any(|pair| pair.admits(&inside)) {
             continue;
         }
         let mut no_good = Expression::from(0.0);

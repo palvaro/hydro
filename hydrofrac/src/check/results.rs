@@ -157,12 +157,10 @@ pub struct RaceNotes {
     pub early_stops: usize,
     /// Fault sets run over one schedule only (every run of them has the same facts).
     pub single_schedule_sets: usize,
-    /// Fault sets the fallback enumeration ran (for pairs no robust derivation covers).
-    pub enumerated_sets: usize,
     /// Whether the certificate covers Claim B (no new disagreement outside the domain) too:
-    /// the label is certified, and the program is fragile-free or choice-free, or the search
-    /// ended by enumeration and no fault set was skipped or cut short. Always `false` for
-    /// other verdicts.
+    /// the label is certified, and the program is fragile-free or choice-free, or every fault
+    /// set over the revealed faults was run in every schedule. Always `false` for other
+    /// verdicts.
     pub claim_b: bool,
 }
 
@@ -466,11 +464,9 @@ impl Results {
             if let Some(r) = &l.stats.races {
                 writeln!(
                     f,
-                    "{detail}races: {} stopped early, {} on one schedule, {} enumerated; \
-                     claim B {}",
+                    "{detail}races: {} stopped early, {} on one schedule; claim B {}",
                     plural(r.early_stops, "set", "sets"),
                     plural(r.single_schedule_sets, "set", "sets"),
-                    plural(r.enumerated_sets, "set", "sets"),
                     if r.claim_b {
                         "certified"
                     } else {

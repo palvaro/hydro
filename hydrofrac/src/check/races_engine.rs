@@ -1,16 +1,16 @@
-//! The races mode of the check (docs/design/hydrofrac-races.md §4.4, §5): [`EcCheck::races`].
+//! The races mode of the check (docs/design/hydrofrac-races.md §4.4, §5, §12): [`EcCheck::races`].
 //!
-//! Each label keeps one clause per derivation of each `(member, fact)` pair, robust if no record
-//! of it passed a fragile step ([`crate::races`]). A fault set is skipped only when, for every
+//! Each label keeps one clause per derivation of each `(member, fact)` pair, with the premises of
+//! the fragile steps it passed ([`crate::races`]). A fault set is skipped only when, for every
 //! pair, a robust derivation survives it (Lemma R). Every set the search does run is explored
 //! over its schedules, and stops early as soon as the derivations learned cover every pair:
 //! - one schedule, if every run of the set has the same facts: the program is fragile-free (or
-//!   has no schedule choices) and every crash of the set is a start crash;
+//!   has no schedule choices) and every crash literal the set touches is proved;
 //! - otherwise every schedule (or the sample), stopping early.
 //!
-//! When the sweep cannot finish (a pair with no robust derivation, or a set that was run and is
-//! still admissible for some pair), the label falls back to enumerating every admissible set of
-//! at most [`FALLBACK_FAULTS`] faults over the faults the runs revealed, fewest crashes first.
+//! The label is certified when the hitting-set program has no untried solution over the faults the
+//! runs revealed ([`races::Sweep`]). There is no fallback and no size bound beyond the crash
+//! bound: a pair no robust derivation protects makes the program propose every set.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,11 +23,8 @@ use hydro_lang::sim::compiled::quiesce;
 use super::*;
 use crate::check::RaceNotes;
 use crate::fault::{Fate, NodeNames};
-use crate::races::{self, PairClause, Pairs, SendOrder};
-use crate::search::{CrashAt, HYPOTHESIS_BUDGET, Node, Tolerance, crash_count};
-
-/// The largest fault set the fallback enumeration runs.
-pub(super) const FALLBACK_FAULTS: usize = 2;
+use crate::races::{self, PairClause, Pairs};
+use crate::search::{CrashAt, Node};
 
 /// A pair: the node name of a member of the checked cluster, and a fact.
 type Pair = (Node, Fact);
@@ -57,58 +54,62 @@ struct Explored {
 enum Reading {
     /// `POST` failed.
     Fails(Failure),
-    /// `POST` held: a clause for every derivation of every held pair, and the domain facts some
-    /// correct member holds.
+    /// `POST` held: a clause for every derivation of every held pair.
     Holds {
         clauses: Vec<(Pair, PairClause<MessageId>)>,
-        held: BTreeSet<Fact>,
     },
 }
 
-/// The faults and sends the runs revealed, shared by every label.
+/// What one run revealed: the faults it makes possible (`check/brute_force.rs` `harvest`), and
+/// each crashable node's sends before the heal, with their positions among that node's sends.
 #[derive(Default)]
-struct World {
-    /// The brute-force enumerator's candidates (`check/brute_force.rs` `harvest`).
-    universe: BTreeSet<Fault<MessageId>>,
-    /// Every message each node sent before the heal.
-    sends: BTreeMap<Node, BTreeSet<MessageId>>,
+struct Revealed {
+    faults: Vec<Fault<MessageId>>,
+    sends: Vec<(Node, MessageId, u64)>,
 }
 
-impl World {
-    /// Adds what `record` reveals: `omit(m)` for every lossy message sent before the heal,
-    /// `crash(n)` for every crashable node and `crash(n after m)` for every message it sent
-    /// before the heal. Returns the sends it saw, by node name.
-    fn harvest(&mut self, record: &InstanceRecord, tables: &Tables) -> Vec<(Node, MessageId)> {
+impl Revealed {
+    /// `omit(m)` for every lossy message sent before the heal, `crash(n)` for every crashable
+    /// node and `crash(n after m)` for every message it sent before the heal.
+    fn of(record: &InstanceRecord, tables: &Tables) -> Self {
         let names = tables.names();
         let crashable: BTreeSet<&NodeId> = names.crashable().iter().collect();
+        let mut out = Revealed::default();
         for node in &crashable {
-            self.universe
-                .insert(Fault::crash_after(names.name(node), None));
+            out.faults.push(Fault::crash_after(names.name(node), None));
         }
-        let mut sent = vec![];
+        let mut positions: BTreeMap<Node, u64> = BTreeMap::new();
         for event in record.log.events() {
             match event {
                 // Neither omissions nor new crashes fire after the heal.
                 Event::Heal => break,
                 Event::Sent { msg, fate, .. } if *fate != Fate::SenderDead => {
-                    let from = names.name(&msg.from);
-                    if crashable.contains(&msg.from) {
-                        self.universe
-                            .insert(Fault::crash_after(from.clone(), Some(msg.clone())));
-                    }
                     if tables.is_faulty(msg.channel) {
-                        self.universe.insert(Fault::Omit(msg.clone()));
+                        out.faults.push(Fault::Omit(msg.clone()));
                     }
-                    self.sends
-                        .entry(from.clone())
-                        .or_default()
-                        .insert(msg.clone());
-                    sent.push((from, msg.clone()));
+                    if crashable.contains(&msg.from) {
+                        let from = names.name(&msg.from);
+                        out.faults
+                            .push(Fault::crash_after(from.clone(), Some(msg.clone())));
+                        let at = positions.entry(from.clone()).or_default();
+                        out.sends.push((from, msg.clone(), *at));
+                        *at += 1;
+                    }
                 }
                 _ => {}
             }
         }
-        sent
+        out
+    }
+
+    /// Tells `sweep` what this run revealed.
+    fn tell(&self, sweep: &mut races::Sweep<MessageId>) {
+        for f in &self.faults {
+            sweep.saw_fault(f.clone());
+        }
+        for (node, m, at) in &self.sends {
+            sweep.saw_send(node, m.clone(), *at);
+        }
     }
 }
 
@@ -190,17 +191,21 @@ fn read_schedule(
             pair.fact.clone(),
         );
         for &event in &pair.supports {
+            // In a choice-free program each fault set has one schedule, so every derivation
+            // holds in it, and needs no premise.
+            let premises = if all_robust {
+                BTreeSet::new()
+            } else {
+                (*lineage.fragile_sites(event)).clone()
+            };
             let clause = PairClause {
                 deps: (*lineage.derivation(event)).clone(),
-                robust: all_robust || lineage.fragile_sites(event).is_empty(),
+                premises,
             };
             clauses.push((key.clone(), clause));
         }
     }
-    Reading::Holds {
-        clauses,
-        held: evaluation.required,
-    }
+    Reading::Holds { clauses }
 }
 
 /// Whether every crash of `set` is a start crash (`crash(n)`, before any send), or a crash
@@ -215,37 +220,15 @@ fn crashes_all(set: &FaultSet<MessageId>, allowed: impl Fn(&Node, &MessageId) ->
     })
 }
 
-/// The order of closed-broadcast fan-outs (`crate::provenance::fanout`): on a marked channel,
-/// a node sends each payload to the destination cluster's members in increasing id order, so
-/// `(v → j)` precedes `(v → k)` for `j < k`. Each `(channel, sender, payload)` is one chain.
-#[derive(Debug, Default)]
-pub(super) struct FanOutOrder {
-    channels: BTreeSet<usize>,
-}
-
-impl FanOutOrder {
-    /// The marked channels of `sim`.
-    fn of(sim: &CompiledSim) -> Self {
-        FanOutOrder {
-            channels: sim
-                .channels()
-                .iter()
-                .filter(|c| c.op.id == Some(crate::provenance::fanout::FANOUT_MARK))
-                .map(|c| c.id)
-                .collect(),
-        }
-    }
-}
-
-impl SendOrder<MessageId> for FanOutOrder {
-    fn precedes(&self, earlier: &MessageId, later: &MessageId) -> bool {
-        self.channels.contains(&later.channel)
-            && earlier.channel == later.channel
-            && earlier.from == later.from
-            && earlier.bytes == later.bytes
-            && earlier.to.location == later.to.location
-            && matches!((earlier.to.member, later.to.member), (Some(j), Some(k)) if j < k)
-    }
+/// The proved send order of `sim`: its marked closed-broadcast channels
+/// ([`races::FanOutOrder`]).
+fn fan_out_order(sim: &CompiledSim) -> races::FanOutOrder {
+    races::FanOutOrder::new(
+        sim.channels()
+            .iter()
+            .filter(|c| c.op.id == Some(crate::provenance::fanout::FANOUT_MARK))
+            .map(|c| c.id),
+    )
 }
 
 /// What the program is, for the races policy.
@@ -255,15 +238,14 @@ struct Shape {
     fragile_free: bool,
     /// No schedule choice: one schedule per fault set.
     choice_free: bool,
-    /// Some channel admits omissions.
-    lossy: bool,
 }
 
 impl Shape {
     /// Every run of `set` has the same facts (Lemma R both ways), so explore one schedule, if
     /// the program has no choices, or is fragile-free and every crash of `set` is a start crash
-    /// or `exact` (`races::Sweep::is_exact`): then the crash rule is exact for `set`, so a
-    /// derivation one run shows survives the rule, and holds in every run.
+    /// or `exact` (`races::Sweep::is_exact`: every crash literal it touches is proved). Then the
+    /// crash rule is exact for `set`, so a derivation one run shows survives the rule, and holds
+    /// in every run.
     fn policy(
         self,
         set: &FaultSet<MessageId>,
@@ -283,11 +265,6 @@ struct Search<'t> {
     notes: RaceNotes,
     /// A multi-schedule exploration ran on a sample to its end: no certificate.
     sampled: bool,
-}
-
-/// What exploring one set found.
-struct SetOutcome {
-    failure: Option<Failure>,
 }
 
 impl<B: AsyncFnMut()> Engine<'_, B> {
@@ -371,17 +348,12 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
         }
     }
 
-    /// Whether the program is fragile-free, choice-free, lossy.
+    /// Whether the program is fragile-free, choice-free.
     fn shape(&self) -> Shape {
         Shape {
             fragile_free: self.fragile.as_ref().is_some_and(Vec::is_empty)
                 && self.islands.borrow().is_empty(),
             choice_free: self.choices().is_empty(),
-            lossy: self
-                .sim
-                .channels()
-                .iter()
-                .any(|c| self.tables.is_faulty(c.id)),
         }
     }
 
@@ -391,7 +363,8 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
         let (mut verdicts, targets) = self.label_targets();
         let shape = self.shape();
         let labels = self.labels;
-        let mut world = World::default();
+        // What every run revealed, for every label's sweep.
+        let mut world: Vec<Revealed> = vec![];
 
         // Hypothesis 0: the failure-free probe, one schedule if every run has the same facts.
         let policy = shape.policy(&FaultSet::new(), |_, _| false);
@@ -399,7 +372,7 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
         let mut learned: BTreeMap<usize, Vec<(Pair, PairClause<MessageId>)>> = BTreeMap::new();
         let mut failures: BTreeMap<usize, Failure> = BTreeMap::new();
         let probe = self.explore_races(&FaultSet::new(), policy, |tables, record| {
-            world.harvest(&record, tables);
+            world.push(Revealed::of(&record, tables));
             let lineage = Lineage::new(&record.log, tables);
             for t in &targets {
                 // As lite's probe: each schedule is read against its own correct members' facts.
@@ -421,7 +394,7 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
                     Reading::Fails(failure) => {
                         failures.entry(t.label).or_insert(failure);
                     }
-                    Reading::Holds { clauses, .. } => {
+                    Reading::Holds { clauses } => {
                         learned.entry(t.label).or_default().extend(clauses);
                     }
                 }
@@ -429,6 +402,7 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
             false
         });
         let probe_sampled = policy == Policy::All && self.sample_schedules.is_some();
+        let probe_in_full = policy == Policy::All && !probe_sampled || shape.choice_free;
         let probe_stats = Stats {
             hypotheses: 1,
             schedules: probe.schedules,
@@ -462,7 +436,7 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
                     &target,
                     clauses,
                     probe_stats,
-                    probe_sampled,
+                    (probe_sampled, probe_in_full),
                     shape,
                     &mut world,
                 )
@@ -473,15 +447,16 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
         self.results(verdicts)
     }
 
-    /// One label's search, from the probe's clauses.
+    /// One label's search, from the probe's clauses. `probe`: whether the probe was sampled, and
+    /// whether it ran every schedule.
     fn search_races(
         &mut self,
         target: &Target,
         probe_clauses: Vec<(Pair, PairClause<MessageId>)>,
         probe_stats: Stats,
-        probe_sampled: bool,
+        (probe_sampled, probe_in_full): (bool, bool),
         shape: Shape,
-        world: &mut World,
+        world: &mut Vec<Revealed>,
     ) -> (Verdict, Stats) {
         let start = Instant::now();
         let mut search = Search {
@@ -492,21 +467,24 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
             sampled: probe_sampled,
         };
         search.pairs.learn(probe_clauses);
-        let mut sweep: races::Sweep<MessageId, Fact> =
-            races::Sweep::new(self.bounds(target)).with_order(Rc::new(FanOutOrder::of(self.sim)));
-        for (node, sent) in &world.sends {
-            sweep.saw_sends(node, sent.iter().cloned());
+        let mut sweep: races::Sweep<MessageId> =
+            races::Sweep::new(self.bounds(target)).with_order(Rc::new(fan_out_order(self.sim)));
+        for revealed in world.iter() {
+            revealed.tell(&mut sweep);
         }
         if shape.fragile_free {
             // The probe showed every send (`races::Sweep::sends_complete`).
             sweep.sends_complete();
         }
-        let mut fell_back = None;
+        if probe_in_full {
+            sweep.explored_in_full(FaultSet::new());
+        }
         let verdict = loop {
             match sweep.next(&search.pairs.pairs) {
-                races::Next::Try(set) => {
-                    let outcome = self.explore_set(&mut search, &mut sweep, world, &set, shape);
-                    if let Some(failure) = outcome.failure {
+                races::Next::Try { set, in_full } => {
+                    let failure =
+                        self.explore_set(&mut search, &mut sweep, world, &set, shape, in_full);
+                    if let Some(failure) = failure {
                         break counterexample(
                             set,
                             sweep.tolerated(),
@@ -528,50 +506,45 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
                         tolerates: sweep.tolerated(),
                     };
                 }
-                races::Next::Unconstrained(_) => {
-                    let (verdict, skipped) = self.fallback(&mut search, &mut sweep, world, shape);
-                    fell_back = Some(skipped);
-                    break verdict;
-                }
             }
         };
-        let enumerated_everything = fell_back
-            .is_some_and(|skipped| skipped == 0 && search.notes.early_stops == 0)
-            && !search.sampled;
+        // Claim B (§2): faults create no fact outside the domain in a fragile-free or choice-free
+        // program; otherwise only if every set was run in every schedule.
         search.notes.claim_b = matches!(verdict, Verdict::Certified { .. })
-            && (shape.fragile_free || shape.choice_free || enumerated_everything);
+            && (shape.fragile_free
+                || shape.choice_free
+                || search.notes.early_stops == 0 && sweep.covers_everything(&search.pairs.pairs));
         search.stats.races = Some(search.notes);
         search.stats.wall += start.elapsed();
         (verdict, search.stats)
     }
 
     /// Explores `set` for the label of `search` (see the [module docs](self)), learning its
-    /// clauses, and marks its lost facts dead where that is sound.
+    /// clauses and what its runs reveal. With `in_full`, every schedule, without stopping early.
+    /// Returns the failure, if a schedule failed.
     fn explore_set(
         &mut self,
         search: &mut Search<'_>,
-        sweep: &mut races::Sweep<MessageId, Fact>,
-        world: &mut World,
+        sweep: &mut races::Sweep<MessageId>,
+        world: &mut Vec<Revealed>,
         set: &FaultSet<MessageId>,
         shape: Shape,
-    ) -> SetOutcome {
-        let policy = shape.policy(set, |n, m| sweep.is_exact(n, m));
+        in_full: bool,
+    ) -> Option<Failure> {
+        let policy = if in_full {
+            Policy::All
+        } else {
+            shape.policy(set, |n, m| sweep.is_exact(n, m))
+        };
         let labels = self.labels;
         let target = search.target;
-        let names = self.tables.names();
-        let members: BTreeSet<Node> = target
-            .members
-            .iter()
-            .map(|m| names.name(&NodeId::new(&target.cluster, Some(*m))))
-            .collect();
         let pairs = &mut search.pairs;
         let mut failure = None;
         let mut pruned = false;
-        let mut held_somewhere: BTreeSet<Fact> = BTreeSet::new();
         let explored = self.explore_races(set, policy, |tables, record| {
-            for (node, msg) in world.harvest(&record, tables) {
-                sweep.saw_sends(&node, [msg]);
-            }
+            let revealed = Revealed::of(&record, tables);
+            revealed.tell(sweep);
+            world.push(revealed);
             let lineage = Lineage::new(&record.log, tables);
             match read_schedule(
                 labels,
@@ -586,11 +559,11 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
                     failure = Some(f);
                     true
                 }
-                Reading::Holds { clauses, held } => {
+                Reading::Holds { clauses } => {
                     pairs.learn(clauses);
-                    held_somewhere.extend(held);
                     if policy == Policy::All
-                        && races::pruned(set, &pairs.pairs, sweep.dead(), sweep.order())
+                        && !in_full
+                        && races::pruned(set, &pairs.pairs, sweep.order())
                     {
                         pruned = true;
                     }
@@ -608,141 +581,16 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
             Policy::All if pruned => search.notes.early_stops += 1,
             Policy::All => {}
         }
-        if policy == Policy::All
-            && self.sample_schedules.is_some()
-            && !explored.stopped
-            && failure.is_none()
-        {
+        let sampled = policy == Policy::All && self.sample_schedules.is_some();
+        if sampled && !explored.stopped && failure.is_none() {
             search.sampled = true;
         }
-        // A fragile-free program, a set of omissions, start crashes and exact crash points of
-        // nodes outside the cluster, its one schedule read in full: a domain fact no correct
-        // member holds is held by none under any superset either (`races::Sweep::mark_dead`).
-        let deadly = crashes_all(set, |n, m| !members.contains(n) && sweep.is_exact(n, m));
-        if failure.is_none() && policy == Policy::One && shape.fragile_free && deadly {
-            for fact in &target.domain {
-                if !held_somewhere.contains(fact) {
-                    sweep.mark_dead(set.clone(), fact.clone());
-                }
-            }
+        if failure.is_none()
+            && !explored.stopped
+            && (policy == Policy::All && !sampled || shape.choice_free)
+        {
+            sweep.explored_in_full(set.clone());
         }
-        SetOutcome { failure }
-    }
-
-    /// The fallback enumeration (see the [module docs](self)): every admissible set of at most
-    /// [`FALLBACK_FAULTS`] faults over the harvested universe, fewest crashes first, skipping
-    /// those tried or pruned. Returns the verdict, and how many sets pruning skipped.
-    fn fallback(
-        &mut self,
-        search: &mut Search<'_>,
-        sweep: &mut races::Sweep<MessageId, Fact>,
-        world: &mut World,
-        shape: Shape,
-    ) -> (Verdict, usize) {
-        let bounds = self.bounds(search.target);
-        let collect = |universe: &BTreeSet<Fault<MessageId>>| -> Vec<FaultSet<MessageId>> {
-            let faults: Vec<&Fault<MessageId>> = universe.iter().collect();
-            let mut sets: Vec<FaultSet<MessageId>> = vec![];
-            for (i, a) in faults.iter().enumerate() {
-                sets.push(FaultSet::from([(*a).clone()]));
-                if FALLBACK_FAULTS >= 2 {
-                    for b in &faults[i + 1..] {
-                        sets.push(FaultSet::from([(*a).clone(), (*b).clone()]));
-                    }
-                }
-            }
-            sets.retain(|s| races::within_bounds(s, &bounds));
-            sets.sort_by_cached_key(|s| (crash_count(s), s.len(), s.clone()));
-            sets
-        };
-        let mut queue = collect(&world.universe);
-        let mut known = world.universe.len();
-        let mut next = 0;
-        let mut skipped = 0;
-        // The breaking set with the fewest crashes so far, its failure and hypothesis index.
-        let mut best: Option<(FaultSet<MessageId>, Failure, usize)> = None;
-        loop {
-            if world.universe.len() != known {
-                queue = collect(&world.universe);
-                known = world.universe.len();
-                next = 0;
-            }
-            let Some(set) = queue.get(next).cloned() else {
-                break;
-            };
-            next += 1;
-            if best
-                .as_ref()
-                .is_some_and(|(b, _, _)| crash_count(&set) >= crash_count(b))
-            {
-                break;
-            }
-            if sweep.tried().contains(&set) {
-                continue;
-            }
-            if races::pruned(&set, &search.pairs.pairs, sweep.dead(), sweep.order()) {
-                skipped += 1;
-                continue;
-            }
-            if search.stats.hypotheses >= HYPOTHESIS_BUDGET {
-                return (
-                    Verdict::Budget {
-                        tolerates: sweep.tolerated(),
-                    },
-                    skipped,
-                );
-            }
-            sweep.mark_tried(set.clone());
-            search.notes.enumerated_sets += 1;
-            let outcome = self.explore_set(search, sweep, world, &set, shape);
-            if let Some(failure) = outcome.failure {
-                best = Some((set, failure, search.stats.hypotheses - 1));
-            }
-        }
-        let cap = self
-            .max_crashes
-            .unwrap_or(FALLBACK_FAULTS)
-            .min(FALLBACK_FAULTS);
-        let verdict = if let Some((set, failure, hypothesis)) = best {
-            let tolerates = crash_count(&set).checked_sub(1);
-            // Sets with fewer crashes but more than `FALLBACK_FAULTS` faults (omissions) were
-            // not enumerated, unless the sweep had already cleared their bound.
-            let certified = !search.sampled
-                && (tolerates.is_none() || !shape.lossy || sweep.tolerated() >= tolerates);
-            counterexample(set, tolerates, certified, hypothesis, &failure)
-        } else {
-            // With no lossy channel every fault is a crash. If no admissible set can crash more
-            // than `FALLBACK_FAULTS` nodes, the enumeration covered every admissible set.
-            let names = self.tables.names();
-            let crashable = names.crashable().len();
-            let most = match &bounds.checked {
-                Some(checked) => {
-                    let inside = names
-                        .crashable()
-                        .iter()
-                        .filter(|n| checked.nodes.contains(&names.name(n)))
-                        .count();
-                    crashable - inside + inside.min(checked.cap)
-                }
-                None => crashable,
-            };
-            // Never every node (the vacuity bound); the `max_crashes` cap is not counted, so
-            // that `All` means what it means for the sweep.
-            let most = most.min(bounds.nodes.saturating_sub(1));
-            let tolerates = if !shape.lossy && most <= FALLBACK_FAULTS {
-                Tolerance::All
-            } else {
-                Tolerance::UpTo(sweep.tolerated().map_or(cap, |t| t.max(cap)))
-            };
-            if shape.lossy || search.sampled {
-                Verdict::Exhausted {
-                    tolerates,
-                    sites: search.target.sites.clone(),
-                }
-            } else {
-                Verdict::Certified { tolerates }
-            }
-        };
-        (verdict, skipped)
+        failure
     }
 }
