@@ -1,0 +1,109 @@
+hydro_test::cluster::relay_broadcast relay_broadcast (reliable_resend) workload members=5 members, round_data closure, timer=20/round, report_tick=1/round, data in rounds 0..125
+
+cress amplification check: 1000 rounds of workload, every hold begins at round 1
+horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
+run time: 609.2 s including compilation
+input: data in rounds 0..125, timers only afterwards; finite holds that outlast the input: 128, 256, 512
+unheld run: 116875 records admitted at decision points, 5625 network messages sent, 7 decision points had buffered input
+
+A decision point is named by the file and line of its own use::batch or use::snapshot expression, then its kind: a batch admits the records waiting at an edge, a snapshot reads a version of a piece of state. When two decision points share a line, #n gives each one's position within its step. Each curve gives extra work over the unheld run, at each hold length: records admitted, messages from the busiest sender (what the verdict reads), and messages from all senders together (which stays flat when work only moved from one sender to another).
+
+hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
+hydro_test/src/cluster/relay_broadcast.rs:525, batch of (usize, ()): no extra work at any hold length
+hydro_test/src/cluster/relay_broadcast.rs:526, batch of Arrival
+    extra records admitted               50    150    350    750   1550   3150   6350  12750  25550  51150  31240
+    extra messages, busiest sender        4     12     28     60    124    252    508   1020   2044   4092   3496
+    extra messages, all senders          20     60    140    300    620   1260   2540   5100  10220  20460  17480
+    first reacted at a hold of 1 rounds with 50 extra; largest extra work 51150 in admitted records
+    beyond the input (holds 128, 256, 512): extra sends from Cluster(loc2v1) @4 keeps growing: rate 8.00 per round of delay, no ceiling within the run (rates 8.000, 8.000)
+    beyond the input (holds 128, 256, 512): extra admitted records keeps growing: rate 100.00 per round of delay, no ceiling within the run (rates 100.000, 100.000)
+    multiplier: 5.09× the unheld run's 1000 sends from Cluster(loc2v1) @4 (+4092 at a hold of 512 rounds)
+    under a hold that never ends: +31240 admitted records (31.3 per round of the run)
+hydro_test/src/cluster/relay_broadcast.rs:527, batch of (u64, Body): no extra work at any hold length
+hydro_test/src/cluster/relay_broadcast.rs:528, batch of Ack
+    extra records admitted                0    100    300    700   1500   3100   6300  12700  25500  51100  77360
+    extra messages, busiest sender        0      8     24     56    120    248    504   1016   2040   4088   7984
+    extra messages, all senders           0     40    120    280    600   1240   2520   5080  10200  20440  39920
+    first reacted at a hold of 2 rounds with 100 extra; largest extra work 77360 in admitted records
+    beyond the input (holds 128, 256, 512): extra sends from Cluster(loc2v1) @4 keeps growing: rate 8.00 per round of delay, no ceiling within the run (rates 8.000, 8.000)
+    beyond the input (holds 128, 256, 512): extra admitted records keeps growing: rate 100.00 per round of delay, no ceiling within the run (rates 100.000, 100.000)
+    multiplier: 8.98× the unheld run's 1000 sends from Cluster(loc2v1) @4 (+7984 at a hold of 999 rounds)
+    under a hold that never ends: +77360 admitted records (77.4 per round of the run)
+hydro_test/src/cluster/relay_broadcast.rs:657, batch of (usize, ()): no extra work at any hold length
+hydro_test/src/cluster/relay_broadcast.rs:658, batch of Arrival: no extra work at any hold length
+hydro_test/src/cluster/relay_broadcast.rs:659, batch of (u32, Relay): no extra work at any hold length
+hydro_test/src/cluster/relay_broadcast.rs:661: not holdable (snapshot of an optional; the simulator cannot script it, so it follows the prompt schedule in every run)
+
+output streams across the sweep: a stream is conserved when its count is the unheld run's under every finite hold (fixed by the input), amplified when some hold raised it, a level when it emits exactly one record per execution of a tick at its location, shed when holds only lowered it.
+stream                  kind         unheld  finite holds      hold to the end   largest at
+wire                    amplified      2500  2500..12730       20..22460         hydro_test/src/cluster/relay_broadcast.rs:526, batch of Arrival at a hold of 512
+merged                  amplified      3125  3125..13355       25..23085         hydro_test/src/cluster/relay_broadcast.rs:526, batch of Arrival at a hold of 512
+acks_sent               amplified      2500  2500..12730       20..22460         hydro_test/src/cluster/relay_broadcast.rs:526, batch of Arrival at a hold of 512
+outstanding_depth       shed           5000  2440..5000        5..5000           -
+delivered               amplified      3125  3125..13355       645..23085        hydro_test/src/cluster/relay_broadcast.rs:526, batch of Arrival at a hold of 512
+metrics                 shed           5000  2440..5000        5..5000           -
+
+count by hold length (rounds)             1      2      4      8     16     32     64    128    256    512    999
+wire (amplified, unheld 2500)
+    hydro_test/src/cluster/relay_broadcast.rs:525, batch of (usize, ())   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500
+    hydro_test/src/cluster/relay_broadcast.rs:526, batch of Arrival   2510   2530   2570   2650   2810   3130   3770   5050   7610  12730  22460
+    hydro_test/src/cluster/relay_broadcast.rs:527, batch of (u64, Body)   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500     20
+    hydro_test/src/cluster/relay_broadcast.rs:528, batch of Ack   2500   2520   2560   2640   2800   3120   3760   5040   7600  12720  22460
+    hydro_test/src/cluster/relay_broadcast.rs:657, batch of (usize, ())   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500
+    hydro_test/src/cluster/relay_broadcast.rs:658, batch of Arrival   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500
+    hydro_test/src/cluster/relay_broadcast.rs:659, batch of (u32, Relay)   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500
+merged (amplified, unheld 3125)
+    hydro_test/src/cluster/relay_broadcast.rs:525, batch of (usize, ())   3125   3125   3125   3125   3125   3125   3125   3125   3125   3125   3125
+    hydro_test/src/cluster/relay_broadcast.rs:526, batch of Arrival   3135   3155   3195   3275   3435   3755   4395   5675   8235  13355     25
+    hydro_test/src/cluster/relay_broadcast.rs:527, batch of (u64, Body)   3125   3125   3125   3125   3125   3125   3125   3125   3125   3125    645
+    hydro_test/src/cluster/relay_broadcast.rs:528, batch of Ack   3125   3145   3185   3265   3425   3745   4385   5665   8225  13345  23085
+    hydro_test/src/cluster/relay_broadcast.rs:657, batch of (usize, ())   3125   3125   3125   3125   3125   3125   3125   3125   3125   3125   3125
+    hydro_test/src/cluster/relay_broadcast.rs:658, batch of Arrival   3125   3125   3125   3125   3125   3125   3125   3125   3125   3125   3125
+    hydro_test/src/cluster/relay_broadcast.rs:659, batch of (u32, Relay)   3125   3125   3125   3125   3125   3125   3125   3125   3125   3125   3125
+acks_sent (amplified, unheld 2500)
+    hydro_test/src/cluster/relay_broadcast.rs:525, batch of (usize, ())   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500
+    hydro_test/src/cluster/relay_broadcast.rs:526, batch of Arrival   2510   2530   2570   2650   2810   3130   3770   5050   7610  12730     20
+    hydro_test/src/cluster/relay_broadcast.rs:527, batch of (u64, Body)   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500     20
+    hydro_test/src/cluster/relay_broadcast.rs:528, batch of Ack   2500   2520   2560   2640   2800   3120   3760   5040   7600  12720  22460
+    hydro_test/src/cluster/relay_broadcast.rs:657, batch of (usize, ())   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500
+    hydro_test/src/cluster/relay_broadcast.rs:658, batch of Arrival   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500
+    hydro_test/src/cluster/relay_broadcast.rs:659, batch of (u32, Relay)   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500   2500
+outstanding_depth (shed, unheld 5000)
+    hydro_test/src/cluster/relay_broadcast.rs:525, batch of (usize, ())   4995   4990   4980   4960   4920   4840   4680   4360   3720   2440      5
+    hydro_test/src/cluster/relay_broadcast.rs:526, batch of Arrival   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000
+    hydro_test/src/cluster/relay_broadcast.rs:527, batch of (u64, Body)   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000
+    hydro_test/src/cluster/relay_broadcast.rs:528, batch of Ack   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000
+    hydro_test/src/cluster/relay_broadcast.rs:657, batch of (usize, ())   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000
+    hydro_test/src/cluster/relay_broadcast.rs:658, batch of Arrival   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000
+    hydro_test/src/cluster/relay_broadcast.rs:659, batch of (u32, Relay)   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000
+delivered (amplified, unheld 3125)
+    hydro_test/src/cluster/relay_broadcast.rs:525, batch of (usize, ())   3125   3125   3125   3125   3125   3125   3125   3125   3125   3125   3125
+    hydro_test/src/cluster/relay_broadcast.rs:526, batch of Arrival   3135   3155   3195   3275   3435   3755   4395   5675   8235  13355  23085
+    hydro_test/src/cluster/relay_broadcast.rs:527, batch of (u64, Body)   3125   3125   3125   3125   3125   3125   3125   3125   3125   3125    645
+    hydro_test/src/cluster/relay_broadcast.rs:528, batch of Ack   3125   3145   3185   3265   3425   3745   4385   5665   8225  13345  23085
+    hydro_test/src/cluster/relay_broadcast.rs:657, batch of (usize, ())   3125   3125   3125   3125   3125   3125   3125   3125   3125   3125   3125
+    hydro_test/src/cluster/relay_broadcast.rs:658, batch of Arrival   3125   3125   3125   3125   3125   3125   3125   3125   3125   3125   3125
+    hydro_test/src/cluster/relay_broadcast.rs:659, batch of (u32, Relay)   3125   3125   3125   3125   3125   3125   3125   3125   3125   3125   3125
+metrics (shed, unheld 5000)
+    hydro_test/src/cluster/relay_broadcast.rs:525, batch of (usize, ())   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000
+    hydro_test/src/cluster/relay_broadcast.rs:526, batch of Arrival   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000
+    hydro_test/src/cluster/relay_broadcast.rs:527, batch of (u64, Body)   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000
+    hydro_test/src/cluster/relay_broadcast.rs:528, batch of Ack   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000
+    hydro_test/src/cluster/relay_broadcast.rs:657, batch of (usize, ())   4995   4990   4980   4960   4920   4840   4680   4360   3720   2440      5
+    hydro_test/src/cluster/relay_broadcast.rs:658, batch of Arrival   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000
+    hydro_test/src/cluster/relay_broadcast.rs:659, batch of (u32, Relay)   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000   5000
+
+verdict: hazardous
+  decision point: hydro_test/src/cluster/relay_broadcast.rs:526, batch of Arrival
+  first reacted at a hold of 1 rounds, with 50 extra admitted records there
+  largest extra work over the curve: 51150 in admitted records
+  decision points that admitted more records under that hold, at its peak:
+    hydro_test/src/cluster/relay_broadcast.rs:526, batch of Arrival +10230
+    hydro_test/src/cluster/relay_broadcast.rs:528, batch of Ack +10230
+    hydro_test/src/cluster/relay_broadcast.rs:658, batch of Arrival +10230
+    hydro_test/src/cluster/relay_broadcast.rs:659, batch of (u32, Relay) +10230
+    hydro_test/src/cluster/relay_broadcast.rs:660, batch of (u32, (u64, Body)) +10230
+growth: keeps growing. Once the hold outlasts the input, every further round of delay costs the same amount of extra work.
+  worst shape, at hydro_test/src/cluster/relay_broadcast.rs:528, batch of Ack over holds 128, 256, 512: extra sends from Cluster(loc2v1) @4 keeps growing: rate 8.00 per round of delay, no ceiling within the run (rates 8.000, 8.000)
+  largest multiplier, at hydro_test/src/cluster/relay_broadcast.rs:528, batch of Ack: 8.98× the unheld run's 1000 sends from Cluster(loc2v1) @4 (+7984 at a hold of 999 rounds)
+  largest stall reaction, at hydro_test/src/cluster/relay_broadcast.rs:528, batch of Ack: +77360 admitted records (77.4 per round of the run) under a hold that never ends

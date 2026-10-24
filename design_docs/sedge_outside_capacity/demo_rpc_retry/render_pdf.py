@@ -33,9 +33,11 @@ def main():
     body = re.sub(r"</p>\s*<p>", "<br><br>", body)
     # Tables: fpdf2 wants a border and a header row.
     body = body.replace("<table>", '<table border="1" width="100%">')
-    # Code blocks: keep leading spaces (fpdf2 collapses them), in a smaller monospace.
+    # Code blocks: keep leading and repeated spaces (fpdf2 collapses them), in a smaller monospace.
     def keep_indent(m):
         code = re.sub(r"(?m)^( +)", lambda s: "\u00a0" * len(s.group(1)), m.group(0))
+        # Runs of spaces inside a line too, so that column-aligned output stays aligned.
+        code = re.sub(r"(?<=\S)( {2,})", lambda s: "\u00a0" * len(s.group(1)), code)
         return code
 
     body = re.sub(r"<pre><code[^>]*>.*?</code></pre>", keep_indent, body, flags=re.S)
