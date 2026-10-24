@@ -19,8 +19,33 @@ pub struct PairClause<M> {
     pub robust: bool,
 }
 
-/// The clauses learned so far, by pair. The engine keys pairs by `(member, fact)`.
+/// The clauses learned so far, by pair.
 pub type Pairs<P, M> = BTreeMap<P, Vec<PairClause<M>>>;
+
+/// A pair's key: which member it is about, and which fact. Implemented for `(member, fact)`.
+pub trait PairKey: Ord + Clone {
+    /// The fact's type.
+    type Fact: Ord + Clone;
+    /// The node of the member that should hold the fact.
+    fn member(&self) -> &Node;
+    /// The fact.
+    fn fact(&self) -> &Self::Fact;
+}
+
+impl<F: Ord + Clone> PairKey for (Node, F) {
+    type Fact = F;
+    fn member(&self) -> &Node {
+        &self.0
+    }
+    fn fact(&self) -> &F {
+        &self.1
+    }
+}
+
+/// Facts verified lost under a fault set, hence under every superset of it
+/// ([`super::Sweep::mark_dead`]): each entry is a set of omissions and start crashes, and a
+/// fact that no correct member holds under it, in any schedule.
+pub type Dead<M, F> = [(FaultSet<M>, F)];
 
 /// Whether `fault` kills the delivery `dep`, in every schedule (§4.2):
 /// - `omit(m)` kills it iff `dep` is `m` on a lossy channel;
@@ -83,25 +108,55 @@ impl<M: Ord> PairClause<M> {
     }
 }
 
-/// Whether `set` is admissible for a pair with these clauses: it kills every robust one. A pair
-/// with no robust clause makes every set admissible.
-pub fn admissible_for<M: Ord>(set: &FaultSet<M>, clauses: &[PairClause<M>]) -> bool {
-    clauses
+/// Whether `pair` cannot be broken by `set`, whatever its clauses say:
+/// - **crashed at start:** `set` holds `crash(member)` before any send, which fires at instance
+///   start in every schedule, so the member is never correct;
+/// - **dead fact:** `set` is a superset of a set under which the pair's fact was verified lost
+///   ([`super::Sweep::mark_dead`]), so no correct member holds it under `set` either.
+pub fn excused<P: PairKey, M: Ord + Clone>(
+    set: &FaultSet<M>,
+    pair: &P,
+    dead: &Dead<M, P::Fact>,
+) -> bool {
+    set.contains(&Fault::crash_after(pair.member().clone(), None))
+        || dead
+            .iter()
+            .any(|(lost, fact)| fact == pair.fact() && lost.is_subset(set))
+}
+
+/// Whether `set` is admissible for `pair`: it does not [excuse](excused) the pair, and it kills
+/// every robust clause of it. A pair with no robust clause makes every set that does not
+/// excuse it admissible.
+pub fn admissible_for<P: PairKey, M: Ord + Clone>(
+    set: &FaultSet<M>,
+    pair: &P,
+    clauses: &[PairClause<M>],
+    dead: &Dead<M, P::Fact>,
+) -> bool {
+    !excused(set, pair, dead)
+        && clauses
+            .iter()
+            .filter(|c| c.robust)
+            .all(|c| c.hit_by_set(set))
+}
+
+/// Whether `set` can be skipped (§4.3, the corollary of Lemma R): it is admissible for no pair.
+/// For each pair, either some robust clause survives it, so in every schedule of `set` the pair
+/// is held or its member crashed, or `set` [excuses](excused) the pair. Fragile clauses are
+/// ignored, and a pair with no robust clause keeps every set that does not excuse it unpruned.
+pub fn pruned<P: PairKey, M: Ord + Clone>(
+    set: &FaultSet<M>,
+    pairs: &Pairs<P, M>,
+    dead: &Dead<M, P::Fact>,
+) -> bool {
+    pairs
         .iter()
-        .filter(|c| c.robust)
-        .all(|c| c.hit_by_set(set))
+        .all(|(pair, clauses)| !admissible_for(set, pair, clauses, dead))
 }
 
-/// Whether `set` can be skipped (§4.3, the corollary of Lemma R): for **every** pair, some
-/// robust clause survives it, so in every schedule of `set` every pair is held or its member
-/// crashed. Fragile clauses are ignored, and a pair with no robust clause is never satisfied,
-/// so it keeps every set unpruned.
-pub fn pruned<P, M: Ord>(set: &FaultSet<M>, pairs: &Pairs<P, M>) -> bool {
-    pairs.values().all(|clauses| !admissible_for(set, clauses))
-}
-
-/// The pairs with no robust clause. Each makes every fault set admissible, so the hitting-set
-/// program cannot finish the label and the engine must enumerate (§4.4, step 4).
+/// The pairs with no robust clause. Each makes every fault set that does not excuse it
+/// admissible, so the hitting-set program cannot finish the label and the engine must
+/// enumerate (§4.4, step 4).
 pub fn unconstrained_pairs<P: Clone, M: Ord>(pairs: &Pairs<P, M>) -> Vec<P> {
     pairs
         .iter()
@@ -111,14 +166,22 @@ pub fn unconstrained_pairs<P: Clone, M: Ord>(pairs: &Pairs<P, M>) -> Vec<P> {
 }
 
 /// The pairs for which some set of `tried` is still admissible. The empty set (the probe) is
-/// admissible exactly for the [unconstrained](unconstrained_pairs) pairs; a set that was run
+/// admissible exactly for the [unconstrained](unconstrained_pairs) pairs. A set that was run
 /// and stays admissible for a pair gave that pair no robust derivation it spares, so every
-/// superset of it is admissible for the pair too, including supersets adding faults that no
-/// clause names.
-pub fn stuck_pairs<P: Clone, M: Ord>(tried: &BTreeSet<FaultSet<M>>, pairs: &Pairs<P, M>) -> Vec<P> {
+/// superset of it that does not excuse the pair is admissible for it too, including supersets
+/// adding faults that no clause names.
+pub fn stuck_pairs<P: PairKey, M: Ord + Clone>(
+    tried: &BTreeSet<FaultSet<M>>,
+    pairs: &Pairs<P, M>,
+    dead: &Dead<M, P::Fact>,
+) -> Vec<P> {
     pairs
         .iter()
-        .filter(|(_, clauses)| tried.iter().any(|t| admissible_for(t, clauses)))
+        .filter(|(pair, clauses)| {
+            tried
+                .iter()
+                .any(|t| admissible_for(t, *pair, clauses, dead))
+        })
         .map(|(p, _)| p.clone())
         .collect()
 }
@@ -133,7 +196,9 @@ pub fn stuck_pairs<P: Clone, M: Ord>(tried: &BTreeSet<FaultSet<M>>, pairs: &Pair
 /// outside the universe by `crash(n)`. Such a crash is `crash(n after m)` for an `m` no clause
 /// names, so it kills every delivery from `n`: exactly what `crash(n)` kills. The image crashes
 /// a subset of `H`'s nodes, so it is within every crash bound `H` is. Hence "no admissible set
-/// over the universe" is a statement about every fault set.
+/// over the universe" is a statement about every fault set, as long as no pair is [excused]:
+/// `crash(n)` can excuse a pair where the crash it replaces did not, so [`candidates`] adds a
+/// replacement that excuses nothing.
 ///
 /// Order, weakest first (the solver's tie-break prefers earlier candidates, so a hypothesis
 /// leaves as much of the protocol running as it can): omissions, then per node the crash points
@@ -168,6 +233,91 @@ pub fn universe<'a, M: Ord + Clone + 'a>(
                 .map(|(_, m)| Fault::crash_after(node.clone(), Some(m))),
         );
         out.push(Fault::crash_after(node, None));
+    }
+    out
+}
+
+/// One candidate of the hitting-set program.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum Candidate<M> {
+    /// A fault.
+    Fault(Fault<M>),
+    /// `crash(n after m)` for a message `m` of `n` that no clause names, when no run has shown
+    /// such a message: it kills every delivery from `n`, as `crash(n)` does, but excuses nothing.
+    /// It cannot be run; a proposal that needs it goes to the enumerator.
+    Unnamed(Node),
+}
+
+impl<M: Ord> Candidate<M> {
+    /// Whether this candidate kills some delivery of `clause`.
+    pub fn hits(&self, clause: &PairClause<M>) -> bool {
+        match self {
+            Candidate::Fault(fault) => clause.hit_by(fault),
+            Candidate::Unnamed(node) => clause
+                .deps
+                .iter()
+                .any(|d| d.sender.as_ref().is_some_and(|(sender, _)| sender == node)),
+        }
+    }
+
+    /// The node this candidate crashes, if it is a crash.
+    pub fn crashed_node(&self) -> Option<&Node> {
+        match self {
+            Candidate::Fault(fault) => fault.crashed_node(),
+            Candidate::Unnamed(node) => Some(node),
+        }
+    }
+}
+
+/// The [universe] of `pairs`, completed for the exemptions of [excused]: for every node `n`
+/// whose `crash(n)` can excuse a pair (`n` is a pair's member, or `crash(n)` is part of a dead
+/// set), a crash of `n` right after a message no clause names, placed right after `crash(n)`.
+/// That is `crash(n after w)` for the first such `w` in `sends[n]` (every message the runs
+/// showed `n` sending), or [`Candidate::Unnamed`] if there is none.
+///
+/// **Completion with exemptions.** Map a fault set `H` admissible for a pair `p` as in
+/// [universe], but replace a crash of an exempting node `n` after a message no clause names by
+/// this candidate rather than by `crash(n)`. It kills every delivery from `n`, as the crash it
+/// replaces does. The image holds `crash(n)` only where `H` does, and dead sets hold only
+/// omissions and start crashes, so the image excuses `p` only if `H` does: it is still
+/// admissible for `p`.
+pub fn candidates<P: PairKey, M: Ord + Clone>(
+    pairs: &Pairs<P, M>,
+    dead: &Dead<M, P::Fact>,
+    sends: &BTreeMap<Node, BTreeSet<M>>,
+) -> Vec<Candidate<M>> {
+    let named: BTreeSet<&M> = pairs
+        .values()
+        .flatten()
+        .flat_map(|c| c.deps.iter().map(|d| &d.message))
+        .collect();
+    let exempting: BTreeSet<&Node> = pairs
+        .keys()
+        .map(PairKey::member)
+        .chain(
+            dead.iter()
+                .flat_map(|(set, _)| set.iter().filter_map(Fault::crashed_node)),
+        )
+        .collect();
+    let mut out = vec![];
+    for fault in universe(pairs.values().flatten()) {
+        let replacement = match &fault {
+            Fault::Crash {
+                node,
+                at: CrashAt::BeforeAnySend,
+            } if exempting.contains(node) => Some(
+                match sends
+                    .get(node)
+                    .and_then(|sent| sent.iter().find(|m| !named.contains(m)))
+                {
+                    Some(w) => Candidate::Fault(Fault::crash_after(node.clone(), Some(w.clone()))),
+                    None => Candidate::Unnamed(node.clone()),
+                },
+            ),
+            _ => None,
+        };
+        out.push(Candidate::Fault(fault));
+        out.extend(replacement);
     }
     out
 }

@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 
-use super::clause::{Pairs, pruned};
+use super::clause::{Dead, PairKey, Pairs, pruned};
 use crate::search::{CrashBounds, Fault, FaultSet, Node};
 
 /// Whether `set` is within `bounds`: at most one crash per node, the crash cap, the every-node
@@ -33,8 +33,8 @@ pub fn within_bounds<M>(set: &FaultSet<M>, bounds: &CrashBounds) -> bool {
 /// A cursor over the subsets of a universe, by increasing size, then lexicographically by
 /// position in the universe (the order faults were first added). Deterministic.
 ///
-/// A skipped set is not revisited: the caller's clauses only grow, and a pruned set stays
-/// pruned when clauses are added. Growing the universe restarts the cursor (tried sets are
+/// A skipped set is not revisited: the caller's clauses and dead sets only grow, and a pruned
+/// set stays pruned when they do. Growing the universe restarts the cursor (tried sets are
 /// still skipped).
 #[derive(Clone, Debug)]
 pub struct Enumerator<M> {
@@ -76,13 +76,14 @@ impl<M: Ord + Clone> Enumerator<M> {
         grew
     }
 
-    /// The next set within `bounds` that is neither in `tried` nor [pruned] by `pairs`, or
-    /// `None` once every set of up to `max_faults` faults has been passed.
-    pub fn next<P>(
+    /// The next set within `bounds` that is neither in `tried` nor [pruned] by `pairs` and
+    /// `dead`, or `None` once every set of up to `max_faults` faults has been passed.
+    pub fn next<P: PairKey>(
         &mut self,
         bounds: &CrashBounds,
         tried: &BTreeSet<FaultSet<M>>,
         pairs: &Pairs<P, M>,
+        dead: &Dead<M, P::Fact>,
     ) -> Option<FaultSet<M>> {
         while let Some(positions) = self.cursor.take() {
             self.cursor = self.advance(&positions);
@@ -90,7 +91,7 @@ impl<M: Ord + Clone> Enumerator<M> {
                 .iter()
                 .map(|&i| self.universe[i].clone())
                 .collect();
-            if within_bounds(&set, bounds) && !tried.contains(&set) && !pruned(&set, pairs) {
+            if within_bounds(&set, bounds) && !tried.contains(&set) && !pruned(&set, pairs, dead) {
                 return Some(set);
             }
         }
