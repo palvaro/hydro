@@ -32,6 +32,19 @@ pub mod two_pc;
 pub mod two_pc_bench;
 pub mod two_pc_ctp;
 
+pub mod ec_hydrofrac;
+pub mod ec_hydrofrac_classes;
+#[cfg(test)]
+mod ec_two_pc_hydrofrac;
+#[cfg(test)]
+mod hydrofrac_provenance_tests;
+
+#[cfg(test)]
+mod ec_demos_hydrofrac;
+
+#[cfg(test)]
+mod ec_bruteforce;
+
 // WIP: the following modules were written against an older hydro_lang API
 // (they call `broadcast_from_member`, which has since been renamed/removed,
 // and `typed_consensus` has a `T`/`usize` type mismatch at ~line 360).
