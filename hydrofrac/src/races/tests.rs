@@ -692,6 +692,13 @@ fn a_start_crash_of_the_member_excuses_its_pairs() {
     let mut blind = Sweep::new(cap(1));
     assert_eq!(blind.next(&pairs), Next::Unconstrained(vec![p.clone()]));
 
+    // If the runs showed every message `m1` can send, a crash after another one never fires:
+    // nothing is left to propose.
+    let mut complete = Sweep::new(cap(1));
+    complete.saw_sends(&"m1".to_owned(), ["a", "b"].map(str::to_owned));
+    complete.sends_complete();
+    assert_eq!(complete.next(&pairs), Next::Certified(Tolerance::All));
+
     let mut sweep = Sweep::new(cap(1));
     sweep.saw_sends(&"m1".to_owned(), ["a", "b", "w"].map(str::to_owned));
     assert_eq!(sweep.next(&pairs), Next::Try(set([crash_after("m1", "w")])));

@@ -25,6 +25,10 @@
 //! lineage pruning assumes a derivation recurs whenever its deliveries do. Each label's search
 //! then only needs to kill one schedule's derivations of each earlier run
 //! ([`crate::search::Sweep::next_any`]), and ends [`Verdict::Exhausted`] instead of certified.
+//!
+//! [`EcCheck::races`] is the mode for such programs (docs/design/hydrofrac-races.md): clauses per
+//! `(member, fact)`, only robust derivations skip fault sets, and every set run is explored over
+//! its schedules until they cover it. It can certify labels of programs with schedule choices.
 
 #[cfg(stageleft_runtime)]
 mod engine;
@@ -38,7 +42,7 @@ pub use engine::EcCheck;
 pub use engine::{BruteForce, BruteLabel, CrossCheck};
 #[cfg(stageleft_runtime)]
 pub use results::{
-    ChoiceSite, Counterexample, LabelResult, Results, Stats, VacuousReason, Verdict,
+    ChoiceSite, Counterexample, LabelResult, RaceNotes, Results, Stats, VacuousReason, Verdict,
 };
 
 #[cfg(test)]

@@ -273,7 +273,10 @@ impl<M: Ord> Candidate<M> {
 /// whose `crash(n)` can excuse a pair (`n` is a pair's member, or `crash(n)` is part of a dead
 /// set), a crash of `n` right after a message no clause names, placed right after `crash(n)`.
 /// That is `crash(n after w)` for the first such `w` in `sends[n]` (every message the runs
-/// showed `n` sending), or [`Candidate::Unnamed`] if there is none.
+/// showed `n` sending), or [`Candidate::Unnamed`] if there is none. With `sends_complete`
+/// (`sends` holds every message any node sends under any fault set, in any schedule) there is
+/// no replacement when there is no such `w`: a crash after a message `n` never sends never
+/// fires, so a set holding it runs exactly as the set without it.
 ///
 /// **Completion with exemptions.** Map a fault set `H` admissible for a pair `p` as in
 /// [universe], but replace a crash of an exempting node `n` after a message no clause names by
@@ -285,6 +288,7 @@ pub fn candidates<P: PairKey, M: Ord + Clone>(
     pairs: &Pairs<P, M>,
     dead: &Dead<M, P::Fact>,
     sends: &BTreeMap<Node, BTreeSet<M>>,
+    sends_complete: bool,
 ) -> Vec<Candidate<M>> {
     let named: BTreeSet<&M> = pairs
         .values()
@@ -305,15 +309,17 @@ pub fn candidates<P: PairKey, M: Ord + Clone>(
             Fault::Crash {
                 node,
                 at: CrashAt::BeforeAnySend,
-            } if exempting.contains(node) => Some(
-                match sends
-                    .get(node)
-                    .and_then(|sent| sent.iter().find(|m| !named.contains(m)))
-                {
-                    Some(w) => Candidate::Fault(Fault::crash_after(node.clone(), Some(w.clone()))),
-                    None => Candidate::Unnamed(node.clone()),
-                },
-            ),
+            } if exempting.contains(node) => match sends
+                .get(node)
+                .and_then(|sent| sent.iter().find(|m| !named.contains(m)))
+            {
+                Some(w) => Some(Candidate::Fault(Fault::crash_after(
+                    node.clone(),
+                    Some(w.clone()),
+                ))),
+                None if sends_complete => None,
+                None => Some(Candidate::Unnamed(node.clone())),
+            },
             _ => None,
         };
         out.push(Candidate::Fault(fault));

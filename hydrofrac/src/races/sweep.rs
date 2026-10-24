@@ -50,6 +50,7 @@ pub struct Sweep<M, F> {
     tried: BTreeSet<FaultSet<M>>,
     dead: Vec<(FaultSet<M>, F)>,
     sends: BTreeMap<Node, BTreeSet<M>>,
+    sends_complete: bool,
     /// The hypothesis budget, counting the probe.
     pub budget: usize,
     /// The solver.
@@ -66,6 +67,7 @@ impl<M: Ord + Clone, F: Ord + Clone> Sweep<M, F> {
             tried: BTreeSet::from([FaultSet::new()]),
             dead: vec![],
             sends: BTreeMap::new(),
+            sends_complete: false,
             budget: HYPOTHESIS_BUDGET,
             backend: Backend::default(),
         }
@@ -134,13 +136,23 @@ impl<M: Ord + Clone, F: Ord + Clone> Sweep<M, F> {
         self.sends.entry(node.clone()).or_default().extend(messages);
     }
 
+    /// Records that [`Self::saw_sends`] has been told every message any node sends under any
+    /// fault set, in any schedule. True of a fragile-free program once its failure-free run was
+    /// read: every record under a fault set is computed from a derivation the fault set leaves
+    /// intact, which exists without faults too, so every send under faults is a send without
+    /// them. Then a crash after a message no run showed never fires, and needs no candidate
+    /// ([`candidates`]).
+    pub fn sends_complete(&mut self) {
+        self.sends_complete = true;
+    }
+
     /// The next step given every clause learned so far. A proposed set counts as tried.
     pub fn next<P: PairKey<Fact = F>>(&mut self, pairs: &Pairs<P, M>) -> Next<M, P> {
         let stuck = stuck_pairs(&self.tried, pairs, &self.dead);
         if !stuck.is_empty() {
             return Next::Unconstrained(stuck);
         }
-        let universe = candidates(pairs, &self.dead, &self.sends);
+        let universe = candidates(pairs, &self.dead, &self.sends, self.sends_complete);
         // The most crashes a set over this universe can hold: one per node, and at most the
         // checked cluster's cap among its members. Past it, a higher bound admits nothing new.
         let crash_nodes: BTreeSet<_> = universe

@@ -32,6 +32,11 @@ mod brute;
 #[cfg(any(test, feature = "cross-check"))]
 pub use brute::{BruteForce, BruteLabel, CrossCheck};
 
+// The races mode (docs/design/hydrofrac-races.md §4.4): a child of this module, as it drives
+// the engine.
+#[path = "races_engine.rs"]
+mod races_engine;
+
 /// Checks every `EventualConsistency` label of a program (see the [module docs](super)).
 ///
 /// Two knobs; everything else is a convention (docs/design/hydrofrac-lite.md §2):
@@ -48,12 +53,26 @@ pub struct EcCheck {
     /// The program's fragile steps, if instrumented by [`Self::instrument_fragile`] (filled at
     /// compile time).
     fragile: Option<Rc<RefCell<Vec<crate::provenance::FragileSite>>>>,
+    /// Whether this is the races mode ([`Self::races`]).
+    races: bool,
 }
 
 impl EcCheck {
     /// A check with no cap on crashes, exploring every schedule.
     pub fn new() -> Self {
         EcCheck::default()
+    }
+
+    /// A check in races mode (docs/design/hydrofrac-races.md §4.4), for programs with
+    /// `nondet!` choices: [`Self::instrument`] tags records with the fragile steps they passed
+    /// through, and [`Self::run`] keeps clauses per (member, fact), skips only fault sets that
+    /// robust derivations cover, and explores the others over their schedules. No cap on
+    /// crashes, every schedule explored.
+    pub fn races() -> Self {
+        EcCheck {
+            races: true,
+            ..EcCheck::default()
+        }
     }
 
     /// Caps the crash sweep at `n` crashes: a label that holds at `n` is reported as holding
@@ -75,7 +94,12 @@ impl EcCheck {
     /// points, attaches record provenance, skips the program's own consistency assertions
     /// (the check is what checks them) and acknowledges lossy channels (the check injects their
     /// omissions itself). Compile the result and pass it to [`Self::run`].
+    ///
+    /// In races mode ([`Self::races`]) this is [`Self::instrument_fragile`].
     pub fn instrument<'a>(&mut self, flow: SimFlow<'a>) -> SimFlow<'a> {
+        if self.races {
+            return self.instrument_fragile(flow);
+        }
         let flow = self.instrument_taps(flow);
         // Record provenance (docs/design/hydrofrac-lite.md §5): a `PostNetwork` pass, so it
         // sees the taps' outputs and attaches each observed fact's lineage to them. Operators
@@ -128,7 +152,11 @@ impl EcCheck {
             .expect("`EcCheck::run` needs a simulation compiled from `EcCheck::instrument`")
             .labels();
         let mut engine = Engine::new(self, sim, &labels, &mut body);
-        engine.check()
+        if self.races {
+            engine.check_races()
+        } else {
+            engine.check()
+        }
     }
 }
 
@@ -246,6 +274,7 @@ impl Run {
             hypotheses: 1,
             schedules: self.schedules,
             wall: self.wall,
+            races: None,
         }
     }
 }
@@ -545,6 +574,8 @@ struct Engine<'c, B> {
     sample_schedules: Option<usize>,
     /// Every run so far, by fault set; labels share them.
     runs: BTreeMap<FaultSet<MessageId>, Rc<Run>>,
+    /// The program's fragile steps, if the simulation was instrumented in fragile mode.
+    fragile: Option<Vec<crate::provenance::FragileSite>>,
 }
 
 /// The message of a panic payload.
@@ -569,6 +600,7 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
             max_crashes: check.max_crashes,
             sample_schedules: check.sample_schedules,
             runs: BTreeMap::new(),
+            fragile: check.fragile_sites(),
         }
     }
 
@@ -746,7 +778,11 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
             verdicts[t.label] = Some(result);
         }
         self.write_diagrams(&mut verdicts);
+        self.results(verdicts)
+    }
 
+    /// The results, from every label's verdict (by label index).
+    fn results(&self, mut verdicts: Vec<Option<(Verdict, Stats)>>) -> Results {
         let plans = &self.labels.plans;
         Results {
             labels: plans
@@ -777,6 +813,32 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
         &mut self,
         seen: impl FnMut(&Tables, &InstanceRecord),
     ) -> (Vec<Option<(Verdict, Stats)>>, Vec<Target>, Rc<Run>) {
+        let (mut verdicts, mut targets) = self.label_targets();
+
+        // Hypothesis 0: the failure-free probe learns every label's fact domain as it reads
+        // each schedule (see `RunFold::read`).
+        let mut probe = self.execute(&FaultSet::new(), &targets, true, seen);
+        for t in &mut targets {
+            t.domain = probe.domains.remove(&t.label).unwrap_or_default();
+        }
+        let (empty, targets): (Vec<Target>, Vec<Target>) =
+            targets.into_iter().partition(|t| t.domain.is_empty());
+        for t in empty {
+            // Nothing to agree on, unless the probe panicked (a counterexample).
+            let verdict = match &probe.labels[&t.label].failure {
+                Some(f) => counterexample(FaultSet::new(), None, !t.sensitive(), 0, f),
+                None => Verdict::Vacuous(VacuousReason::EmptyDomain),
+            };
+            verdicts[t.label] = Some((verdict, probe.stats()));
+        }
+        let probe = Rc::new(probe);
+        self.runs.insert(FaultSet::new(), probe.clone());
+        (verdicts, targets, probe)
+    }
+
+    /// The labels that need no search, decided (by label index), and the labels left to search
+    /// (with empty fact domains).
+    fn label_targets(&self) -> (Vec<Option<(Verdict, Stats)>>, Vec<Target>) {
         let plans = &self.labels.plans;
         let mut verdicts: Vec<Option<(Verdict, Stats)>> = vec![None; plans.len()];
         // The searched labels with more than one member; the others are decided up front.
@@ -805,26 +867,7 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
                 }
             }
         }
-
-        // Hypothesis 0: the failure-free probe learns every label's fact domain as it reads
-        // each schedule (see `RunFold::read`).
-        let mut probe = self.execute(&FaultSet::new(), &targets, true, seen);
-        for t in &mut targets {
-            t.domain = probe.domains.remove(&t.label).unwrap_or_default();
-        }
-        let (empty, targets): (Vec<Target>, Vec<Target>) =
-            targets.into_iter().partition(|t| t.domain.is_empty());
-        for t in empty {
-            // Nothing to agree on, unless the probe panicked (a counterexample).
-            let verdict = match &probe.labels[&t.label].failure {
-                Some(f) => counterexample(FaultSet::new(), None, !t.sensitive(), 0, f),
-                None => Verdict::Vacuous(VacuousReason::EmptyDomain),
-            };
-            verdicts[t.label] = Some((verdict, probe.stats()));
-        }
-        let probe = Rc::new(probe);
-        self.runs.insert(FaultSet::new(), probe.clone());
-        (verdicts, targets, probe)
+        (verdicts, targets)
     }
 
     /// Writes each counterexample's Lamport diagram to `target/hydrofrac/<test>/<label>/`
