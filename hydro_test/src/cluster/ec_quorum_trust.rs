@@ -1,4 +1,4 @@
-//! Trusted `quorum` (docs/design/hydrofrac-races.md §8.2): the races mode trusts
+//! Trusted `quorum` (docs/design/hydrofrac-races.md §8.2): the check trusts
 //! `hydro_std::ec_inference_demos::quorum::quorum`'s mint (and only it, by its exact compiled
 //! form), so a certificate's lineage is its fact's own attestations and no step of the mint is
 //! fragile.
@@ -11,10 +11,9 @@
 //!   flight); [`hand_written_quorum_stays_fragile`]: a copy of the same logic, quoted in this file,
 //!   is not trusted.
 //! - [`races_urb3_threshold2`]: uniform reliable broadcast over three members, which brute force
-//!   cannot exhaust, checked by the races mode alone.
-//! - [`races_planted_local_attestation_lite`] / [`races_planted_local_attestation_races`]: a
-//!   planted bug through the real `quorum` (members attest only their own receipt), found by both
-//!   modes and by brute force.
+//!   cannot exhaust, checked by the search alone.
+//! - [`races_planted_local_attestation`]: a planted bug through the real `quorum` (members attest
+//!   only their own receipt), found by the search and by brute force.
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -250,7 +249,7 @@ fn costs(name: &str, results: &hydrofrac::Results, wall: std::time::Duration) {
 }
 
 /// `uniform_reliable_broadcast_closed` over `n` members, with echo threshold `threshold`, one
-/// item, checked by the races mode alone (up to two crashes).
+/// item, checked by the search alone (up to two crashes).
 fn urb_races(n: usize, threshold: usize) -> hydrofrac::Results {
     use hydro_std::ec_inference_demos::uniform_broadcast::uniform_reliable_broadcast_closed;
     let mut flow = FlowBuilder::new();
@@ -258,7 +257,7 @@ fn urb_races(n: usize, threshold: usize) -> hydrofrac::Results {
     let members = flow.cluster::<Member>();
     let (send, items) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
     let _out = uniform_reliable_broadcast_closed(items, &members, threshold).sim_cluster_output();
-    let mut check = EcCheck::races().max_crashes(2);
+    let mut check = EcCheck::new().max_crashes(2);
     let sim = check
         .instrument(flow.sim().with_cluster_size(&members, n))
         .compiled();
@@ -373,11 +372,6 @@ fn planted(check: EcCheck) {
 }
 
 #[test]
-fn races_planted_local_attestation_lite() {
+fn races_planted_local_attestation() {
     planted(EcCheck::new());
-}
-
-#[test]
-fn races_planted_local_attestation_races() {
-    planted(EcCheck::races());
 }

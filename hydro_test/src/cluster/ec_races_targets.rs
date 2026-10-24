@@ -6,10 +6,9 @@
 //! Every agreement test explores **every** schedule of every admissible fault set of at most
 //! [`MAX_FAULTS`] faults (all channels here are `fail_stop`, so every fault is a crash). The
 //! search is capped at the same number of crashes ([`EcCheck::max_crashes`]), so its sweep and
-//! the enumeration cover the same sets. Each program is checked twice, by lite
-//! ([`EcCheck::new`]) and by the races mode ([`EcCheck::races`]); both must agree with the
-//! enumeration, and the cost lines (`COST ...`, with `--nocapture`) put the search's sets and
-//! schedules next to the enumeration's.
+//! the enumeration cover the same sets. Each program is checked by the search ([`EcCheck::new`]),
+//! which must agree with the enumeration, and the cost lines (`COST ...`, with `--nocapture`) put
+//! the search's sets and schedules next to the enumeration's.
 //!
 //! Skipped, because brute force cannot exhaust even their failure-free run (measured by the probes
 //! below): uniform reliable broadcast over three members (checked by the races mode alone in
@@ -37,20 +36,9 @@ pub struct Learner;
 /// The largest fault set the enumeration covers, and the search's crash cap.
 const MAX_FAULTS: usize = 2;
 
-/// Which check a cross-check runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Mode {
-    Lite,
-    Races,
-}
-
-/// The check `mode` runs, capped at `max_crashes` crashes.
-fn mode_check(mode: Mode, max_crashes: usize) -> EcCheck {
-    match mode {
-        Mode::Lite => EcCheck::new(),
-        Mode::Races => EcCheck::races(),
-    }
-    .max_crashes(max_crashes)
+/// The check, capped at `max_crashes` crashes.
+fn capped(max_crashes: usize) -> EcCheck {
+    EcCheck::new().max_crashes(max_crashes)
 }
 
 /// One line per verdict.
@@ -80,16 +68,16 @@ fn verdict(cross: &CrossCheck, v: &Verdict) -> String {
 
 /// Prints the search's report, the enumeration's, and one `COST` line per searched label: the
 /// verdict, the search's sets and schedules, and the enumeration's.
-fn costs(name: &str, mode: Mode, cross: &CrossCheck, wall: std::time::Duration) {
+fn costs(name: &str, cross: &CrossCheck, wall: std::time::Duration) {
     eprintln!(
-        "=== {name} [{mode:?}] ({:.1}s)\nsearch:\n{}\n{cross}",
+        "=== {name} ({:.1}s)\nsearch:\n{}\n{cross}",
         wall.as_secs_f64(),
         cross.results
     );
     for l in cross.results.results() {
         let brute = cross.brute.label(l.index);
         eprintln!(
-            "COST {name} [{mode:?}] / {}: {} | search {} sets, {} schedules, {:.1}s, races {:?} | \
+            "COST {name} / {}: {} | search {} sets, {} schedules, {:.1}s, races {:?} | \
              brute force: {} | brute force total {} sets, {} schedules, {:.1}s",
             l.name(),
             verdict(cross, &l.verdict),
@@ -115,31 +103,30 @@ fn costs(name: &str, mode: Mode, cross: &CrossCheck, wall: std::time::Duration) 
         );
     }
     if cross.disagreements.is_empty() {
-        eprintln!("AGREE {name} [{mode:?}]");
+        eprintln!("AGREE {name}");
     } else {
         for d in &cross.disagreements {
-            eprintln!("DISAGREEMENT {name} [{mode:?}]: {d}");
+            eprintln!("DISAGREEMENT {name}: {d}");
         }
     }
 }
 
-/// Runs `build` (a cross-check of `max_faults` faults) under `mode`, capped at `max_faults`
-/// crashes, prints its costs, and returns it.
+/// Runs `build` (a cross-check of `max_faults` faults), capped at `max_faults` crashes, prints
+/// its costs, and returns it.
 fn cross(
     name: &str,
-    mode: Mode,
     max_faults: usize,
     build: impl FnOnce(EcCheck, usize) -> CrossCheck,
 ) -> CrossCheck {
     let start = std::time::Instant::now();
-    let cross = build(mode_check(mode, max_faults), max_faults);
-    costs(name, mode, &cross, start.elapsed());
+    let cross = build(capped(max_faults), max_faults);
+    costs(name, &cross, start.elapsed());
     cross
 }
 
 /// The failure-free schedule space of a configuration (both sides capped at zero crashes).
 fn probe(name: &str, build: impl FnOnce(EcCheck, usize) -> CrossCheck) {
-    let cross = cross(name, Mode::Races, 0, build);
+    let cross = cross(name, 0, build);
     eprintln!(
         "PROBE {name}: {} failure-free schedules in {:.1}s",
         cross.brute.schedules,
@@ -425,48 +412,16 @@ fn assert_one_schedule_per_set(cross: &CrossCheck, name: &str) {
 
 /// Uniform reliable broadcast, two members (so no member may crash: only the source), one item.
 #[test]
-fn races_targets_urb2_threshold1_lite() {
-    cross(
-        "urb (2 members, threshold 1)",
-        Mode::Lite,
-        MAX_FAULTS,
-        urb(2, 1),
-    )
-    .assert_agrees();
-}
-
-#[test]
-fn races_targets_urb2_threshold1_races() {
-    let c = cross(
-        "urb (2 members, threshold 1)",
-        Mode::Races,
-        MAX_FAULTS,
-        urb(2, 1),
-    );
+fn races_targets_urb2_threshold1() {
+    let c = cross("urb (2 members, threshold 1)", MAX_FAULTS, urb(2, 1));
     c.assert_agrees();
     assert_certified(&c, "uniform_reliable_broadcast_closed");
     assert_one_schedule_per_set(&c, "uniform_reliable_broadcast_closed");
 }
 
 #[test]
-fn races_targets_urb2_threshold2_lite() {
-    cross(
-        "urb (2 members, threshold 2)",
-        Mode::Lite,
-        MAX_FAULTS,
-        urb(2, 2),
-    )
-    .assert_agrees();
-}
-
-#[test]
-fn races_targets_urb2_threshold2_races() {
-    let c = cross(
-        "urb (2 members, threshold 2)",
-        Mode::Races,
-        MAX_FAULTS,
-        urb(2, 2),
-    );
+fn races_targets_urb2_threshold2() {
+    let c = cross("urb (2 members, threshold 2)", MAX_FAULTS, urb(2, 2));
     c.assert_agrees();
     assert_certified(&c, "uniform_reliable_broadcast_closed");
     assert_one_schedule_per_set(&c, "uniform_reliable_broadcast_closed");
@@ -475,24 +430,8 @@ fn races_targets_urb2_threshold2_races() {
 /// Two-phase commit with cooperative termination, two participants, the quiescing harness
 /// (transaction → quiesce → timeouts), every schedule of every set of at most two faults.
 #[test]
-fn races_targets_ctp2_quiescing_lite() {
-    cross(
-        "ctp (2 participants, quiescing)",
-        Mode::Lite,
-        MAX_FAULTS,
-        ctp(2, true),
-    )
-    .assert_agrees();
-}
-
-#[test]
-fn races_targets_ctp2_quiescing_races() {
-    let c = cross(
-        "ctp (2 participants, quiescing)",
-        Mode::Races,
-        MAX_FAULTS,
-        ctp(2, true),
-    );
+fn races_targets_ctp2_quiescing() {
+    let c = cross("ctp (2 participants, quiescing)", MAX_FAULTS, ctp(2, true));
     c.assert_agrees();
     assert_certified(&c, "committed");
 }
@@ -504,21 +443,9 @@ fn races_targets_ctp2_quiescing_races() {
 const RACING_SAMPLES: usize = 64;
 
 #[test]
-fn races_targets_ctp2_racing_sampled_lite() {
+fn races_targets_ctp2_racing_sampled() {
     let c = cross(
         "ctp (2 participants, racing timers, sampled)",
-        Mode::Lite,
-        1,
-        sampled(RACING_SAMPLES, ctp(2, false)),
-    );
-    c.assert_agrees();
-}
-
-#[test]
-fn races_targets_ctp2_racing_sampled_races() {
-    let c = cross(
-        "ctp (2 participants, racing timers, sampled)",
-        Mode::Races,
         1,
         sampled(RACING_SAMPLES, ctp(2, false)),
     );

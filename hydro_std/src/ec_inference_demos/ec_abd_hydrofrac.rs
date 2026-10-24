@@ -186,7 +186,7 @@ fn races_targets_probe_abd() {
     let outs = abd_register(&replicas, REPLICAS / 2 + 1, writes, reads);
     let _done = outs.write_done.sim_cluster_output();
     let _read = outs.read_result.sim_cluster_output();
-    let mut check = hydrofrac::EcCheck::races().max_crashes(0);
+    let mut check = hydrofrac::EcCheck::new().max_crashes(0);
     let sim = check
         .instrument(
             flow.sim()

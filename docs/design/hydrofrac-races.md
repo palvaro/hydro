@@ -159,8 +159,8 @@ iff it uses any send of `n`.
   fires.
 - **Conservative.** It ignores orders that every schedule happens to share, e.g. two sends from one `flat_map`.
   So it may propose a few more hypotheses than lite on choice-free programs. That is measured in §7.
-- **Completion carries over.** Lite's argument (§4.5 of the lite doc) needs one property: `crash(n)` kills
-  everything any other crash of `n` kills. That still holds.
+- **Completion** is §12.2's: the candidates are the faults the runs revealed, plus one unseen crash per
+  node.
 - **Firing is unchanged.** It is lite's `FaultHook`: the crash fires when `m` is sent before the heal.
 
 **Refinement: closed-broadcast fan-out order.** `crash(n after m)` also spares a send `d` of `n`
@@ -182,24 +182,19 @@ that is always sent before `m`. One case is known for sure: `broadcast_closed`.
 - **Checked.** `check/fanout_tests.rs` runs a process broadcast and a batched cluster broadcast
   under every schedule (1,332 of them for one test). On each, it asserts that every payload
   goes to members in increasing id order.
-- **Completion.** Each `(channel, sender, payload)` is one totally ordered chain, and chains are
-  disjoint.
-  - A crash after a message `x` that no clause names has an image: the crash after the last
-    named message that precedes `x` in its chain. Both spare the same named sends, so both
-    kill the same named deliveries.
-  - If no named message precedes `x`, the image is `crash(n)`, as before.
-  - The stand-in for `crash(n)` used with exemptions must be a crash after an unnamed message
-    that no named message precedes.
+- **Chains.** Each `(channel, sender, payload)` is one totally ordered chain, and chains are
+  disjoint. A crash literal `after(d, m)` is fixed when `d` and `m` lie in one chain, and free
+  otherwise (§12.1).
 - **Exact crash points.** Suppose the program is fragile-free, so the probe has seen every
   message any node can send, and every message `n` can send lies in `m`'s chain. Then
-  `crash(n after m)` cuts exactly the chain after `m`, in every run.
+  `crash(n after m)` touches only proved literals (§12.1), and cuts exactly the chain after
+  `m`, in every run.
   - Such a set's facts are the same in every schedule. It is run on one schedule.
   - If `n` is not a member of the label's cluster, a fact the set loses everywhere is dead
-    (`Sweep::mark_dead`). The argument is the start-crash one: a derivation under a superset
-    sends from `n` only messages up to `m`, which the rule spares.
-  - For completion, every crash point of such an `n` is a candidate. Mapping a crash after an
-    unnamed message onto the dead set's crash point would excuse a pair the original crash
-    does not.
+    (`Sweep::mark_dead`), a row with no literal. The argument is the start-crash one: a
+    derivation under a superset sends from `n` only messages up to `m`, which the rule spares.
+  - Every crash point the runs revealed is a candidate (§12.2), so no image lands on a dead
+    set's crash point unless the original crash is that one.
 
 ### 4.3 Clauses per pair
 
@@ -234,14 +229,11 @@ v1 keeps clauses per pair, as Molly kept them per goal:
 
    `H` is then a no-good. Early stopping is where most of the saving is. A hypothesis whose first schedule shows
    every pair robustly re-derived and spared costs one schedule, not thousands.
-4. **Conclude.**
-   - When no admissible `H` is left over the completed universe (lite's completion, with §4.2's rule), the label
-     is certified up to the bound, and the crash sweep goes on as in lite.
-   - **Universe for pairs with no robust derivation.** Such a pair makes *every* fault set admissible, so the
-     candidate faults its robust clauses would propose are not enough. For these pairs the universe is the
-     brute-force enumerator's (`check/brute_force.rs` `harvest`): every lossy message and every crash point seen
-     in any run, grown to a fixpoint. The ILP then proposes every fault set over it that is not skipped. So
-     these labels cost about what brute force costs, minus the skipped sets.
+4. **Conclude.** When no untried admissible `H` is left over the candidates, the label is certified up to the
+   bound, and the crash sweep goes on to the next. The candidates are every fault the runs revealed (the
+   brute-force enumerator's harvest) plus an unseen crash per node (§12.2). A pair with no robust derivation
+   makes every fault set admissible, so the ILP proposes every set over the candidates: such labels cost about
+   what brute force costs, minus the skipped sets. There is no other fallback and no size bound (§12).
 
 ### 4.5 Which choices are explored, per spec
 
@@ -518,8 +510,8 @@ cluster: the source, the broadcaster or the coordinator.
 - multi-Paxos, 1 proposer, 3 acceptors: over 21,000;
 - ABD, 1 write: over 131,000.
 
-In those programs v1 also falls back to enumeration, because their derivations pass through fragile steps. So v1
-cannot certify them at any size worth having.
+In those programs v1 also fell back to enumeration, because their derivations pass through fragile steps, so v1 could
+not certify them at any size worth having. The trusted `quorum` (§8.2) and §12 changed that for uniform broadcast.
 
 ### What this shows
 
@@ -532,19 +524,20 @@ cannot certify them at any size worth having.
   - the plain broadcast's counterexample: 2 schedules where brute force needs 38.
 - **Where it does not.** Labels whose derivations are fragile cost exactly brute force: 2PC `committed`, the
   uniform broadcast's quorum output. That is sound, but no saving.
-- **A regression against lite.** On `reliable_broadcast_closed` with several payloads, lite costs 25 / 46 fault
-  sets and races costs 134 / 281.
+- **A regression against lite** (lite has since been deleted, §12.8). On `reliable_broadcast_closed` with
+  several payloads, lite cost 25 / 46 fault sets and races costs 134 / 281.
   - The program has no `nondet!` branching at all, so lite's positional rule applies there.
   - Races' crash rule knows only the order inside one broadcast, not the order between two broadcasts.
   - The proposed fix is to recognise that a source's `TotalOrder` stream broadcasts payload 1 before payload 2.
     It is not done yet.
 
-### Next
+### Next (as of §11; see §12 for what followed)
 
-1. Order between successive broadcasts of a `TotalOrder` stream (fixes the regression).
+1. Order between successive broadcasts of a `TotalOrder` stream (fixes the regression). Superseded by §12: the
+   crash literals between two payload chains are free.
 2. v2 (§8.1): "trigger meets state" premises with barrier discharge. This is what would let G-Set gossip and CTP-2
    with the quiescing harness be certified without enumerating.
-3. §8.2: a trusted quorum combinator, for uniform broadcast, multi-Paxos and ABD.
+3. §8.2: a trusted quorum combinator, for uniform broadcast, multi-Paxos and ABD. Done for `quorum`.
 
 ## 12. Order in the formula (design for review, before implementation)
 
@@ -687,3 +680,25 @@ robust derivation survives it, so every superset of it stays admissible: the sol
 each crash point of each member, one schedule each. Example: `new_messages` with one payload runs 12 such
 supersets. The echo broadcast over three members (3×) and `new_messages` with one payload (2.5×) are past the 2×
 gate.
+
+### 12.8 Stage 2: the only engine
+
+- **Lite is deleted.**
+  - Its clause, hitting-set program and sweep (`search/clause.rs`, `ilp.rs`, `sweep.rs`) are gone, along with its
+    loop in `check/engine.rs` and its positional crash rule (`Dependency::killed_by`).
+  - `EcCheck::new()` is the races search. There is no mode and no `EcCheck::races()`.
+  - `EcCheck::instrument` is the fragile-mode instrumentation; `instrument_fragile` is gone.
+  - `search/` keeps only the shared vocabulary: faults, dependencies, bounds, `Tolerance`, the budget.
+- **The brute-force oracle keeps its own execution path** (`check/brute_force.rs`). It reads outputs straight from
+  the event log, with no lineage, provenance or pruning.
+- **`Verdict::Exhausted` now means a sampled search** that found nothing. A program with schedule choices but no
+  fragile step is certified.
+- **The dead-fact row is kept** as a literal-free theorem (stage 1b, `Sweep::mark_dead`). It needs a fragile-free
+  program, start crashes or exact crash points of nodes outside the cluster, and no order observed in a run.
+- **Against the lite baseline** (`docs/design/races-vs-lite-comparison.md`, 232 of 240 rows matched):
+  - no verdict is weaker, and 43 are stronger or correct a false certificate;
+  - fault sets cost 2.1× in total, and schedules 0.70×.
+  - Rows past 2× are of two kinds:
+    - labels with no derivation a fragile step does not touch (ABD, gossip, Paxos, CTP), which now pay brute-force
+      cost, as §12.4 accepted;
+    - `new_messages` with several payloads (§11).

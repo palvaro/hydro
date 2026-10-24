@@ -17,9 +17,7 @@
 //! A delivery in a support becomes a [`Dependency`]: it is omittable if its channel is faulty
 //! (lossy) and it was sent before the network healed, and it is
 //! killed by a crash of its sender if the sender can crash. A delivery that neither kind of fault
-//! can kill is dropped from the derivation, but the closure still runs through it. A
-//! [`Clause`] pairs a derivation with the run's send sequences and pre-heal send counts, which
-//! give positional crash points their meaning in that run.
+//! can kill is dropped from the derivation, but the closure still runs through it.
 //!
 //! Only delivered sends can appear in a support: provenance names deliveries by the tags their
 //! receivers saw, and the execution rule follows receives.
@@ -31,7 +29,7 @@ use std::rc::Rc;
 use hydro_lang::sim::network_hook::{ChannelInfo, LocationInfo};
 
 use crate::fault::{DeliveryId, Event, EventLog, Fate, MessageId, NodeId, NodeNames};
-use crate::search::{Clause, Dependency, Derivation, PreHealSends, SendSequences};
+use crate::search::{Dependency, Derivation};
 
 pub use crate::provenance::RecordProv;
 use crate::provenance::fragile_site;
@@ -90,7 +88,7 @@ impl Tables {
 /// One observed fact of the run: an [`Event::Output`].
 #[derive(Clone, Copy, Debug)]
 pub struct Observation<'a> {
-    /// Its index in the event log (the argument of [`Lineage::clause_for`]).
+    /// Its index in the event log (the argument of [`Lineage::derivation`]).
     pub event: usize,
     /// The external port.
     pub port: usize,
@@ -139,8 +137,6 @@ pub struct Lineage<'a> {
     outputs: BTreeMap<usize, OutputRecord>,
     /// Receives per node in program order: `(event index, index into sends)`.
     recvs_at: HashMap<NodeId, Vec<(usize, usize)>>,
-    sequences: Rc<SendSequences<MessageId>>,
-    pre_heal: Rc<PreHealSends>,
     memo: RefCell<HashMap<Record, Closure>>,
     opaque: RefCell<BTreeSet<Record>>,
 }
@@ -200,8 +196,6 @@ impl<'a> Lineage<'a> {
         let mut by_id = HashMap::new();
         let mut outputs = BTreeMap::new();
         let mut recv_events = Vec::new();
-        let mut sequences: SendSequences<MessageId> = BTreeMap::new();
-        let mut pre_heal: PreHealSends = BTreeMap::new();
         for (i, event) in events.iter().enumerate() {
             match event {
                 Event::Sent {
@@ -215,14 +209,6 @@ impl<'a> Lineage<'a> {
                     let sender = crashable
                         .contains(&msg.from)
                         .then(|| (names.name(&msg.from), *ordinal));
-                    if let Some((node, _)) = &sender
-                        && *fate != Fate::SenderDead
-                    {
-                        sequences.entry(node.clone()).or_default().push(msg.clone());
-                        if before_heal {
-                            *pre_heal.entry(node.clone()).or_default() += 1;
-                        }
-                    }
                     let lossy = before_heal && tables.is_faulty(msg.channel);
                     let dependency = (lossy || sender.is_some()).then(|| Dependency {
                         message: msg.clone(),
@@ -267,8 +253,6 @@ impl<'a> Lineage<'a> {
             by_id,
             outputs,
             recvs_at,
-            sequences: Rc::new(sequences),
-            pre_heal: Rc::new(pre_heal),
             memo: RefCell::new(HashMap::new()),
             opaque: RefCell::new(BTreeSet::new()),
         }
@@ -292,17 +276,6 @@ impl<'a> Lineage<'a> {
             }),
             _ => None,
         })
-    }
-
-    /// Every crashable node's sends in this run, in order (sends after its crash fired
-    /// excluded).
-    pub fn send_sequences(&self) -> &Rc<SendSequences<MessageId>> {
-        &self.sequences
-    }
-
-    /// How many of each crashable node's sends happened before the network healed.
-    pub fn pre_heal_sends(&self) -> &Rc<PreHealSends> {
-        &self.pre_heal
     }
 
     /// The derivation of the observation at event index `event`.
@@ -339,21 +312,6 @@ impl<'a> Lineage<'a> {
     pub fn send_derivation(&self, id: DeliveryId) -> Option<Rc<Derivation<MessageId>>> {
         let &s = self.by_id.get(&id)?;
         Some(self.closure(Record::Send(s)).derivation)
-    }
-
-    /// The clause of the observation at event index `event`: its derivation, with this run's send
-    /// sequences and pre-heal send counts. Its premises are empty; the loop sets them to the
-    /// crashes of the hypothesis the run was under.
-    ///
-    /// # Panics
-    /// If `event` is not the index of an [`Event::Output`].
-    pub fn clause_for(&self, event: usize) -> Clause<MessageId> {
-        Clause {
-            deps: (*self.derivation(event)).clone(),
-            sends: self.sequences.clone(),
-            pre_heal_sends: self.pre_heal.clone(),
-            premises: BTreeSet::new(),
-        }
     }
 
     /// How many distinct records (sends and outputs) the derivations computed so far reached

@@ -44,9 +44,9 @@ pub struct Counterexample {
     /// omissions alone. A certificate when [`Self::tolerance_certified`], else only what the
     /// search found.
     pub tolerates: Option<usize>,
-    /// Whether [`Self::tolerates`] is a certificate. It is in a program whose fault sets each
-    /// have one execution. In a program with schedule choices (docs/design/hydrofrac-lite.md
-    /// §4.9) it says only that the search found no counterexample with fewer crashes.
+    /// Whether [`Self::tolerates`] is a certificate. It is unless the search sampled schedules
+    /// ([`crate::EcCheck::sample_schedules`]): then it says only that the sample showed no
+    /// counterexample with fewer crashes.
     pub tolerance_certified: bool,
     /// The index of the hypothesis in the label's search (0 is the failure-free probe).
     pub hypothesis: usize,
@@ -87,15 +87,12 @@ pub enum Verdict {
     Vacuous(VacuousReason),
     /// The hypothesis budget ran out: not a certificate.
     Budget {
-        /// The largest crash bound cleared before the budget ran out, if any (a certificate only
-        /// in a program with no schedule choices).
+        /// The largest crash bound cleared before the budget ran out, if any (a certificate
+        /// unless schedules were sampled).
         tolerates: Option<usize>,
     },
-    /// A label of a program with schedule choices (docs/design/hydrofrac-lite.md §4.9) whose
-    /// search ran out of hypotheses without a counterexample: **not a certificate**. Lineage
-    /// pruning is sound only where each fault set has one execution. Here a derivation seen in
-    /// one schedule need not recur in another, so the fault sets the search skipped were not
-    /// ruled out.
+    /// A label whose search sampled schedules ([`crate::EcCheck::sample_schedules`]) and found
+    /// no counterexample: **not a certificate**, as a schedule outside the sample may break it.
     Exhausted {
         /// How far the search went: every crash bound up to the vacuity bounds
         /// ([`Tolerance::All`]), or up to the `max_crashes` cap.
@@ -112,8 +109,8 @@ pub enum Verdict {
 
 impl Verdict {
     /// Whether the verdict is not a certificate of a label that needs checking: a
-    /// counterexample, an exhausted budget, or an exhausted search in a program with schedule
-    /// choices (what [`Results::assert_holds`] rejects).
+    /// counterexample, an exhausted budget, or a sampled search (what [`Results::assert_holds`]
+    /// rejects).
     pub fn fails(&self) -> bool {
         matches!(
             self,
@@ -249,14 +246,13 @@ impl Results {
     }
 
     /// Whether every label is certified (or needs no check): no counterexample, no exhausted
-    /// budget, and no label whose search merely found nothing in a program with schedule
-    /// choices ([`Verdict::Exhausted`]).
+    /// budget, and no label whose sampled search merely found nothing ([`Verdict::Exhausted`]).
     pub fn holds(&self) -> bool {
         !self.labels.iter().any(|l| l.verdict.fails())
     }
 
-    /// Panics with the report unless every label holds (see [`Self::holds`]). No label of a
-    /// program with schedule choices can be certified, so for such a program use
+    /// Panics with the report unless every label holds (see [`Self::holds`]). A sampled search
+    /// certifies nothing, so with [`crate::EcCheck::sample_schedules`] use
     /// [`Self::assert_no_counterexample`].
     #[track_caller]
     pub fn assert_holds(&self) {
@@ -267,7 +263,7 @@ impl Results {
             && !self.labels.iter().any(|l| l.verdict.is_counterexample())
         {
             panic!(
-                "hydrofrac: the program has schedule choices, so the search of label `{}` is not a \
+                "hydrofrac: schedules were sampled, so the search of label `{}` is not a \
                  certificate (`assert_no_counterexample` accepts it)\n{self}",
                 l.name()
             );
@@ -282,9 +278,8 @@ impl Results {
     }
 
     /// Panics with the report if some label has a counterexample. Weaker than
-    /// [`Self::assert_holds`]: it also accepts a label whose search found nothing in a program
-    /// with schedule choices ([`Verdict::Exhausted`]) and an exhausted budget, neither of which
-    /// is a certificate.
+    /// [`Self::assert_holds`]: it also accepts a sampled search that found nothing
+    /// ([`Verdict::Exhausted`]) and an exhausted budget, neither of which is a certificate.
     #[track_caller]
     pub fn assert_no_counterexample(&self) {
         assert!(
@@ -401,7 +396,7 @@ pub(crate) fn verdict_line(
                 }
             };
             format!(
-                "{searched}; not a certificate (program has schedule choices: {})",
+                "{searched} on sampled schedules; not a certificate (schedule choices: {})",
                 site_list(sites)
             )
         }

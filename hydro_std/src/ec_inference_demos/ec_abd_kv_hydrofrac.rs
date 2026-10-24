@@ -67,23 +67,12 @@ fn ec_check(mut check: hydrofrac::EcCheck, mode: &str) -> hydrofrac::Results {
 }
 
 /// `EcCheck::new()` (lite) with sampled schedules.
+/// `EcCheck::new()`, exhaustive per hypothesis unless `ABD_KV_SAMPLES` is set.
 #[cfg(stageleft_runtime)]
 #[test]
 #[ignore = "measurement"]
-fn abd_kv_two_writes_lite() {
-    let samples = std::env::var("ABD_KV_SAMPLES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8);
-    ec_check(hydrofrac::EcCheck::new().sample_schedules(samples), "new()");
-}
-
-/// `EcCheck::races()`, exhaustive per hypothesis unless `ABD_KV_SAMPLES` is set.
-#[cfg(stageleft_runtime)]
-#[test]
-#[ignore = "measurement"]
-fn abd_kv_two_writes_races() {
-    let mut check = hydrofrac::EcCheck::races();
+fn abd_kv_two_writes() {
+    let mut check = hydrofrac::EcCheck::new();
     if let Some(n) = std::env::var("ABD_KV_SAMPLES")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -96,7 +85,7 @@ fn abd_kv_two_writes_races() {
     {
         check = check.max_crashes(n);
     }
-    ec_check(check, "races()");
+    ec_check(check, "new()");
 }
 
 #[cfg(stageleft_runtime)]
@@ -157,7 +146,10 @@ fn abd_kv_two_writes_failure_free_completion() {
         }
     };
     let start = std::time::Instant::now();
-    let explored = match std::env::var("ABD_KV_FUZZ").ok().and_then(|s| s.parse().ok()) {
+    let explored = match std::env::var("ABD_KV_FUZZ")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
         Some(n) => {
             sim.fuzz_bounded(n, body);
             n

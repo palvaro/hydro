@@ -127,6 +127,14 @@ fn brute_force_agrees_on_a_plain_broadcast() {
     // The enumeration itself finds the mid fan-out crash of the source.
     let b = &cross.brute.labels[0];
     assert_eq!(b.min_crashes(), Some(1), "{cross}");
+    let cex = cross
+        .results
+        .label("delivered")
+        .verdict
+        .counterexample()
+        .expect("a mid fan-out crash");
+    assert_eq!(cex.crashes(), 1, "{cross}");
+    assert!(cex.tolerance_certified, "{cross}");
 }
 
 #[cfg(stageleft_runtime)]
@@ -140,6 +148,13 @@ fn brute_force_agrees_on_a_lossy_broadcast() {
         b.breaking[0].iter().all(|f| matches!(f, Fault::Omit(_))),
         "{cross}"
     );
+    let cex = cross
+        .results
+        .label("delivered")
+        .verdict
+        .counterexample()
+        .expect("an omission");
+    assert_eq!(cex.crashes(), 0, "{cross}");
 }
 
 #[cfg(stageleft_runtime)]
@@ -151,6 +166,11 @@ fn brute_force_agrees_on_an_echo_broadcast() {
     let label = cross.results.label("delivered");
     let b = cross.brute.label(label.index).expect("searched");
     assert_eq!(b.min_crashes(), Some(2), "{cross}");
+    let cex = label
+        .verdict
+        .counterexample()
+        .expect("two crashes break it");
+    assert_eq!(cex.crashes(), 2, "{cross}");
 }
 
 #[cfg(stageleft_runtime)]
@@ -474,75 +494,45 @@ fn total_loss_masks_a_partial_loss_in(check: EcCheck, max_crashes: Option<usize>
     )
 }
 
-/// S1 with the search capped at zero crashes: a false certificate.
+/// S1 with the search capped at zero crashes. Lite's union clauses certified it falsely; the
+/// per-pair clauses keep (m1, f)'s derivation from the probe, and `omit(gossip m0→m1)` alone
+/// breaks the label, as the enumeration finds.
 #[cfg(stageleft_runtime)]
 #[test]
 fn suspected_total_loss_masks_a_partial_loss_certificate() {
-    let start = std::time::Instant::now();
     let cross = total_loss_masks_a_partial_loss(Some(0));
-    eprintln!(
-        "=== S1 (max_crashes 0), {:?}\n{cross}\n{}",
-        start.elapsed(),
-        cross.results
-    );
+    eprintln!("=== S1 (max_crashes 0)\n{cross}\n{}", cross.results);
     assert!(
         cross.results.choices.is_empty(),
         "not choice-free: {:?}",
         cross.results.choices
     );
-    // The enumeration finds a zero-crash breaking set; the search certifies zero crashes.
-    assert!(
-        matches!(
-            cross.results.label("known").verdict,
-            Verdict::Certified {
-                tolerates: Tolerance::UpTo(0)
-            }
-        ),
-        "{cross}"
-    );
-    let label = cross.results.label("known");
-    let b = cross.brute.label(label.index).expect("searched");
-    assert_eq!(b.min_crashes(), Some(0), "{cross}");
-    assert!(
-        cross
-            .disagreements
-            .iter()
-            .any(|d| d.starts_with("known") && d.contains("omit(gossip[cluster@0→cluster@1]")),
-        "expected the search to disagree with the enumeration on `known`:\n{cross}"
-    );
+    assert_breaks_by_the_gossip_omission(&cross);
 }
 
-/// S1 uncapped: the search reports a counterexample, but claims the label tolerates every
-/// zero-crash fault set, while `omit(gossip m0→m1)` alone breaks it.
+/// S1 uncapped: the counterexample is the zero-crash omission (lite claimed to tolerate every
+/// zero-crash fault set).
 #[cfg(stageleft_runtime)]
 #[test]
 fn suspected_total_loss_masks_a_partial_loss_tolerance() {
-    let start = std::time::Instant::now();
     let cross = total_loss_masks_a_partial_loss(None);
-    eprintln!(
-        "=== S1 (uncapped), {:?}\n{cross}\n{}",
-        start.elapsed(),
-        cross.results
-    );
-    let label = cross.results.label("known");
-    let b = cross.brute.label(label.index).expect("searched");
-    assert_eq!(b.min_crashes(), Some(0), "{cross}");
-    assert!(
-        cross
-            .disagreements
-            .iter()
-            .any(|d| d.starts_with("known") && d.contains("omit(gossip[cluster@0→cluster@1]")),
-        "expected the search to disagree with the enumeration on `known`:\n{cross}"
-    );
+    eprintln!("=== S1 (uncapped)\n{cross}\n{}", cross.results);
+    assert_breaks_by_the_gossip_omission(&cross);
 }
 
-// The races mode (docs/design/hydrofrac-races.md §4.4), cross-checked on the same programs.
-
-/// Prints the races search's report and the cross-check, and asserts agreement.
+/// The search agrees with the enumeration on S1, and breaks `known` with no crash.
 #[cfg(stageleft_runtime)]
-fn races_agree(name: &str, cross: &CrossCheck) {
-    eprintln!("=== races: {name}\nsearch:\n{}\n{cross}", cross.results);
+fn assert_breaks_by_the_gossip_omission(cross: &CrossCheck) {
     cross.assert_agrees();
+    let label = cross.results.label("known");
+    let cex = label
+        .verdict
+        .counterexample()
+        .unwrap_or_else(|| panic!("omissions alone break it: {cross}"));
+    assert_eq!(cex.crashes(), 0, "{cross}");
+    assert!(cex.tolerance_certified, "{cross}");
+    let b = cross.brute.label(label.index).expect("searched");
+    assert_eq!(b.min_crashes(), Some(0), "{cross}");
 }
 
 /// The verdict on `label`, and its races notes.
@@ -554,66 +544,6 @@ fn races_label<'c>(cross: &'c CrossCheck, label: &str) -> (&'c Verdict, super::R
         .races
         .unwrap_or_else(|| panic!("no races notes: {cross}"));
     (&l.verdict, notes)
-}
-
-#[cfg(stageleft_runtime)]
-#[test]
-fn races_agree_on_a_plain_broadcast() {
-    let cross = plain_broadcast_in(EcCheck::races(), false);
-    races_agree("plain broadcast (fail_stop)", &cross);
-    let (verdict, _) = races_label(&cross, "delivered");
-    let cex = verdict.counterexample().expect("a mid fan-out crash");
-    assert_eq!(cex.crashes(), 1, "{cross}");
-    assert!(cex.tolerance_certified, "{cross}");
-}
-
-#[cfg(stageleft_runtime)]
-#[test]
-fn races_agree_on_a_lossy_broadcast() {
-    let cross = plain_broadcast_in(EcCheck::races(), true);
-    races_agree("plain broadcast (lossy)", &cross);
-    let (verdict, _) = races_label(&cross, "delivered");
-    let cex = verdict.counterexample().expect("an omission");
-    assert_eq!(cex.crashes(), 0, "{cross}");
-}
-
-#[cfg(stageleft_runtime)]
-#[test]
-fn races_agree_on_an_echo_broadcast() {
-    let cross = echo_broadcast_in(EcCheck::races(), 3, false);
-    races_agree("echo broadcast (3 members)", &cross);
-    let (verdict, _) = races_label(&cross, "delivered");
-    let cex = verdict.counterexample().expect("two crashes break it");
-    assert_eq!(cex.crashes(), 2, "{cross}");
-}
-
-#[cfg(stageleft_runtime)]
-#[test]
-fn races_agree_on_an_echo_over_a_lossy_first_hop() {
-    let cross = echo_broadcast_in(EcCheck::races(), 3, true);
-    races_agree("echo broadcast (lossy first hop)", &cross);
-}
-
-#[cfg(stageleft_runtime)]
-#[test]
-fn races_agree_on_a_lossy_relay_chain() {
-    races_agree("lossy relay chain", &lossy_relay_chain(EcCheck::races()));
-}
-
-/// S1: where lite certifies zero crashes (or claims to tolerate them) and `omit(gossip m0→m1)`
-/// alone breaks the label, the races mode keeps (m1, f)'s clause from the probe and finds it.
-#[cfg(stageleft_runtime)]
-#[test]
-fn races_agree_where_a_total_loss_masks_a_partial_loss() {
-    for cap in [Some(0), None] {
-        let cross = total_loss_masks_a_partial_loss_in(EcCheck::races(), cap);
-        races_agree(&format!("S1 (max_crashes {cap:?})"), &cross);
-        let (verdict, _) = races_label(&cross, "known");
-        let cex = verdict
-            .counterexample()
-            .unwrap_or_else(|| panic!("omissions alone break it: {cross}"));
-        assert_eq!(cex.crashes(), 0, "{cross}");
-    }
 }
 
 /// An echo broadcast whose members batch what they receive (a `nondet!` choice) and only map
@@ -646,7 +576,7 @@ fn races_certify_a_batched_echo() {
         ));
     let _out = delivered.sim_cluster_output();
 
-    let mut check = EcCheck::races().max_crashes(1);
+    let mut check = EcCheck::new().max_crashes(1);
     let sim = check
         .instrument(flow.sim().with_cluster_size(&members, 3))
         .compiled();
@@ -658,7 +588,7 @@ fn races_certify_a_batched_echo() {
         },
         MAX_FAULTS,
     );
-    races_agree("batched echo", &cross);
+    agree("batched echo", &cross);
     assert!(!cross.results.choices.is_empty(), "{cross}");
     let label = cross.results.label("delivered");
     assert!(
@@ -703,7 +633,7 @@ fn races_find_a_broadcast_whose_members_do_not_re_forward() {
         ));
     let _out = delivered.sim_cluster_output();
 
-    let mut check = EcCheck::races();
+    let mut check = EcCheck::new();
     let sim = check
         .instrument(flow.sim().with_cluster_size(&members, 3))
         .compiled();
@@ -714,7 +644,7 @@ fn races_find_a_broadcast_whose_members_do_not_re_forward() {
         },
         MAX_FAULTS,
     );
-    races_agree("broadcast without re-forwarding", &cross);
+    agree("broadcast without re-forwarding", &cross);
     let (verdict, _) = races_label(&cross, "delivered");
     let cex = verdict
         .counterexample()
@@ -827,8 +757,9 @@ fn positional_crash_order_relay_in(
 #[cfg(stageleft_runtime)]
 const RELAY_BREAK: &str = "crash(process#5 after fanout[process#5→cluster@0]: ";
 
-/// Suspected soundness bug S2, uncapped: the search reports a counterexample with two crashes and
-/// claims (as certified) that the label tolerates one, while one crash breaks it.
+/// Suspected soundness bug S2 (demonstrated in lite, whose positional crash rule is deleted):
+/// lite reported a counterexample with two crashes and claimed (as certified) that the label
+/// tolerates one, while one crash breaks it. The order-free crash rule finds the one crash.
 ///
 /// The program ([`positional_crash_order_relay`]): two members `m0`, `m1`, label `known`, one
 /// fact `7`. The relay `n` (`process#5`) gets `7` twice: first over the lossy one-hop `direct`,
@@ -844,12 +775,12 @@ const RELAY_BREAK: &str = "crash(process#5 after fanout[process#5→cluster@0]: 
 /// - **`H = {crash(n after →m0)}`:** without the omission, `n` sends `→m0` first, as in the
 ///   probe, and dies before `→m1`. `m0` holds `7`, `m1` never does: the label breaks with one
 ///   crash. But in `{omit(direct)}`'s run `→m0` came *after* `→m1`, so the kill relation
-///   (`Dependency::killed_by`, read in the clause's own run) says `H` kills nothing there: `m1`'s
-///   old derivation "survives" `H`, and `H` is never proposed.
-/// - Every other one-crash set either holds (the echo covers `{omit(direct), crash(n after
+///   (lite's `Dependency::killed_by`, read in the clause's own run) said `H` kills nothing there:
+///   `m1`'s old derivation "survived" `H`, and `H` was never proposed. The order-free rule says
+///   `crash(n after →m0)` kills `→m1` (their order is not proved), so `H` is proposed.
+/// - Lite: every other one-crash set either holds (the echo covers `{omit(direct), crash(n after
 ///   →m1)}`; the redundant paths cover `r1`, `r2` and the sources) or hits no clause. So bound 1
-///   is declared exhausted (the completion adds only `crash(n)`, which is vacuous), and the search
-///   breaks at 2 with `{crash(s1), crash(s2)}`.
+///   was declared exhausted, and lite broke at 2 with `{crash(s1), crash(s2)}`.
 ///
 /// The breaking pair `(m1, 7)` is held in the run whose clause excludes `H`, with a derivation
 /// through `n`'s `→m1`: this is the send-order flip (S2), not a fact lost everywhere (S1).
@@ -857,11 +788,9 @@ const RELAY_BREAK: &str = "crash(process#5 after fanout[process#5→cluster@0]: 
 #[test]
 fn suspected_positional_crash_order_tolerance() {
     for max_faults in [2, 3, 4] {
-        let start = std::time::Instant::now();
         let cross = positional_crash_order_relay(EcCheck::new(), max_faults);
         eprintln!(
-            "=== S2 relay (uncapped, {max_faults} faults), {:?}\n{cross}\nsearch:\n{}",
-            start.elapsed(),
+            "=== S2 relay (uncapped, {max_faults} faults)\n{cross}\nsearch:\n{}",
             cross.results
         );
         assert!(
@@ -869,78 +798,44 @@ fn suspected_positional_crash_order_tolerance() {
             "not choice-free: {:?}",
             cross.results.choices
         );
-        let label = cross.results.label("known");
-        let cex = label
-            .verdict
-            .counterexample()
-            .unwrap_or_else(|| panic!("expected a counterexample: {cross}"));
-        assert_eq!(cex.tolerates, Some(1), "{cross}");
-        assert!(cex.tolerance_certified, "{cross}");
-        assert_eq!(cex.crashes(), 2, "{cross}");
-        let b = cross.brute.label(label.index).expect("searched");
-        assert_eq!(b.min_crashes(), Some(1), "{cross}");
-        assert_eq!(b.breaking[0].len(), 1, "{cross}");
-        assert!(
-            cross
-                .results
-                .report_names()
-                .fault_set(&b.breaking[0])
-                .starts_with(&format!("{{{RELAY_BREAK}")),
-            "{cross}"
-        );
-        assert!(
-            cross
-                .disagreements
-                .iter()
-                .any(|d| d.starts_with("known") && d.contains("tolerates 1 crash")),
-            "expected the search to disagree with the enumeration on `known`:\n{cross}"
-        );
+        assert_breaks_at_the_relay(&cross);
     }
 }
 
-/// S2 with the search capped at one crash: a false certificate ("holds with up to 1 crash")
-/// where `{crash(n after →m0)}` breaks the label. See
-/// [`suspected_positional_crash_order_tolerance`].
+/// S2 with the search capped at one crash: lite certified "holds with up to 1 crash"; the search
+/// finds `{crash(n after →m0)}`. See [`suspected_positional_crash_order_tolerance`].
 #[cfg(stageleft_runtime)]
 #[test]
 fn suspected_positional_crash_order_certificate() {
-    let start = std::time::Instant::now();
     let cross = positional_crash_order_relay_in(EcCheck::new(), 3, Some(1));
     eprintln!(
-        "=== S2 relay (max_crashes 1, 3 faults), {:?}\n{cross}\nsearch:\n{}",
-        start.elapsed(),
+        "=== S2 relay (max_crashes 1, 3 faults)\n{cross}\nsearch:\n{}",
         cross.results
     );
-    let label = cross.results.label("known");
-    assert!(
-        matches!(
-            label.verdict,
-            Verdict::Certified {
-                tolerates: Tolerance::UpTo(1)
-            }
-        ),
-        "{cross}"
-    );
-    assert!(
-        cross
-            .disagreements
-            .iter()
-            .any(|d| d.starts_with("known") && d.contains(RELAY_BREAK)),
-        "expected the search to disagree with the enumeration on `known`:\n{cross}"
-    );
+    assert_breaks_at_the_relay(&cross);
 }
 
-/// The races mode on the S2 relay agrees with the enumeration (up to 4 faults): it finds
-/// `{crash(n after →m0)}` at one crash.
+/// The search agrees with the enumeration on the S2 relay, and breaks `known` with the one crash
+/// `{crash(n after →m0)}`, its tolerance of none certified.
 #[cfg(stageleft_runtime)]
-#[test]
-fn races_on_the_positional_crash_order_relay() {
-    for (cap, max_faults) in [(None, 3), (Some(1), 3), (None, 4)] {
-        let cross = positional_crash_order_relay_in(EcCheck::races(), max_faults, cap);
-        eprintln!(
-            "=== races: S2 relay (max_crashes {cap:?}, {max_faults} faults)\nsearch:\n{}\n{cross}",
-            cross.results
-        );
-        cross.assert_agrees();
-    }
+fn assert_breaks_at_the_relay(cross: &CrossCheck) {
+    cross.assert_agrees();
+    let label = cross.results.label("known");
+    let cex = label
+        .verdict
+        .counterexample()
+        .unwrap_or_else(|| panic!("expected a counterexample: {cross}"));
+    assert_eq!(cex.crashes(), 1, "{cross}");
+    assert_eq!(cex.tolerates, Some(0), "{cross}");
+    assert!(cex.tolerance_certified, "{cross}");
+    let b = cross.brute.label(label.index).expect("searched");
+    assert_eq!(b.min_crashes(), Some(1), "{cross}");
+    assert!(
+        cross
+            .results
+            .report_names()
+            .fault_set(&b.breaking[0])
+            .starts_with(&format!("{{{RELAY_BREAK}")),
+        "{cross}"
+    );
 }

@@ -48,16 +48,13 @@ fn plain_broadcast(check: EcCheck, lossy: bool) -> Results {
 /// Agreement survives any single crash: one surviving recipient echoes to everyone.
 #[cfg(stageleft_runtime)]
 fn echo_broadcast(check: EcCheck) -> Results {
-    echo_broadcast_with(check, false).0
+    echo_broadcast_with(check).0
 }
 
-/// [`echo_broadcast`], instrumented in fragile mode if `fragile`; also returns the program's
+/// [`echo_broadcast`]; also returns the program's
 /// fragile steps ([`EcCheck::fragile_sites`]).
 #[cfg(stageleft_runtime)]
-fn echo_broadcast_with(
-    check: EcCheck,
-    fragile: bool,
-) -> (Results, Option<Vec<crate::provenance::FragileSite>>) {
+fn echo_broadcast_with(check: EcCheck) -> (Results, Option<Vec<crate::provenance::FragileSite>>) {
     let mut flow = FlowBuilder::new();
     let source = flow.process::<()>();
     let members = flow.cluster::<()>();
@@ -79,13 +76,9 @@ fn echo_broadcast_with(
     let _out = delivered.sim_cluster_output();
 
     let mut check = check;
-    let flow = flow.sim().with_cluster_size(&members, MEMBERS);
-    let flow = if fragile {
-        check.instrument_fragile(flow)
-    } else {
-        check.instrument(flow)
-    };
-    let sim = flow.compiled();
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, MEMBERS))
+        .compiled();
     let results = check.run(&sim, async || {
         send.send(7);
     });
@@ -143,28 +136,12 @@ fn an_echo_broadcast_tolerates_one_crash_and_breaks_at_two() {
     assert_eq!(cex.crashes(), 2, "{results}");
 }
 
-/// Fragile mode (docs/design/hydrofrac-races.md §4.1) only adds ids that lite's lineage skips,
-/// so the check's verdict is the same. The echo broadcast has no fragile step.
+/// The instrumentation lists the program's fragile steps: the echo broadcast has none.
 #[cfg(stageleft_runtime)]
 #[test]
-fn fragile_mode_leaves_the_check_unchanged() {
-    let (lite, none) = echo_broadcast_with(EcCheck::new(), false);
-    let (fragile, sites) = echo_broadcast_with(EcCheck::new(), true);
-    assert_eq!(none, None);
+fn the_echo_broadcast_has_no_fragile_step() {
+    let (_, sites) = echo_broadcast_with(EcCheck::new());
     assert_eq!(sites, Some(vec![]));
-    // The verdict without the run it was found in (whose metadata bytes differ).
-    let verdicts = |r: &Results| -> Vec<String> {
-        r.labels
-            .iter()
-            .map(|l| match &l.verdict {
-                Verdict::Counterexample(cex) => {
-                    format!("{:?} {:?} {:?}", cex.faults, cex.tolerates, cex.missing)
-                }
-                other => format!("{other:?}"),
-            })
-            .collect()
-    };
-    assert_eq!(verdicts(&lite), verdicts(&fragile), "{lite}\n{fragile}");
 }
 
 #[cfg(stageleft_runtime)]
@@ -364,10 +341,16 @@ fn the_report_is_in_source_names() {
     );
     // The broadcast value 7 is decoded through the tapped fact with the same bytes.
     assert!(line.contains("]: 7"), "{report}");
-    assert!(!report.contains("07000000"), "raw bincode in the report:\n{report}");
+    assert!(
+        !report.contains("07000000"),
+        "raw bincode in the report:\n{report}"
+    );
     assert!(report.contains("lacks 7"), "{report}");
     // Channels are named by the program's names.
-    assert!(line.contains("initial[") || line.contains("echo["), "{report}");
+    assert!(
+        line.contains("initial[") || line.contains("echo["),
+        "{report}"
+    );
 }
 
 #[cfg(stageleft_runtime)]
@@ -421,64 +404,61 @@ fn batched_exchange(check: EcCheck) -> Results {
     })
 }
 
+/// A schedule choice that no derivation needs to win: the batch is a choice but not a fragile
+/// step, so every derivation is robust, and the label is certified (Claim B too). The plain
+/// `initial` hop still breaks at one crash, and its tolerance of none is a certificate.
 #[cfg(stageleft_runtime)]
 #[test]
-fn a_program_with_a_schedule_choice_is_exhausted_not_certified() {
+fn a_schedule_choice_with_robust_derivations_is_certified() {
     let results = batched_exchange(EcCheck::new());
     assert_eq!(
-        results.choices.iter().map(|c| c.op.as_str()).collect::<Vec<_>>(),
+        results
+            .choices
+            .iter()
+            .map(|c| c.op.as_str())
+            .collect::<Vec<_>>(),
         ["batch"],
         "{results}"
     );
     let label = results.label("delivered");
-    let Verdict::Exhausted { tolerates, sites } = &label.verdict else {
-        panic!("expected an exhausted search:\n{results}");
-    };
-    assert_eq!(*tolerates, Tolerance::All, "{results}");
-    assert_eq!(sites, &results.choices, "{results}");
     assert!(
-        results
-            .to_string()
-            .contains("not a certificate (program has schedule choices: batch at tests.rs:"),
+        matches!(
+            label.verdict,
+            Verdict::Certified {
+                tolerates: Tolerance::All
+            }
+        ),
         "{results}"
     );
-    assert!(!results.holds(), "{results}");
-    // The plain `initial` hop, which nothing batches, still breaks at one crash. The rule is per
-    // program, so its tolerance of no crash is what the search found, not a certificate.
+    assert!(label.stats.races.is_some_and(|r| r.claim_b), "{results}");
     let initial = results.label("initial");
     let cex = initial.verdict.counterexample().expect("the hop breaks");
-    assert!(!cex.tolerance_certified, "{results}");
+    assert!(cex.tolerance_certified, "{results}");
     assert_eq!(cex.tolerates, Some(0), "{results}");
 }
 
-/// `assert_holds` rejects an exhausted search, and says why; `assert_no_counterexample` accepts
-/// it. Capped at zero crashes, the exchange has no counterexample. Both labels' searches end
-/// exhausted: `fail_stop` admits no omission alone, and the program has a schedule choice.
+/// A sampled search certifies nothing: `assert_holds` rejects it, and says why;
+/// `assert_no_counterexample` accepts it. (A fragile-free program like the exchange is certified
+/// even when sampled, since one schedule of a set shows all its facts; so the verdict here is set
+/// by hand. The sampled CTP targets in `hydro_test` reach it through the engine.)
 #[cfg(stageleft_runtime)]
 #[test]
-#[should_panic(expected = "the program has schedule choices, so the search of label")]
-fn assert_holds_rejects_an_exhausted_search() {
-    let results = batched_exchange(EcCheck::new().max_crashes(0));
+#[should_panic(expected = "schedules were sampled, so the search of label")]
+fn assert_holds_rejects_a_sampled_search() {
+    let mut results = batched_exchange(EcCheck::new().max_crashes(0).sample_schedules(4));
+    let sites = results.choices.clone();
+    let index = results.label("delivered").index;
+    results.labels[index].verdict = Verdict::Exhausted {
+        tolerates: Tolerance::UpTo(0),
+        sites,
+    };
     assert!(
-        matches!(
-            results.label("initial").verdict,
-            Verdict::Exhausted {
-                tolerates: Tolerance::UpTo(0),
-                ..
-            }
+        results.to_string().contains(
+            "on sampled schedules; not a certificate (schedule choices: batch at tests.rs:"
         ),
         "{results}"
     );
-    assert!(
-        matches!(
-            results.label("delivered").verdict,
-            Verdict::Exhausted {
-                tolerates: Tolerance::UpTo(0),
-                ..
-            }
-        ),
-        "{results}"
-    );
+    assert!(!results.holds(), "{results}");
     results.assert_no_counterexample();
     results.assert_holds();
 }
@@ -510,7 +490,10 @@ fn message_payloads_render_by_their_debug() {
     });
 
     let label = results.label("orders");
-    let cex = label.verdict.counterexample().expect("an omission breaks it");
+    let cex = label
+        .verdict
+        .counterexample()
+        .expect("an omission breaks it");
     // The rendering comes from the send's metadata, not from a fact with the same bytes.
     let carried = cex.record.log.events().iter().any(|e| match e {
         crate::fault::Event::Sent { meta: Some(m), .. } => {

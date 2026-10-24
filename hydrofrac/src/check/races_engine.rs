@@ -1,4 +1,4 @@
-//! The races mode of the check (docs/design/hydrofrac-races.md §4.4, §5, §12): [`EcCheck::races`].
+//! The search behind [`EcCheck::run`] (docs/design/hydrofrac-races.md §4.4, §5, §12).
 //!
 //! Each label keeps one clause per derivation of each `(member, fact)` pair, with the premises of
 //! the fragile steps it passed ([`crate::races`]). A fault set is skipped only when, for every
@@ -146,8 +146,8 @@ impl LabelPairs {
     }
 }
 
-/// What one schedule's record says about `target`, against `domain`: lite's `outcome`, with
-/// one clause per support of each held pair. `all_robust`: the program has no schedule choices,
+/// What one schedule's record says about `target`, against `domain`, with one clause per
+/// support of each held pair. `all_robust`: the program has no schedule choices,
 /// so every derivation holds in its one schedule.
 fn read_schedule(
     labels: &Labels,
@@ -311,7 +311,7 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
             let mut body = AssertUnwindSafe(&mut *self.body);
             let thunk = async || {
                 (*body)().await;
-                // As lite's `execute`: faults are admitted while the body drives inputs and
+                // Faults are admitted while the body drives inputs and
                 // while the work it caused settles; then the network heals.
                 quiesce().await;
                 healer.heal();
@@ -363,7 +363,7 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
     }
 
     /// The races loop over every label (see the [module docs](self)).
-    pub(super) fn check_races(&mut self) -> Results {
+    pub(super) fn check(&mut self) -> Results {
         let start = Instant::now();
         let (mut verdicts, targets) = self.label_targets();
         let shape = self.shape();
@@ -380,7 +380,7 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
             world.push(Revealed::of(&record, tables));
             let lineage = Lineage::new(&record.log, tables);
             for t in &targets {
-                // As lite's probe: each schedule is read against its own correct members' facts.
+                // Each schedule is read against its own correct members' facts (as the oracle reads it).
                 let own = record_domain(labels, t, &record);
                 domains
                     .entry(t.label)
@@ -407,7 +407,8 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
             false
         });
         let probe_sampled = policy == Policy::All && self.sample_schedules.is_some();
-        let probe_in_full = policy == Policy::All && !probe_sampled || shape.choice_free;
+        // A sampled probe counts as run in full too (a sampled search certifies nothing).
+        let probe_in_full = policy == Policy::All || shape.choice_free;
         let probe_stats = Stats {
             hypotheses: 1,
             schedules: probe.schedules,
@@ -598,10 +599,10 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
         if sampled && !explored.stopped && failure.is_none() {
             search.sampled = true;
         }
-        if failure.is_none()
-            && !explored.stopped
-            && (policy == Policy::All && !sampled || shape.choice_free)
-        {
+        if failure.is_none() && !explored.stopped && (policy == Policy::All || shape.choice_free) {
+            // Every schedule was run, or a sample of them: a sampled search certifies nothing
+            // (`Verdict::Exhausted`), so counting the sample as the set's runs only spares
+            // re-running it for each unseen crash.
             sweep.explored_in_full(set.clone());
         }
         // A fragile-free program, a set of omissions, start crashes and exact crash points of

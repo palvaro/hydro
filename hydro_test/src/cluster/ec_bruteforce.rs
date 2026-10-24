@@ -24,16 +24,14 @@
 //!   schedule of every fault set. The enumeration finds a single crash that breaks its claim
 //!   (the members' known values). Molly's pruning rule would prune that crash with derivations
 //!   from schedules in which the peer had already learned the value when the query arrived,
-//!   and certify the claim; the search no longer certifies labels of programs with schedule
-//!   choices, and its heuristic for them finds the crash.
+//!   and certify the claim. The search marks those derivations fragile (they pass a "trigger
+//!   meets state" step), so they protect nothing, and it finds the crash.
 //! - two-phase commit with cooperative termination and three participants (the program the
 //!   bug was found on), on sampled schedules: one coordinator crash alone takes more than
 //!   100,000 schedules to explore (see [`TWO_PC_SCHEDULES`]).
 //!
 //! Each agreement test on an order-sensitive program has a companion that asserts only the
-//! enumeration's side (that it finds the breaking set), so the oracle stays guarded. For these
-//! labels, agreement means the search found every counterexample the enumeration did, within
-//! the crash bounds it swept, and certified none of them (docs/design/hydrofrac-lite.md §4.9).
+//! enumeration's side (that it finds the breaking set), so the oracle stays guarded.
 //!
 //! ABD (`hydro_std`'s `abd_register`, one client write, three replicas) is order-sensitive too,
 //! but too large to enumerate: its failure-free probe alone passed 21,000 schedules at about
@@ -87,11 +85,17 @@ fn plain_reliable_broadcast(mut check: EcCheck) -> CrossCheck {
 #[test]
 fn brute_force_agrees_on_a_plain_broadcast() {
     let cross = plain_reliable_broadcast(EcCheck::new());
+    costs("reliable_broadcast::broadcast (plain)", &cross);
     agree("reliable_broadcast::broadcast (plain)", &cross);
     // Without the echo, a broadcaster crash mid fan-out breaks every searched label.
     assert!(!cross.brute.labels.is_empty(), "{cross}");
     for b in &cross.brute.labels {
         assert_eq!(b.min_crashes(), Some(1), "{}: {cross}", b.name);
+        let cex = cross.results.results()[b.index]
+            .verdict
+            .counterexample()
+            .unwrap_or_else(|| panic!("{}: a mid fan-out crash breaks it: {cross}", b.name));
+        assert_eq!(cex.crashes(), 1, "{cross}");
     }
 }
 
@@ -99,6 +103,7 @@ fn brute_force_agrees_on_a_plain_broadcast() {
 #[test]
 fn brute_force_agrees_on_reliable_broadcast_closed() {
     let cross = reliable_broadcast_closed_cross_check(EcCheck::new());
+    costs("reliable_broadcast_closed", &cross);
     agree("reliable_broadcast_closed", &cross);
 }
 
@@ -282,12 +287,14 @@ fn brute_force_finds_the_ask_once_race() {
 
 /// The search agrees with the enumeration on [`ask_once`]. Molly's rule certified the claim
 /// after 2 hypotheses, pruning the breaking crash with a derivation (member 1 answering member
-/// 2's query) that only occurs in the schedules where member 1 already knew the value. The
-/// program has schedule choices, so the search uses its heuristic (a hypothesis need only kill
-/// one schedule's derivations) and finds the crash at its first hypothesis.
+/// 2's query) that only occurs in the schedules where member 1 already knew the value. Here that
+/// derivation is fragile, and the crash of member 0 right after its announcement to member 1
+/// spares (1, 7) under the order-free crash rule and kills (2, 7)'s only robust derivation; one of
+/// its schedules splits the members.
 #[test]
 fn brute_force_agrees_on_ask_once() {
     let cross = ask_once_cross_check(EcCheck::new());
+    costs("ask_once", &cross);
     cross.assert_agrees();
     let label = claim(&cross, "known");
     assert!(
@@ -299,7 +306,8 @@ fn brute_force_agrees_on_ask_once() {
         .counterexample()
         .unwrap_or_else(|| panic!("the search finds the race: {cross}"));
     assert_eq!(cex.crashes(), 1, "{cross}");
-    assert!(!cex.tolerance_certified, "{cross}");
+    // Every schedule was explored, so no counterexample with fewer crashes was missed.
+    assert!(cex.tolerance_certified, "{cross}");
 }
 
 /// Schedules sampled per fault set for two-phase commit with cooperative termination. Its
@@ -316,13 +324,7 @@ const TWO_PC_SCHEDULES: usize = 64;
 /// Two-phase commit (`ctp`: with cooperative termination) over `participants` participants,
 /// one transaction, every participant's timer fired once the transaction settles (the
 /// harness of `ec_two_pc_hydrofrac`). `samples`: schedules per fault set, or every schedule.
-/// `races`: checked by [`EcCheck::races`].
-fn two_pc_cross_check(
-    ctp: bool,
-    participants_count: u32,
-    samples: Option<usize>,
-    races: bool,
-) -> CrossCheck {
+fn two_pc_cross_check(ctp: bool, participants_count: u32, samples: Option<usize>) -> CrossCheck {
     let mut flow = FlowBuilder::new();
     let coordinator = flow.process::<Coordinator>();
     let participants = flow.cluster::<Participant>();
@@ -343,14 +345,9 @@ fn two_pc_cross_check(
     )
     .sim_cluster_output();
 
-    let check = if races {
-        EcCheck::races()
-    } else {
-        EcCheck::new()
-    };
     let mut check = match samples {
-        Some(n) => check.sample_schedules(n),
-        None => check,
+        Some(n) => EcCheck::new().sample_schedules(n),
+        None => EcCheck::new(),
     };
     let sim = check
         .instrument(
@@ -368,7 +365,7 @@ fn two_pc_cross_check(
         MAX_FAULTS,
     );
     eprintln!(
-        "=== two_pc (ctp: {ctp}, {participants_count} participants, samples: {samples:?}, races: {races})\nsearch:\n{}\n{cross}",
+        "=== two_pc (ctp: {ctp}, {participants_count} participants, samples: {samples:?})\nsearch:\n{}\n{cross}",
         cross.results
     );
     cross
@@ -380,7 +377,7 @@ fn two_pc_cross_check(
 /// About 36 s of enumeration (200 sets, 12,800 schedules).
 #[test]
 fn brute_force_finds_the_two_pc_cooperative_termination_violation() {
-    let cross = two_pc_cross_check(true, 3, Some(TWO_PC_SCHEDULES), false);
+    let cross = two_pc_cross_check(true, 3, Some(TWO_PC_SCHEDULES));
     let label = claim(&cross, "committed");
     let b = cross
         .brute
@@ -400,29 +397,32 @@ fn brute_force_finds_the_two_pc_cooperative_termination_violation() {
 
 /// The search agrees with the enumeration on two-phase commit with cooperative termination
 /// and three participants. Molly's rule certified `committed` (after 12 hypotheses), which two
-/// crashes break; the heuristic for programs with schedule choices finds the two crashes.
+/// crashes break: every derivation of it passes a negation, so none protects a pair, and the
+/// search finds the two crashes. Sampled, so the tolerance is not a certificate.
 #[test]
 fn brute_force_agrees_on_two_pc_cooperative_termination() {
-    let cross = two_pc_cross_check(true, 3, Some(TWO_PC_SCHEDULES), false);
+    let cross = two_pc_cross_check(true, 3, Some(TWO_PC_SCHEDULES));
+    costs("two_pc ctp (3 participants, sampled)", &cross);
     cross.assert_agrees();
     let cex = claim(&cross, "committed")
         .verdict
         .counterexample()
         .unwrap_or_else(|| panic!("the search finds the two-crash split: {cross}"));
     assert_eq!(cex.crashes(), 2, "{cross}");
+    assert!(
+        !cex.tolerance_certified,
+        "sampled schedules never certify: {cross}"
+    );
 }
 
-// The races mode (docs/design/hydrofrac-races.md §4.4) on the same programs. Each test prints
-// the search's cost next to the enumeration's.
-
-/// Prints the races search's and the enumeration's cost (sets, schedules) for every label.
+/// Prints the search's and the enumeration's cost (sets, schedules) for every label.
 fn costs(name: &str, cross: &CrossCheck) {
     for l in cross.results.results() {
         if l.stats.hypotheses == 0 {
             continue;
         }
         eprintln!(
-            "COST {name} / {}: races {} sets, {} schedules ({:?}); brute force {} sets, {} \
+            "COST {name} / {}: search {} sets, {} schedules ({:?}); brute force {} sets, {} \
              schedules",
             l.name(),
             l.stats.hypotheses,
@@ -434,63 +434,12 @@ fn costs(name: &str, cross: &CrossCheck) {
     }
 }
 
-#[test]
-fn races_agree_on_a_plain_broadcast() {
-    let cross = plain_reliable_broadcast(EcCheck::races());
-    costs("reliable_broadcast::broadcast (plain)", &cross);
-    agree("races: reliable_broadcast::broadcast (plain)", &cross);
-    for b in &cross.brute.labels {
-        let verdict = &cross.results.results()[b.index].verdict;
-        let cex = verdict
-            .counterexample()
-            .unwrap_or_else(|| panic!("{}: a mid fan-out crash breaks it: {cross}", b.name));
-        assert_eq!(cex.crashes(), 1, "{cross}");
-    }
-}
-
-#[test]
-fn races_agree_on_reliable_broadcast_closed() {
-    let cross = reliable_broadcast_closed_cross_check(EcCheck::races());
-    costs("reliable_broadcast_closed", &cross);
-    agree("races: reliable_broadcast_closed", &cross);
-}
-
-/// The races mode finds the `ask_once` race: the crash of member 0 right after its announcement
-/// to member 1 spares (1, 7) under the order-free crash rule and kills (2, 7)'s only robust
-/// derivation, and one of its schedules splits the members.
-#[test]
-fn races_agree_on_ask_once() {
-    let cross = ask_once_cross_check(EcCheck::races());
-    costs("ask_once", &cross);
-    cross.assert_agrees();
-    let label = claim(&cross, "known");
-    let cex = label
-        .verdict
-        .counterexample()
-        .unwrap_or_else(|| panic!("the races mode finds the race: {cross}"));
-    assert_eq!(cex.crashes(), 1, "{cross}");
-}
-
-/// Two-phase commit with cooperative termination, three participants, sampled: every
-/// derivation of `committed` is fragile, so nothing is certified.
-#[test]
-fn races_agree_on_two_pc_cooperative_termination() {
-    let cross = two_pc_cross_check(true, 3, Some(TWO_PC_SCHEDULES), true);
-    costs("two_pc ctp (3 participants, sampled)", &cross);
-    cross.assert_agrees();
-    let label = claim(&cross, "committed");
-    assert!(
-        !matches!(label.verdict, hydrofrac::Verdict::Certified { .. }),
-        "sampled schedules never certify: {cross}"
-    );
-}
-
 // Several payloads sent together, so the `nondet!` batches have something to split: one payload
 // gives a single failure-free schedule, and brute force then runs one schedule per set too.
 // `hydro_std`'s `reliable_broadcast_closed` has no schedule choice at all (one failure-free
 // schedule however many payloads); `reliable_broadcast::broadcast` batches, and branches.
-// Each test runs lite's check and the races mode, each cross-checked, and prints a `TABLE` line
-// per label (run with `--nocapture`).
+// Each test runs the check, cross-checked, and prints a `TABLE` line per label (run with
+// `--nocapture`).
 
 /// A short rendering of a verdict, for the comparison tables.
 fn verdict_summary(verdict: &hydrofrac::Verdict) -> String {
@@ -514,48 +463,38 @@ fn verdict_summary(verdict: &hydrofrac::Verdict) -> String {
     }
 }
 
-/// Runs `build` with lite's check and with the races mode, asserts both agree with brute force,
-/// and prints one comparison line per searched label. `build` returns the cross-check and the
-/// program's failure-free schedule count.
+/// Runs `build` with the check, asserts it agrees with brute force, and prints one line per
+/// searched label. `build` returns the cross-check and the program's failure-free schedule count.
 fn compare(name: &str, build: impl Fn(EcCheck) -> (CrossCheck, usize)) {
     let start = std::time::Instant::now();
-    let (lite, schedules) = build(EcCheck::new());
-    let lite_wall = start.elapsed();
-    let start = std::time::Instant::now();
-    let (races, _) = build(EcCheck::races());
-    let races_wall = start.elapsed();
+    let (cross, schedules) = build(EcCheck::new());
+    let wall = start.elapsed();
     eprintln!(
-        "=== {name}: {schedules} failure-free schedules\nlite:\n{}\nraces:\n{}\n{races}",
-        lite.results, races.results
+        "=== {name}: {schedules} failure-free schedules\nsearch:\n{}\n{cross}",
+        cross.results
     );
-    for (l, r) in lite.results.results().iter().zip(races.results.results()) {
-        let Some(b) = races.brute.label(r.index) else {
+    for r in cross.results.results() {
+        let Some(b) = cross.brute.label(r.index) else {
             continue;
         };
         let notes = r.stats.races.unwrap_or_default();
         eprintln!(
-            "TABLE {name} | {} | races: {} — {} sets / {} schedules (one-schedule {}, early stops \
-             {}) | lite: {} — {} sets / {} schedules | brute force: {} sets / {} \
-             schedules, min crashes {:?} | failure-free schedules {schedules}",
+            "TABLE {name} | {} | search: {} — {} sets / {} schedules (one-schedule {}, early stops \
+             {}) | brute force: {} sets / {} schedules, min crashes {:?} | failure-free schedules \
+             {schedules}",
             r.name(),
             verdict_summary(&r.verdict),
             r.stats.hypotheses,
             r.stats.schedules,
             notes.single_schedule_sets,
             notes.early_stops,
-            verdict_summary(&l.verdict),
-            l.stats.hypotheses,
-            l.stats.schedules,
-            races.brute.sets,
-            races.brute.schedules,
+            cross.brute.sets,
+            cross.brute.schedules,
             b.min_crashes(),
         );
     }
-    eprintln!(
-        "TIME {name}: lite {lite_wall:.1?}, races {races_wall:.1?} (each with its brute force)"
-    );
-    lite.assert_agrees();
-    races.assert_agrees();
+    eprintln!("TIME {name}: {wall:.1?} (with its brute force)");
+    cross.assert_agrees();
 }
 
 /// Every failure-free schedule of `sim` under `body` (the harness then quiesces), counted.
@@ -623,14 +562,14 @@ fn reliable_broadcast_with(
 }
 
 #[test]
-fn both_agree_on_reliable_broadcast_closed_with_two_payloads() {
+fn brute_force_agrees_on_reliable_broadcast_closed_with_two_payloads() {
     compare("reliable_broadcast_closed, 2 payloads", |check| {
         reliable_broadcast_closed_with(check, &[1, 2])
     });
 }
 
 #[test]
-fn both_agree_on_a_plain_broadcast_with_two_payloads() {
+fn brute_force_agrees_on_a_plain_broadcast_with_two_payloads() {
     compare(
         "reliable_broadcast::broadcast (plain), 2 payloads",
         |check| reliable_broadcast_with(check, false, 3, &[1, 2]),
@@ -638,14 +577,14 @@ fn both_agree_on_a_plain_broadcast_with_two_payloads() {
 }
 
 #[test]
-fn both_agree_on_reliable_broadcast_closed_with_three_payloads() {
+fn brute_force_agrees_on_reliable_broadcast_closed_with_three_payloads() {
     compare("reliable_broadcast_closed, 3 payloads", |check| {
         reliable_broadcast_closed_with(check, &[1, 2, 3])
     });
 }
 
 #[test]
-fn both_agree_on_a_plain_broadcast_with_three_payloads() {
+fn brute_force_agrees_on_a_plain_broadcast_with_three_payloads() {
     compare(
         "reliable_broadcast::broadcast (plain), 3 payloads",
         |check| reliable_broadcast_with(check, false, 3, &[1, 2, 3]),
@@ -653,7 +592,7 @@ fn both_agree_on_a_plain_broadcast_with_three_payloads() {
 }
 
 #[test]
-fn both_agree_on_an_echo_broadcast_over_two_members() {
+fn brute_force_agrees_on_an_echo_broadcast_over_two_members() {
     compare(
         "reliable_broadcast::broadcast (echo), 2 members, 1 payload",
         |check| reliable_broadcast_with(check, true, 2, &[1]),
@@ -661,22 +600,22 @@ fn both_agree_on_an_echo_broadcast_over_two_members() {
 }
 
 /// Too large to cross-check: lite's exhaustive search and the enumeration together did not
-/// finish within 30 minutes.
+/// finish within 30 minutes (the enumeration alone is most of it).
 #[test]
 #[ignore = "did not finish within 30 minutes"]
-fn both_agree_on_an_echo_broadcast_over_two_members_with_two_payloads() {
+fn brute_force_agrees_on_an_echo_broadcast_over_two_members_with_two_payloads() {
     compare(
         "reliable_broadcast::broadcast (echo), 2 members, 2 payloads",
         |check| reliable_broadcast_with(check, true, 2, &[1, 2]),
     );
 }
 
-/// Races mode alone (no enumeration, which cannot finish here: the failure-free run alone has
+/// The search alone (no enumeration, which cannot finish here: the failure-free run alone has
 /// more than 160,000 schedules) on the echo broadcast over three members with one payload. The
 /// program is fragile-free, so each fault set runs on one schedule. Prints the verdicts and
 /// costs; asserts that `deliveries` is certified.
 #[test]
-fn races_alone_on_an_echo_broadcast_over_three_members() {
+fn search_alone_on_an_echo_broadcast_over_three_members() {
     let mut flow = FlowBuilder::new();
     let broadcaster = flow.process::<Broadcaster>();
     let members = flow.cluster::<Member>();
@@ -689,7 +628,7 @@ fn races_alone_on_an_echo_broadcast_over_three_members() {
         nondet!(/** test */),
     )
     .sim_cluster_output();
-    let mut check = EcCheck::races();
+    let mut check = EcCheck::new();
     let sim = check
         .instrument(flow.sim().with_cluster_size(&members, 3))
         .compiled();
@@ -697,10 +636,13 @@ fn races_alone_on_an_echo_broadcast_over_three_members() {
     let results = check.run(&sim, async || {
         send.send(Payload(42));
     });
-    eprintln!("=== races alone, echo broadcast, 3 members, 1 payload ({:?})\n{results}", start.elapsed());
+    eprintln!(
+        "=== search alone, echo broadcast, 3 members, 1 payload ({:?})\n{results}",
+        start.elapsed()
+    );
     for l in results.results() {
         eprintln!(
-            "RACES-ALONE {} | certified: {} | {} sets / {} schedules | {:?}",
+            "ALONE {} | certified: {} | {} sets / {} schedules | {:?}",
             l.plan.collection.display_name(),
             matches!(l.verdict, hydrofrac::check::Verdict::Certified { .. }),
             l.stats.hypotheses,
@@ -714,7 +656,10 @@ fn races_alone_on_an_echo_broadcast_over_three_members() {
         .find(|l| l.plan.collection.display_name() == "deliveries")
         .expect("a deliveries label");
     assert!(
-        matches!(deliveries.verdict, hydrofrac::check::Verdict::Certified { .. }),
+        matches!(
+            deliveries.verdict,
+            hydrofrac::check::Verdict::Certified { .. }
+        ),
         "{results}"
     );
 }
