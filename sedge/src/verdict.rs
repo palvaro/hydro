@@ -351,6 +351,11 @@ pub fn judge(trace: &Trace, profile: &Profile) -> Verdict {
 const AMPLIFICATION_SLACK_FACTOR: f64 = 1.5;
 const AMPLIFICATION_SLACK_FLOOR: f64 = 2.0;
 const AMPLIFICATION_COLLAPSE_FACTOR: f64 = 3.0;
+/// The floor also scales with the program's own work: a stream quiet at baseline (re-sends, say)
+/// is judged against this fraction of the busiest amplified or work stream's baseline rate, so a
+/// trickle that is a negligible share of what the program does (a few spurious re-sends a second
+/// against tens of thousands of sends) is not read as amplification.
+const AMPLIFICATION_MATERIAL_FRACTION: f64 = 0.01;
 
 /// [`judge`] with every observed stream's kind given, and whether ids were recorded (so that
 /// completion fractions and latencies mean something). Without ids, goodput is the smallest
@@ -414,13 +419,19 @@ pub fn judge_with_kinds(
     };
     // Amplified (and unclassified) streams: the tail rate against the baseline rate, with a
     // floor so that a stream quiet in both windows is not read as infinite.
+    let work_scale = kinds
+        .iter()
+        .filter(|(_, k)| matches!(k, StreamKind::Amplified | StreamKind::Work))
+        .filter_map(|(n, _)| baseline.stream(n).map(|s| s.rate))
+        .fold(0.0, f64::max);
+    let floor = AMPLIFICATION_SLACK_FLOOR.max(AMPLIFICATION_MATERIAL_FRACTION * work_scale);
     let amplification = kinds
         .iter()
         .filter(|(_, k)| matches!(k, StreamKind::Amplified | StreamKind::Work))
         .filter_map(|(n, _)| {
             let b = baseline.stream(n)?.rate;
             let t = tail.stream(n)?.rate;
-            let ratio = t / (b + AMPLIFICATION_SLACK_FLOOR);
+            let ratio = t / (b + floor);
             Some((n.clone(), ratio, b, t))
         })
         .max_by(|x, y| x.1.partial_cmp(&y.1).unwrap_or(std::cmp::Ordering::Equal));

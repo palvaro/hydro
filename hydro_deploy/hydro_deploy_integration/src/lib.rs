@@ -6,6 +6,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering::Relaxed;
 use std::time::Duration;
 
 use async_recursion::async_recursion;
@@ -572,22 +574,123 @@ impl ConnectedSink for ConnectedDirect {
 /// `unbounded`, every outgoing connection instead hands its messages to a background task over an
 /// unbounded in-memory queue, the way most RPC stacks buffer sends, so the sending process never
 /// waits on a slow peer and a backlog forms in the sender's queue instead. Overload harnesses
-/// (Sedge) set it, so that an open-loop workload stays open-loop past the first slow link.
+/// (Sedge) set it, so that an open-loop workload stays open-loop past the first slow link. Set to
+/// `lossy:N`, each outgoing connection queues at most `N` messages and drops a send that finds
+/// its queue full (see `decouple_send`), and publishes what it dropped to the file named by
+/// [`SEND_STATS_ENV`].
 pub const SEND_BUFFER_ENV: &str = "HYDRO_DEPLOY_SEND_BUFFER";
 
 /// Applies [`SEND_BUFFER_ENV`] to one outgoing connection.
+///
+/// `lossy:N` gives the connection a bounded queue of `N` messages in front of a background
+/// writer, and *drops* a send that finds the queue full (counted in [`SEND_STATS`]). A slow peer then neither stalls the
+/// sending dataflow (the default) nor grows the sender's memory without limit (`unbounded`): its
+/// excess sends are lost, as a full network queue loses packets, and a protocol that retries
+/// re-sends them.
 fn decouple_send(sink: DynSink<Bytes>) -> DynSink<Bytes> {
-    if std::env::var(SEND_BUFFER_ENV).as_deref() != Ok("unbounded") {
-        return sink;
+    let mode = std::env::var(SEND_BUFFER_ENV).ok();
+    match mode.as_deref() {
+        Some("unbounded") => {
+            let (tx, rx) = futures::channel::mpsc::unbounded::<Bytes>();
+            // `forward` writes everything queued, and flushes whenever the queue is momentarily
+            // empty. A write error (the peer went away at teardown) ends the task; later sends
+            // are dropped.
+            tokio::spawn(async move {
+                let mut sink = sink;
+                let _ = rx.map(Ok).forward(&mut sink).await;
+            });
+            Box::pin(tx.sink_map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e)))
+        }
+        Some(m) if m.starts_with("lossy:") => {
+            let capacity: usize = m["lossy:".len()..]
+                .parse()
+                .ok()
+                .filter(|n| *n > 0)
+                .unwrap_or_else(|| panic!("{SEND_BUFFER_ENV}={m}: want lossy:N with N > 0"));
+            // A bounded channel holds `buffer + 1` messages for its one sender.
+            let (tx, rx) = futures::channel::mpsc::channel::<Bytes>(capacity - 1);
+            tokio::spawn(async move {
+                let mut sink = sink;
+                let _ = rx.map(Ok).forward(&mut sink).await;
+            });
+            report_send_buffer_drops();
+            Box::pin(futures::sink::unfold(tx, |mut tx, item: Bytes| async move {
+                let len = item.len() as u64;
+                SEND_STATS.attempted.fetch_add(1, Relaxed);
+                SEND_STATS.attempted_bytes.fetch_add(len, Relaxed);
+                // Full: the message is lost. Disconnected (the writer ended at teardown): the
+                // same, rather than failing the sending dataflow.
+                if tx.try_send(item).is_err() {
+                    SEND_STATS.dropped.fetch_add(1, Relaxed);
+                    SEND_STATS.dropped_bytes.fetch_add(len, Relaxed);
+                }
+                Ok::<_, io::Error>(tx)
+            }))
+        }
+        _ => sink,
     }
-    let (tx, rx) = futures::channel::mpsc::unbounded::<Bytes>();
-    // `forward` writes everything queued, and flushes whenever the queue is momentarily empty.
-    // A write error (the peer went away at teardown) ends the task; later sends are dropped.
-    tokio::spawn(async move {
-        let mut sink = sink;
-        let _ = rx.map(Ok).forward(&mut sink).await;
+}
+
+/// What this process's `lossy` send queues saw, over all their connections: every message the
+/// dataflow handed them (attempted) and the ones dropped at a full queue, in messages and bytes.
+/// Counted in the transport, outside the program's own reporting.
+pub struct SendStats {
+    pub attempted: AtomicU64,
+    pub attempted_bytes: AtomicU64,
+    pub dropped: AtomicU64,
+    pub dropped_bytes: AtomicU64,
+}
+
+pub static SEND_STATS: SendStats = SendStats {
+    attempted: AtomicU64::new(0),
+    attempted_bytes: AtomicU64::new(0),
+    dropped: AtomicU64::new(0),
+    dropped_bytes: AtomicU64::new(0),
+};
+
+/// The environment variable naming a file that a process with `lossy` send queues rewrites
+/// (atomically, by rename) five times a second with its [`SEND_STATS`]:
+/// `attempted attempted_bytes dropped dropped_bytes`. Unset, the drop count goes to stderr once a
+/// second while it changes instead.
+pub const SEND_STATS_ENV: &str = "HYDRO_DEPLOY_SEND_STATS";
+
+/// Starts (once per process) the task that publishes [`SEND_STATS`].
+fn report_send_buffer_drops() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        let path = std::env::var_os(SEND_STATS_ENV).map(PathBuf::from);
+        tokio::spawn(async move {
+            let mut last = 0;
+            loop {
+                let snapshot = [
+                    SEND_STATS.attempted.load(Relaxed),
+                    SEND_STATS.attempted_bytes.load(Relaxed),
+                    SEND_STATS.dropped.load(Relaxed),
+                    SEND_STATS.dropped_bytes.load(Relaxed),
+                ];
+                match &path {
+                    Some(path) => {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        let tmp = path.with_extension("tmp");
+                        let line = format!(
+                            "{} {} {} {}\n",
+                            snapshot[0], snapshot[1], snapshot[2], snapshot[3]
+                        );
+                        if std::fs::write(&tmp, line).is_ok() {
+                            let _ = std::fs::rename(&tmp, path);
+                        }
+                    }
+                    None => {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        if snapshot[2] != last {
+                            eprintln!("send-buffer: dropped {}", snapshot[2]);
+                            last = snapshot[2];
+                        }
+                    }
+                }
+            }
+        });
     });
-    Box::pin(tx.sink_map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e)))
 }
 
 pub type BufferedDrain<S, I> = sinktools::demux_map::DemuxMap<u32, Pin<Box<Buffer<S, I>>>>;
