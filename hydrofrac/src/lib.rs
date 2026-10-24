@@ -12,6 +12,7 @@
 hydro_lang::setup!();
 
 pub mod fault;
+pub mod provenance;
 #[cfg(stageleft_runtime)]
 pub mod search;
 
