@@ -443,7 +443,11 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
             let result = if let Some(failure) = failure {
                 let verdict = counterexample(FaultSet::new(), None, !probe_sampled, 0, &failure);
                 (verdict, probe_stats)
-            } else if target.domain.is_empty() {
+            } else if target.domain.is_empty() && (shape.fragile_free || shape.choice_free) {
+                // No fault creates a fact outside the domain (Claim B, §13 of
+                // docs/design/hydrofrac-soundness.md), so no run holds a fact at all. Otherwise
+                // faults may create facts (a failover's output), and the search below runs every
+                // set within the bounds to check them (`races::Sweep::next`, no pairs).
                 (Verdict::Vacuous(VacuousReason::EmptyDomain), probe_stats)
             } else {
                 let clauses = learned.remove(&target.label).unwrap_or_default();

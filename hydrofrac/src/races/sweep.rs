@@ -49,14 +49,16 @@ pub enum Next<M> {
     /// Run this set. With `in_full`, run every schedule, without stopping early, and report it
     /// with [`Sweep::explored_in_full`]: the proposal held a [`Candidate::Unseen`] crash, which
     /// stands for every crash after a message the set's runs do not send, and those are all the
-    /// set itself once its runs have shown every message they send.
+    /// set itself once its runs have shown every message they send; or the label has no pair, so
+    /// every set is run in full for Claim B.
     Try {
         /// The fault set.
         set: FaultSet<M>,
         /// Whether to run every schedule.
         in_full: bool,
     },
-    /// No fault set within the bounds is admissible: the label holds (Claim A).
+    /// No fault set within the bounds is admissible: the label holds (Claim A). With no pair,
+    /// every set within the bounds was tried, in full (Claim B).
     Certified(Tolerance),
     /// The hypothesis budget is spent: not a certificate.
     Budget,
@@ -278,7 +280,15 @@ impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
                 return Next::Budget;
             }
             let bounds = self.bounds.capped_at(self.bound);
-            for scope in [Scope::AllKnown, Scope::RobustOnly] {
+            // No pair (an empty domain): Claim A holds of every set, so the only claim left is
+            // Claim B, which needs every set within the bounds run in full.
+            let everything = pairs.is_empty();
+            let scopes: &[Scope] = if everything {
+                &[Scope::Any]
+            } else {
+                &[Scope::AllKnown, Scope::RobustOnly]
+            };
+            for &scope in scopes {
                 let Some(proposal) = propose(
                     &universe,
                     pairs,
@@ -303,7 +313,7 @@ impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
                 self.runs += 1;
                 return Next::Try {
                     set,
-                    in_full: unseen,
+                    in_full: unseen || everything,
                 };
             }
             self.tolerated = Some(self.bound);

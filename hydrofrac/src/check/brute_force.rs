@@ -539,7 +539,6 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
         for t in &mut targets {
             t.domain = probe.domains.remove(&t.label).unwrap_or_default();
         }
-        targets.retain(|t| !t.domain.is_empty());
         (targets, Rc::new(probe))
     }
 
@@ -705,6 +704,7 @@ fn disagreement(
         Verdict::Budget { tolerates: Some(t) } => {
             refuted(*t, &format!("holds with up to {t} crash(es) (budget)"))
         }
+        Verdict::Vacuous(_) => refuted(usize::MAX, "is vacuous"),
         Verdict::Exhausted {
             tolerates: Tolerance::All,
             ..

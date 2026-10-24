@@ -580,9 +580,16 @@ oracle).
     it. That is why the probe must be exhaustive unless one of the two exceptions applies.
 - **Divergent facts.** In every explored run, a fact outside the domain held by some but not all correct members is a
   counterexample (`hf/check/races_engine.rs`, `read_schedule`; the oracle: `hf/check/brute_force.rs:338`).
-- **An empty domain** makes the label `Vacuous` (`hf/check/races_engine.rs`, `check`), and it is not searched; brute
-  force drops such labels too. A fact that appears only under faults (a failover's output, say) is then never
-  checked (§18).
+- **An empty domain.** No correct member holds a fact in any failure-free schedule, so POST is vacuous and only
+  divergence can fail: a fact that only faults create (a failover's output, say), held by some correct members and
+  not others.
+  - **Fragile-free or choice-free program:** faults create no fact outside the domain (§13), so no run holds a fact.
+    The label is `Vacuous`, with no search (`hf/check/races_engine.rs`, `check`).
+  - **Otherwise** the label is searched for Claim B alone. With no pair, the sweep proposes every set within the
+    bounds over the revealed faults, and runs each one in every schedule, without stopping early (`hf/races/sweep.rs`,
+    `next`; `Scope::Any`). The result is a counterexample, a certificate with Claim B certified, or `Budget`.
+  - Brute force checks such labels like any other. A `Vacuous` verdict that some set breaks is a disagreement.
+  - **Tested:** `a_fact_only_faults_create_is_checked` (§17, fix 12).
 
 **Where.** `hf/spec.rs:113`, `:158`.
 
@@ -786,6 +793,12 @@ and fixed structurally:
 10. **The simulator's own faults** (reviewers #1 and #2): `with_crashable_*` and `with_dynamic_membership` are refused
     (A14). Regression: `the_simulators_own_crashes_are_refused`.
 11. **The heal invariant** (reviewer #1) is now checked over every log (A15).
+12. **Empty domains** (reviewer #3, R3-F5; brute force agreed). A label that holds no fact in any failure-free
+    schedule was `Vacuous` without a search, and brute force dropped it, so both passed it. A fact that only faults
+    create was never checked: in `a_fact_only_faults_create_is_checked`, a single crash of the source, right after it
+    sends `x` to one member, makes the other two members report `x` missing and the first not. Now such a label is
+    `Vacuous` only when §13 proves faults create no fact; otherwise it is searched for Claim B over every set within
+    the bounds (§11).
 
 ## 18. Known gaps: what certificates do not cover
 
@@ -815,8 +828,10 @@ and fixed structurally:
 - **Impurity beyond the textual guard** (A3). A closure that calls a function with hidden state, or a type whose
   `Clone` or `Hash` is impure, is not detected.
 - **Fact identity without `Serialize`** (A4, §11). `Debug` text or a 64-bit hash identifies facts of other types.
-- **Unchecked labels.** Scalars (§11), labels with an empty domain (`Vacuous`: a fact that appears only under faults
-  is never checked), and collections inside a tick are reported, not checked.
+- **Unchecked labels.** Scalars (§11) and collections inside a tick are reported, not checked.
+- **Empty domains cost a full enumeration** (§11). Outside fragile-free and choice-free programs, a label with an
+  empty domain runs every set within the bounds, in full; the hypothesis budget may stop it (`Budget`, not a
+  certificate).
 - **Whole-message omission.** `omit(m)` drops every copy of a content-identical message, so "lose the first copy,
   deliver the retry" is never explored.
 - **Stuck ticks are the simulator's semantics.** A tick blocked on a snapshot that never got a value never runs in

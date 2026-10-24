@@ -1225,3 +1225,70 @@ fn a_time_bounded_exhaustive_run_is_refused() {
         "{stdout}\n{stderr}"
     );
 }
+
+/// A member reports `x` as missing (label `missing`) when a probe for `x` reaches it in the
+/// recovery phase and it never heard `x`. Without faults every member hears `x` before the heal,
+/// so the label is empty in every failure-free schedule. The program batches (a choice), so no
+/// proof says faults create no fact.
+#[cfg(stageleft_runtime)]
+fn missing_alarm(mut check: EcCheck) -> CrossCheck {
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let prober = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let (send_probe, probe) = prober.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let tick = members.tick();
+    let arrived = input
+        .broadcast_closed(&members, TCP.fail_stop().name("data").bincode())
+        .batch(&tick, nondet!(/** which tick a delivery lands in */))
+        .weaken_ordering::<NoOrder>();
+    let (handle, prev) = tick.cycle::<Stream<u32, _, Bounded, NoOrder>, _>();
+    let heard = prev.chain(arrived);
+    handle.complete_next_tick(heard.clone());
+    let probes = probe.broadcast_closed(&members, TCP.fail_stop().name("probe").bincode());
+    let missing = probes
+        .batch(&tick, nondet!(/** which tick a probe lands in */))
+        .weaken_ordering::<NoOrder>()
+        .filter_not_in(heard)
+        .all_ticks()
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed (wrongly): every member misses the same inputs */
+        ));
+    let _out = missing.sim_cluster_output();
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 3))
+        .compiled();
+    check.cross_check_then_recover(
+        &sim,
+        async || send.send(1),
+        async || send_probe.send(1),
+        MAX_FAULTS,
+    )
+}
+
+/// Review R3-F5: a label with an empty domain was reported `Vacuous` without a search, and the
+/// enumeration dropped it too, so both passed it. In [`missing_alarm`], a single crash of the
+/// source, right after it sends `x` to one member, makes the other two report `x` missing and
+/// the first not: a fact only faults create, held by some correct members and not others. Such a
+/// label is now searched over every set within the bounds (Claim B). With no crash allowed, no
+/// set breaks it, and that search certifies Claim B.
+#[cfg(stageleft_runtime)]
+#[test]
+fn a_fact_only_faults_create_is_checked() {
+    let cross = missing_alarm(EcCheck::new());
+    agree("a fact only faults create", &cross);
+    let cex = cross.results.label("missing").verdict.counterexample();
+    let cex = cex.unwrap_or_else(|| panic!("a single crash of the source breaks it: {cross}"));
+    assert_eq!(cex.crashes(), 1, "{cross}");
+    assert!(cex.missing.is_empty() && !cex.divergent.is_empty(), "{cross}");
+
+    let cross = missing_alarm(EcCheck::new().max_crashes(0));
+    agree("a fact only faults create, no crash", &cross);
+    let label = cross.results.label("missing");
+    assert!(
+        matches!(label.verdict, Verdict::Certified { tolerates: Tolerance::UpTo(0) }),
+        "{cross}"
+    );
+    assert!(label.stats.races.is_some_and(|r| r.claim_b), "{cross}");
+}
