@@ -34,12 +34,7 @@ fn agree(name: &str, cross: &CrossCheck) {
 /// lossy channel.
 #[cfg(stageleft_runtime)]
 fn plain_broadcast(lossy: bool) -> CrossCheck {
-    plain_broadcast_in(EcCheck::new(), lossy)
-}
-
-/// [`plain_broadcast`], checked by `check`.
-#[cfg(stageleft_runtime)]
-fn plain_broadcast_in(mut check: EcCheck, lossy: bool) -> CrossCheck {
+    let mut check = EcCheck::new();
     let mut flow = FlowBuilder::new();
     let source = flow.process::<()>();
     let members = flow.cluster::<()>();
@@ -69,12 +64,7 @@ fn plain_broadcast_in(mut check: EcCheck, lossy: bool) -> CrossCheck {
 /// first hop lossy (the echo stays `fail_stop`).
 #[cfg(stageleft_runtime)]
 fn echo_broadcast(n: usize, initial_lossy: bool) -> CrossCheck {
-    echo_broadcast_in(EcCheck::new(), n, initial_lossy)
-}
-
-/// [`echo_broadcast`], checked by `check`.
-#[cfg(stageleft_runtime)]
-fn echo_broadcast_in(mut check: EcCheck, n: usize, initial_lossy: bool) -> CrossCheck {
+    let mut check = EcCheck::new();
     let mut flow = FlowBuilder::new();
     let source = flow.process::<()>();
     let members = flow.cluster::<()>();
@@ -206,12 +196,13 @@ fn brute_force_agrees_on_an_echo_over_a_lossy_first_hop() {
 #[cfg(stageleft_runtime)]
 #[test]
 fn brute_force_agrees_on_a_lossy_relay_chain() {
-    agree("lossy relay chain", &lossy_relay_chain(EcCheck::new()));
+    agree("lossy relay chain", &lossy_relay_chain());
 }
 
-/// The relay chain of [`brute_force_agrees_on_a_lossy_relay_chain`], checked by `check`.
+/// The relay chain of [`brute_force_agrees_on_a_lossy_relay_chain`].
 #[cfg(stageleft_runtime)]
-fn lossy_relay_chain(mut check: EcCheck) -> CrossCheck {
+fn lossy_relay_chain() -> CrossCheck {
+    let mut check = EcCheck::new();
     let mut flow = FlowBuilder::new();
     let source = flow.process::<()>();
     let relay = flow.process::<()>();
@@ -435,12 +426,6 @@ fn the_cross_check_catches_wrong_verdicts() {
 /// Returns the cross-check, with the search capped at `max_crashes` crashes if given.
 #[cfg(stageleft_runtime)]
 fn total_loss_masks_a_partial_loss(max_crashes: Option<usize>) -> CrossCheck {
-    total_loss_masks_a_partial_loss_in(EcCheck::new(), max_crashes)
-}
-
-/// [`total_loss_masks_a_partial_loss`], checked by `check`.
-#[cfg(stageleft_runtime)]
-fn total_loss_masks_a_partial_loss_in(check: EcCheck, max_crashes: Option<usize>) -> CrossCheck {
     use hydro_lang::location::cluster::CLUSTER_SELF_ID;
 
     let mut flow = FlowBuilder::new();
@@ -478,8 +463,8 @@ fn total_loss_masks_a_partial_loss_in(check: EcCheck, max_crashes: Option<usize>
     let _out = known.sim_cluster_output();
 
     let mut check = match max_crashes {
-        Some(n) => check.max_crashes(n),
-        None => check,
+        Some(n) => EcCheck::new().max_crashes(n),
+        None => EcCheck::new(),
     };
     let sim = check
         .instrument(flow.sim().with_cluster_size(&members, 2))
@@ -665,19 +650,11 @@ fn races_find_a_broadcast_whose_members_do_not_re_forward() {
 /// The S2 relay: a fact `y` reaches the relay `n` twice. `direct` (lossy, one hop from `s`) asks
 /// `n` to forward `y` to `m0` only; the slower copy (two `fail_stop` hops, through `r1` and,
 /// redundantly, `r2`) asks it to forward `y` to `m1`, then to `m0`. `m1` echoes what it gets to
-/// `m0`. Returns the cross-check, enumerating sets of at most `max_faults` faults.
+/// `m0`. Returns the cross-check, enumerating sets of at most `max_faults` faults, with the
+/// search capped at `max_crashes` crashes if given.
 #[cfg(stageleft_runtime)]
-fn positional_crash_order_relay(check: EcCheck, max_faults: usize) -> CrossCheck {
-    positional_crash_order_relay_in(check, max_faults, None)
-}
-
-/// [`positional_crash_order_relay`], with the search capped at `max_crashes` crashes if given.
-#[cfg(stageleft_runtime)]
-fn positional_crash_order_relay_in(
-    mut check: EcCheck,
-    max_faults: usize,
-    max_crashes: Option<usize>,
-) -> CrossCheck {
+fn positional_crash_order_relay(max_faults: usize, max_crashes: Option<usize>) -> CrossCheck {
+    let mut check = EcCheck::new();
     use hydro_lang::location::cluster::CLUSTER_SELF_ID;
 
     let mut flow = FlowBuilder::new();
@@ -788,7 +765,7 @@ const RELAY_BREAK: &str = "crash(process#5 after fanout[process#5→cluster@0]: 
 #[test]
 fn suspected_positional_crash_order_tolerance() {
     for max_faults in [2, 3, 4] {
-        let cross = positional_crash_order_relay(EcCheck::new(), max_faults);
+        let cross = positional_crash_order_relay(max_faults, None);
         eprintln!(
             "=== S2 relay (uncapped, {max_faults} faults)\n{cross}\nsearch:\n{}",
             cross.results
@@ -807,7 +784,7 @@ fn suspected_positional_crash_order_tolerance() {
 #[cfg(stageleft_runtime)]
 #[test]
 fn suspected_positional_crash_order_certificate() {
-    let cross = positional_crash_order_relay_in(EcCheck::new(), 3, Some(1));
+    let cross = positional_crash_order_relay(3, Some(1));
     eprintln!(
         "=== S2 relay (max_crashes 1, 3 faults)\n{cross}\nsearch:\n{}",
         cross.results
