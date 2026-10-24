@@ -451,3 +451,62 @@ If either is real, it is a bug in lite's certified class, independent of `nondet
    - planted bugs;
    - cost against brute force.
 3. **v2 (§8.1)** only if v1 lands and the root agrees.
+
+## 11. Results (stage 3, measured)
+
+Branch `hydrofrac-races` @ `fbff7b5955`. "Races" is `EcCheck::races()`. "Brute force" is lite's enumerator:
+every fault set of at most 2 faults, each run over every schedule. "Cost" is fault sets run / schedules run. Every
+row where brute force ran agrees with it (`assert_agrees`). There is no disagreement anywhere.
+
+**How to read the certificates.** In a 2-member cluster the vacuity rule (never crash all, or all but one, of the
+checked cluster) admits no member crash. A certificate there covers only crashes of the one node outside the
+cluster: the source, the broadcaster or the coordinator.
+
+| program, configuration | label | verdict (plain English) | proven? | races cost | lite | brute force | test |
+|---|---|---|---|---|---|---|---|
+| `ask_once`, 3 members, value ∥ timer | `known` | a single crash of member 0, right after its announcement to member 1, makes member 2 miss 7 in the schedules where 2's query reaches member 1 first | counterexample | 4 / 74 | finds it (heuristic) | 8 / 132 | `races_agree_on_ask_once` |
+| 2PC cooperative termination, 3 participants, 64 sampled schedules per set | `committed` | two crashes (coordinator after commit→P0, P0 after Decided→P1) split the participants | counterexample; sampled, so no certificate | 133 / 8,451 | — | 200 / 12,800 | `races_agree_on_two_pc_cooperative_termination` |
+| 2PC-CTP, 2 participants, racing timers, 64 sampled | `committed` | a single crash of the coordinator right after its commit to P0 makes P1 never commit | counterexample; sampled | 5 / 258 | 2 / 128 | 6 / 384 | `races_targets_ctp2_racing_sampled_races` |
+| 2PC-CTP, 2 participants, quiescing harness, exhaustive | `committed` | every admissible fault set (coordinator crashes only), every schedule | **certified** | 6 / 2,460 (= brute force) | `Exhausted`, 5 / 2,428 | 6 / 2,460 | `races_targets_ctp2_quiescing_races` |
+| uniform reliable broadcast, 2 members, 1 send, threshold 1 and 2 | output, `certified` | every admissible set (source crashes only) | **certified** | 4 / 169 (= brute force) | `Exhausted`, 3 / 113 | 4 / 169 | `races_targets_urb2_threshold{1,2}_races` |
+| same | `echo`, `distinct_acks` | same | **certified** | 3 / 58 | `Exhausted` | 4 / 169 | same |
+| `hydro_test` echo reliable broadcast, 2 members, 1 payload (204 failure-free schedules) | `deliveries`, `echo`, `echoes` | same | **certified** | **2 / 2** | `Exhausted`, 3 / 215 | 4 / 419 | `both_agree_on_an_echo_broadcast_over_two_members` |
+| same, **3 members** (over 160,000 failure-free schedules) | `deliveries` | every admissible set: the broadcaster and one member may crash, anywhere | **certified**, not cross-checked (brute force cannot run) | **6 / 6**, 0.1 s | `Exhausted` | infeasible | `races_alone_on_an_echo_broadcast_over_three_members` |
+| `reliable_broadcast_closed` (1 failure-free schedule: its batch never branches) | `new_messages`, 1 / 2 / 3 payloads | every admissible set | **certified** | 8 / 8, 134 / 134, 281 / 281 | certified, 25 / 25 and 46 / 46 for 2 and 3 payloads | 65 / 65, 176 / 176, 341 / 341 | `races_agree_on_reliable_broadcast_closed`, `both_agree_on_reliable_broadcast_closed_with_*` |
+| `reliable_broadcast` plain, 1 / 2 / 3 payloads | `deliveries` | a single crash of the broadcaster partway through its broadcast leaves some members without the payload | counterexample | 2 / 2, 4 / 225, 4 / 9,921 | 2 / 282, 2 / 12,524 for 2 and 3 payloads | 20 / 38, 32 / 668, 44 / 24,484 | `races_agree_on_a_plain_broadcast`, `both_agree_on_a_plain_broadcast_with_*` |
+| planted bug: members do not re-forward | `delivered` | a single crash of the source partway through its broadcast | counterexample | 2 / 2 | — | agrees | `hydrofrac` `brute_tests` |
+| the S1 program (no `nondet!`) | `known` | omitting member 0's forward to member 1 makes member 1 miss f | counterexample (lite falsely certifies) | 3 / 3 | false certificate | agrees with races | `suspected_total_loss_*`, races variant |
+
+**Not cross-checkable:** brute force cannot even finish the failure-free run on these.
+- uniform broadcast, 3 members: over 215,000 schedules;
+- G-Set gossip, 3 members, 1 round: over 44,000;
+- multi-Paxos, 1 proposer, 3 acceptors: over 21,000;
+- ABD, 1 write: over 131,000.
+
+In those programs v1 also falls back to enumeration, because their derivations pass through fragile steps. So v1
+cannot certify them at any size worth having.
+
+### What this shows
+
+- **Soundness.** No disagreement with brute force in any of the configurations above. The known false certificates
+  are gone: `ask_once`, CTP-3, and lite's own S1.
+- **Where races wins.** Where a label's derivations are robust, a fault set costs one schedule instead of all of
+  them. Examples:
+  - the echo broadcast: 2 schedules where brute force needs 419, and 6 schedules for 3 members, where brute force
+    is impossible;
+  - the plain broadcast's counterexample: 2 schedules where brute force needs 38.
+- **Where it does not.** Labels whose derivations are fragile cost exactly brute force: 2PC `committed`, the
+  uniform broadcast's quorum output. That is sound, but no saving.
+- **A regression against lite.** On `reliable_broadcast_closed` with several payloads, lite costs 25 / 46 fault
+  sets and races costs 134 / 281.
+  - The program has no `nondet!` branching at all, so lite's positional rule applies there.
+  - Races' crash rule knows only the order inside one broadcast, not the order between two broadcasts.
+  - The proposed fix is to recognise that a source's `TotalOrder` stream broadcasts payload 1 before payload 2.
+    It is not done yet.
+
+### Next
+
+1. Order between successive broadcasts of a `TotalOrder` stream (fixes the regression).
+2. v2 (§8.1): "trigger meets state" premises with barrier discharge. This is what would let G-Set gossip and CTP-2
+   with the quiescing harness be certified without enumerating.
+3. §8.2: a trusted quorum combinator, for uniform broadcast, multi-Paxos and ABD.
