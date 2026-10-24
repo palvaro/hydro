@@ -48,7 +48,7 @@ use crate::capacity::{
     ProcSampler, host_fingerprint,
 };
 use crate::generator::drive;
-use hydro_deploy_integration::SEND_BUFFER_ENV;
+use hydro_deploy_integration::{SEND_BUFFER_ENV, SEND_STATS_ENV};
 use crate::profile::Profile;
 use crate::program::{Observer, StreamMode};
 use crate::trace::{Recorder, Sample, Trace};
@@ -90,6 +90,9 @@ pub struct CapacityConfig {
     pub image: String,
     /// A memory limit per node, in bytes.
     pub memory: Option<u64>,
+    /// Per-role memory limits (`--memory-mb ROLE=M`), overriding `memory`; `None` removes the
+    /// limit for that role.
+    pub role_memory: Vec<(String, Option<u64>)>,
 }
 
 /// Parses a CPU cap: a positive number of cores, or `none` for no quota (stored as `0.0`).
@@ -137,6 +140,7 @@ impl Default for CapacityConfig {
             harness_cpuset,
             image: "public.ecr.aws/amazonlinux/amazonlinux:latest".to_owned(),
             memory: None,
+            role_memory: Vec::new(),
         }
     }
 }
@@ -165,7 +169,12 @@ impl CapacityConfig {
         Limits {
             cpu: (cpus > 0.0).then(|| CpuQuota::from_cores(cpus, self.period(meta))),
             cpuset: self.node_cpuset.clone(),
-            memory: self.memory,
+            memory: self
+                .role_memory
+                .iter()
+                .find(|(r, _)| r.eq_ignore_ascii_case(role))
+                .map(|(_, m)| *m)
+                .unwrap_or(self.memory),
         }
     }
 
@@ -331,6 +340,13 @@ pub struct RunConfig {
     /// every other node (the load's entry point in particular) keeps unbounded queues and the
     /// feed stays open-loop.
     pub bounded_send_roles: Vec<String>,
+    /// Roles whose nodes get *lossy* bounded send queues (`--send-buffer lossy:N:ROLE,...`):
+    /// each outgoing connection queues at most `lossy_capacity` messages and drops a send that
+    /// finds its queue full, so a slow peer neither stalls the node (as `bounded` does) nor
+    /// grows its memory without limit (as `unbounded` does). A dropped message is a message
+    /// omission, the fault a retrying protocol is built to tolerate.
+    pub lossy_send_roles: Vec<String>,
+    pub lossy_capacity: usize,
     /// The Cargo profile the deployed nodes are built with: [`DEPLOY_PROFILE`] by default (an
     /// optimized build), or `dev` for a debug build (`--deploy-profile dev`).
     pub deploy_profile: String,
@@ -368,6 +384,8 @@ impl Default for RunConfig {
             calibrate_only: false,
             unbounded_sends: true,
             bounded_send_roles: Vec::new(),
+            lossy_send_roles: Vec::new(),
+            lossy_capacity: 0,
             deploy_profile: DEPLOY_PROFILE.to_owned(),
         }
     }
@@ -512,10 +530,21 @@ impl RunConfig {
                 }
                 "--image" => cfg.capacity.image = value("--image")?,
                 "--memory-mb" => {
-                    cfg.capacity.memory = Some(
-                        (positive(&value("--memory-mb")?, "--memory-mb")? * 1024.0 * 1024.0)
-                            as u64,
-                    )
+                    let v = value("--memory-mb")?;
+                    match v.split_once('=') {
+                        Some((role, m)) => {
+                            let m = if m.trim() == "none" {
+                                None
+                            } else {
+                                Some((positive(m, "--memory-mb")? * 1024.0 * 1024.0) as u64)
+                            };
+                            cfg.capacity.role_memory.push((role.trim().to_owned(), m));
+                        }
+                        None => {
+                            cfg.capacity.memory =
+                                Some((positive(&v, "--memory-mb")? * 1024.0 * 1024.0) as u64)
+                        }
+                    }
                 }
                 "--cpu-dip" => dip_k = Some(positive(&value("--cpu-dip")?, "--cpu-dip")?),
                 "--cpu-dip-nodes" => {
@@ -539,9 +568,27 @@ impl RunConfig {
                                 .filter(|r| !r.is_empty())
                                 .collect();
                         }
+                        v if v.starts_with("lossy:") => {
+                            let bad = || {
+                                format!("--send-buffer lossy wants lossy:N:ROLE,..., got `{v}`")
+                            };
+                            let (n, roles) =
+                                v["lossy:".len()..].split_once(':').ok_or_else(bad)?;
+                            cfg.unbounded_sends = true;
+                            cfg.lossy_capacity =
+                                n.trim().parse().ok().filter(|n| *n > 0).ok_or_else(bad)?;
+                            cfg.lossy_send_roles = roles
+                                .split(',')
+                                .map(|r| r.trim().to_owned())
+                                .filter(|r| !r.is_empty())
+                                .collect();
+                            if cfg.lossy_send_roles.is_empty() {
+                                return Err(bad());
+                            }
+                        }
                         v => {
                             return Err(format!(
-                                "--send-buffer wants unbounded, bounded or bounded:ROLE,..., got `{v}`"
+                                "--send-buffer wants unbounded, bounded, bounded:ROLE,... or lossy:N:ROLE,..., got `{v}`"
                             ));
                         }
                     }
@@ -611,12 +658,14 @@ usage: sedge [options] <crate> [function-substring]
   --node-cpus LIST         cores the nodes run on (default: upper half; `none` for any)
   --harness-cpus LIST      cores the harness is pinned to (default: lower half; `none`)
   --image IMAGE            container image (default amazonlinux:latest)
-  --memory-mb M            memory limit per node
-  --send-buffer unbounded|bounded|bounded:ROLE,...
+  --memory-mb M|ROLE=M     memory limit per node, or per role (ROLE=none: no limit)
+  --send-buffer unbounded|bounded|bounded:ROLE,...|lossy:N:ROLE,...
                            nodes' outgoing connections queue sends in memory (default unbounded,
                            so a slow peer never stalls a node and the workload stays open-loop),
                            or push back on the sending dataflow (Hydro's own default); with
-                           `bounded:ROLE,...` only those roles push back
+                           `bounded:ROLE,...` only those roles push back; with
+                           `lossy:N:ROLE,...` those roles queue at most N messages per
+                           connection and drop a send that finds the queue full
   --deploy-profile NAME    Cargo profile the nodes are built with (default `profile`: release
                            with debug info and no LTO; `dev` for a debug build)
  μ:
@@ -958,7 +1007,25 @@ impl TrialCapacity {
             .rustflags("-C opt-level=3 -C codegen-units=1 -C strip=none -C debuginfo=2 -C lto=off")
             .profile(run.deploy_profile.clone())
             .feature("sedge");
-        if run.unbounded_sends
+        if run
+            .lossy_send_roles
+            .iter()
+            .any(|r| r.eq_ignore_ascii_case(role))
+        {
+            h = h.env(SEND_BUFFER_ENV, format!("lossy:{}", run.lossy_capacity));
+            if self.nodes.is_some() {
+                let name = match member {
+                    Some(m) => format!("{}-{}-{m}", self.prefix, sanitize(role)),
+                    None => format!("{}-{}", self.prefix, sanitize(role)),
+                };
+                let path = send_stats_path(&name);
+                if let Some(dir) = path.parent() {
+                    let _ = fs::create_dir_all(dir);
+                }
+                let _ = fs::remove_file(&path);
+                h = h.env(SEND_STATS_ENV, path.to_string_lossy().into_owned());
+            }
+        } else if run.unbounded_sends
             && !run
                 .bounded_send_roles
                 .iter()
@@ -971,6 +1038,22 @@ impl TrialCapacity {
         }
         h
     }
+}
+
+/// Where the node in container `name` publishes its lossy send queues' counters
+/// ([`SEND_STATS_ENV`]): under the temporary directory, which every node container mounts.
+pub fn send_stats_path(name: &str) -> PathBuf {
+    std::env::temp_dir()
+        .join("sedge-sendstats")
+        .join(format!("{name}.stats"))
+}
+
+/// The counters a node's lossy send queues published: `[attempted, attempted bytes, dropped,
+/// dropped bytes]`, or `None` if it publishes none.
+fn read_send_stats(name: &str) -> Option<[u64; 4]> {
+    let text = fs::read_to_string(send_stats_path(name)).ok()?;
+    let v: Vec<u64> = text.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+    (v.len() == 4).then(|| [v[0], v[1], v[2], v[3]])
 }
 
 fn sanitize(s: &str) -> String {
@@ -1232,7 +1315,11 @@ impl Executed {
 /// Samples every node's `cpu.stat` once a second from `start` until the returned flag is set,
 /// and applies `dip` in the profile's trigger window.
 /// With a `procs` sampler, also reads every node's `/proc` accounting each second.
-type CapacitySamples = (Vec<Vec<Option<CpuStat>>>, Vec<Vec<Option<ProcIo>>>);
+type CapacitySamples = (
+    Vec<Vec<Option<CpuStat>>>,
+    Vec<Vec<Option<ProcIo>>>,
+    Vec<Vec<Option<[u64; 4]>>>,
+);
 
 fn spawn_capacity_tasks(
     nodes: &Nodes,
@@ -1256,27 +1343,30 @@ fn spawn_capacity_tasks(
             // samples[s][node]: cumulative stat at second s.
             let mut samples: Vec<Vec<Option<CpuStat>>> = Vec::new();
             let mut io: Vec<Vec<Option<ProcIo>>> = Vec::new();
+            let mut sends: Vec<Vec<Option<[u64; 4]>>> = Vec::new();
             let mut s = 0u32;
             loop {
                 tokio::time::sleep_until((start + Duration::from_secs(s as u64)).into()).await;
                 let hs = handles.clone();
                 let b = backend.clone();
                 let p = procs.clone();
-                let (row, io_row) = tokio::task::spawn_blocking(move || {
+                let (row, io_row, send_row) = tokio::task::spawn_blocking(move || {
                     let row = hs.iter().map(|h| b.cpu_stat(h)).collect::<Vec<_>>();
                     let io_row = p.map(|p| {
                         let pids: Vec<Vec<u32>> = hs.iter().map(|h| b.pids(h)).collect();
                         p.set_pids(&pids);
                         p.read(hs.len())
                     });
-                    (row, io_row.unwrap_or_default())
+                    let send_row = hs.iter().map(|h| read_send_stats(&h.name)).collect();
+                    (row, io_row.unwrap_or_default(), send_row)
                 })
                 .await
                 .unwrap_or_default();
                 samples.push(row);
                 io.push(io_row);
+                sends.push(send_row);
                 if stop.load(Ordering::Relaxed) {
-                    return (samples, io);
+                    return (samples, io, sends);
                 }
                 s += 1;
             }
@@ -1618,7 +1708,7 @@ where
         if let Some(d) = dipper {
             d.abort();
         }
-        let (samples, io) = sampler.await.unwrap_or_default();
+        let (samples, io, sends) = sampler.await.unwrap_or_default();
         usage = usage_from_samples(&n.handles(), &samples);
         let len = trace.buckets.len();
         if proc_sampler.is_some() {
@@ -1644,6 +1734,27 @@ where
                         .collect(),
                 ));
             }
+        }
+        // The lossy send queues' own counters (`--send-buffer lossy:...`), per second: what the
+        // dataflow tried to send and what was dropped at a full queue, counted in the transport.
+        for (i, h) in n.handles().iter().enumerate() {
+            let at = |s: usize| sends.get(s).and_then(|row| row.get(i).copied().flatten());
+            if (0..=len).all(|s| at(s).is_none()) {
+                continue;
+            }
+            let tag = h.node.to_string().replace(':', "_");
+            let delta = |k: usize, scale: f64| -> Vec<f64> {
+                (0..len)
+                    .map(|s| match (at(s), at(s + 1)) {
+                        (Some(a), Some(b)) => b[k].saturating_sub(a[k]) as f64 / scale,
+                        _ => f64::NAN,
+                    })
+                    .collect()
+            };
+            trace.extra.push((format!("sendq_attempted_{tag}"), delta(0, 1.0)));
+            trace.extra.push((format!("sendq_attempted_kb_{tag}"), delta(1, 1024.0)));
+            trace.extra.push((format!("sendq_dropped_{tag}"), delta(2, 1.0)));
+            trace.extra.push((format!("sendq_dropped_kb_{tag}"), delta(3, 1024.0)));
         }
         for u in &usage {
             let col = |f: &dyn Fn(&(f64, u64, f64)) -> f64| -> Vec<f64> {
@@ -1811,6 +1922,46 @@ where
                 );
                 verdict.outcome = Outcome::Invalid;
             }
+            let tail = ex.trace.window(profile.trigger_end(), profile.total());
+            let silent = silent_seconds(tail, &ex.kinds);
+            if ex.node_failures.is_empty()
+                && verdict.outcome != Outcome::Invalid
+                && (silent as f64) > SILENT_MAX * tail.len().max(1) as f64
+            {
+                // The program's levels cannot be read; its capped nodes' kernel writes, measured
+                // from outside, still can. Far below their baseline while the load is still
+                // offered is a collapse; anything else cannot be judged.
+                match outside_reading(&ex, &profile) {
+                    Some((writes, cpu)) if writes <= OUTSIDE_COLLAPSE_WRITES => {
+                        verdict.reason = format!(
+                            "the program went silent in band ({silent} of the tail's {} seconds without a report); read from outside, its capped nodes wrote {:.0}% of their baseline bytes per second through the second half of the tail, at {:.0}% of their CPU quota (the program's own reading was {}: {})",
+                            tail.len(),
+                            writes * 100.0,
+                            cpu * 100.0,
+                            verdict.outcome,
+                            verdict.reason
+                        );
+                        verdict.outcome = Outcome::Collapsed;
+                    }
+                    reading => {
+                        verdict.reason = format!(
+                            "the program went silent: no in-band report reached the harness in {silent} of the tail's {} seconds, so its levels cannot be read{} (the program's own reading was {}: {})",
+                            tail.len(),
+                            match reading {
+                                Some((w, c)) => format!(
+                                    "; from outside, its capped nodes wrote {:.0}% of their baseline bytes at {:.0}% of their CPU quota through the second half of the tail",
+                                    w * 100.0,
+                                    c * 100.0
+                                ),
+                                None => String::new(),
+                            },
+                            verdict.outcome,
+                            verdict.reason
+                        );
+                        verdict.outcome = Outcome::Invalid;
+                    }
+                }
+            }
             if !ex.node_failures.is_empty() {
                 verdict.reason = format!(
                     "a node died during the run ({}), so this is a crash, not an overload (the program's own reading was {}: {})",
@@ -1937,7 +2088,18 @@ where
     }
     let roles: Vec<String> = meta.roles.iter().map(|r| r.to_string()).collect();
     // μ depends on how the nodes were built as much as on their limits.
-    let key = format!("{};build={}", run.capacity.key(meta, &roles), run.deploy_profile);
+    let mut key = format!("{};build={}", run.capacity.key(meta, &roles), run.deploy_profile);
+    // The send buffers change μ too; the default (unbounded everywhere) keeps the old key.
+    if !run.unbounded_sends {
+        key += ";send=bounded";
+    } else if !run.bounded_send_roles.is_empty() {
+        key += &format!(";send=bounded:{}", run.bounded_send_roles.join(","));
+    } else if !run.lossy_send_roles.is_empty() {
+        key += &format!(";send=lossy:{}:{}", run.lossy_capacity, run.lossy_send_roles.join(","));
+    }
+    for (r, m) in &run.capacity.role_memory {
+        key += &format!(";mem[{r}]={}", m.map(|m| m.to_string()).unwrap_or_else(|| "-".to_owned()));
+    }
     if run.calibrate == Calibrate::Auto
         && let Some(mu) = cached_mu(run, meta, &key, host)
     {
@@ -1967,7 +2129,82 @@ pub struct ProbePoint {
     pub harness_bound: bool,
     pub mean_cores: Vec<(String, f64)>,
     pub throttled: f64,
+    /// Seconds of the measured window in which no observed stream produced a record: the
+    /// program's in-band reports stopped, so its levels cannot show a backlog.
+    pub silent_seconds: usize,
+    pub window_seconds: usize,
+    /// A node died (OOM-killed or exited) during the probe.
+    pub node_failed: bool,
     pub good: bool,
+}
+
+/// The largest fraction of a window's seconds that may have no in-band record at all for the
+/// program's own streams to be read. A program whose reports stop cannot show a rising backlog
+/// (its levels carry their last value forward), so a probe or tail that goes silent is not
+/// evidence of keeping up.
+pub const SILENT_MAX: f64 = 0.2;
+
+/// Seconds of `window` in which none of the observed streams produced a record. Zero when the
+/// program observes no streams.
+pub fn silent_seconds(window: &[crate::trace::Bucket], kinds: &StreamKinds) -> usize {
+    if kinds.is_empty() {
+        return 0;
+    }
+    window
+        .iter()
+        .filter(|b| {
+            kinds
+                .keys()
+                .all(|n| b.stream_records.get(n).copied().unwrap_or(0) == 0)
+        })
+        .count()
+}
+
+/// A silent tail reads as collapsed when the capped nodes' kernel writes, measured from outside,
+/// are at most this fraction of their pre-trigger rate.
+pub const OUTSIDE_COLLAPSE_WRITES: f64 = 0.5;
+
+/// The capped nodes' outside-measured kernel writes (`wchar`) through the second half of the tail
+/// as a fraction of their rate in the second half of the pre-trigger baseline, and their CPU use
+/// through the same half of the tail as a fraction of their quota. The second half, as for the
+/// levels' trend: a run that storms on the wire for a while before it goes silent is judged by
+/// where it ends up. `None` without a capacity backend's `/proc` columns.
+pub fn outside_reading(ex: &Executed, profile: &Profile) -> Option<(f64, f64)> {
+    let capped: Vec<(String, f64)> = ex
+        .usage
+        .iter()
+        .filter_map(|u| {
+            let q = u.limits.cpu?;
+            Some((
+                u.node.to_string().replace(':', "_"),
+                q.quota_us as f64 / q.period_us as f64,
+            ))
+        })
+        .collect();
+    if capped.is_empty() {
+        return None;
+    }
+    let col = |name: String| ex.trace.extra.iter().find(|(n, _)| *n == name).map(|(_, v)| v);
+    let mean_sum = |prefix: &str, from: usize, to: usize| -> Option<f64> {
+        let cols: Vec<&Vec<f64>> = capped
+            .iter()
+            .map(|(tag, _)| col(format!("{prefix}{tag}")))
+            .collect::<Option<_>>()?;
+        let per_second: Vec<f64> = (from..to)
+            .map(|s| cols.iter().map(|c| c.get(s).copied().unwrap_or(f64::NAN)).sum::<f64>())
+            .filter(|v| v.is_finite())
+            .collect();
+        (!per_second.is_empty()).then(|| per_second.iter().sum::<f64>() / per_second.len() as f64)
+    };
+    let start = profile.trigger_start().as_secs() as usize;
+    let end = profile.trigger_end().as_secs() as usize;
+    let total = profile.total().as_secs() as usize;
+    let late = end + (total - end) / 2;
+    let base = mean_sum("wchar_kb_", start / 2, start)?;
+    let tail = mean_sum("wchar_kb_", late, total)?;
+    let cpu = mean_sum("cpu_", late, total)?;
+    let quota: f64 = capped.iter().map(|(_, q)| q).sum();
+    (base > 0.0).then(|| (tail / base, cpu / quota))
 }
 
 /// The fraction of offered work a probe must complete to count as keeping up.
@@ -2017,7 +2254,7 @@ where
         let ex = once(&spec).await;
         let p = judge_probe(&ex, &profile, rate, reference);
         eprintln!(
-            "    probe {rate:>9.1}/s: offered {:.1}/s ({} late, {} entered late, worst {:.0} ms), goodput {:.1}%, {}{}{} → {}",
+            "    probe {rate:>9.1}/s: offered {:.1}/s ({} late, {} entered late, worst {:.0} ms), goodput {:.1}%, {}{}{}{}{} → {}",
             p.offered_rate,
             ex.late,
             ex.feed_late,
@@ -2038,6 +2275,15 @@ where
             } else {
                 format!(", throttled {:.0}%", p.throttled * 100.0)
             },
+            if p.silent_seconds > 0 {
+                format!(
+                    ", silent {}/{} s (no in-band reports)",
+                    p.silent_seconds, p.window_seconds
+                )
+            } else {
+                String::new()
+            },
+            if p.node_failed { ", a node died" } else { "" },
             if p.good { "keeps up" } else { "falls behind" }
         );
         record_probe(run, meta, &ex, &p);
@@ -2140,8 +2386,12 @@ fn judge_probe(ex: &Executed, profile: &Profile, rate: f64, reference: &mut Opti
     } else {
         ex.usage.iter().map(|u| u.throttled_fraction()).fold(0.0, f64::max)
     };
+    let silent = silent_seconds(window, &ex.kinds);
+    let node_failed = !ex.node_failures.is_empty();
     let good = goodput >= PROBE_GOODPUT
         && rising.is_empty()
+        && (silent as f64) <= SILENT_MAX * window.len().max(1) as f64
+        && !node_failed
         && w.abandoned == 0
         && offered_rate >= 0.8 * rate
         && offered_rate <= 1.25 * rate
@@ -2168,6 +2418,9 @@ fn judge_probe(ex: &Executed, profile: &Profile, rate: f64, reference: &mut Opti
             .map(|u| (u.node.to_string(), u.mean_cores()))
             .collect(),
         throttled,
+        silent_seconds: silent,
+        window_seconds: window.len(),
+        node_failed,
         good,
     }
 }
@@ -2422,6 +2675,20 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<RunConfig, String> {
         RunConfig::from_args(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn silent_seconds_counts_seconds_with_no_in_band_record() {
+        let kinds: StreamKinds = [("unacked".to_owned(), StreamKind::Level)].into();
+        let bucket = |records: u64| crate::trace::Bucket {
+            stream_records: [("unacked".to_owned(), records)].into(),
+            ..Default::default()
+        };
+        // A level carries its value forward, so only the record counts show the silence.
+        let window = [bucket(9), bucket(0), bucket(9), bucket(0), bucket(0)];
+        assert_eq!(silent_seconds(&window, &kinds), 3);
+        assert_eq!(silent_seconds(&window, &StreamKinds::new()), 0);
+        assert_eq!(silent_seconds(&[crate::trace::Bucket::default()], &kinds), 1);
     }
 
     fn meta() -> Meta {

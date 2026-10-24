@@ -1,0 +1,6 @@
+cress_pe_final.log:! HAZARDOUS  relay_broadcast (per_entry_n9_4k)  growth: grows  multiplier: 175.60x  location: hydro_test/src/cluster/relay_broadcast.rs:616, batch of Arrival
+cress_pe_final.log:    outputs: amplified: wire, merged, acks_sent, delivered; shed: outstanding_depth, metrics
+cress_pe3.log:! HAZARDOUS  relay_broadcast (per_entry3_n9_4k)  growth: stops  multiplier: 2.80x  location: hydro_test/src/cluster/relay_broadcast.rs:616, batch of Arrival
+cress_pe3.log:    outputs: amplified: wire, merged, acks_sent, delivered; shed: outstanding_depth, metrics
+cress_rr.log:! HAZARDOUS  relay_broadcast (reliable_resend_n9_4k)  growth: grows  multiplier: 25.95x  location: hydro_test/src/cluster/relay_broadcast.rs:616, batch of Arrival
+cress_rr.log:    outputs: amplified: wire, merged, acks_sent, delivered; shed: outstanding_depth, metrics
