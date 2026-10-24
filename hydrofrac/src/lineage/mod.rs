@@ -34,6 +34,7 @@ use crate::fault::{DeliveryId, Event, EventLog, Fate, MessageId, NodeId, NodeNam
 use crate::search::{Clause, Dependency, Derivation, PreHealSends, SendSequences};
 
 pub use crate::provenance::RecordProv;
+use crate::provenance::fragile_site;
 
 /// Decodes a record's metadata ([`RecordProv`], as the provenance rewrite encodes it).
 /// Missing or malformed metadata is [`RecordProv::Opaque`]: the execution rule is sound for
@@ -140,9 +141,20 @@ pub struct Lineage<'a> {
     recvs_at: HashMap<NodeId, Vec<(usize, usize)>>,
     sequences: Rc<SendSequences<MessageId>>,
     pre_heal: Rc<PreHealSends>,
-    memo: RefCell<HashMap<Record, Rc<Derivation<MessageId>>>>,
+    memo: RefCell<HashMap<Record, Closure>>,
     opaque: RefCell<BTreeSet<Record>>,
 }
+
+/// The backward closure of one record: its derivation and the fragile sites on it.
+#[derive(Clone)]
+struct Closure {
+    derivation: Rc<Derivation<MessageId>>,
+    sites: Rc<BTreeSet<usize>>,
+}
+
+/// The site [`Lineage::fragile_sites`] reports for a derivation that reached an opaque record:
+/// its lineage is unknown, so it counts as fragile.
+pub const OPAQUE_SITE: usize = usize::MAX;
 
 /// The lineage of the run `log` records.
 pub fn derive<'a>(log: &'a EventLog, tables: &Tables) -> Lineage<'a> {
@@ -302,14 +314,31 @@ impl<'a> Lineage<'a> {
             self.outputs.contains_key(&event),
             "event {event} is not an output"
         );
-        self.closure(Record::Output(event))
+        self.closure(Record::Output(event)).derivation
+    }
+
+    /// The fragile steps the derivation of the observation at event index `event` passed
+    /// through (docs/design/hydrofrac-races.md §4.1): the site indices the records of its
+    /// backward closure name (ids with [`crate::provenance::FRAGILE_BIT`] set), plus
+    /// [`OPAQUE_SITE`] if the closure reached an opaque record. Empty iff the derivation is
+    /// robust. Only a run instrumented in fragile mode
+    /// ([`crate::provenance::install_fragile`]) names any site.
+    ///
+    /// # Panics
+    /// If `event` is not the index of an [`Event::Output`].
+    pub fn fragile_sites(&self, event: usize) -> Rc<BTreeSet<usize>> {
+        assert!(
+            self.outputs.contains_key(&event),
+            "event {event} is not an output"
+        );
+        self.closure(Record::Output(event)).sites
     }
 
     /// The derivation of the send carrying delivery `id`, if the log has it: what the sending
     /// record was computed from, not including the delivery itself.
     pub fn send_derivation(&self, id: DeliveryId) -> Option<Rc<Derivation<MessageId>>> {
         let &s = self.by_id.get(&id)?;
-        Some(self.closure(Record::Send(s)))
+        Some(self.closure(Record::Send(s)).derivation)
     }
 
     /// The clause of the observation at event index `event`: its derivation, with this run's send
@@ -334,7 +363,7 @@ impl<'a> Lineage<'a> {
     }
 
     /// The closure from `root` (memoized).
-    fn closure(&self, root: Record) -> Rc<Derivation<MessageId>> {
+    fn closure(&self, root: Record) -> Closure {
         if let Some(d) = self.memo.borrow().get(&root) {
             return d.clone();
         }
@@ -347,6 +376,7 @@ impl<'a> Lineage<'a> {
         }
 
         let mut derivation = Derivation::new();
+        let mut sites = BTreeSet::new();
         let mut reached: BTreeSet<usize> = BTreeSet::new();
         let mut expanded: BTreeSet<Record> = BTreeSet::new();
         // Per node, the bound up to which its receives were already taken: the execution rule
@@ -379,8 +409,12 @@ impl<'a> Lineage<'a> {
                         }
                     };
                     match prov {
-                        RecordProv::Ids(ids) => self.push_ids(ids, &mut stack, Work::Delivery),
+                        RecordProv::Ids(ids) => {
+                            sites.extend(ids.iter().filter_map(|&id| fragile_site(id)));
+                            self.push_ids(ids, &mut stack, Work::Delivery);
+                        }
                         RecordProv::Opaque => {
+                            sites.insert(OPAQUE_SITE);
                             self.opaque.borrow_mut().insert(record);
                             self.push_recvs(node, bound, &mut scanned, &mut stack, Work::Delivery);
                         }
@@ -389,9 +423,12 @@ impl<'a> Lineage<'a> {
             }
         }
 
-        let derivation = Rc::new(derivation);
-        self.memo.borrow_mut().insert(root, derivation.clone());
-        derivation
+        let closure = Closure {
+            derivation: Rc::new(derivation),
+            sites: Rc::new(sites),
+        };
+        self.memo.borrow_mut().insert(root, closure.clone());
+        closure
     }
 
     /// Pushes the delivered sends `ids` names (unknown or undelivered ids name nothing a fault
@@ -443,3 +480,7 @@ mod tests;
 // In the staged copy too: the tests' `q!` closures are resolved there.
 #[cfg(test)]
 mod sim_tests;
+
+// In the staged copy too, like `sim_tests`.
+#[cfg(test)]
+mod fragile_tests;

@@ -45,6 +45,9 @@ pub struct EcCheck {
     taps: Option<TapPass>,
     /// The operators the provenance rewrite left as opaque islands (filled at compile time).
     islands: Rc<RefCell<Vec<String>>>,
+    /// The program's fragile steps, if instrumented by [`Self::instrument_fragile`] (filled at
+    /// compile time).
+    fragile: Option<Rc<RefCell<Vec<crate::provenance::FragileSite>>>>,
 }
 
 impl EcCheck {
@@ -73,20 +76,43 @@ impl EcCheck {
     /// (the check is what checks them) and acknowledges lossy channels (the check injects their
     /// omissions itself). Compile the result and pass it to [`Self::run`].
     pub fn instrument<'a>(&mut self, flow: SimFlow<'a>) -> SimFlow<'a> {
-        let (taps, pass) = tap_pass();
-        self.taps = Some(taps);
-        // The tap pass runs before networks are compiled, so the provenance rewrite (a
-        // `PostNetwork` pass) traces the taps like any other operator.
-        let flow = flow
-            .skip_consistency_assertions()
-            .test_safety_only()
-            .with_network_hook_points()
-            .with_ir_pass(IrPassStage::PreNetwork, pass);
+        let flow = self.instrument_taps(flow);
         // Record provenance (docs/design/hydrofrac-lite.md §5): a `PostNetwork` pass, so it
         // sees the taps' outputs and attaches each observed fact's lineage to them. Operators
         // it cannot see into are recorded as opaque islands; their records fall back to the
         // execution rule, which is sound.
         crate::provenance::install(flow, Some(self.islands.clone()))
+    }
+
+    /// Like [`Self::instrument`], with record provenance in fragile mode
+    /// (docs/design/hydrofrac-races.md §4.1): records also name the fragile steps they passed
+    /// through, which [`crate::lineage::Lineage::fragile_sites`] collects. Once the result is
+    /// compiled, [`Self::fragile_sites`] lists the program's fragile steps. [`Self::run`] works
+    /// on such a simulation unchanged: lite's lineage ignores the extra ids.
+    pub fn instrument_fragile<'a>(&mut self, flow: SimFlow<'a>) -> SimFlow<'a> {
+        let flow = self.instrument_taps(flow);
+        let sites = Rc::new(RefCell::new(vec![]));
+        self.fragile = Some(sites.clone());
+        crate::provenance::install_fragile(flow, Some(self.islands.clone()), sites)
+    }
+
+    /// The program's fragile steps, indexed by site: `Some` once a flow passed through
+    /// [`Self::instrument_fragile`] was compiled, else `None`.
+    pub fn fragile_sites(&self) -> Option<Vec<crate::provenance::FragileSite>> {
+        self.fragile.as_ref().map(|sites| sites.borrow().clone())
+    }
+
+    /// The instrumentation [`Self::instrument`] and [`Self::instrument_fragile`] share: taps,
+    /// hook points and the simulator settings the check needs.
+    fn instrument_taps<'a>(&mut self, flow: SimFlow<'a>) -> SimFlow<'a> {
+        let (taps, pass) = tap_pass();
+        self.taps = Some(taps);
+        // The tap pass runs before networks are compiled, so the provenance rewrite (a
+        // `PostNetwork` pass) traces the taps like any other operator.
+        flow.skip_consistency_assertions()
+            .test_safety_only()
+            .with_network_hook_points()
+            .with_ir_pass(IrPassStage::PreNetwork, pass)
     }
 
     /// Runs the check on `sim` (compiled from a flow passed through [`Self::instrument`]).

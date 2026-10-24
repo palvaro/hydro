@@ -101,6 +101,32 @@ fn opaque_tag() -> TokenStream {
     quote!(#p::Tag { kind: #p::TagKind::Operational, port: #PORT, member: #PORT, seq: u64::MAX })
 }
 
+/// The tag naming fragile site `index` (docs/design/hydrofrac-races.md §4.1). It reaches message
+/// metadata as the id `FRAGILE_BIT | index` ([`super::FRAGILE_BIT`]); its `member` keeps it
+/// distinct from every delivery tag and from [`opaque_tag`].
+fn fragile_tag(index: usize) -> TokenStream {
+    let p = prov();
+    let seq = super::FRAGILE_BIT | u64::try_from(index).expect("site index fits u64");
+    let member = PORT - 1;
+    quote!(#p::Tag { kind: #p::TagKind::Operational, port: #PORT, member: #member, seq: #seq })
+}
+
+/// A `Map` closure adding the tag of fragile site `index` to every item of representation `repr`
+/// and (tagged) type `ty`.
+fn add_fragile_tag(index: usize, repr: Repr, ty: &syn::Type) -> ClosureExpr {
+    let tag = fragile_tag(index);
+    match repr {
+        Repr::Flat => plain_closure(quote!(|mut __prov_x: #ty| {
+            __prov_x.tags.insert(#tag);
+            __prov_x
+        })),
+        Repr::Keyed => plain_closure(quote!(|(__prov_k, mut __prov_v): #ty| {
+            __prov_v.tags.insert(#tag);
+            (__prov_k, __prov_v)
+        })),
+    }
+}
+
 /// An item with opaque lineage.
 fn opaque_item(value: TokenStream) -> TokenStream {
     let p = prov();
@@ -633,11 +659,29 @@ fn plain_closure(tokens: TokenStream) -> ClosureExpr {
 // Node rewriting
 // ---------------------------------------------------------------------------------------------
 
-/// What the pass learned, for reporting.
+/// An identity for an IR node that survives the rewrite moving it: the heap address of its
+/// collection kind's type. Every node owns that allocation, a node is moved but never copied
+/// before the rewrite visits it, and a copy of its metadata (a `Map` the rewrite inserts)
+/// allocates a new one. Valid only until the rewrite has visited the node.
+pub(crate) fn node_key(node: &HydroNode) -> usize {
+    let ty = match &node.metadata().collection_kind {
+        CollectionKind::Stream { element_type, .. }
+        | CollectionKind::Singleton { element_type, .. }
+        | CollectionKind::Optional { element_type, .. } => element_type,
+        CollectionKind::KeyedStream { value_type, .. }
+        | CollectionKind::KeyedSingleton { value_type, .. } => value_type,
+    };
+    std::ptr::from_ref::<syn::Type>(&ty.0) as usize
+}
+
+/// What the pass learned, for reporting, and what it was told.
 #[derive(Default)]
 struct Ctx {
     /// Operators left as opaque islands, by debug name.
     islands: std::cell::RefCell<Vec<String>>,
+    /// The fragile steps to tag, by their key before the rewrite ([`node_key`]) to site
+    /// index. Empty unless the rewrite runs in fragile mode.
+    fragile: std::collections::HashMap<usize, usize>,
 }
 
 /// Wraps `node` in a `Map` applying `f`; the map inherits `node`'s (already retyped) metadata.
@@ -738,6 +782,20 @@ fn ty_of(node: &HydroNode) -> syn::Type {
 }
 
 fn transform_node(node: &mut HydroNode, ctx: &Ctx) {
+    // Looked up before the node is rewritten, which invalidates its key.
+    let fragile = if ctx.fragile.is_empty() || matches!(node, HydroNode::Placeholder) {
+        None
+    } else {
+        ctx.fragile.get(&node_key(node)).copied()
+    };
+    transform_node_inner(node, ctx);
+    // After a fragile step, every record it emits names its site.
+    if let Some(index) = fragile {
+        wrap_after(node, add_fragile_tag(index, kind_of(node), &ty_of(node)));
+    }
+}
+
+fn transform_node_inner(node: &mut HydroNode, ctx: &Ctx) {
     let p = prov();
     match node {
         HydroNode::Placeholder => panic!("provenance: unexpected placeholder"),
@@ -1309,7 +1367,10 @@ fn transform_root(root: &mut HydroRoot) {
 ///
 /// [`IrPassStage::PostNetwork`]: hydro_lang::sim::network_hook::IrPassStage::PostNetwork
 pub fn rewrite(ir: &mut [HydroRoot]) -> Vec<String> {
-    let ctx = Ctx::default();
+    rewrite_with(ir, Ctx::default())
+}
+
+fn rewrite_with(ir: &mut [HydroRoot], ctx: Ctx) -> Vec<String> {
     let mut seen_tees: SeenSharedNodes = Default::default();
     for root in ir.iter_mut() {
         root.transform_bottom_up(
@@ -1332,6 +1393,34 @@ pub fn install<'a>(
         hydro_lang::sim::network_hook::IrPassStage::PostNetwork,
         move |ir| {
             let found = rewrite(ir);
+            if let Some(islands) = islands {
+                islands.borrow_mut().extend(found);
+            }
+        },
+    )
+}
+
+/// Like [`install`], in *fragile mode* (docs/design/hydrofrac-races.md §4.1): before the rewrite,
+/// the program's fragile steps are found (`fragile::classify`) and stored in `sites`; then
+/// every record a fragile step emits also carries that step's site, which reaches message
+/// metadata as the id `FRAGILE_BIT | index` ([`super::FRAGILE_BIT`]). Lineage collects them
+/// ([`crate::lineage::Lineage::fragile_sites`]); lite's lineage skips them as unknown ids.
+#[cfg(stageleft_runtime)]
+pub fn install_fragile<'a>(
+    flow: hydro_lang::sim::flow::SimFlow<'a>,
+    islands: Option<std::rc::Rc<std::cell::RefCell<Vec<String>>>>,
+    sites: std::rc::Rc<std::cell::RefCell<Vec<super::FragileSite>>>,
+) -> hydro_lang::sim::flow::SimFlow<'a> {
+    flow.with_network_hook_points().with_ir_pass(
+        hydro_lang::sim::network_hook::IrPassStage::PostNetwork,
+        move |ir| {
+            let (found, fragile) = super::fragile::classify(ir);
+            *sites.borrow_mut() = found;
+            let ctx = Ctx {
+                fragile,
+                ..Ctx::default()
+            };
+            let found = rewrite_with(ir, ctx);
             if let Some(islands) = islands {
                 islands.borrow_mut().extend(found);
             }

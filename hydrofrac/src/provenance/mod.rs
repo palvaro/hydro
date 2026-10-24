@@ -29,9 +29,27 @@ pub mod check;
 #[cfg(stageleft_runtime)]
 #[doc(hidden)]
 pub mod choices;
+/// The program's fragile steps (docs/design/hydrofrac-races.md §3.1): steps whose output can
+/// exist or not depending on the schedule.
+#[cfg(stageleft_runtime)]
+pub mod fragile;
 pub mod rewrite;
 
+#[cfg(stageleft_runtime)]
+pub use fragile::FragileSite;
+#[cfg(stageleft_runtime)]
+pub use rewrite::install_fragile;
 pub use rewrite::{install, rewrite};
+
+/// The bit that marks an id of [`RecordProv::Ids`] as a fragile-step site rather than a
+/// delivery: the rewrite's fragile mode ([`install_fragile`]) names site `i` by the id
+/// `FRAGILE_BIT | i`. Delivery ids are counted up from 1, so they never set it.
+pub const FRAGILE_BIT: u64 = 1 << 63;
+
+/// The fragile site an id of [`RecordProv::Ids`] names, or `None` if it names a delivery.
+pub fn fragile_site(id: u64) -> Option<usize> {
+    (id & FRAGILE_BIT != 0).then(|| usize::try_from(id & !FRAGILE_BIT).expect("site fits usize"))
+}
 
 /// The lineage of one record as handed to the network hook: the per-message metadata format.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

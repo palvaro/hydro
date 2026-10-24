@@ -48,7 +48,7 @@ fn unordered(kind: &CollectionKind) -> bool {
 }
 
 /// The closures of the allowlisted nodes that have any.
-fn closures(node: &HydroNode) -> Vec<&ClosureExpr> {
+pub(crate) fn closures(node: &HydroNode) -> Vec<&ClosureExpr> {
     use HydroNode::*;
     match node {
         Map { f, .. } | FlatMap { f, .. } | Filter { f, .. } | FilterMap { f, .. } => vec![f],

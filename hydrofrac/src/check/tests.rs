@@ -48,6 +48,16 @@ fn plain_broadcast(check: EcCheck, lossy: bool) -> Results {
 /// Agreement survives any single crash: one surviving recipient echoes to everyone.
 #[cfg(stageleft_runtime)]
 fn echo_broadcast(check: EcCheck) -> Results {
+    echo_broadcast_with(check, false).0
+}
+
+/// [`echo_broadcast`], instrumented in fragile mode if `fragile`; also returns the program's
+/// fragile steps ([`EcCheck::fragile_sites`]).
+#[cfg(stageleft_runtime)]
+fn echo_broadcast_with(
+    check: EcCheck,
+    fragile: bool,
+) -> (Results, Option<Vec<crate::provenance::FragileSite>>) {
     let mut flow = FlowBuilder::new();
     let source = flow.process::<()>();
     let members = flow.cluster::<()>();
@@ -69,12 +79,17 @@ fn echo_broadcast(check: EcCheck) -> Results {
     let _out = delivered.sim_cluster_output();
 
     let mut check = check;
-    let sim = check
-        .instrument(flow.sim().with_cluster_size(&members, MEMBERS))
-        .compiled();
-    check.run(&sim, async || {
+    let flow = flow.sim().with_cluster_size(&members, MEMBERS);
+    let flow = if fragile {
+        check.instrument_fragile(flow)
+    } else {
+        check.instrument(flow)
+    };
+    let sim = flow.compiled();
+    let results = check.run(&sim, async || {
         send.send(7);
-    })
+    });
+    (results, check.fragile_sites())
 }
 
 #[cfg(stageleft_runtime)]
@@ -126,6 +141,30 @@ fn an_echo_broadcast_tolerates_one_crash_and_breaks_at_two() {
     };
     assert_eq!(cex.tolerates, Some(1), "{results}");
     assert_eq!(cex.crashes(), 2, "{results}");
+}
+
+/// Fragile mode (docs/design/hydrofrac-races.md §4.1) only adds ids that lite's lineage skips,
+/// so the check's verdict is the same. The echo broadcast has no fragile step.
+#[cfg(stageleft_runtime)]
+#[test]
+fn fragile_mode_leaves_the_check_unchanged() {
+    let (lite, none) = echo_broadcast_with(EcCheck::new(), false);
+    let (fragile, sites) = echo_broadcast_with(EcCheck::new(), true);
+    assert_eq!(none, None);
+    assert_eq!(sites, Some(vec![]));
+    // The verdict without the run it was found in (whose metadata bytes differ).
+    let verdicts = |r: &Results| -> Vec<String> {
+        r.labels
+            .iter()
+            .map(|l| match &l.verdict {
+                Verdict::Counterexample(cex) => {
+                    format!("{:?} {:?} {:?}", cex.faults, cex.tolerates, cex.missing)
+                }
+                other => format!("{other:?}"),
+            })
+            .collect()
+    };
+    assert_eq!(verdicts(&lite), verdicts(&fragile), "{lite}\n{fragile}");
 }
 
 #[cfg(stageleft_runtime)]
