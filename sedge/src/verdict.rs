@@ -134,6 +134,30 @@ impl WindowStats {
     }
 }
 
+/// Whether a level is rising the way a backlog does when the program cannot keep up, read from
+/// its per-second values over a window. Two conditions, both needed:
+///
+/// - **A sustained trend.** Its mean over the window's last third is above its mean over the
+///   middle third, which is above its mean over the first third. One high sample, or a level
+///   that wobbles around a constant, does not qualify.
+/// - **Substantial growth.** The rise from the first third's mean to the last third's is more
+///   than half the first third's mean (growth relative to the level's own size) and more than
+///   `floor` (in absolute terms; the caller scales it with the offered load).
+///
+/// A small table that wobbles between 0 and 70 entries, say, is not rising, however its halves
+/// happen to compare; a backlog that grows steadily by more than its own size is.
+pub fn level_rising(values: &[f64], floor: f64) -> bool {
+    if values.len() < 3 {
+        return false;
+    }
+    let third = values.len() / 3;
+    let mean = |xs: &[f64]| xs.iter().sum::<f64>() / xs.len() as f64;
+    let (a, rest) = values.split_at(third);
+    let (b, c) = rest.split_at(rest.len() - third);
+    let (m1, m2, m3) = (mean(a), mean(b), mean(c));
+    m1 < m2 && m2 < m3 && m3 - m1 > (0.5 * m1).max(floor)
+}
+
 /// The statistics [`judge_with_kinds`] reads from a window, for other readers of a trace (the
 /// harness's capacity probe).
 pub fn window_stats(buckets: &[Bucket], kinds: &StreamKinds) -> WindowStats {
@@ -693,5 +717,24 @@ mod tests {
             &profile(),
         );
         assert_eq!(v.outcome, Outcome::Draining, "{v}");
+    }
+    #[test]
+    fn level_rising_needs_a_sustained_substantial_trend() {
+        // A small table wobbling around a constant: not rising, whatever its halves say.
+        let wobble = [0.0, 40.0, 5.0, 69.0, 10.0, 30.0, 0.0, 22.0, 60.0, 8.0, 70.0, 15.0];
+        assert!(!level_rising(&wobble, 14.0));
+        // A steady backlog: rising.
+        let backlog: Vec<f64> = (0..12).map(|i| 25.0 * i as f64).collect();
+        assert!(level_rising(&backlog, 14.0));
+        // A large level creeping up by less than half its size: not rising.
+        let creep = [100.0, 102.0, 104.0, 106.0, 108.0, 110.0, 112.0, 114.0, 116.0];
+        assert!(!level_rising(&creep, 14.0));
+        // A tiny level growing monotonically, but by less than the floor: not rising.
+        let tiny = [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        assert!(!level_rising(&tiny, 10.0));
+        // One spike at the end of a flat level: not a trend.
+        let spike = [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 300.0];
+        assert!(!level_rising(&spike, 14.0));
+        assert!(!level_rising(&[1.0, 100.0], 0.0));
     }
 }

@@ -301,12 +301,28 @@ impl Observation {
 pub type ObservationStream = Pin<Box<dyn FStream<Item = Observation>>>;
 
 #[cfg(stageleft_runtime)]
+/// How the harness reads an observed stream's records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamMode {
+    /// Every record is one event (and its value, if numeric, a level or an id): the default.
+    Whole,
+    /// Every record is a count of events since the member's last report: the harness adds that
+    /// many events to the trace (see [`Observer::cluster_counter`]).
+    Counter,
+    /// Every record is a member's current level, summed over members (see
+    /// [`Observer::cluster_gauge`]).
+    Gauge,
+}
+
+#[cfg(stageleft_runtime)]
 /// An output stream registered whole; `connect` turns the deployed port into observations.
 pub struct ObservedStream<'a> {
     pub name: String,
     /// Whether the stream's item type is a plain number, read from its type name; what a
     /// per-tick level looks like.
     pub numeric: bool,
+    /// How the harness reads the records.
+    pub mode: StreamMode,
     #[allow(clippy::type_complexity)]
     pub connect: Box<
         dyn for<'n> FnOnce(
@@ -350,6 +366,7 @@ where
         ObservedStream {
             name: name.to_owned(),
             numeric: is_numeric::<T>(),
+            mode: StreamMode::Whole,
             connect: Box::new(move |nodes| {
                 Box::pin(async move {
                     use futures::StreamExt as _;
@@ -381,6 +398,7 @@ where
         ObservedStream {
             name: name.to_owned(),
             numeric: is_numeric::<T>(),
+            mode: StreamMode::Whole,
             connect: Box::new(move |nodes| {
                 Box::pin(async move {
                     use futures::StreamExt as _;
@@ -491,6 +509,43 @@ impl<'a> Observer<'a> {
         R: Retries,
     {
         self.gauges.push((name.to_owned(), self.port(samples)));
+    }
+
+    /// [`Self::counter`] for a cluster: every member reports its own increments (each member's
+    /// count of re-sends in its last metrics window, say), and the trace sums them over members.
+    /// The verdict reads a counter like any unclassified stream: its tail rate must return to
+    /// the baseline's. A program whose per-message outputs would cost its capped members more to
+    /// report than to produce reports these instead, once per window.
+    pub fn cluster_counter<L, C, O, R>(
+        &mut self,
+        name: &str,
+        increments: Stream<f64, Cluster<'a, L, C>, Unbounded, O, R>,
+    ) where
+        L: 'a,
+        C: Consistency,
+        O: Ordering,
+        R: Retries,
+    {
+        let mut observed = increments.observed(name, self);
+        observed.mode = StreamMode::Counter;
+        self.streams.push(observed);
+    }
+
+    /// [`Self::gauge`] for a cluster: every member reports its own level, and the trace's level
+    /// is the sum of the members' latest reports.
+    pub fn cluster_gauge<L, C, O, R>(
+        &mut self,
+        name: &str,
+        samples: Stream<f64, Cluster<'a, L, C>, Unbounded, O, R>,
+    ) where
+        L: 'a,
+        C: Consistency,
+        O: Ordering,
+        R: Retries,
+    {
+        let mut observed = samples.observed(name, self);
+        observed.mode = StreamMode::Gauge;
+        self.streams.push(observed);
     }
 
     /// A count of events the program reports in increments (re-sends in the last window,
