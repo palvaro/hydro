@@ -671,3 +671,51 @@ fn both_agree_on_an_echo_broadcast_over_two_members_with_two_payloads() {
         |check| reliable_broadcast_with(check, true, 2, &[1, 2]),
     );
 }
+
+/// Races mode alone (no enumeration, which cannot finish here: the failure-free run alone has
+/// more than 160,000 schedules) on the echo broadcast over three members with one payload. The
+/// program is fragile-free, so each fault set runs on one schedule. Prints the verdicts and
+/// costs; asserts that `deliveries` is certified.
+#[test]
+fn races_alone_on_an_echo_broadcast_over_three_members() {
+    let mut flow = FlowBuilder::new();
+    let broadcaster = flow.process::<Broadcaster>();
+    let members = flow.cluster::<Member>();
+    let (send, source) = broadcaster.sim_input::<Payload, TotalOrder, ExactlyOnce>();
+    let _out = broadcast(
+        &members,
+        source,
+        true,
+        nondet!(/** test */),
+        nondet!(/** test */),
+    )
+    .sim_cluster_output();
+    let mut check = EcCheck::races();
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 3))
+        .compiled();
+    let start = std::time::Instant::now();
+    let results = check.run(&sim, async || {
+        send.send(Payload(42));
+    });
+    eprintln!("=== races alone, echo broadcast, 3 members, 1 payload ({:?})\n{results}", start.elapsed());
+    for l in results.results() {
+        eprintln!(
+            "RACES-ALONE {} | certified: {} | {} sets / {} schedules | {:?}",
+            l.plan.collection.display_name(),
+            matches!(l.verdict, hydrofrac::check::Verdict::Certified { .. }),
+            l.stats.hypotheses,
+            l.stats.schedules,
+            l.stats.races
+        );
+    }
+    let deliveries = results
+        .results()
+        .iter()
+        .find(|l| l.plan.collection.display_name() == "deliveries")
+        .expect("a deliveries label");
+    assert!(
+        matches!(deliveries.verdict, hydrofrac::check::Verdict::Certified { .. }),
+        "{results}"
+    );
+}
