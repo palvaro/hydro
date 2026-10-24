@@ -213,7 +213,7 @@ derivation that is robust and spared by the crash rule covers the pair.
 - **Not covered:** some choice may matter, so the schedules are run.
 
 The question becomes one of lineage, which is what the user asked for. The price is that inside an explored
-hypothesis every choice is still varied (§8.2 explains why fixing the "irrelevant" ones is not yet safe).
+hypothesis every choice is still varied (§8.3 explains why fixing the "irrelevant" ones is not yet safe).
 
 ## 5. Why it is sound
 
@@ -310,8 +310,24 @@ tick*.
   - v1 enumerates their fault sets, every schedule each: brute-force cost.
   - It is sound, but saves nothing. This is what v2 is for.
 
-The per-program prediction and the measured table go here after stage 3 (`races-target-steps.md` has the
-per-label step analysis).
+**Per-target prediction.** This comes from reading the code (`races-target-steps.md`); nothing here is measured
+yet. "Semantically fragile in its harness" means a fact's presence at a correct member can differ between two
+schedules with the same faults. "v1 sees" is what the step table of §3.1 says.
+
+| target | semantically fragile in its harness? | what v1 sees | v1 outcome |
+|---|---|---|---|
+| `hydro_test` broadcast, plain | no | dedup only, so robust | certified, about lite's cost |
+| `hydro_test` broadcast, echo | no | robust | certified, but the probe alone is >160k schedules unless the program counts as fragile-free (it does: dedup only), in which case 1 schedule |
+| URB closed | no (threshold over cumulative state) | a closure over `by_mut` state, so fragile | enumeration; the probe alone is >240k schedules, too big |
+| G-Set gossip | no (barriers between rounds) | snapshot × pump, so fragile | enumeration, sampled: no certificate |
+| multi-Paxos, ABD | no, but only because the harness has one ballot / one writer | closures over state, a max over the threshold batch | enumeration, too big |
+| CTP-2, quiescing harness | no (the barrier orders decision before query) | trigger × state, so fragile | enumeration, sampled |
+| CTP-3, CTP-2 racing, `ask_once` | **yes** | fragile | counterexample (as brute force) |
+
+The lesson: in this corpus every semantically fragile step is **a one-shot trigger (a query, a timeout) meeting
+stored state**. Everything v1 wrongly calls fragile is either a threshold over cumulative state hidden inside a
+closure, or a trigger × state whose race a barrier removes. v2 (§8.1) addresses the second. The first needs a rule
+for closures over state, which syntax alone cannot give soundly (§8.2).
 
 ## 8. v2 (proposed): ordering premises, barriers, directed schedules
 
@@ -344,7 +360,26 @@ was released.
   The quorum step (`collect_quorum`: count over retained responses, then a threshold) is a different shape. It
   needs its own rule ("state retained until the record it supports is emitted"), which is not designed yet.
 
-### 8.2 Fixing irrelevant choices inside an explored hypothesis (not proposed for v1)
+### 8.2 Thresholds over state hidden in closures (open)
+
+The uniform broadcast, multi-Paxos and ABD mints all have the same form: one closure over `by_mut` state that adds
+each response to a pending set and emits once the set reaches a threshold.
+
+- **Why they are robust.** The pending set is cumulative and the threshold test is monotone. Batching therefore
+  changes only *when* the record is emitted.
+- **Why provenance cannot tell.** The rewrite sees only "a closure that reads state". Whether that closure is
+  monotone in its state is a property of user code. The Paxos acceptor shows the danger: its closure over state
+  refuses accepts below its promise, which is not monotone.
+
+There are three ways out, none of them in v1:
+1. **Trust a small vetted combinator.** A library threshold (`quorum` / `collect_quorum`) declared monotone, like
+   `unique` is today. The certificate would then name every combinator it trusts.
+2. **Ask programs to express the mint with structural operators** whose semantics the table covers.
+3. **Pay brute-force cost** for these labels.
+
+I recommend (1). It moves the trust from arbitrary closures to one audited function.
+
+### 8.3 Fixing irrelevant choices inside an explored hypothesis (not proposed for v1)
 
 - **The argument.** If every step after a choice is set-preserving, the choice only shifts *when* records arrive
   downstream. Downstream hooks can always hold records back, so "release everything at once" upstream reaches
