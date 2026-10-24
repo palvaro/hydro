@@ -151,6 +151,16 @@ pub enum RelayPolicy {
         /// Ticks a relay may wait for its acknowledgement before it is re-sent.
         ack_timeout_ticks: u64,
     },
+    /// `ReliableResend` with a retry timer per relay: on every timer tick, *every* relay whose
+    /// acknowledgement is `ack_timeout_ticks` overdue is re-sent (there is no per-peer or per-tick
+    /// cap), and its deadline restarts. After `max_attempts` sends in all (`None`: no limit) the
+    /// relay is given up and dropped from the table.
+    ReliableResendPerEntry {
+        /// Ticks a relay may wait for its acknowledgement before it is re-sent.
+        ack_timeout_ticks: u64,
+        /// Sends per relay, the first included, before it is given up; `None` never gives up.
+        max_attempts: Option<u32>,
+    },
 }
 
 /// The failure model of the relay channel, chosen when the graph is built. The rest of the
@@ -321,6 +331,39 @@ impl<'a> sedge::Observed<'a> for Outputs<'a> {
         inputs.requests.send(Request::with_body(round as u64, 4096));
     },
 ))]
+#[cfg_attr(feature = "cress", amplification_check(
+    name = per_entry_n9_4k,
+    members = 9,
+    workload_rounds = 10, horizon = 200,
+    skip_consistency_assertions,
+    config = RelayConfig { policy: RelayPolicy::ReliableResendPerEntry { ack_timeout_ticks: 3, max_attempts: None }, channel: RelayChannel::FailStop },
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(Request::new(round as u64));
+    },
+))]
+#[cfg_attr(feature = "cress", amplification_check(
+    name = per_entry5_n9_4k,
+    members = 9,
+    workload_rounds = 10, horizon = 200,
+    skip_consistency_assertions,
+    config = RelayConfig { policy: RelayPolicy::ReliableResendPerEntry { ack_timeout_ticks: 3, max_attempts: Some(5) }, channel: RelayChannel::FailStop },
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(Request::new(round as u64));
+    },
+))]
+#[cfg_attr(feature = "cress", amplification_check(
+    name = per_entry3_n9_4k,
+    members = 9,
+    workload_rounds = 10, horizon = 200,
+    skip_consistency_assertions,
+    config = RelayConfig { policy: RelayPolicy::ReliableResendPerEntry { ack_timeout_ticks: 3, max_attempts: Some(3) }, channel: RelayChannel::FailStop },
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(Request::new(round as u64));
+    },
+))]
 #[cfg_attr(feature = "sedge", sedge::overload_check(
     name = echo_only,
     members = 5,
@@ -441,6 +484,42 @@ impl<'a> sedge::Observed<'a> for Outputs<'a> {
         inputs.requests.send(Request::with_body(round as u64, 4096));
     },
 ))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = per_entry_n9_4k,
+    members = 9,
+    config = RelayConfig { policy: RelayPolicy::ReliableResendPerEntry { ack_timeout_ticks: 3, max_attempts: None }, channel: RelayChannel::FailStop },
+    mu = 150,
+    cpus(Member = 0.01),
+    cpu_period_us = 100_000,
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(Request::with_body(round as u64, 4096));
+    },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = per_entry5_n9_4k,
+    members = 9,
+    config = RelayConfig { policy: RelayPolicy::ReliableResendPerEntry { ack_timeout_ticks: 3, max_attempts: Some(5) }, channel: RelayChannel::FailStop },
+    mu = 150,
+    cpus(Member = 0.01),
+    cpu_period_us = 100_000,
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(Request::with_body(round as u64, 4096));
+    },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = per_entry3_n9_4k,
+    members = 9,
+    config = RelayConfig { policy: RelayPolicy::ReliableResendPerEntry { ack_timeout_ticks: 3, max_attempts: Some(3) }, channel: RelayChannel::FailStop },
+    mu = 150,
+    cpus(Member = 0.01),
+    cpu_period_us = 100_000,
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(Request::with_body(round as u64, 4096));
+    },
+))]
 pub fn relay_broadcast<'a>(
     source: &Process<'a, Source>,
     members: &Cluster<'a, Member>,
@@ -454,11 +533,21 @@ pub fn relay_broadcast<'a>(
     // The policy is fixed when the graph is built: whether members echo at all, and after how
     // many ticks an unacknowledged echo is re-sent (zero: never).
     // `relay_any`: relay ids first received from a peer as well, deduplicated per member.
-    let (echo_enabled, relay_any, ack_timeout_ticks) = match policy {
-        RelayPolicy::None => (false, false, 0u64),
-        RelayPolicy::Echo => (true, false, 0u64),
-        RelayPolicy::EchoResend { ack_timeout_ticks } => (true, false, ack_timeout_ticks),
-        RelayPolicy::ReliableResend { ack_timeout_ticks } => (true, true, ack_timeout_ticks),
+    // `per_entry`: re-send every overdue relay on each timer tick, rather than each peer's oldest;
+    // `max_attempts`: sends per relay before giving up (0: never give up).
+    let (echo_enabled, relay_any, ack_timeout_ticks, per_entry, max_attempts) = match policy {
+        RelayPolicy::None => (false, false, 0u64, false, 0u32),
+        RelayPolicy::Echo => (true, false, 0u64, false, 0u32),
+        RelayPolicy::EchoResend { ack_timeout_ticks } => {
+            (true, false, ack_timeout_ticks, false, 0u32)
+        }
+        RelayPolicy::ReliableResend { ack_timeout_ticks } => {
+            (true, true, ack_timeout_ticks, false, 0u32)
+        }
+        RelayPolicy::ReliableResendPerEntry {
+            ack_timeout_ticks,
+            max_attempts,
+        } => (true, true, ack_timeout_ticks, true, max_attempts.unwrap_or(0)),
     };
 
     let LocationId::Cluster(cluster_key) = Location::id(members) else {
@@ -507,40 +596,27 @@ pub fn relay_broadcast<'a>(
             body: r.body
         })));
 
-    // What a member relays: under `ReliableResend` the first receipt of each id from any sender,
-    // otherwise the source's broadcast (whose ids never repeat). Deduplicated across the whole
-    // run by a top-level `unique`, a persistent set that costs O(1) per arrival; a per-tick
-    // state rebuilt every tick would cost O(ids seen so far) per tick, and the member would slow
-    // down as the run goes on.
+    // What a member may relay: under `ReliableResend` every receipt from any sender, otherwise
+    // the source's broadcast. Only the first receipt of each id is relayed; the outstanding
+    // table below deduplicates by id in a persistent set of ids (O(1) per receipt), which keeps
+    // no bodies. (A top-level `unique` over `(id, body)` did the same, but its set held every
+    // body ever received, so a member's memory grew with the run.)
     let first_receipts = arrivals_in
         .clone()
         .filter_map(q!(move |a| if echo_enabled && (relay_any || a.relay_from.is_none()) {
             Some((a.id, a.body))
         } else {
             None
-        }))
-        .unique();
+        }));
 
-    let (wire, merged, acks_sent, resends, unacked, outstanding_depth) = sliced! {
+    // The members' tick: merge and acknowledge arrivals, fan out first receipts, and turn the
+    // tick's acknowledgements, fan-out and timer element into events for the outstanding table.
+    let (merged, acks_sent, table_events) = sliced! {
         let clock = use::batch(timer.enumerate(), nondet!(/** batching only shifts which tick observes a timer element; each element still advances the protocol clock */));
         let arrivals = use::batch(arrivals_in, nondet!(/** how long an arrival waits before the member merges it; this is the delay the mechanism depends on */));
         let first_receipts = use::batch(first_receipts, nondet!(/** how long a first receipt waits before the member relays it; relaying later only delays the fan-out */));
         let acks = use::batch(acks_in, nondet!(/** how long an acknowledgement waits before it clears the outstanding entry; late acknowledgements cause re-sends */));
-        // `(peer, id)` -> (tick last sent, body to re-send).
-        let mut outstanding = use::state_null::<KeyedSingleton<(u32, u64), (u64, Body), Tick<_>, Bounded>>();
         let mut now = use::state(|l| l.singleton(q!(0u64)));
-        let mut depth = use::state(|l| l.singleton(q!(0usize)));
-        // The other members' raw ids: deploy-time metadata, identical on every member and never
-        // reassigned, so this state is a constant.
-        let mut peers = use::state(|l| l.singleton(q!({
-            let me = CLUSTER_SELF_ID.get_raw_id();
-            cluster_members
-                .iter()
-                .map(|id| MemberId::<crate::cluster::relay_broadcast::Member>::from_tagless(id.clone()).get_raw_id())
-                .filter(|id| *id != me)
-                .collect::<Vec<u32>>()
-        })));
-        peers = peers.clone();
 
         let now_cur = clock.clone().map(q!(|(i, _)| i as u64)).max().unwrap_or(now.clone());
         now = now_cur.clone();
@@ -557,75 +633,86 @@ pub fn relay_broadcast<'a>(
             a.relay_from.map(move |peer| (peer, Ack { from: me, id }))
         }));
 
-        // ---- Relay: echo each initial arrival to every peer, outstanding table, re-send -----
-        // The first receipts that reached this tick, deduplicated before the tick (see
-        // `first_receipts`).
-        let to_relay = first_receipts.sort();
-        let echoes = to_relay
-            .cross_singleton(peers.clone())
-            .flat_map_ordered(q!(|((id, body), peers)| peers.into_iter().map(move |peer| (peer, (id, body.clone())))));
-
-        let acked_keys = acks.map(q!(|a| (a.from, a.id)));
-        let still_waiting = outstanding.filter_key_not_in(acked_keys);
-        // Per peer, the oldest outstanding echo that has waited past the timeout. This is the
-        // operator where the mechanism lives; with `ack_timeout_ticks == 0` nothing passes.
-        // The table is scanned only on ticks that saw a timer element (`filter_if` ends the
-        // stream without pulling it otherwise), so a tick that only merges arrivals does not pay
-        // for the whole unacknowledged table.
-        let due = still_waiting
-            .clone()
-            .entries()
-            .filter_if(pump.clone())
-            .cross_singleton(now_cur.clone())
-            .filter_map(q!(move |(((peer, id), (last_sent, body)), now)| {
-                if ack_timeout_ticks > 0 && now - last_sent >= ack_timeout_ticks {
-                    Some((peer, (id, body)))
-                } else {
-                    None
-                }
-            }))
-            .into_keyed()
+        // The tick's events for the outstanding table, in the order the table applies them:
+        // acknowledgements clear entries, then this tick's receipts are deduplicated and the
+        // first receipts fanned out to every peer and recorded, then (on a timer tick) the
+        // re-send pump runs.
+        let ack_events = acks
             .sort()
-            .first()
-            .entries()
-            .sort();
-
-        let resent = due
-            .clone()
+            .map(q!(|a| TableEvent::Ack { peer: a.from, id: a.id }));
+        let send_events = first_receipts
+            .sort()
             .cross_singleton(now_cur.clone())
-            .map(q!(|((peer, (id, body)), now)| ((peer, id), (now, body))))
-            .into_keyed();
-        let kept = still_waiting
-            .filter_key_not_in(due.clone().map(q!(|(peer, (id, _))| (peer, id))))
-            .into_keyed_stream();
-        // Only `EchoResend` waits for acknowledgements; the plain echo keeps no table.
-        let new_entries = echoes
-            .clone()
-            .filter(q!(move |_| ack_timeout_ticks > 0))
-            .cross_singleton(now_cur.clone())
-            .map(q!(|((peer, (id, body)), now)| ((peer, id), (now, body))))
-            .into_keyed();
-        outstanding = kept.chain(resent).chain(new_entries).first();
-
-        let wire = echoes.chain(due.clone()).map(q!(move |(peer, (id, body))| (
-            peer,
-            Relay { from: CLUSTER_SELF_ID.get_raw_id(), id, body }
-        )));
-
-        // The table's size, counted on timer ticks only (like the scan above) and held between
-        // them.
-        let depth_now = outstanding.clone().keys().filter_if(pump.clone()).count().filter_if(pump);
-        let depth_cur = depth_now.clone().unwrap_or(depth.clone());
-        depth = depth_cur.clone();
+            .map(q!(|((id, body), now)| TableEvent::Receipt { id, body, now }));
+        let pump_events = now_cur
+            .filter_if(pump)
+            .into_stream()
+            .map(q!(|now| TableEvent::Pump { now }));
         (
-            wire,
             merged,
             acks_sent,
-            due,
-            depth_cur,
-            depth_now.into_stream(),
+            ack_events.chain(send_events).chain(pump_events),
         )
     };
+
+    // ---- The outstanding table: `(peer, id)` -> (timer tick last sent, body to re-send) ------
+    // Persistent state, updated in place: an acknowledgement removes one entry, a first receipt
+    // inserts one per peer, and the pump re-sends. With `ReliableResend` (and `EchoResend`) the
+    // pump re-sends, per peer, the oldest outstanding relay (smallest id) that has waited at
+    // least `ack_timeout_ticks` timer ticks; with `ReliableResendPerEntry`, every relay that has,
+    // in deadline order. A tick therefore costs O(arrivals + acks + peers + re-sends), not
+    // O(table): the table is never copied or rescanned as a whole. (An earlier version kept it as
+    // a tick-scoped `KeyedSingleton` carried by `defer_tick`, which rebuilt and filtered the
+    // whole table on every tick.) Only the resend policies keep a table; with
+    // `ack_timeout_ticks == 0` a relay is sent once and forgotten.
+    //
+    // Deadlines are in timer elements (`now` is the timer's index), and the deployed timer is a
+    // Tokio interval that delivers missed ticks late rather than dropping them, so a starved
+    // member's clock catches up and its overdue relays are all re-sent on its next timer tick.
+    let table_out = table_events
+        .scan(
+            q!(move || OutstandingTable::new({
+                // The other members' raw ids: deploy-time metadata, identical on every member and
+                // never reassigned.
+                let me = CLUSTER_SELF_ID.get_raw_id();
+                cluster_members
+                    .iter()
+                    .map(|id| {
+                        MemberId::<crate::cluster::relay_broadcast::Member>::from_tagless(id.clone())
+                            .get_raw_id()
+                    })
+                    .filter(|id| *id != me)
+                    .collect::<Vec<u32>>()
+            })),
+            q!(move |table, event| Some(table.apply(
+                event,
+                ack_timeout_ticks,
+                per_entry,
+                max_attempts
+            ))),
+        )
+        .flat_map_ordered(q!(|out| out));
+
+    // Every relay on the wire, first sends then (on timer ticks) re-sends, in table order.
+    let wire = table_out.clone().filter_map(q!(move |out| match out {
+        TableOut::Wire { peer, id, body, .. } => Some((
+            peer,
+            Relay { from: CLUSTER_SELF_ID.get_raw_id(), id, body }
+        )),
+        TableOut::Depth(_) => None,
+    }));
+    let resends = table_out.clone().filter_map(q!(|out| match out {
+        TableOut::Wire { peer, id, body, resend: true } => Some((peer, (id, body))),
+        _ => None,
+    }));
+    // The table's size at the end of each timer tick.
+    let outstanding_depth = table_out.filter_map(q!(|out| match out {
+        TableOut::Depth(d) => Some(d),
+        TableOut::Wire { .. } => None,
+    }));
+    let unacked = outstanding_depth
+        .clone()
+        .fold(q!(|| 0usize), q!(|last, d| *last = d));
 
     // 2. The relay channel: echoes and re-sends, identical bytes.
     let relays_out = wire
@@ -707,4 +794,277 @@ pub struct RelayMetrics {
     pub resent: u64,
     /// Relays awaiting an acknowledgement at the end of the window.
     pub unacked: u64,
+}
+
+/// One event for a member's [`OutstandingTable`], produced by the member's tick in the order the
+/// table applies it.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum TableEvent {
+    /// `peer` acknowledged the relay of `id`.
+    Ack { peer: u32, id: u64 },
+    /// The member received `id` (from the source, or from a peer under `ReliableResend`) at
+    /// timer tick `now`: if it is the first receipt, relay it to every peer.
+    Receipt { id: u64, body: Body, now: u64 },
+    /// A timer tick: re-send what has waited past the timeout.
+    Pump { now: u64 },
+}
+
+/// What the table emits for an event.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum TableOut {
+    /// A relay on the wire: a first send, or a re-send.
+    Wire { peer: u32, id: u64, body: Body, resend: bool },
+    /// The table's size at the end of a timer tick.
+    Depth(usize),
+}
+
+/// A per-relay entry of the per-entry policy: when it is next due, how often it has been sent.
+#[derive(Clone, Debug)]
+struct PerEntry {
+    deadline: u64,
+    attempts: u32,
+    body: Body,
+}
+
+/// A member's relay state, kept as persistent state and updated in place, so each event costs
+/// O(log table) plus whatever it sends:
+///
+/// - `seen`: every id the member has relayed (ids only, no bodies), which deduplicates
+///   receipts;
+/// - for the per-peer policies (`EchoResend`, `ReliableResend`): `peer -> id -> (timer tick last
+///   sent, body)`;
+/// - for `ReliableResendPerEntry`: `(peer, id) -> (deadline, attempts, body)` with a deadline-
+///   ordered index, so a timer tick touches only the relays that are due.
+#[derive(Clone, Debug, Default)]
+pub struct OutstandingTable {
+    peers: Vec<u32>,
+    seen: std::collections::HashSet<u64>,
+    by_peer: std::collections::BTreeMap<u32, std::collections::BTreeMap<u64, (u64, Body)>>,
+    entries: std::collections::HashMap<(u32, u64), PerEntry>,
+    due: std::collections::BTreeSet<(u64, u32, u64)>,
+    len: usize,
+}
+
+impl OutstandingTable {
+    /// An empty table for a member whose peers are `peers`.
+    pub fn new(peers: Vec<u32>) -> Self {
+        Self {
+            peers,
+            ..Self::default()
+        }
+    }
+
+    /// Relays awaiting an acknowledgement.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether no relay awaits an acknowledgement.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Applies one event. With `ack_timeout_ticks == 0` (no resend policy) nothing is recorded,
+    /// and first sends pass straight through. `per_entry` selects `ReliableResendPerEntry`'s
+    /// pump, and `max_attempts` (0: unlimited) its retry limit.
+    pub fn apply(
+        &mut self,
+        event: TableEvent,
+        ack_timeout_ticks: u64,
+        per_entry: bool,
+        max_attempts: u32,
+    ) -> Vec<TableOut> {
+        match event {
+            TableEvent::Ack { peer, id } => {
+                if per_entry {
+                    if let Some(e) = self.entries.remove(&(peer, id)) {
+                        self.due.remove(&(e.deadline, peer, id));
+                        self.len -= 1;
+                    }
+                } else if let Some(m) = self.by_peer.get_mut(&peer)
+                    && m.remove(&id).is_some()
+                {
+                    self.len -= 1;
+                }
+                Vec::new()
+            }
+            TableEvent::Receipt { id, body, now } => {
+                if !self.seen.insert(id) {
+                    return Vec::new();
+                }
+                // A single attempt means nothing is ever re-sent, so nothing is kept.
+                let keep = ack_timeout_ticks > 0 && !(per_entry && max_attempts == 1);
+                let mut out = Vec::with_capacity(self.peers.len());
+                for &peer in &self.peers {
+                    if keep {
+                        if per_entry {
+                            let deadline = now + ack_timeout_ticks;
+                            if self
+                                .entries
+                                .insert(
+                                    (peer, id),
+                                    PerEntry {
+                                        deadline,
+                                        attempts: 1,
+                                        body: body.clone(),
+                                    },
+                                )
+                                .is_none()
+                            {
+                                self.due.insert((deadline, peer, id));
+                                self.len += 1;
+                            }
+                        } else if let std::collections::btree_map::Entry::Vacant(e) =
+                            self.by_peer.entry(peer).or_default().entry(id)
+                        {
+                            e.insert((now, body.clone()));
+                            self.len += 1;
+                        }
+                    }
+                    out.push(TableOut::Wire {
+                        peer,
+                        id,
+                        body: body.clone(),
+                        resend: false,
+                    });
+                }
+                out
+            }
+            TableEvent::Pump { now } => {
+                let mut out = Vec::new();
+                if ack_timeout_ticks > 0 && per_entry {
+                    // Every relay whose deadline has passed, in deadline order.
+                    while let Some(&(deadline, peer, id)) = self.due.first() {
+                        if deadline > now {
+                            break;
+                        }
+                        self.due.pop_first();
+                        let e = self
+                            .entries
+                            .get_mut(&(peer, id))
+                            .expect("every deadline has its entry");
+                        e.attempts += 1;
+                        out.push(TableOut::Wire {
+                            peer,
+                            id,
+                            body: e.body.clone(),
+                            resend: true,
+                        });
+                        if max_attempts > 0 && e.attempts >= max_attempts {
+                            // The last attempt: give the relay up.
+                            self.entries.remove(&(peer, id));
+                            self.len -= 1;
+                        } else {
+                            e.deadline = now + ack_timeout_ticks;
+                            self.due.insert((e.deadline, peer, id));
+                        }
+                    }
+                } else if ack_timeout_ticks > 0 {
+                    // Per peer, the smallest id that has waited past the timeout. The entries
+                    // skipped on the way are the ones sent within the last `ack_timeout_ticks`
+                    // timer ticks, so the walk is short.
+                    for (peer, m) in self.by_peer.iter_mut() {
+                        if let Some((id, (last_sent, body))) = m
+                            .iter_mut()
+                            .find(|(_, (last_sent, _))| now - *last_sent >= ack_timeout_ticks)
+                        {
+                            *last_sent = now;
+                            out.push(TableOut::Wire {
+                                peer: *peer,
+                                id: *id,
+                                body: body.clone(),
+                                resend: true,
+                            });
+                        }
+                    }
+                }
+                out.push(TableOut::Depth(self.len));
+                out
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod table_tests {
+    use super::{Body, OutstandingTable, TableEvent, TableOut};
+
+    fn receipt(id: u64, now: u64) -> TableEvent {
+        TableEvent::Receipt {
+            id,
+            body: Body::default(),
+            now,
+        }
+    }
+
+    fn resent(out: &[TableOut]) -> Vec<(u32, u64)> {
+        out.iter()
+            .filter_map(|o| match o {
+                TableOut::Wire {
+                    peer,
+                    id,
+                    resend: true,
+                    ..
+                } => Some((*peer, *id)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn first_receipts_fan_out_once() {
+        let mut t = OutstandingTable::new(vec![1, 2]);
+        assert_eq!(t.apply(receipt(7, 0), 3, false, 0).len(), 2);
+        assert!(t.apply(receipt(7, 0), 3, false, 0).is_empty());
+        assert_eq!(t.len(), 2);
+    }
+
+    #[test]
+    fn per_peer_pump_resends_each_peers_oldest_due() {
+        let mut t = OutstandingTable::new(vec![1, 2]);
+        t.apply(receipt(5, 0), 3, false, 0);
+        t.apply(receipt(6, 0), 3, false, 0);
+        assert!(resent(&t.apply(TableEvent::Pump { now: 2 }, 3, false, 0)).is_empty());
+        assert_eq!(
+            resent(&t.apply(TableEvent::Pump { now: 3 }, 3, false, 0)),
+            vec![(1, 5), (2, 5)]
+        );
+        t.apply(TableEvent::Ack { peer: 1, id: 6 }, 3, false, 0);
+        assert_eq!(
+            resent(&t.apply(TableEvent::Pump { now: 4 }, 3, false, 0)),
+            vec![(2, 6)]
+        );
+        assert_eq!(t.len(), 3);
+    }
+
+    #[test]
+    fn per_entry_pump_resends_every_due_entry_and_gives_up() {
+        let mut t = OutstandingTable::new(vec![1, 2]);
+        t.apply(receipt(5, 0), 3, true, 3);
+        t.apply(receipt(6, 1), 3, true, 3);
+        t.apply(TableEvent::Ack { peer: 2, id: 6 }, 3, true, 3);
+        // A starved timer: the next tick is already at 10, so everything is overdue.
+        assert_eq!(
+            resent(&t.apply(TableEvent::Pump { now: 10 }, 3, true, 3)),
+            vec![(1, 5), (2, 5), (1, 6)]
+        );
+        assert!(resent(&t.apply(TableEvent::Pump { now: 12 }, 3, true, 3)).is_empty());
+        // The third and last attempt, then the entries are given up.
+        assert_eq!(resent(&t.apply(TableEvent::Pump { now: 13 }, 3, true, 3)).len(), 3);
+        assert_eq!(t.len(), 0);
+        assert!(resent(&t.apply(TableEvent::Pump { now: 20 }, 3, true, 3)).is_empty());
+    }
+
+    #[test]
+    fn per_entry_unbounded_never_gives_up() {
+        let mut t = OutstandingTable::new(vec![1]);
+        t.apply(receipt(5, 0), 3, true, 0);
+        for k in 1..=20 {
+            assert_eq!(
+                resent(&t.apply(TableEvent::Pump { now: 3 * k }, 3, true, 0)),
+                vec![(1, 5)]
+            );
+        }
+        assert_eq!(t.len(), 1);
+    }
 }
