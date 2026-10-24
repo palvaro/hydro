@@ -320,7 +320,6 @@ impl Instance {
 /// instance, or all of them afterwards with [`Self::drain_instances`].
 pub struct FaultHook {
     channels: HashMap<usize, ChannelInfo>,
-    names: NodeNames,
     omit: BTreeSet<MessageId>,
     crashes: BTreeMap<NodeId, CrashAt<MessageId>>,
     current: RefCell<Instance>,
@@ -378,22 +377,11 @@ impl FaultHook {
         }
         FaultHook {
             channels: channels.iter().map(|c| (c.id, c.clone())).collect(),
-            names,
             omit,
             crashes,
             current: RefCell::new(Instance::default()),
             finished: RefCell::new(Vec::new()),
         }
-    }
-
-    /// The node names of the simulation.
-    pub fn names(&self) -> &NodeNames {
-        &self.names
-    }
-
-    /// The channel with id `id`.
-    pub fn channel(&self, id: usize) -> Option<&ChannelInfo> {
-        self.channels.get(&id)
     }
 
     /// Heals the network for the rest of the current instance: from now on no omission applies
