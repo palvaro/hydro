@@ -112,7 +112,7 @@ pub fn reliable_broadcast_closed_with_echoes<
     cluster: &Cluster<'a, L2>,
 ) -> (
     Stream<T, Cluster<'a, L2, EventualConsistency>, Unbounded, NoOrder, ExactlyOnce>,
-    hydro_lang::live_collections::keyed_stream::KeyedStream<
+    KeyedStream<
         hydro_lang::location::MemberId<L2>,
         T,
         Cluster<'a, L2, EventualConsistency>,
@@ -236,11 +236,96 @@ where
     new_messages
 }
 
+/// Reliable broadcast from every member of a Cluster to a Cluster: the echo protocol of
+/// [`reliable_broadcast_closed`] with a cluster source, each message keyed by the member that
+/// broadcast it (`(sender, message)`, as `broadcast_closed(..).entries()` delivers it).
+///
+/// A sender may crash mid-broadcast, reaching some members and not others; every member
+/// that receives a message re-broadcasts it before delivering, so it reaches every correct
+/// member if any correct member delivered it. EC is inferred around the cycle exactly as in
+/// [`reliable_broadcast_closed`].
+///
+/// # Cost
+///
+/// O(n²) messages per input message, against O(n) for a plain `broadcast_closed`.
+pub fn reliable_broadcast_closed_from_cluster<
+    'a,
+    T: Clone + Eq + Hash + Serialize + DeserializeOwned + 'a,
+    L: 'a,
+    L2: 'a,
+    O: hydro_lang::live_collections::stream::Ordering,
+>(
+    source: Stream<T, Cluster<'a, L>, Unbounded, O, ExactlyOnce>,
+    cluster: &Cluster<'a, L2>,
+) -> Stream<
+    (hydro_lang::location::MemberId<L>, T),
+    Cluster<'a, L2, EventualConsistency>,
+    Unbounded,
+    NoOrder,
+    ExactlyOnce,
+> {
+    // Step 1: the senders' broadcast, keyed by sender. EC inferred.
+    let initial = source
+        .broadcast_closed(cluster, TCP.fail_stop().bincode())
+        .entries();
+
+    // Steps 2-5, as in `reliable_broadcast_closed_with_echoes`: merge the re-broadcasts,
+    // deduplicate, echo what is new, deliver.
+    let (rebroadcast_handle, rebroadcast_fwd) =
+        initial
+            .location()
+            .forward_ref::<Stream<(hydro_lang::location::MemberId<L>, T), _, Unbounded, NoOrder>>();
+    let new_messages = initial.merge_unordered(rebroadcast_fwd).unique();
+    let echo = new_messages
+        .clone()
+        .broadcast_closed(cluster, TCP.fail_stop().bincode())
+        .values();
+    rebroadcast_handle.complete(echo);
+    new_messages
+}
+
 #[cfg(test)]
 mod tests {
     use hydro_lang::prelude::*;
 
-    use super::{reliable_broadcast_closed, reliable_broadcast_live};
+    use super::{
+        reliable_broadcast_closed, reliable_broadcast_closed_from_cluster, reliable_broadcast_live,
+    };
+
+    /// `reliable_broadcast_closed_from_cluster` delivers every source member's message to every
+    /// member, keyed by its sender.
+    #[test]
+    fn reliable_broadcast_closed_from_cluster_delivers_to_all() {
+        use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
+        use hydro_lang::location::MemberId;
+
+        let mut flow = FlowBuilder::new();
+        let sources = flow.cluster::<()>();
+        let cluster = flow.cluster::<()>();
+
+        let (in_send, data) = sources.sim_input::<u32, TotalOrder, ExactlyOnce>();
+
+        let out_recv = reliable_broadcast_closed_from_cluster(data, &cluster)
+            .map(q!(|(sender, v)| (sender.into_tagless(), v)))
+            .sim_cluster_output();
+
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&sources, 2)
+            .with_cluster_size(&cluster, 3)
+            .exhaustive(async || {
+                in_send.send(0, 10);
+                in_send.send(1, 11);
+                let expected = vec![
+                    (MemberId::<()>::from_raw_id(0).into_tagless(), 10),
+                    (MemberId::<()>::from_raw_id(1).into_tagless(), 11),
+                ];
+                for member in 0..3u32 {
+                    let got: Vec<_> = out_recv.collect_n_sorted(member, 2).await;
+                    assert_eq!(got, expected, "member {member} did not deliver both");
+                }
+            });
+    }
 
     /// Baseline: `reliable_broadcast_closed` (static membership) delivers the
     /// broadcast message to every cluster member.

@@ -319,7 +319,46 @@ impl<T> AbdPlan<T> {
 /// `writes` carries `(request_id, value)` and `reads` carries `request_id`,
 /// per client member; request ids must be unique per member across both, and
 /// each member must have at most one operation outstanding (see module docs).
+///
+/// Phase 2 (writes and read write-backs) reaches the replicas by one
+/// `broadcast_closed`, O(n) messages per write.
 pub fn abd_register<'a, T, CL, R>(
+    replicas: &Cluster<'a, R>,
+    majority: usize,
+    writes: Stream<(u64, T), Cluster<'a, CL>, Unbounded, TotalOrder, ExactlyOnce>,
+    reads: Stream<u64, Cluster<'a, CL>, Unbounded, TotalOrder, ExactlyOnce>,
+) -> AbdOutputs<'a, CL, T>
+where
+    T: Clone + Eq + Hash + Serialize + DeserializeOwned + 'a,
+    CL: 'a,
+    R: 'a,
+{
+    abd_register_with::<T, CL, R, false>(replicas, majority, writes, reads)
+}
+
+/// [`abd_register`] with phase 2 over reliable broadcast
+/// ([`reliable_broadcast_closed_from_cluster`](super::reliable_broadcast::reliable_broadcast_closed_from_cluster)):
+/// every replica that receives a write (or a read write-back) echoes it to every replica, so a
+/// client crashing mid-phase-2 cannot leave the correct replicas' registers disagreeing on what
+/// was stored. The cost is O(n²) phase-2 messages per write instead of O(n). The protocol is
+/// otherwise identical.
+pub fn abd_register_reliable_phase2<'a, T, CL, R>(
+    replicas: &Cluster<'a, R>,
+    majority: usize,
+    writes: Stream<(u64, T), Cluster<'a, CL>, Unbounded, TotalOrder, ExactlyOnce>,
+    reads: Stream<u64, Cluster<'a, CL>, Unbounded, TotalOrder, ExactlyOnce>,
+) -> AbdOutputs<'a, CL, T>
+where
+    T: Clone + Eq + Hash + Serialize + DeserializeOwned + 'a,
+    CL: 'a,
+    R: 'a,
+{
+    abd_register_with::<T, CL, R, true>(replicas, majority, writes, reads)
+}
+
+/// The body of [`abd_register`] and [`abd_register_reliable_phase2`]; `RELIABLE_PHASE2`
+/// selects how phase 2 reaches the replicas.
+fn abd_register_with<'a, T, CL, R, const RELIABLE_PHASE2: bool>(
     replicas: &Cluster<'a, R>,
     majority: usize,
     writes: Stream<(u64, T), Cluster<'a, CL>, Unbounded, TotalOrder, ExactlyOnce>,
@@ -428,10 +467,14 @@ where
 
     // Phase 2 to the replicas — fresh writes and read-repairs alike — closing
     // the forward_ref cycle.
-    let phase2 = write_phase2
-        .merge_unordered(read_writeback)
-        .broadcast_closed(replicas, TCP.fail_stop().bincode())
-        .entries();
+    let phase2 = write_phase2.merge_unordered(read_writeback);
+    let phase2 = if !RELIABLE_PHASE2 {
+        phase2
+            .broadcast_closed(replicas, TCP.fail_stop().bincode())
+            .entries()
+    } else {
+        super::reliable_broadcast::reliable_broadcast_closed_from_cluster(phase2, replicas)
+    };
     phase2_handle.complete(phase2);
 
     // ---- Completion: a Durable certificate on the rid ----------------------
@@ -804,8 +847,8 @@ mod tests {
     use hydro_lang::prelude::*;
 
     use super::{
-        AbdOp, AbdPlan, ToClient, ToReplica, Ts, abd_kv_register, abd_register, abd_register_state,
-        abd_replica,
+        AbdOp, AbdPlan, ToClient, ToReplica, Ts, abd_kv_register, abd_register,
+        abd_register_reliable_phase2, abd_register_state, abd_replica,
     };
 
     const N: usize = 3;
@@ -1099,6 +1142,16 @@ mod tests {
     /// Smoke: one client member, write then read.
     #[test]
     fn abd_write_then_read() {
+        write_then_read(false);
+    }
+
+    /// The same smoke test with phase 2 over reliable broadcast.
+    #[test]
+    fn abd_reliable_phase2_write_then_read() {
+        write_then_read(true);
+    }
+
+    fn write_then_read(reliable_phase2: bool) {
         let mut flow = FlowBuilder::new();
         let replicas = flow.cluster::<()>();
         let clients = flow.cluster::<()>();
@@ -1106,7 +1159,11 @@ mod tests {
         let (w_send, writes) = clients.sim_input::<(u64, u32), TotalOrder, ExactlyOnce>();
         let (r_send, reads) = clients.sim_input::<u64, TotalOrder, ExactlyOnce>();
 
-        let outs = abd_register(&replicas, MAJORITY, writes, reads);
+        let outs = if reliable_phase2 {
+            abd_register_reliable_phase2(&replicas, MAJORITY, writes, reads)
+        } else {
+            abd_register(&replicas, MAJORITY, writes, reads)
+        };
         let done_recv = outs.write_done.sim_cluster_output();
         let read_recv = outs.read_result.sim_cluster_output();
 

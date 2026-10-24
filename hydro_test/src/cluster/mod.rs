@@ -22,6 +22,7 @@ pub mod provenance_ground_truth;
 pub mod provenance_evidence_matrix;
 pub mod pure_heartbeat;
 pub mod raft;
+pub mod reliable_broadcast;
 pub mod provenance_survey;
 pub mod provenance_buffers;
 pub mod simple_cluster;
@@ -29,6 +30,7 @@ pub mod simple_cluster;
 pub mod two_pc;
 #[cfg(feature = "tokio")]
 pub mod two_pc_bench;
+pub mod two_pc_ctp;
 
 // WIP: the following modules were written against an older hydro_lang API
 // (they call `broadcast_from_member`, which has since been renamed/removed,
