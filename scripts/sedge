@@ -9,6 +9,7 @@
 #   --before S  --trigger S  --tail S  --grace S  --seed N  --features A,B
 #   capacity: --backend docker|none  --cpus C | ROLE=C  --cpu-period-us P  --node-cpus LIST
 #             --harness-cpus LIST  --image IMAGE  --memory-mb M
+#   build:    --deploy-profile NAME (default `profile`, an optimized build; `dev` for debug)
 #   μ:        --mu RPS  --recalibrate  --no-calibrate  --calibrate-only  --probe-step S
 #             --probe-start RPS
 #   triggers: --cpu-dip K  --cpu-dip-nodes SEL,...  --dip TIMER=K (a timing fault)
