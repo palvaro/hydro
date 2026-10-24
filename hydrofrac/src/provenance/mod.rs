@@ -84,4 +84,6 @@ pub fn split_meta(bytes: &[u8]) -> Option<(RecordProv, Option<String>)> {
 }
 
 #[cfg(test)]
+mod choices_tests;
+#[cfg(test)]
 mod tests;
