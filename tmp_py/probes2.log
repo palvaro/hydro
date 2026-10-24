@@ -1,0 +1,410 @@
+warning: variable does not need to be mutable
+    --> hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     |
+1383 |     let mut observe = |history: &mut Vec<EmissionRecord>,
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `hydro_lang` (lib) generated 1 warning (run `cargo fix --lib -p hydro_lang` to apply 1 suggestion)
+   Compiling hydrofrac v0.0.0 (/local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydrofrac)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 46.38s
+     Running unittests src/lib.rs (/tmp/.tmpyHGM1F/target/debug/deps/hydrofrac-8f7c9b898aa5095f)
+
+running 8 tests
+test check::rev2_probes::c1_tick_constant ... warning: profile package spec `website_playground` in profile `release` did not match any packages
+warning: profile package spec `website_playground` in profile `dev` did not match any packages
+warning: variable does not need to be mutable
+    --> /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     |
+1383 |     let mut observe = |history: &mut Vec<EmissionRecord>,
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling hydrofrac v0.0.0 (/local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydrofrac)
+warning: `hydro_lang` (lib) generated 1 warning (run `cargo fix --lib -p hydro_lang` to apply 1 suggestion)
+   Compiling hydrofrac-hydro-trybuild v0.0.0 (/tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac)
+   Compiling hydrofrac-hydro-trybuild-dylib v0.0.0 (/tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac/dylib)
+   Compiling hydrofrac-hydro-trybuild-dylib-examples v0.0.0 (/tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac/dylib-examples)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 21.64s
+[1m[33mwarning[0m[1m: variable does not need to be mutable[0m
+    [1m[94m--> [0m(full path) /tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac///local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     [1m[94m|[0m
+[1m[94m1383[0m [1m[94m|[0m     let mut observe = |history: &mut Vec<EmissionRecord>,
+     [1m[94m|[0m         [1m[94m----[0m[1m[33m^^^^^^^[0m
+     [1m[94m|[0m         [1m[94m|[0m
+     [1m[94m|[0m         [1m[94mhelp: remove this `mut`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+
+test <unknown> ...	run time: 5.188328ms | iterations/s: 1156 | exhaustive inputs: 6
+test <unknown> ...	run time: 684.896µs | iterations/s: 1460 | exhaustive inputs: 1
+test <unknown> ...	run time: 617.775µs | iterations/s: 1619 | exhaustive inputs: 1
+test <unknown> ...	run time: 439.334µs | iterations/s: 2276 | exhaustive inputs: 1
+=== PROBE C1
+fragile sites: Some([])
+brute force up to 2 fault(s): 7 candidate faults, 4 sets, 9 schedules, 2 pass(es), 8.32ms
+  AssertIsConsistent (rev2_probes.rs): omissions alone break it: {omit(initial[process→cluster@0]: 1)} (2 breaking of 4 admissible sets)
+
+the search agrees with the enumeration on every label
+
+PROBE C1 DISAGREEMENTS (0): []
+PROBE C1 SEARCH:
+cluster:
+  [0] AssertIsConsistent (Stream, rev2_probes.rs:38): breaks under omissions alone: {omit(initial[process→cluster@0]: 1)}
+      cluster@0 lacks 1
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/c1_tick_constant/AssertIsConsistent_rev2_probes.rs/counterexample.svg
+      2 hypotheses, 2 schedules, 33.10ms
+      races: 0 sets stopped early, 2 sets on one schedule; claim B not certified
+  [1] nine (Stream, rev2_probes.rs:46): not checked: local inputs only
+
+ok
+test check::rev2_probes::c2_first_tick_unwrap_or ... [1m[33mwarning[0m[1m: variable does not need to be mutable[0m
+    [1m[94m--> [0m(full path) /tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac///local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     [1m[94m|[0m
+[1m[94m1383[0m [1m[94m|[0m     let mut observe = |history: &mut Vec<EmissionRecord>,
+     [1m[94m|[0m         [1m[94m----[0m[1m[33m^^^^^^^[0m
+     [1m[94m|[0m         [1m[94m|[0m
+     [1m[94m|[0m         [1m[94mhelp: remove this `mut`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+
+test <unknown> ...	run time: 11.391164ms | iterations/s: 1229 | exhaustive inputs: 14
+=== PROBE C2
+fragile sites: Some([])
+brute force up to 2 fault(s): 7 candidate faults, 1 sets, 14 schedules, 1 pass(es), 11.90ms
+  AssertIsConsistent (rev2_probes.rs): no admissible set breaks it (0 breaking of 1 admissible sets)
+
+the search agrees with the enumeration on every label
+
+PROBE C2 DISAGREEMENTS (0): []
+PROBE C2 SEARCH:
+cluster:
+  [0] AssertIsConsistent (Stream, rev2_probes.rs:75): holds with up to 0 crashes (the `max_crashes` cap)
+      1 hypothesis, 1 schedule, 3.18ms
+      races: 0 sets stopped early, 1 set on one schedule; claim B certified
+  [1] firsts (Stream, rev2_probes.rs:84): not checked: local inputs only
+
+ok
+test check::rev2_probes::c3_deferred_constant ... [1m[33mwarning[0m[1m: variable does not need to be mutable[0m
+    [1m[94m--> [0m(full path) /tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac///local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     [1m[94m|[0m
+[1m[94m1383[0m [1m[94m|[0m     let mut observe = |history: &mut Vec<EmissionRecord>,
+     [1m[94m|[0m         [1m[94m----[0m[1m[33m^^^^^^^[0m
+     [1m[94m|[0m         [1m[94m|[0m
+     [1m[94m|[0m         [1m[94mhelp: remove this `mut`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+
+test <unknown> ...	run time: 26.482499ms | iterations/s: 529 | exhaustive inputs: 14
+=== PROBE C3
+fragile sites: Some([])
+brute force up to 2 fault(s): 7 candidate faults, 1 sets, 14 schedules, 1 pass(es), 27.02ms
+  AssertIsConsistent (rev2_probes.rs): no admissible set breaks it (0 breaking of 1 admissible sets)
+
+the search agrees with the enumeration on every label
+
+PROBE C3 DISAGREEMENTS (0): []
+PROBE C3 SEARCH:
+cluster:
+  [0] AssertIsConsistent (Stream, rev2_probes.rs:114): holds with up to 0 crashes (the `max_crashes` cap)
+      1 hypothesis, 1 schedule, 3.13ms
+      races: 0 sets stopped early, 1 set on one schedule; claim B certified
+  [1] sevens (Stream, rev2_probes.rs:123): not checked: local inputs only
+
+ok
+test check::rev2_probes::c4_snapshot_blocks_tick ... [1m[33mwarning[0m[1m: variable does not need to be mutable[0m
+    [1m[94m--> [0m(full path) /tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac///local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     [1m[94m|[0m
+[1m[94m1383[0m [1m[94m|[0m     let mut observe = |history: &mut Vec<EmissionRecord>,
+     [1m[94m|[0m         [1m[94m----[0m[1m[33m^^^^^^^[0m
+     [1m[94m|[0m         [1m[94m|[0m
+     [1m[94m|[0m         [1m[94mhelp: remove this `mut`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+
+test <unknown> ...	run time: 551.648014ms | iterations/s: 526 | exhaustive inputs: 290
+test <unknown> ...	run time: 1.868282ms | iterations/s: 535 | exhaustive inputs: 1 | exit reason: test failure
+
+======================== Test Failure ========================
+
+Input: 
+[
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+]
+
+==============================================================
+
+Running Tick (Cluster Member 0)
+* --> src/check/rev2_probes.rs:157:10
+*  |        .snapshot(&tick, nondet!(/** probe */))
+*  |         ^ releasing snapshot: 0
+* --> src/check/rev2_probes.rs:163:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing no items
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:157:10
+*  |        .snapshot(&tick, nondet!(/** probe */))
+*  |         ^ releasing snapshot: 0
+* --> src/check/rev2_probes.rs:163:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing no items
+
+Running Tick (Cluster Member 0)
+* --> src/check/rev2_probes.rs:157:10
+*  |        .snapshot(&tick, nondet!(/** probe */))
+*  |         ^ releasing unchanged snapshot: 0
+* --> src/check/rev2_probes.rs:163:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing items: [1]
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:157:10
+*  |        .snapshot(&tick, nondet!(/** probe */))
+*  |         ^ releasing snapshot: 1
+* --> src/check/rev2_probes.rs:163:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing no items
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:157:10
+*  |        .snapshot(&tick, nondet!(/** probe */))
+*  |         ^ releasing unchanged snapshot: 1
+* --> src/check/rev2_probes.rs:163:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing items: [1]
+test <unknown> ...	run time: 1.804211ms | iterations/s: 554 | exhaustive inputs: 1 | exit reason: test failure
+
+======================== Test Failure ========================
+
+Input: 
+[
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+]
+
+==============================================================
+
+Running Tick (Cluster Member 0)
+* --> src/check/rev2_probes.rs:157:10
+*  |        .snapshot(&tick, nondet!(/** probe */))
+*  |         ^ releasing snapshot: 0
+* --> src/check/rev2_probes.rs:163:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing no items
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:157:10
+*  |        .snapshot(&tick, nondet!(/** probe */))
+*  |         ^ releasing snapshot: 0
+* --> src/check/rev2_probes.rs:163:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing no items
+
+Running Tick (Cluster Member 0)
+* --> src/check/rev2_probes.rs:157:10
+*  |        .snapshot(&tick, nondet!(/** probe */))
+*  |         ^ releasing unchanged snapshot: 0
+* --> src/check/rev2_probes.rs:163:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing items: [1]
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:157:10
+*  |        .snapshot(&tick, nondet!(/** probe */))
+*  |         ^ releasing snapshot: 1
+* --> src/check/rev2_probes.rs:163:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing no items
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:157:10
+*  |        .snapshot(&tick, nondet!(/** probe */))
+*  |         ^ releasing unchanged snapshot: 1
+* --> src/check/rev2_probes.rs:163:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing items: [1]
+test <unknown> ...	run time: 774.216142ms | iterations/s: 375 | exhaustive inputs: 290
+test <unknown> ...	run time: 106.630721ms | iterations/s: 563 | exhaustive inputs: 60
+test <unknown> ...	run time: 79.291511ms | iterations/s: 757 | exhaustive inputs: 60
+test <unknown> ...	run time: 19.28208ms | iterations/s: 726 | exhaustive inputs: 14
+=== PROBE C4
+fragile sites: Some([FragileSite { index: 0, op: "snapshot", site: "rev2_probes.rs:157" }, FragileSite { index: 1, op: "fold", site: "rev2_probes.rs:155" }])
+brute force up to 2 fault(s): 9 candidate faults, 4 sets, 424 schedules, 2 pass(es), 982.03ms
+  count (rev2_probes.rs): omissions alone break it: {omit(second[process→cluster@0]: 5)} (2 breaking of 4 admissible sets)
+  count (rev2_probes.rs #1): omissions alone break it: {omit(second[process→cluster@0]: 5)} (2 breaking of 4 admissible sets)
+  batched (rev2_probes.rs): no admissible set breaks it (0 breaking of 4 admissible sets)
+  batched (rev2_probes.rs #1): no admissible set breaks it (0 breaking of 4 admissible sets)
+
+the search agrees with the enumeration on every label
+
+PROBE C4 DISAGREEMENTS (0): []
+PROBE C4 SEARCH:
+cluster:
+  [0] count (Stream, rev2_probes.rs:154): breaks under omissions alone: {omit(second[process→cluster@0]: 5)}
+      cluster@0 lacks 5
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/c4_snapshot_blocks_tick/count_rev2_probes.rs/counterexample.svg
+      2 hypotheses, 291 schedules, 561.45ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [1] count (Stream, rev2_probes.rs:155): breaks under omissions alone: {omit(second[process→cluster@0]: 5)}
+      cluster@0 lacks 5
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/c4_snapshot_blocks_tick/count_rev2_probes.rs_1/counterexample.svg
+      2 hypotheses, 291 schedules, 561.12ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [2] count (Singleton, rev2_probes.rs:155): not checked: Singleton (not a set-valued collection)
+  [3] batched (Stream, rev2_probes.rs:162): holds with up to 0 crashes (the `max_crashes` cap)
+      1 hypothesis, 290 schedules, 557.18ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [4] batched (Stream, rev2_probes.rs:165): holds with up to 0 crashes (the `max_crashes` cap)
+      1 hypothesis, 290 schedules, 567.54ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+
+ok
+test check::rev2_probes::c5_dedup_state_leaks ... [1m[33mwarning[0m[1m: variable does not need to be mutable[0m
+    [1m[94m--> [0m(full path) /tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac///local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     [1m[94m|[0m
+[1m[94m1383[0m [1m[94m|[0m     let mut observe = |history: &mut Vec<EmissionRecord>,
+     [1m[94m|[0m         [1m[94m----[0m[1m[33m^^^^^^^[0m
+     [1m[94m|[0m         [1m[94m|[0m
+     [1m[94m|[0m         [1m[94mhelp: remove this `mut`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+
+#423	iterations/s: 423	state space estimate: 428 (98.832%, 00s)
+#789	iterations/s: 366	state space estimate: 795 (99.245%, 00s)
+test <unknown> ...	run time: 2.793258765s | iterations/s: 405 | exhaustive inputs: 1130
+=== PROBE C5
+fragile sites: Some([])
+brute force up to 2 fault(s): 7 candidate faults, 1 sets, 1130 schedules, 1 pass(es), 2.79s
+  arrived (rev2_probes.rs): no admissible set breaks it (0 breaking of 1 admissible sets)
+  leaked (rev2_probes.rs): the failure-free run breaks it (1 breaking of 1 admissible sets)
+
+DISAGREEMENT: leaked (rev2_probes.rs): the search says it holds with up to 0 crash(es), but {} (0 crash(es)) breaks it
+
+PROBE C5 DISAGREEMENTS (1): [
+    "leaked (rev2_probes.rs): the search says it holds with up to 0 crash(es), but {} (0 crash(es)) breaks it",
+]
+PROBE C5 SEARCH:
+cluster:
+  [0] arrived (Stream, rev2_probes.rs:195): holds with up to 0 crashes (the `max_crashes` cap)
+      1 hypothesis, 1 schedule, 6.68ms
+      races: 0 sets stopped early, 1 set on one schedule; claim B certified
+  [1] leaked (Stream, rev2_probes.rs:205): holds with up to 0 crashes (the `max_crashes` cap)
+      1 hypothesis, 1 schedule, 6.37ms
+      races: 0 sets stopped early, 1 set on one schedule; claim B certified
+
+ok
+test check::rev2_probes::f4_atomic_keyed_singleton ... [1m[33mwarning[0m[1m: variable does not need to be mutable[0m
+    [1m[94m--> [0m(full path) /tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac///local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     [1m[94m|[0m
+[1m[94m1383[0m [1m[94m|[0m     let mut observe = |history: &mut Vec<EmissionRecord>,
+     [1m[94m|[0m         [1m[94m----[0m[1m[33m^^^^^^^[0m
+     [1m[94m|[0m         [1m[94m|[0m
+     [1m[94m|[0m         [1m[94mhelp: remove this `mut`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+
+test <unknown> ...	run time: 118.201493ms | iterations/s: 321 | exhaustive inputs: 38
+test <unknown> ...	run time: 106.479974ms | iterations/s: 357 | exhaustive inputs: 38
+=== PROBE F4
+fragile sites: Some([FragileSite { index: 0, op: "scan", site: "rev2_probes.rs:236" }])
+brute force up to 2 fault(s): 7 candidate faults, 1 sets, 38 schedules, 1 pass(es), 107.19ms
+  firsts (rev2_probes.rs): no admissible set breaks it (0 breaking of 1 admissible sets)
+  firsts (rev2_probes.rs #1): no admissible set breaks it (0 breaking of 1 admissible sets)
+
+the search agrees with the enumeration on every label
+
+PROBE F4 DISAGREEMENTS (0): []
+PROBE F4 SEARCH:
+cluster:
+  [0] firsts (Stream, rev2_probes.rs:234): holds with up to 0 crashes (the `max_crashes` cap)
+      1 hypothesis, 38 schedules, 120.68ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B certified
+  [1] firsts (Stream, rev2_probes.rs:239): holds with up to 0 crashes (the `max_crashes` cap)
+      1 hypothesis, 38 schedules, 120.79ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B certified
+
+ok
+test check::rev2_probes::f5_impure_closure ... [1m[33mwarning[0m[1m: variable does not need to be mutable[0m
+    [1m[94m--> [0m(full path) /tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac///local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     [1m[94m|[0m
+[1m[94m1383[0m [1m[94m|[0m     let mut observe = |history: &mut Vec<EmissionRecord>,
+     [1m[94m|[0m         [1m[94m----[0m[1m[33m^^^^^^^[0m
+     [1m[94m|[0m         [1m[94m|[0m
+     [1m[94m|[0m         [1m[94mhelp: remove this `mut`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+
+test <unknown> ...	run time: 6.097801ms | iterations/s: 328 | exhaustive inputs: 2
+test <unknown> ...	run time: 2.364221ms | iterations/s: 423 | exhaustive inputs: 1
+test <unknown> ...	run time: 2.494298ms | iterations/s: 401 | exhaustive inputs: 1
+test <unknown> ...	run time: 2.718005ms | iterations/s: 368 | exhaustive inputs: 1
+=== PROBE F5
+fragile sites: Some([])
+brute force up to 2 fault(s): 9 candidate faults, 4 sets, 5 schedules, 2 pass(es), 15.83ms
+  AssertIsConsistent (rev2_probes.rs): omissions alone break it: {omit(x[process→cluster@0]: 1)} (2 breaking of 4 admissible sets)
+  out (rev2_probes.rs): no admissible set breaks it (0 breaking of 4 admissible sets)
+  out (rev2_probes.rs #1): no admissible set breaks it (0 breaking of 4 admissible sets)
+
+the search agrees with the enumeration on every label
+
+PROBE F5 DISAGREEMENTS (0): []
+PROBE F5 SEARCH:
+cluster:
+  [0] AssertIsConsistent (Stream, rev2_probes.rs:269): breaks under omissions alone: {omit(x[process→cluster@0]: 1)}
+      cluster@0 lacks 1
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/f5_impure_closure/AssertIsConsistent_rev2_probes.rs/counterexample.svg
+      2 hypotheses, 2 schedules, 7.41ms
+      races: 0 sets stopped early, 2 sets on one schedule; claim B not certified
+  [1] out (Stream, rev2_probes.rs:272): holds with up to 0 crashes (the `max_crashes` cap)
+      1 hypothesis, 1 schedule, 4.46ms
+      races: 0 sets stopped early, 1 set on one schedule; claim B certified
+  [2] out (Stream, rev2_probes.rs:273): holds with up to 0 crashes (the `max_crashes` cap)
+      1 hypothesis, 1 schedule, 4.36ms
+      races: 0 sets stopped early, 1 set on one schedule; claim B certified
+
+ok
+test check::rev2_probes::zz_review_batch_beside_an_unready_snapshot ... [1m[33mwarning[0m[1m: variable does not need to be mutable[0m
+    [1m[94m--> [0m(full path) /tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac///local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     [1m[94m|[0m
+[1m[94m1383[0m [1m[94m|[0m     let mut observe = |history: &mut Vec<EmissionRecord>,
+     [1m[94m|[0m         [1m[94m----[0m[1m[33m^^^^^^^[0m
+     [1m[94m|[0m         [1m[94m|[0m
+     [1m[94m|[0m         [1m[94mhelp: remove this `mut`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+
+test <unknown> ...	run time: 80.822117ms | iterations/s: 569 | exhaustive inputs: 46
+Simulator internal error: tick has a hook that never became ready
+error: test failed, to rerun pass `-p hydrofrac --lib`
+
+Caused by:
+  process didn't exit successfully: `/tmp/.tmpyHGM1F/target/debug/deps/hydrofrac-8f7c9b898aa5095f rev2_probes --nocapture --test-threads=1` (signal: 6, SIGABRT: process abort signal)
+exit 101

@@ -1,0 +1,23 @@
+0000000000000000000000000000000000000000 2f8708f97cc9d3d4214097d8c4b0a4cfbd2b29dc Peter Alvaro <palvarox@amazon.com> 1792812302 +0000
+2f8708f97cc9d3d4214097d8c4b0a4cfbd2b29dc 2f8708f97cc9d3d4214097d8c4b0a4cfbd2b29dc Peter Alvaro <palvarox@amazon.com> 1792812302 +0000	reset: moving to HEAD
+2f8708f97cc9d3d4214097d8c4b0a4cfbd2b29dc a30ff79af3c8ea9d6ca4cded568068754d2cbd13 Infinity <infinity@localhost> 1792812934 +0000	commit: feat(hydrofrac): races search core: per-pair clauses and an order-free crash rule
+a30ff79af3c8ea9d6ca4cded568068754d2cbd13 6a697527f3aa195f998da12d822a65ccb664b148 Infinity <infinity@localhost> 1792813617 +0000	commit: feat(hydrofrac): races: excuse pairs by start crashes and dead facts
+6a697527f3aa195f998da12d822a65ccb664b148 dc4c74ebcf2b4445a476de6fe010918560c41940 Peter Alvaro <palvarox@amazon.com> 1792814216 +0000	reset: moving to int1
+dc4c74ebcf2b4445a476de6fe010918560c41940 8dea36ff128cc0795bc2182e0cbb23132d7046d2 Infinity <infinity@localhost> 1792815869 +0000	commit: feat(hydrofrac): races mode of `EcCheck`
+8dea36ff128cc0795bc2182e0cbb23132d7046d2 3efefed6dd85287d28fd3bb775e5cdc372112d8b Infinity <infinity@localhost> 1792818170 +0000	commit: feat(hydrofrac): races: closed-broadcast fan-out order in the crash rule
+3efefed6dd85287d28fd3bb775e5cdc372112d8b 887aa74c9c5cdd4c6e6ecd7b5426581d03897385 Infinity <infinity@localhost> 1792819376 +0000	commit: feat(hydrofrac): races: exact crash points (one schedule, dead facts)
+887aa74c9c5cdd4c6e6ecd7b5426581d03897385 b550ffb45d32e3229824d861da84352404da26e8 Infinity <infinity@localhost> 1792822230 +0000	commit: test(hydro_test): lite and races cross-checks with several payloads
+b550ffb45d32e3229824d861da84352404da26e8 d2e851a8c5c1c63ca8190de0a50bdc79c654206c Peter Alvaro <palvarox@amazon.com> 1792859691 +0000	reset: moving to int2
+d2e851a8c5c1c63ca8190de0a50bdc79c654206c 6bddb46372934aeecacf409b3405565beb8ae4fe Infinity <infinity@localhost> 1792862376 +0000	commit: feat(hydrofrac): races: trust `quorum`'s mint
+6bddb46372934aeecacf409b3405565beb8ae4fe cbfff465dbf06584acc60d1f1c2d682595abcb64 Peter Alvaro <palvarox@amazon.com> 1792862460 +0000	reset: moving to int3
+cbfff465dbf06584acc60d1f1c2d682595abcb64 d91b299782b44ca564e721a69524718744f683af Infinity <infinity@localhost> 1792863985 +0000	commit: feat(hydrofrac): races: order in the formula, no fallback
+d91b299782b44ca564e721a69524718744f683af d5f1bbeb22738add5c970e88ee7b4249e5c8e815 Peter Alvaro <palvarox@amazon.com> 1792864065 +0000	reset: moving to int4
+d5f1bbeb22738add5c970e88ee7b4249e5c8e815 e56fe99820cbeed8440435dc7eadd44a195203de Infinity <infinity@localhost> 1792864576 +0000	commit: feat(hydrofrac): races: dead facts, a literal-free row
+e56fe99820cbeed8440435dc7eadd44a195203de 29bed35165c1234aaf20d78708bee2db6e1dad31 Infinity <infinity@localhost> 1792867227 +0000	commit: refactor(hydrofrac)!: races is the only engine
+29bed35165c1234aaf20d78708bee2db6e1dad31 7c50e2f9ad6abd9f398d7ba187adece5a4285242 Infinity <infinity@localhost> 1792871247 +0000	commit: fix(hydrofrac): tag order-dependent top-level folds and scans as fragile
+7c50e2f9ad6abd9f398d7ba187adece5a4285242 7df7e0753a43105864a71b06eab3c4abc94dec11 Infinity <infinity@localhost> 1792872487 +0000	commit: fix(hydrofrac): `defer_tick` is fragile, but for the dedup idiom's state edge
+7df7e0753a43105864a71b06eab3c4abc94dec11 4d5097ce047616df4dcc934ba5ac338f804a0e9e Infinity <infinity@localhost> 1792872890 +0000	commit: docs(hydrofrac): the soundness argument, standalone
+4d5097ce047616df4dcc934ba5ac338f804a0e9e dd5c4d05a5615a97e63fc2cb5f9636c15659157f Peter Alvaro <palvarox@amazon.com> 1792873652 +0000	reset: moving to int5
+dd5c4d05a5615a97e63fc2cb5f9636c15659157f b57cbd0aa79a0ddaa336b4d539b3a3f6957d09a2 Infinity <infinity@localhost> 1792873754 +0000	commit: docs(hydrofrac): refresh the soundness document's references
+b57cbd0aa79a0ddaa336b4d539b3a3f6957d09a2 d7b9cdf8814830ccd406a69aed6cfb4ebe5ed5af Infinity <infinity@localhost> 1792879597 +0000	commit: fix(hydrofrac)!: close the soundness gaps from reviews #1–#3
+d7b9cdf8814830ccd406a69aed6cfb4ebe5ed5af 1171c0137d451bc58a2f47f3f9586ccae956293d Infinity <infinity@localhost> 1792879597 +0000	commit: docs(hydrofrac): soundness document for reviews #1–#3

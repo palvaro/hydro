@@ -1,0 +1,397 @@
+diff --git a/hydro_lang/src/sim/compiled.rs b/hydro_lang/src/sim/compiled.rs
+index cb073d946b..43d2b2dd6a 100644
+--- a/hydro_lang/src/sim/compiled.rs
++++ b/hydro_lang/src/sim/compiled.rs
+@@ -975,6 +975,11 @@ pub struct CompiledSimInstance<'a> {
+ }
+ 
+ impl<'a> CompiledSimInstance<'a> {
++    pub(crate) async fn run_exhaustive_mode(mut self, thunk: impl AsyncFnOnce() + RefUnwindSafe) {
++        self.exhaustive = true;
++        self.run(thunk).await
++    }
++
+     async fn run(self, thunk: impl AsyncFnOnce() + RefUnwindSafe) {
+         self.run_without_launching(async |instance| {
+             instance.run_with_scheduler(thunk()).await;
+diff --git a/hydro_lang/src/sim/mod.rs b/hydro_lang/src/sim/mod.rs
+index ba67fbde23..739ac32c08 100644
+--- a/hydro_lang/src/sim/mod.rs
++++ b/hydro_lang/src/sim/mod.rs
+@@ -99,6 +99,10 @@ pub mod panic_guard;
+ #[cfg(stageleft_runtime)]
+ mod provenance_ir;
+ 
++#[cfg(stageleft_runtime)]
++#[doc(hidden)]
++pub mod trace_driver;
++
+ #[cfg(stageleft_runtime)]
+ #[doc(hidden)]
+ pub mod runtime;
+diff --git a/hydro_lang/src/sim/trace_driver.rs b/hydro_lang/src/sim/trace_driver.rs
+new file mode 100644
+index 0000000000..48679322ab
+--- /dev/null
++++ b/hydro_lang/src/sim/trace_driver.rs
+@@ -0,0 +1,142 @@
++//! INVESTIGATION ONLY (not committed): a bolero driver that mirrors the exhaustive driver's
++//! `select(bound)` semantics, follows a script, then either all-zeros (exhaustive's first
++//! alternative) or uniform random, and records every non-trivial choice `(value, bound)`.
++
++use std::cell::RefCell;
++use std::ops::Bound;
++use std::rc::Rc;
++
++
++pub type Trace = Rc<RefCell<Vec<(u64, u64)>>>;
++
++pub struct TraceDriver {
++    pub script: Vec<u64>,
++    pub cursor: usize,
++    pub rng: Option<u64>,
++    pub trace: Trace,
++    pub print: bool,
++}
++
++impl TraceDriver {
++    fn select(&mut self, bound: u64) -> u64 {
++        if bound == 0 {
++            return 0;
++        }
++        let v = if self.cursor < self.script.len() {
++            self.script[self.cursor].min(bound)
++        } else if let Some(s) = &mut self.rng {
++            // xorshift64*
++            *s ^= *s >> 12;
++            *s ^= *s << 25;
++            *s ^= *s >> 27;
++            let r = s.wrapping_mul(0x2545F4914F6CDD1D);
++            if bound == u64::MAX { r } else { r % (bound + 1) }
++        } else {
++            0
++        };
++        if self.print {
++            eprintln!("    #choice {} = {} of 0..={}", self.cursor, v, bound);
++        }
++        self.cursor += 1;
++        self.trace.borrow_mut().push((v, bound));
++        v
++    }
++}
++
++macro_rules! gen_int {
++    ($fun:ident, $ty:ident) => {
++        fn $fun(&mut self, min: Bound<&$ty>, max: Bound<&$ty>) -> Option<$ty> {
++            let lo: i128 = match min {
++                Bound::Included(v) => *v as i128,
++                Bound::Excluded(v) => *v as i128 + 1,
++                Bound::Unbounded => $ty::MIN as i128,
++            };
++            let hi: i128 = match max {
++                Bound::Included(v) => *v as i128,
++                Bound::Excluded(v) => *v as i128 - 1,
++                Bound::Unbounded => $ty::MAX as i128,
++            };
++            if lo > hi {
++                return None;
++            }
++            let v = self.select((hi - lo) as u64);
++            Some((lo + v as i128) as $ty)
++        }
++    };
++}
++
++impl bolero::Driver for TraceDriver {
++    fn depth(&self) -> usize {
++        0
++    }
++    fn set_depth(&mut self, _depth: usize) {}
++    fn max_depth(&self) -> usize {
++        usize::MAX
++    }
++    fn gen_variant(&mut self, variants: usize, _base_case: usize) -> Option<usize> {
++        Some(self.select(variants as u64 - 1) as usize)
++    }
++    gen_int!(gen_u8, u8);
++    gen_int!(gen_i8, i8);
++    gen_int!(gen_u16, u16);
++    gen_int!(gen_i16, i16);
++    gen_int!(gen_u32, u32);
++    gen_int!(gen_i32, i32);
++    gen_int!(gen_u64, u64);
++    gen_int!(gen_i64, i64);
++    gen_int!(gen_usize, usize);
++    gen_int!(gen_isize, isize);
++    fn gen_u128(&mut self, _min: Bound<&u128>, _max: Bound<&u128>) -> Option<u128> {
++        None
++    }
++    fn gen_i128(&mut self, _min: Bound<&i128>, _max: Bound<&i128>) -> Option<i128> {
++        None
++    }
++    fn gen_f32(&mut self, _min: Bound<&f32>, _max: Bound<&f32>) -> Option<f32> {
++        None
++    }
++    fn gen_f64(&mut self, _min: Bound<&f64>, _max: Bound<&f64>) -> Option<f64> {
++        None
++    }
++    fn gen_char(&mut self, _min: Bound<&char>, _max: Bound<&char>) -> Option<char> {
++        None
++    }
++    fn gen_bool(&mut self, _probability: Option<f32>) -> Option<bool> {
++        Some(self.select(1) == 1)
++    }
++    fn gen_from_bytes<Hint, Gen, T>(&mut self, _hint: Hint, _produce: Gen) -> Option<T>
++    where
++        Hint: FnOnce() -> (usize, Option<usize>),
++        Gen: FnMut(&[u8]) -> Option<(usize, T)>,
++    {
++        None
++    }
++}
++
++impl super::compiled::CompiledSim {
++    /// Runs one instance (in exhaustive mode) under `driver`; returns whether the body panicked.
++    pub fn run_traced(
++        &self,
++        driver: TraceDriver,
++        mut thunk: impl AsyncFnMut() + std::panic::RefUnwindSafe,
++    ) -> bool {
++        self.with_instantiator(
++            |instantiator| {
++                let instance = instantiator();
++                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++                    bolero::bolero_engine::any::scope::with(
++                        Box::new(bolero::bolero_engine::driver::object::Object(driver)),
++                        || {
++                            tokio::runtime::Builder::new_current_thread()
++                                .build()
++                                .unwrap()
++                                .block_on(instance.run_exhaustive_mode(&mut thunk));
++                        },
++                    );
++                }));
++                r.is_err()
++            },
++            false,
++        )
++    }
++}
+diff --git a/hydro_std/src/ec_inference_demos/ec_abd_kv_hydrofrac.rs b/hydro_std/src/ec_inference_demos/ec_abd_kv_hydrofrac.rs
+index 658c39e188..3e779d159c 100644
+--- a/hydro_std/src/ec_inference_demos/ec_abd_kv_hydrofrac.rs
++++ b/hydro_std/src/ec_inference_demos/ec_abd_kv_hydrofrac.rs
+@@ -174,3 +174,213 @@ fn abd_kv_two_writes_failure_free_completion() {
+         MISSING_2.load(Ordering::Relaxed),
+     );
+ }
++
++/// Decision-trace analysis of the failure-free hang. Needs the local, uncommitted
++/// `hydro_lang::sim::trace_driver` instrumentation (see
++/// `docs/design/sim-exhaustive-misses-abd-kv.md`), hence the `abd_kv_trace` cfg: build with
++/// `RUSTFLAGS='--cfg abd_kv_trace'`.
++///
++/// Samples `ABD_KV_TRACE_SEEDS` (default 2000) schedules that pick every choice uniformly in the
++/// exhaustive driver's own coordinates, minimizes the first failing one to its non-default
++/// choices, and estimates (Knuth's estimator) how many schedules exhaustive's depth-first order
++/// enumerates before it.
++#[cfg(all(stageleft_runtime, abd_kv_trace))]
++#[test]
++#[ignore = "measurement"]
++fn abd_kv_two_writes_trace() {
++    use std::cell::RefCell;
++    use std::sync::atomic::AtomicBool;
++    use std::rc::Rc;
++
++    use hydro_lang::sim::trace_driver::{Trace, TraceDriver};
++
++    build!(flow, replicas, clients, w_send, done);
++    let sim = flow
++        .sim()
++        .skip_consistency_assertions()
++        .with_cluster_size(&replicas, REPLICAS)
++        .with_cluster_size(&clients, 1)
++        .compiled();
++    static FAILED: AtomicBool = AtomicBool::new(false);
++    // Runs one schedule; returns (failed, trace of (value, bound)).
++    let run = |script: Vec<u64>, rng: Option<u64>, print: bool| -> (bool, Vec<(u64, u64)>) {
++        let trace: Trace = Rc::new(RefCell::new(Vec::new()));
++        FAILED.store(false, Ordering::Relaxed);
++        let panicked = sim.run_traced(
++            TraceDriver {
++                script,
++                cursor: 0,
++                rng,
++                trace: trace.clone(),
++                print,
++            },
++            async || {
++                for r in REQUESTS {
++                    w_send.send(0, r);
++                }
++                hydro_lang::sim::compiled::quiesce().await;
++                let got: Vec<(u64, (u32, Ts))> = done.collect_sorted(0).await;
++                let has = |rid| got.iter().any(|(r, _)| *r == rid);
++                if !(has(1) && has(2)) {
++                    FAILED.store(true, Ordering::Relaxed);
++                }
++            },
++        );
++        assert!(!panicked, "instance panicked");
++        (FAILED.load(Ordering::Relaxed), trace.take())
++    };
++    let env = |k: &str, d: u64| -> u64 {
++        std::env::var(k)
++            .ok()
++            .and_then(|s| s.parse().ok())
++            .unwrap_or(d)
++    };
++    let seeds = env("ABD_KV_TRACE_SEEDS", 2000);
++
++    // 1. The first (all-default) schedule.
++    let (f0, t0) = run(vec![], None, false);
++    eprintln!("all-default schedule: failed={f0}, {} choices: {:?}", t0.len(), t0);
++
++    // 2. Uniform random sampling over the exhaustive tree.
++    let start = std::time::Instant::now();
++    let mut fails = 0;
++    let mut first_fail = None;
++    let mut all_fails = Vec::new();
++    let mut lens = Vec::new();
++    let zero_prefix = vec![0u64; env("ABD_KV_ZERO_PREFIX", 0) as usize];
++    for seed in 1..=seeds {
++        let (f, t) = run(zero_prefix.clone(), Some(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1), false);
++        lens.push(t.len());
++        if f {
++            fails += 1;
++            all_fails.push(t.clone());
++            if first_fail.is_none() {
++                first_fail = Some((seed, t));
++            }
++        }
++    }
++    lens.sort();
++    eprintln!(
++        "random (uniform per choice): {fails}/{seeds} failing in {:.1}s; choices per schedule min {} median {} max {}",
++        start.elapsed().as_secs_f64(),
++        lens[0],
++        lens[lens.len() / 2],
++        lens[lens.len() - 1]
++    );
++    let (seed, t) = first_fail.expect("no failing schedule sampled");
++    eprintln!("first failing seed {seed}: {} choices: {:?}", t.len(), t);
++
++    // 3b. Minimize every sampled failure (same greedy procedure); report the distribution of
++    //     the number of non-default choices and of the deepest non-default index.
++    let minimize = |t: &[(u64, u64)]| -> Vec<(u64, u64)> {
++        let mut script: Vec<u64> = t.iter().map(|(v, _)| *v).collect();
++        for i in (0..script.len()).rev() {
++            for v in 0..script[i] {
++                let mut s = script.clone();
++                s[i] = v;
++                if run(s.clone(), None, false).0 {
++                    script = s;
++                    break;
++                }
++            }
++        }
++        run(script, None, false).1
++    };
++    if std::env::var("ABD_KV_MIN_ALL").is_ok() {
++        let mut summary = Vec::new();
++        for t in &all_fails {
++            let m = minimize(t);
++            let nd: Vec<usize> = (0..m.len()).filter(|&i| m[i].0 != 0).collect();
++            summary.push((nd.len(), *nd.last().unwrap(), nd));
++        }
++        summary.sort();
++        for (n, last, nd) in &summary {
++            eprintln!("minimized failure: {n} non-default choices, deepest #{last}: {nd:?}");
++        }
++    }
++
++    // 3. Minimize: reset non-default choices to 0 (latest first), or lower them, while the
++    //    schedule still fails.
++    let mut script: Vec<u64> = t.iter().map(|(v, _)| *v).collect();
++    for i in (0..script.len()).rev() {
++        if script[i] == 0 {
++            continue;
++        }
++        for v in 0..script[i] {
++            let mut s = script.clone();
++            s[i] = v;
++            if run(s.clone(), None, false).0 {
++                script = s;
++                break;
++            }
++        }
++    }
++    while script.last() == Some(&0) {
++        script.pop();
++    }
++    let (fm, tm) = run(script.clone(), None, false);
++    assert!(fm, "minimized schedule no longer fails");
++    let nondefault: Vec<(usize, u64, u64)> = tm
++        .iter()
++        .enumerate()
++        .filter(|(_, (v, _))| *v != 0)
++        .map(|(i, (v, b))| (i, *v, *b))
++        .collect();
++    eprintln!(
++        "minimized: {} choices total; non-default (index, value, bound): {:?}",
++        tm.len(),
++        nondefault
++    );
++    eprintln!("minimized trace: {:?}", tm);
++
++    // 4. Knuth's estimator of the number of leaves under a node given by `prefix`.
++    let samples = env("ABD_KV_KNUTH_SAMPLES", 300);
++    let knuth = |prefix: &[u64]| -> f64 {
++        let mut total = 0f64;
++        for s in 1..=samples {
++            let (_, t) = run(prefix.to_vec(), Some(s.wrapping_mul(0xD1B54A32D192ED03) | 1), false);
++            let prod: f64 = t[prefix.len().min(t.len())..]
++                .iter()
++                .map(|(_, b)| (*b + 1) as f64)
++                .product();
++            total += prod;
++        }
++        total / samples as f64
++    };
++    eprintln!("estimated schedules in the whole tree: {:.3e}", knuth(&[]));
++    for &(i, v, _b) in &nondefault {
++        // Exhaustive enumerates the whole subtree with value 0 at index i (same prefix) before
++        // it tries value v there: a lower bound on the schedules it runs before this one.
++        let mut p: Vec<u64> = tm[..i].iter().map(|(x, _)| *x).collect();
++        p.push(0);
++        eprintln!(
++            "choice #{i} (value {v}): subtree under value 0 holds ~{:.3e} schedules",
++            knuth(&p)
++        );
++    }
++
++    // 6. Depth scan: with the first k choices fixed to exhaustive's first alternative (0) and
++    //    the rest uniform, how often does a schedule fail, and how big is that subtree?
++    if let Ok(step) = std::env::var("ABD_KV_DEPTH_SCAN") {
++        let step: usize = step.parse().unwrap_or(5);
++        let n = env("ABD_KV_DEPTH_SAMPLES", 1000);
++        let mut k = 0;
++        while k <= t0.len() {
++            let zeros = vec![0u64; k];
++            let fails = (1..=n)
++                .filter(|s| run(zeros.clone(), Some(s.wrapping_mul(0xA24BAED4963EE407) | 1), false).0)
++                .count();
++            eprintln!(
++                "depth scan: first {k:>2} choices default: {fails:>4}/{n} failing; subtree ~{:.3e} schedules",
++                knuth(&zeros)
++            );
++            k += step;
++        }
++    }
++
++    // 5. Replay the minimized schedule, marking each choice (with HYDRO_SIM_LOG=1 the
++    //    simulator log is interleaved).
++    if std::env::var("ABD_KV_TRACE_LOG").is_ok() {
++        let _ = run(script, None, true);
++    }
++}

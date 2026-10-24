@@ -4,8 +4,8 @@
 //! 1. [`ec_collections`] enumerates every collection the program labels
 //!    `EventualConsistency`, on the IR as the program built it.
 //! 2. [`plan`] decides for each whether the set-based specification applies
-//!    ([`NotCheckedReason`]). A labelled scalar computed by an aggregation from a labelled
-//!    stream is checked at that stream ([`LabelPlan::covered_by`]).
+//!    ([`NotCheckedReason`]). A labelled scalar is not checked, even when it aggregates a
+//!    checked stream: members agreeing on the stream's facts can disagree on a fold of it.
 //! 3. The tap pass ([`tap_pass`], a `PreNetwork` IR pass) tees every checked collection, at
 //!    every member, into an external output of its own. Each element leaves as
 //!    `(bincode(element), Debug of the element if it has one)`; the host sees it through
@@ -26,6 +26,8 @@ pub mod source_names;
 #[cfg(stageleft_runtime)]
 mod tap;
 
+#[cfg(stageleft_runtime)]
+pub(crate) use collections::{ec_label, tick_of};
 #[cfg(stageleft_runtime)]
 pub use collections::{EcCollection, ec_collections, kind_name};
 #[cfg(stageleft_runtime)]

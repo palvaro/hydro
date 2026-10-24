@@ -9,8 +9,7 @@
 //!   before its first send).
 //!
 //! Faults only happen before [`FaultHook::heal`]: after it, no omission applies and no crash
-//! fires, but crashes that already fired persist (§4.6). Channels into an eager location (the
-//! observer) are never faulty.
+//! fires, but crashes that already fired persist (§4.6).
 //!
 //! Every callback is appended to the instance's [`EventLog`] in program order.
 
@@ -20,10 +19,9 @@ use std::fmt::{self, Display};
 use std::rc::Rc;
 
 use hydro_lang::location::dynamic::LocationId;
+use hydro_lang::networking::{NetworkingInfo, TcpFault};
 use hydro_lang::sim::compiled::CompiledSim;
-use hydro_lang::sim::network_hook::{
-    ChannelInfo, ExecKind, LocationInfo, OutputInfo, SimNetworkHook, Transport,
-};
+use hydro_lang::sim::network_hook::{ChannelInfo, LocationInfo, SimNetworkHook};
 
 use crate::search::{CrashAt, Fault, FaultSet, Node};
 
@@ -71,7 +69,7 @@ pub struct NodeNames {
     by_id: BTreeMap<NodeId, Node>,
     by_name: BTreeMap<Node, NodeId>,
     labels: BTreeMap<LocationId, String>,
-    /// Nodes that can fail, in location then member order: every node of a non-eager location.
+    /// Nodes that can fail, in location then member order: every node.
     crashable: Vec<NodeId>,
 }
 
@@ -117,9 +115,7 @@ impl NodeNames {
                     .collect(),
             };
             for (id, name) in nodes {
-                if !l.eager {
-                    names.crashable.push(id.clone());
-                }
+                names.crashable.push(id.clone());
                 names.by_name.insert(name.clone(), id.clone());
                 names.by_id.insert(id, name);
             }
@@ -146,8 +142,7 @@ impl NodeNames {
         self.labels.get(location.root()).map(String::as_str)
     }
 
-    /// Every node that can crash (all nodes outside eager locations), in location then member
-    /// order. Its length is [`CompiledSim::node_count`].
+    /// Every node that can crash (every node of the program), in location then member order.
     pub fn crashable(&self) -> &[NodeId] {
         &self.crashable
     }
@@ -202,14 +197,9 @@ pub enum Event {
     Exec {
         /// Where it runs.
         node: NodeId,
-        /// An asynchronous run or a tick.
-        kind: ExecKind,
     },
     /// The execution announced by the last [`Event::Exec`] finished.
-    ExecEnd {
-        /// `false` for an asynchronous run that found no work.
-        progressed: bool,
-    },
+    ExecEnd,
     /// A send was attempted.
     Sent {
         /// Its tag.
@@ -234,7 +224,7 @@ pub enum Event {
     },
     /// A value was emitted on an external output.
     Output {
-        /// The external port ([`OutputInfo::port`]).
+        /// The external port.
         port: usize,
         /// The emitting node.
         node: NodeId,
@@ -260,6 +250,29 @@ impl EventLog {
     /// The events, in program order.
     pub fn events(&self) -> &[Event] {
         &self.0
+    }
+
+    /// Panics unless the heal ended the faults: after an [`Event::Heal`], no send is omitted
+    /// and no crash fires. Lineage relies on it: it marks a delivery omittable only if it was
+    /// sent before the heal, and keeps every delivery's sender-crash dependency, since a node
+    /// that crashed before the heal sends nothing after it. Sends after the heal are fine.
+    pub fn check_heal(events: &[Event]) {
+        let Some(heal) = events.iter().position(|e| matches!(e, Event::Heal)) else {
+            return;
+        };
+        for e in &events[heal..] {
+            match e {
+                Event::Sent {
+                    fate: Fate::Omitted,
+                    msg,
+                    ..
+                } => panic!("hydrofrac: `{msg}` was omitted after the network healed"),
+                Event::Halted { node } => {
+                    panic!("hydrofrac: a crash of `{node}` fired after the network healed")
+                }
+                _ => {}
+            }
+        }
     }
 
     /// The sends, in program order, as `(id, message, ordinal, fate)`.
@@ -302,6 +315,8 @@ struct Instance {
     dead: BTreeSet<NodeId>,
     halts: Vec<(LocationId, Option<u32>)>,
     healed: bool,
+    /// The node of the execution in progress (outputs are attributed to it).
+    exec: Option<NodeId>,
 }
 
 impl Instance {
@@ -313,6 +328,7 @@ impl Instance {
     }
 
     fn record(self) -> InstanceRecord {
+        EventLog::check_heal(&self.log);
         InstanceRecord {
             log: EventLog(self.log),
             crashed: self.dead,
@@ -324,13 +340,10 @@ impl Instance {
 ///
 /// Install it with [`CompiledSim::set_network_hook`] on a flow compiled with
 /// `with_network_hook_points()`. One hook serves many instances (schedules): each starts with
-/// fresh fault state. Collect each instance's record with [`Self::take_log`] / [`Self::crashed`]
-/// from inside the instance, or all of them afterwards with [`Self::drain_instances`].
+/// fresh fault state. Collect each instance's record with [`Self::crashed`] from inside the
+/// instance, or all of them afterwards with [`Self::drain_instances`].
 pub struct FaultHook {
     channels: HashMap<usize, ChannelInfo>,
-    outputs: HashMap<usize, OutputInfo>,
-    eager: BTreeSet<LocationId>,
-    names: NodeNames,
     omit: BTreeSet<MessageId>,
     crashes: BTreeMap<NodeId, CrashAt<MessageId>>,
     current: RefCell<Instance>,
@@ -344,16 +357,24 @@ impl FaultHook {
     /// If a crash of the plan names a node `sim` does not have, or a crash point `After(m)` names
     /// a message `m` its node does not send.
     pub fn new(plan: &FaultPlan, sim: &CompiledSim) -> Self {
-        Self::from_tables(plan, sim.channels(), sim.outputs(), sim.locations())
+        Self::from_tables(plan, sim.channels(), sim.locations())
     }
 
     /// [`Self::new`], from the simulation's tables.
+    ///
+    /// # Panics
+    /// Also if a lossy channel is not intercepted (its omissions could not be injected).
     pub fn from_tables(
         plan: &FaultPlan,
         channels: &[ChannelInfo],
-        outputs: &[OutputInfo],
         locations: &[LocationInfo],
     ) -> Self {
+        for c in channels {
+            assert!(
+                c.intercepted || !is_lossy(&c.networking),
+                "lossy channel {c:?} is not intercepted"
+            );
+        }
         let names = NodeNames::new(locations);
         let mut omit = BTreeSet::new();
         let mut crashes = BTreeMap::new();
@@ -380,28 +401,11 @@ impl FaultHook {
         }
         FaultHook {
             channels: channels.iter().map(|c| (c.id, c.clone())).collect(),
-            outputs: outputs.iter().map(|o| (o.port, o.clone())).collect(),
-            eager: locations
-                .iter()
-                .filter(|l| l.eager)
-                .map(|l| l.id.root().clone())
-                .collect(),
-            names,
             omit,
             crashes,
             current: RefCell::new(Instance::default()),
             finished: RefCell::new(Vec::new()),
         }
-    }
-
-    /// The node names of the simulation.
-    pub fn names(&self) -> &NodeNames {
-        &self.names
-    }
-
-    /// The channel with id `id`.
-    pub fn channel(&self, id: usize) -> Option<&ChannelInfo> {
-        self.channels.get(&id)
     }
 
     /// Heals the network for the rest of the current instance: from now on no omission applies
@@ -412,16 +416,6 @@ impl FaultHook {
             cur.healed = true;
             cur.log.push(Event::Heal);
         }
-    }
-
-    /// Whether the current instance has healed.
-    pub fn is_healed(&self) -> bool {
-        self.current.borrow().healed
-    }
-
-    /// Takes the current instance's events so far (later events start a new log).
-    pub fn take_log(&self) -> EventLog {
-        EventLog(std::mem::take(&mut self.current.borrow_mut().log))
     }
 
     /// The nodes whose crash has fired in the current instance.
@@ -439,9 +433,17 @@ impl FaultHook {
         finished
     }
 
-    fn faulty(&self, channel: &ChannelInfo) -> bool {
-        channel.transport == Transport::Lossy && !self.eager.contains(channel.to.root())
-    }
+}
+
+/// Whether a channel with this networking may lose messages (so omissions apply to it):
+/// everything but `fail_stop` TCP.
+pub fn is_lossy(networking: &NetworkingInfo) -> bool {
+    !matches!(
+        networking,
+        NetworkingInfo::Tcp {
+            fault: TcpFault::FailStop
+        }
+    )
 }
 
 impl SimNetworkHook for FaultHook {
@@ -489,7 +491,7 @@ impl SimNetworkHook for FaultHook {
         };
         let fate = if cur.dead.contains(&msg.from) {
             Fate::SenderDead
-        } else if !cur.healed && self.faulty(info) && self.omit.contains(&msg) {
+        } else if !cur.healed && is_lossy(&info.networking) && self.omit.contains(&msg) {
             Fate::Omitted
         } else {
             Fate::Delivered
@@ -530,11 +532,13 @@ impl SimNetworkHook for FaultHook {
         payload: &[u8],
         meta: Option<Vec<u8>>,
     ) -> bool {
-        let node = match self.outputs.get(&port) {
-            Some(info) => NodeId::new(&info.location, member),
-            None => panic!("output on unknown port {port}"),
-        };
         let mut cur = self.current.borrow_mut();
+        // Only the scheduler's executions run dataflow, so every output belongs to one.
+        let node = cur
+            .exec
+            .clone()
+            .unwrap_or_else(|| panic!("output on port {port} outside an execution"));
+        assert_eq!(node.member, member, "output on port {port} from another member");
         // A crashed node emits nothing, like it sends nothing (between its crash firing and the
         // scheduler halting it, its current execution may still run).
         if cur.dead.contains(&node) {
@@ -549,18 +553,17 @@ impl SimNetworkHook for FaultHook {
         true
     }
 
-    fn on_exec_begin(&self, location: &LocationId, member: Option<u32>, kind: ExecKind) {
-        self.current.borrow_mut().log.push(Event::Exec {
-            node: NodeId::new(location, member),
-            kind,
-        });
+    fn on_exec_begin(&self, location: &LocationId, member: Option<u32>) {
+        let node = NodeId::new(location, member);
+        let mut cur = self.current.borrow_mut();
+        cur.exec = Some(node.clone());
+        cur.log.push(Event::Exec { node });
     }
 
-    fn on_exec_end(&self, progressed: bool) {
-        self.current
-            .borrow_mut()
-            .log
-            .push(Event::ExecEnd { progressed });
+    fn on_exec_end(&self) {
+        let mut cur = self.current.borrow_mut();
+        cur.exec = None;
+        cur.log.push(Event::ExecEnd);
     }
 
     fn take_halts(&self) -> Vec<(LocationId, Option<u32>)> {

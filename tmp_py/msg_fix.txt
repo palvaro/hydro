@@ -1,0 +1,66 @@
+fix(hydrofrac)!: close the soundness gaps from reviews #1–#3
+
+Fixes for the reviewers' findings, each reproduced against brute force first.
+
+## Fragile steps (`provenance/fragile.rs`, `provenance/choices.rs`)
+- **Tick constants (R2-F1).** `SingletonSource` and `Source::Iter` inside a tick are fragile
+  (`tick_constant`), except a dedup idiom's initial state. The constant exemption no longer covers
+  `DeferTick`.
+- **Dedup exclusivity (R2-F3).** `View::dedup_idiom` replaces `dedup_edge`. The exemption holds only
+  if `seen`, the sink, the cycle source, the carrying `DeferTick` and the initial state are read by
+  nothing else, except readers whose every path to a root passes a node that tags its output
+  (`View::covered`, `View::tags`).
+- **Batch beside a snapshot (R2-F2, R1).** A `Batch`/`BeginAtomic` of a stream into a tick that
+  snapshots a singleton is fragile (`batch_beside_snapshot`).
+- **`BeginAtomic` (R2-F4)** gets `Batch`'s kind check.
+- **Impure closures (R2-F5).** A closure or source expression naming outside state (`names_impure`,
+  a textual guard) is fragile (`impure_closure`) and a schedule choice.
+
+## Label planning and taps (`observe/`)
+- A node inside a tick is fed by its tick's entry points (`tick_entries`). Tick-constant labels
+  are no longer "local inputs only".
+- **One label per labelled node (R3-F1).** Labels are keyed by node identity, not by
+  `(label, op, kind, cluster)`. The tap pass panics unless each searched label is tapped at
+  exactly one node.
+- **Scalars are no longer covered by their stream (R3-F4)**: they are reported not checked.
+
+## Refusals and invariants
+- `hydro_lang`: a new `SimFlow::refuse_sim_faults(by)`. `compiled()` then panics on
+  `with_crashable_*` / `with_dynamic_membership` (R2-F6, R1-F3); `EcCheck::instrument` sets it.
+- `hydro_lang` (`hydrofrac` feature): a tick stuck on a never-ready snapshot now lets the run
+  quiesce instead of aborting the process (R1).
+- Both engines refuse an exhaustive run when `BOLERO_RANDOM_TEST_TIME_MS` is set (R3-F2).
+- `EventLog::check_heal`: no omission and no crash after `Heal` (R1-F2). Sends after the heal are
+  allowed.
+
+## Tests
+New, in `check::brute_tests`:
+- `tick_constants_are_fragile`
+- `a_dedup_state_read_elsewhere_is_fragile`
+- `review_batch_beside_an_unready_snapshot`
+- `one_labelling_line_twice_is_two_labels`
+- `impure_closures_are_fragile_choices`
+- `the_simulators_own_crashes_are_refused`
+- `a_time_bounded_exhaustive_run_is_refused`
+
+Updated:
+- `observe::tests::gossip_state_is_not_covered_by_the_stream_it_folds`
+- `hydro_std` ABD `register()`
+- `hydro_test` `effective`, plus the G-Set filters
+
+Results:
+- `cargo test -p hydrofrac --features cross-check`: 149 passed (before the final edits to
+  `ec_abd_hydrofrac.rs` and `ec_demos_hydrofrac.rs`, which `hydrofrac` does not depend on).
+- `cargo test -p hydro_std --lib hydrofrac`: 12 passed.
+- Row diff (hydrofrac + hydro_std): the only verdict changes are the new tests' labels and the
+  two ABD `abd_register_state` rows, COV → NC. Some existing labels have a new display name with
+  the same verdict and cost (`echo_broadcast_in` → `echo_broadcast`).
+
+**NOT run**:
+- `hydro_test` `cluster::ec_` (the run was cut by the server move);
+- clippy.
+
+BREAKING CHANGE: scalars are never `CoveredBy` their stream (they are `NotChecked`). Two
+collections labelled on one line are now two labels. `EcCollection` gains a `node` field.
+`EcCheck` refuses simulations with the simulator's own crash injection or dynamic membership, and
+exhaustive runs under `BOLERO_RANDOM_TEST_TIME_MS`.

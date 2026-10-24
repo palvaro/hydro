@@ -1,0 +1,1327 @@
+warning: variable does not need to be mutable
+    --> hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     |
+1383 |     let mut observe = |history: &mut Vec<EmissionRecord>,
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `hydro_lang` (lib) generated 1 warning (run `cargo fix --lib -p hydro_lang` to apply 1 suggestion)
+   Compiling hydrofrac v0.0.0 (/local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydrofrac)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 53.33s
+     Running unittests src/lib.rs (/tmp/.tmpyHGM1F/target/debug/deps/hydrofrac-8f7c9b898aa5095f)
+
+running 9 tests
+test check::rev2_probes::c1_tick_constant ... warning: profile package spec `website_playground` in profile `dev` did not match any packages
+warning: profile package spec `website_playground` in profile `release` did not match any packages
+   Compiling hydro_lang v0.17.0-alpha.4 (/local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang)
+   Compiling hydrofrac v0.0.0 (/local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydrofrac)
+warning: variable does not need to be mutable
+    --> /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     |
+1383 |     let mut observe = |history: &mut Vec<EmissionRecord>,
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling hydro_std v0.17.0-alpha.4 (/local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_std)
+warning: `hydro_lang` (lib) generated 1 warning (run `cargo fix --lib -p hydro_lang` to apply 1 suggestion)
+   Compiling hydrofrac-hydro-trybuild v0.0.0 (/tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac)
+   Compiling hydrofrac-hydro-trybuild-dylib v0.0.0 (/tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac/dylib)
+   Compiling hydrofrac-hydro-trybuild-dylib-examples v0.0.0 (/tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac/dylib-examples)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 34.91s
+[1m[33mwarning[0m[1m: variable does not need to be mutable[0m
+    [1m[94m--> [0m(full path) /tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac///local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     [1m[94m|[0m
+[1m[94m1383[0m [1m[94m|[0m     let mut observe = |history: &mut Vec<EmissionRecord>,
+     [1m[94m|[0m         [1m[94m----[0m[1m[33m^^^^^^^[0m
+     [1m[94m|[0m         [1m[94m|[0m
+     [1m[94m|[0m         [1m[94mhelp: remove this `mut`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+
+test <unknown> ...	run time: 69.90466ms | iterations/s: 86 | exhaustive inputs: 6
+test <unknown> ...	run time: 52.337254ms | iterations/s: 19 | exhaustive inputs: 1 | exit reason: test failure
+
+======================== Test Failure ========================
+
+Input: 
+[]
+
+==============================================================
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:39:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing unordered items: [1]
+
+--> src/check/rev2_probes.rs:40:10
+ |        .all_ticks()
+ |         ^ observered non-deterministic order: [1]
+test <unknown> ...	run time: 1.130049ms | iterations/s: 885 | exhaustive inputs: 1 | exit reason: test failure
+
+======================== Test Failure ========================
+
+Input: 
+[]
+
+==============================================================
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:39:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing unordered items: [1]
+
+--> src/check/rev2_probes.rs:40:10
+ |        .all_ticks()
+ |         ^ observered non-deterministic order: [1]
+test <unknown> ...	run time: 12.757815ms | iterations/s: 470 | exhaustive inputs: 6
+test <unknown> ...	run time: 9.756111ms | iterations/s: 102 | exhaustive inputs: 1
+test <unknown> ...	run time: 606.774µs | iterations/s: 1648 | exhaustive inputs: 1
+test <unknown> ...	run time: 422.213µs | iterations/s: 2368 | exhaustive inputs: 1
+=== PROBE C1
+fragile sites: Some([FragileSite { index: 0, op: "tick_constant", site: "rev2_probes.rs:43" }])
+brute force up to 2 fault(s): 7 candidate faults, 4 sets, 9 schedules, 2 pass(es), 29.82ms
+  AssertIsConsistent (rev2_probes.rs): omissions alone break it: {omit(initial[process→cluster@0]: 1)} (2 breaking of 4 admissible sets)
+  nine (rev2_probes.rs): omissions alone break it: {omit(initial[process→cluster@0]: 1)} (2 breaking of 4 admissible sets)
+
+the search agrees with the enumeration on every label
+
+PROBE C1 DISAGREEMENTS (0): []
+PROBE C1 SEARCH:
+cluster:
+  [0] AssertIsConsistent (Stream, rev2_probes.rs:38): breaks under omissions alone: {omit(initial[process→cluster@0]: 1)}
+      cluster@0 lacks 1
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/c1_tick_constant/AssertIsConsistent_rev2_probes.rs/counterexample.svg
+      2 hypotheses, 7 schedules, 160.55ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [1] nine (Stream, rev2_probes.rs:46): breaks under omissions alone: {omit(initial[process→cluster@0]: 1)}
+      cluster@0 lacks 9
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/c1_tick_constant/nine_rev2_probes.rs/counterexample.svg
+      2 hypotheses, 7 schedules, 97.25ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+
+ok
+test check::rev2_probes::c1b_tick_constant_fed ... [1m[33mwarning[0m[1m: variable does not need to be mutable[0m
+    [1m[94m--> [0m(full path) /tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac///local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     [1m[94m|[0m
+[1m[94m1383[0m [1m[94m|[0m     let mut observe = |history: &mut Vec<EmissionRecord>,
+     [1m[94m|[0m         [1m[94m----[0m[1m[33m^^^^^^^[0m
+     [1m[94m|[0m         [1m[94m|[0m
+     [1m[94m|[0m         [1m[94mhelp: remove this `mut`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+
+test <unknown> ...	run time: 23.475226ms | iterations/s: 256 | exhaustive inputs: 6
+test <unknown> ...	run time: 9.634173ms | iterations/s: 104 | exhaustive inputs: 1 | exit reason: test failure
+
+======================== Test Failure ========================
+
+Input: 
+[]
+
+==============================================================
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:76:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing unordered items: [1]
+
+--> src/check/rev2_probes.rs:77:10
+ |        .all_ticks()
+ |         ^ observered non-deterministic order: [1]
+test <unknown> ...	run time: 1.079579ms | iterations/s: 926 | exhaustive inputs: 1 | exit reason: test failure
+
+======================== Test Failure ========================
+
+Input: 
+[]
+
+==============================================================
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:76:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing unordered items: [1]
+
+--> src/check/rev2_probes.rs:77:10
+ |        .all_ticks()
+ |         ^ observered non-deterministic order: [1]
+test <unknown> ...	run time: 14.334767ms | iterations/s: 419 | exhaustive inputs: 6
+test <unknown> ...	run time: 5.351788ms | iterations/s: 187 | exhaustive inputs: 1
+test <unknown> ...	run time: 732.064µs | iterations/s: 1366 | exhaustive inputs: 1
+test <unknown> ...	run time: 467.339µs | iterations/s: 2140 | exhaustive inputs: 1
+=== PROBE C1b
+fragile sites: Some([FragileSite { index: 0, op: "tick_constant", site: "rev2_probes.rs:81" }])
+brute force up to 2 fault(s): 9 candidate faults, 4 sets, 9 schedules, 2 pass(es), 25.27ms
+  AssertIsConsistent (rev2_probes.rs): omissions alone break it: {omit(x[process→cluster@0]: 1)} (2 breaking of 4 admissible sets)
+  y (rev2_probes.rs): no admissible set breaks it (0 breaking of 4 admissible sets)
+  nine (rev2_probes.rs): omissions alone break it: {omit(x[process→cluster@0]: 1)} (2 breaking of 4 admissible sets)
+
+the search agrees with the enumeration on every label
+
+PROBE C1b DISAGREEMENTS (0): []
+PROBE C1b SEARCH:
+cluster:
+  [0] AssertIsConsistent (Stream, rev2_probes.rs:75): breaks under omissions alone: {omit(x[process→cluster@0]: 1)}
+      cluster@0 lacks 1
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/c1b_tick_constant_fed/AssertIsConsistent_rev2_probes.rs/counterexample.svg
+      2 hypotheses, 7 schedules, 43.97ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [1] y (Stream, rev2_probes.rs:79): holds with up to 0 crashes (the `max_crashes` cap)
+      1 hypothesis, 6 schedules, 26.77ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [2] nine (Stream, rev2_probes.rs:86): breaks under omissions alone: {omit(x[process→cluster@0]: 1)}
+      cluster@0 lacks 9
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/c1b_tick_constant_fed/nine_rev2_probes.rs/counterexample.svg
+      2 hypotheses, 7 schedules, 28.72ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+
+ok
+test check::rev2_probes::c2_first_tick_unwrap_or ... [1m[33mwarning[0m[1m: variable does not need to be mutable[0m
+    [1m[94m--> [0m(full path) /tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac///local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     [1m[94m|[0m
+[1m[94m1383[0m [1m[94m|[0m     let mut observe = |history: &mut Vec<EmissionRecord>,
+     [1m[94m|[0m         [1m[94m----[0m[1m[33m^^^^^^^[0m
+     [1m[94m|[0m         [1m[94m|[0m
+     [1m[94m|[0m         [1m[94mhelp: remove this `mut`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+
+test <unknown> ...	run time: 22.682046ms | iterations/s: 617 | exhaustive inputs: 14
+test <unknown> ...	run time: 19.407327ms | iterations/s: 721 | exhaustive inputs: 14
+=== PROBE C2
+fragile sites: Some([FragileSite { index: 0, op: "tick_constant", site: "rev2_probes.rs:122" }, FragileSite { index: 1, op: "tick_constant", site: "rev2_probes.rs:121" }])
+brute force up to 2 fault(s): 7 candidate faults, 1 sets, 14 schedules, 1 pass(es), 20.90ms
+  AssertIsConsistent (rev2_probes.rs): no admissible set breaks it (0 breaking of 1 admissible sets)
+  firsts (rev2_probes.rs): the failure-free run breaks it (1 breaking of 1 admissible sets)
+
+the search agrees with the enumeration on every label
+
+PROBE C2 DISAGREEMENTS (0): []
+PROBE C2 SEARCH:
+cluster:
+  [0] AssertIsConsistent (Stream, rev2_probes.rs:116): holds with up to 0 crashes (the `max_crashes` cap)
+      1 hypothesis, 14 schedules, 28.69ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B certified
+  [1] firsts (Stream, rev2_probes.rs:125): breaks without faults
+      cluster@1 lacks 2
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/c2_first_tick_unwrap_or/firsts_rev2_probes.rs/counterexample.svg
+      1 hypothesis, 14 schedules, 27.48ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+
+ok
+test check::rev2_probes::c3_deferred_constant ... [1m[33mwarning[0m[1m: variable does not need to be mutable[0m
+    [1m[94m--> [0m(full path) /tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac///local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     [1m[94m|[0m
+[1m[94m1383[0m [1m[94m|[0m     let mut observe = |history: &mut Vec<EmissionRecord>,
+     [1m[94m|[0m         [1m[94m----[0m[1m[33m^^^^^^^[0m
+     [1m[94m|[0m         [1m[94m|[0m
+     [1m[94m|[0m         [1m[94mhelp: remove this `mut`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+
+test <unknown> ...	run time: 62.714664ms | iterations/s: 223 | exhaustive inputs: 14
+test <unknown> ...	run time: 31.45456ms | iterations/s: 445 | exhaustive inputs: 14
+=== PROBE C3
+fragile sites: Some([FragileSite { index: 0, op: "defer_tick", site: "rev2_probes.rs:162" }, FragileSite { index: 1, op: "tick_constant", site: "rev2_probes.rs:160" }])
+brute force up to 2 fault(s): 7 candidate faults, 1 sets, 14 schedules, 1 pass(es), 36.08ms
+  AssertIsConsistent (rev2_probes.rs): no admissible set breaks it (0 breaking of 1 admissible sets)
+  sevens (rev2_probes.rs): the failure-free run breaks it (1 breaking of 1 admissible sets)
+
+the search agrees with the enumeration on every label
+
+PROBE C3 DISAGREEMENTS (0): []
+PROBE C3 SEARCH:
+cluster:
+  [0] AssertIsConsistent (Stream, rev2_probes.rs:155): holds with up to 0 crashes (the `max_crashes` cap)
+      1 hypothesis, 14 schedules, 79.45ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B certified
+  [1] sevens (Stream, rev2_probes.rs:164): breaks without faults
+      cluster@1 lacks 7
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/c3_deferred_constant/sevens_rev2_probes.rs/counterexample.svg
+      1 hypothesis, 14 schedules, 76.86ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+
+ok
+test check::rev2_probes::c4_snapshot_blocks_tick ... [1m[33mwarning[0m[1m: variable does not need to be mutable[0m
+    [1m[94m--> [0m(full path) /tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac///local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     [1m[94m|[0m
+[1m[94m1383[0m [1m[94m|[0m     let mut observe = |history: &mut Vec<EmissionRecord>,
+     [1m[94m|[0m         [1m[94m----[0m[1m[33m^^^^^^^[0m
+     [1m[94m|[0m         [1m[94m|[0m
+     [1m[94m|[0m         [1m[94mhelp: remove this `mut`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+
+test <unknown> ...	run time: 468.674518ms | iterations/s: 619 | exhaustive inputs: 290
+test <unknown> ...	run time: 65.367836ms | iterations/s: 15 | exhaustive inputs: 1 | exit reason: test failure
+
+======================== Test Failure ========================
+
+Input: 
+[
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+]
+
+==============================================================
+
+Running Tick (Cluster Member 0)
+* --> src/check/rev2_probes.rs:198:10
+*  |        .snapshot(&tick, nondet!(/** probe */))
+*  |         ^ releasing snapshot: 0
+* --> src/check/rev2_probes.rs:204:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing no items
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:198:10
+*  |        .snapshot(&tick, nondet!(/** probe */))
+*  |         ^ releasing snapshot: 0
+* --> src/check/rev2_probes.rs:204:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing no items
+
+Running Tick (Cluster Member 0)
+* --> src/check/rev2_probes.rs:198:10
+*  |        .snapshot(&tick, nondet!(/** probe */))
+*  |         ^ releasing unchanged snapshot: 0
+* --> src/check/rev2_probes.rs:204:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing items: [1]
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:198:10
+*  |        .snapshot(&tick, nondet!(/** probe */))
+*  |         ^ releasing snapshot: 1
+* --> src/check/rev2_probes.rs:204:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing no items
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:198:10
+*  |        .snapshot(&tick, nondet!(/** probe */))
+*  |         ^ releasing unchanged snapshot: 1
+* --> src/check/rev2_probes.rs:204:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing items: [1]
+test <unknown> ...	run time: 2.404633ms | iterations/s: 416 | exhaustive inputs: 1 | exit reason: test failure
+
+======================== Test Failure ========================
+
+Input: 
+[
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+]
+
+==============================================================
+
+Running Tick (Cluster Member 0)
+* --> src/check/rev2_probes.rs:198:10
+*  |        .snapshot(&tick, nondet!(/** probe */))
+*  |         ^ releasing snapshot: 0
+* --> src/check/rev2_probes.rs:204:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing no items
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:198:10
+*  |        .snapshot(&tick, nondet!(/** probe */))
+*  |         ^ releasing snapshot: 0
+* --> src/check/rev2_probes.rs:204:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing no items
+
+Running Tick (Cluster Member 0)
+* --> src/check/rev2_probes.rs:198:10
+*  |        .snapshot(&tick, nondet!(/** probe */))
+*  |         ^ releasing unchanged snapshot: 0
+* --> src/check/rev2_probes.rs:204:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing items: [1]
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:198:10
+*  |        .snapshot(&tick, nondet!(/** probe */))
+*  |         ^ releasing snapshot: 1
+* --> src/check/rev2_probes.rs:204:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing no items
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:198:10
+*  |        .snapshot(&tick, nondet!(/** probe */))
+*  |         ^ releasing unchanged snapshot: 1
+* --> src/check/rev2_probes.rs:204:10
+*  |        .batch(&tick, nondet!(/** probe */))
+*  |         ^ releasing items: [1]
+test <unknown> ...	run time: 70.048404ms | iterations/s: 857 | exhaustive inputs: 60
+test <unknown> ...	run time: 64.468625ms | iterations/s: 931 | exhaustive inputs: 60
+test <unknown> ...	run time: 14.429521ms | iterations/s: 970 | exhaustive inputs: 14
+test <unknown> ...	run time: 398.539383ms | iterations/s: 728 | exhaustive inputs: 290
+test <unknown> ...	run time: 82.951696ms | iterations/s: 723 | exhaustive inputs: 60
+test <unknown> ...	run time: 64.111216ms | iterations/s: 936 | exhaustive inputs: 60
+test <unknown> ...	run time: 15.655567ms | iterations/s: 894 | exhaustive inputs: 14
+=== PROBE C4
+fragile sites: Some([FragileSite { index: 0, op: "snapshot", site: "rev2_probes.rs:198" }, FragileSite { index: 1, op: "fold", site: "rev2_probes.rs:196" }, FragileSite { index: 2, op: "batch_beside_snapshot", site: "rev2_probes.rs:204" }])
+brute force up to 2 fault(s): 9 candidate faults, 4 sets, 424 schedules, 2 pass(es), 571.40ms
+  count (rev2_probes.rs): omissions alone break it: {omit(second[process→cluster@0]: 5)} (2 breaking of 4 admissible sets)
+  count (rev2_probes.rs #1): omissions alone break it: {omit(second[process→cluster@0]: 5)} (2 breaking of 4 admissible sets)
+  batched (rev2_probes.rs): no admissible set breaks it (0 breaking of 4 admissible sets)
+  batched (rev2_probes.rs #1): no admissible set breaks it (0 breaking of 4 admissible sets)
+
+the search agrees with the enumeration on every label
+
+PROBE C4 DISAGREEMENTS (0): []
+PROBE C4 SEARCH:
+cluster:
+  [0] count (Stream, rev2_probes.rs:195): breaks under omissions alone: {omit(second[process→cluster@0]: 5)}
+      cluster@0 lacks 5
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/c4_snapshot_blocks_tick/count_rev2_probes.rs/counterexample.svg
+      2 hypotheses, 291 schedules, 580.33ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [1] count (Stream, rev2_probes.rs:196): breaks under omissions alone: {omit(second[process→cluster@0]: 5)}
+      cluster@0 lacks 5
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/c4_snapshot_blocks_tick/count_rev2_probes.rs_1/counterexample.svg
+      2 hypotheses, 291 schedules, 487.85ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [2] count (Singleton, rev2_probes.rs:196): not checked: Singleton (not a set-valued collection)
+  [3] batched (Stream, rev2_probes.rs:203): holds with up to 0 crashes (the `max_crashes` cap)
+      1 hypothesis, 290 schedules, 480.17ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [4] batched (Stream, rev2_probes.rs:206): holds with up to 0 crashes (the `max_crashes` cap)
+      4 hypotheses, 424 schedules, 633.60ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B certified
+
+ok
+test check::rev2_probes::c5_dedup_state_leaks ... [1m[33mwarning[0m[1m: variable does not need to be mutable[0m
+    [1m[94m--> [0m(full path) /tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac///local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     [1m[94m|[0m
+[1m[94m1383[0m [1m[94m|[0m     let mut observe = |history: &mut Vec<EmissionRecord>,
+     [1m[94m|[0m         [1m[94m----[0m[1m[33m^^^^^^^[0m
+     [1m[94m|[0m         [1m[94m|[0m
+     [1m[94m|[0m         [1m[94mhelp: remove this `mut`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+
+#610	iterations/s: 610	state space estimate: 619 (98.546%, 00s)
+test <unknown> ...	run time: 1.736550636s | iterations/s: 651 | exhaustive inputs: 1130
+#996	iterations/s: 996	state space estimate: 1000 (99.600%, 00s)
+test <unknown> ...	run time: 1.121722671s | iterations/s: 1007 | exhaustive inputs: 1130
+=== PROBE C5
+fragile sites: Some([FragileSite { index: 0, op: "difference", site: "rev2_probes.rs:241" }, FragileSite { index: 1, op: "tick_constant", site: "rev2_probes.rs:240" }, FragileSite { index: 2, op: "defer_tick", site: "rev2_probes.rs:239" }])
+brute force up to 2 fault(s): 7 candidate faults, 1 sets, 1130 schedules, 1 pass(es), 1.13s
+  arrived (rev2_probes.rs): no admissible set breaks it (0 breaking of 1 admissible sets)
+  leaked (rev2_probes.rs): the failure-free run breaks it (1 breaking of 1 admissible sets)
+
+the search agrees with the enumeration on every label
+
+PROBE C5 DISAGREEMENTS (0): []
+PROBE C5 SEARCH:
+cluster:
+  [0] arrived (Stream, rev2_probes.rs:236): holds with up to 0 crashes (the `max_crashes` cap)
+      1 hypothesis, 1130 schedules, 1.78s
+      races: 0 sets stopped early, 0 sets on one schedule; claim B certified
+  [1] leaked (Stream, rev2_probes.rs:246): breaks without faults
+      cluster@1 lacks 1
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/c5_dedup_state_leaks/leaked_rev2_probes.rs/counterexample.svg
+      1 hypothesis, 1130 schedules, 1.76s
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+
+ok
+test check::rev2_probes::f4_atomic_keyed_singleton ... [1m[33mwarning[0m[1m: variable does not need to be mutable[0m
+    [1m[94m--> [0m(full path) /tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac///local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     [1m[94m|[0m
+[1m[94m1383[0m [1m[94m|[0m     let mut observe = |history: &mut Vec<EmissionRecord>,
+     [1m[94m|[0m         [1m[94m----[0m[1m[33m^^^^^^^[0m
+     [1m[94m|[0m         [1m[94m|[0m
+     [1m[94m|[0m         [1m[94mhelp: remove this `mut`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+
+test <unknown> ...	run time: 254.045733ms | iterations/s: 150 | exhaustive inputs: 38
+test <unknown> ...	run time: 53.015811ms | iterations/s: 717 | exhaustive inputs: 38
+=== PROBE F4
+fragile sites: Some([FragileSite { index: 0, op: "snapshot", site: "rev2_probes.rs:278" }, FragileSite { index: 1, op: "scan", site: "rev2_probes.rs:277" }])
+brute force up to 2 fault(s): 7 candidate faults, 1 sets, 38 schedules, 1 pass(es), 58.76ms
+  firsts (rev2_probes.rs): no admissible set breaks it (0 breaking of 1 admissible sets)
+  firsts (rev2_probes.rs #1): no admissible set breaks it (0 breaking of 1 admissible sets)
+
+the search agrees with the enumeration on every label
+
+PROBE F4 DISAGREEMENTS (0): []
+PROBE F4 SEARCH:
+cluster:
+  [0] firsts (Stream, rev2_probes.rs:275): holds with up to 0 crashes (the `max_crashes` cap)
+      1 hypothesis, 38 schedules, 290.10ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B certified
+  [1] firsts (Stream, rev2_probes.rs:280): holds with up to 0 crashes (the `max_crashes` cap)
+      1 hypothesis, 38 schedules, 283.86ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B certified
+
+ok
+test check::rev2_probes::f5_impure_closure ... [1m[33mwarning[0m[1m: variable does not need to be mutable[0m
+    [1m[94m--> [0m(full path) /tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac///local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     [1m[94m|[0m
+[1m[94m1383[0m [1m[94m|[0m     let mut observe = |history: &mut Vec<EmissionRecord>,
+     [1m[94m|[0m         [1m[94m----[0m[1m[33m^^^^^^^[0m
+     [1m[94m|[0m         [1m[94m|[0m
+     [1m[94m|[0m         [1m[94mhelp: remove this `mut`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+
+test <unknown> ...	run time: 18.601709ms | iterations/s: 108 | exhaustive inputs: 2
+test <unknown> ...	run time: 10.17385ms | iterations/s: 98 | exhaustive inputs: 1
+test <unknown> ...	run time: 2.130714ms | iterations/s: 469 | exhaustive inputs: 1
+test <unknown> ...	run time: 2.379809ms | iterations/s: 420 | exhaustive inputs: 1
+=== PROBE F5
+fragile sites: Some([FragileSite { index: 0, op: "impure_closure", site: "rev2_probes.rs:314" }])
+brute force up to 2 fault(s): 9 candidate faults, 4 sets, 5 schedules, 2 pass(es), 47.41ms
+  AssertIsConsistent (rev2_probes.rs): omissions alone break it: {omit(x[process→cluster@0]: 1)} (2 breaking of 4 admissible sets)
+  out (rev2_probes.rs): no admissible set breaks it (0 breaking of 4 admissible sets)
+  out (rev2_probes.rs #1): the failure-free run breaks it (4 breaking of 4 admissible sets)
+
+DISAGREEMENT: out (rev2_probes.rs #1): the search says it holds with up to 0 crash(es), but {} (0 crash(es)) breaks it
+
+PROBE F5 DISAGREEMENTS (1): [
+    "out (rev2_probes.rs #1): the search says it holds with up to 0 crash(es), but {} (0 crash(es)) breaks it",
+]
+PROBE F5 SEARCH:
+cluster:
+  [0] AssertIsConsistent (Stream, rev2_probes.rs:310): breaks under omissions alone: {omit(x[process→cluster@0]: 1)}
+      cluster@0 lacks 1
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/f5_impure_closure/AssertIsConsistent_rev2_probes.rs/counterexample.svg
+      2 hypotheses, 2 schedules, 72.89ms
+      races: 0 sets stopped early, 2 sets on one schedule; claim B not certified
+  [1] out (Stream, rev2_probes.rs:313): holds with up to 0 crashes (the `max_crashes` cap)
+      1 hypothesis, 1 schedule, 48.94ms
+      races: 0 sets stopped early, 1 set on one schedule; claim B certified
+  [2] out (Stream, rev2_probes.rs:314): holds with up to 0 crashes (the `max_crashes` cap)
+      1 hypothesis, 1 schedule, 48.83ms
+      races: 0 sets stopped early, 1 set on one schedule; claim B certified
+
+ok
+test check::rev2_probes::zz_review_batch_beside_an_unready_snapshot ... [1m[33mwarning[0m[1m: variable does not need to be mutable[0m
+    [1m[94m--> [0m(full path) /tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac///local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     [1m[94m|[0m
+[1m[94m1383[0m [1m[94m|[0m     let mut observe = |history: &mut Vec<EmissionRecord>,
+     [1m[94m|[0m         [1m[94m----[0m[1m[33m^^^^^^^[0m
+     [1m[94m|[0m         [1m[94m|[0m
+     [1m[94m|[0m         [1m[94mhelp: remove this `mut`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+
+test <unknown> ...	run time: 82.837025ms | iterations/s: 555 | exhaustive inputs: 46
+test <unknown> ...	run time: 46.774272ms | iterations/s: 21 | exhaustive inputs: 1 | exit reason: test failure
+
+======================== Test Failure ========================
+
+Input: 
+[
+    0,
+]
+
+==============================================================
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:361:15
+*  |    let s = x.batch(&producer, nondet!(/** */)).count().latest();
+*  |              ^ releasing unordered items: [1]
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:353:10
+*  |        .batch(&consumer, nondet!(/** */))
+*  |         ^ releasing no items
+* --> src/check/rev2_probes.rs:362:7
+*  |    s.snapshot(&consumer, nondet!(/** */))
+*  |      ^ releasing snapshot: 1
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:353:10
+*  |        .batch(&consumer, nondet!(/** */))
+*  |         ^ releasing items: [7]
+* --> src/check/rev2_probes.rs:362:7
+*  |    s.snapshot(&consumer, nondet!(/** */))
+*  |      ^ releasing unchanged snapshot: 1
+
+thread 'check::rev2_probes::zz_review_batch_beside_an_unready_snapshot' (10956) panicked at hydro_lang/src/sim/compiled.rs:2187:21:
+member stuck: a tick of Cluster(loc2v1) (member Some(0)) has a hook that never became ready (a snapshot of a singleton that never got a value)
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/panicking.rs:80:14
+   2: {async_fn#0}<std::io::util::Empty>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:2187:21
+   3: {async_fn#0}<std::io::util::Empty>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:2124:27
+   4: {async_fn#0}<std::io::util::Empty, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure#1}::{async_closure_env#0}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:1165:28
+   5: {async_fn#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure#1}::{async_closure_env#0}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:1116:14
+   6: {async_closure#0}<&mut hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:980:50
+   7: {async_block#3}<hydro_lang::sim::compiled::{impl#5}::run::{async_fn#0}::{closure_env#0}<&mut hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:1101:33
+   8: {closure#0}<core::cell::RefCell<hydro_lang::sim::compiled::SimConnections>, hydro_lang::sim::compiled::{impl#5}::run_without_launching::{async_fn#0}::{async_block_env#3}<hydro_lang::sim::compiled::{impl#5}::run::{async_fn#0}::{closure_env#0}<&mut hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/task_local.rs:401:35
+   9: tokio::task::task_local::LocalKey<T>::scope_inner
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/task_local.rs:217:19
+  10: <tokio::task::task_local::TaskLocalFuture<T,F> as core::future::future::Future>::poll
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/task_local.rs:399:14
+  11: {async_fn#0}<hydro_lang::sim::compiled::{impl#5}::run::{async_fn#0}::{closure_env#0}<&mut hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:1104:14
+  12: {async_fn#0}<&mut hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:982:10
+  13: {async_block#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:867:68
+  14: poll<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/future/future.rs:133:9
+  15: poll<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/future/future.rs:133:9
+  16: {closure#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:742:70
+  17: with_budget<core::task::poll::Poll<()>, tokio::runtime::scheduler::current_thread::{impl#8}::block_on::{closure#0}::{closure#0}::{closure_env#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/coop/mod.rs:167:5
+  18: budget<core::task::poll::Poll<()>, tokio::runtime::scheduler::current_thread::{impl#8}::block_on::{closure#0}::{closure#0}::{closure_env#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/coop/mod.rs:133:5
+  19: {closure#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:742:25
+  20: tokio::runtime::scheduler::current_thread::Context::enter
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:432:19
+  21: {closure#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:741:44
+  22: tokio::runtime::scheduler::current_thread::CoreGuard::enter::{{closure}}
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:829:68
+  23: tokio::runtime::context::scoped::Scoped<T>::set
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/context/scoped.rs:40:9
+  24: tokio::runtime::context::set_scheduler::{{closure}}
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/context.rs:176:38
+  25: try_with<tokio::runtime::context::Context, tokio::runtime::context::set_scheduler::{closure_env#0}<(alloc::boxed::Box<tokio::runtime::scheduler::current_thread::Core, alloc::alloc::Global>, core::option::Option<()>), tokio::runtime::scheduler::current_thread::{impl#8}::enter::{closure_env#0}<tokio::runtime::scheduler::current_thread::{impl#8}::block_on::{closure_env#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>, core::option::Option<()>>>, (alloc::boxed::Box<tokio::runtime::scheduler::current_thread::Core, alloc::alloc::Global>, core::option::Option<()>)>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/thread/local.rs:462:12
+  26: std::thread::local::LocalKey<T>::with
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/thread/local.rs:426:20
+  27: tokio::runtime::context::set_scheduler
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/context.rs:176:17
+  28: tokio::runtime::scheduler::current_thread::CoreGuard::enter
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:829:27
+  29: tokio::runtime::scheduler::current_thread::CoreGuard::block_on
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:729:24
+  30: {closure#0}<core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:200:33
+  31: tokio::runtime::context::runtime::enter_runtime
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/context/runtime.rs:65:16
+  32: block_on<core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:188:9
+  33: tokio::runtime::runtime::Runtime::block_on_inner
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/runtime.rs:368:52
+  34: block_on<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/runtime.rs:340:18
+  35: {closure#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:867:26
+  36: bolero_hydro::test::TestEngine::run_with_scope::{{closure}}::{{closure}}
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:265:25
+  37: with<bolero_generator_hydro::driver::object::Object<bolero_generator_hydro::driver::exhaustive::Driver>, bolero_hydro::test::{impl#2}::run_with_scope::{closure#0}::{closure_env#0}<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>, ()>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-generator-hydro-0.13.6/src/any/default.rs:51:15
+  38: bolero_hydro::test::TestEngine::run_with_scope::{{closure}}
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:264:21
+  39: run_exhaustive<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, bolero_hydro::test::{impl#2}::run_with_scope::{closure_env#0}<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:476:33
+  40: run_with_scope<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:284:25
+  41: <bolero_hydro::test::TestEngine as bolero_engine_hydro::ScopedEngine>::run
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:508:14
+  42: bolero_hydro::TestTarget<bolero_hydro::ByteSliceGenerator,E,bolero_hydro::BorrowedInput>::run_with_replay
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/lib.rs:491:21
+  43: hydro_lang::sim::compiled::CompiledSim::exhaustive_then::{{closure}}
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:846:18
+  44: with_instantiator<(), hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:597:9
+  45: exhaustive_then<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:834:14
+  46: hydrofrac::check::engine::races_engine::<impl hydrofrac::check::engine::Engine<B>>::explore_races::{{closure}}
+             at ./src/check/races_engine.rs:331:25
+  47: <core::panic::unwind_safe::AssertUnwindSafe<F> as core::ops::function::FnOnce<()>>::call_once
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/panic/unwind_safe.rs:275:9
+  48: do_call<core::panic::unwind_safe::AssertUnwindSafe<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#3}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panicking.rs:581:40
+  49: __rust_try
+  50: catch_unwind<(), core::panic::unwind_safe::AssertUnwindSafe<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#3}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panicking.rs:544:19
+  51: catch_unwind<core::panic::unwind_safe::AssertUnwindSafe<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#3}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panic.rs:359:14
+  52: explore_races<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>
+             at ./src/check/races_engine.rs:327:13
+  53: hydrofrac::check::engine::races_engine::<impl hydrofrac::check::engine::Engine<B>>::explore_set
+             at ./src/check/races_engine.rs:557:29
+  54: hydrofrac::check::engine::races_engine::<impl hydrofrac::check::engine::Engine<B>>::search_races
+             at ./src/check/races_engine.rs:492:30
+  55: check<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>
+             at ./src/check/races_engine.rs:441:22
+  56: hydrofrac::check::engine::EcCheck::run
+             at ./src/check/engine.rs:126:52
+  57: hydrofrac::check::engine::brute::<impl hydrofrac::check::engine::EcCheck>::cross_check
+             at ./src/check/brute_force.rs:232:28
+  58: hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot
+             at ./src/check/rev2_probes.rs:370:23
+  59: hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{{closure}}
+             at ./src/check/rev2_probes.rs:342:48
+  60: core::ops::function::FnOnce::call_once
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+  61: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+test <unknown> ...	run time: 1.110987ms | iterations/s: 900 | exhaustive inputs: 1 | exit reason: test failure
+
+======================== Test Failure ========================
+
+Input: 
+[
+    0,
+]
+
+==============================================================
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:361:15
+*  |    let s = x.batch(&producer, nondet!(/** */)).count().latest();
+*  |              ^ releasing unordered items: [1]
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:353:10
+*  |        .batch(&consumer, nondet!(/** */))
+*  |         ^ releasing no items
+* --> src/check/rev2_probes.rs:362:7
+*  |    s.snapshot(&consumer, nondet!(/** */))
+*  |      ^ releasing snapshot: 1
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:353:10
+*  |        .batch(&consumer, nondet!(/** */))
+*  |         ^ releasing items: [7]
+* --> src/check/rev2_probes.rs:362:7
+*  |    s.snapshot(&consumer, nondet!(/** */))
+*  |      ^ releasing unchanged snapshot: 1
+
+thread 'check::rev2_probes::zz_review_batch_beside_an_unready_snapshot' (10956) panicked at hydro_lang/src/sim/compiled.rs:2187:21:
+member stuck: a tick of Cluster(loc2v1) (member Some(0)) has a hook that never became ready (a snapshot of a singleton that never got a value)
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/panicking.rs:80:14
+   2: {async_fn#0}<std::io::util::Empty>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:2187:21
+   3: {async_fn#0}<std::io::util::Empty>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:2124:27
+   4: {async_fn#0}<std::io::util::Empty, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure#1}::{async_closure_env#0}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:1165:28
+   5: {async_fn#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure#1}::{async_closure_env#0}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:1116:14
+   6: {async_closure#0}<&mut hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:980:50
+   7: {async_block#3}<hydro_lang::sim::compiled::{impl#5}::run::{async_fn#0}::{closure_env#0}<&mut hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:1101:33
+   8: {closure#0}<core::cell::RefCell<hydro_lang::sim::compiled::SimConnections>, hydro_lang::sim::compiled::{impl#5}::run_without_launching::{async_fn#0}::{async_block_env#3}<hydro_lang::sim::compiled::{impl#5}::run::{async_fn#0}::{closure_env#0}<&mut hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/task_local.rs:401:35
+   9: tokio::task::task_local::LocalKey<T>::scope_inner
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/task_local.rs:217:19
+  10: <tokio::task::task_local::TaskLocalFuture<T,F> as core::future::future::Future>::poll
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/task_local.rs:399:14
+  11: {async_fn#0}<hydro_lang::sim::compiled::{impl#5}::run::{async_fn#0}::{closure_env#0}<&mut hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:1104:14
+  12: {async_fn#0}<&mut hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:982:10
+  13: {async_block#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:867:68
+  14: poll<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/future/future.rs:133:9
+  15: poll<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/future/future.rs:133:9
+  16: {closure#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:742:70
+  17: with_budget<core::task::poll::Poll<()>, tokio::runtime::scheduler::current_thread::{impl#8}::block_on::{closure#0}::{closure#0}::{closure_env#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/coop/mod.rs:167:5
+  18: budget<core::task::poll::Poll<()>, tokio::runtime::scheduler::current_thread::{impl#8}::block_on::{closure#0}::{closure#0}::{closure_env#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/coop/mod.rs:133:5
+  19: {closure#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:742:25
+  20: tokio::runtime::scheduler::current_thread::Context::enter
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:432:19
+  21: {closure#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:741:44
+  22: tokio::runtime::scheduler::current_thread::CoreGuard::enter::{{closure}}
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:829:68
+  23: tokio::runtime::context::scoped::Scoped<T>::set
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/context/scoped.rs:40:9
+  24: tokio::runtime::context::set_scheduler::{{closure}}
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/context.rs:176:38
+  25: try_with<tokio::runtime::context::Context, tokio::runtime::context::set_scheduler::{closure_env#0}<(alloc::boxed::Box<tokio::runtime::scheduler::current_thread::Core, alloc::alloc::Global>, core::option::Option<()>), tokio::runtime::scheduler::current_thread::{impl#8}::enter::{closure_env#0}<tokio::runtime::scheduler::current_thread::{impl#8}::block_on::{closure_env#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>, core::option::Option<()>>>, (alloc::boxed::Box<tokio::runtime::scheduler::current_thread::Core, alloc::alloc::Global>, core::option::Option<()>)>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/thread/local.rs:462:12
+  26: std::thread::local::LocalKey<T>::with
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/thread/local.rs:426:20
+  27: tokio::runtime::context::set_scheduler
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/context.rs:176:17
+  28: tokio::runtime::scheduler::current_thread::CoreGuard::enter
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:829:27
+  29: tokio::runtime::scheduler::current_thread::CoreGuard::block_on
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:729:24
+  30: {closure#0}<core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:200:33
+  31: tokio::runtime::context::runtime::enter_runtime
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/context/runtime.rs:65:16
+  32: block_on<core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:188:9
+  33: tokio::runtime::runtime::Runtime::block_on_inner
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/runtime.rs:368:52
+  34: block_on<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/runtime.rs:340:18
+  35: {closure#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:867:26
+  36: bolero_hydro::test::TestEngine::run_with_scope::{{closure}}::{{closure}}
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:265:25
+  37: with<bolero_generator_hydro::driver::object::Object<bolero_generator_hydro::driver::exhaustive::Driver>, bolero_hydro::test::{impl#2}::run_with_scope::{closure#0}::{closure_env#0}<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>, ()>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-generator-hydro-0.13.6/src/any/default.rs:51:15
+  38: bolero_hydro::test::TestEngine::run_with_scope::{{closure}}
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:264:21
+  39: run_exhaustive<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, bolero_hydro::test::{impl#2}::run_with_scope::{closure_env#0}<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:476:33
+  40: run_with_scope<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:284:25
+  41: <bolero_hydro::test::TestEngine as bolero_engine_hydro::ScopedEngine>::run
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:508:14
+  42: bolero_hydro::TestTarget<bolero_hydro::ByteSliceGenerator,E,bolero_hydro::BorrowedInput>::run_with_replay
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/lib.rs:491:21
+  43: hydro_lang::sim::compiled::CompiledSim::exhaustive_then::{{closure}}
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:846:18
+  44: with_instantiator<(), hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure_env#0}<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:597:9
+  45: exhaustive_then<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#1}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:834:14
+  46: hydrofrac::check::engine::races_engine::<impl hydrofrac::check::engine::Engine<B>>::explore_races::{{closure}}
+             at ./src/check/races_engine.rs:331:25
+  47: <core::panic::unwind_safe::AssertUnwindSafe<F> as core::ops::function::FnOnce<()>>::call_once
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/panic/unwind_safe.rs:275:9
+  48: do_call<core::panic::unwind_safe::AssertUnwindSafe<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#3}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panicking.rs:581:40
+  49: __rust_try
+  50: catch_unwind<(), core::panic::unwind_safe::AssertUnwindSafe<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#3}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panicking.rs:544:19
+  51: catch_unwind<core::panic::unwind_safe::AssertUnwindSafe<hydrofrac::check::engine::races_engine::{impl#3}::explore_races::{closure_env#3}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panic.rs:359:14
+  52: explore_races<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::races_engine::{impl#3}::explore_set::{closure_env#2}<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>
+             at ./src/check/races_engine.rs:327:13
+  53: hydrofrac::check::engine::races_engine::<impl hydrofrac::check::engine::Engine<B>>::explore_set
+             at ./src/check/races_engine.rs:557:29
+  54: hydrofrac::check::engine::races_engine::<impl hydrofrac::check::engine::Engine<B>>::search_races
+             at ./src/check/races_engine.rs:492:30
+  55: check<&mut hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>
+             at ./src/check/races_engine.rs:441:22
+  56: hydrofrac::check::engine::EcCheck::run
+             at ./src/check/engine.rs:126:52
+  57: hydrofrac::check::engine::brute::<impl hydrofrac::check::engine::EcCheck>::cross_check
+             at ./src/check/brute_force.rs:232:28
+  58: hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot
+             at ./src/check/rev2_probes.rs:370:23
+  59: hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{{closure}}
+             at ./src/check/rev2_probes.rs:342:48
+  60: core::ops::function::FnOnce::call_once
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+  61: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+test <unknown> ...	run time: 51.488663ms | iterations/s: 893 | exhaustive inputs: 46
+test <unknown> ...	run time: 12.817647ms | iterations/s: 78 | exhaustive inputs: 1 | exit reason: test failure
+
+======================== Test Failure ========================
+
+Input: 
+[
+    0,
+]
+
+==============================================================
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:361:15
+*  |    let s = x.batch(&producer, nondet!(/** */)).count().latest();
+*  |              ^ releasing unordered items: [1]
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:353:10
+*  |        .batch(&consumer, nondet!(/** */))
+*  |         ^ releasing no items
+* --> src/check/rev2_probes.rs:362:7
+*  |    s.snapshot(&consumer, nondet!(/** */))
+*  |      ^ releasing snapshot: 1
+
+Running Tick (Cluster Member 1)
+* --> src/check/rev2_probes.rs:353:10
+*  |        .batch(&consumer, nondet!(/** */))
+*  |         ^ releasing items: [7]
+* --> src/check/rev2_probes.rs:362:7
+*  |    s.snapshot(&consumer, nondet!(/** */))
+*  |      ^ releasing unchanged snapshot: 1
+
+thread 'check::rev2_probes::zz_review_batch_beside_an_unready_snapshot' (10956) panicked at hydro_lang/src/sim/compiled.rs:2187:21:
+member stuck: a tick of Cluster(loc2v1) (member Some(0)) has a hook that never became ready (a snapshot of a singleton that never got a value)
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/panicking.rs:80:14
+   2: {async_fn#0}<std::io::util::Empty>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:2187:21
+   3: {async_fn#0}<std::io::util::Empty>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:2124:27
+   4: {async_fn#0}<std::io::util::Empty, hydrofrac::check::engine::brute::{impl#8}::execute::{closure#1}::{async_closure_env#0}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:1165:28
+   5: {async_fn#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure#1}::{async_closure_env#0}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:1116:14
+   6: {async_closure#0}<&mut hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:980:50
+   7: {async_block#3}<hydro_lang::sim::compiled::{impl#5}::run::{async_fn#0}::{closure_env#0}<&mut hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:1101:33
+   8: {closure#0}<core::cell::RefCell<hydro_lang::sim::compiled::SimConnections>, hydro_lang::sim::compiled::{impl#5}::run_without_launching::{async_fn#0}::{async_block_env#3}<hydro_lang::sim::compiled::{impl#5}::run::{async_fn#0}::{closure_env#0}<&mut hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/task_local.rs:401:35
+   9: tokio::task::task_local::LocalKey<T>::scope_inner
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/task_local.rs:217:19
+  10: <tokio::task::task_local::TaskLocalFuture<T,F> as core::future::future::Future>::poll
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/task_local.rs:399:14
+  11: {async_fn#0}<hydro_lang::sim::compiled::{impl#5}::run::{async_fn#0}::{closure_env#0}<&mut hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:1104:14
+  12: {async_fn#0}<&mut hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:982:10
+  13: {async_block#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:867:68
+  14: poll<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/future/future.rs:133:9
+  15: poll<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/future/future.rs:133:9
+  16: {closure#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:742:70
+  17: with_budget<core::task::poll::Poll<()>, tokio::runtime::scheduler::current_thread::{impl#8}::block_on::{closure#0}::{closure#0}::{closure_env#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/coop/mod.rs:167:5
+  18: budget<core::task::poll::Poll<()>, tokio::runtime::scheduler::current_thread::{impl#8}::block_on::{closure#0}::{closure#0}::{closure_env#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/coop/mod.rs:133:5
+  19: {closure#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:742:25
+  20: tokio::runtime::scheduler::current_thread::Context::enter
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:432:19
+  21: {closure#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:741:44
+  22: tokio::runtime::scheduler::current_thread::CoreGuard::enter::{{closure}}
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:829:68
+  23: tokio::runtime::context::scoped::Scoped<T>::set
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/context/scoped.rs:40:9
+  24: tokio::runtime::context::set_scheduler::{{closure}}
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/context.rs:176:38
+  25: try_with<tokio::runtime::context::Context, tokio::runtime::context::set_scheduler::{closure_env#0}<(alloc::boxed::Box<tokio::runtime::scheduler::current_thread::Core, alloc::alloc::Global>, core::option::Option<()>), tokio::runtime::scheduler::current_thread::{impl#8}::enter::{closure_env#0}<tokio::runtime::scheduler::current_thread::{impl#8}::block_on::{closure_env#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>, core::option::Option<()>>>, (alloc::boxed::Box<tokio::runtime::scheduler::current_thread::Core, alloc::alloc::Global>, core::option::Option<()>)>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/thread/local.rs:462:12
+  26: std::thread::local::LocalKey<T>::with
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/thread/local.rs:426:20
+  27: tokio::runtime::context::set_scheduler
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/context.rs:176:17
+  28: tokio::runtime::scheduler::current_thread::CoreGuard::enter
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:829:27
+  29: tokio::runtime::scheduler::current_thread::CoreGuard::block_on
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:729:24
+  30: {closure#0}<core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:200:33
+  31: tokio::runtime::context::runtime::enter_runtime
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/context/runtime.rs:65:16
+  32: block_on<core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:188:9
+  33: tokio::runtime::runtime::Runtime::block_on_inner
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/runtime.rs:368:52
+  34: block_on<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/runtime.rs:340:18
+  35: {closure#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:867:26
+  36: bolero_hydro::test::TestEngine::run_with_scope::{{closure}}::{{closure}}
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:265:25
+  37: with<bolero_generator_hydro::driver::object::Object<bolero_generator_hydro::driver::exhaustive::Driver>, bolero_hydro::test::{impl#2}::run_with_scope::{closure#0}::{closure_env#0}<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>, ()>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-generator-hydro-0.13.6/src/any/default.rs:51:15
+  38: bolero_hydro::test::TestEngine::run_with_scope::{{closure}}
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:264:21
+  39: run_exhaustive<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, bolero_hydro::test::{impl#2}::run_with_scope::{closure_env#0}<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:476:33
+  40: run_with_scope<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:284:25
+  41: <bolero_hydro::test::TestEngine as bolero_engine_hydro::ScopedEngine>::run
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:508:14
+  42: bolero_hydro::TestTarget<bolero_hydro::ByteSliceGenerator,E,bolero_hydro::BorrowedInput>::run_with_replay
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/lib.rs:491:21
+  43: hydro_lang::sim::compiled::CompiledSim::exhaustive_then::{{closure}}
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:846:18
+  44: with_instantiator<(), hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:597:9
+  45: exhaustive_then<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:834:14
+  46: hydrofrac::check::engine::brute::<impl hydrofrac::check::engine::Engine<B>>::execute::{{closure}}
+             at ./src/check/brute_force.rs:508:25
+  47: <core::panic::unwind_safe::AssertUnwindSafe<F> as core::ops::function::FnOnce<()>>::call_once
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/panic/unwind_safe.rs:275:9
+  48: do_call<core::panic::unwind_safe::AssertUnwindSafe<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#3}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panicking.rs:581:40
+  49: __rust_try
+  50: catch_unwind<(), core::panic::unwind_safe::AssertUnwindSafe<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#3}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panicking.rs:544:19
+  51: catch_unwind<core::panic::unwind_safe::AssertUnwindSafe<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#3}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panic.rs:359:14
+  52: execute<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>
+             at ./src/check/brute_force.rs:505:13
+  53: brute_force<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>
+             at ./src/check/brute_force.rs:560:40
+  54: hydrofrac::check::engine::brute::<impl hydrofrac::check::engine::EcCheck>::cross_check
+             at ./src/check/brute_force.rs:239:41
+  55: hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot
+             at ./src/check/rev2_probes.rs:370:23
+  56: hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{{closure}}
+             at ./src/check/rev2_probes.rs:342:48
+  57: core::ops::function::FnOnce::call_once
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+  58: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+test <unknown> ...	run time: 1.074082ms | iterations/s: 931 | exhaustive inputs: 1 | exit reason: test failure
+
+======================== Test Failure ========================
+
+Input: 
+[
+    0,
+]
+
+==============================================================
+
+Running Tick (Cluster Member 0)
+* --> src/check/rev2_probes.rs:361:15
+*  |    let s = x.batch(&producer, nondet!(/** */)).count().latest();
+*  |              ^ releasing unordered items: [1]
+
+Running Tick (Cluster Member 0)
+* --> src/check/rev2_probes.rs:353:10
+*  |        .batch(&consumer, nondet!(/** */))
+*  |         ^ releasing no items
+* --> src/check/rev2_probes.rs:362:7
+*  |    s.snapshot(&consumer, nondet!(/** */))
+*  |      ^ releasing snapshot: 1
+
+Running Tick (Cluster Member 0)
+* --> src/check/rev2_probes.rs:353:10
+*  |        .batch(&consumer, nondet!(/** */))
+*  |         ^ releasing items: [7]
+* --> src/check/rev2_probes.rs:362:7
+*  |    s.snapshot(&consumer, nondet!(/** */))
+*  |      ^ releasing unchanged snapshot: 1
+
+thread 'check::rev2_probes::zz_review_batch_beside_an_unready_snapshot' (10956) panicked at hydro_lang/src/sim/compiled.rs:2187:21:
+member stuck: a tick of Cluster(loc2v1) (member Some(1)) has a hook that never became ready (a snapshot of a singleton that never got a value)
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/panicking.rs:80:14
+   2: {async_fn#0}<std::io::util::Empty>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:2187:21
+   3: {async_fn#0}<std::io::util::Empty>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:2124:27
+   4: {async_fn#0}<std::io::util::Empty, hydrofrac::check::engine::brute::{impl#8}::execute::{closure#1}::{async_closure_env#0}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:1165:28
+   5: {async_fn#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure#1}::{async_closure_env#0}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:1116:14
+   6: {async_closure#0}<&mut hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:980:50
+   7: {async_block#3}<hydro_lang::sim::compiled::{impl#5}::run::{async_fn#0}::{closure_env#0}<&mut hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:1101:33
+   8: {closure#0}<core::cell::RefCell<hydro_lang::sim::compiled::SimConnections>, hydro_lang::sim::compiled::{impl#5}::run_without_launching::{async_fn#0}::{async_block_env#3}<hydro_lang::sim::compiled::{impl#5}::run::{async_fn#0}::{closure_env#0}<&mut hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/task_local.rs:401:35
+   9: tokio::task::task_local::LocalKey<T>::scope_inner
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/task_local.rs:217:19
+  10: <tokio::task::task_local::TaskLocalFuture<T,F> as core::future::future::Future>::poll
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/task_local.rs:399:14
+  11: {async_fn#0}<hydro_lang::sim::compiled::{impl#5}::run::{async_fn#0}::{closure_env#0}<&mut hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:1104:14
+  12: {async_fn#0}<&mut hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:982:10
+  13: {async_block#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:867:68
+  14: poll<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/future/future.rs:133:9
+  15: poll<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/future/future.rs:133:9
+  16: {closure#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:742:70
+  17: with_budget<core::task::poll::Poll<()>, tokio::runtime::scheduler::current_thread::{impl#8}::block_on::{closure#0}::{closure#0}::{closure_env#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/coop/mod.rs:167:5
+  18: budget<core::task::poll::Poll<()>, tokio::runtime::scheduler::current_thread::{impl#8}::block_on::{closure#0}::{closure#0}::{closure_env#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/coop/mod.rs:133:5
+  19: {closure#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:742:25
+  20: tokio::runtime::scheduler::current_thread::Context::enter
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:432:19
+  21: {closure#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:741:44
+  22: tokio::runtime::scheduler::current_thread::CoreGuard::enter::{{closure}}
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:829:68
+  23: tokio::runtime::context::scoped::Scoped<T>::set
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/context/scoped.rs:40:9
+  24: tokio::runtime::context::set_scheduler::{{closure}}
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/context.rs:176:38
+  25: try_with<tokio::runtime::context::Context, tokio::runtime::context::set_scheduler::{closure_env#0}<(alloc::boxed::Box<tokio::runtime::scheduler::current_thread::Core, alloc::alloc::Global>, core::option::Option<()>), tokio::runtime::scheduler::current_thread::{impl#8}::enter::{closure_env#0}<tokio::runtime::scheduler::current_thread::{impl#8}::block_on::{closure_env#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>, core::option::Option<()>>>, (alloc::boxed::Box<tokio::runtime::scheduler::current_thread::Core, alloc::alloc::Global>, core::option::Option<()>)>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/thread/local.rs:462:12
+  26: std::thread::local::LocalKey<T>::with
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/thread/local.rs:426:20
+  27: tokio::runtime::context::set_scheduler
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/context.rs:176:17
+  28: tokio::runtime::scheduler::current_thread::CoreGuard::enter
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:829:27
+  29: tokio::runtime::scheduler::current_thread::CoreGuard::block_on
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:729:24
+  30: {closure#0}<core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:200:33
+  31: tokio::runtime::context::runtime::enter_runtime
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/context/runtime.rs:65:16
+  32: block_on<core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:188:9
+  33: tokio::runtime::runtime::Runtime::block_on_inner
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/runtime.rs:368:52
+  34: block_on<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/runtime.rs:340:18
+  35: {closure#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:867:26
+  36: bolero_hydro::test::TestEngine::run_with_scope::{{closure}}::{{closure}}
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:265:25
+  37: with<bolero_generator_hydro::driver::object::Object<bolero_generator_hydro::driver::exhaustive::Driver>, bolero_hydro::test::{impl#2}::run_with_scope::{closure#0}::{closure_env#0}<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>, ()>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-generator-hydro-0.13.6/src/any/default.rs:51:15
+  38: bolero_hydro::test::TestEngine::run_with_scope::{{closure}}
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:264:21
+  39: run_exhaustive<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, bolero_hydro::test::{impl#2}::run_with_scope::{closure_env#0}<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:476:33
+  40: run_with_scope<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:284:25
+  41: <bolero_hydro::test::TestEngine as bolero_engine_hydro::ScopedEngine>::run
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:508:14
+  42: bolero_hydro::TestTarget<bolero_hydro::ByteSliceGenerator,E,bolero_hydro::BorrowedInput>::run_with_replay
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/lib.rs:491:21
+  43: hydro_lang::sim::compiled::CompiledSim::exhaustive_then::{{closure}}
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:846:18
+  44: with_instantiator<(), hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:597:9
+  45: exhaustive_then<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:834:14
+  46: hydrofrac::check::engine::brute::<impl hydrofrac::check::engine::Engine<B>>::execute::{{closure}}
+             at ./src/check/brute_force.rs:508:25
+  47: <core::panic::unwind_safe::AssertUnwindSafe<F> as core::ops::function::FnOnce<()>>::call_once
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/panic/unwind_safe.rs:275:9
+  48: do_call<core::panic::unwind_safe::AssertUnwindSafe<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#3}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panicking.rs:581:40
+  49: __rust_try
+  50: catch_unwind<(), core::panic::unwind_safe::AssertUnwindSafe<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#3}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panicking.rs:544:19
+  51: catch_unwind<core::panic::unwind_safe::AssertUnwindSafe<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#3}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panic.rs:359:14
+  52: execute<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>
+             at ./src/check/brute_force.rs:505:13
+  53: brute_force<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>
+             at ./src/check/brute_force.rs:560:40
+  54: hydrofrac::check::engine::brute::<impl hydrofrac::check::engine::EcCheck>::cross_check
+             at ./src/check/brute_force.rs:239:41
+  55: hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot
+             at ./src/check/rev2_probes.rs:370:23
+  56: hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{{closure}}
+             at ./src/check/rev2_probes.rs:342:48
+  57: core::ops::function::FnOnce::call_once
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+  58: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+test <unknown> ...	run time: 584.174µs | iterations/s: 1712 | exhaustive inputs: 1 | exit reason: test failure
+
+======================== Test Failure ========================
+
+Input: 
+[]
+
+==============================================================
+
+thread 'check::rev2_probes::zz_review_batch_beside_an_unready_snapshot' (10956) panicked at hydro_lang/src/sim/compiled.rs:2187:21:
+member stuck: a tick of Cluster(loc2v1) (member Some(0)) has a hook that never became ready (a snapshot of a singleton that never got a value)
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/panicking.rs:80:14
+   2: {async_fn#0}<std::io::util::Empty>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:2187:21
+   3: {async_fn#0}<std::io::util::Empty>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:2124:27
+   4: {async_fn#0}<std::io::util::Empty, hydrofrac::check::engine::brute::{impl#8}::execute::{closure#1}::{async_closure_env#0}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:1165:28
+   5: {async_fn#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure#1}::{async_closure_env#0}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:1116:14
+   6: {async_closure#0}<&mut hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:980:50
+   7: {async_block#3}<hydro_lang::sim::compiled::{impl#5}::run::{async_fn#0}::{closure_env#0}<&mut hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:1101:33
+   8: {closure#0}<core::cell::RefCell<hydro_lang::sim::compiled::SimConnections>, hydro_lang::sim::compiled::{impl#5}::run_without_launching::{async_fn#0}::{async_block_env#3}<hydro_lang::sim::compiled::{impl#5}::run::{async_fn#0}::{closure_env#0}<&mut hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/task_local.rs:401:35
+   9: tokio::task::task_local::LocalKey<T>::scope_inner
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/task_local.rs:217:19
+  10: <tokio::task::task_local::TaskLocalFuture<T,F> as core::future::future::Future>::poll
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/task_local.rs:399:14
+  11: {async_fn#0}<hydro_lang::sim::compiled::{impl#5}::run::{async_fn#0}::{closure_env#0}<&mut hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:1104:14
+  12: {async_fn#0}<&mut hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:982:10
+  13: {async_block#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:867:68
+  14: poll<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/future/future.rs:133:9
+  15: poll<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/future/future.rs:133:9
+  16: {closure#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:742:70
+  17: with_budget<core::task::poll::Poll<()>, tokio::runtime::scheduler::current_thread::{impl#8}::block_on::{closure#0}::{closure#0}::{closure_env#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/coop/mod.rs:167:5
+  18: budget<core::task::poll::Poll<()>, tokio::runtime::scheduler::current_thread::{impl#8}::block_on::{closure#0}::{closure#0}::{closure_env#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/task/coop/mod.rs:133:5
+  19: {closure#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:742:25
+  20: tokio::runtime::scheduler::current_thread::Context::enter
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:432:19
+  21: {closure#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:741:44
+  22: tokio::runtime::scheduler::current_thread::CoreGuard::enter::{{closure}}
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:829:68
+  23: tokio::runtime::context::scoped::Scoped<T>::set
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/context/scoped.rs:40:9
+  24: tokio::runtime::context::set_scheduler::{{closure}}
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/context.rs:176:38
+  25: try_with<tokio::runtime::context::Context, tokio::runtime::context::set_scheduler::{closure_env#0}<(alloc::boxed::Box<tokio::runtime::scheduler::current_thread::Core, alloc::alloc::Global>, core::option::Option<()>), tokio::runtime::scheduler::current_thread::{impl#8}::enter::{closure_env#0}<tokio::runtime::scheduler::current_thread::{impl#8}::block_on::{closure_env#0}<core::pin::Pin<&mut core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>>, core::option::Option<()>>>, (alloc::boxed::Box<tokio::runtime::scheduler::current_thread::Core, alloc::alloc::Global>, core::option::Option<()>)>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/thread/local.rs:462:12
+  26: std::thread::local::LocalKey<T>::with
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/thread/local.rs:426:20
+  27: tokio::runtime::context::set_scheduler
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/context.rs:176:17
+  28: tokio::runtime::scheduler::current_thread::CoreGuard::enter
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:829:27
+  29: tokio::runtime::scheduler::current_thread::CoreGuard::block_on
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:729:24
+  30: {closure#0}<core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:200:33
+  31: tokio::runtime::context::runtime::enter_runtime
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/context/runtime.rs:65:16
+  32: block_on<core::pin::Pin<alloc::boxed::Box<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, alloc::alloc::Global>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/scheduler/current_thread/mod.rs:188:9
+  33: tokio::runtime::runtime::Runtime::block_on_inner
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/runtime.rs:368:52
+  34: block_on<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure#0}::{async_block_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.48.0/src/runtime/runtime.rs:340:18
+  35: {closure#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:867:26
+  36: bolero_hydro::test::TestEngine::run_with_scope::{{closure}}::{{closure}}
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:265:25
+  37: with<bolero_generator_hydro::driver::object::Object<bolero_generator_hydro::driver::exhaustive::Driver>, bolero_hydro::test::{impl#2}::run_with_scope::{closure#0}::{closure_env#0}<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>, ()>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-generator-hydro-0.13.6/src/any/default.rs:51:15
+  38: bolero_hydro::test::TestEngine::run_with_scope::{{closure}}
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:264:21
+  39: run_exhaustive<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, bolero_hydro::test::{impl#2}::run_with_scope::{closure_env#0}<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:476:33
+  40: run_with_scope<hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure#0}::{closure_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:284:25
+  41: <bolero_hydro::test::TestEngine as bolero_engine_hydro::ScopedEngine>::run
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/test/mod.rs:508:14
+  42: bolero_hydro::TestTarget<bolero_hydro::ByteSliceGenerator,E,bolero_hydro::BorrowedInput>::run_with_replay
+             at /tmp/.tmpyHGM1F/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bolero-hydro-0.13.7/src/lib.rs:491:21
+  43: hydro_lang::sim::compiled::CompiledSim::exhaustive_then::{{closure}}
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:846:18
+  44: with_instantiator<(), hydro_lang::sim::compiled::{impl#4}::exhaustive_then::{closure_env#0}<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:597:9
+  45: exhaustive_then<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#1}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>, hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#2}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>
+             at /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/compiled.rs:834:14
+  46: hydrofrac::check::engine::brute::<impl hydrofrac::check::engine::Engine<B>>::execute::{{closure}}
+             at ./src/check/brute_force.rs:508:25
+  47: <core::panic::unwind_safe::AssertUnwindSafe<F> as core::ops::function::FnOnce<()>>::call_once
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/panic/unwind_safe.rs:275:9
+  48: do_call<core::panic::unwind_safe::AssertUnwindSafe<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#3}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panicking.rs:581:40
+  49: __rust_try
+  50: catch_unwind<(), core::panic::unwind_safe::AssertUnwindSafe<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#3}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panicking.rs:544:19
+  51: catch_unwind<core::panic::unwind_safe::AssertUnwindSafe<hydrofrac::check::engine::brute::{impl#8}::execute::{closure_env#3}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>>, ()>
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std/src/panic.rs:359:14
+  52: execute<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}, hydrofrac::check::engine::brute::{impl#8}::brute_force::{closure_env#5}<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>>
+             at ./src/check/brute_force.rs:505:13
+  53: brute_force<hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{closure_env#0}>
+             at ./src/check/brute_force.rs:560:40
+  54: hydrofrac::check::engine::brute::<impl hydrofrac::check::engine::EcCheck>::cross_check
+             at ./src/check/brute_force.rs:239:41
+  55: hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot
+             at ./src/check/rev2_probes.rs:370:23
+  56: hydrofrac::check::rev2_probes::zz_review_batch_beside_an_unready_snapshot::{{closure}}
+             at ./src/check/rev2_probes.rs:342:48
+  57: core::ops::function::FnOnce::call_once
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+  58: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+=== PROBE R1
+fragile sites: Some([FragileSite { index: 0, op: "batch_beside_snapshot", site: "rev2_probes.rs:353" }, FragileSite { index: 1, op: "snapshot", site: "rev2_probes.rs:362" }, FragileSite { index: 2, op: "fold", site: "rev2_probes.rs:361" }])
+brute force up to 2 fault(s): 9 candidate faults, 4 sets, 52 schedules, 2 pass(es), 113.76ms
+  y (rev2_probes.rs): omissions alone break it: {omit(x[process→cluster@0]: 1)} (3 breaking of 4 admissible sets)
+  facts (rev2_probes.rs): omissions alone break it: {omit(x[process→cluster@0]: 1)} (3 breaking of 4 admissible sets)
+  x (rev2_probes.rs): omissions alone break it: {omit(x[process→cluster@0]: 1)} (3 breaking of 4 admissible sets)
+
+DISAGREEMENT: y (rev2_probes.rs): the search says it holds with up to 0 crash(es), but {omit(x[process→cluster@0]: 1)} (0 crash(es)) breaks it
+
+PROBE R1 DISAGREEMENTS (1): [
+    "y (rev2_probes.rs): the search says it holds with up to 0 crash(es), but {omit(x[process→cluster@0]: 1)} (0 crash(es)) breaks it",
+]
+PROBE R1 SEARCH:
+cluster:
+  [0] y (Stream, rev2_probes.rs:349): holds with up to 0 crashes (the `max_crashes` cap)
+      1 hypothesis, 46 schedules, 92.28ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [1] facts (Stream, rev2_probes.rs:355): breaks under omissions alone: {omit(x[process→cluster@0]: 1)} (the run panicked: member stuck: a tick of Cluster(loc2v1) (member Some(0)) has a hook that never became ready (a snapshot of a singleton that never got a value))
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/zz_review_batch_beside_an_unready_snapshot/facts_rev2_probes.rs/counterexample.svg
+      2 hypotheses, 46 schedules, 557.90ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [2] x (Stream, rev2_probes.rs:358): breaks under omissions alone: {omit(x[process→cluster@0]: 1)} (the run panicked: member stuck: a tick of Cluster(loc2v1) (member Some(0)) has a hook that never became ready (a snapshot of a singleton that never got a value))
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/zz_review_batch_beside_an_unready_snapshot/x_rev2_probes.rs/counterexample.svg
+      2 hypotheses, 46 schedules, 96.95ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+
+ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 142 filtered out; finished in 130.15s
+
+exit 0

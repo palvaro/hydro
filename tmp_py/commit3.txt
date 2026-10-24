@@ -1,0 +1,53 @@
+fix(hydrofrac): tag order-dependent top-level folds and scans as fragile
+
+## The bug: a false certificate
+`provenance/fragile.rs` tagged `fold`, `fold_keyed`, `reduce`, `reduce_keyed`
+and `scan` as fragile only inside a tick. But a top-level `TotalOrder` stream
+can carry an order the simulator chooses: `assume_ordering` at top level
+(`ObserveNonDet` with `trusted: false`) compiles to a
+`TopLevelStreamOrderHook` (`hydro_lang/src/sim/builder.rs`), which is a
+schedule choice. A top-level `scan` after it depends on that order, but was
+untagged. The program counted as fragile-free, ran on one schedule, and was
+certified.
+
+Repro, now the regression test
+`check::brute_tests::a_top_level_scan_over_a_chosen_order_is_fragile`:
+- two processes each `broadcast_closed` one value (1 and 2) to two members;
+- each member merges them, applies `assume_ordering::<TotalOrder>`, then
+  `scan`s to keep the first value;
+- the output is labelled eventually consistent.
+
+Before the fix, `fragile_sites() == Some([])` and the search said "holds with
+up to 0 crashes", while brute force broke the label with the empty set. Now
+`scan` is a fragile site, and the search finds the no-fault counterexample,
+in agreement with brute force.
+
+## The fix: an allowlist
+`View::fragile` is now an allowlist. An operator is robust only on an arm
+that says why it is insensitive to arrival order and batching:
+- plumbing;
+- element-wise operators with pure closures;
+- set-preserving merges and reorderings;
+- networks, and `batch` of a stream;
+- fixed sources and the harness's inputs;
+- top-level joins (with `JoinHalf`'s bounded build side complete before it is
+  probed);
+- the dedup idiom;
+- constant inputs.
+
+Every other kind is fragile through a default arm. That includes folds,
+reduces and scans anywhere, snapshots, negation, `cross_singleton`,
+`enumerate`, `chain_first`, and any IR kind added later. Opaque islands keep
+no tag, since lineage already treats their records as fragile.
+
+Sources decide directly: a source has no inputs, so the constant-inputs
+exemption would hold for it vacuously.
+
+## Gates (every label of every check, before vs after)
+- `cargo test -p hydrofrac --features cross-check`: 141 passed (140 + the
+  regression).
+- `cargo test -p hydro_std --lib hydrofrac`: 12 passed.
+- `cargo test -p hydro_test --lib cluster::ec_`: 42 passed.
+- No verdict changed and no certificate was lost. The only cost changes are
+  in sampled searches (multi-Paxos, uniform broadcast and CTP-3 demos, which
+  sample 8 or 64 schedules), i.e. sampling noise.

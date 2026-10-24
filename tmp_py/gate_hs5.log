@@ -1,0 +1,1321 @@
+   Compiling hydro_lang v0.17.0-alpha.4 (/local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang)
+   Compiling hydrofrac v0.0.0 (/local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydrofrac)
+warning: variable does not need to be mutable
+    --> hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     |
+1383 |     let mut observe = |history: &mut Vec<EmissionRecord>,
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `hydro_lang` (lib) generated 1 warning (run `cargo fix --lib -p hydro_lang` to apply 1 suggestion)
+   Compiling hydro_std v0.17.0-alpha.4 (/local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_std)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 11s
+     Running unittests src/lib.rs (/tmp/.tmpyHGM1F/target/debug/deps/hydro_std-0d94de225ae2ac10)
+
+running 15 tests
+test ec_inference_demos::ec_abd_hydrofrac::races_targets_probe_abd ... ignored, measurement
+test ec_inference_demos::ec_abd_kv_hydrofrac::abd_kv_two_writes ... ignored, measurement
+test ec_inference_demos::ec_abd_kv_hydrofrac::abd_kv_two_writes_failure_free_completion ... ignored, measurement
+warning: profile package spec `website_playground` in profile `release` did not match any packages
+warning: profile package spec `website_playground` in profile `dev` did not match any packages
+   Compiling hydro_lang v0.17.0-alpha.4 (/local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang)
+   Compiling hydrofrac v0.0.0 (/local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydrofrac)
+warning: variable does not need to be mutable
+    --> /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     |
+1383 |     let mut observe = |history: &mut Vec<EmissionRecord>,
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling hydro_std v0.17.0-alpha.4 (/local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_std)
+warning: `hydro_lang` (lib) generated 1 warning (run `cargo fix --lib -p hydro_lang` to apply 1 suggestion)
+   Compiling hydro_std-hydro-trybuild v0.0.0 (/tmp/.tmpyHGM1F/target/hydro_trybuild/hydro_std)
+   Compiling hydro_std-hydro-trybuild-dylib v0.0.0 (/tmp/.tmpyHGM1F/target/hydro_trybuild/hydro_std/dylib)
+   Compiling hydro_std-hydro-trybuild-dylib-examples v0.0.0 (/tmp/.tmpyHGM1F/target/hydro_trybuild/hydro_std/dylib-examples)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 42.68s
+test ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register has been running for over 60 seconds
+test ec_inference_demos::ec_abd_hydrofrac::the_register_breaks_when_the_client_crashes_mid_phase_two has been running for over 60 seconds
+test ec_inference_demos::hydrofrac_provenance_tests::corpus_abd_register has been running for over 60 seconds
+test ec_inference_demos::hydrofrac_provenance_tests::corpus_abd_register_reliable_phase2 has been running for over 60 seconds
+test ec_inference_demos::hydrofrac_provenance_tests::corpus_broadcast_live has been running for over 60 seconds
+test ec_inference_demos::hydrofrac_provenance_tests::corpus_g_set_gossip has been running for over 60 seconds
+test ec_inference_demos::hydrofrac_provenance_tests::corpus_g_set_gossip_live has been running for over 60 seconds
+test ec_inference_demos::hydrofrac_provenance_tests::corpus_leader_merge has been running for over 60 seconds
+test ec_inference_demos::hydrofrac_provenance_tests::corpus_broadcast_live ... ok
+test ec_inference_demos::hydrofrac_provenance_tests::corpus_leader_merge ... ok
+test ec_inference_demos::hydrofrac_provenance_tests::corpus_g_set_gossip ... ok
+test ec_inference_demos::hydrofrac_provenance_tests::corpus_g_set_gossip_live ... ok
+test ec_inference_demos::hydrofrac_provenance_tests::corpus_abd_register ... ok
+test ec_inference_demos::hydrofrac_provenance_tests::corpus_abd_register_reliable_phase2 ... ok
+test ec_inference_demos::ec_abd_hydrofrac::the_register_breaks_when_the_client_crashes_mid_phase_two ... FAILED
+test ec_inference_demos::hydrofrac_provenance_tests::corpus_reliable_broadcast_closed ... ok
+test ec_inference_demos::hydrofrac_provenance_tests::corpus_reliable_broadcast_live ... ok
+test ec_inference_demos::hydrofrac_provenance_tests::corpus_uniform_broadcast ... ok
+test ec_inference_demos::hydrofrac_provenance_tests::corpus_multi_paxos ... ok
+test ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register ... FAILED
+
+failures:
+
+---- ec_inference_demos::ec_abd_hydrofrac::the_register_breaks_when_the_client_crashes_mid_phase_two stdout ----
+[1m[33mwarning[0m[1m: variable does not need to be mutable[0m
+    [1m[94m--> [0m(full path) /tmp/.tmpyHGM1F/target/hydro_trybuild/hydro_std///local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     [1m[94m|[0m
+[1m[94m1383[0m [1m[94m|[0m     let mut observe = |history: &mut Vec<EmissionRecord>,
+     [1m[94m|[0m         [1m[94m----[0m[1m[33m^^^^^^^[0m
+     [1m[94m|[0m         [1m[94m|[0m
+     [1m[94m|[0m         [1m[94mhelp: remove this `mut`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+
+test <unknown> ...	run time: 64.373306ms | iterations/s: 124 | rng inputs: 8
+test <unknown> ...	run time: 31.350652ms | iterations/s: 255 | rng inputs: 8
+test <unknown> ...	run time: 16.828492ms | iterations/s: 59 | rng inputs: 1 | exit reason: test failure
+
+======================== Test Failure ========================
+
+BOLERO_RANDOM_SEED=111015554097890343081568266043819450841
+
+Input: 
+()
+
+Error: 
+thread panicked with an unknown error
+==============================================================
+
+Running Tick (Cluster Member 1)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+
+Running Tick (Cluster Member 2)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+
+Running Tick (Cluster Member 1)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unchanged snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Query { rid: 1 })]
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Query { rid: 1 })]
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/quorum.rs:347:18
+*  |    let covered = sliced! {
+*  |                 ^ releasing unordered items: [(1, (MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Replica>(1), None)), (1, (MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Replica>(0), None))]
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 })]
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unchanged snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+
+Running Tick (Cluster Member 1)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 })]
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unchanged snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+
+--> src/ec_inference_demos/abd.rs:147:10
+ |        .fold(
+ |         ^ fold input batch (permuted): [(Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10)]
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: Some((Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10))
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+
+Running Tick (Cluster Member 2)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unchanged snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Query { rid: 1 })]
+
+--> src/ec_inference_demos/abd.rs:147:10
+ |        .fold(
+ |         ^ fold input batch (permuted): [(Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10)]
+
+Running Tick (Cluster Member 1)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: Some((Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10))
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+test <unknown> ...	run time: 36.919487ms | iterations/s: 217 | rng inputs: 8
+test <unknown> ...	run time: 3.893196ms | iterations/s: 257 | rng inputs: 1 | exit reason: test failure
+
+======================== Test Failure ========================
+
+BOLERO_RANDOM_SEED=108399982543437329744226874906142342179
+
+Input: 
+()
+
+Error: 
+thread panicked with an unknown error
+==============================================================
+
+Running Tick (Cluster Member 2)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Query { rid: 1 })]
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+
+Running Tick (Cluster Member 1)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Query { rid: 1 })]
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/quorum.rs:347:18
+*  |    let covered = sliced! {
+*  |                 ^ releasing unordered items: [(1, (MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Replica>(1), None))]
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/quorum.rs:347:18
+*  |    let covered = sliced! {
+*  |                 ^ releasing unordered items: [(1, (MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Replica>(2), None))]
+
+--> src/ec_inference_demos/abd.rs:147:10
+ |        .fold(
+ |         ^ fold input batch (permuted): [(Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10)]
+
+Running Tick (Cluster Member 1)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 })]
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: Some((Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10))
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+
+--> src/ec_inference_demos/abd.rs:147:10
+ |        .fold(
+ |         ^ fold input batch (permuted): [(Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10)]
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 })]
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unchanged snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: Some((Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10))
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Query { rid: 1 })]
+test <unknown> ...	run time: 56.110083ms | iterations/s: 143 | rng inputs: 8
+test <unknown> ...	run time: 32.318014ms | iterations/s: 248 | rng inputs: 8
+test <unknown> ...	run time: 28.386644ms | iterations/s: 282 | rng inputs: 8
+test <unknown> ...	run time: 1.868986ms | iterations/s: 535 | rng inputs: 1 | exit reason: test failure
+
+======================== Test Failure ========================
+
+BOLERO_RANDOM_SEED=208521304939108915694968318492322778432
+
+Input: 
+()
+
+Error: 
+thread panicked with an unknown error
+==============================================================
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unchanged snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Query { rid: 1 })]
+
+Running Tick (Cluster Member 1)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Query { rid: 1 })]
+
+Running Tick (Cluster Member 2)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+test <unknown> ...	run time: 38.571637ms | iterations/s: 207 | rng inputs: 8
+test <unknown> ...	run time: 3.405515ms | iterations/s: 294 | rng inputs: 1 | exit reason: test failure
+
+======================== Test Failure ========================
+
+BOLERO_RANDOM_SEED=51593621130213622453425112821558668189
+
+Input: 
+()
+
+Error: 
+thread panicked with an unknown error
+==============================================================
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Query { rid: 1 })]
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/quorum.rs:347:18
+*  |    let covered = sliced! {
+*  |                 ^ releasing unordered items: [(1, (MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Replica>(0), None))]
+
+Running Tick (Cluster Member 2)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Query { rid: 1 })]
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/quorum.rs:347:18
+*  |    let covered = sliced! {
+*  |                 ^ releasing unordered items: [(1, (MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Replica>(2), None))]
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 })]
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unchanged snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+
+Running Tick (Cluster Member 1)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 })]
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Query { rid: 1 })]
+
+--> src/ec_inference_demos/abd.rs:147:10
+ |        .fold(
+ |         ^ fold input batch (permuted): [(Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10)]
+
+--> src/ec_inference_demos/abd.rs:147:10
+ |        .fold(
+ |         ^ fold input batch (permuted): [(Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10)]
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: Some((Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10))
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+
+Running Tick (Cluster Member 1)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: Some((Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10))
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+abd (reliable phase 2: false): 0.7s
+Replica:
+  [0] phase2_fwd (Stream, abd.rs:387): no counterexample with up to 0 crashes found, breaks at 1: {crash(Client@0 after phase2[Client@0→Replica@1]: ‹1›)}
+      Replica@2 lacks ‹2›
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/the_register_breaks_when_the_client_crashes_mid_phase_two/phase2_fwd_abd.rs/counterexample.svg
+      3 hypotheses, 17 schedules, 126.12ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [1] abd_register_state (Stream, abd.rs:143): no counterexample with up to 0 crashes found, breaks at 1: {crash(Client@0 after phase2[Client@0→Replica@1]: ‹1›)}
+      Replica@2 lacks ‹3›
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/the_register_breaks_when_the_client_crashes_mid_phase_two/abd_register_state_abd.rs/counterexample.svg
+      3 hypotheses, 17 schedules, 118.61ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [2] abd_register_state (Singleton, abd.rs:147): not checked: Singleton (not a set-valued collection)
+  [3] queries (KeyedStream, abd.rs:378): no counterexample with up to 0 crashes found, breaks at 1: {crash(Client@0 after queries[Client@0→Replica@1]: Query { rid: 1 })}
+      Replica@2 lacks (Client@0, Query { rid: 1 })
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/the_register_breaks_when_the_client_crashes_mid_phase_two/queries_abd.rs/counterexample.svg
+      5 hypotheses, 33 schedules, 193.08ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [4] phase2 (KeyedStream, abd.rs:473): no counterexample with up to 0 crashes found, breaks at 1: {crash(Client@0 after phase2[Client@0→Replica@1]: ‹1›)}
+      Replica@2 lacks ‹2›
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/the_register_breaks_when_the_client_crashes_mid_phase_two/phase2_abd.rs/counterexample.svg
+      3 hypotheses, 17 schedules, 119.33ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+legend:
+  ‹1› = Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 }
+  ‹2› = (Client@0, Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 })
+  ‹3› = (Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10)
+
+
+thread 'ec_inference_demos::ec_abd_hydrofrac::the_register_breaks_when_the_client_crashes_mid_phase_two' (1832) panicked at hydro_std/src/ec_inference_demos/ec_abd_hydrofrac.rs:68:9:
+one covered register label
+Replica:
+  [0] phase2_fwd (Stream, abd.rs:387): no counterexample with up to 0 crashes found, breaks at 1: {crash(Client@0 after phase2[Client@0→Replica@1]: ‹1›)}
+      Replica@2 lacks ‹2›
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/the_register_breaks_when_the_client_crashes_mid_phase_two/phase2_fwd_abd.rs/counterexample.svg
+      3 hypotheses, 17 schedules, 126.12ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [1] abd_register_state (Stream, abd.rs:143): no counterexample with up to 0 crashes found, breaks at 1: {crash(Client@0 after phase2[Client@0→Replica@1]: ‹1›)}
+      Replica@2 lacks ‹3›
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/the_register_breaks_when_the_client_crashes_mid_phase_two/abd_register_state_abd.rs/counterexample.svg
+      3 hypotheses, 17 schedules, 118.61ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [2] abd_register_state (Singleton, abd.rs:147): not checked: Singleton (not a set-valued collection)
+  [3] queries (KeyedStream, abd.rs:378): no counterexample with up to 0 crashes found, breaks at 1: {crash(Client@0 after queries[Client@0→Replica@1]: Query { rid: 1 })}
+      Replica@2 lacks (Client@0, Query { rid: 1 })
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/the_register_breaks_when_the_client_crashes_mid_phase_two/queries_abd.rs/counterexample.svg
+      5 hypotheses, 33 schedules, 193.08ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [4] phase2 (KeyedStream, abd.rs:473): no counterexample with up to 0 crashes found, breaks at 1: {crash(Client@0 after phase2[Client@0→Replica@1]: ‹1›)}
+      Replica@2 lacks ‹2›
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/the_register_breaks_when_the_client_crashes_mid_phase_two/phase2_abd.rs/counterexample.svg
+      3 hypotheses, 17 schedules, 119.33ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+legend:
+  ‹1› = Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 }
+  ‹2› = (Client@0, Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 })
+  ‹3› = (Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10)
+
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/panicking.rs:80:14
+   2: hydro_std::ec_inference_demos::ec_abd_hydrofrac::register
+             at ./src/ec_inference_demos/ec_abd_hydrofrac.rs:68:9
+   3: hydro_std::ec_inference_demos::ec_abd_hydrofrac::the_register_breaks_when_the_client_crashes_mid_phase_two
+             at ./src/ec_inference_demos/ec_abd_hydrofrac.rs:136:38
+   4: hydro_std::ec_inference_demos::ec_abd_hydrofrac::the_register_breaks_when_the_client_crashes_mid_phase_two::{{closure}}
+             at ./src/ec_inference_demos/ec_abd_hydrofrac.rs:134:63
+   5: core::ops::function::FnOnce::call_once
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+   6: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+---- ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register stdout ----
+[1m[33mwarning[0m[1m: variable does not need to be mutable[0m
+    [1m[94m--> [0m(full path) /tmp/.tmpyHGM1F/target/hydro_trybuild/hydro_std///local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     [1m[94m|[0m
+[1m[94m1383[0m [1m[94m|[0m     let mut observe = |history: &mut Vec<EmissionRecord>,
+     [1m[94m|[0m         [1m[94m----[0m[1m[33m^^^^^^^[0m
+     [1m[94m|[0m         [1m[94m|[0m
+     [1m[94m|[0m         [1m[94mhelp: remove this `mut`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mnote[0m: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+
+test <unknown> ...	run time: 85.860526ms | iterations/s: 93 | rng inputs: 8
+test <unknown> ...	run time: 52.213442ms | iterations/s: 153 | rng inputs: 8
+test <unknown> ...	run time: 52.828697ms | iterations/s: 151 | rng inputs: 8
+test <unknown> ...	run time: 52.608732ms | iterations/s: 152 | rng inputs: 8
+test <unknown> ...	run time: 17.361952ms | iterations/s: 461 | rng inputs: 8
+test <unknown> ...	run time: 15.065653ms | iterations/s: 531 | rng inputs: 8
+test <unknown> ...	run time: 11.791439ms | iterations/s: 678 | rng inputs: 8
+test <unknown> ...	run time: 8.228438ms | iterations/s: 972 | rng inputs: 8
+test <unknown> ...	run time: 56.52561ms | iterations/s: 142 | rng inputs: 8
+test <unknown> ...	run time: 60.023868ms | iterations/s: 133 | rng inputs: 8
+test <unknown> ...	run time: 47.22218ms | iterations/s: 169 | rng inputs: 8
+test <unknown> ...	run time: 48.855069ms | iterations/s: 164 | rng inputs: 8
+test <unknown> ...	run time: 51.683253ms | iterations/s: 155 | rng inputs: 8
+test <unknown> ...	run time: 54.170126ms | iterations/s: 148 | rng inputs: 8
+test <unknown> ...	run time: 41.82447ms | iterations/s: 191 | rng inputs: 8
+test <unknown> ...	run time: 56.004695ms | iterations/s: 143 | rng inputs: 8
+test <unknown> ...	run time: 63.044187ms | iterations/s: 127 | rng inputs: 8
+test <unknown> ...	run time: 46.802787ms | iterations/s: 171 | rng inputs: 8
+test <unknown> ...	run time: 52.398146ms | iterations/s: 153 | rng inputs: 8
+test <unknown> ...	run time: 45.8336ms | iterations/s: 175 | rng inputs: 8
+test <unknown> ...	run time: 45.07602ms | iterations/s: 177 | rng inputs: 8
+test <unknown> ...	run time: 41.345375ms | iterations/s: 193 | rng inputs: 8
+test <unknown> ...	run time: 57.011581ms | iterations/s: 140 | rng inputs: 8
+test <unknown> ...	run time: 62.92399ms | iterations/s: 127 | rng inputs: 8
+test <unknown> ...	run time: 47.140587ms | iterations/s: 170 | rng inputs: 8
+test <unknown> ...	run time: 59.027566ms | iterations/s: 136 | rng inputs: 8
+test <unknown> ...	run time: 58.315415ms | iterations/s: 137 | rng inputs: 8
+test <unknown> ...	run time: 61.87252ms | iterations/s: 129 | rng inputs: 8
+test <unknown> ...	run time: 47.092634ms | iterations/s: 170 | rng inputs: 8
+test <unknown> ...	run time: 48.073471ms | iterations/s: 166 | rng inputs: 8
+test <unknown> ...	run time: 44.110305ms | iterations/s: 181 | rng inputs: 8
+test <unknown> ...	run time: 40.163023ms | iterations/s: 199 | rng inputs: 8
+test <unknown> ...	run time: 40.003997ms | iterations/s: 200 | rng inputs: 8
+test <unknown> ...	run time: 40.738529ms | iterations/s: 196 | rng inputs: 8
+test <unknown> ...	run time: 49.520321ms | iterations/s: 162 | rng inputs: 8
+test <unknown> ...	run time: 48.450626ms | iterations/s: 165 | rng inputs: 8
+test <unknown> ...	run time: 14.03635ms | iterations/s: 570 | rng inputs: 8
+test <unknown> ...	run time: 35.460594ms | iterations/s: 226 | rng inputs: 8
+test <unknown> ...	run time: 37.03413ms | iterations/s: 216 | rng inputs: 8
+test <unknown> ...	run time: 14.204177ms | iterations/s: 563 | rng inputs: 8
+test <unknown> ...	run time: 11.306534ms | iterations/s: 708 | rng inputs: 8
+test <unknown> ...	run time: 34.985995ms | iterations/s: 229 | rng inputs: 8
+test <unknown> ...	run time: 25.494156ms | iterations/s: 314 | rng inputs: 8
+test <unknown> ...	run time: 35.653851ms | iterations/s: 224 | rng inputs: 8
+test <unknown> ...	run time: 12.180577ms | iterations/s: 657 | rng inputs: 8
+test <unknown> ...	run time: 11.31297ms | iterations/s: 707 | rng inputs: 8
+test <unknown> ...	run time: 37.943061ms | iterations/s: 211 | rng inputs: 8
+test <unknown> ...	run time: 13.690027ms | iterations/s: 584 | rng inputs: 8
+test <unknown> ...	run time: 35.310581ms | iterations/s: 227 | rng inputs: 8
+test <unknown> ...	run time: 35.085507ms | iterations/s: 228 | rng inputs: 8
+test <unknown> ...	run time: 11.013788ms | iterations/s: 726 | rng inputs: 8
+test <unknown> ...	run time: 44.190447ms | iterations/s: 181 | rng inputs: 8
+test <unknown> ...	run time: 13.391076ms | iterations/s: 597 | rng inputs: 8
+test <unknown> ...	run time: 36.383498ms | iterations/s: 220 | rng inputs: 8
+test <unknown> ...	run time: 17.265153ms | iterations/s: 463 | rng inputs: 8
+test <unknown> ...	run time: 10.555926ms | iterations/s: 758 | rng inputs: 8
+test <unknown> ...	run time: 34.584035ms | iterations/s: 231 | rng inputs: 8
+test <unknown> ...	run time: 29.060289ms | iterations/s: 275 | rng inputs: 8
+test <unknown> ...	run time: 13.917078ms | iterations/s: 575 | rng inputs: 8
+test <unknown> ...	run time: 34.529023ms | iterations/s: 232 | rng inputs: 8
+test <unknown> ...	run time: 15.720079ms | iterations/s: 509 | rng inputs: 8
+test <unknown> ...	run time: 11.152819ms | iterations/s: 717 | rng inputs: 8
+test <unknown> ...	run time: 53.142318ms | iterations/s: 151 | rng inputs: 8
+test <unknown> ...	run time: 33.776129ms | iterations/s: 237 | rng inputs: 8
+test <unknown> ...	run time: 13.553983ms | iterations/s: 590 | rng inputs: 8
+test <unknown> ...	run time: 13.293703ms | iterations/s: 602 | rng inputs: 8
+test <unknown> ...	run time: 12.105508ms | iterations/s: 661 | rng inputs: 8
+test <unknown> ...	run time: 44.240064ms | iterations/s: 181 | rng inputs: 8
+test <unknown> ...	run time: 40.623937ms | iterations/s: 197 | rng inputs: 8
+test <unknown> ...	run time: 15.16197ms | iterations/s: 528 | rng inputs: 8
+test <unknown> ...	run time: 13.159163ms | iterations/s: 608 | rng inputs: 8
+test <unknown> ...	run time: 14.125201ms | iterations/s: 566 | rng inputs: 8
+test <unknown> ...	run time: 81.764668ms | iterations/s: 98 | rng inputs: 8
+test <unknown> ...	run time: 69.362295ms | iterations/s: 115 | rng inputs: 8
+test <unknown> ...	run time: 44.013815ms | iterations/s: 182 | rng inputs: 8
+test <unknown> ...	run time: 17.867545ms | iterations/s: 448 | rng inputs: 8
+test <unknown> ...	run time: 11.470341ms | iterations/s: 697 | rng inputs: 8
+test <unknown> ...	run time: 43.334783ms | iterations/s: 185 | rng inputs: 8
+test <unknown> ...	run time: 10.577659ms | iterations/s: 756 | rng inputs: 8
+test <unknown> ...	run time: 47.7464ms | iterations/s: 168 | rng inputs: 8
+test <unknown> ...	run time: 52.293429ms | iterations/s: 153 | rng inputs: 8
+test <unknown> ...	run time: 17.869077ms | iterations/s: 448 | rng inputs: 8
+test <unknown> ...	run time: 18.727438ms | iterations/s: 427 | rng inputs: 8
+test <unknown> ...	run time: 45.517208ms | iterations/s: 176 | rng inputs: 8
+test <unknown> ...	run time: 11.012862ms | iterations/s: 726 | rng inputs: 8
+test <unknown> ...	run time: 64.293803ms | iterations/s: 124 | rng inputs: 8
+test <unknown> ...	run time: 42.190993ms | iterations/s: 190 | rng inputs: 8
+test <unknown> ...	run time: 18.835872ms | iterations/s: 425 | rng inputs: 8
+test <unknown> ...	run time: 15.308369ms | iterations/s: 523 | rng inputs: 8
+test <unknown> ...	run time: 10.226839ms | iterations/s: 782 | rng inputs: 8
+test <unknown> ...	run time: 52.73115ms | iterations/s: 152 | rng inputs: 8
+test <unknown> ...	run time: 11.915129ms | iterations/s: 671 | rng inputs: 8
+test <unknown> ...	run time: 51.187635ms | iterations/s: 156 | rng inputs: 8
+test <unknown> ...	run time: 50.950255ms | iterations/s: 157 | rng inputs: 8
+test <unknown> ...	run time: 19.47608ms | iterations/s: 411 | rng inputs: 8
+test <unknown> ...	run time: 15.427816ms | iterations/s: 519 | rng inputs: 8
+test <unknown> ...	run time: 13.925168ms | iterations/s: 574 | rng inputs: 8
+test <unknown> ...	run time: 47.175038ms | iterations/s: 170 | rng inputs: 8
+test <unknown> ...	run time: 44.7386ms | iterations/s: 179 | rng inputs: 8
+test <unknown> ...	run time: 140.695931ms | iterations/s: 57 | rng inputs: 8
+test <unknown> ...	run time: 40.775519ms | iterations/s: 196 | rng inputs: 8
+test <unknown> ...	run time: 20.275704ms | iterations/s: 395 | rng inputs: 8
+test <unknown> ...	run time: 23.721715ms | iterations/s: 337 | rng inputs: 8
+test <unknown> ...	run time: 8.907748ms | iterations/s: 898 | rng inputs: 8
+test <unknown> ...	run time: 42.716971ms | iterations/s: 187 | rng inputs: 8
+test <unknown> ...	run time: 18.222395ms | iterations/s: 439 | rng inputs: 8
+test <unknown> ...	run time: 14.074737ms | iterations/s: 568 | rng inputs: 8
+test <unknown> ...	run time: 12.209841ms | iterations/s: 655 | rng inputs: 8
+test <unknown> ...	run time: 40.009666ms | iterations/s: 200 | rng inputs: 8
+test <unknown> ...	run time: 12.221829ms | iterations/s: 655 | rng inputs: 8
+test <unknown> ...	run time: 37.613088ms | iterations/s: 213 | rng inputs: 8
+test <unknown> ...	run time: 16.88029ms | iterations/s: 474 | rng inputs: 8
+test <unknown> ...	run time: 16.973983ms | iterations/s: 471 | rng inputs: 8
+test <unknown> ...	run time: 58.463732ms | iterations/s: 137 | rng inputs: 8
+test <unknown> ...	run time: 72.072486ms | iterations/s: 111 | rng inputs: 8
+test <unknown> ...	run time: 11.226864ms | iterations/s: 713 | rng inputs: 8
+test <unknown> ...	run time: 148.956943ms | iterations/s: 54 | rng inputs: 8
+test <unknown> ...	run time: 57.832508ms | iterations/s: 138 | rng inputs: 8
+test <unknown> ...	run time: 14.329339ms | iterations/s: 558 | rng inputs: 8
+test <unknown> ...	run time: 14.732639ms | iterations/s: 543 | rng inputs: 8
+test <unknown> ...	run time: 48.974175ms | iterations/s: 163 | rng inputs: 8
+test <unknown> ...	run time: 9.524131ms | iterations/s: 840 | rng inputs: 8
+test <unknown> ...	run time: 47.875051ms | iterations/s: 167 | rng inputs: 8
+test <unknown> ...	run time: 46.343527ms | iterations/s: 173 | rng inputs: 8
+test <unknown> ...	run time: 14.545185ms | iterations/s: 550 | rng inputs: 8
+test <unknown> ...	run time: 11.971729ms | iterations/s: 668 | rng inputs: 8
+test <unknown> ...	run time: 38.088785ms | iterations/s: 210 | rng inputs: 8
+test <unknown> ...	run time: 10.593047ms | iterations/s: 755 | rng inputs: 8
+test <unknown> ...	run time: 39.016798ms | iterations/s: 205 | rng inputs: 8
+test <unknown> ...	run time: 40.408943ms | iterations/s: 198 | rng inputs: 8
+test <unknown> ...	run time: 16.5949ms | iterations/s: 482 | rng inputs: 8
+test <unknown> ...	run time: 14.428605ms | iterations/s: 554 | rng inputs: 8
+test <unknown> ...	run time: 39.29787ms | iterations/s: 204 | rng inputs: 8
+test <unknown> ...	run time: 10.727358ms | iterations/s: 746 | rng inputs: 8
+test <unknown> ...	run time: 40.441809ms | iterations/s: 198 | rng inputs: 8
+test <unknown> ...	run time: 41.609147ms | iterations/s: 192 | rng inputs: 8
+test <unknown> ...	run time: 17.277816ms | iterations/s: 463 | rng inputs: 8
+test <unknown> ...	run time: 13.738537ms | iterations/s: 582 | rng inputs: 8
+test <unknown> ...	run time: 11.705223ms | iterations/s: 683 | rng inputs: 8
+test <unknown> ...	run time: 45.069839ms | iterations/s: 178 | rng inputs: 8
+test <unknown> ...	run time: 11.203336ms | iterations/s: 714 | rng inputs: 8
+test <unknown> ...	run time: 55.089935ms | iterations/s: 145 | rng inputs: 8
+test <unknown> ...	run time: 47.165026ms | iterations/s: 170 | rng inputs: 8
+test <unknown> ...	run time: 17.876966ms | iterations/s: 448 | rng inputs: 8
+test <unknown> ...	run time: 16.455022ms | iterations/s: 486 | rng inputs: 8
+test <unknown> ...	run time: 14.314892ms | iterations/s: 559 | rng inputs: 8
+test <unknown> ...	run time: 50.484301ms | iterations/s: 158 | rng inputs: 8
+test <unknown> ...	run time: 45.754182ms | iterations/s: 175 | rng inputs: 8
+test <unknown> ...	run time: 46.955113ms | iterations/s: 170 | rng inputs: 8
+test <unknown> ...	run time: 38.311525ms | iterations/s: 209 | rng inputs: 8
+test <unknown> ...	run time: 16.602452ms | iterations/s: 482 | rng inputs: 8
+test <unknown> ...	run time: 14.220437ms | iterations/s: 563 | rng inputs: 8
+test <unknown> ...	run time: 8.475528ms | iterations/s: 944 | rng inputs: 8
+test <unknown> ...	run time: 37.369653ms | iterations/s: 214 | rng inputs: 8
+test <unknown> ...	run time: 14.394612ms | iterations/s: 556 | rng inputs: 8
+test <unknown> ...	run time: 18.458044ms | iterations/s: 433 | rng inputs: 8
+test <unknown> ...	run time: 14.460969ms | iterations/s: 553 | rng inputs: 8
+test <unknown> ...	run time: 36.492884ms | iterations/s: 219 | rng inputs: 8
+test <unknown> ...	run time: 10.347646ms | iterations/s: 773 | rng inputs: 8
+test <unknown> ...	run time: 37.888779ms | iterations/s: 211 | rng inputs: 8
+test <unknown> ...	run time: 18.658007ms | iterations/s: 429 | rng inputs: 8
+test <unknown> ...	run time: 16.295555ms | iterations/s: 491 | rng inputs: 8
+test <unknown> ...	run time: 13.862158ms | iterations/s: 577 | rng inputs: 8
+test <unknown> ...	run time: 11.275087ms | iterations/s: 710 | rng inputs: 8
+test <unknown> ...	run time: 37.979185ms | iterations/s: 211 | rng inputs: 8
+test <unknown> ...	run time: 27.079897ms | iterations/s: 295 | rng inputs: 8
+test <unknown> ...	run time: 15.051461ms | iterations/s: 532 | rng inputs: 8
+test <unknown> ...	run time: 9.599959ms | iterations/s: 833 | rng inputs: 8
+test <unknown> ...	run time: 13.933427ms | iterations/s: 574 | rng inputs: 8
+test <unknown> ...	run time: 35.980706ms | iterations/s: 222 | rng inputs: 8
+test <unknown> ...	run time: 18.623109ms | iterations/s: 430 | rng inputs: 8
+test <unknown> ...	run time: 15.071527ms | iterations/s: 531 | rng inputs: 8
+test <unknown> ...	run time: 32.801366ms | iterations/s: 244 | rng inputs: 8
+test <unknown> ...	run time: 57.912072ms | iterations/s: 138 | rng inputs: 8
+test <unknown> ...	run time: 11.310869ms | iterations/s: 707 | rng inputs: 8
+test <unknown> ...	run time: 61.780181ms | iterations/s: 129 | rng inputs: 8
+test <unknown> ...	run time: 117.00485ms | iterations/s: 68 | rng inputs: 8
+test <unknown> ...	run time: 185.904014ms | iterations/s: 43 | rng inputs: 8
+test <unknown> ...	run time: 115.647961ms | iterations/s: 69 | rng inputs: 8
+test <unknown> ...	run time: 24.805379ms | iterations/s: 323 | rng inputs: 8
+test <unknown> ...	run time: 16.83277ms | iterations/s: 475 | rng inputs: 8
+test <unknown> ...	run time: 16.984481ms | iterations/s: 471 | rng inputs: 8
+test <unknown> ...	run time: 18.748979ms | iterations/s: 427 | rng inputs: 8
+test <unknown> ...	run time: 172.182425ms | iterations/s: 46 | rng inputs: 8
+test <unknown> ...	run time: 122.713309ms | iterations/s: 65 | rng inputs: 8
+test <unknown> ...	run time: 69.904665ms | iterations/s: 114 | rng inputs: 8
+test <unknown> ...	run time: 59.624161ms | iterations/s: 134 | rng inputs: 8
+test <unknown> ...	run time: 102.257832ms | iterations/s: 78 | rng inputs: 8
+test <unknown> ...	run time: 125.947407ms | iterations/s: 64 | rng inputs: 8
+test <unknown> ...	run time: 158.954452ms | iterations/s: 50 | rng inputs: 8
+test <unknown> ...	run time: 239.155806ms | iterations/s: 33 | rng inputs: 8
+test <unknown> ...	run time: 157.446885ms | iterations/s: 51 | rng inputs: 8
+test <unknown> ...	run time: 128.681158ms | iterations/s: 62 | rng inputs: 8
+test <unknown> ...	run time: 136.755326ms | iterations/s: 58 | rng inputs: 8
+test <unknown> ...	run time: 136.681705ms | iterations/s: 59 | rng inputs: 8
+test <unknown> ...	run time: 97.517238ms | iterations/s: 82 | rng inputs: 8
+test <unknown> ...	run time: 51.293087ms | iterations/s: 156 | rng inputs: 8
+test <unknown> ...	run time: 88.509946ms | iterations/s: 90 | rng inputs: 8
+test <unknown> ...	run time: 106.271146ms | iterations/s: 75 | rng inputs: 8
+test <unknown> ...	run time: 86.426ms | iterations/s: 93 | rng inputs: 8
+test <unknown> ...	run time: 77.177924ms | iterations/s: 104 | rng inputs: 8
+test <unknown> ...	run time: 60.291437ms | iterations/s: 133 | rng inputs: 8
+test <unknown> ...	run time: 59.889229ms | iterations/s: 134 | rng inputs: 8
+test <unknown> ...	run time: 112.132049ms | iterations/s: 71 | rng inputs: 8
+test <unknown> ...	run time: 100.150283ms | iterations/s: 80 | rng inputs: 8
+test <unknown> ...	run time: 104.069298ms | iterations/s: 77 | rng inputs: 8
+test <unknown> ...	run time: 58.930934ms | iterations/s: 136 | rng inputs: 8
+test <unknown> ...	run time: 127.73976ms | iterations/s: 63 | rng inputs: 8
+test <unknown> ...	run time: 84.303583ms | iterations/s: 95 | rng inputs: 8
+test <unknown> ...	run time: 41.713538ms | iterations/s: 192 | rng inputs: 8
+test <unknown> ...	run time: 55.938736ms | iterations/s: 143 | rng inputs: 8
+test <unknown> ...	run time: 16.568603ms | iterations/s: 483 | rng inputs: 8
+test <unknown> ...	run time: 76.562957ms | iterations/s: 104 | rng inputs: 8
+test <unknown> ...	run time: 75.162852ms | iterations/s: 106 | rng inputs: 8
+test <unknown> ...	run time: 17.654883ms | iterations/s: 453 | rng inputs: 8
+test <unknown> ...	run time: 20.130147ms | iterations/s: 397 | rng inputs: 8
+test <unknown> ...	run time: 50.860385ms | iterations/s: 157 | rng inputs: 8
+test <unknown> ...	run time: 29.620987ms | iterations/s: 270 | rng inputs: 8
+test <unknown> ...	run time: 42.9109ms | iterations/s: 186 | rng inputs: 8
+test <unknown> ...	run time: 14.326536ms | iterations/s: 558 | rng inputs: 8
+test <unknown> ...	run time: 13.149112ms | iterations/s: 608 | rng inputs: 8
+test <unknown> ...	run time: 56.58883ms | iterations/s: 141 | rng inputs: 8
+test <unknown> ...	run time: 38.026059ms | iterations/s: 210 | rng inputs: 8
+test <unknown> ...	run time: 74.358309ms | iterations/s: 108 | rng inputs: 8
+test <unknown> ...	run time: 65.589177ms | iterations/s: 122 | rng inputs: 8
+test <unknown> ...	run time: 13.972089ms | iterations/s: 573 | rng inputs: 8
+test <unknown> ...	run time: 105.795757ms | iterations/s: 76 | rng inputs: 8
+test <unknown> ...	run time: 16.392521ms | iterations/s: 488 | rng inputs: 8
+test <unknown> ...	run time: 65.564849ms | iterations/s: 122 | rng inputs: 8
+test <unknown> ...	run time: 19.004361ms | iterations/s: 421 | rng inputs: 8
+test <unknown> ...	run time: 11.183279ms | iterations/s: 715 | rng inputs: 8
+test <unknown> ...	run time: 58.577409ms | iterations/s: 137 | rng inputs: 8
+test <unknown> ...	run time: 117.531102ms | iterations/s: 68 | rng inputs: 8
+test <unknown> ...	run time: 42.93449ms | iterations/s: 186 | rng inputs: 8
+test <unknown> ...	run time: 100.721801ms | iterations/s: 79 | rng inputs: 8
+test <unknown> ...	run time: 36.27987ms | iterations/s: 221 | rng inputs: 8
+test <unknown> ...	run time: 31.582517ms | iterations/s: 253 | rng inputs: 8
+test <unknown> ...	run time: 112.659527ms | iterations/s: 71 | rng inputs: 8
+test <unknown> ...	run time: 81.700472ms | iterations/s: 98 | rng inputs: 8
+test <unknown> ...	run time: 20.567064ms | iterations/s: 389 | rng inputs: 8
+test <unknown> ...	run time: 15.205621ms | iterations/s: 526 | rng inputs: 8
+test <unknown> ...	run time: 11.784606ms | iterations/s: 679 | rng inputs: 8
+test <unknown> ...	run time: 53.379526ms | iterations/s: 150 | rng inputs: 8
+test <unknown> ...	run time: 25.369408ms | iterations/s: 315 | rng inputs: 8
+test <unknown> ...	run time: 15.830105ms | iterations/s: 505 | rng inputs: 8
+test <unknown> ...	run time: 11.126517ms | iterations/s: 719 | rng inputs: 8
+test <unknown> ...	run time: 12.496717ms | iterations/s: 640 | rng inputs: 8
+test <unknown> ...	run time: 51.008503ms | iterations/s: 157 | rng inputs: 8
+test <unknown> ...	run time: 58.468171ms | iterations/s: 137 | rng inputs: 8
+test <unknown> ...	run time: 46.938168ms | iterations/s: 170 | rng inputs: 8
+test <unknown> ...	run time: 16.538772ms | iterations/s: 484 | rng inputs: 8
+test <unknown> ...	run time: 12.712754ms | iterations/s: 629 | rng inputs: 8
+test <unknown> ...	run time: 49.330727ms | iterations/s: 162 | rng inputs: 8
+test <unknown> ...	run time: 9.853612ms | iterations/s: 812 | rng inputs: 8
+test <unknown> ...	run time: 45.693035ms | iterations/s: 175 | rng inputs: 8
+test <unknown> ...	run time: 41.900353ms | iterations/s: 191 | rng inputs: 8
+test <unknown> ...	run time: 12.715883ms | iterations/s: 629 | rng inputs: 8
+test <unknown> ...	run time: 10.741343ms | iterations/s: 745 | rng inputs: 8
+test <unknown> ...	run time: 35.004988ms | iterations/s: 229 | rng inputs: 8
+test <unknown> ...	run time: 9.474179ms | iterations/s: 844 | rng inputs: 8
+test <unknown> ...	run time: 37.036366ms | iterations/s: 216 | rng inputs: 8
+test <unknown> ...	run time: 35.065305ms | iterations/s: 228 | rng inputs: 8
+test <unknown> ...	run time: 15.300791ms | iterations/s: 523 | rng inputs: 8
+test <unknown> ...	run time: 13.120608ms | iterations/s: 610 | rng inputs: 8
+test <unknown> ...	run time: 7.491581ms | iterations/s: 1068 | rng inputs: 8
+test <unknown> ...	run time: 46.169176ms | iterations/s: 173 | rng inputs: 8
+test <unknown> ...	run time: 10.02814ms | iterations/s: 798 | rng inputs: 8
+test <unknown> ...	run time: 40.070575ms | iterations/s: 200 | rng inputs: 8
+test <unknown> ...	run time: 39.246644ms | iterations/s: 204 | rng inputs: 8
+test <unknown> ...	run time: 32.781925ms | iterations/s: 244 | rng inputs: 8
+test <unknown> ...	run time: 14.952006ms | iterations/s: 535 | rng inputs: 8
+test <unknown> ...	run time: 12.009899ms | iterations/s: 666 | rng inputs: 8
+test <unknown> ...	run time: 35.805442ms | iterations/s: 223 | rng inputs: 8
+test <unknown> ...	run time: 37.136347ms | iterations/s: 215 | rng inputs: 8
+test <unknown> ...	run time: 38.744267ms | iterations/s: 206 | rng inputs: 8
+test <unknown> ...	run time: 16.242046ms | iterations/s: 493 | rng inputs: 8
+test <unknown> ...	run time: 13.408822ms | iterations/s: 597 | rng inputs: 8
+test <unknown> ...	run time: 11.430965ms | iterations/s: 700 | rng inputs: 8
+test <unknown> ...	run time: 8.47015ms | iterations/s: 944 | rng inputs: 8
+test <unknown> ...	run time: 33.113574ms | iterations/s: 242 | rng inputs: 8
+test <unknown> ...	run time: 18.269431ms | iterations/s: 438 | rng inputs: 8
+test <unknown> ...	run time: 15.324431ms | iterations/s: 522 | rng inputs: 8
+test <unknown> ...	run time: 13.853651ms | iterations/s: 577 | rng inputs: 8
+test <unknown> ...	run time: 35.916166ms | iterations/s: 223 | rng inputs: 8
+test <unknown> ...	run time: 10.982715ms | iterations/s: 728 | rng inputs: 8
+test <unknown> ...	run time: 37.791718ms | iterations/s: 212 | rng inputs: 8
+test <unknown> ...	run time: 18.803449ms | iterations/s: 425 | rng inputs: 8
+test <unknown> ...	run time: 13.387259ms | iterations/s: 598 | rng inputs: 8
+test <unknown> ...	run time: 11.359338ms | iterations/s: 704 | rng inputs: 8
+test <unknown> ...	run time: 52.984246ms | iterations/s: 151 | rng inputs: 8
+test <unknown> ...	run time: 10.745411ms | iterations/s: 745 | rng inputs: 8
+test <unknown> ...	run time: 57.831712ms | iterations/s: 138 | rng inputs: 8
+test <unknown> ...	run time: 31.826604ms | iterations/s: 251 | rng inputs: 8
+test <unknown> ...	run time: 14.608843ms | iterations/s: 548 | rng inputs: 8
+test <unknown> ...	run time: 14.335745ms | iterations/s: 558 | rng inputs: 8
+test <unknown> ...	run time: 72.067616ms | iterations/s: 111 | rng inputs: 8
+test <unknown> ...	run time: 11.398898ms | iterations/s: 702 | rng inputs: 8
+test <unknown> ...	run time: 53.370231ms | iterations/s: 150 | rng inputs: 8
+test <unknown> ...	run time: 74.677158ms | iterations/s: 107 | rng inputs: 8
+test <unknown> ...	run time: 13.45692ms | iterations/s: 594 | rng inputs: 8
+test <unknown> ...	run time: 11.949447ms | iterations/s: 669 | rng inputs: 8
+test <unknown> ...	run time: 37.310672ms | iterations/s: 214 | rng inputs: 8
+test <unknown> ...	run time: 9.984304ms | iterations/s: 801 | rng inputs: 8
+test <unknown> ...	run time: 42.961123ms | iterations/s: 186 | rng inputs: 8
+test <unknown> ...	run time: 50.574242ms | iterations/s: 158 | rng inputs: 8
+test <unknown> ...	run time: 15.522693ms | iterations/s: 515 | rng inputs: 8
+test <unknown> ...	run time: 11.13491ms | iterations/s: 718 | rng inputs: 8
+test <unknown> ...	run time: 47.363601ms | iterations/s: 169 | rng inputs: 8
+test <unknown> ...	run time: 11.431453ms | iterations/s: 700 | rng inputs: 8
+test <unknown> ...	run time: 44.103455ms | iterations/s: 181 | rng inputs: 8
+test <unknown> ...	run time: 47.28074ms | iterations/s: 169 | rng inputs: 8
+test <unknown> ...	run time: 18.157482ms | iterations/s: 441 | rng inputs: 8
+test <unknown> ...	run time: 13.72299ms | iterations/s: 583 | rng inputs: 8
+test <unknown> ...	run time: 11.727542ms | iterations/s: 682 | rng inputs: 8
+test <unknown> ...	run time: 43.672065ms | iterations/s: 183 | rng inputs: 8
+test <unknown> ...	run time: 10.322534ms | iterations/s: 775 | rng inputs: 8
+test <unknown> ...	run time: 48.684147ms | iterations/s: 164 | rng inputs: 8
+test <unknown> ...	run time: 38.441465ms | iterations/s: 208 | rng inputs: 8
+test <unknown> ...	run time: 17.065502ms | iterations/s: 469 | rng inputs: 8
+test <unknown> ...	run time: 15.531465ms | iterations/s: 515 | rng inputs: 8
+test <unknown> ...	run time: 11.989754ms | iterations/s: 667 | rng inputs: 8
+test <unknown> ...	run time: 37.692846ms | iterations/s: 212 | rng inputs: 8
+test <unknown> ...	run time: 38.892145ms | iterations/s: 206 | rng inputs: 8
+test <unknown> ...	run time: 34.880691ms | iterations/s: 229 | rng inputs: 8
+test <unknown> ...	run time: 17.640279ms | iterations/s: 454 | rng inputs: 8
+test <unknown> ...	run time: 13.321255ms | iterations/s: 601 | rng inputs: 8
+test <unknown> ...	run time: 10.195604ms | iterations/s: 785 | rng inputs: 8
+test <unknown> ...	run time: 9.883448ms | iterations/s: 809 | rng inputs: 8
+test <unknown> ...	run time: 50.953666ms | iterations/s: 157 | rng inputs: 8
+test <unknown> ...	run time: 13.239566ms | iterations/s: 604 | rng inputs: 8
+test <unknown> ...	run time: 12.320201ms | iterations/s: 649 | rng inputs: 8
+test <unknown> ...	run time: 13.865946ms | iterations/s: 577 | rng inputs: 8
+test <unknown> ...	run time: 33.404749ms | iterations/s: 239 | rng inputs: 8
+test <unknown> ...	run time: 11.290526ms | iterations/s: 709 | rng inputs: 8
+test <unknown> ...	run time: 39.013336ms | iterations/s: 205 | rng inputs: 8
+test <unknown> ...	run time: 18.27689ms | iterations/s: 438 | rng inputs: 8
+test <unknown> ...	run time: 15.814596ms | iterations/s: 506 | rng inputs: 8
+test <unknown> ...	run time: 13.552957ms | iterations/s: 590 | rng inputs: 8
+test <unknown> ...	run time: 11.453895ms | iterations/s: 698 | rng inputs: 8
+test <unknown> ...	run time: 39.273827ms | iterations/s: 204 | rng inputs: 8
+test <unknown> ...	run time: 15.99978ms | iterations/s: 500 | rng inputs: 8
+test <unknown> ...	run time: 14.412094ms | iterations/s: 555 | rng inputs: 8
+test <unknown> ...	run time: 11.08666ms | iterations/s: 722 | rng inputs: 8
+test <unknown> ...	run time: 13.87003ms | iterations/s: 577 | rng inputs: 8
+test <unknown> ...	run time: 11.003237ms | iterations/s: 727 | rng inputs: 8
+test <unknown> ...	run time: 11.773203ms | iterations/s: 680 | rng inputs: 8
+test <unknown> ...	run time: 14.006393ms | iterations/s: 571 | rng inputs: 8
+test <unknown> ...	run time: 10.853169ms | iterations/s: 737 | rng inputs: 8
+test <unknown> ...	run time: 11.74351ms | iterations/s: 681 | rng inputs: 8
+test <unknown> ...	run time: 11.347883ms | iterations/s: 705 | rng inputs: 8
+test <unknown> ...	run time: 9.677016ms | iterations/s: 827 | rng inputs: 8
+test <unknown> ...	run time: 53.502798ms | iterations/s: 150 | rng inputs: 8
+test <unknown> ...	run time: 53.303918ms | iterations/s: 150 | rng inputs: 8
+test <unknown> ...	run time: 49.31181ms | iterations/s: 162 | rng inputs: 8
+test <unknown> ...	run time: 2.078292ms | iterations/s: 481 | rng inputs: 1 | exit reason: test failure
+
+======================== Test Failure ========================
+
+BOLERO_RANDOM_SEED=299411697652367165143313686281068571361
+
+Input: 
+()
+
+Error: 
+thread panicked with an unknown error
+==============================================================
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Query { rid: 1 })]
+
+Running Tick (Cluster Member 1)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Query { rid: 1 })]
+
+Running Tick (Cluster Member 2)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+test <unknown> ...	run time: 53.319398ms | iterations/s: 150 | rng inputs: 8
+test <unknown> ...	run time: 6.824027ms | iterations/s: 147 | rng inputs: 1 | exit reason: test failure
+
+======================== Test Failure ========================
+
+BOLERO_RANDOM_SEED=266548648380394487359777577696391343947
+
+Input: 
+()
+
+Error: 
+thread panicked with an unknown error
+==============================================================
+
+Running Tick (Cluster Member 1)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+
+Running Tick (Cluster Member 2)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Query { rid: 1 })]
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Query { rid: 1 })]
+
+Running Tick (Cluster Member 1)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unchanged snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Query { rid: 1 })]
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/quorum.rs:347:18
+*  |    let covered = sliced! {
+*  |                 ^ releasing unordered items: [(1, (MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Replica>(2), None))]
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/quorum.rs:347:18
+*  |    let covered = sliced! {
+*  |                 ^ releasing unordered items: [(1, (MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Replica>(1), None))]
+
+--> src/ec_inference_demos/abd.rs:147:10
+ |        .fold(
+ |         ^ fold input batch (permuted): [(Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10)]
+
+Running Tick (Cluster Member 2)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 })]
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unchanged snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+
+--> src/ec_inference_demos/abd.rs:147:10
+ |        .fold(
+ |         ^ fold input batch (permuted): [(Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10)]
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: Some((Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10))
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+
+--> src/ec_inference_demos/abd.rs:147:10
+ |        .fold(
+ |         ^ fold input batch (permuted): [(Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10)]
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 })]
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unchanged snapshot: Some((Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10))
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+
+Running Tick (Cluster Member 2)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: Some((Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10))
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+
+Running Tick (Cluster Member 1)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 })]
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unchanged snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+
+Running Tick (Cluster Member 1)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: Some((Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10))
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+test <unknown> ...	run time: 53.964451ms | iterations/s: 148 | rng inputs: 8
+test <unknown> ...	run time: 57.475037ms | iterations/s: 139 | rng inputs: 8
+test <unknown> ...	run time: 69.018888ms | iterations/s: 116 | rng inputs: 8
+test <unknown> ...	run time: 16.48575ms | iterations/s: 485 | rng inputs: 8
+test <unknown> ...	run time: 21.208958ms | iterations/s: 377 | rng inputs: 8
+test <unknown> ...	run time: 13.04583ms | iterations/s: 613 | rng inputs: 8
+test <unknown> ...	run time: 10.972352ms | iterations/s: 729 | rng inputs: 8
+test <unknown> ...	run time: 113.049252ms | iterations/s: 71 | rng inputs: 8
+test <unknown> ...	run time: 77.491117ms | iterations/s: 103 | rng inputs: 8
+test <unknown> ...	run time: 75.209992ms | iterations/s: 106 | rng inputs: 8
+test <unknown> ...	run time: 8.638556ms | iterations/s: 116 | rng inputs: 1 | exit reason: test failure
+
+======================== Test Failure ========================
+
+BOLERO_RANDOM_SEED=73733167121258764242196469548340035329
+
+Input: 
+()
+
+Error: 
+thread panicked with an unknown error
+==============================================================
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Query { rid: 1 })]
+
+Running Tick (Cluster Member 2)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+
+Running Tick (Cluster Member 1)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Query { rid: 1 })]
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/quorum.rs:347:18
+*  |    let covered = sliced! {
+*  |                 ^ releasing unordered items: [(1, (MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Replica>(0), None))]
+
+Running Tick (Cluster Member 2)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unchanged snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Query { rid: 1 })]
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/quorum.rs:347:18
+*  |    let covered = sliced! {
+*  |                 ^ releasing unordered items: [(1, (MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Replica>(1), None))]
+
+Running Tick (Cluster Member 2)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 })]
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unchanged snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/quorum.rs:347:18
+*  |    let covered = sliced! {
+*  |                 ^ releasing unordered items: [(1, (MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Replica>(2), None))]
+
+Running Tick (Cluster Member 1)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unordered items: [(MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Client>(0), Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 })]
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing unchanged snapshot: None
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+
+--> src/ec_inference_demos/abd.rs:147:10
+ |        .fold(
+ |         ^ fold input batch (permuted): [(Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10)]
+
+--> src/ec_inference_demos/abd.rs:147:10
+ |        .fold(
+ |         ^ fold input batch (permuted): [(Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10)]
+
+Running Tick (Cluster Member 1)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: Some((Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10))
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+
+Running Tick (Cluster Member 2)
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing snapshot: Some((Ts { round: 1, writer: Legacy { raw_id: 0 } }, 10))
+* --> src/ec_inference_demos/abd.rs:207:4
+*  |    sliced! {
+*  |   ^ releasing no items
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/quorum.rs:135:20
+*  |    let certified = sliced! {
+*  |                   ^ releasing unordered items: [(1, MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Replica>(1))]
+* --> src/ec_inference_demos/quorum.rs:144:32
+*  |        let ack_vec = new_acks.fold(
+*  |                               ^ observed non-deterministic order: [(1, MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Replica>(1))]
+
+Running Tick (Cluster Member 0)
+* --> src/ec_inference_demos/quorum.rs:135:20
+*  |    let certified = sliced! {
+*  |                   ^ releasing unordered items: [(1, MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Replica>(2))]
+* --> src/ec_inference_demos/quorum.rs:144:32
+*  |        let ack_vec = new_acks.fold(
+*  |                               ^ observed non-deterministic order: [(1, MemberId::<hydro_std_hydro_trybuild::__staged::ec_inference_demos::ec_abd_hydrofrac::Replica>(2))]
+abd (reliable phase 2: true): 31.5s
+Replica:
+  [0] phase2_fwd (Stream, abd.rs:387): no counterexample found on sampled schedules; not a certificate (schedule choices: batch at abd.rs:207, fold_unordered at abd.rs:147, fold_unordered at quorum.rs:360, and 3 more)
+      176 hypotheses, 1408 schedules, 15.29s
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [1] abd_register_state (Stream, abd.rs:143): no counterexample found on sampled schedules; not a certificate (schedule choices: batch at abd.rs:207, fold_unordered at abd.rs:147, fold_unordered at quorum.rs:360, and 3 more)
+      176 hypotheses, 1408 schedules, 15.08s
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [2] abd_register_state (Singleton, abd.rs:147): not checked: Singleton (not a set-valued collection)
+  [3] queries (KeyedStream, abd.rs:378): no counterexample with up to 0 crashes found, breaks at 1: {crash(Client@0 after queries[Client@0→Replica@1]: Query { rid: 1 })}
+      Replica@2 lacks (Client@0, Query { rid: 1 })
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/reliable_phase_two_certifies_the_register/queries_abd.rs/counterexample.svg
+      5 hypotheses, 33 schedules, 302.85ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [4] initial (KeyedStream, reliable_broadcast.rs:269): no counterexample with up to 0 crashes found, breaks at 1: {crash(Client@0 after initial[Client@0→Replica@1]: ‹1›)}
+      Replica@2 lacks ‹2›
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/reliable_phase_two_certifies_the_register/initial_reliable_broadcast.rs/counterexample.svg
+      3 hypotheses, 17 schedules, 210.23ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [5] echo (KeyedStream, reliable_broadcast.rs:281): no counterexample with up to 0 crashes found, breaks at 1: {crash(Replica@0 after echo[Replica@0→Replica@1]: ‹2›)}
+      Replica@2 lacks ‹3›
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/reliable_phase_two_certifies_the_register/echo_reliable_broadcast.rs/counterexample.svg
+      12 hypotheses, 89 schedules, 807.16ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+legend:
+  ‹1› = Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 }
+  ‹2› = (Client@0, Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 })
+  ‹3› = (Replica@0, (Client@0, Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 }))
+
+
+thread 'ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register' (1831) panicked at hydro_std/src/ec_inference_demos/ec_abd_hydrofrac.rs:68:9:
+one covered register label
+Replica:
+  [0] phase2_fwd (Stream, abd.rs:387): no counterexample found on sampled schedules; not a certificate (schedule choices: batch at abd.rs:207, fold_unordered at abd.rs:147, fold_unordered at quorum.rs:360, and 3 more)
+      176 hypotheses, 1408 schedules, 15.29s
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [1] abd_register_state (Stream, abd.rs:143): no counterexample found on sampled schedules; not a certificate (schedule choices: batch at abd.rs:207, fold_unordered at abd.rs:147, fold_unordered at quorum.rs:360, and 3 more)
+      176 hypotheses, 1408 schedules, 15.08s
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [2] abd_register_state (Singleton, abd.rs:147): not checked: Singleton (not a set-valued collection)
+  [3] queries (KeyedStream, abd.rs:378): no counterexample with up to 0 crashes found, breaks at 1: {crash(Client@0 after queries[Client@0→Replica@1]: Query { rid: 1 })}
+      Replica@2 lacks (Client@0, Query { rid: 1 })
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/reliable_phase_two_certifies_the_register/queries_abd.rs/counterexample.svg
+      5 hypotheses, 33 schedules, 302.85ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [4] initial (KeyedStream, reliable_broadcast.rs:269): no counterexample with up to 0 crashes found, breaks at 1: {crash(Client@0 after initial[Client@0→Replica@1]: ‹1›)}
+      Replica@2 lacks ‹2›
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/reliable_phase_two_certifies_the_register/initial_reliable_broadcast.rs/counterexample.svg
+      3 hypotheses, 17 schedules, 210.23ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+  [5] echo (KeyedStream, reliable_broadcast.rs:281): no counterexample with up to 0 crashes found, breaks at 1: {crash(Replica@0 after echo[Replica@0→Replica@1]: ‹2›)}
+      Replica@2 lacks ‹3›
+      diagram: /tmp/.tmpyHGM1F/target/hydrofrac/reliable_phase_two_certifies_the_register/echo_reliable_broadcast.rs/counterexample.svg
+      12 hypotheses, 89 schedules, 807.16ms
+      races: 0 sets stopped early, 0 sets on one schedule; claim B not certified
+legend:
+  ‹1› = Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 }
+  ‹2› = (Client@0, Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 })
+  ‹3› = (Replica@0, (Client@0, Write { rid: 1, ts: Ts { round: 1, writer: Legacy { raw_id: 0 } }, value: 10 }))
+
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/panicking.rs:80:14
+   2: hydro_std::ec_inference_demos::ec_abd_hydrofrac::register
+             at ./src/ec_inference_demos/ec_abd_hydrofrac.rs:68:9
+   3: hydro_std::ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register
+             at ./src/ec_inference_demos/ec_abd_hydrofrac.rs:158:33
+   4: hydro_std::ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register::{{closure}}
+             at ./src/ec_inference_demos/ec_abd_hydrofrac.rs:156:47
+   5: core::ops::function::FnOnce::call_once
+             at /local/home/palvarox/.rustup/toolchains/1.96.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+   6: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+failures:
+    ec_inference_demos::ec_abd_hydrofrac::reliable_phase_two_certifies_the_register
+    ec_inference_demos::ec_abd_hydrofrac::the_register_breaks_when_the_client_crashes_mid_phase_two
+
+test result: FAILED. 10 passed; 2 failed; 3 ignored; 0 measured; 93 filtered out; finished in 201.20s
+
+error: test failed, to rerun pass `-p hydro_std --lib`
+exit 101

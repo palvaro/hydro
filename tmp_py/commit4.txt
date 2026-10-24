@@ -1,0 +1,48 @@
+fix(hydrofrac): `defer_tick` is fragile, but for the dedup idiom's state edge
+
+## The bug: a second false certificate
+`defer_tick` was on the allowlist as plumbing. But a deferred record reaches
+the next tick only if a next tick runs at that location, and the simulator
+runs a tick only when some hook can release something
+(`hydro_lang/src/sim/compiled.rs`, `SimTick::can_run`: every hook ready, and
+at least one able to release). Nothing pending in a `defer_tick` makes a tick
+runnable. So whether a deferred record is ever emitted depends on how the
+deliveries were batched.
+
+Repro, now the regression test
+`check::brute_tests::deferred_records_are_fragile`: a process broadcasts two
+values to two members, and each member does `batch → defer_tick → all_ticks`
+into an eventually-consistent output.
+- A member that batched the values apart emits the first: the second tick
+  runs and releases it.
+- A member that batched them together emits nothing.
+
+Before the fix, `fragile_sites() == Some([])`, and the search said "holds
+with up to 0 crashes", while brute force broke the label with the empty set.
+Now `defer_tick` is a fragile site, and the search finds the no-fault
+counterexample, in agreement with brute force.
+
+## The fix
+`DeferTick` is fragile, except the edge that carries the dedup idiom's
+`seen` state to the next tick (`View::dedup_edge`, which returns that edge;
+it replaces `is_dedup`). That edge feeds only the negation's negative side,
+whose tags the rewrite drops. The idiom's output over the run is every record
+of `pos` not in the constant initial state, however many ticks run.
+
+Rechecked for the same issue, the other allowlist entries do not depend on a
+later tick running:
+- `all_ticks`/`YieldConcat` emits at the end of the same tick;
+- a top-level `CycleSource` is async;
+- tick cycles go through an explicit `DeferTick`;
+- a `batch` of a stream has a hook that can always release pending input, so
+  quiescence runs the tick.
+
+## Gates (every label of every check, before vs after)
+- `cargo test -p hydrofrac --features cross-check`: 142 passed (141 + the
+  regression).
+- `cargo test -p hydro_std --lib hydrofrac`: 12 passed.
+- `cargo test -p hydro_test --lib cluster::ec_`: 42 passed.
+- No verdict changed and no certificate was lost: no corpus program emits
+  through a `defer_tick` other than the dedup idiom's. The only cost changes
+  are in sampled searches (multi-Paxos and uniform-broadcast demos at 8
+  samples, CTP-3 at 64), i.e. sampling noise.

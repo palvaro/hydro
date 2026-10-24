@@ -1,0 +1,109 @@
+refactor(hydrofrac)!: races is the only engine
+
+Stage 2 of docs/design/hydrofrac-races.md §12: lite is deleted, and
+`EcCheck::new()` is the races search. No mode, no knob.
+
+## Deleted
+- `search/clause.rs`, `search/ilp.rs`, `search/sweep.rs`: lite's `Clause`,
+  completion, universe, hitting-set program and `Sweep`, and its positional
+  crash rule (`Dependency::killed_by`), which must never come back (S1, S2).
+- Lite's loop in `check/engine.rs`: `Learned`, `ClauseKey`, `search`, `check`,
+  the clause-building `RunFold`, and the run cache.
+- `EcCheck::races()` and `EcCheck::instrument_fragile`: `instrument` is now
+  the fragile-mode instrumentation (taps, fan-out marks, provenance with
+  fragile tags).
+- Lineage's send sequences, pre-heal counts and `clause_for`, which only the
+  positional rule used.
+
+## Kept, folded
+- `search` (one file) keeps the shared vocabulary under its names: `Node`,
+  `Fault`, `CrashAt`, `FaultSet`, `crash_count`, `Dependency`, `Derivation`,
+  `CrashBounds`, `CheckedCluster`, `Backend`, `weights`, `HYPOTHESIS_BUDGET`,
+  `Tolerance`.
+- `check/engine.rs` keeps what the search and the oracle share: `EcCheck`,
+  targets, bounds, results and diagrams.
+
+## The oracle
+`check/brute_force.rs` has its own execution path: `execute`, `RunFold` and
+`prepare` moved there, now test-only. It reads outputs straight from the
+event log, with no lineage, provenance or pruning, so it is more independent
+of the search than before.
+
+## Fix found by the comparison
+A sampled exploration now counts as run in full for resolving unseen crashes.
+A sampled search certifies nothing anyway, and before the fix every proposal
+with an unseen crash re-ran its set. ABD over reliable phase two went from
+225 to 176 sets.
+
+## Changed test expectations
+Every changed expectation is the new truth, and agrees with brute force.
+- `hydrofrac`, `check::tests`:
+  - `a_program_with_a_schedule_choice_is_exhausted_not_certified` →
+    `a_schedule_choice_with_robust_derivations_is_certified`. `delivered` is
+    `Certified(All)` with Claim B (was `Exhausted`), and `initial`'s
+    tolerance of no crash is certified (was not).
+  - `assert_holds_rejects_an_exhausted_search` →
+    `assert_holds_rejects_a_sampled_search`. A fragile-free program is
+    certified even when sampled, so the sampled verdict is set by hand; the
+    message is now "schedules were sampled".
+  - `fragile_mode_leaves_the_check_unchanged` (lite vs lite in fragile mode)
+    is replaced by `the_echo_broadcast_has_no_fragile_step`.
+- `hydrofrac`, `check::brute_tests`:
+  - `suspected_total_loss_masks_a_partial_loss_{certificate,tolerance}` (S1):
+    were "lite disagrees with brute force (false certificate / tolerance)";
+    now "agrees: `omit(gossip m0→m1)` breaks `known` with no crash,
+    tolerance certified".
+  - `suspected_positional_crash_order_{tolerance,certificate}` (S2): were
+    "lite reports 2 crashes and certifies tolerating 1 / certifies up to 1";
+    now "agrees: `crash(n after →m0)` breaks `known` with 1 crash, tolerance
+    of 0 certified".
+  - The `races_agree_*` twins of the `brute_force_agrees_*` tests are merged
+    into them, including the S1/S2 races variants.
+- `hydrofrac`, lineage and search tests: lineage tests use
+  `races::PairClause` and the order-free rule. The lite assertion "a crash
+  point named by a post-heal send never fires" is dropped: no candidate names
+  a post-heal send. `search/tests.rs` (lite's sweep, 30 tests) is replaced by
+  3 tests of the shared types.
+- `hydro_test`:
+  - `ec_hydrofrac::ec_generated_spec_separates_plain_from_reliable_broadcast`:
+    the echoing broadcast's `deliveries` is `Certified(All)` (was
+    `Exhausted`).
+  - `ec_bruteforce::brute_force_agrees_on_ask_once`: the counterexample's
+    tolerance is now certified (was not).
+  - `ec_bruteforce`: `both_agree_*` → `brute_force_agrees_*`, one check each;
+    `races_agree_*` merged into `brute_force_agrees_*`;
+    `races_alone_on_an_echo_broadcast_over_three_members` →
+    `search_alone_on_an_echo_broadcast_over_three_members`.
+  - `ec_races_targets`: the `*_lite` twins are deleted and `*_races` lose the
+    suffix.
+  - `ec_quorum_trust`: `races_planted_local_attestation_{lite,races}` →
+    `races_planted_local_attestation`.
+- `hydro_std`: `ec_abd_hydrofrac` uses `new()`;
+  `ec_abd_kv_hydrofrac::abd_kv_two_writes_{lite,races}` →
+  `abd_kv_two_writes` (ignored measurement).
+
+## Measured
+- **Lines** (`hydrofrac/src`): product 10,486 → 9,206; tests 7,649 → 6,596.
+  These are physical lines; tests are `*tests*.rs`, the test-only
+  `brute_force.rs`, and inline `#[cfg(test)] mod` blocks.
+- **Lite baseline** (docs/design/races-vs-lite-comparison.md): 232 of 240 rows
+  matched (8 from the deleted lite-vs-lite test).
+  - No verdict is weaker: 185 same, 4 same claim, 42 stronger, 1 false
+    certificate corrected.
+  - Fault sets 1,340 → 2,856; schedules 85,051 → 59,647.
+  - Rows past 2× are labels whose every derivation passes a fragile step
+    (ABD 8.4×, gossip, Paxos, CTP), and `new_messages` with several payloads
+    (5.4×, 6.1×).
+- Docs: §4.2, §4.4 and §11 no longer describe removed mechanisms; §12.8 is
+  added.
+
+BREAKING CHANGE: `EcCheck::races()` and `EcCheck::instrument_fragile()` are
+removed. `EcCheck::new()` with `EcCheck::instrument()` is the races search.
+BREAKING CHANGE: `hydrofrac::search` keeps only the shared types; `Clause`,
+`Sweep`, `Next`, `completion`, `universe`, `hitting_set_any`,
+`SendSequences`, `PreHealSends` and `Dependency::killed_by` are removed.
+BREAKING CHANGE: `Lineage::send_sequences`, `Lineage::pre_heal_sends` and
+`Lineage::clause_for` are removed; use `Lineage::derivation`.
+BREAKING CHANGE: `RaceNotes::enumerated_sets` is removed, and
+`Verdict::Exhausted` now means a sampled search that found no
+counterexample.

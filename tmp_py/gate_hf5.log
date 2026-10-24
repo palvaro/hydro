@@ -1,0 +1,195 @@
+warning: variable does not need to be mutable
+    --> hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     |
+1383 |     let mut observe = |history: &mut Vec<EmissionRecord>,
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling hydrofrac v0.0.0 (/local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydrofrac)
+warning: `hydro_lang` (lib) generated 1 warning (run `cargo fix --lib -p hydro_lang` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 19.99s
+     Running unittests src/lib.rs (/tmp/.tmpyHGM1F/target/debug/deps/hydrofrac-8f7c9b898aa5095f)
+
+running 149 tests
+warning: profile package spec `website_playground` in profile `release` did not match any packages
+warning: profile package spec `website_playground` in profile `dev` did not match any packages
+warning: variable does not need to be mutable
+    --> /local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydro_lang/src/sim/feedback_campaign.rs:1383:9
+     |
+1383 |     let mut observe = |history: &mut Vec<EmissionRecord>,
+     |         ----^^^^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling hydrofrac v0.0.0 (/local/home/palvarox/hydro/.lite-wt/.infinity/.sandboxes/.tmpXtKNI8/hydrofrac)
+warning: `hydro_lang` (lib) generated 1 warning (run `cargo fix --lib -p hydro_lang` to apply 1 suggestion)
+   Compiling hydrofrac-hydro-trybuild v0.0.0 (/tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac)
+   Compiling hydrofrac-hydro-trybuild-dylib v0.0.0 (/tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac/dylib)
+   Compiling hydrofrac-hydro-trybuild-dylib-examples v0.0.0 (/tmp/.tmpyHGM1F/target/hydro_trybuild/hydrofrac/dylib-examples)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 11.83s
+test check::brute_tests::a_time_bounded_exhaustive_run_is_refused ... ok
+test check::brute_tests::brute_force_agrees_on_a_lossy_relay_chain ... ok
+test check::brute_tests::brute_force_agrees_on_a_two_member_exchange ... ok
+test check::brute_tests::brute_force_agrees_on_a_lossy_broadcast ... ok
+test check::brute_tests::brute_force_agrees_on_an_echo_broadcast ... ok
+test check::brute_tests::brute_force_agrees_on_a_plain_broadcast ... ok
+test check::brute_tests::a_top_level_scan_over_a_chosen_order_is_fragile ... ok
+test check::brute_tests::a_dedup_state_read_elsewhere_is_fragile ... ok
+test check::brute_tests::impure_closures_are_fragile_choices ... ok
+test check::brute_tests::deferred_records_are_fragile ... ok
+test check::brute_tests::brute_force_agrees_on_an_echo_over_a_lossy_first_hop ... ok
+test check::brute_tests::brute_force_agrees_on_an_ownership_exchange ... ok
+test check::brute_tests::one_labelling_line_twice_is_two_labels ... ok
+test check::brute_tests::races_certify_a_batched_echo ... ok
+test check::brute_tests::brute_force_agrees_where_provenance_precision_matters ... ok
+test check::brute_tests::the_simulators_own_crashes_are_refused - should panic ... ok
+test check::brute_tests::the_cross_check_catches_wrong_verdicts ... ok
+test check::brute_tests::races_find_a_broadcast_whose_members_do_not_re_forward ... ok
+test check::brute_tests::review_batch_beside_an_unready_snapshot ... ok
+test check::fanout_tests::a_hand_written_fan_out_is_not_recognised ... ok
+test check::brute_tests::suspected_positional_crash_order_certificate ... ok
+test check::fanout_tests::closed_broadcasts_after_a_batch_fan_out_in_member_order ... ok
+test check::brute_tests::tick_constants_are_fragile ... ok
+test check::brute_tests::suspected_total_loss_masks_a_partial_loss_certificate ... ok
+test check::tests::a_lossy_broadcast_breaks_by_omission_alone ... ok
+test check::brute_tests::suspected_total_loss_masks_a_partial_loss_tolerance ... ok
+test check::tests::a_body_that_panics_is_a_counterexample ... ok
+test check::tests::a_label_that_sees_nothing_without_faults_is_vacuous ... ok
+test check::tests::a_plain_broadcast_tolerates_no_crash_and_breaks_at_a_mid_fan_out_crash ... ok
+test check::tests::assert_holds_panics_with_the_report - should panic ... ok
+test check::tests::counterexamples_write_their_lamport_diagram ... ok
+test check::tests::an_echo_broadcast_tolerates_one_crash_and_breaks_at_two ... ok
+test check::fanout_tests::closed_broadcasts_fan_out_in_member_order ... ok
+test check::tests::sampled_schedules_find_the_same_counterexample ... ok
+test check::brute_tests::suspected_positional_crash_order_tolerance ... ok
+test check::tests::a_schedule_choice_with_robust_derivations_is_certified ... ok
+test check::tests::members_that_disagree_without_faults_break_at_the_probe ... ok
+test check::tests::assert_holds_rejects_a_sampled_search - should panic ... ok
+test check::tests::the_crash_cap_ends_the_sweep_with_a_bounded_certificate ... ok
+test check::tests::message_payloads_render_by_their_debug ... ok
+test check::tests::the_report_states_omission_only_counterexamples ... ok
+test check::tests::the_echo_broadcast_has_no_fragile_step ... ok
+test check::tests::the_report_is_in_source_names ... ok
+test lamport::tests::a_crash_that_never_fired_is_named ... ok
+test lamport::tests::a_message_in_flight_across_a_crash_starts_above_the_crash ... ok
+test lamport::tests::a_node_crashed_from_the_start_loses_its_sends ... ok
+test lamport::tests::an_omitted_message_ends_in_a_cross_on_the_receivers_lane ... ok
+test lamport::tests::default_labels_are_hex ... ok
+test lamport::tests::directories ... ok
+test lamport::tests::escaping ... ok
+test lamport::tests::long_labels_are_cut_and_listed_in_the_legend ... ok
+test lamport::tests::the_heal_is_drawn_where_it_happened ... ok
+test lamport::tests::writes_dot_and_svg_when_graphviz_is_installed ... ok
+test fault::tests::crash_before_any_send_sends_nothing ... ok
+test check::tests::the_check_tracks_record_provenance_precisely ... ok
+test fault::tests::positional_crash_delivers_its_message_and_stops_later_sends ... ok
+test fault::tests::heal_stops_omissions_and_crashes ... ok
+test fault::tests::event_log_is_in_program_order_and_tags_round_trip ... ok
+test fault::tests::node_names_are_short_and_disambiguated ... ok
+test fault::tests::omissions_apply_only_on_lossy_channels ... ok
+test lineage::fragile_tests::batch_map_send_is_robust ... ok
+test lineage::fragile_tests::anti_join_is_fragile ... ok
+test lineage::fragile_tests::closure_over_state_is_fragile ... ok
+test lineage::tests::clause_kill_relation_matches_the_run ... ok
+test lineage::tests::derivations_are_memoized_and_fallbacks_counted_once ... ok
+test lineage::tests::execution_rule_takes_every_earlier_receive_and_nothing_later ... ok
+test lineage::tests::local_facts_have_empty_derivations ... ok
+test lineage::fragile_tests::tick_join_is_fragile ... ok
+test lineage::tests::missing_metadata_falls_back_to_the_execution_rule ... ok
+test lineage::tests::record_prov_encoding_is_bincode ... ok
+test lineage::tests::record_rule_closes_across_two_hops ... ok
+test lineage::tests::rules_mix_along_the_closure ... ok
+test lineage::tests::sends_after_the_heal_are_not_omittable ... ok
+test lineage::tests::undelivered_sends_never_appear_in_a_support ... ok
+test observe::source_names::tests::binding_names ... ok
+test observe::source_names::tests::function_names ... ok
+test observe::source_names::tests::short_debugs ... ok
+test observe::source_names::tests::tails ... ok
+test observe::source_names::tests::unbound_statements ... ok
+test observe::tests::a_closed_broadcast_is_one_searched_label_named_after_its_binding ... ok
+test observe::tests::a_cluster_broadcasts_member_list_is_not_a_label ... ok
+test observe::tests::a_label_fed_through_closure_references_is_checked ... ok
+test observe::tests::a_label_with_local_inputs_only_is_not_checked ... ok
+test lineage::fragile_tests::top_level_join_is_robust ... ok
+test observe::tests::broadcast_live_is_labelled_at_its_fan_out ... ok
+test lineage::tests::long_chains_do_not_recurse ... ok
+test observe::tests::gossip_state_is_not_covered_by_the_stream_it_folds ... ok
+test lineage::fragile_tests::dedup_against_own_history_is_robust ... ok
+test lineage::fragile_tests::snapshot_meets_trigger_is_fragile ... ok
+test provenance::choices_tests::a_choice_anywhere_in_the_program_counts ... ok
+test provenance::choices_tests::an_ordered_lossy_channel_is_a_choice ... ok
+test provenance::choices_tests::what_the_scan_cannot_see_through_is_a_choice ... ok
+test provenance::choices_tests::an_unordered_external_input_is_a_choice ... ok
+test lineage::sim_tests::execution_rule_on_a_two_hop_run ... ok
+test lineage::fragile_tests::ask_once_answer_is_fragile_and_announcement_robust ... ok
+test provenance::tests::inline_metadata_encoding_matches_record_prov ... ok
+test observe::tests::keyed_taps_carry_entries_and_agree_across_members ... ok
+test observe::tests::taps_deliver_every_element_to_the_host_per_member_with_its_debug ... ok
+test observe::tests::an_overwritten_singleton_is_not_tapped ... ok
+test provenance::tests::fold_accumulates_the_deliveries_it_folded ... ok
+test provenance::tests::by_ref_state_absorbs_its_lineage ... ok
+test lineage::sim_tests::record_provenance_is_precise_end_to_end ... ok
+test races::tests::a_crash_point_is_exact_when_every_send_lies_in_its_chain ... ok
+test races::tests::a_dead_fact_excuses_its_pairs_under_supersets ... ok
+test races::tests::a_dead_set_with_an_inexact_crash_point_is_refused - should panic ... ok
+test races::tests::a_fan_out_order_narrows_admissible_crash_points ... ok
+test races::tests::a_known_send_order_spares_what_precedes_the_crash_point ... ok
+test races::tests::a_pair_whose_clause_cannot_be_killed_is_never_chosen ... ok
+test races::tests::a_run_that_lost_a_fact_does_not_hide_its_breaking_set ... ok
+test races::tests::a_start_crash_of_the_member_excuses_its_pairs ... ok
+test races::tests::a_tried_set_that_stays_admissible_gets_its_supersets_proposed ... ok
+test races::tests::an_exact_crash_point_may_be_part_of_a_dead_set ... ok
+test races::tests::an_unprotected_pair_gets_every_set_then_a_certificate ... ok
+test races::tests::an_unseen_crash_is_resolved_by_a_run_in_full ... ok
+test races::tests::ask_once_crash_splits_the_members ... ok
+test races::tests::bounds_hold_in_proposals ... ok
+test races::tests::candidates_order_omissions_then_later_crash_points_then_unseen_then_crash ... ok
+test provenance::tests::by_mut_state_carries_the_writers_lineage ... ok
+test races::tests::crash_after_a_message_spares_that_message_only ... ok
+test races::tests::crash_before_any_send_kills_every_send_of_its_node ... ok
+test races::tests::crash_literals_are_fixed_only_by_a_proved_order ... ok
+test races::tests::fragile_clauses_never_prune_but_steer_all_known ... ok
+test races::tests::new_candidates_restart_the_sweep ... ok
+test races::tests::omission_kills_only_its_own_lossy_message ... ok
+test races::tests::proposals_are_the_sets_admissible_for_some_pair ... ok
+test races::tests::sweep_certifies_up_to_the_cap_and_stops_at_the_budget ... ok
+test races::tests::the_image_keeps_known_faults_and_maps_the_rest ... ok
+test report::tests::faults_name_nodes_and_messages ... ok
+test report::tests::long_payloads_go_to_a_legend_once ... ok
+test report::tests::payloads_decode_through_facts_with_the_same_bytes ... ok
+test provenance::tests::join_unions_both_sides ... ok
+test search::tests::crash_bounds_cap_and_never_crash_every_node ... ok
+test search::tests::faults_render_as_in_the_report ... ok
+test search::tests::the_tie_break_never_trades_cardinality ... ok
+test races::tests::completion_covers_every_fault_set ... ok
+test spec::tests::a_crashed_member_owes_nothing_and_its_facts_require_nothing ... ok
+test spec::tests::a_missing_fact_is_a_violation ... ok
+test spec::tests::an_empty_probe_is_vacuous ... ok
+test spec::tests::facts_outside_the_domain_are_not_required ... ok
+test spec::tests::holds_when_every_correct_member_has_every_fact ... ok
+test spec::tests::other_labels_are_ignored ... ok
+test spec::tests::the_view_is_a_union_and_keeps_every_support_in_order ... ok
+test spec::tests::a_fact_only_some_correct_members_hold_is_required_of_all ... ok
+test report::tests::unnamed_channels_fall_back_to_their_site_then_their_id ... ok
+test provenance::tests::received_record_names_exactly_its_delivery ... ok
+test provenance::tests::lineage_closes_through_two_hops ... ok
+test provenance::tests::opaque_islands_run_and_report_opaque_lineage ... ok
+test provenance::tests::leader_merge_entries_partially_ordered_is_precise ... ok
+test provenance::tests::the_rewrite_preserves_behaviour_and_schedules ... ok
+
+test result: ok. 149 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 62.06s
+
+   Doc-tests hydrofrac
+
+running 1 test
+test hydrofrac/src/check/mod.rs - check (line 4) ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+all doctests ran in 0.68s; merged doctests compilation took 0.68s
+exit 0
