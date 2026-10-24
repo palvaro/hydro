@@ -12,6 +12,7 @@
 hydro_lang::setup!();
 
 pub mod fault;
+pub mod lamport;
 pub mod lineage;
 pub mod observe;
 pub mod provenance;
