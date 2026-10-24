@@ -484,3 +484,190 @@ fn races_agree_on_two_pc_cooperative_termination() {
         "sampled schedules never certify: {cross}"
     );
 }
+
+// Several payloads sent together, so the `nondet!` batches have something to split: one payload
+// gives a single failure-free schedule, and brute force then runs one schedule per set too.
+// `hydro_std`'s `reliable_broadcast_closed` has no schedule choice at all (one failure-free
+// schedule however many payloads); `reliable_broadcast::broadcast` batches, and branches.
+// Each test runs lite's check and the races mode, each cross-checked, and prints a `TABLE` line
+// per label (run with `--nocapture`).
+
+/// A short rendering of a verdict, for the comparison tables.
+fn verdict_summary(verdict: &hydrofrac::Verdict) -> String {
+    use hydrofrac::Verdict;
+    use hydrofrac::search::Tolerance;
+    let tolerance = |t: &Tolerance| match t {
+        Tolerance::All => "all".to_owned(),
+        Tolerance::UpTo(k) => format!("up to {k}"),
+    };
+    match verdict {
+        Verdict::Certified { tolerates } => format!("certified ({})", tolerance(tolerates)),
+        Verdict::Counterexample(cex) => format!(
+            "counterexample, {} crash(es), {} fault(s)",
+            cex.crashes(),
+            cex.faults.len()
+        ),
+        Verdict::Exhausted { tolerates, .. } => format!("exhausted ({})", tolerance(tolerates)),
+        Verdict::Budget { .. } => "budget".to_owned(),
+        Verdict::Vacuous(_) => "vacuous".to_owned(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Runs `build` with lite's check and with the races mode, asserts both agree with brute force,
+/// and prints one comparison line per searched label. `build` returns the cross-check and the
+/// program's failure-free schedule count.
+fn compare(name: &str, build: impl Fn(EcCheck) -> (CrossCheck, usize)) {
+    let start = std::time::Instant::now();
+    let (lite, schedules) = build(EcCheck::new());
+    let lite_wall = start.elapsed();
+    let start = std::time::Instant::now();
+    let (races, _) = build(EcCheck::races());
+    let races_wall = start.elapsed();
+    eprintln!(
+        "=== {name}: {schedules} failure-free schedules\nlite:\n{}\nraces:\n{}\n{races}",
+        lite.results, races.results
+    );
+    for (l, r) in lite.results.results().iter().zip(races.results.results()) {
+        let Some(b) = races.brute.label(r.index) else {
+            continue;
+        };
+        let notes = r.stats.races.unwrap_or_default();
+        eprintln!(
+            "TABLE {name} | {} | races: {} — {} sets / {} schedules (one-schedule {}, early stops \
+             {}, enumerated {}) | lite: {} — {} sets / {} schedules | brute force: {} sets / {} \
+             schedules, min crashes {:?} | failure-free schedules {schedules}",
+            r.name(),
+            verdict_summary(&r.verdict),
+            r.stats.hypotheses,
+            r.stats.schedules,
+            notes.single_schedule_sets,
+            notes.early_stops,
+            notes.enumerated_sets,
+            verdict_summary(&l.verdict),
+            l.stats.hypotheses,
+            l.stats.schedules,
+            races.brute.sets,
+            races.brute.schedules,
+            b.min_crashes(),
+        );
+    }
+    eprintln!(
+        "TIME {name}: lite {lite_wall:.1?}, races {races_wall:.1?} (each with its brute force)"
+    );
+    lite.assert_agrees();
+    races.assert_agrees();
+}
+
+/// Every failure-free schedule of `sim` under `body` (the harness then quiesces), counted.
+fn failure_free_schedules(
+    sim: &hydro_lang::sim::compiled::CompiledSim,
+    body: &mut impl AsyncFnMut(),
+) -> usize {
+    let mut body = std::panic::AssertUnwindSafe(body);
+    sim.exhaustive(async || {
+        (*body)().await;
+        hydro_lang::sim::compiled::quiesce().await;
+    })
+}
+
+/// `reliable_broadcast_closed` over three members, with `payloads` sent together.
+fn reliable_broadcast_closed_with(mut check: EcCheck, payloads: &[u32]) -> (CrossCheck, usize) {
+    use hydro_std::ec_inference_demos::reliable_broadcast::reliable_broadcast_closed;
+
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let _out = reliable_broadcast_closed(input, &members).sim_cluster_output();
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 3))
+        .compiled();
+    let mut body = async || {
+        for p in payloads {
+            send.send(*p);
+        }
+    };
+    let schedules = failure_free_schedules(&sim, &mut body);
+    (check.cross_check(&sim, &mut body, MAX_FAULTS), schedules)
+}
+
+/// `reliable_broadcast::broadcast` over three members, with `payloads` sent together.
+fn reliable_broadcast_with(
+    mut check: EcCheck,
+    echo: bool,
+    members_count: usize,
+    payloads: &[u32],
+) -> (CrossCheck, usize) {
+    let mut flow = FlowBuilder::new();
+    let broadcaster = flow.process::<Broadcaster>();
+    let members = flow.cluster::<Member>();
+    let (send, source) = broadcaster.sim_input::<Payload, TotalOrder, ExactlyOnce>();
+    let _out = broadcast(
+        &members,
+        source,
+        echo,
+        nondet!(/** test */),
+        nondet!(/** test */),
+    )
+    .sim_cluster_output();
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, members_count))
+        .compiled();
+    let mut body = async || {
+        for p in payloads {
+            send.send(Payload(*p));
+        }
+    };
+    let schedules = failure_free_schedules(&sim, &mut body);
+    (check.cross_check(&sim, &mut body, MAX_FAULTS), schedules)
+}
+
+#[test]
+fn both_agree_on_reliable_broadcast_closed_with_two_payloads() {
+    compare("reliable_broadcast_closed, 2 payloads", |check| {
+        reliable_broadcast_closed_with(check, &[1, 2])
+    });
+}
+
+#[test]
+fn both_agree_on_a_plain_broadcast_with_two_payloads() {
+    compare(
+        "reliable_broadcast::broadcast (plain), 2 payloads",
+        |check| reliable_broadcast_with(check, false, 3, &[1, 2]),
+    );
+}
+
+#[test]
+fn both_agree_on_reliable_broadcast_closed_with_three_payloads() {
+    compare("reliable_broadcast_closed, 3 payloads", |check| {
+        reliable_broadcast_closed_with(check, &[1, 2, 3])
+    });
+}
+
+#[test]
+fn both_agree_on_a_plain_broadcast_with_three_payloads() {
+    compare(
+        "reliable_broadcast::broadcast (plain), 3 payloads",
+        |check| reliable_broadcast_with(check, false, 3, &[1, 2, 3]),
+    );
+}
+
+#[test]
+fn both_agree_on_an_echo_broadcast_over_two_members() {
+    compare(
+        "reliable_broadcast::broadcast (echo), 2 members, 1 payload",
+        |check| reliable_broadcast_with(check, true, 2, &[1]),
+    );
+}
+
+/// Too large to cross-check: lite's exhaustive search and the enumeration together did not
+/// finish within 30 minutes.
+#[test]
+#[ignore = "did not finish within 30 minutes"]
+fn both_agree_on_an_echo_broadcast_over_two_members_with_two_payloads() {
+    compare(
+        "reliable_broadcast::broadcast (echo), 2 members, 2 payloads",
+        |check| reliable_broadcast_with(check, true, 2, &[1, 2]),
+    );
+}
