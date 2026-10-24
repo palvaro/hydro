@@ -4,7 +4,8 @@ This document states what a hydrofrac certificate claims and argues why it is tr
 attacked without the other design documents: every term is defined here. For each argument it gives the claim, the
 assumptions, the proof, where it lives in code, and what tests check it.
 
-**Code reference:** `hydrofrac-races` at `7df7e0753a`. Paths are relative to the repository root; `hydrofrac/src/` is
+**Code reference:** `hydrofrac-races` at `dd5c4d05a5` (first written at `7df7e0753a`; section numbers are unchanged
+since). Paths are relative to the repository root; `hydrofrac/src/` is
 abbreviated `hf/`. Line numbers are at that commit.
 
 **Status words.** Every step is marked:
@@ -34,12 +35,12 @@ have regression tests. They are recorded in §17.
   - Messages are *content-addressed*: a `MessageId` is `(channel, from, to, payload bytes)` (`hf/fault/mod.rs:154`).
   - A *fault set* has at most one crash per node.
   - **The heal**: from the heal on, no omission applies and no new crash fires; crashes that fired persist
-    (`hf/fault/mod.rs:401`).
+    (`hf/fault/mod.rs:389`).
 - **Correct member.** A member of the label's cluster whose crash did not fire in the run (`hf/check/engine.rs:364`,
   from the hook's record).
 - **Fact domain.** The facts correct members held at the end of the failure-free runs: the *probe*, read over every
   schedule unless §14 allows one (`hf/check/engine.rs:164`, `hf/spec.rs:113`).
-- **The specification of a label** (`hf/spec.rs:158`), evaluated on one run:
+- **The specification of a label** (`hf/spec.rs:156`), evaluated on one run:
   - **POST**: every correct member holds every domain fact that some correct member holds;
   - **no divergence**: a fact outside the domain that some correct member holds is held by every correct member
     (`hf/check/races_engine.rs`, `read_schedule`; `hf/check/brute_force.rs:338`).
@@ -82,12 +83,12 @@ schedule, the harness is deterministic, and the rewrite preserves the program's 
 
   `Unseen(n)` is "crash `n` after a message no run showed". It kills every dependency sent by `n`, and excuses
   nothing.
-- **The program** (`hf/races/ilp.rs:138`). Proposals are subsets of `U` within the bounds that are admissible for some
+- **The program** (`hf/races/ilp.rs:134`). Proposals are subsets of `U` within the bounds that are admissible for some
   pair. Every tried proposal is excluded by an exact no-good.
 
 **Certificate.** The sweep concludes at bound `k` when the program has no solution at bound `k` over the final `U`,
-with every tried proposal excluded (`hf/races/sweep.rs:259`). If `U` grows after a bound concluded, the sweep
-restarts from zero crashes, so a conclusion always refers to the current `U` (`hf/races/sweep.rs:262-266`).
+with every tried proposal excluded (`hf/races/sweep.rs:253`). If `U` grows after a bound concluded, the sweep
+restarts from zero crashes, so a conclusion always refers to the current `U` (`hf/races/sweep.rs:256-260`).
 `Certified(UpTo k)` and `Certified(All)` are emitted only from such a conclusion. `All` additionally needs the bound
 to have reached the vacuity limit or saturation (§10).
 
@@ -131,8 +132,8 @@ to have reached the vacuity limit or saturation (§10).
 
 **Where it lives.**
 - `hf/races/sweep.rs:10-35`: the theorem in the module docs;
-- `hf/races/sweep.rs:259`: `next`;
-- `hf/races/ilp.rs:138`: the program;
+- `hf/races/sweep.rs:253`: `next`;
+- `hf/races/ilp.rs:134`: the program;
 - `hf/check/races_engine.rs:458`: the search loop;
 - `hf/check/races_engine.rs:531`: exploration.
 
@@ -209,7 +210,7 @@ of the run, `c`'s tap has emitted `f`, or `c` has crashed.
       kill it by the rule above, so `n'` was alive at the send, hence when it received `d`, since it received `d`
       before computing the send's record.
 - **The end.** `c` computes `f` and its tap emits it, unless `c` is dead. A dead node's outputs are dropped
-  (`hf/fault/mod.rs:516`), and that is the "or crashed" case. The member view only grows (`hf/spec.rs:45`).
+  (`hf/fault/mod.rs:504`), and that is the "or crashed" case. The member view only grows (`hf/spec.rs:45`).
 
 **Duplicates.** Messages are content-addressed, so `omit(m)` drops every copy and `crash(n after m)` fires after the
 first copy. A dependency on a later copy of `m` is served by the first copy, whose content is the same (A4).
@@ -244,7 +245,7 @@ or is an opaque island.
   added to the IR later;
 - a closure that reads Hydro state by reference is fragile before any arm (`closure_over_state`).
 
-**The table** (every `HydroNode` kind at `7df7e0753a`):
+**The table** (every `HydroNode` kind at `dd5c4d05a5`):
 
 | kind | verdict | why |
 |---|---|---|
@@ -298,8 +299,8 @@ or is an opaque island.
 **Claim.** In a program with no schedule choice, every derivation may be treated as robust. `read_schedule` drops
 premises when `choice_free` (`hf/check/races_engine.rs:198`).
 
-**What "choice-free" means.** The choice scan (`hf/provenance/choices.rs:72`, `choice`) finds nothing. The scan is an
-allowlist too: an operator is choice-free only if its kind is in `ALLOWED` (`hf/provenance/choices.rs:21`) and no
+**What "choice-free" means.** The choice scan (`hf/provenance/choices.rs:73`, `choice`) finds nothing. The scan is an
+allowlist too: an operator is choice-free only if its kind is in `ALLOWED` (`hf/provenance/choices.rs:22`) and no
 special rule names it. A `batch`, a snapshot, an untrusted `observe_nondet`, a fold over an unordered input, an
 unordered external input, an ordered lossy network, any source but iterators, membership and external networks, and
 every unlisted kind are choices.
@@ -314,8 +315,10 @@ every unlisted kind are choices.
   `wrap_acc`; `:628`, `wrap_scan`).
 - So a derivation whose dependencies all survive `H` is recomputed under `H`, which is Lemma R's conclusion.
 
-**Proved**, given A1, A2 and A13. **Tested:** every choice-free corpus program is cross-checked (`reliable_broadcast_closed`,
-S1, S2).
+**Proved**, given A1, A2 and A13. **Not tested** by any gate at `dd5c4d05a5`:
+- the choice-free corpus programs (`reliable_broadcast_closed`, S1, S2) are also fragile-free, so the shortcut decides
+  nothing there that the fragile-free rule would not;
+- forcing `choice_free = false` changes no gate's verdict (found by the dead-code audit).
 
 ## 4. Premise literals
 
@@ -336,7 +339,7 @@ every schedule in which its sending record exists.
 - **`d = m`:** the crash fires right after `m`'s first send, so `m` is sent.
 - **`after(d, m)` proved false:** `d` is sent before `m` in every run (§6.1), and the crash fires only once `m` is sent.
 - **Otherwise the rule says the crash kills `d`**, so there is nothing to prove.
-- **Never sent:** if `m` is never sent, the crash never fires (`hf/fault/mod.rs:487-489`).
+- **Never sent:** if `m` is never sent, the crash never fires (`hf/fault/mod.rs:475-477`).
 
 The observed position of a send in a run (the ordinal) is never used to decide a kill (`hf/races/clause.rs:62`). It
 is only a tie-break for weights. Lite's positional rule, which decided kills from one run's send order, was unsound
@@ -388,19 +391,19 @@ order).
    harvest names every possible crash point.
 
 **Proof.**
-1. `hf/fault/mod.rs:487-489`: the crash fires only on the send of its message, before the heal. **Checked in code.**
+1. `hf/fault/mod.rs:475-477`: the crash fires only on the send of its message, before the heal. **Checked in code.**
 2. In a fragile-free program, every record has a robust derivation, including every send's record. A send under `H`
    in some schedule has a robust derivation `D`, all of whose dependencies were delivered under `H`. Without faults,
    `D`'s dependencies are not killed. So by Lemma R, `D`'s record exists in every failure-free schedule, and the
    probe sees the send. **Proved**, given Lemma R.
 
-   This is what lets a fragile-free program use no `Unseen` candidate (`hf/races/sweep.rs:155`,
+   This is what lets a fragile-free program use no `Unseen` candidate (`hf/races/sweep.rs:150`,
    `hf/check/races_engine.rs`: `sends_complete` when `fragile_free`).
 
 ### 6.3 Exact crash points
 
 `crash(n after m)` is *exact* if sends are complete and every message `n` can send has a proved literal `after(·, m)`
-(`hf/races/sweep.rs:174`). Then in every run the crash cuts exactly the sends whose literal is true. **Proved**, from
+(`hf/races/sweep.rs:169`). Then in every run the crash cuts exactly the sends whose literal is true. **Proved**, from
 6.1 and 6.2.
 
 ## 7. Trusted `quorum`
@@ -449,7 +452,7 @@ attestations, which is sound.
 
 Then under every `H ⊇ S`, in every schedule, no correct member holds `f`.
 
-**Proof** (`hf/races/sweep.rs:182-226`). Suppose some correct member `c` of `H` holds `f` in a schedule of `H`, by a
+**Proof** (`hf/races/sweep.rs:177-226`). Suppose some correct member `c` of `H` holds `f` in a schedule of `H`, by a
 derivation `D`, which is robust because the program is fragile-free.
 - **No fault of `S` kills `D`:**
   - an omission in `S ⊆ H` did not drop `D`'s deliveries;
@@ -465,7 +468,7 @@ it. The one-run verification is valid because of §14: one schedule shows every 
 
 **Where.**
 - `hf/check/races_engine.rs:611-620` (the call, with its preconditions);
-- `hf/races/sweep.rs:210` (`mark_dead` asserts the crash kinds);
+- `hf/races/sweep.rs:205` (`mark_dead` asserts the crash kinds);
 - `hf/races/ilp.rs` (exemption rows);
 - `hf/races/clause.rs:137` (`excused`).
 
@@ -528,7 +531,7 @@ oracle).
 
 **Claims and proofs.**
 - **Monotone view.** A member's view is the union of its tap's emissions (`hf/spec.rs:45`). A tap emits each record
-  once it exists, and a dead node emits nothing (`hf/fault/mod.rs:516`). **Checked in code.**
+  once it exists, and a dead node emits nothing (`hf/fault/mod.rs:504`). **Checked in code.**
 - **Correct members** are decided at the end of the run: the crash set the fault hook recorded
   (`hf/check/engine.rs:364`). A crash point that never fired leaves its member correct. **Checked in code.**
 - **Domain** (`hf/check/engine.rs:164`): the facts correct members held at the end of each probe schedule, unioned over
@@ -548,7 +551,7 @@ oracle).
 
 ## 12. Heal semantics
 
-**Claim.** Faults act only before the heal: omissions while not healed (`hf/fault/mod.rs:482`), crash points firing
+**Claim.** Faults act only before the heal: omissions while not healed (`hf/fault/mod.rs:470`), crash points firing
 only before the heal (`:487-489`), start crashes at instance start (`:438-451`). After the heal every send is
 delivered, and crashes that fired persist.
 
@@ -633,11 +636,11 @@ multi-Paxos.
 | A4 | Records are compared by content; messages are content-addressed | CHECKED IN CODE (`hf/fault/mod.rs:154`, `MessageId`; facts are bytes) |
 | A5 | The provenance rewrite over-approximates every record's dependencies and tags every fragile step's outputs; opaque operators fall back to the execution rule | TESTED (`hf/lineage/*tests*.rs`, provenance tests, every brute-force cross-check); not proved |
 | A6 | Quiescence means no tick can run: every batch hook has released its pending input, and a tick ran for it. A tick runs only when every hook is ready (`SingletonHook::is_ready`, `hydro_lang/src/sim/runtime.rs:591`) and some hook can release (`compiled.rs:2022`). Nothing else makes a tick run (§17, second fix) | CHECKED IN CODE (`compiled.rs:2022`, `quiesce` at `:292`) |
-| A7 | The simulated network delivers every send that no injected omission drops; lossy channels are intercepted by the fault hook | CHECKED IN CODE (`hf/fault/mod.rs:349-354` asserts interception) |
+| A7 | The simulated network delivers every send that no injected omission drops; lossy channels are intercepted by the fault hook | CHECKED IN CODE (`hf/fault/mod.rs:348-353` asserts interception) |
 | A8 | The harness is deterministic: the same inputs, in the same order, in every schedule; it does not branch on outputs | ASSUMED |
 | A9 | The rewrite preserves the program's behaviour (records carry tags but compute the same values) | TESTED (`hf/check/tests.rs`, `hydrofrac_provenance_tests` in `hydro_test` and `hydro_std`) |
 | A10 | Messages are sent one at a time, in production order, per channel | ASSUMED (simulator `for_each(send)`); used by §6.1 |
-| A11 | A crash fires right after the first send of its message and halts the node (no further sends or outputs) | CHECKED IN CODE (`hf/fault/mod.rs:480-501`, `:516-534`) |
+| A11 | A crash fires right after the first send of its message and halts the node (no further sends or outputs) | CHECKED IN CODE (`hf/fault/mod.rs:468-489`, `:516-534`) |
 | A12 | Cluster ids are listed `0..n` by one `source_iter` | ASSUMED from `hydro_lang/src/sim/graph.rs`; TESTED by `fanout_tests` |
 | A13 | A Hydro program with no schedule choice is monotone: non-monotone operators need a bounded input, which only a tick provides, and outside data enters a tick only through a batch (a choice) | ASSUMED (Hydro's type system); used only for Claim B in choice-free programs (§13) |
 
