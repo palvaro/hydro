@@ -1,0 +1,39 @@
+flowchart TD
+    subgraph "Cluster (Each Member)"
+        LOCAL[/"local_updates:\nStream&lt;T&gt;"/]
+        GOSSIP_IN["gossip_from_peers\n(forward_ref)"]
+
+        subgraph "sliced! block"
+            BATCH_W["use::batch\n(local_updates)"]
+            BATCH_G["use::batch\n(gossip_from_peers)"]
+            STATE_NULL["use::state_null\n(accumulated elements)"]
+
+            STATE_NULL --> CHAIN["chain()"]
+            BATCH_W --> CHAIN
+            BATCH_G -->|"flatten_unordered()"| CHAIN
+
+            CHAIN --> UNIQUE["unique()\n(idempotency)"]
+            UNIQUE --> LOCAL_STATE["local_state\n(persists across ticks)"]
+
+            LOCAL_STATE -->|"clone + fold\n(ACI: set insert)"| FOLD["fold → HashSet&lt;T&gt;"]
+        end
+
+        LOCAL --> BATCH_W
+        GOSSIP_IN --> BATCH_G
+        LOCAL_STATE -.->|"feeds back\nnext tick"| STATE_NULL
+
+        FOLD --> STATE["state: Singleton&lt;HashSet&lt;T&gt;&gt;"]
+
+        STATE -->|"sample_every\n(100ms)"| SAMPLE["periodic snapshot"]
+        SAMPLE -->|"broadcast_closed\n(TCP fail_stop bincode)"| BC["broadcast to all peers"]
+        BC -->|".values()\n.weaken_consistency()"| GOSSIP_IN
+    end
+
+    STATE -->|"assert_has_consistency_of\n(manual_proof: ACI)"| EC_OUT[/"Output:\nSingleton&lt;HashSet&lt;T&gt;, EC&gt;"/]
+
+    style LOCAL fill:#e1f5fe
+    style EC_OUT fill:#c8e6c9
+    style UNIQUE fill:#fff3e0
+    style GOSSIP_IN fill:#fce4ec
+    style FOLD fill:#e8eaf6
+    style SAMPLE fill:#f3e5f5

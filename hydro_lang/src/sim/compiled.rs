@@ -60,9 +60,9 @@
 //! swallows panics. Internal invariant checks should use `abort_assert!`
 //! rather than `panic!`/`assert!`.
 //!
-//! TODO(mingwei): Panics inside the tick DFIR (generated code in the dylib) are
-//! also caught by bolero's `catch_unwind`. Consider a mechanism to detect and
-//! propagate those as well.
+//! Panics inside the tick DFIR (generated code in the dylib) are caught in the dylib and raised
+//! again on the host as ordinary panics (see `sim::panic_guard`), so they reach bolero's
+//! `catch_unwind` like panics in the test body.
 
 /// Like `assert!`, but calls `std::process::abort()` instead of `panic!()`.
 /// Use for internal invariants that must not be silently caught by bolero.
@@ -77,7 +77,7 @@ macro_rules! abort_assert {
 
 use core::{fmt, panic};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::panic::RefUnwindSafe;
 use std::path::Path;
@@ -91,23 +91,19 @@ use dfir_rs::scheduled::context::DfirErased;
 use dfir_rs::util::unsync::mpsc::{Receiver as UnsyncReceiver, Sender as UnsyncSender};
 use futures::StreamExt;
 use libloading::Library;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use tempfile::TempPath;
 use tokio::sync::{Mutex, Notify};
 
-use super::runtime::{
-    Hooks, InlineHooks, LineageEvent, LineageHandles, ObservationHooks, PolicyTrace, ScriptTarget,
-    ScriptedHookControl, ScriptedHookRegistry, ScriptedInlineHooks, ScriptedObservationHooks,
-    ScriptedTickHooks, SimLocation,
-};
-use super::slice::Slices;
+use super::network_hook::{ChannelInfo, LocationInfo, SimNetworkHook};
+use super::runtime::{Hooks, InlineHooks};
 use super::{SimClusterReceiver, SimClusterSender, SimReceiver, SimSender};
 use crate::compile::builder::ExternalPortId;
-use crate::compile::trybuild::generate::BuiltArtifact;
 use crate::live_collections::stream::{ExactlyOnce, NoOrder, Ordering, Retries, TotalOrder};
 use crate::location::dynamic::LocationId;
 use crate::sim::graph::{SimExternalPort, SimExternalPortRegistry};
-use crate::sim::runtime::{
-    InlineHook, ObservationHook, ScriptedObservationHook, ScriptedTickInputHook, TickInputHook,
-};
+use crate::sim::runtime::{SimHook, SimInlineHook};
 
 struct QuiescenceState {
     /// Set to true when the scheduler reaches quiescence; reset to false when new input is sent.
@@ -127,8 +123,7 @@ struct QuiescenceState {
     /// `pause_nondet` is set.
     nondet_pending: Cell<bool>,
     /// Wakers for test-side tasks waiting for the scheduler to settle (either quiesce or set
-    /// `nondet_pending`) while `pause_nondet` is set. Also used by scripting futures that
-    /// need to be woken when the scheduler parks.
+    /// `nondet_pending`) while `pause_nondet` is set.
     settle_wakers: RefCell<Vec<std::task::Waker>>,
     /// Set when an observation *forced* the simulation to quiesce (running pending
     /// nondeterministic work) outside of exhaustive mode's forking. Further observations of
@@ -137,12 +132,17 @@ struct QuiescenceState {
     tainted: Cell<bool>,
     /// Set when new input is sent after `tainted`; all further receives panic.
     poisoned: Cell<bool>,
+    /// While set (see [`forbid_barriers`]), a phase barrier — [`quiesce`], or input after an
+    /// observation forced quiescence — panics with this message.
+    barriers_forbidden: Cell<Option<&'static str>>,
 }
 
 impl QuiescenceState {
     /// Signal that new input has been sent, waking the scheduler if it was quiescent.
     fn resume(&self) {
         if self.tainted.get() {
+            // Input after a forced quiescence: the observation was a phase barrier.
+            guard_barrier_allowed(self);
             self.poisoned.set(true);
         }
         self.quiescent.set(false);
@@ -181,395 +181,6 @@ impl QuiescenceState {
     async fn resumed(&self) {
         self.resume_notify.notified().await;
     }
-
-    /// Registers a waker to be woken the next time the scheduler parks (quiescence or
-    /// settle-pause). Used by scripting futures: while the scheduler is running, the test
-    /// body is re-polled after every step anyway, so a waker is only needed for the parked
-    /// cases. Duplicate registrations are harmless.
-    fn push_park_waker(&self, waker: &std::task::Waker) {
-        self.settle_wakers.borrow_mut().push(waker.clone());
-    }
-}
-
-/// The **current group** of scripted decisions: consecutive decision calls in the test body
-/// that target different hooks of the same tick form a group, describing one execution of
-/// that tick. At most one group's decisions are ever installed at a time; the first decision
-/// call of the *next* group suspends until the current group's tick execution has consumed
-/// every installed decision.
-pub(crate) struct CurrentGroup {
-    /// The scheduler action the group's decisions apply to.
-    target: ScriptTarget,
-    /// The registry keys (handle ID plus cluster member) with an installed decision in
-    /// this group.
-    members: Vec<(usize, Option<u32>)>,
-    /// Set when the scheduler starts a step. Until then, consecutive decisions for different
-    /// hooks of this tick may join the group in the same poll of the test body.
-    sealed: bool,
-}
-
-/// Coordinates the script protocol between test-side hook handles and the scheduler.
-#[derive(Default)]
-pub(crate) struct ScriptCoordinator {
-    /// `Some` means exactly one decision group is outstanding. The scheduler clears it only
-    /// after that group's tick executes, so the test cannot replace an unconsumed group.
-    current: Option<CurrentGroup>,
-    /// Set by the scheduler at each quiescence: `true` when the outstanding group is stuck
-    /// even though every queued decision is satisfiable, because none of them can trigger
-    /// the tick (and no unscripted input on the tick can trigger it either — otherwise the
-    /// tick would be runnable and the simulation would not be quiescent). Selects the
-    /// stuck-script error style rendered at the suspended test-side await; `false` means
-    /// some decision is waiting on input that can never arrive.
-    stuck_cannot_trigger: bool,
-}
-
-impl ScriptCoordinator {
-    /// Describes the not-yet-consumed decisions of the current group, one per line
-    /// (without a trailing newline), for error messages. `None` when no group is
-    /// outstanding or every decision is consumed.
-    fn describe_unconsumed(&self, hooks: &ScriptedHookRegistry) -> Option<String> {
-        let group = self.current.as_ref()?;
-        let mut out = String::new();
-        for key in &group.members {
-            let hook = hooks.get(key).unwrap().borrow();
-            if let Some(decision) = hook.describe_decision() {
-                use std::fmt::Write;
-                if !out.is_empty() {
-                    out.push('\n');
-                }
-                let member = key
-                    .1
-                    .map(|m| format!(" (cluster member {m})"))
-                    .unwrap_or_default();
-                write!(
-                    out,
-                    "  {} is waiting on the hook at {}{}, which has {}",
-                    decision,
-                    hook.location_meta().location,
-                    member,
-                    hook.describe_pending()
-                        .as_deref()
-                        .unwrap_or("no pending input"),
-                )
-                .unwrap();
-            }
-        }
-        (!out.is_empty()).then_some(out)
-    }
-}
-
-/// The per-instance scripting context, resolved through the task-local sim connections.
-///
-/// The three `Rc`s are genuinely distinct (not one shared allocation) because they have
-/// different owners and lifetimes: the hook registry only materializes when the dylib is
-/// launched (it is part of the `DylibResult`), while the coordinator and quiescence
-/// state live in the pre-launch `SimConnections` and are independently shared with
-/// receivers and test-side handles (quiescence is also used by non-scripting paths).
-/// This struct is the bundle of all three, assembled by-clone at resolution time.
-pub(crate) struct ScriptCtx {
-    hooks: Rc<ScriptedHookRegistry>,
-    coordinator: Rc<RefCell<ScriptCoordinator>>,
-    quiescence: Rc<QuiescenceState>,
-}
-
-/// The result of attempting to schedule one decision; see
-/// [`ScriptCtx::try_schedule_decision`].
-pub(crate) enum ScheduleDecision {
-    /// The decision was installed into the current group.
-    Installed,
-    /// The previous group has not been consumed yet; the decision blob is handed back and
-    /// the caller should retry after the scheduler makes progress.
-    Wait(Vec<u8>),
-}
-
-const UNBOUND_HOOK_ERROR: &str = "this sim hook handle is not bound to any operator in the simulated flow; \
-     attach it with `nondet!(... hook = handle)` at the operator it should control";
-
-impl ScriptCtx {
-    /// Resolves a hook handle's scripted hook instance; `member` selects a cluster
-    /// member's instance (`None` for hooks on processes). Panics if the handle is not
-    /// bound to an operator or the member does not exist.
-    #[track_caller]
-    pub(crate) fn control(
-        &self,
-        hook_id: usize,
-        member: Option<u32>,
-    ) -> Rc<RefCell<dyn ScriptedHookControl>> {
-        if let Some(hook) = self.hooks.get(&(hook_id, member)) {
-            return hook.clone();
-        }
-
-        // The exact instance is missing; distinguish the misuse cases from a handle
-        // that was never bound at all.
-        let bound_members: Vec<u32> = self
-            .hooks
-            .range((hook_id, None)..=(hook_id, Some(u32::MAX)))
-            .filter_map(|((_, m), _)| *m)
-            .collect();
-        match member {
-            None if !bound_members.is_empty() => panic!(
-                "this sim hook handle is bound to an operator running on a cluster, where every member has its own independent instance to script; \
-                 select one with `.on(member_id)` (members: {:?})",
-                bound_members
-            ),
-            Some(m) if self.hooks.contains_key(&(hook_id, None)) => panic!(
-                "`.on({m})` was used on a sim hook handle bound to an operator running on a process, which has no cluster members; \
-                 script the handle without `.on(..)`"
-            ),
-            Some(m) if !bound_members.is_empty() => panic!(
-                "`.on({m})` does not name a member of the cluster this sim hook handle is bound to (members: {:?})",
-                bound_members
-            ),
-            _ => panic!("{}", UNBOUND_HOOK_ERROR),
-        }
-    }
-
-    /// Whether the simulation is currently quiescent (no more progress possible).
-    pub(crate) fn is_quiescent(&self) -> bool {
-        self.quiescence.is_quiescent()
-    }
-
-    /// See [`QuiescenceState::push_park_waker`].
-    pub(crate) fn push_park_waker(&self, waker: &std::task::Waker) {
-        self.quiescence.push_park_waker(waker);
-    }
-
-    /// Attempts to install a decision (bincode-serialized; the handle and hook statically
-    /// know the matching type) for the hook instance `(hook_id, member)` under the group
-    /// protocol: join the current group if this decision belongs to it, open a new group
-    /// if the previous one has been consumed, or hand the decision back to be retried
-    /// once the previous group's tick execution has happened. Each cluster member's tick
-    /// is its own scheduler action, so decisions for different members never share a
-    /// group.
-    #[track_caller]
-    pub(crate) fn try_schedule_decision(
-        &self,
-        hook_id: usize,
-        member: Option<u32>,
-        decision_blob: Vec<u8>,
-    ) -> Result<ScheduleDecision, String> {
-        let key = (hook_id, member);
-        let hook = self.control(hook_id, member);
-        let target = hook.borrow().target();
-
-        let mut coordinator = self.coordinator.borrow_mut();
-
-        enum Action {
-            Join,
-            NewGroup,
-            Wait,
-        }
-
-        let action = match &coordinator.current {
-            None => Action::NewGroup,
-            Some(group)
-                if !group.sealed
-                    && matches!(target, ScriptTarget::Tick { .. })
-                    && group.target == target
-                    && !group.members.contains(&key) =>
-            {
-                Action::Join
-            }
-            Some(_) => Action::Wait,
-        };
-
-        match action {
-            Action::Join => {
-                coordinator.current.as_mut().unwrap().members.push(key);
-            }
-            Action::NewGroup => {
-                coordinator.current = Some(CurrentGroup {
-                    target,
-                    members: vec![key],
-                    sealed: false,
-                });
-            }
-            Action::Wait => {
-                // The previous group's execution hasn't happened yet; hand the decision
-                // back to be retried. The waiting hook stays subject to the boundary scan:
-                // buffered input held across this wait must be declared with an explicit
-                // pause (the waiting decision names a *later* execution).
-                if self.quiescence.is_quiescent() {
-                    let stuck = coordinator.describe_unconsumed(&self.hooks);
-                    let stuck = stuck.as_deref().unwrap_or("  (unknown decision)");
-                    let header = if coordinator.stuck_cannot_trigger {
-                        "a previously scripted decision group can never run: none of its tick's hooks can trigger it (no scripted decision triggers, and no unscripted input has data)"
-                    } else {
-                        "a previously scripted decision can never be satisfied (the simulation has no more work it can do)"
-                    };
-                    return Err(format!("cannot script this decision: {header}:\n{stuck}"));
-                }
-                return Ok(ScheduleDecision::Wait(decision_blob));
-            }
-        }
-        drop(coordinator);
-
-        hook.borrow_mut().install_decision(&decision_blob);
-        // Installing a decision can make a tick runnable; wake the scheduler if parked.
-        self.quiescence.resume();
-        Ok(ScheduleDecision::Installed)
-    }
-}
-
-/// A snapshot of the current simulation instance's lineage events (see
-/// [`LineageEvent`]). Panics if called outside a simulation.
-#[cfg_attr(
-    not(feature = "ldfi"),
-    expect(dead_code, reason = "used by `sim::ldfi`")
-)]
-pub(crate) fn lineage_events() -> Vec<LineageEvent> {
-    CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().lineage.snapshot())
-}
-
-/// Whether the current simulation instance was compiled with record-level provenance.
-#[cfg_attr(
-    not(feature = "ldfi"),
-    expect(dead_code, reason = "used by `sim::ldfi`")
-)]
-pub(crate) fn lineage_provenance_enabled() -> bool {
-    CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().provenance)
-}
-
-/// The static dependency slices of the current simulation instance's program. Panics if
-/// called outside a simulation.
-#[cfg_attr(
-    not(feature = "ldfi"),
-    expect(dead_code, reason = "used by `sim::ldfi`")
-)]
-pub(crate) fn lineage_slices() -> Rc<Slices> {
-    CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().slices.clone())
-}
-
-/// The current simulation instance's shared lineage/crash handles. Panics if called outside
-/// a simulation.
-#[cfg_attr(
-    not(feature = "ldfi"),
-    expect(dead_code, reason = "used by `sim::ldfi`")
-)]
-pub(crate) fn lineage_handles() -> LineageHandles {
-    CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().lineage.clone())
-}
-
-/// The raw simulator port number that lineage [`LineageEvent::Output`] events use for an
-/// external output port. Panics if called outside a simulation.
-#[cfg_attr(
-    not(feature = "ldfi"),
-    expect(dead_code, reason = "used by `sim::ldfi`")
-)]
-pub(crate) fn lineage_port(port: ExternalPortId) -> usize {
-    CURRENT_SIM_CONNECTIONS.with(|connections| {
-        connections
-            .borrow()
-            .external_registered
-            .get(&port)
-            .expect("external port is not registered in this simulation")
-            .into_inner()
-    })
-}
-
-/// A scripted tick-input hook the fault-injection layer drives without knowing its element
-/// type: its handle id and member, the node it belongs to, and the tick it feeds.
-#[cfg(feature = "ldfi")]
-#[derive(Clone, Debug)]
-pub(crate) struct TracedHook {
-    pub hook_id: usize,
-    pub member: Option<u32>,
-    pub node: (LocationId, Option<u32>),
-    pub tick: (LocationId, Option<u32>),
-}
-
-/// Places every scripted tick-input hook of the current instance that has a traced
-/// pass-through policy under it (see `ScriptableHook::passthrough_policy`), so it delivers
-/// everything as it arrives without entropy and its releases are logged, and returns those
-/// hooks. Panics if called outside a simulation.
-#[cfg(feature = "ldfi")]
-pub(crate) fn trace_all_hooks() -> Vec<TracedHook> {
-    let ctx = script_ctx();
-    let mut traced = vec![];
-    for ((hook_id, member), hook) in ctx.hooks.iter() {
-        let mut hook = hook.borrow_mut();
-        let ScriptTarget::Tick { location } = hook.target() else {
-            continue;
-        };
-        if hook.install_passthrough() {
-            traced.push(TracedHook {
-                hook_id: *hook_id,
-                member: *member,
-                node: (location.location.root().clone(), location.cluster_id),
-                tick: (location.location, location.cluster_id),
-            });
-        }
-    }
-    traced
-}
-
-/// Places every traced hook of the current instance under a replay policy: `scripts[hook]`
-/// (serialized items per execution of its tick) where given, an empty script otherwise (the
-/// tick never runs on that hook's account). Panics if called outside a simulation.
-#[cfg(feature = "ldfi")]
-pub(crate) fn replay_all_hooks(scripts: &HashMap<(usize, Option<u32>), Vec<Vec<Vec<u8>>>>) {
-    let ctx = script_ctx();
-    for (key, hook) in ctx.hooks.iter() {
-        let mut hook = hook.borrow_mut();
-        if !matches!(hook.target(), ScriptTarget::Tick { .. }) {
-            continue;
-        }
-        let script = scripts.get(key).cloned().unwrap_or_default();
-        hook.install_replay(script);
-    }
-}
-
-/// Resolves the per-instance scripting context. Panics if called outside a simulation.
-pub(crate) fn script_ctx() -> ScriptCtx {
-    CURRENT_SIM_CONNECTIONS.with(|connections| {
-        let connections = connections.borrow();
-        ScriptCtx {
-            hooks: connections.scripted_hooks.clone(),
-            coordinator: connections.script_coordinator.clone(),
-            quiescence: connections.quiescence.clone(),
-        }
-    })
-}
-
-/// Renders the stuck-script error for a quiescent simulation with an outstanding group.
-/// Two distinct failure styles: a decision that is *unsatisfiable* (waiting on input that
-/// can never arrive), vs decisions that are all satisfiable but *cannot trigger* their
-/// tick (none of them triggers, and no unscripted input on the tick has data).
-fn render_stuck_script_error(cannot_trigger: bool, stuck: &str) -> String {
-    if cannot_trigger {
-        format!(
-            "the simulation has stopped, but scripted decisions are still pending: none of the tick's hooks can trigger it (no scripted decision triggers, and no unscripted input has data):\n{stuck}\nhelp: script a decision that triggers the tick, or drive an unscripted input, so the tick can run"
-        )
-    } else {
-        format!("a scripted decision can never be satisfied:\n{stuck}")
-    }
-}
-
-/// Renders the stuck-script error for the current instance (see
-/// [`render_stuck_script_error`]); the scheduler classified the failure style when it
-/// reached quiescence.
-pub(crate) fn script_stuck_error(stuck: &str) -> String {
-    let cannot_trigger = CURRENT_SIM_CONNECTIONS.with(|connections| {
-        let connections = connections.borrow();
-        let coordinator = connections.script_coordinator.borrow();
-        coordinator.stuck_cannot_trigger
-    });
-    render_stuck_script_error(cannot_trigger, stuck)
-}
-
-/// If a scripted group is outstanding, returns a description of its decisions (used by
-/// output awaits and `pause_until` waits, which are script barriers: they must not
-/// resolve until every decision scripted so far has run).
-pub(crate) fn script_unconsumed_description() -> Option<String> {
-    CURRENT_SIM_CONNECTIONS.with(|connections| {
-        let connections = connections.borrow();
-        let coordinator = connections.script_coordinator.borrow();
-        coordinator.current.as_ref()?;
-        Some(
-            coordinator
-                .describe_unconsumed(&connections.scripted_hooks)
-                .unwrap_or_else(|| "  (unknown decision)".to_owned()),
-        )
-    })
 }
 
 /// Tracks a pending "settle" pause request to the scheduler (see
@@ -660,11 +271,35 @@ impl Drop for SettlePauseGuard {
 /// Panics if the simulation has been poisoned: an earlier observation forced the simulation
 /// to quiesce (running pending nondeterministic work), and new input has been sent since, so
 /// further observations could misattribute failures caused by the forced overrun.
+/// Panics if phase barriers are forbidden (see [`forbid_barriers`]).
+fn guard_barrier_allowed(quiescence: &QuiescenceState) {
+    if let Some(reason) = quiescence.barriers_forbidden.get() {
+        panic!("{reason}");
+    }
+}
+
+/// Runs `phase` with phase barriers forbidden: a [`quiesce`] inside it, or new input after an
+/// observation forced the simulation to quiesce (such as [`SimReceiver::try_next`] with
+/// nondeterministic work pending), panics with `reason`. Waiting for a message stays allowed.
+///
+/// For checkers that explore every interleaving of a phase: a barrier inside it would hide
+/// the interleavings it cuts.
+#[cfg(feature = "hydrofrac")]
+pub async fn forbid_barriers<T>(reason: &'static str, phase: impl Future<Output = T>) -> T {
+    let quiescence =
+        CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().quiescence.clone());
+    let outer = quiescence.barriers_forbidden.replace(Some(reason));
+    let out = phase.await;
+    quiescence.barriers_forbidden.set(outer);
+    out
+}
+
 fn guard_not_poisoned(quiescence: &QuiescenceState) {
-    assert!(
-        !quiescence.poisoned.get(),
-        "cannot receive more simulator output: an earlier observation (such as `try_next`, `collect`, or a quiescence assertion outside exhaustive mode) forced the simulation to quiesce by running pending nondeterministic work, and new input has been sent since. Failures observed now could be misattributed, so either restructure the test to make quiescence-forcing observations its last step, or insert an explicit `sim::quiesce().await` phase barrier before sending more input."
-    );
+    if quiescence.poisoned.get() {
+        panic!(
+            "cannot receive more simulator output: an earlier observation (such as `try_next`, `collect`, or a quiescence assertion outside exhaustive mode) forced the simulation to quiesce by running pending nondeterministic work, and new input has been sent since. Failures observed now could be misattributed, so either restructure the test to make quiescence-forcing observations its last step, or insert an explicit `sim::quiesce().await` phase barrier before sending more input."
+        );
+    }
 }
 
 /// Runs the simulation to quiescence, as an explicit *phase barrier* between rounds of a
@@ -686,15 +321,11 @@ pub async fn quiesce() {
     let quiescence =
         CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().quiescence.clone());
     guard_not_poisoned(&quiescence);
+    guard_barrier_allowed(&quiescence);
 
     let mut notified_fut = pin!(None);
     std::future::poll_fn(|cx| {
         if quiescence.is_quiescent() {
-            // A stuck scripted decision makes this a *dirty* quiescence: report it here
-            // rather than letting the barrier silently pass.
-            if let Some(stuck) = script_unconsumed_description() {
-                panic!("{}", script_stuck_error(&stuck));
-            }
             return Poll::Ready(());
         }
         // Registered before the scheduler can run (single-threaded), so the quiescence
@@ -711,22 +342,6 @@ pub async fn quiesce() {
     // everything before it has fully settled, and the test has explicitly opted into
     // observing only post-quiescence states from here on.
     quiescence.tainted.set(false);
-}
-
-/// Removes every message already delivered to `receiver` and returns how many there were. This
-/// never runs the scheduler: it neither settles the simulation nor forces pending work, so it
-/// cannot taint or poison the instance, and messages that pending work would still produce are
-/// not waited for. Callers that need a final count reach quiescence first (see [`quiesce`]).
-fn drain_delivered_bytes(receiver: &Mutex<UnsyncReceiver<Bytes>>) -> usize {
-    let mut receiver = receiver
-        .try_lock()
-        .expect("simulation output is being received elsewhere");
-    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-    let mut count = 0;
-    while let Poll::Ready(Some(_)) = receiver.poll_next_unpin(&mut cx) {
-        count += 1;
-    }
-    count
 }
 
 /// Receives the next message from `receiver` while trying not to overrun the simulation:
@@ -749,18 +364,6 @@ async fn try_next_bytes(
     let mut notified_fut = pin!(None);
 
     std::future::poll_fn(|cx| {
-        // **Scripted-decision barrier**: an output await completes only after every
-        // decision scripted so far has been consumed, so every point where the test body
-        // resumes is a clean synchronization point (the script written so far has fully
-        // happened). If the simulation runs out of work while a scripted decision is still
-        // waiting, that decision can never be honored — panic instead of yielding output
-        // or end-of-stream, so a stuck script cannot masquerade as a completed one.
-        if let Some(stuck) = script_unconsumed_description() {
-            assert!(!quiescence.is_quiescent(), "{}", script_stuck_error(&stuck));
-            quiescence.push_park_waker(cx.waker());
-            return Poll::Pending;
-        }
-
         // A message may become available at any point (including from deterministic work
         // while settling), so always check the stream first.
         match receiver_stream.poll_next_unpin(cx) {
@@ -803,16 +406,6 @@ struct SimConnections {
         HashMap<SimExternalPort, HashMap<u32, Rc<Mutex<UnsyncReceiver<Bytes>>>>>,
     external_registered: HashMap<ExternalPortId, SimExternalPort>,
     quiescence: Rc<QuiescenceState>,
-    /// Every scripted hook (shared with the scheduler's tick lists), keyed by handle ID.
-    scripted_hooks: Rc<ScriptedHookRegistry>,
-    /// Coordinates the decision-group protocol between hook handles and the scheduler.
-    script_coordinator: Rc<RefCell<ScriptCoordinator>>,
-    /// The execution-granular lineage log, shared with the generated code and the scheduler.
-    lineage: LineageHandles,
-    /// Static dependency slices of the program's sinks.
-    slices: Rc<Slices>,
-    /// Compiled with record-level provenance.
-    provenance: bool,
     log: bool,
     /// Whether this instance is being executed by the exhaustive engine (see
     /// [`CompiledSim::exhaustive`]), which affects how `assert_yields_only` explores
@@ -903,38 +496,49 @@ tokio::task_local! {
 
 /// A handle to a compiled Hydro simulation, which can be instantiated and run.
 pub struct CompiledSim {
-    pub(super) _path: BuiltArtifact,
+    pub(super) _path: TempPath,
     pub(super) lib: Library,
     pub(super) externals_port_registry: SimExternalPortRegistry,
     pub(super) unit_test_fuzz_iterations: usize,
-    /// Static dependency slices of the program's sinks (see [`super::slice`]).
-    pub(super) slices: Rc<Slices>,
-    /// Compiled with record-level provenance (see [`super::provenance`]).
-    pub(super) provenance: bool,
-    /// Locations whose ticks run as soon as they are runnable, outside the schedule choice
-    /// (see `SimFlow::eager_locations`).
-    pub(super) eager_locations: Rc<HashSet<LocationId>>,
-    /// Each cluster's member ids (from `SimFlow::with_cluster_size`).
-    pub(super) cluster_members: Rc<std::collections::BTreeMap<LocationId, Vec<u32>>>,
-    /// The number of processes of the program, not counting the observer a specification adds
-    /// (`sim::spec`).
-    pub(super) process_count: usize,
-    /// The labelled collections and whether each is observed, when the flow carries an
-    /// automatic specification (`Spec::all_labels`; see `sim::observe`).
-    #[cfg(feature = "ldfi")]
-    pub(super) labels: Option<Rc<Vec<super::observe::LabelPlan>>>,
-    /// Each location's short type name (`Learner`), for reports.
-    pub(super) location_names: Rc<std::collections::BTreeMap<crate::location::LocationKey, String>>,
-    #[cfg(not(feature = "ldfi"))]
-    #[expect(
-        dead_code,
-        reason = "set by `SimFlow::compiled` for the `ldfi` feature"
-    )]
-    pub(super) labels: Option<()>,
-    /// Per location, the non-deterministic operators upstream of everything sent to it (see
-    /// `sim::order`): for a specification's observer, of what it observes.
-    #[cfg(feature = "ldfi")]
-    pub(super) upstream_nondet: Rc<HashMap<LocationId, Vec<super::order::NondetSite>>>,
+    /// Whether the dylib was generated with network hook points.
+    pub(super) network_hooks: bool,
+    /// The hook installed with [`Self::set_network_hook`], handed to every instance.
+    pub(super) network_hook: RefCell<Option<Rc<dyn SimNetworkHook>>>,
+    #[cfg_attr(not(feature = "hydrofrac"), expect(dead_code, reason = "hydrofrac API"))]
+    pub(super) channels: Vec<ChannelInfo>,
+    #[cfg_attr(not(feature = "hydrofrac"), expect(dead_code, reason = "hydrofrac API"))]
+    pub(super) locations: Vec<LocationInfo>,
+}
+
+/// Signature of the dylib's exported network-hook installer.
+type SetNetworkHookFn = unsafe extern "Rust" fn(Option<Rc<dyn SimNetworkHook>>);
+
+#[cfg(feature = "hydrofrac")]
+impl CompiledSim {
+    /// Installs `hook` for every subsequent instance. Requires a flow compiled with
+    /// [`SimFlow::with_network_hook_points`](super::flow::SimFlow::with_network_hook_points).
+    pub fn set_network_hook(&self, hook: Rc<dyn SimNetworkHook>) {
+        assert!(
+            self.network_hooks,
+            "set_network_hook requires a flow compiled with `with_network_hook_points()`"
+        );
+        *self.network_hook.borrow_mut() = Some(hook);
+    }
+
+    /// Removes the hook installed with [`Self::set_network_hook`].
+    pub fn clear_network_hook(&self) {
+        *self.network_hook.borrow_mut() = None;
+    }
+
+    /// The program's network channels, one per `Network` node, in emission order.
+    pub fn channels(&self) -> &[ChannelInfo] {
+        &self.channels
+    }
+
+    /// The program's processes and clusters, in location order.
+    pub fn locations(&self) -> &[LocationInfo] {
+        &self.locations
+    }
 }
 
 #[sealed::sealed]
@@ -947,12 +551,13 @@ impl<'a, T: RefUnwindSafe + Fn() -> CompiledSimInstance<'a>> Instantiator<'a> fo
 
 fn null_handler(_args: fmt::Arguments<'_>) {}
 
+// The dylib calls these mid-tick, so a panic in them (e.g. a closed stdout) stays host-side.
 fn println_handler(args: fmt::Arguments<'_>) {
-    println!("{}", args);
+    super::panic_guard::catch_host((), || println!("{}", args));
 }
 
 fn eprintln_handler(args: fmt::Arguments<'_>) {
-    eprintln!("{}", args);
+    super::panic_guard::catch_host((), || eprintln!("{}", args));
 }
 
 /// Creates a simulation instance, returning:
@@ -970,62 +575,16 @@ type SimLoaded<'a> = libloading::Symbol<
         cluster_external_in: &mut HashMap<usize, HashMap<u32, UnsyncSender<Bytes>>>,
         println_handler: fn(fmt::Arguments<'_>),
         eprintln_handler: fn(fmt::Arguments<'_>),
+        panic_handler: super::panic_guard::PanicHandler,
     ) -> (
-        Vec<(LocationId, Option<u32>, DfirErased)>,
-        Vec<(LocationId, Option<u32>, DfirErased)>,
-        Hooks,
-        ObservationHooks,
-        InlineHooks,
-        ScriptedTickHooks,
-        ScriptedObservationHooks,
-        ScriptedInlineHooks,
-        ScriptedHookRegistry,
-        LineageHandles,
+        Vec<(&'static str, Option<u32>, DfirErased)>,
+        Vec<(&'static str, Option<u32>, DfirErased)>,
+        Hooks<&'static str>,
+        InlineHooks<&'static str>,
     ),
 >;
 
 impl CompiledSim {
-    /// The labelled collections of the program and whether the automatic specification
-    /// observes each (see [`crate::sim::spec::Spec::all_labels`]); `None` when the flow was
-    /// compiled without one.
-    #[cfg(feature = "ldfi")]
-    pub fn labels(&self) -> Option<&[super::observe::LabelPlan]> {
-        self.labels.as_deref().map(Vec::as_slice)
-    }
-
-    /// The short type name of a process or cluster (`Learner` for `flow.cluster::<Learner>()`),
-    /// for reports.
-    pub fn location_name(&self, location: &LocationId) -> Option<&str> {
-        match location.root() {
-            LocationId::Process(key) | LocationId::Cluster(key) => {
-                self.location_names.get(key).map(String::as_str)
-            }
-            _ => None,
-        }
-    }
-
-    /// The non-deterministic operators (those whose API takes a `nondet!` guard) upstream of
-    /// everything the program sends to `location`, across every location (see
-    /// [`crate::sim::order`]); empty when what reaches `location` is order-insensitive.
-    #[cfg(feature = "ldfi")]
-    pub fn nondet_upstream_of(&self, location: &LocationId) -> &[super::order::NondetSite] {
-        self.upstream_nondet
-            .get(location)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-    }
-
-    /// Each cluster's member ids, from `SimFlow::with_cluster_size`.
-    pub fn cluster_members(&self, cluster: &LocationId) -> Option<&[u32]> {
-        self.cluster_members.get(cluster).map(Vec::as_slice)
-    }
-
-    /// The number of nodes of the program: every process and every cluster member, except the
-    /// observer a specification adds (`sim::spec`), which is not a node of the program.
-    pub fn node_count(&self) -> usize {
-        self.process_count + self.cluster_members.values().map(Vec::len).sum::<usize>()
-    }
-
     /// Executes the given closure with a single instance of the compiled simulation.
     pub fn with_instance<T>(&self, thunk: impl FnOnce(CompiledSimInstance<'_>) -> T) -> T {
         self.with_instantiator(|instantiator| thunk(instantiator()), true)
@@ -1044,19 +603,37 @@ impl CompiledSim {
         always_log: bool,
     ) -> T {
         let func: SimLoaded<'_> = unsafe { self.lib.get(b"__hydro_runtime").unwrap() };
+        // The provenance drain is exported by every generated dylib; it is only meaningful when
+        // the flow was compiled with `with_provenance()`, but looking it up is harmless otherwise.
+        let drain: Option<libloading::Symbol<'_, super::provenance::DrainFn>> =
+            unsafe { self.lib.get(b"__hydro_provenance_drain").ok() };
+        let drain_fn: Option<super::provenance::DrainFn> = drain.map(|d| *d);
+        let reset: Option<libloading::Symbol<'_, super::provenance::ResetFn>> =
+            unsafe { self.lib.get(b"__hydro_provenance_reset").ok() };
+        let reset_fn: Option<super::provenance::ResetFn> = reset.map(|d| *d);
         let log = always_log || std::env::var("HYDRO_SIM_LOG").is_ok_and(|v| v == "1");
+        // Only dylibs generated with hook points export the installer.
+        let set_network_hook: Option<SetNetworkHookFn> = self.network_hooks.then(|| unsafe {
+            *self
+                .lib
+                .get::<SetNetworkHookFn>(b"__hydro_set_network_hook")
+                .unwrap()
+        });
+        // A panic inside an instance aborts that instance, and the hook sees
+        // `on_instance_begin` before the next one.
+        let network_hook = std::panic::AssertUnwindSafe(self.network_hook.borrow().clone());
+        let externals_port_registry = &self.externals_port_registry;
         thunk(
             &(|| CompiledSimInstance {
                 func: func.clone(),
-                externals_port_registry: self.externals_port_registry.clone(),
-                slices: self.slices.clone(),
-                provenance: self.provenance,
-                eager_locations: self.eager_locations.clone(),
+                externals_port_registry: externals_port_registry.clone(),
                 dylib_result: None,
                 log,
                 exhaustive: false,
-                deterministic: false,
-                replay: false,
+                provenance_drain: drain_fn,
+                provenance_reset: reset_fn,
+                set_network_hook,
+                network_hook: Option::clone(&network_hook),
             }),
         )
     }
@@ -1094,7 +671,7 @@ impl CompiledSim {
             let corpus_dir = std::env::current_dir().unwrap().join(".fuzz-corpus");
             std::fs::create_dir_all(&corpus_dir).unwrap();
             let libfuzzer_args = format!(
-                "{} {} -artifact_prefix={}/ -handle_abrt=0",
+                "{} {} -artifact_prefix={}/ -handle_abrt=0 -rss_limit_mb=8192",
                 corpus_dir.to_str().unwrap(),
                 corpus_dir.to_str().unwrap(),
                 corpus_dir.to_str().unwrap(),
@@ -1199,55 +776,6 @@ impl CompiledSim {
         }
     }
 
-    /// Explores exactly `iterations` randomly scheduled executions of the simulation, with no
-    /// fuzzer, no reproducer lookup, and no failure output: a bounded random sample of the
-    /// schedule space, for callers (such as `hydro_lang::sim::ldfi`) that run many such samples
-    /// under their own control and need each one to terminate. Prefer [`Self::fuzz`] for tests.
-    pub fn fuzz_bounded(&self, iterations: usize, thunk: impl AsyncFnMut() + RefUnwindSafe) {
-        self.fuzz_bounded_then(iterations, thunk, || {});
-    }
-
-    /// [`Self::fuzz_bounded`], calling `after` once each execution has finished, outside the
-    /// instance (see [`Self::exhaustive_then`]).
-    #[cfg_attr(
-        not(feature = "ldfi"),
-        expect(dead_code, reason = "used by `sim::ldfi`")
-    )]
-    pub(crate) fn fuzz_bounded_then(
-        &self,
-        iterations: usize,
-        mut thunk: impl AsyncFnMut() + RefUnwindSafe,
-        after: impl FnMut(),
-    ) {
-        let mut after = std::panic::AssertUnwindSafe(after);
-        self.with_instantiator(
-            |instantiator| {
-                bolero::test(bolero::TargetLocation {
-                    package_name: "",
-                    manifest_dir: "",
-                    module_path: "",
-                    file: ".",
-                    line: 0,
-                    item_path: "<unknown>::__bolero_item_path__",
-                    test_name: None,
-                })
-                .with_iterations(iterations)
-                .run_with_replay(move |is_replay| {
-                    let mut instance = instantiator();
-                    if is_replay {
-                        instance.log = true;
-                    }
-                    tokio::runtime::Builder::new_current_thread()
-                        .build()
-                        .unwrap()
-                        .block_on(async { instance.run(&mut thunk).await });
-                    (*after)();
-                })
-            },
-            false,
-        );
-    }
-
     /// Executes the given closure with a single instance of the compiled simulation, using the
     /// provided bytes as the source of fuzzing decisions. This can be used to manually reproduce a
     /// failure found during fuzzing.
@@ -1292,44 +820,6 @@ impl CompiledSim {
         }
     }
 
-    /// Executes the given closure with a single instance of the compiled simulation, drawing
-    /// every scheduling decision from the provided bolero [`Driver`] instead of a fuzzer.
-    /// [`super::prompt_schedule::PromptScheduleDriver`] is a deterministic driver that always
-    /// moves the most data forward; a custom driver can implement any fixed scheduling policy.
-    ///
-    /// This is a stand-in for [`CompiledSim::deterministic`] for callers that script some hooks
-    /// and need a fixed default for the rest: `deterministic()` refuses hooks with more than one
-    /// legal decision and more than one runnable tick, and not every hook kind can be scripted
-    /// yet (see the [`prompt_schedule`](super::prompt_schedule) docs). Once they can, or once
-    /// `deterministic()` takes a default policy, this method should be deleted.
-    ///
-    /// The closure receives the instance without the scheduler running; use
-    /// [`CompiledSimInstance::run_with_scheduler_and_logger`] (or a receiver's methods, which
-    /// drive the scheduler while they wait) inside it. Tick logging follows `HYDRO_SIM_LOG`.
-    ///
-    /// [`Driver`]: bolero::bolero_engine::driver::Driver
-    pub fn run_with_driver<D: bolero::bolero_engine::driver::Driver + 'static>(
-        &self,
-        driver: D,
-        thunk: impl AsyncFnOnce(CompiledSimInstance<'_>) + RefUnwindSafe,
-    ) {
-        self.with_instantiator(
-            |instantiator| {
-                let instance = instantiator();
-                bolero::bolero_engine::any::scope::with(
-                    Box::new(bolero::bolero_engine::driver::object::Object(driver)),
-                    || {
-                        tokio::runtime::Builder::new_current_thread()
-                            .build()
-                            .unwrap()
-                            .block_on(async { instance.run_without_launching(thunk).await })
-                    },
-                );
-            },
-            false,
-        );
-    }
-
     /// Exhaustively searches all possible executions of the simulation. The provided
     /// closure will be repeatedly executed with instances of the Hydro program where the
     /// batching boundaries, order of messages, and retries are varied.
@@ -1345,18 +835,18 @@ impl CompiledSim {
     }
 
     /// [`Self::exhaustive`], calling `after` once each execution has finished, outside the
-    /// instance (so `after` may run instances of its own, such as counterfactual replays).
-    #[cfg_attr(
-        not(feature = "ldfi"),
-        expect(dead_code, reason = "used by `sim::ldfi`")
-    )]
-    pub(crate) fn exhaustive_then(
+    /// instance.
+    ///
+    /// This lets a caller fold each execution's results into a summary between executions
+    /// (rather than accumulating them across the whole exploration), and run instances of its
+    /// own from `after`. A panic in `after` ends the exploration like a panic in `thunk` does.
+    ///
+    /// Returns the number of distinct executions explored.
+    pub fn exhaustive_then(
         &self,
         mut thunk: impl AsyncFnMut() + RefUnwindSafe,
         after: impl FnMut(),
     ) -> usize {
-        // `after` runs between executions, outside any instance; a panic in it ends the
-        // exploration like a panic in `thunk` does.
         let mut after = std::panic::AssertUnwindSafe(after);
         if std::env::var("BOLERO_FUZZER").is_ok() {
             eprintln!(
@@ -1413,19 +903,60 @@ impl CompiledSim {
         count
     }
 
-    /// One execution: the first schedule [`Self::exhaustive`] explores (every scheduling and
-    /// batching choice resolved to its first alternative, by an all-zero entropy source), then
-    /// `after`, outside the instance. Deterministic: the same program and body always run the
-    /// same schedule.
-    #[cfg_attr(
-        not(feature = "ldfi"),
-        expect(dead_code, reason = "used by `sim::ldfi`")
-    )]
-    pub(crate) fn first_schedule_then(
+    /// Explores exactly `iterations` randomly scheduled executions of the simulation, with no
+    /// fuzzer, no reproducer lookup and no failure output.
+    ///
+    /// This is a bounded random sample of the schedule space, for callers that run many such
+    /// samples under their own control and need each one to terminate. Prefer [`Self::fuzz`]
+    /// for tests.
+    pub fn fuzz_bounded(&self, iterations: usize, thunk: impl AsyncFnMut() + RefUnwindSafe) {
+        self.fuzz_bounded_then(iterations, thunk, || {});
+    }
+
+    /// [`Self::fuzz_bounded`], calling `after` once each execution has finished, outside the
+    /// instance (see [`Self::exhaustive_then`]).
+    pub fn fuzz_bounded_then(
         &self,
+        iterations: usize,
         mut thunk: impl AsyncFnMut() + RefUnwindSafe,
-        after: impl FnOnce(),
+        after: impl FnMut(),
     ) {
+        let mut after = std::panic::AssertUnwindSafe(after);
+        self.with_instantiator(
+            |instantiator| {
+                bolero::test(bolero::TargetLocation {
+                    package_name: "",
+                    manifest_dir: "",
+                    module_path: "",
+                    file: ".",
+                    line: 0,
+                    item_path: "<unknown>::__bolero_item_path__",
+                    test_name: None,
+                })
+                .with_iterations(iterations)
+                .run_with_replay(move |is_replay| {
+                    let mut instance = instantiator();
+                    if is_replay {
+                        instance.log = true;
+                    }
+                    tokio::runtime::Builder::new_current_thread()
+                        .build()
+                        .unwrap()
+                        .block_on(async { instance.run(&mut thunk).await });
+                    (*after)();
+                })
+            },
+            false,
+        );
+    }
+
+    /// Runs exactly one execution: the first schedule [`Self::exhaustive`] explores, with every
+    /// scheduling and batching choice resolved to its first alternative by an all-zero entropy
+    /// source.
+    ///
+    /// Deterministic: the same program and body always run the same schedule, which makes
+    /// this useful for debugging a single run.
+    pub fn first_schedule(&self, mut thunk: impl AsyncFnMut() + RefUnwindSafe) {
         self.with_instantiator(
             |instantiator| {
                 let mut instance = instantiator();
@@ -1447,99 +978,15 @@ impl CompiledSim {
             },
             false,
         );
-        after();
-    }
-
-    /// Runs the test body against exactly **one** execution of the program, with no fuzzer
-    /// involved anywhere: if it passes once, it passes always, on every machine.
-    ///
-    /// Every source of variation must be pinned: inputs are already scripted (via
-    /// `sim_input`), and every unsafe operator that receives data must be bound to a sim
-    /// hook (see [`crate::sim_hooks`]) and scripted — encountering an unhooked operator
-    /// with meaningful input panics, naming the operator. The scheduler needs no
-    /// tie-breaking policy because at most one tick is ever runnable: scripted decisions
-    /// activate one group at a time, so the *script* is the schedule.
-    pub fn deterministic(&self, thunk: impl AsyncFnOnce() + RefUnwindSafe) {
-        self.with_instance(|mut instance| {
-            instance.deterministic = true;
-
-            // Deliberately do not install a Bolero entropy scope. Deterministic execution
-            // must never draw entropy; Bolero's unset thread-local scope makes any accidental
-            // draw fail immediately with `no scope set`.
-            tokio::runtime::Builder::new_current_thread()
-                .build()
-                .unwrap()
-                .block_on(instance.run(thunk));
-        })
-    }
-
-    /// A quiet instance driven by a fixed, all-zero entropy source: every scheduling choice
-    /// and every unhooked in-tick decision resolves to its first alternative, so two such
-    /// instances of the same program under the same scripts behave identically. For the
-    /// counterfactual replays of `sim::ldfi`, whose hooks are all under replay policies.
-    #[cfg_attr(
-        not(feature = "ldfi"),
-        expect(dead_code, reason = "used by `sim::ldfi`")
-    )]
-    ///
-    /// Returns `Err` with the message when the program's own code panicked during the replay
-    /// (caught by the tick guard, see `sim::runtime::erase_guarded`, and re-raised on the
-    /// host side): a diverged counterfactual state may drive the program into conditions no
-    /// real execution reaches, and such a replay is inconclusive, not fatal.
-    pub(crate) fn replay(&self, thunk: impl AsyncFnOnce() + RefUnwindSafe) -> Result<(), String> {
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.with_instantiator(
-                |instantiator| {
-                    let mut instance = instantiator();
-                    instance.replay = true;
-                    bolero::bolero_engine::any::scope::with(
-                        Box::new(bolero::bolero_engine::driver::object::Object(
-                            bolero::bolero_engine::driver::bytes::Driver::new(
-                                vec![0u8; 1 << 20],
-                                &Default::default(),
-                            ),
-                        )),
-                        || {
-                            tokio::runtime::Builder::new_current_thread()
-                                .build()
-                                .unwrap()
-                                .block_on(instance.run(thunk));
-                        },
-                    );
-                },
-                false,
-            )
-        }));
-        match outcome {
-            Ok(()) => Ok(()),
-            Err(payload) => {
-                let message = payload
-                    .downcast_ref::<String>()
-                    .cloned()
-                    .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
-                    .unwrap_or_else(|| "(non-string panic payload)".to_owned());
-                if message.starts_with("the simulated program panicked") {
-                    Err(message)
-                } else {
-                    std::panic::resume_unwind(payload)
-                }
-            }
-        }
     }
 }
 
 // This must be a tuple because it is referenced from generated code in `graph.rs`.
 type DylibResult = (
-    Vec<(LocationId, Option<u32>, DfirErased)>,
-    Vec<(LocationId, Option<u32>, DfirErased)>,
-    Hooks,
-    ObservationHooks,
-    InlineHooks,
-    ScriptedTickHooks,
-    ScriptedObservationHooks,
-    ScriptedInlineHooks,
-    ScriptedHookRegistry,
-    LineageHandles,
+    Vec<(&'static str, Option<u32>, DfirErased)>,
+    Vec<(&'static str, Option<u32>, DfirErased)>,
+    Hooks<&'static str>,
+    InlineHooks<&'static str>,
 );
 
 /// A single instance of a compiled Hydro simulation, which provides methods to interactively
@@ -1547,16 +994,13 @@ type DylibResult = (
 pub struct CompiledSimInstance<'a> {
     func: SimLoaded<'a>,
     externals_port_registry: SimExternalPortRegistry,
-    slices: Rc<Slices>,
-    provenance: bool,
-    eager_locations: Rc<HashSet<LocationId>>,
     dylib_result: Option<DylibResult>,
     log: bool,
     exhaustive: bool,
-    deterministic: bool,
-    /// A counterfactual replay (see [`CompiledSim::replay`]): tick executions are scripted by
-    /// replay policies and may legitimately have nothing to do.
-    replay: bool,
+    provenance_drain: Option<super::provenance::DrainFn>,
+    provenance_reset: Option<super::provenance::ResetFn>,
+    set_network_hook: Option<SetNetworkHookFn>,
+    network_hook: Option<Rc<dyn SimNetworkHook>>,
 }
 
 impl<'a> CompiledSimInstance<'a> {
@@ -1578,7 +1022,28 @@ impl<'a> CompiledSimInstance<'a> {
         let mut cluster_external_in: HashMap<usize, HashMap<u32, UnsyncSender<Bytes>>> =
             HashMap::new();
 
-        let mut dylib_result = unsafe {
+        // Fresh provenance state for this instance (the dylib's thread-locals persist across
+        // instances on the same thread).
+        if let Some(reset) = self.provenance_reset {
+            unsafe { reset() };
+        }
+
+        // A host panic stashed by a previous instance (which then panicked itself) is stale.
+        super::panic_guard::clear_pending();
+
+        // Hand this instance's hook to the dylib, guarded so a panic in its callbacks stays on the
+        // host side of the dylib boundary (see `sim::panic_guard`).
+        if let Some(set_network_hook) = self.set_network_hook {
+            if let Some(hook) = &self.network_hook {
+                hook.on_instance_begin();
+            }
+            let guarded = self.network_hook.clone().map(|hook| {
+                Rc::new(super::panic_guard::GuardedNetworkHook(hook)) as Rc<dyn SimNetworkHook>
+            });
+            unsafe { set_network_hook(guarded) };
+        }
+
+        let dylib_result = unsafe {
             (self.func)(
                 colored::control::SHOULD_COLORIZE.should_colorize(),
                 &mut external_out,
@@ -1595,6 +1060,7 @@ impl<'a> CompiledSimInstance<'a> {
                 } else {
                     null_handler
                 },
+                super::panic_guard::host_handler,
             )
         };
 
@@ -1609,6 +1075,7 @@ impl<'a> CompiledSimInstance<'a> {
             settle_wakers: RefCell::new(vec![]),
             tainted: Cell::new(false),
             poisoned: Cell::new(false),
+            barriers_forbidden: Cell::new(None),
         });
 
         let mut input_senders = HashMap::new();
@@ -1642,18 +1109,11 @@ impl<'a> CompiledSimInstance<'a> {
             }
         }
 
-        let scripted_hooks = Rc::new(std::mem::take(&mut dylib_result.8));
-        let lineage = dylib_result.9.clone();
-        // The filter enforces the program's declared fault model: only channels whose
-        // transport admits loss accept omissions.
-        lineage.faults.borrow_mut().lossy = self
-            .slices
-            .channels
-            .values()
-            .filter(|channel| channel.lossy)
-            .map(|channel| channel.id)
-            .collect();
         self.dylib_result = Some(dylib_result);
+
+        // Make the dylib's provenance log reachable from `provenance::take_emissions()`. The
+        // simulation is single-threaded, so a thread-local is sufficient.
+        super::provenance::HOST_DRAIN.with(|d| *d.borrow_mut() = self.provenance_drain);
 
         CURRENT_SIM_CONNECTIONS
             .scope(
@@ -1664,11 +1124,6 @@ impl<'a> CompiledSimInstance<'a> {
                     cluster_output_receivers,
                     external_registered: self.externals_port_registry.registered.clone(),
                     quiescence: quiescence.clone(),
-                    scripted_hooks,
-                    script_coordinator: Rc::new(RefCell::new(ScriptCoordinator::default())),
-                    lineage,
-                    slices: self.slices.clone(),
-                    provenance: self.provenance,
                     log: self.log,
                     exhaustive: self.exhaustive,
                 }),
@@ -1684,10 +1139,9 @@ impl<'a> CompiledSimInstance<'a> {
     /// The future always gets to run first; whenever it is blocked (e.g. waiting to receive
     /// simulation outputs), the scheduler runs a single step to completion. Steps are atomic
     /// with respect to the future: it is re-polled between every pair of scheduler steps, but
-    /// never while a step is in flight. The `LaunchedSim` state struct lives across steps,
-    /// in this function's frame. Tick logging is off; see
-    /// [`CompiledSimInstance::run_with_scheduler_and_logger`] for a trace.
-    pub async fn run_with_scheduler(self, thunk: impl Future<Output = ()>) {
+    /// never while a step is in flight. The [`LaunchedSim`] state struct lives across steps,
+    /// in this function's frame.
+    async fn run_with_scheduler(self, thunk: impl Future<Output = ()>) {
         self.run_with_scheduler_and_maybe_logger::<std::io::Empty>(None, thunk)
             .await;
     }
@@ -1715,26 +1169,10 @@ impl<'a> CompiledSimInstance<'a> {
     ) {
         let mut sim = self.start(log_override);
         let mut thunk_fut = pin!(thunk);
-        let mut thunk_complete = false;
         loop {
-            // The thunk always gets to run first until it completes. Completion is itself a
-            // script barrier: after the body returns, keep stepping until every decision it
-            // installed has been consumed (or report a decision that can never be honored).
-            if !thunk_complete && futures::poll!(thunk_fut.as_mut()).is_ready() {
-                thunk_complete = true;
-            }
-
-            if thunk_complete {
-                let Some(stuck) = script_unconsumed_description() else {
-                    break;
-                };
-                assert!(
-                    !sim.quiescence.is_quiescent(),
-                    "{}",
-                    script_stuck_error(&stuck)
-                );
-                sim.step().await;
-                continue;
+            // The thunk always gets to run first.
+            if futures::poll!(thunk_fut.as_mut()).is_ready() {
+                break;
             }
 
             if sim.quiescence.is_quiescent() || sim.quiescence.nondet_pending.get() {
@@ -1762,119 +1200,58 @@ impl<'a> CompiledSimInstance<'a> {
     /// Consumes this instance and constructs the [`LaunchedSim`] state struct, which is
     /// advanced incrementally via [`LaunchedSim::step`].
     fn start<W: std::io::Write>(mut self, log_override: Option<W>) -> LaunchedSim<W> {
-        let (
-            async_dfirs,
-            tick_dfirs,
-            mut hooks,
-            mut observation_hooks,
-            mut inline_hooks,
-            mut scripted_hooks,
-            mut scripted_observation_hooks,
-            mut scripted_inline_hooks,
-            _registry,
-            lineage,
-        ) = self.dylib_result.take().unwrap();
+        let (async_dfirs, tick_dfirs, mut hooks, mut inline_hooks) =
+            self.dylib_result.take().unwrap();
 
-        // The generated code keys hooks and tick DFIRs by the same locations, so we can
-        // move each tick's / observation's hooks out of the maps and attach them
-        // directly. This lets the scheduler's hot paths avoid keyed lookups entirely.
+        // The generated code keys hooks and tick DFIRs by the same serialized location
+        // strings, so we can move each tick's / observation's hooks out of the maps and
+        // attach them directly. This lets the scheduler's hot paths avoid keyed lookups
+        // (which would clone `LocationId`s) entirely.
         let not_ready_ticks = tick_dfirs
             .into_iter()
-            .map(|(location, cluster_id, dfir)| {
-                let key = SimLocation {
-                    location,
-                    cluster_id,
-                };
-                let LocationId::Tick {
-                    tick: _,
-                    parent_location,
-                } = &key.location
-                else {
+            .map(|(lid, cluster_id, dfir)| {
+                let location: LocationId = serde_json::from_str(lid).unwrap();
+                let LocationId::Tick(_, parent_location) = location else {
                     unreachable!("tick DFIRs are always keyed by a tick location")
                 };
-                let parent_location = (**parent_location).clone();
-                let tick = SimTick {
-                    parent_location,
+                SimTick {
+                    parent_location: *parent_location,
                     cluster_id,
                     dfir,
-                    hooks: hooks.remove(&key).unwrap_or_default(),
-                    scripted_hooks: scripted_hooks.remove(&key).unwrap_or_default(),
-                    inline_hooks: inline_hooks.remove(&key).unwrap_or_default(),
-                    scripted_inline_hooks: scripted_inline_hooks.remove(&key).unwrap_or_default(),
-                    location: key.location,
-                };
-                abort_assert!(
-                    !(tick.hooks.is_empty() && tick.scripted_hooks.is_empty()),
-                    "every tick DFIR must have at least one hook"
-                );
-                tick
+                    hooks: hooks
+                        .remove(&(lid, cluster_id))
+                        .expect("every tick DFIR must have at least one hook"),
+                    inline_hooks: inline_hooks.remove(&(lid, cluster_id)).unwrap_or_default(),
+                }
             })
             .collect();
 
-        let (quiescence, script_coordinator, hook_ids) =
-            CURRENT_SIM_CONNECTIONS.with(|connections| {
-                let connections = connections.borrow();
-                let hook_ids = connections
-                    .scripted_hooks
-                    .iter()
-                    .map(|(key, hook)| (Rc::as_ptr(hook).cast::<()>(), *key))
-                    .collect();
-                (
-                    connections.quiescence.clone(),
-                    connections.script_coordinator.clone(),
-                    hook_ids,
-                )
-            });
+        let quiescence = CURRENT_SIM_CONNECTIONS.with(|connections| {
+            let connections = connections.borrow();
+            connections.quiescence.clone()
+        });
 
         let not_ready_observations = async_dfirs
             .iter()
-            .flat_map(|(location, cluster_id, _)| {
-                let key = SimLocation {
-                    location: location.clone(),
-                    cluster_id: *cluster_id,
-                };
-                let cluster_id = *cluster_id;
-                let unscripted = observation_hooks
-                    .remove(&key)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|hook| ObservationSlot::Unscripted { hook });
-                let scripted = scripted_observation_hooks
-                    .remove(&key)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|hook| {
-                        let ScriptTarget::Observation { hook_id, .. } = hook.borrow().target()
-                        else {
-                            unreachable!("observation-registered scripted hook had a tick target")
-                        };
-                        ObservationSlot::Scripted { hook_id, hook }
-                    });
-                unscripted.chain(scripted).map(move |hook| SimObservation {
-                    location: key.location.clone(),
-                    cluster_id,
-                    hook,
-                })
+            .map(|(lid, cluster_id, _)| SimObservation {
+                location: serde_json::from_str(lid).unwrap(),
+                cluster_id: *cluster_id,
+                hooks: hooks.remove(&(*lid, *cluster_id)).unwrap_or_default(),
             })
             .collect();
 
         debug_assert!(
-            hooks.is_empty()
-                && observation_hooks.is_empty()
-                && inline_hooks.is_empty()
-                && scripted_hooks.is_empty()
-                && scripted_observation_hooks.is_empty()
-                && scripted_inline_hooks.is_empty(),
+            hooks.is_empty() && inline_hooks.is_empty(),
             "all hooks should belong to either a tick DFIR or a top-level location"
         );
 
         LaunchedSim {
-            async_dfirs,
+            async_dfirs: async_dfirs
+                .into_iter()
+                .map(|(lid, c_id, dfir)| (serde_json::from_str(lid).unwrap(), c_id, dfir))
+                .collect(),
             possibly_ready_ticks: vec![],
             not_ready_ticks,
-            current_scripted_tick: None,
-            current_scripted_observation: None,
-            script_coordinator,
             possibly_ready_observations: vec![],
             not_ready_observations,
             log: if self.log {
@@ -1887,23 +1264,19 @@ impl<'a> CompiledSimInstance<'a> {
                 LogKind::Null
             },
             quiescence,
-            deterministic: self.deterministic,
-            replay: self.replay,
-            lineage,
-            next_exec: 0,
-            hook_ids,
-            eager_locations: self.eager_locations.clone(),
+            halted: vec![],
+            network_hook: self.network_hook.take(),
         }
     }
 }
 
-impl<T, O: Ordering, R: Retries> Clone for SimReceiver<T, O, R> {
+impl<T: Serialize + DeserializeOwned, O: Ordering, R: Retries> Clone for SimReceiver<T, O, R> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T, O: Ordering, R: Retries> Copy for SimReceiver<T, O, R> {}
+impl<T: Serialize + DeserializeOwned, O: Ordering, R: Retries> Copy for SimReceiver<T, O, R> {}
 
 /// How a [`QuiescenceCheckFuture`] resolves the "did the stream end?" check of
 /// `assert_no_more`. Decided once the simulation has settled (run out of deterministic
@@ -2033,7 +1406,7 @@ impl<F: Future<Output = ()>> Future for QuiescenceCheckFuture<F> {
     }
 }
 
-impl<T, O: Ordering, R: Retries> SimReceiver<T, O, R> {
+impl<T: Serialize + DeserializeOwned, O: Ordering, R: Retries> SimReceiver<T, O, R> {
     fn connections(&self) -> (Rc<Mutex<UnsyncReceiver<Bytes>>>, Rc<QuiescenceState>) {
         CURRENT_SIM_CONNECTIONS.with(|connections| {
             let connections = connections.borrow();
@@ -2050,13 +1423,7 @@ impl<T, O: Ordering, R: Retries> SimReceiver<T, O, R> {
         let (receiver, quiescence) = self.connections();
         try_next_bytes(&receiver, &quiescence)
             .await
-            .map(|bytes| (self.2)(&bytes))
-    }
-
-    /// See [`drain_delivered_bytes`].
-    pub(crate) fn drain_delivered(&self) -> usize {
-        let (receiver, _) = self.connections();
-        drain_delivered_bytes(&receiver)
+            .map(|bytes| bincode::deserialize(&bytes).unwrap())
     }
 
     /// Asserts that the stream has ended and no more messages can possibly arrive.
@@ -2085,8 +1452,8 @@ impl<T, O: Ordering, R: Retries> SimReceiver<T, O, R> {
     }
 }
 
-impl<T> SimReceiver<T, TotalOrder, ExactlyOnce> {
-    /// Receives the next message from the simulation output stream, waiting (and letting the
+impl<T: Serialize + DeserializeOwned> SimReceiver<T, TotalOrder, ExactlyOnce> {
+    /// Receives the next message from the external bincode stream, waiting (and letting the
     /// scheduler run any pending simulation work) until one is available. If the simulation
     /// becomes quiescent without producing a message, the test fails.
     ///
@@ -2110,7 +1477,7 @@ impl<T> SimReceiver<T, TotalOrder, ExactlyOnce> {
         }
     }
 
-    /// Receives the next message from the simulation output stream, or returns `None` if no
+    /// Receives the next message from the external bincode stream, or returns `None` if no
     /// more messages can possibly arrive.
     ///
     /// If answering requires forcing pending nondeterministic work to run, then afterwards,
@@ -2120,7 +1487,7 @@ impl<T> SimReceiver<T, TotalOrder, ExactlyOnce> {
         self.try_next_impl().await
     }
 
-    /// Receives the next `n` messages from the simulation output stream, waiting (and letting
+    /// Receives the next `n` messages from the external bincode stream, waiting (and letting
     /// the scheduler run any pending simulation work) until they are available. If the
     /// simulation becomes quiescent before `n` messages arrive, the test fails.
     ///
@@ -2161,7 +1528,7 @@ impl<T> SimReceiver<T, TotalOrder, ExactlyOnce> {
         out
     }
 
-    /// Collects all remaining messages from the simulation output stream into a collection,
+    /// Collects all remaining messages from the external bincode stream into a collection,
     /// waiting until no more messages can possibly arrive.
     ///
     /// If this has to force pending nondeterministic work to run, it should be the last
@@ -2287,25 +1654,20 @@ impl<F1: Future<Output = ()>, F2: Future<Output = ()>> Future for ChainedFuture<
     }
 }
 
-impl<T> SimReceiver<T, NoOrder, ExactlyOnce> {
-    /// Receives the next `n` messages, sorted, and then asserts that the stream ends (like
-    /// [`SimReceiver::assert_no_more`], forking the search in exhaustive mode). If the
-    /// simulation becomes quiescent before `n` messages arrive, the test fails.
+impl<T: Serialize + DeserializeOwned> SimReceiver<T, NoOrder, ExactlyOnce> {
+    /// Receives the next `n` messages, sorted, waiting (and letting the scheduler run any
+    /// pending simulation work) until they are available. If the simulation becomes quiescent
+    /// before `n` messages arrive, the test fails.
     ///
-    /// Unlike [`collect_n`](SimReceiver::collect_n) on ordered streams, there is no variant
-    /// of this API that skips the end-of-stream check. On an unordered stream, the set of
-    /// messages that arrives *first* is not well-defined, so observing a strict prefix of
-    /// the output would be sensitive to arrival orders that the simulator does not explore
-    /// (delivery into the port is FIFO, with no ordering hook); sorting normalizes the
-    /// permutation of the received messages, but not the choice of *subset*. The quiescence
-    /// check makes the observation sound: it proves the `n` messages are *all* the messages
-    /// the program can produce from the input so far, a set which does not depend on
-    /// arrival order.
-    pub async fn collect_n_sorted_only<C: Default + Extend<T> + AsMut<[T]>>(self, n: usize) -> C
+    /// Like [`SimReceiver::next`], this is safe to use in the middle of a test.
+    pub fn collect_n_sorted<C: Default + Extend<T> + AsMut<[T]>>(
+        &self,
+        n: usize,
+    ) -> impl use<'_, T, C> + Future<Output = C>
     where
-        T: Debug + Ord,
+        T: Ord,
     {
-        let out = FutureTrackingCaller {
+        FutureTrackingCaller {
             future: async move {
                 let mut out = C::default();
                 for i in 0..n {
@@ -2324,29 +1686,9 @@ impl<T> SimReceiver<T, NoOrder, ExactlyOnce> {
                 Ok(out)
             },
         }
-        .await;
-        self.assert_no_more().await;
-        out
     }
 
-    /// Receives the next message, and then asserts that the stream ends (like
-    /// [`SimReceiver::assert_no_more`], forking the search in exhaustive mode). If the
-    /// simulation becomes quiescent without producing a message, the test fails.
-    ///
-    /// This is a shortcut for [`Self::collect_n_sorted_only`] with `n = 1`. Unlike
-    /// [`next`](SimReceiver::next) on ordered streams, there is no variant that skips the
-    /// end-of-stream check, because on an unordered stream *which* message arrives first is
-    /// not well-defined; the check proves the message is the *only* one the program can
-    /// produce from the input so far.
-    pub async fn next_only(self) -> T
-    where
-        T: Debug + Ord,
-    {
-        let mut out: Vec<T> = self.collect_n_sorted_only(1).await;
-        out.remove(0)
-    }
-
-    /// Collects all remaining messages from the simulation output stream into a collection,
+    /// Collects all remaining messages from the external bincode stream into a collection,
     /// sorting them. This will wait until no more messages can possibly arrive.
     ///
     /// If this has to force pending nondeterministic work to run, it should be the last
@@ -2418,7 +1760,7 @@ impl<T> SimReceiver<T, NoOrder, ExactlyOnce> {
     }
 }
 
-impl<T, O: Ordering, R: Retries> SimSender<T, O, R> {
+impl<T: Serialize + DeserializeOwned, O: Ordering, R: Retries> SimSender<T, O, R> {
     fn with_sink<Out>(&self, thunk: impl FnOnce(&dyn Fn(T)) -> Out) -> Out {
         let (sender, quiescence) = CURRENT_SIM_CONNECTIONS.with(|connections| {
             let connections = connections.borrow();
@@ -2432,16 +1774,22 @@ impl<T, O: Ordering, R: Retries> SimSender<T, O, R> {
             )
         });
 
-        let encode = self.2;
         thunk(&move |t| {
-            sender.try_send(encode(&t).into()).unwrap();
+            sender
+                .try_send(bincode::serialize(&t).unwrap().into())
+                .unwrap();
             quiescence.resume();
         })
     }
 }
 
-impl<T, O: Ordering> SimSender<T, O, ExactlyOnce> {
-    /// Sends several messages to the simulation input. The messages will be asynchronously
+impl<T: Serialize + DeserializeOwned, O: Ordering> SimSender<T, O, ExactlyOnce> {
+    /// Sends one value without requiring the matrix to branch on type-level ordering.
+    pub fn send_indexed(&self, value: T) {
+        self.with_sink(|send| send(value));
+    }
+
+    /// Sends several messages to the external bincode sink. The messages will be asynchronously
     /// processed as part of the simulation, in non-deterministic order.
     pub fn send_many_unordered<I: IntoIterator<Item = T>>(&self, iter: I) {
         self.with_sink(|send| {
@@ -2452,14 +1800,14 @@ impl<T, O: Ordering> SimSender<T, O, ExactlyOnce> {
     }
 }
 
-impl<T> SimSender<T, TotalOrder, ExactlyOnce> {
-    /// Sends a message to the simulation input. The message will be asynchronously processed
+impl<T: Serialize + DeserializeOwned> SimSender<T, TotalOrder, ExactlyOnce> {
+    /// Sends a message to the external bincode sink. The message will be asynchronously processed
     /// as part of the simulation.
     pub fn send(&self, t: T) {
         self.with_sink(|send| send(t));
     }
 
-    /// Sends several messages to the simulation input. The messages will be asynchronously
+    /// Sends several messages to the external bincode sink. The messages will be asynchronously
     /// processed as part of the simulation.
     pub fn send_many<I: IntoIterator<Item = T>>(&self, iter: I) {
         self.with_sink(|send| {
@@ -2470,15 +1818,20 @@ impl<T> SimSender<T, TotalOrder, ExactlyOnce> {
     }
 }
 
-impl<T, O: Ordering, R: Retries> Clone for SimClusterReceiver<T, O, R> {
+impl<T: Serialize + DeserializeOwned, O: Ordering, R: Retries> Clone
+    for SimClusterReceiver<T, O, R>
+{
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T, O: Ordering, R: Retries> Copy for SimClusterReceiver<T, O, R> {}
+impl<T: Serialize + DeserializeOwned, O: Ordering, R: Retries> Copy
+    for SimClusterReceiver<T, O, R>
+{
+}
 
-impl<T, O: Ordering, R: Retries> SimClusterReceiver<T, O, R> {
+impl<T: Serialize + DeserializeOwned, O: Ordering, R: Retries> SimClusterReceiver<T, O, R> {
     fn member_connections(
         &self,
         member_id: u32,
@@ -2499,43 +1852,11 @@ impl<T, O: Ordering, R: Retries> SimClusterReceiver<T, O, R> {
         let (receiver, quiescence) = self.member_connections(member_id);
         try_next_bytes(&receiver, &quiescence)
             .await
-            .map(|bytes| (self.2)(&bytes))
-    }
-
-    /// See [`drain_delivered_bytes`].
-    pub(crate) fn drain_delivered(&self, member_id: u32) -> usize {
-        let (receiver, _) = self.member_connections(member_id);
-        drain_delivered_bytes(&receiver)
-    }
-
-    /// Asserts that the stream from a specific cluster member has ended and no more messages
-    /// can possibly arrive.
-    ///
-    /// If the check cannot be answered without running pending nondeterministic work (such
-    /// as ticks with buffered inputs):
-    /// - Under [`CompiledSim::exhaustive`], the search forks: one instance performs the
-    ///   check and ends there, while sibling instances skip the check and continue.
-    /// - In other modes, the pending work runs; afterwards, sending more input and then
-    ///   attempting to receive output will panic.
-    pub fn assert_no_more(self, member_id: u32) -> impl Future<Output = ()>
-    where
-        T: Debug,
-    {
-        QuiescenceCheckFuture::new(FutureTrackingCaller {
-            future: async move {
-                if let Some(next) = self.try_next_impl(member_id).await {
-                    return Err(format!(
-                        "Stream yielded unexpected message: {:?}, expected termination",
-                        next
-                    ));
-                }
-                Ok(())
-            },
-        })
+            .map(|bytes| bincode::deserialize(&bytes).unwrap())
     }
 }
 
-impl<T> SimClusterReceiver<T, TotalOrder, ExactlyOnce> {
+impl<T: Serialize + DeserializeOwned> SimClusterReceiver<T, TotalOrder, ExactlyOnce> {
     /// Receives the next value from a specific cluster member, waiting (and letting the
     /// scheduler run any pending simulation work) until one is available. If the simulation
     /// becomes quiescent without producing a value, the test fails.
@@ -2579,24 +1900,21 @@ impl<T> SimClusterReceiver<T, TotalOrder, ExactlyOnce> {
     }
 }
 
-impl<T> SimClusterReceiver<T, NoOrder, ExactlyOnce> {
-    /// Receives the next `n` values from a specific cluster member, sorted, and then
-    /// asserts that the stream ends (like [`Self::assert_no_more`], forking the search in
-    /// exhaustive mode). If the simulation becomes quiescent before `n` values arrive, the
-    /// test fails.
+impl<T: Serialize + DeserializeOwned> SimClusterReceiver<T, NoOrder, ExactlyOnce> {
+    /// Receives the next `n` values from a specific cluster member, sorted, waiting (and
+    /// letting the scheduler run any pending simulation work) until they are available. If
+    /// the simulation becomes quiescent before `n` values arrive, the test fails.
     ///
-    /// There is no variant of this API that skips the end-of-stream check; see
-    /// [`SimReceiver::collect_n_sorted_only`] for why observing a strict prefix of an
-    /// unordered stream would be unsound.
-    pub async fn collect_n_sorted_only<C: Default + Extend<T> + AsMut<[T]>>(
-        self,
+    /// Like [`SimReceiver::next`], this is safe to use in the middle of a test.
+    pub fn collect_n_sorted<C: Default + Extend<T> + AsMut<[T]>>(
+        &self,
         member_id: u32,
         n: usize,
-    ) -> C
+    ) -> impl use<'_, T, C> + Future<Output = C>
     where
-        T: Debug + Ord,
+        T: Ord,
     {
-        let out = FutureTrackingCaller {
+        FutureTrackingCaller {
             future: async move {
                 let mut out = C::default();
                 for i in 0..n {
@@ -2616,24 +1934,6 @@ impl<T> SimClusterReceiver<T, NoOrder, ExactlyOnce> {
                 Ok(out)
             },
         }
-        .await;
-        self.assert_no_more(member_id).await;
-        out
-    }
-
-    /// Receives the next value from a specific cluster member, and then asserts that the
-    /// stream ends (like [`Self::assert_no_more`], forking the search in exhaustive mode).
-    /// If the simulation becomes quiescent without producing a value, the test fails.
-    ///
-    /// This is a shortcut for [`Self::collect_n_sorted_only`] with `n = 1`; see
-    /// [`SimReceiver::next_only`] for why there is no variant that skips the end-of-stream
-    /// check.
-    pub async fn next_only(self, member_id: u32) -> T
-    where
-        T: Debug + Ord,
-    {
-        let mut out: Vec<T> = self.collect_n_sorted_only(member_id, 1).await;
-        out.remove(0)
     }
 
     /// Collects all remaining values from a specific cluster member, sorted, waiting until no
@@ -2654,7 +1954,7 @@ impl<T> SimClusterReceiver<T, NoOrder, ExactlyOnce> {
     }
 }
 
-impl<T, O: Ordering, R: Retries> SimClusterSender<T, O, R> {
+impl<T: Serialize + DeserializeOwned, O: Ordering, R: Retries> SimClusterSender<T, O, R> {
     fn with_sink<Out>(&self, thunk: impl FnOnce(&dyn Fn(u32, T)) -> Out) -> Out {
         let (senders, quiescence) = CURRENT_SIM_CONNECTIONS.with(|connections| {
             let connections = connections.borrow();
@@ -2668,15 +1968,20 @@ impl<T, O: Ordering, R: Retries> SimClusterSender<T, O, R> {
             )
         });
 
-        let encode = self.2;
         thunk(&move |member_id: u32, t: T| {
-            senders[&member_id].try_send(encode(&t).into()).unwrap();
+            let payload = bincode::serialize(&t).unwrap();
+            senders[&member_id].try_send(Bytes::from(payload)).unwrap();
             quiescence.resume();
         })
     }
 }
 
-impl<T, O: Ordering> SimClusterSender<T, O, ExactlyOnce> {
+impl<T: Serialize + DeserializeOwned, O: Ordering> SimClusterSender<T, O, ExactlyOnce> {
+    /// Sends one value without requiring the matrix to branch on type-level ordering.
+    pub fn send_indexed(&self, member_id: u32, value: T) {
+        self.with_sink(|send| send(member_id, value));
+    }
+
     /// Sends multiple values to specific cluster members. The messages will be asynchronously
     /// processed as part of the simulation, in non-deterministic order.
     pub fn send_many_unordered<I: IntoIterator<Item = (u32, T)>>(&self, iter: I) {
@@ -2688,7 +1993,7 @@ impl<T, O: Ordering> SimClusterSender<T, O, ExactlyOnce> {
     }
 }
 
-impl<T> SimClusterSender<T, TotalOrder, ExactlyOnce> {
+impl<T: Serialize + DeserializeOwned> SimClusterSender<T, TotalOrder, ExactlyOnce> {
     /// Sends a value to a specific cluster member.
     pub fn send(&self, member_id: u32, t: T) {
         self.with_sink(|send| send(member_id, t));
@@ -2726,8 +2031,6 @@ impl<W: std::io::Write> std::fmt::Write for LogKind<W> {
 
 /// A tick-scoped DFIR together with the hooks that feed it data.
 struct SimTick {
-    /// The tick's location, used to match this tick to an outstanding script group.
-    location: LocationId,
     /// The location of the process/cluster the tick lives on, used to match this tick
     /// against the async DFIR that produces its input data.
     parent_location: LocationId,
@@ -2737,87 +2040,47 @@ struct SimTick {
     dfir: DfirErased,
     /// Hooks (e.g. from `batch`) resolved *before* the tick runs, deciding what data to
     /// release into it.
-    hooks: Vec<Box<dyn TickInputHook>>,
-    /// Scripted hooks (bound to test-side handles), also resolved before the tick runs.
-    /// Kept separate from `hooks` so the scheduler can apply the script-specific rules
-    /// (the boundary scan and `blocks_tick`), and shared (`Rc`) with the per-instance
-    /// registry that test-side handles resolve through (see [`ScriptedRuntimeHook`]).
-    scripted_hooks: Vec<Rc<RefCell<dyn ScriptedTickInputHook>>>,
+    hooks: Vec<Box<dyn SimHook>>,
     /// Hooks (e.g. from `assume_ordering` inside the tick) resolved *while* the tick DFIR
     /// is running, via a `tokio::select!` loop, for operators that block on ordering
     /// decisions mid-tick.
-    inline_hooks: Vec<Box<dyn InlineHook>>,
-    scripted_inline_hooks: Vec<Rc<RefCell<dyn crate::sim::runtime::ScriptedInlineHook>>>,
+    inline_hooks: Vec<Box<dyn SimInlineHook>>,
 }
 
 impl SimTick {
     /// Whether the scheduler can execute this tick right now.
     fn can_run(&self) -> bool {
-        // No scripted hook may have a queued decision that is not yet honorable
-        // (such a decision names this tick's *next* execution, so the tick must wait
-        // until it can be honored in full)...
-        !self
-            .scripted_hooks
-            .iter()
-            .any(|hook| hook.borrow().blocks_tick())
-            // ...and at least one hook must be able to trigger the tick.
-            && (self.hooks.iter().any(|hook| hook.can_trigger_tick())
-                || self
-                    .scripted_hooks
-                    .iter()
-                    .any(|hook| hook.borrow().can_trigger_tick()))
+        // All hooks must be ready (have received input or have a last value)...
+        self.hooks.iter().all(|hook| hook.is_ready())
+            // ...and at least one hook must be able to release data into the tick.
+            && self.hooks.iter().any(|hook| hook_can_release(&**hook))
     }
 }
 
-/// A single top-level hook (e.g. from `assume_ordering` on a non-tick stream) that needs
-/// scheduling decisions, but has no tick DFIR to execute. The scheduler just resolves the
-/// hook.
-///
-/// Each top-level hook is its own observation ("its own virtual tick"), even when several
-/// hooks live at the same location: unlike a tick's hooks, which one atomic tick
-/// execution consumes together, co-located top-level hooks are causally independent
-/// operators, so resolving them jointly would only couple their decisions. Grouping them
-/// would both add redundant schedules (releasing jointly is equivalent to releasing in
-/// consecutive steps, which is explored anyway) and *lose* schedules for hook kinds whose
-/// decisions always release when resolved (a fold could never stay silent while a
-/// co-located sibling acts). With one hook per observation, "act" and "stay silent" are
-/// expressed purely by the scheduler picking or not picking the observation, and a picked
-/// observation always makes a nontrivial decision.
+/// A top-level location whose hooks (e.g. from `assume_ordering` on a non-tick stream)
+/// need scheduling decisions, but which has no tick DFIR to execute. The scheduler just
+/// resolves the hooks.
 struct SimObservation {
     /// The top-level location, used to match this observation against the async DFIR that
-    /// produces its input data (and, for a scripted hook, against an outstanding script
-    /// group).
+    /// produces its input data.
     location: LocationId,
     /// The cluster member ID, if the location is a cluster.
     cluster_id: Option<u32>,
-    /// The hook resolved when the scheduler selects this observation.
-    hook: ObservationSlot,
-}
-
-/// The single hook of a [`SimObservation`]: either an ordinary autonomous hook, or a
-/// scripted hook (bound to a test-side handle), tagged with its hook ID so a script group
-/// can be matched to exactly this observation.
-enum ObservationSlot {
-    /// An ordinary autonomous hook, owned by the scheduler.
-    Unscripted { hook: Box<dyn ObservationHook> },
-    /// A hook bound to a test-side handle, shared (`Rc`) with the per-instance registry.
-    Scripted {
-        /// The bound handle's ID, used to match a script group to this observation.
-        hook_id: usize,
-        hook: Rc<RefCell<dyn ScriptedObservationHook>>,
-    },
+    /// Hooks resolved when the scheduler selects this observation.
+    hooks: Vec<Box<dyn SimHook>>,
 }
 
 impl SimObservation {
-    /// Whether the scheduler can resolve this observation's hook right now.
+    /// Whether the scheduler can resolve any of this observation's hooks right now.
     fn can_run(&self) -> bool {
-        match &self.hook {
-            // Running an observation *is* releasing, so any pending input makes an
-            // unscripted observation runnable.
-            ObservationSlot::Unscripted { hook } => hook.has_pending_input(),
-            ObservationSlot::Scripted { hook, .. } => hook.borrow().can_fire(),
-        }
+        self.hooks.iter().any(|hook| hook_can_release(&**hook))
     }
+}
+
+/// Whether the hook has already decided to release data, or has pending input that would
+/// allow it to decide to do so.
+fn hook_can_release(hook: &dyn SimHook) -> bool {
+    hook.current_decision().unwrap_or(false) || hook.can_make_nontrivial_decision()
 }
 
 /// A running simulation, which manages the async DFIRs, tick DFIRs, and hook-based
@@ -2841,12 +2104,6 @@ struct LaunchedSim<W: std::io::Write> {
     possibly_ready_ticks: Vec<SimTick>,
     /// Ticks whose parent async DFIR has not yet made progress since they were last checked.
     not_ready_ticks: Vec<SimTick>,
-    /// The tick owned by the one sealed, outstanding scripted decision group. It is kept
-    /// outside the ordinary ready lists until it executes and consumes that group.
-    current_scripted_tick: Option<SimTick>,
-    current_scripted_observation: Option<SimObservation>,
-    /// Coordinates the decision group shared with test-side hook handles.
-    script_coordinator: Rc<RefCell<ScriptCoordinator>>,
     /// Observations whose async DFIR has made progress, so their hooks may have decisions
     /// to resolve.
     possibly_ready_observations: Vec<SimObservation>,
@@ -2855,51 +2112,34 @@ struct LaunchedSim<W: std::io::Write> {
     log: LogKind<W>,
     /// Represents quiescence state of the simulation.
     quiescence: Rc<QuiescenceState>,
-    /// When true, this simulation runs in deterministic mode: no fuzzer entropy is ever
-    /// drawn, every unsafe operator with meaningful input must be scripted, and at most
-    /// one tick is ever runnable (see `SimFlow::deterministic`).
-    deterministic: bool,
-    /// Whether this is a counterfactual replay, whose scripted tick executions may have
-    /// nothing to do.
-    replay: bool,
-    /// The lineage log shared with generated code; the scheduler assigns execution ids
-    /// and records executions and hook releases into it.
-    lineage: LineageHandles,
-    /// The next execution id to assign.
-    next_exec: u64,
-    /// Scripted hook object identity → `(hook_id, member)`, from the registry; lets the
-    /// scheduler attribute a release to the handle the test knows it by.
-    hook_ids: HashMap<*const (), (usize, Option<u32>)>,
-    /// Locations whose runnable ticks are run first, without a schedule choice: they only
-    /// consume (a specification's observer), so their interleaving is unobservable to the
-    /// program and exploring it would only multiply schedules.
-    eager_locations: Rc<HashSet<LocationId>>,
-}
-
-/// The items a scripted hook has delivered under a standing policy (empty when it has
-/// none), from its serialized [`PolicyTrace`].
-fn policy_delivered(hook: &dyn ScriptedTickInputHook) -> Vec<Vec<u8>> {
-    let trace: PolicyTrace = bincode::deserialize(&hook.policy_trace_blob())
-        .expect("internal error: policy trace blob was malformed");
-    trace.delivered
+    /// Locations halted by crash-fault injection (see
+    /// [`CrashHook`](super::runtime::CrashHook)). Their async DFIRs are skipped
+    /// (but kept alive so inbound channels stay open), and their ticks and
+    /// observations have been removed.
+    halted: Vec<(LocationId, Option<u32>)>,
+    /// The instance's network hook, told about executions and polled for halts.
+    network_hook: Option<Rc<dyn SimNetworkHook>>,
 }
 
 impl<W: std::io::Write> LaunchedSim<W> {
-    /// Starts a new execution: assigns the next id, publishes it to generated code, and
-    /// records it. Returns the id.
-    fn begin_exec(&mut self, location: &LocationId, member: Option<u32>, tick: bool) -> u64 {
-        let id = self.next_exec;
-        self.next_exec += 1;
-        self.lineage.current_exec.set(id);
-        self.lineage.events.borrow_mut().push(LineageEvent::Exec {
-            id,
-            location: location.clone(),
-            member,
-            tick,
-        });
-        id
+    /// Permanently halts a crashed location: its async DFIR is skipped from now on
+    /// (but kept alive, so channels *into* it stay open and senders to it are
+    /// unaffected), and its tick DFIRs and observations are removed from
+    /// scheduling.
+    fn halt_location(&mut self, loc: &LocationId, c_id: Option<u32>) {
+        if self.halted.iter().any(|(l, c)| l == loc && *c == c_id) {
+            return;
+        }
+        self.halted.push((loc.clone(), c_id));
+        self.possibly_ready_ticks
+            .retain(|tick| !(tick.parent_location == *loc && tick.cluster_id == c_id));
+        self.not_ready_ticks
+            .retain(|tick| !(tick.parent_location == *loc && tick.cluster_id == c_id));
+        self.possibly_ready_observations
+            .retain(|obs| !(obs.location == *loc && obs.cluster_id == c_id));
+        self.not_ready_observations
+            .retain(|obs| !(obs.location == *loc && obs.cluster_id == c_id));
     }
-
     /// Runs a single step of the simulation scheduler.
     ///
     /// A step first advances all async DFIRs; if none of them made progress, it instead runs
@@ -2908,123 +2148,31 @@ impl<W: std::io::Write> LaunchedSim<W> {
     /// responsible for parking until new external input arrives (see
     /// [`QuiescenceState::resumed`]).
     ///
-    /// Reports, as a panic on the host side, a panic the program's own code raised inside the
-    /// generated crate and that the tick guard caught there (`sim::runtime::erase_guarded`):
-    /// unwinding across the dynamic-library boundary would abort the process. A test fails
-    /// with the program's message; a counterfactual replay (`CompiledSim::replay`) catches it
-    /// and reports the replay as inconclusive.
-    fn report_program_panic(&self) {
-        if let Some(message) = self.lineage.panicked.borrow_mut().take() {
-            panic!("the simulated program panicked: {message}");
-        }
-    }
-
     /// This future is always awaited to completion by the driver, so a step is atomic: user
     /// code never runs (and never observes intermediate state) while a step is in flight.
     async fn step(&mut self) {
-        // A group remains joinable only while the test body is in the same synchronous poll
-        // that created it. Starting any scheduler step seals it and moves its tick out of
-        // the ordinary lists exactly once; `Some(current)` then means that tick exclusively
-        // owns the one outstanding group until it executes.
-        let outstanding_target = {
-            let mut coordinator = self.script_coordinator.borrow_mut();
-            coordinator.current.as_mut().map(|group| {
-                group.sealed = true;
-                group.target.clone()
-            })
-        };
-        match outstanding_target {
-            Some(ScriptTarget::Tick {
-                location:
-                    SimLocation {
-                        location: group_location,
-                        cluster_id: group_cluster_id,
-                    },
-            }) => {
-                abort_assert!(
-                    self.current_scripted_observation.is_none(),
-                    "scripted observation remained active for a tick group"
-                );
-                if self.current_scripted_tick.is_none() {
-                    let matches_group = |tick: &SimTick| {
-                        tick.location == group_location && tick.cluster_id == group_cluster_id
-                    };
-                    self.current_scripted_tick = self
-                        .possibly_ready_ticks
-                        .iter()
-                        .position(matches_group)
-                        .map(|index| self.possibly_ready_ticks.swap_remove(index))
-                        .or_else(|| {
-                            self.not_ready_ticks
-                                .iter()
-                                .position(matches_group)
-                                .map(|index| self.not_ready_ticks.swap_remove(index))
-                        });
-                }
-                let tick = self.current_scripted_tick.as_ref().unwrap();
-                abort_assert!(
-                    tick.location == group_location && tick.cluster_id == group_cluster_id,
-                    "outstanding scripted group changed before its tick executed"
-                );
-            }
-            Some(ScriptTarget::Observation {
-                location:
-                    SimLocation {
-                        location: group_location,
-                        cluster_id: group_cluster_id,
-                    },
-                hook_id,
-            }) => {
-                abort_assert!(
-                    self.current_scripted_tick.is_none(),
-                    "scripted tick remained active for an observation group"
-                );
-                if self.current_scripted_observation.is_none() {
-                    let matches_group = |observation: &SimObservation| {
-                        observation.location == group_location
-                            && observation.cluster_id == group_cluster_id
-                            && matches!(observation.hook, ObservationSlot::Scripted { hook_id: id, .. } if id == hook_id)
-                    };
-                    self.current_scripted_observation = self
-                        .possibly_ready_observations
-                        .iter()
-                        .position(matches_group)
-                        .map(|index| self.possibly_ready_observations.swap_remove(index))
-                        .or_else(|| {
-                            self.not_ready_observations
-                                .iter()
-                                .position(matches_group)
-                                .map(|index| self.not_ready_observations.swap_remove(index))
-                        });
-                }
-                abort_assert!(
-                    self.current_scripted_observation.is_some(),
-                    "outstanding scripted group did not match an observation"
-                );
-            }
-            None => abort_assert!(
-                self.current_scripted_tick.is_none() && self.current_scripted_observation.is_none(),
-                "scripted action remained active without an outstanding group"
-            ),
+        self.step_inner().await;
+        let halts = self.network_hook.as_ref().map(|h| h.take_halts());
+        for (loc, c_id) in halts.into_iter().flatten() {
+            self.halt_location(&loc, c_id);
         }
+    }
 
+    async fn step_inner(&mut self) {
         let mut any_made_progress = false;
-        for index in 0..self.async_dfirs.len() {
-            let (loc, c_id) = {
-                let (loc, c_id, _) = &self.async_dfirs[index];
-                (loc.clone(), *c_id)
-            };
-            // Every async run is an execution; one that makes no progress produces no
-            // events, so recording it is harmless and keeps ids dense.
-            let events_before = self.lineage.events.borrow().len();
-            self.begin_exec(&loc, c_id, false);
-            let progressed = self.async_dfirs[index].2.run_tick().await;
-            self.report_program_panic();
-            if !progressed {
-                // Drop the `Exec` record of a run that did nothing.
-                self.lineage.truncate(events_before);
+        for (loc, c_id, dfir) in &mut self.async_dfirs {
+            if self.halted.iter().any(|(l, c)| l == loc && c == c_id) {
+                // Crashed location: its DFIR is never run again (but is kept
+                // alive so channels into it stay open).
+                continue;
             }
-            let (loc, c_id, _) = &self.async_dfirs[index];
+            if let Some(hook) = &self.network_hook {
+                hook.on_exec_begin(loc, *c_id);
+            }
+            let progressed = dfir.run_tick().await;
+            if let Some(hook) = &self.network_hook {
+                hook.on_exec_end();
+            }
             if progressed {
                 any_made_progress = true;
 
@@ -3045,74 +2193,6 @@ impl<W: std::io::Write> LaunchedSim<W> {
             return;
         }
 
-        // The **boundary scan**: the async dataflows have stopped making progress and we
-        // are about to consider running ticks — the first moment where a missing scripted
-        // decision could influence what happens next. Check ticks exposed by async progress,
-        // plus the active scripted tick (which lives outside the ordinary ready lists).
-        for tick in self
-            .possibly_ready_ticks
-            .iter()
-            .chain(self.current_scripted_tick.iter())
-        {
-            for hook in &tick.scripted_hooks {
-                if let Err(message) = hook.borrow().boundary_check() {
-                    panic!("{}", message);
-                }
-            }
-        }
-
-        for observation in self
-            .possibly_ready_observations
-            .iter()
-            .chain(self.current_scripted_observation.iter())
-        {
-            if let ObservationSlot::Scripted { hook, .. } = &observation.hook
-                && let Err(message) = hook.borrow().boundary_check()
-            {
-                panic!("{}", message);
-            }
-        }
-
-        // A fully scripted tick needs at least one decision that can eventually trigger
-        // it. There is exactly one outstanding group, so only its owned tick can contain
-        // a newly installed group in which no decision can trigger.
-        if let Some(tick) = &self.current_scripted_tick
-            && tick.hooks.is_empty()
-        {
-            let has_pending_decision = tick
-                .scripted_hooks
-                .iter()
-                .any(|hook| hook.borrow().has_decision());
-            let any_pending_decision_can_eventually_trigger =
-                tick.scripted_hooks.iter().any(|hook| {
-                    let hook = hook.borrow();
-                    // A decision that is not yet honorable may become honorable and
-                    // trigger once more data arrives, so it does not fail this check.
-                    hook.has_decision() && (hook.blocks_tick() || hook.can_trigger_tick())
-                });
-
-            if has_pending_decision && !any_pending_decision_can_eventually_trigger {
-                let mut details = String::new();
-                let member = tick
-                    .cluster_id
-                    .map(|m| format!(" (cluster member {m})"))
-                    .unwrap_or_default();
-                for hook in &tick.scripted_hooks {
-                    let hook = hook.borrow();
-                    if let Some(decision) = hook.describe_decision() {
-                        let loc = ScriptedHookControl::location_meta(&*hook).location;
-                        use std::fmt::Write;
-                        write!(details, "\n  {} on the hook at {}{}", decision, loc, member)
-                            .unwrap();
-                    }
-                }
-                panic!(
-                    "none of the scripted decisions in this group can trigger their tick, so the tick can never run; at least one decision in the group must trigger it:{}",
-                    details
-                );
-            }
-        }
-
         use bolero::generator::*;
 
         // Send anything that can't make a scheduling decision back to the not-ready lists.
@@ -3125,34 +2205,22 @@ impl<W: std::io::Write> LaunchedSim<W> {
                 .extract_if(.., |obs| !obs.can_run()),
         );
 
-        let scripted_tick_runnable = self
-            .current_scripted_tick
-            .as_ref()
-            .is_some_and(SimTick::can_run);
-        let scripted_observation_runnable = self
-            .current_scripted_observation
-            .as_ref()
-            .is_some_and(SimObservation::can_run);
-
-        if self.possibly_ready_ticks.is_empty()
-            && !scripted_tick_runnable
-            && !scripted_observation_runnable
-            && self.possibly_ready_observations.is_empty()
-        {
-            // Classify why the outstanding scripted group (if any) is stuck, so the
-            // suspended test-side await renders the right error: `true` when every
-            // queued decision is satisfiable but none can trigger the tick — given
-            // quiescence, no unscripted input on the tick can trigger it either, or the
-            // tick would be runnable.
-            self.script_coordinator.borrow_mut().stuck_cannot_trigger =
-                self.current_scripted_tick.as_ref().is_some_and(|tick| {
-                    let mut queued = tick
-                        .scripted_hooks
-                        .iter()
-                        .filter(|hook| hook.borrow().has_decision())
-                        .peekable();
-                    queued.peek().is_some() && queued.all(|hook| !hook.borrow().blocks_tick())
-                });
+        if self.possibly_ready_ticks.is_empty() && self.possibly_ready_observations.is_empty() {
+            // If any tick is blocked because a hook is not ready, that's a
+            // simulator bug — it means a singleton never received a value.
+            for tick in &self.not_ready_ticks {
+                // hydrofrac injects faults that can starve a snapshot's producer, so a tick that
+                // can never run is a property of the run, not a simulator bug: the run quiesces
+                // with that member never processing the tick, and the checker sees what it lacks.
+                #[cfg(feature = "hydrofrac")]
+                if !tick.hooks.iter().all(|hook| hook.is_ready()) {
+                    continue;
+                }
+                abort_assert!(
+                    tick.hooks.iter().all(|hook| hook.is_ready()),
+                    "tick has a hook that never became ready"
+                );
+            }
 
             // Signal quiescence, waking receivers waiting for data (their streams end). The
             // driver is responsible for parking until new input arrives.
@@ -3165,61 +2233,15 @@ impl<W: std::io::Write> LaunchedSim<W> {
             self.quiescence.nondet_pending.set(true);
             self.quiescence.wake_settled();
         } else {
-            let ordinary_tick_count = self.possibly_ready_ticks.len();
-            let scripted_tick_index = ordinary_tick_count;
-            let observation_start = scripted_tick_index + usize::from(scripted_tick_runnable);
-            let scripted_observation_index =
-                observation_start + self.possibly_ready_observations.len();
-            let candidate_count =
-                scripted_observation_index + usize::from(scripted_observation_runnable);
-            let eager_tick = self
-                .possibly_ready_ticks
-                .iter()
-                .position(|tick| self.eager_locations.contains(tick.parent_location.root()));
-            let next_tick_or_obs = if let Some(index) = eager_tick {
-                index
-            } else if self.deterministic {
-                for tick in self.possibly_ready_ticks.iter().chain(
-                    self.current_scripted_tick
-                        .iter()
-                        .filter(|_| scripted_tick_runnable),
-                ) {
-                    for hook in &tick.hooks {
-                        assert!(
-                            hook.only_one_possible_decision(),
-                            "{}",
-                            crate::sim::runtime::render_unhooked_nondet_error(hook.location_meta())
-                        );
-                    }
-                }
-                for obs in &self.possibly_ready_observations {
-                    if let ObservationSlot::Unscripted { hook } = &obs.hook
-                        && !hook.only_one_possible_decision()
-                    {
-                        panic!(
-                            "{}",
-                            crate::sim::runtime::render_unhooked_nondet_error(hook.location_meta())
-                        );
-                    }
-                }
-                // Each action on its own may be free of choices, but the order in
-                // which they run is not determined, and it can be observable.
-                assert!(
-                    candidate_count <= 1,
-                    "deterministic simulation reached a state with more than one runnable tick/observation; the order in which they run is not deterministic\nhelp: script the involved operators so the schedule is explicit, or run under `fuzz` / `exhaustive` instead"
-                );
-                0
-            } else {
-                (0..candidate_count).any()
-            };
+            let next_tick_or_obs = (0..(self.possibly_ready_ticks.len()
+                + self.possibly_ready_observations.len()))
+                .any();
 
-            if next_tick_or_obs < observation_start {
-                let is_scripted_tick = next_tick_or_obs == scripted_tick_index;
-                let mut tick = if is_scripted_tick {
-                    self.current_scripted_tick.take().unwrap()
-                } else {
-                    self.possibly_ready_ticks.remove(next_tick_or_obs)
-                };
+            if next_tick_or_obs < self.possibly_ready_ticks.len() {
+                let mut tick = self.possibly_ready_ticks.remove(next_tick_or_obs);
+                if let Some(hook) = &self.network_hook {
+                    hook.on_exec_begin(&tick.parent_location, tick.cluster_id);
+                }
 
                 match &mut self.log {
                     LogKind::Null => {}
@@ -3250,154 +2272,66 @@ impl<W: std::io::Write> LaunchedSim<W> {
                     write.write_str(" ")
                 };
 
-                let exec = self.begin_exec(&tick.location, tick.cluster_id, true);
-                let delivered_before: Vec<usize> = tick
-                    .scripted_hooks
-                    .iter()
-                    .map(|hook| policy_delivered(&*hook.borrow()).len())
-                    .collect();
-
                 let mut tick_decision_writer = (!matches!(self.log, LogKind::Null)).then(|| {
                     indenter::indented(&mut self.log).with_format(indenter::Format::Custom {
                         inserter: &mut asterisk_indenter,
                     })
                 });
 
-                run_hooks(
-                    tick_decision_writer.as_mut(),
-                    &mut tick.hooks,
-                    &tick.scripted_hooks,
-                );
-
-                // Lineage: whatever each policy hook delivered just now fed this execution.
-                for (hook_rc, before) in tick.scripted_hooks.iter().zip(delivered_before) {
-                    let hook = hook_rc.borrow();
-                    let delivered = policy_delivered(&*hook);
-                    if delivered.len() > before {
-                        let ScriptTarget::Tick { location } = hook.target() else {
-                            unreachable!("tick-registered scripted hook had an observation target")
-                        };
-                        let (hook_id, _) = self.hook_ids[&Rc::as_ptr(hook_rc).cast::<()>()];
-                        self.lineage
-                            .events
-                            .borrow_mut()
-                            .push(LineageEvent::Released {
-                                exec,
-                                hook_id,
-                                member: location.cluster_id,
-                                items: delivered[before..].to_vec(),
-                            });
-                    }
-                }
+                run_hooks(tick_decision_writer.as_mut(), &mut tick.hooks);
 
                 let run_tick_future = tick.dfir.run_tick();
-                if !tick.inline_hooks.is_empty() || !tick.scripted_inline_hooks.is_empty() {
+                if !tick.inline_hooks.is_empty() {
                     let mut run_tick_future_pinned = pin!(run_tick_future);
-                    let deterministic = self.deterministic;
-                    let replay = self.replay;
 
                     loop {
                         tokio::select! {
                             biased;
                             r = &mut run_tick_future_pinned => {
-                                self.report_program_panic();
-                                abort_assert!(r || replay, "runnable tick's DFIR run_tick() returned false");
+                                abort_assert!(r, "tick DFIR run_tick() returned false");
                                 break;
                             }
-                            () = async {} => {
-                                  for hook in &tick.scripted_inline_hooks {
-                                      if hook.borrow().has_pending_input() {
-                                          let run = hook.borrow_mut().run_decision(
-                                              tick_decision_writer
-                                                  .as_mut()
-                                                  .map(|w| w as &mut dyn std::fmt::Write),
-                                          );
-                                          // The error is reported here, on the host side of
-                                          // the dylib boundary (unwinding across it aborts).
-                                          if let Err(message) = run {
-                                              panic!("{}", message);
-                                          }
-                                      }
-                                  }
-                                  if !tick.inline_hooks.is_empty() {
-                                      bolero_generator::any::scope::borrow_with(|driver| {
-                                          for hook in tick.inline_hooks.iter_mut() {
-                                              if hook.has_pending_input() {
-                                                  // In deterministic mode there is no fuzzer
-                                                  // to decide for this operator; it may only
-                                                  // proceed when exactly one outcome is
-                                                  // possible.
-                                                  if deterministic {
-                                                      assert!(
-                                                          hook.only_one_possible_decision(),
-                                                          "{}",
-                                                          crate::sim::runtime::render_unhooked_nondet_error(
-                                                              hook.location_meta()
-                                                          )
-                                                      );
-                                                  }
-                                                  hook.autonomous_decision(driver);
-                                                  hook.release_decision(
-                                                      tick_decision_writer
-                                                          .as_mut()
-                                                          .map(|w| w as &mut dyn std::fmt::Write),
-                                                  );
-                                              }
-                                          }
-                                      });
-                                  }
+                            _ = async {} => {
+                                bolero_generator::any::scope::borrow_with(|driver| {
+                                    for hook in tick.inline_hooks.iter_mut() {
+                                        if hook.pending_decision() {
+                                            if !hook.has_decision() {
+                                                hook.autonomous_decision(driver);
+                                            }
+
+                                            hook.release_decision(
+                                                tick_decision_writer
+                                                    .as_mut()
+                                                    .map(|w| w as &mut dyn std::fmt::Write),
+                                            );
+                                        }
+                                    }
+                                });
                             }
                         }
                     }
                 } else {
-                    let made_progress = run_tick_future.await;
-                    self.report_program_panic();
-                    abort_assert!(
-                        made_progress || self.replay,
-                        "runnable tick's DFIR run_tick() returned false"
-                    );
+                    abort_assert!(run_tick_future.await, "tick DFIR run_tick() returned false");
+                }
+                if let Some(hook) = &self.network_hook {
+                    hook.on_exec_end();
                 }
 
-                if is_scripted_tick {
-                    for hook in &tick.scripted_inline_hooks {
-                        abort_assert!(
-                            !hook.borrow().has_decision(),
-                            "tick completed without consuming a scripted inline decision"
-                        );
-                    }
-                    let group = self.script_coordinator.borrow_mut().current.take();
-                    abort_assert!(
-                        group.is_some(),
-                        "scripted tick executed without an outstanding group"
-                    );
-                }
                 self.possibly_ready_ticks.push(tick);
             } else {
-                let is_scripted_observation = next_tick_or_obs == scripted_observation_index;
-                let observation = if is_scripted_observation {
-                    self.current_scripted_observation.as_mut().unwrap()
-                } else {
-                    &mut self.possibly_ready_observations[next_tick_or_obs - observation_start]
-                };
+                let next_obs = next_tick_or_obs - self.possibly_ready_ticks.len();
                 let log_writer = (!matches!(self.log, LogKind::Null)).then_some(&mut self.log);
-                match &mut observation.hook {
-                    ObservationSlot::Unscripted { hook } => {
-                        run_observation_hook(log_writer, &mut **hook);
-                    }
-                    ObservationSlot::Scripted { hook, .. } => {
-                        abort_assert!(
-                            hook.borrow().can_fire(),
-                            "scripted observation ran without a releasing decision"
-                        );
-                        hook.borrow_mut()
-                            .run_decision(log_writer.map(|w| w as &mut dyn std::fmt::Write));
-                    }
-                }
-                if is_scripted_observation {
-                    let group = self.script_coordinator.borrow_mut().current.take();
-                    abort_assert!(group.is_some(), "scripted observation ran without a group");
-                    let observation = self.current_scripted_observation.take().unwrap();
-                    self.possibly_ready_observations.push(observation);
+                run_hooks(
+                    log_writer,
+                    &mut self.possibly_ready_observations[next_obs].hooks,
+                );
+
+                // A crash hook may have just fired: permanently halt the crashed
+                // location (removes this observation, among others).
+                let obs = &mut self.possibly_ready_observations[next_obs];
+                if obs.hooks.iter_mut().any(|hook| hook.take_halt()) {
+                    let (loc, c_id) = (obs.location.clone(), obs.cluster_id);
+                    self.halt_location(&loc, c_id);
                 }
             }
         }
@@ -3406,76 +2340,40 @@ impl<W: std::io::Write> LaunchedSim<W> {
 
 fn run_hooks<W: std::fmt::Write>(
     mut tick_decision_writer: Option<&mut W>,
-    hooks: &mut [Box<dyn TickInputHook>],
-    scripted_hooks: &[Rc<RefCell<dyn ScriptedTickInputHook>>],
+    hooks: &mut [Box<dyn SimHook>],
 ) {
-    // Scripted hooks own and release their decisions without entropy. Run them completely
-    // before considering regular hooks; only regular hooks need a Bolero driver.
-    let mut made_triggering_decision = false;
-    for hook in scripted_hooks {
-        let mut hook = hook.borrow_mut();
-        // Whether a scripted decision triggers is known before running it.
-        made_triggering_decision |= hook.can_trigger_tick();
-        hook.run_decision(
-            tick_decision_writer
-                .as_deref_mut()
-                .map(|w| w as &mut dyn std::fmt::Write),
-        );
-    }
+    let mut remaining_decision_count = hooks.len();
+    let mut made_nontrivial_decision = false;
 
-    if !hooks.is_empty() {
-        let mut decided = vec![false; hooks.len()];
-        let mut remaining_decision_count = hooks.len();
-        bolero::generator::bolero_generator::any::scope::borrow_with(|driver| {
-            // First, resolve every hook that faces no choice (its decision consumes no
-            // entropy). Doing this before the second pass lets the final undecided hook
-            // be forced to trigger when no earlier hook made a triggering decision.
-            for (hook, decided) in hooks.iter_mut().zip(decided.iter_mut()) {
-                if hook.only_one_possible_decision() {
-                    // The no-choice decision can still trigger the tick (the passthrough
-                    // singleton always releases the latest value), so its result counts.
-                    made_triggering_decision |= hook.autonomous_decision(driver, false);
-                    *decided = true;
-                    remaining_decision_count -= 1;
-                }
-            }
-
-            for (hook, decided) in hooks.iter_mut().zip(decided.iter()) {
-                if !decided {
-                    made_triggering_decision |= hook.autonomous_decision(
-                        driver,
-                        !made_triggering_decision && remaining_decision_count == 1,
-                    );
-                    remaining_decision_count -= 1;
-                }
-
-                hook.release_decision(
-                    tick_decision_writer
-                        .as_deref_mut()
-                        .map(|w| w as &mut dyn std::fmt::Write),
-                );
+    bolero::generator::bolero_generator::any::scope::borrow_with(|driver| {
+        // first, scan manual decisions
+        hooks.iter_mut().for_each(|hook| {
+            if let Some(is_nontrivial) = hook.current_decision() {
+                made_nontrivial_decision |= is_nontrivial;
+                remaining_decision_count -= 1;
+            } else if !hook.can_make_nontrivial_decision() {
+                // if no nontrivial decision is possible, make a trivial one
+                // (we need to do this in the first pass to force nontrivial decisions
+                // on the remaining hooks)
+                hook.autonomous_decision(driver, false);
+                remaining_decision_count -= 1;
             }
         });
-    }
 
-    abort_assert!(
-        made_triggering_decision,
-        "runnable tick had no hook make a triggering decision"
-    );
-}
+        hooks.iter_mut().for_each(|hook| {
+            if hook.current_decision().is_none() {
+                made_nontrivial_decision |= hook.autonomous_decision(
+                    driver,
+                    !made_nontrivial_decision && remaining_decision_count == 1,
+                );
+                remaining_decision_count -= 1;
+            }
 
-/// Resolves a single unscripted observation hook. The observation was only scheduled
-/// because it has pending input (running an observation *is* releasing), so its
-/// autonomous decision must stage a release — running an observation without releasing
-/// would be a wasted schedule step the exploration must not contain.
-fn run_observation_hook<W: std::fmt::Write>(
-    writer: Option<&mut W>,
-    hook: &mut dyn ObservationHook,
-) {
-    bolero::generator::bolero_generator::any::scope::borrow_with(|driver| {
-        hook.autonomous_decision(driver);
+            hook.release_decision(
+                tick_decision_writer
+                    .as_deref_mut()
+                    .map(|w| w as &mut dyn std::fmt::Write),
+            );
+        });
     });
-    // `release_decision` panics if the autonomous decision staged nothing, so a
-    // contract violation cannot pass silently.
-    hook.release_decision(writer.map(|w| w as &mut dyn std::fmt::Write));
 }

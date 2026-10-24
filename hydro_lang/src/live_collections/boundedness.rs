@@ -4,7 +4,6 @@
 use sealed::sealed;
 
 use super::keyed_singleton::KeyedSingletonBound;
-use super::optional::{InitNone, OptionalBound};
 use crate::compile::ir::BoundKind;
 use crate::live_collections::singleton::SingletonBound;
 
@@ -13,9 +12,7 @@ use crate::live_collections::singleton::SingletonBound;
 /// Implementors of this trait use it to signal the boundedness property of a stream.
 #[sealed]
 pub trait Boundedness:
-    SingletonBound<UnderlyingBound = Self>
-    + KeyedSingletonBound<UnderlyingBound = Self>
-    + OptionalBound<UnderlyingBound = Self>
+    SingletonBound<UnderlyingBound = Self> + KeyedSingletonBound<UnderlyingBound = Self>
 {
     /// `true` if the bound is [`Bounded`], `false` if it is [`Unbounded`].
     const BOUNDED: bool;
@@ -26,15 +23,6 @@ pub trait Boundedness:
     } else {
         BoundKind::Unbounded
     };
-
-    /// The [`OptionalBound`] of an optional produced by aggregating a stream with this
-    /// boundedness (e.g. `reduce`/`max`/`min`/`first`/`last`).
-    ///
-    /// A [`Bounded`] stream yields a [`Bounded`] optional. An [`Unbounded`] stream yields an
-    /// [`InitNone`] optional: such an aggregation is materialized at a top-level location where
-    /// its state persists across ticks, so once the first element arrives the result becomes
-    /// non-null and stays non-null (its value may still change).
-    type AggregatedOptional: OptionalBound<UnderlyingBound = Self>;
 
     /// Determines the output ordering of a join based on this (right/build) side's boundedness.
     ///
@@ -51,7 +39,6 @@ pub enum Unbounded {}
 #[sealed]
 impl Boundedness for Unbounded {
     const BOUNDED: bool = false;
-    type AggregatedOptional = InitNone;
     type PreserveOrderIfBounded<InO: crate::live_collections::stream::Ordering> =
         crate::live_collections::stream::NoOrder;
 }
@@ -63,7 +50,6 @@ pub enum Bounded {}
 #[sealed]
 impl Boundedness for Bounded {
     const BOUNDED: bool = true;
-    type AggregatedOptional = Bounded;
     type PreserveOrderIfBounded<InO: crate::live_collections::stream::Ordering> = InO;
 }
 

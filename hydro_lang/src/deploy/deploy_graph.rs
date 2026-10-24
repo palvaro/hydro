@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
-use dfir_lang::graph::{AsCodeOptions, DfirGraph};
+use dfir_lang::graph::DfirGraph;
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use hydro_deploy::custom_service::CustomClientPort;
 use hydro_deploy::rust_crate::RustCrateService;
@@ -549,11 +549,9 @@ impl TrybuildHost {
     }
 
     pub fn display_name(self, display_name: impl Into<String>) -> Self {
-        assert!(
-            self.display_name.is_none(),
-            "{} already set",
-            name_of!(display_name in Self)
-        );
+        if self.display_name.is_some() {
+            panic!("{} already set", name_of!(display_name in Self));
+        }
 
         Self {
             display_name: Some(display_name.into()),
@@ -562,11 +560,9 @@ impl TrybuildHost {
     }
 
     pub fn rustflags(self, rustflags: impl Into<String>) -> Self {
-        assert!(
-            self.rustflags.is_none(),
-            "{} already set",
-            name_of!(rustflags in Self)
-        );
+        if self.rustflags.is_some() {
+            panic!("{} already set", name_of!(rustflags in Self));
+        }
 
         Self {
             rustflags: Some(rustflags.into()),
@@ -575,11 +571,9 @@ impl TrybuildHost {
     }
 
     pub fn profile(self, profile: impl Into<String>) -> Self {
-        assert!(
-            self.profile.is_none(),
-            "{} already set",
-            name_of!(profile in Self)
-        );
+        if self.profile.is_some() {
+            panic!("{} already set", name_of!(profile in Self));
+        }
 
         Self {
             profile: Some(profile.into()),
@@ -611,13 +605,10 @@ impl TrybuildHost {
         self
     }
 
-    #[must_use]
     pub fn tracing(self, tracing: TracingOptions) -> Self {
-        assert!(
-            self.tracing.is_none(),
-            "{} already set",
-            name_of!(tracing in Self)
-        );
+        if self.tracing.is_some() {
+            panic!("{} already set", name_of!(tracing in Self));
+        }
 
         Self {
             tracing: Some(tracing),
@@ -642,7 +633,6 @@ impl TrybuildHost {
         Self { env, ..self }
     }
 
-    #[must_use]
     pub fn pin_to_core(self, core: usize) -> Self {
         Self {
             pin_to_core: Some(core),
@@ -817,7 +807,6 @@ impl Node for DeployExternal {
         _graph: DfirGraph,
         extra_stmts: &[syn::Stmt],
         sidecars: &[syn::Expr],
-        _as_code_options: &AsCodeOptions,
     ) {
         assert!(extra_stmts.is_empty());
         assert!(sidecars.is_empty());
@@ -899,7 +888,6 @@ impl Node for DeployNode {
         graph: DfirGraph,
         extra_stmts: &[syn::Stmt],
         sidecars: &[syn::Expr],
-        as_code_options: &AsCodeOptions,
     ) {
         let (service, host) = match self.service_spec.borrow_mut().take().unwrap() {
             CrateOrTrybuild::Crate(c, host) => (c, host),
@@ -919,7 +907,6 @@ impl Node for DeployNode {
                     graph,
                     extra_stmts,
                     sidecars,
-                    as_code_options,
                     trybuild.name_hint.as_deref(),
                     crate::compile::trybuild::generate::DeployMode::HydroDeploy,
                     linking_mode,
@@ -991,7 +978,6 @@ impl Node for DeployCluster {
         graph: DfirGraph,
         extra_stmts: &[syn::Stmt],
         sidecars: &[syn::Expr],
-        as_code_options: &AsCodeOptions,
     ) {
         let has_trybuild = self
             .cluster_spec
@@ -1027,7 +1013,6 @@ impl Node for DeployCluster {
                 graph,
                 extra_stmts,
                 sidecars,
-                as_code_options,
                 self.name_hint.as_deref(),
                 crate::compile::trybuild::generate::DeployMode::HydroDeploy,
                 linking_mode,
