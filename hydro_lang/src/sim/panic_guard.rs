@@ -15,12 +15,12 @@
 //!   payload. That host panic unwinds out of the handler, through the guard's frame (which is no
 //!   longer catching), and on into the host, where `catch_unwind` and `#[should_panic]` see it
 //!   like any other.
-//! - **Host panics inside dylib callbacks.** The only host code the dylib calls back into while a
-//!   tick runs is the installed [`SimNetworkHook`](super::network_hook::SimNetworkHook)
-//!   (`on_send`, `on_recv`, `on_output`). The host wraps it in [`GuardedNetworkHook`], which
-//!   catches a panic on the host side, stashes its payload and returns a harmless default
-//!   (drop the message). The guard around the tick asks the handler after every poll, and the
-//!   handler re-raises the stashed payload, unchanged, as soon as the tick returns control.
+//! - **Host panics inside dylib callbacks.** Host code the dylib calls back into while a tick
+//!   runs (the log handlers, and the installed network hook through [`GuardedNetworkHook`]) is
+//!   run under [`catch_host`], which catches a panic on the host side,
+//!   stashes its payload and returns a harmless default. The guard around the tick asks the
+//!   handler after every poll, and the handler re-raises the stashed payload, unchanged, as soon
+//!   as the tick returns control.
 //!
 //! Nothing changes when nothing panics: each poll costs one call to the handler, which checks an
 //! empty thread-local.
@@ -39,19 +39,17 @@ use std::rc::Rc;
 use dfir_rs::scheduled::context::Context;
 
 use super::network_hook::SimNetworkHook;
-use crate::location::dynamic::LocationId;
-use crate::sim::network_hook::ExecKind;
 
 /// The host function the dylib reports to, passed to the dylib's `__hydro_runtime`.
 ///
 /// `Some(message)`: program code in the dylib panicked with `message`; the handler must not return
 /// (it raises the panic on the host). `None`: control is back in the dylib after a poll; the
-/// handler raises any panic the host stashed meanwhile (see [`GuardedNetworkHook`]) and otherwise
+/// handler raises any panic the host stashed meanwhile (see [`catch_host`]) and otherwise
 /// returns.
 pub type PanicHandler = fn(Option<String>);
 
 /// The message of a caught panic payload, as `panic!` formats it.
-pub fn panic_message(payload: &(dyn Any + Send)) -> String {
+fn panic_message(payload: &(dyn Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         (*s).to_owned()
     } else if let Some(s) = payload.downcast_ref::<String>() {
@@ -142,7 +140,7 @@ pub(crate) fn clear_pending() {
 
 /// Runs host code called back from the dylib. A panic is caught here, on the host side, and
 /// stashed for [`host_handler`]; the dylib gets `default` instead. Only the first panic is kept.
-fn catch_host<R>(default: R, f: impl FnOnce() -> R) -> R {
+pub(crate) fn catch_host<R>(default: R, f: impl FnOnce() -> R) -> R {
     match std::panic::catch_unwind(AssertUnwindSafe(f)) {
         Ok(r) => r,
         Err(payload) => {
@@ -157,15 +155,11 @@ fn catch_host<R>(default: R, f: impl FnOnce() -> R) -> R {
     }
 }
 
-/// The installed network hook, as the dylib sees it: the callbacks the dylib makes are guarded
-/// with [`catch_host`]. The host calls the others directly on the inner hook.
+/// The installed network hook as the dylib sees it: the callbacks the dylib makes mid-tick run
+/// under [`catch_host`]. The host calls the others directly on the inner hook.
 pub(crate) struct GuardedNetworkHook(pub(crate) Rc<dyn SimNetworkHook>);
 
 impl SimNetworkHook for GuardedNetworkHook {
-    fn on_instance_begin(&self) {
-        self.0.on_instance_begin()
-    }
-
     fn on_send(
         &self,
         channel: usize,
@@ -192,17 +186,5 @@ impl SimNetworkHook for GuardedNetworkHook {
         meta: Option<Vec<u8>>,
     ) -> bool {
         catch_host(false, || self.0.on_output(port, member, payload, meta))
-    }
-
-    fn on_exec_begin(&self, location: &LocationId, member: Option<u32>, kind: ExecKind) {
-        self.0.on_exec_begin(location, member, kind)
-    }
-
-    fn on_exec_end(&self, progressed: bool) {
-        self.0.on_exec_end(progressed)
-    }
-
-    fn take_halts(&self) -> Vec<(LocationId, Option<u32>)> {
-        self.0.take_halts()
     }
 }

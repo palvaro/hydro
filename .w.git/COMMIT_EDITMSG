@@ -1,0 +1,7 @@
+docs(hydrofrac): lite baseline over lite's corpus
+
+The raw lite-mode numbers for the paused lite-vs-races comparison: one row per
+label (verdict, fault sets, schedules, wall time) for every `EcCheck` run in
+`hydrofrac` (with `cross-check`), `hydro_std`'s `ec_abd_hydrofrac` and
+`hydro_test`'s `cluster::ec_*`, measured at `d2e851a8c5`. 240 label results.
+Runs built with `EcCheck::races()` directly are left out.

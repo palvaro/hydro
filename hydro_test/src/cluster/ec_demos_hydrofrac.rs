@@ -273,9 +273,9 @@ fn certified_all(verdict: &Verdict) -> bool {
     )
 }
 
-/// A schedule-sensitive label whose search found no counterexample under `tolerates`: all the
-/// check can say for it, since only labels whose fault sets have one execution each can be
-/// certified (docs/design/hydrofrac-lite.md §4.9).
+/// A label of a program with schedule choices whose search found no counterexample under
+/// `tolerates`: all the check can say for it, since only labels of a program whose fault sets
+/// have one execution each can be certified (docs/design/hydrofrac-lite.md §4.9).
 #[cfg(stageleft_runtime)]
 fn exhausted(verdict: &Verdict, tolerates: Tolerance) -> bool {
     matches!(verdict, Verdict::Exhausted { tolerates: t, .. } if *t == tolerates)
@@ -362,8 +362,8 @@ fn ec_demo_reliable_broadcast_all_labels() {
 /// Uniform reliable broadcast delivers after `threshold` echoes. Its delivered set (the `map`
 /// out of the quorum, and the quorum's certificates before it) has no counterexample under
 /// any admissible crash set for thresholds 1 and 2; the single hops into the echo cycle break
-/// on their own. The quorum batches its acks, so the delivered set is schedule-sensitive:
-/// searched, not certified.
+/// on their own. The quorum batches its acks, so the program has schedule choices: the
+/// delivered set is searched, not certified.
 #[test]
 fn ec_demo_uniform_broadcast() {
     for threshold in [1, 2] {
@@ -385,8 +385,8 @@ fn ec_demo_uniform_broadcast() {
 }
 
 /// State-based G-Set gossip, closed and live: the G-Set, checked at the stream it folds, has
-/// no counterexample under any admissible crash set. Gossip rounds are batched, so it is
-/// schedule-sensitive: searched, not certified.
+/// no counterexample under any admissible crash set. Gossip rounds are batched, so the program
+/// has schedule choices: searched, not certified.
 #[test]
 fn ec_demo_g_set_gossip_certifies() {
     for live in [false, true] {

@@ -48,15 +48,11 @@ pub struct SimBuilder {
     /// Per crashable location: the ident of its staged-channel registry, emitted
     /// (along with its `CrashHook` registration) on first use.
     pub crash_channel_vecs: BTreeMap<LocationKey, syn::Ident>,
-    /// Emit network hook points (see [`super::network_hook`]): every bincode network send and
-    /// receive, and every external output, calls into the installed `SimNetworkHook`. When
-    /// false, codegen is exactly as without the hooks.
+    /// Emit network hook points (see [`super::network_hook`]).
     pub network_hooks: bool,
     /// The channel table, one entry per `Network` node, in emission order.
     pub channels: Vec<super::network_hook::ChannelInfo>,
-    /// The external outputs, one entry per `SendExternal` root, in emission order.
-    pub outputs: Vec<super::network_hook::OutputInfo>,
-    /// Set by `network_metadata`, consumed by the `create_network` call that follows it.
+    /// Set by `network_metadata`, consumed by the `create_network` that follows.
     pub pending_network_meta: Option<(StmtId, Option<String>, HydroIrOpMetadata)>,
     /// Set by `external_output_metadata`, consumed by the `create_external_output` that follows.
     pub pending_output_port: Option<(StmtId, usize)>,
@@ -1687,10 +1683,20 @@ impl DfirBuilder for SimBuilder {
 
         let root = get_this_crate();
 
-        let pending = self.pending_network_meta.take();
-        let (name, op) = match pending {
-            Some((id, name, op)) if id == tag_id => (name, op),
-            _ => panic!("SimBuilder: network_metadata was not called before create_network"),
+        // For embedded (external) serialization, the raw payload type flows across the in-memory
+        // channel instead of serialized `Bytes`.
+        let payload: syn::Type = match external_element_type {
+            Some(ty) => ty.clone(),
+            None => parse_quote!(__root_dfir_rs::bytes::Bytes),
+        };
+
+        // Bincode channels wrap the received value in a transport `Result` (matching real
+        // deployments) which the bincode deserialize expression then unwraps. Embedded channels
+        // deliver the raw payload directly, so no such wrapper is inserted.
+        let ok_wrap: proc_macro2::TokenStream = if external_element_type.is_some() {
+            proc_macro2::TokenStream::new()
+        } else {
+            quote::quote!(-> map(|v| -> ::std::result::Result<_, ()> { Ok(v) }))
         };
 
         let from_cluster = match from {
@@ -1710,8 +1716,11 @@ impl DfirBuilder for SimBuilder {
             ),
         };
 
-        // Network hook points (see `sim::network_hook`) intercept bincode channels only: embedded
-        // channels carry typed values, not bytes.
+        let Some((meta_id, name, op)) = self.pending_network_meta.take() else {
+            panic!("SimBuilder: network_metadata was not called before create_network")
+        };
+        assert_eq!(meta_id, tag_id, "SimBuilder: network_metadata for another network");
+        // Hook points intercept bincode channels only: embedded channels carry typed values.
         let intercepted = self.network_hooks && external_element_type.is_none();
         let channel_id = tag_id.into_inner();
         self.channels.push(super::network_hook::ChannelInfo {
@@ -1719,37 +1728,22 @@ impl DfirBuilder for SimBuilder {
             name,
             from: from.clone(),
             to: to.clone(),
-            transport: super::network_hook::Transport::of(networking_info),
+            networking: networking_info.clone(),
             intercepted,
             op,
         });
 
-        // For embedded (external) serialization, the raw payload type flows across the in-memory
-        // channel instead of serialized `Bytes`.
-        let payload: syn::Type = match external_element_type {
-            Some(ty) => ty.clone(),
-            None => parse_quote!(__root_dfir_rs::bytes::Bytes),
-        };
-        // What the sender puts on the wire: cluster senders tag the payload with their member id.
+        // What the sender puts on the wire: cluster senders tag the payload with their member id,
+        // and intercepted channels carry the hook's `u64` tag.
         let elem: syn::Type = if from_cluster {
             parse_quote!((#root::__staged::location::TaglessMemberId, #payload))
         } else {
             payload
         };
-        // Intercepted channels also carry the hook's `u64` tag.
         let wire: syn::Type = if intercepted {
             parse_quote!((u64, #elem))
         } else {
             elem
-        };
-
-        // Bincode channels wrap the received value in a transport `Result` (matching real
-        // deployments) which the bincode deserialize expression then unwraps. Embedded channels
-        // deliver the raw payload directly, so no such wrapper is inserted.
-        let ok_wrap: proc_macro2::TokenStream = if external_element_type.is_some() {
-            proc_macro2::TokenStream::new()
-        } else {
-            quote::quote!(-> map(|v| -> ::std::result::Result<_, ()> { Ok(v) }))
         };
 
         // The channel itself: one queue for a process receiver, one per member for a cluster.
@@ -1796,8 +1790,8 @@ impl DfirBuilder for SimBuilder {
             }
         }
 
-        // The send site. Pieces: the closure pattern, the item put on the wire, the recipient
-        // index (for crash staging), and the delivery into the recipient's queue.
+        // The send site. Pieces: the closure pattern, the recipient index (for crash staging),
+        // the item put on the wire, and the delivery into the recipient's queue.
         let send_pat: syn::Pat = if to_cluster {
             parse_quote!((target_member_id, v))
         } else {
@@ -1842,9 +1836,13 @@ impl DfirBuilder for SimBuilder {
                     ));
                 },
             );
+            let recipient_pat = syn::Ident::new(
+                if to_cluster { "__recipient" } else { "_recipient" },
+                Span::call_site(),
+            );
             let staged_deliver = deliver(
                 &parse_quote!(__crash_sink),
-                &parse_quote!(__recipient),
+                &parse_quote!(#recipient_pat),
                 &parse_quote!(v),
             );
             self.add_extra_stmt_internal(
@@ -1855,7 +1853,7 @@ impl DfirBuilder for SimBuilder {
                         #chvec.borrow_mut().push(::std::boxed::Box::new(
                             #root::sim::runtime::StagedChannel {
                                 buffers: #stage.clone(),
-                                deliver: ::std::boxed::Box::new(move |__recipient, v| {
+                                deliver: ::std::boxed::Box::new(move |#recipient_pat, v| {
                                     #staged_deliver
                                 }),
                             }
@@ -1867,18 +1865,19 @@ impl DfirBuilder for SimBuilder {
         } else {
             deliver(&parse_quote!(#sink), &recipient, &item)
         };
-
         let send_closure: syn::Expr = if intercepted {
-            let from_member: syn::Expr = if from_cluster {
-                parse_quote!(::core::option::Option::Some(__current_cluster_id))
-            } else {
-                parse_quote!(::core::option::Option::None)
+            let member = |cluster: bool, id: syn::Expr| -> syn::Expr {
+                if cluster {
+                    parse_quote!(::core::option::Option::Some(#id))
+                } else {
+                    parse_quote!(::core::option::Option::None)
+                }
             };
-            let to_member: syn::Expr = if to_cluster {
-                parse_quote!(::core::option::Option::Some(#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id)))
-            } else {
-                parse_quote!(::core::option::Option::None)
-            };
+            let from_member = member(from_cluster, parse_quote!(__current_cluster_id));
+            let to_member = member(
+                to_cluster,
+                parse_quote!(#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id)),
+            );
             parse_quote! {
                 |#send_pat| {
                     if let ::core::option::Option::Some(__hydro_net_tag) = #root::sim::network_hook::rt::on_send(
@@ -1913,9 +1912,8 @@ impl DfirBuilder for SimBuilder {
             );
         }
 
-        // The receive site: intercepted channels report the receive (and expose the tag to a
-        // wrapped deserialize) before the payload continues as usual.
-        let recv_strip: proc_macro2::TokenStream = if intercepted {
+        // Intercepted receives report to the hook (and expose the tag to a wrapped deserialize).
+        let recv_strip = if intercepted {
             let to_member: syn::Expr = if to_cluster {
                 parse_quote!(::core::option::Option::Some(__current_cluster_id))
             } else {
@@ -1993,17 +1991,10 @@ impl DfirBuilder for SimBuilder {
             },
         );
 
-        let port = match self.pending_output_port.take() {
-            Some((id, port)) if id == tag_id => port,
-            _ => panic!(
-                "SimBuilder: external_output_metadata was not called before create_external_output"
-            ),
+        let Some((port_id, port)) = self.pending_output_port.take() else {
+            panic!("SimBuilder: external_output_metadata was not called before create_external_output")
         };
-        self.outputs.push(super::network_hook::OutputInfo {
-            port,
-            location: on.root().clone(),
-        });
-
+        assert_eq!(port_id, tag_id, "SimBuilder: external_output_metadata for another output");
         let send_closure: syn::Expr = if self.network_hooks {
             let root = get_this_crate();
             let member: syn::Expr = if matches!(on.root(), LocationId::Cluster(_)) {
