@@ -50,10 +50,10 @@ use crate::capacity::{
 use crate::generator::drive;
 use hydro_deploy_integration::SEND_BUFFER_ENV;
 use crate::profile::Profile;
-use crate::program::Observer;
+use crate::program::{Observer, StreamMode};
 use crate::trace::{Recorder, Sample, Trace};
 use crate::verdict::{
-    Outcome, StreamKind, StreamKinds, Verdict, judge_with_kinds, window_stats,
+    Outcome, StreamKind, StreamKinds, Verdict, judge_with_kinds, level_rising, window_stats,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -326,7 +326,16 @@ pub struct RunConfig {
     /// that a slow peer never stalls a node: the default, since without it backpressure from the
     /// first slow link reaches the generator and the workload is no longer open-loop.
     pub unbounded_sends: bool,
+    /// The Cargo profile the deployed nodes are built with: [`DEPLOY_PROFILE`] by default (an
+    /// optimized build), or `dev` for a debug build (`--deploy-profile dev`).
+    pub deploy_profile: String,
 }
+
+/// The Cargo profile Sedge builds deployed nodes with unless `--deploy-profile` says otherwise:
+/// the workspace's `profile` profile (release with debug info, no LTO, symbols kept). μ and every
+/// verdict are about the program's real capacity, so its nodes must not carry a debug build's
+/// costs (debug assertions, overflow checks), even with `-C opt-level=3` in the rustflags.
+pub const DEPLOY_PROFILE: &str = "profile";
 
 impl Default for RunConfig {
     fn default() -> Self {
@@ -353,6 +362,7 @@ impl Default for RunConfig {
             probe_start: None,
             calibrate_only: false,
             unbounded_sends: true,
+            deploy_profile: DEPLOY_PROFILE.to_owned(),
         }
     }
 }
@@ -521,6 +531,7 @@ impl RunConfig {
                         }
                     }
                 }
+                "--deploy-profile" => cfg.deploy_profile = value("--deploy-profile")?,
                 "--probe-step" => cfg.probe_step = secs(&value("--probe-step")?, "--probe-step")?,
                 "--probe-start" => {
                     cfg.probe_start = Some(positive(&value("--probe-start")?, "--probe-start")?)
@@ -590,6 +601,8 @@ usage: sedge [options] <crate> [function-substring]
                            nodes' outgoing connections queue sends in memory (default unbounded,
                            so a slow peer never stalls a node and the workload stays open-loop),
                            or push back on the sending dataflow (Hydro's own default)
+  --deploy-profile NAME    Cargo profile the nodes are built with (default `profile`: release
+                           with debug info and no LTO; `dev` for a debug build)
  μ:
   --mu RPS                 take μ as given instead of measuring it
   --recalibrate            measure μ even if it is cached for these limits
@@ -927,6 +940,7 @@ impl TrialCapacity {
         };
         let mut h = TrybuildHost::new(host)
             .rustflags("-C opt-level=3 -C codegen-units=1 -C strip=none -C debuginfo=2 -C lto=off")
+            .profile(run.deploy_profile.clone())
             .feature("sedge");
         if run.unbounded_sends {
             h = h.env(SEND_BUFFER_ENV, "unbounded");
@@ -949,6 +963,7 @@ fn sanitize(s: &str) -> String {
 pub fn host(deployment: &mut Deployment, run: &RunConfig) -> TrybuildHost {
     let mut host = TrybuildHost::new(deployment.Localhost())
         .rustflags("-C opt-level=3 -C codegen-units=1 -C strip=none -C debuginfo=2 -C lto=off")
+        .profile(run.deploy_profile.clone())
         .feature("sedge");
     for f in &run.features {
         host = host.feature(f.clone());
@@ -1370,13 +1385,17 @@ where
     let from_cress = cress_kinds(run, meta, spec.probe);
     let mut streams = Vec::new();
     for s in observer.streams {
-        let kind = from_cress.get(&s.name).copied().unwrap_or(if s.numeric {
-            StreamKind::Level
-        } else {
-            StreamKind::Work
-        });
+        let kind = match s.mode {
+            StreamMode::Counter => StreamKind::Work,
+            StreamMode::Gauge => StreamKind::Level,
+            StreamMode::Whole => from_cress.get(&s.name).copied().unwrap_or(if s.numeric {
+                StreamKind::Level
+            } else {
+                StreamKind::Work
+            }),
+        };
         kinds.insert(s.name.clone(), kind);
-        streams.push((s.name, (s.connect)(nodes).await));
+        streams.push((s.name, s.mode, (s.connect)(nodes).await));
     }
     let explicit_ids = completions.is_some();
     deployment.start().await.expect("deployment did not start");
@@ -1447,10 +1466,15 @@ where
                     }
                 }
             }));
-            let read_streams = futures::future::join_all(streams.iter_mut().map(|(name, s)| {
+            let read_streams = futures::future::join_all(streams.iter_mut().map(|(name, mode, s)| {
                 let r = r.clone();
+                let mode = *mode;
                 async move {
                     while let Some(o) = s.next().await {
+                        if mode == StreamMode::Counter {
+                            r.counter(name, o.value.unwrap_or(0.0));
+                            continue;
+                        }
                         r.record(
                             name,
                             Sample {
@@ -1793,7 +1817,8 @@ where
         return (declared(), MuSource::Declared);
     }
     let roles: Vec<String> = meta.roles.iter().map(|r| r.to_string()).collect();
-    let key = run.capacity.key(meta, &roles);
+    // μ depends on how the nodes were built as much as on their limits.
+    let key = format!("{};build={}", run.capacity.key(meta, &roles), run.deploy_profile);
     if run.calibrate == Calibrate::Auto
         && let Some(mu) = cached_mu(run, meta, &key, host)
     {
@@ -1968,17 +1993,22 @@ fn judge_probe(ex: &Executed, profile: &Profile, rate: f64, reference: &mut Opti
             }
         }
     };
-    // A backlog that the program cannot keep up with grows by the excess of the offered rate over
-    // μ. Rising here means growing between the window's halves by more than 5 % of what was
-    // offered over half a window (and by more than 10 items), so that the noise of a small,
-    // healthy level is not read as falling behind.
-    let half = window.len() as f64 / 2.0;
-    let slack = (0.05 * rate * half).max(10.0);
-    let rising: Vec<String> = w
-        .gauge_halves()
-        .into_iter()
-        .filter(|(_, first, second)| *second > first + slack)
-        .map(|(n, _, _)| n)
+    // A backlog that the program cannot keep up with grows steadily, by the excess of the
+    // offered rate over μ: a sustained trend across the window, larger than the level's own
+    // size and than 5 % of what the window offered (and 10 items). See `level_rising`.
+    let floor = (0.05 * rate * window.len() as f64).max(10.0);
+    let rising: Vec<String> = ex
+        .kinds
+        .iter()
+        .filter(|(_, k)| **k == StreamKind::Level)
+        .filter(|(n, _)| {
+            let values: Vec<f64> = window
+                .iter()
+                .filter_map(|b| b.stream_values.get(*n).copied())
+                .collect();
+            level_rising(&values, floor)
+        })
+        .map(|(n, _)| n.clone())
         .collect();
     let harness_bound = ex.harness_bound();
     // Arrivals the generator could not write on time: either the program pushed back (a full
@@ -2367,6 +2397,15 @@ mod tests {
         // Never below the kernel's 1 ms minimum.
         assert_eq!(q.divided(10.0).quota_us, 1000);
         assert_eq!(CpuQuota::from_cores(0.01, 10_000).quota_us, 1000);
+    }
+
+    #[test]
+    fn nodes_are_built_optimized_unless_asked() {
+        assert_eq!(parse(&[]).unwrap().deploy_profile, DEPLOY_PROFILE);
+        assert_eq!(
+            parse(&["--deploy-profile", "dev"]).unwrap().deploy_profile,
+            "dev"
+        );
     }
 
     #[test]
