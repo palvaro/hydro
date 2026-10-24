@@ -20,8 +20,10 @@ have regression tests. They are recorded in §17.
 ## 0. Setting and terms
 
 - **Program.** A Hydro dataflow program compiled for the simulator (`hydro_lang::sim`). It has *nodes*: processes,
-  and members of clusters. A *label* is a collection the user marked `EventualConsistency` on a cluster. The check
-  observes it through a *tap*: each member's tap emits each record of the labelled stream once, as an *output*.
+  and members of clusters. Every node is *crashable*. A *label* is a collection on a cluster whose type carries
+  `EventualConsistency`, whether the user's code put it there (`assert_has_consistency_of`) or a library did (the
+  delivery of a `broadcast_closed`, say). Each labelled IR node is its own label (§11). The check observes a label
+  through a *tap*: each member's tap emits each record of the labelled collection once, as an *output*.
 - **Harness.** Two async closures. The *inputs* (the fault phase) send fixed inputs to the program, and may wait for
   its outputs, but may not place a barrier (§12). The optional *recovery* runs after the heal, and may call
   `quiesce()`. hydrofrac runs `inputs; quiesce(); heal(); quiesce(); recovery; quiesce()` (`drive` in
@@ -34,6 +36,7 @@ have regression tests. They are recorded in §17.
   - `crash(n)`: node `n` is dead from instance start.
   - `crash(n after m)`: `n` dies right after it first sends `m`, if it sends `m` before the heal.
   - Messages are *content-addressed*: a `MessageId` is `(channel, from, to, payload bytes)` (`hf/fault/mod.rs:154`).
+    So `omit(m)` drops every copy with that content, a retry included (§18).
   - A *fault set* has at most one crash per node.
   - **The heal**: from the heal on, no omission applies and no new crash fires; crashes that fired persist
     (`hf/fault/mod.rs:389`).
@@ -47,11 +50,17 @@ have regression tests. They are recorded in §17.
     (`hf/check/races_engine.rs`, `read_schedule`; `hf/check/brute_force.rs:338`).
 
   A *member view* is the union of what the member's tap emitted. It never shrinks.
+
+  Every run the search explores is checked for both. A certificate claims POST in every run within the bounds
+  (Claim A, §1). It claims no divergence in every such run only where §13 says (Claim B), and the report says which.
+  A label with an empty domain has no POST to check, so its only claim is Claim B (§11).
 - **Bounds** (§10). A fault set is *within the bounds* if:
-  - it crashes at most one node per crash;
-  - it crashes at most `max_crashes` nodes;
-  - it never crashes every crashable node;
-  - it never crashes more than `|members| − 2` members of the label's cluster.
+  - it holds at most one crash per node;
+  - it crashes at most `max_crashes` nodes, if the check sets that cap;
+  - it crashes at most `nodes − 1` nodes, where `nodes` counts every node: never all of them;
+  - it crashes at most `|members| − 2` members of the label's cluster.
+
+  Omissions are not bounded.
 
 ## 1. The certificate theorem
 
@@ -147,22 +156,37 @@ to have reached the vacuity limit or saturation (§10).
 
 ### 1.1 Free literals are substituted, not searched
 
-**Claim.** Solving the program with the free literals substituted (§5) has the same solutions in the fault variables
-as solving it with every literal as a variable.
+**Terms.** A *literal* is a yes/no statement about a run: a crash literal `after(d, m)` (§5), or a premise literal of a
+fragile step (§4). A literal is *proved* if §6 shows it has one value in every run, under every fault set. Proved
+literals are constants. Every other literal is *free*: the adversary picks its value. The program of §1 is written
+with each free literal replaced by a fixed value: a free `after(d, m)` by true (the crash kills `d`), a free premise
+by false.
+
+**Claim.** For every assignment of the fault variables, the substituted rows hold if and only if the rows hold for
+some assignment of the free literals. So the substituted program has exactly the solutions, in the fault variables,
+of the program in which the free literals are extra variables.
 
 **Proof.**
-- A row of pair `p` reads `Σ_c x_c · [c kills a dependency of D, given the literals] + Σ_ℓ (1 − ℓ) ≥ z_p`.
-- A free crash literal appears only as a factor of a kill: `crash(n after m)` kills `d` only if `after(d, m)`. So
-  setting it true only helps the row.
-- A free premise literal `ℓ` appears only as `(1 − ℓ)`, so setting it false only helps the row.
-- Neither kind appears in bounds, no-goods or exemption rows, which are over faults only.
-- So for any fault assignment, there is a literal assignment satisfying the rows if and only if the substituted rows
-  hold.
-- With the substitution, a free crash literal means "the crash kills", and a free premise means "the row imposes
-  nothing". A fragile clause therefore imposes nothing in the certificate scope.
+- **Notation.** `x_g` is 1 if the proposal holds candidate `g`. `z_p` is 1 if the proposal must be admissible for
+  pair `p`. There is one row per pair `p` and clause `D` of `p`:
+  `Σ_g x_g · K(g, D) + Σ_{ℓ ∈ premises(D)} (1 − ℓ) ≥ z_p`.
+  `K(g, D)` is 1 if `g` kills some dependency of `D`. For `g = crash(n after m)` and a dependency `d ≠ m` sent by
+  `n`, that is the value of `after(d, m)` (§5).
+- **Each free literal helps every row it is in.** A crash literal appears only inside `K`, where true can only raise
+  the left side. A premise appears only as `(1 − ℓ)`, where false can only raise it.
+- **No free literal appears anywhere else.** The bounds, the no-goods, the row `Σ_p z_p ≥ 1` and the excuse rows
+  (`crash(c)`, and dead sets, which §8 computes from proved literals only) are over faults alone.
+- So one assignment is best for every row at once: every free crash literal true, every free premise false. If any
+  assignment satisfies the rows, this one does. **Proved.**
 
-The adversary may now use literal values no run realises, such as `after(d, m)` and `after(m, d)` together. That only
-strengthens it, which is sound. **Proved.**
+**Consequences.**
+- A fragile clause's row has a left side of at least 1, so it imposes nothing. In the certificate scope
+  (`Scope::RobustOnly`) only robust clauses constrain proposals.
+- The heuristic scope (`Scope::AllKnown`) takes every premise as true instead, so fragile clauses must be killed
+  too. That asks for more, so its proposals are admissible as well. It only orders the search and never decides a
+  certificate.
+- The adversary may use literal values no run realises, such as `after(d, m)` and `after(m, d)` together. It can
+  only propose more sets: that costs runs, never soundness.
 
 **Where.** `hf/races/literals.rs:18-30` (the argument), `hf/races/clause.rs:62` (the kill rule), `hf/races/ilp.rs`
 (`Scope::includes`: fragile clauses only in the heuristic scope).
@@ -526,24 +550,31 @@ the harvest).
 ## 10. Bounds and vacuity
 
 **Claim.** Certificates quantify over fault sets within the bounds and say nothing outside them. The bounds
-(`hf/search/mod.rs:116-140`, `hf/check/engine.rs:251`) are:
+(`CrashBounds`, `hf/search/mod.rs:116-140`; `Engine::bounds`, `hf/check/engine.rs`) are:
 - at most one crash per node;
-- at most `max_crashes` crashes, if capped (`Tolerance::UpTo(k)`);
-- never every crashable node: at most `nodes − 1`;
-- at most `|members| − 2` members of the label's cluster.
+- at most `max_crashes` crashes, if the check sets that cap (`Tolerance::UpTo(k)`);
+- at most `nodes − 1` crashes, where `nodes` counts every node of the program (every node is crashable): never all
+  of them;
+- at most `|members| − 2` crashes among the label's cluster, so every set leaves at least two of its members
+  correct.
+
+Omissions are not bounded. A crash point that does not fire still counts against the bounds.
 
 **What they exclude, and why.**
-- Crashing every node, or all but one member, makes agreement vacuous: a single survivor agrees with itself.
+- Crashing every node, or every member but one, makes agreement vacuous: a single survivor agrees with itself.
 - **The consequence is real.** In a 2-member cluster no member crash is admissible. So a certificate there covers
   only crashes of nodes outside the cluster (sources, coordinators) and omissions.
 
-`Tolerance::All` means one of:
-- the bound reached `min(nodes − 1, …)`;
-- or no proposal can hold more crashes, because the universe's crashable nodes are saturated
+**What `Tolerance` says.** The sweep raises its crash bound `b` from 0, and concludes at `b` when no admissible set
+with at most `b` crashes is left untried (§1).
+- `Tolerance::UpTo(k)`: it concluded at `b = k`, the `max_crashes` cap.
+- `Tolerance::All`: it concluded at a bound that no admissible set can exceed. That is either `b ≥ nodes − 1`, or
+  *saturation*: `b` is at least the most crashes a set over the current candidates can hold, which is one per
+  crashable node the candidates name, with at most `|members| − 2` of them in the label's cluster
   (`hf/races/sweep.rs`, `next`).
 
-**Checked in code** (`hf/races/clause.rs:181` `within_bounds`; `hf/check/brute_force.rs:276`, the same bounds for the
-oracle).
+**Checked in code** (`hf/races/clause.rs:181` `within_bounds`; `hf/check/brute_force.rs`, `admissible`, the same
+bounds for the oracle).
 
 ## 11. The host-side specification check
 

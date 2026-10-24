@@ -68,7 +68,7 @@ Status: **fixed+tested** (named test), **fixed untested**, **documented only**, 
 | R2-F6 / R1-F3 | The simulator's own crash hooks and dynamic membership bypass the fault model | fixed+tested `the_simulators_own_crashes_are_refused` (`SimFlow::refuse_sim_faults`); A14 |
 | R2-F7 | A6 wording | done (§16) |
 | R1-F2 | No omission or crash may happen after the heal | fixed (`EventLog::check_heal`, checked on every run); no dedicated failing test |
-| R1-F4/F5 | Wording | partly done; §0, §1.1 and §10 still open |
+| R1-F4/F5 | Wording | done: §0 (labels, bounds, what a certificate claims), §1.1 (notation, why one literal assignment is best for every row, the heuristic scope), §10 (bounds, what `Tolerance` says). The reviewers' original notes were not in the repo; this is a re-review against the code |
 | R3-F1 | **FATAL.** Collections labelled on the same source line were merged into one label, masking a member's missing fact | fixed+tested `one_labelling_line_twice_is_two_labels`. Labels are keyed by IR node; the tap asserts one node per label |
 | R3-F2 | **FATAL.** `BOLERO_RANDOM_TEST_TIME_MS` silently truncates "exhaustive" runs in both the search and brute force | fixed+tested `a_time_bounded_exhaustive_run_is_refused`. Both refuse to run when it is set. Other bolero limits are NOT CHECKED |
 | R3-F3 | Fact identity falls back to `Debug` text or a 64-bit hash for non-`Serialize` types | **documented only** (A4, §11, §18). Open: require `Serialize` |
