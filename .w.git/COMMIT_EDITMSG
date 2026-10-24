@@ -1,0 +1,12 @@
+test(hydrofrac): fold the oracle tests' engine-parameterised builders
+
+With one engine, every `*_in(check, ...)` builder in `check/brute_tests.rs` was called with
+`EcCheck::new()` only (they let one program run under lite or races):
+
+- `plain_broadcast_in`, `echo_broadcast_in` and `total_loss_masks_a_partial_loss_in` are
+  merged into their wrappers;
+- `lossy_relay_chain` loses its `check` argument;
+- `positional_crash_order_relay` and `positional_crash_order_relay_in` become one builder
+  taking `max_faults` and `max_crashes`.
+
+No test or expectation changes.

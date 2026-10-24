@@ -10,6 +10,7 @@ use stageleft::q;
 
 use super::*;
 use crate::fault::{FaultHook, FaultPlan};
+use crate::races::PairClause;
 use crate::search::Fault;
 
 /// `p1 → p2 → p3` on lossy channels, observed at `p3`. Without the provenance rewrite every
@@ -58,16 +59,16 @@ fn execution_rule_on_a_two_hop_run() {
         let observations: Vec<_> = lineage.observations().collect();
         assert_eq!(observations.len(), 1);
         assert_eq!(*observations[0].node, n3);
-        let clause = lineage.clause_for(observations[0].event);
+        let clause = PairClause::robust(lineage.derivation(observations[0].event).iter().cloned());
         let channels: Vec<usize> = clause.deps.iter().map(|d| d.message.channel).collect();
         assert_eq!(channels.len(), 2, "{clause:?}");
         assert!(channels.contains(&hop1) && channels.contains(&hop2));
         assert!(clause.deps.iter().all(|d| d.lossy && d.sender.is_some()));
         // Omitting either hop, or crashing the first sender before it sends, kills it.
         for dep in &clause.deps {
-            assert!(clause.hit_by(&Fault::Omit(dep.message.clone())));
+            assert!(clause.hit_by(&Fault::Omit(dep.message.clone()), &()));
         }
-        assert!(clause.hit_by(&Fault::crash_after(tables.names().name(&n1), None)));
+        assert!(clause.hit_by(&Fault::crash_after(tables.names().name(&n1), None), &()));
         assert!(lineage.opaque_fallbacks() >= 1);
     }
 }
@@ -131,7 +132,8 @@ fn record_provenance_is_precise_end_to_end() {
                 );
                 assert_eq!(lineage.opaque_fallbacks(), 0);
             }
-            let clause = lineage.clause_for(observations[0].event);
+            let clause =
+                PairClause::robust(lineage.derivation(observations[0].event).iter().cloned());
             assert_eq!(
                 clause
                     .deps

@@ -1,0 +1,5 @@
+0000000000000000000000000000000000000000 29bed35165c1234aaf20d78708bee2db6e1dad31 Peter Alvaro <palvarox@amazon.com> 1792869205 +0000
+29bed35165c1234aaf20d78708bee2db6e1dad31 5e98a5b50b659ba51facb4e21822e8c343cb8e56 Infinity <infinity@localhost> 1792870505 +0000	commit: refactor(hydrofrac)!: drop the HiGHS backend
+5e98a5b50b659ba51facb4e21822e8c343cb8e56 fb5a60abafd4115716673f768c9355b931bc188d Infinity <infinity@localhost> 1792870566 +0000	commit: refactor(hydrofrac)!: remove accessors and a field nothing reads
+fb5a60abafd4115716673f768c9355b931bc188d a06616457a3d8d32a29dc63bec3605e9ee1c7b62 Infinity <infinity@localhost> 1792871869 +0000	commit: docs(hydrofrac): keep the schedule-choice scan, and say what it is for now
+a06616457a3d8d32a29dc63bec3605e9ee1c7b62 07e63c49d8f3ac74e644bb2ec1ddaaf3b3e213c0 Infinity <infinity@localhost> 1792871944 +0000	commit: test(hydrofrac): fold the oracle tests' engine-parameterised builders

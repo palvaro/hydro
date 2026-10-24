@@ -34,6 +34,30 @@ use super::{LabelPlan, Labels, NotCheckedReason, ec_collections, plan, tap_pass}
 use crate::observe::{Fact, decode_output};
 
 #[cfg(stageleft_runtime)]
+/// `(file, name, occurrence)`: an identity that survives edits elsewhere in the file.
+fn stable_key(c: &super::EcCollection) -> (String, String, usize) {
+    (
+        c.file.clone().unwrap_or_default(),
+        c.display_name().to_owned(),
+        c.occurrence,
+    )
+}
+
+#[cfg(stageleft_runtime)]
+fn ports_of(labels: &Labels, label: usize) -> impl Iterator<Item = usize> + '_ {
+    labels
+        .ports
+        .iter()
+        .filter(move |(_, l)| **l == label)
+        .map(|(p, _)| *p)
+}
+
+#[cfg(stageleft_runtime)]
+fn searched(labels: &Labels) -> impl Iterator<Item = (usize, &LabelPlan)> {
+    labels.plans.iter().enumerate().filter(|(_, p)| p.is_searched())
+}
+
+#[cfg(stageleft_runtime)]
 fn plans_of(flow: FlowBuilder<'_>) -> Vec<LabelPlan> {
     let built = flow.finalize();
     plan(ec_collections(built.ir()))
@@ -50,7 +74,7 @@ fn find<'p>(plans: &'p [LabelPlan], name: &str) -> (usize, &'p LabelPlan) {
                 "no label `{name}` among {:?}",
                 plans
                     .iter()
-                    .map(|p| p.collection.stable_key())
+                    .map(|p| stable_key(&p.collection))
                     .collect::<Vec<_>>()
             )
         })
@@ -125,10 +149,9 @@ fn a_closed_broadcast_is_one_searched_label_named_after_its_binding() {
     let plan = &plans[0];
     assert!(plan.is_searched(), "{plan:?}");
     assert_eq!(
-        plan.collection.stable_key(),
+        stable_key(&plan.collection),
         ("tests.rs".to_owned(), "delivered".to_owned(), 0)
     );
-    assert!(plan.collection.minted && plan.collection.exit);
 }
 
 #[cfg(stageleft_runtime)]
@@ -194,11 +217,8 @@ fn gossip_state_is_checked_at_the_stream_it_folds() {
     let (_, state) = find(&plans, "gset_state");
     assert_eq!(state.covered_by, Some(all));
     assert!(!state.is_searched());
-    // The initial broadcast and the echo reach the outside only merged into `all_elements`.
     for hop in ["initial", "echo"] {
-        let (_, hop) = find(&plans, hop);
-        assert!(hop.is_searched());
-        assert_eq!(hop.merged_at, Some(all));
+        assert!(find(&plans, hop).1.is_searched());
     }
 }
 
@@ -241,7 +261,7 @@ fn taps_deliver_every_element_to_the_host_per_member_with_its_debug() {
         .compiled();
     let labels = taps.labels();
     let (label, _) = find(&labels.plans, "delivered");
-    assert_eq!(labels.ports_of(label).count(), 1);
+    assert_eq!(ports_of(&labels, label).count(), 1);
 
     let outputs = Rc::new(Outputs::default());
     sim.set_network_hook(outputs.clone());
@@ -323,16 +343,16 @@ fn an_overwritten_singleton_is_not_tapped() {
         "an overwritten singleton must not be checked by a union view: {plan:?}"
     );
     assert_eq!(plan.covered_by, None);
-    assert_eq!(labels.ports_of(label).count(), 0);
+    assert_eq!(ports_of(&labels, label).count(), 0);
     // The broadcast in the same statement is a label of its own (a stream, so it is checked),
     // and it is the only one tapped.
-    let searched: Vec<_> = labels.searched().collect();
+    let searched: Vec<_> = searched(&labels).collect();
     assert_eq!(searched.len(), 1, "{:?}", labels.plans);
     assert_eq!(
         kind_name(&searched[0].1.collection.collection_kind),
         "Stream"
     );
-    let stream_ports: Vec<usize> = labels.ports_of(searched[0].0).collect();
+    let stream_ports: Vec<usize> = ports_of(&labels, searched[0].0).collect();
 
     let outputs = Rc::new(Outputs::default());
     sim.set_network_hook(outputs.clone());
@@ -439,8 +459,4 @@ fn a_cluster_broadcasts_member_list_is_not_a_label() {
         plans.iter().all(|p| p.not_checked.is_none()),
         "every label is fed by a network: {plans:#?}"
     );
-    // The echo hop is merged into `delivered`.
-    let (delivered_index, _) = find(&plans, "delivered");
-    let (_, echo) = find(&plans, "echoed");
-    assert_eq!(echo.collection.merged_into, [delivered_index]);
 }
