@@ -37,7 +37,7 @@ mod results;
 pub use engine::EcCheck;
 #[cfg(stageleft_runtime)]
 #[cfg(any(test, feature = "cross-check"))]
-pub use engine::{BruteForce, BruteLabel, CrossCheck};
+pub use engine::{BruteForce, BruteLabel, CrossCheck, Oracle2, Oracle2Breaking, Oracle2Collection};
 #[cfg(stageleft_runtime)]
 pub use results::{
     ChoiceSite, Counterexample, LabelResult, RaceNotes, Results, Stats, VacuousReason, Verdict,
@@ -48,6 +48,9 @@ mod tests;
 
 #[cfg(test)]
 mod brute_tests;
+
+#[cfg(test)]
+mod oracle2_tests;
 
 #[cfg(test)]
 mod fanout_tests;

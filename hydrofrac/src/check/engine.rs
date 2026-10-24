@@ -30,6 +30,13 @@ mod brute;
 #[cfg(any(test, feature = "cross-check"))]
 pub use brute::{BruteForce, BruteLabel, CrossCheck};
 
+// The second, independent oracle (`oracle2.rs`): its own program, taps, faults and comparison.
+#[cfg(any(test, feature = "cross-check"))]
+#[path = "oracle2.rs"]
+mod oracle2;
+#[cfg(any(test, feature = "cross-check"))]
+pub use oracle2::{Oracle2, Oracle2Breaking, Oracle2Collection};
+
 // The search (docs/design/hydrofrac-races.md §4.4, §12): a child of this module, as it drives
 // the engine.
 #[path = "races_engine.rs"]
@@ -50,6 +57,9 @@ pub struct EcCheck {
     islands: Rc<RefCell<Vec<String>>>,
     /// The program's fragile steps (filled at compile time).
     fragile: Option<Rc<RefCell<Vec<crate::provenance::FragileSite>>>>,
+    /// Oracle 2's program: the user's flow, forked before it is instrumented.
+    #[cfg(any(test, feature = "cross-check"))]
+    oracle2: Option<oracle2::Program>,
 }
 
 impl EcCheck {
@@ -87,6 +97,10 @@ impl EcCheck {
     ///
     /// Once compiled, [`Self::fragile_sites`] lists the program's fragile steps.
     pub fn instrument<'a>(&mut self, flow: SimFlow<'a>) -> SimFlow<'a> {
+        #[cfg(any(test, feature = "cross-check"))]
+        {
+            self.oracle2 = Some(oracle2::Program::fork(&flow));
+        }
         let (taps, pass) = tap_pass();
         self.taps = Some(taps);
         // The tap pass runs before networks are compiled, so the provenance rewrite (a

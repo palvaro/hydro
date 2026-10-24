@@ -41,6 +41,7 @@ use std::time::{Duration, Instant};
 
 use hydro_lang::sim::compiled::{CompiledSim, quiesce};
 
+use super::oracle2::{self, Oracle2};
 use super::{EcCheck, Engine, Failure, Target, correct_members, panic_message, record_domain};
 use crate::check::results::{LabelResult, Results, Verdict, label_name};
 use crate::fault::{Event, Fate, FaultHook, FaultPlan, InstanceRecord, MessageId, NodeId};
@@ -58,7 +59,9 @@ pub struct CrossCheck {
     pub results: Results,
     /// What the enumeration found.
     pub brute: BruteForce,
-    /// Every disagreement, in words. Empty when they agree.
+    /// What the second oracle found (`oracle2.rs`).
+    pub oracle2: Oracle2,
+    /// Every disagreement, in words (oracle 2's prefixed `oracle 2:`). Empty when they agree.
     pub disagreements: Vec<String>,
     /// For each counterexample whose fault set was rerun, whether the rerun broke its label
     /// again (by label index).
@@ -70,16 +73,19 @@ impl CrossCheck {
     /// test edits a verdict, to check that the comparison catches it).
     pub fn recheck(&mut self) {
         self.disagreements = disagreements(&self.results, &self.brute, &self.confirmed);
+        self.disagreements
+            .extend(oracle2::disagreements(&self.results, &self.oracle2));
     }
 
     /// Panics with both reports if the search and the enumeration disagree.
     pub fn assert_agrees(&self) {
         assert!(
             self.disagreements.is_empty(),
-            "hydrofrac: the search and the brute-force enumeration disagree:\n- {}\n\nsearch:\n{}\nenumeration:\n{}",
+            "hydrofrac: the search and its oracles disagree:\n- {}\n\nsearch:\n{}\nenumeration:\n{}\n{}",
             self.disagreements.join("\n- "),
             self.results,
             self.brute.rendered(Some(&self.results.report_names())),
+            self.oracle2,
         );
     }
 }
@@ -91,8 +97,9 @@ impl Display for CrossCheck {
             "{}",
             self.brute.rendered(Some(&self.results.report_names()))
         )?;
+        writeln!(f, "{}", self.oracle2)?;
         if self.disagreements.is_empty() {
-            writeln!(f, "the search agrees with the enumeration on every label")
+            writeln!(f, "the search agrees with both oracles on every label")
         } else {
             for d in &self.disagreements {
                 writeln!(f, "DISAGREEMENT: {d}")?;
@@ -237,10 +244,14 @@ impl EcCheck {
             .labels();
         let mut engine = Engine::new(self, sim, &labels, &mut body);
         let (brute, confirmed) = engine.brute_force(max_faults, &results);
-        let disagreements = disagreements(&results, &brute, &confirmed);
+        let mut disagreements = disagreements(&results, &brute, &confirmed);
+        // The second oracle runs the same harness on its own program.
+        let oracle2 = self.oracle2(&mut body, max_faults, &results);
+        disagreements.extend(oracle2::disagreements(&results, &oracle2));
         CrossCheck {
             results,
             brute,
+            oracle2,
             disagreements,
             confirmed,
         }
