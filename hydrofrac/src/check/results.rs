@@ -143,11 +143,11 @@ pub struct Stats {
     pub schedules: usize,
     /// Wall time of the search, counting the runs it caused (not those it reused).
     pub wall: Duration,
-    /// What the races mode did ([`super::EcCheck::races`]); `None` in lite's.
+    /// How the search spent its hypotheses; `None` for a label decided without a run.
     pub races: Option<RaceNotes>,
 }
 
-/// How a races-mode search (docs/design/hydrofrac-races.md §4.4) spent its hypotheses.
+/// How a label's search (docs/design/hydrofrac-races.md §4.4) spent its hypotheses.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RaceNotes {
     /// Fault sets whose exploration stopped early: their derivations so far covered every pair.
@@ -208,7 +208,8 @@ pub struct Results {
     /// Empty when the whole program is tracked precisely.
     pub islands: Vec<String>,
     /// The program's schedule choices (docs/design/hydrofrac-lite.md §4.9): what the scan of its
-    /// IR found, then its opaque [`Self::islands`]. If there are any, no label is certified.
+    /// IR found, then its opaque [`Self::islands`]. A sampled verdict ([`Verdict::Exhausted`])
+    /// lists them.
     pub choices: Vec<ChoiceSite>,
     /// The program's network channels (the report names channels by them).
     pub channels: Vec<ChannelInfo>,

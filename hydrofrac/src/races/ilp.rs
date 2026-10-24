@@ -4,8 +4,8 @@
 //! that pair, and does not excuse it. So the program has one indicator per pair, needs at least one
 //! of them, and makes each pair's rows conditional on its indicator. Free literals are substituted
 //! their adversarial values ([`super::literals`]): a free crash literal makes the crash kill, and
-//! a clause with a free premise imposes nothing. The rest is lite's model (`search/ilp.rs`): crash
-//! bounds, no-goods, tie-breaks.
+//! a clause with a free premise imposes nothing. The rest is Molly's model: crash bounds,
+//! no-goods, tie-breaks.
 
 use std::collections::{BTreeMap, BTreeSet};
 

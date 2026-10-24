@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(stageleft_runtime)]
 #[doc(hidden)]
 pub mod check;
-/// The program's schedule choices (docs/design/hydrofrac-lite.md §4.9): no label of a program
-/// with one is certified.
+/// The program's schedule choices (docs/design/hydrofrac-lite.md §4.9): a program with none has
+/// one schedule per fault set without a mid-run crash.
 #[cfg(stageleft_runtime)]
 #[doc(hidden)]
 pub mod choices;

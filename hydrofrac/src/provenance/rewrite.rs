@@ -1499,7 +1499,7 @@ pub fn install<'a>(
 /// the program's fragile steps are found (`fragile::classify`) and stored in `sites`; then
 /// every record a fragile step emits also carries that step's site, which reaches message
 /// metadata as the id `FRAGILE_BIT | index` ([`super::FRAGILE_BIT`]). Lineage collects them
-/// ([`crate::lineage::Lineage::fragile_sites`]); lite's lineage skips them as unknown ids.
+/// ([`crate::lineage::Lineage::fragile_sites`]).
 #[cfg(stageleft_runtime)]
 pub fn install_fragile<'a>(
     flow: hydro_lang::sim::flow::SimFlow<'a>,

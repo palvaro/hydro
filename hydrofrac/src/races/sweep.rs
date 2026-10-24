@@ -1,5 +1,5 @@
 //! The crash sweep over pairs (docs/design/hydrofrac-races.md §4.4, §12): one label's search
-//! from zero crashes upwards, as lite's (`search/sweep.rs`), keeping tried sets across bounds.
+//! from zero crashes upwards, keeping tried sets across bounds.
 //!
 //! At each bound it proposes first by Molly's heuristic ([`Scope::AllKnown`]), then by the
 //! admissibility rule ([`Scope::RobustOnly`]), and concludes at the bound only when the rule

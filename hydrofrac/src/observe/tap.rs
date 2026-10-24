@@ -99,7 +99,7 @@ pub struct Labels {
     /// One plan per labelled collection; the index is the label's identity in hydrofrac.
     pub plans: Vec<LabelPlan>,
     /// The program's schedule choices ([`crate::provenance::choices`]), on the IR as the
-    /// program built it. Empty iff its labels can be certified (§4.9).
+    /// program built it.
     pub choices: Vec<ChoiceSite>,
     /// Tap output port → label (a label tapped at several IR nodes has several ports).
     pub(super) ports: BTreeMap<usize, usize>,

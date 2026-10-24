@@ -1,9 +1,10 @@
 //! The program's schedule choices (docs/design/hydrofrac-lite.md §4.9).
 //!
-//! Molly's strong pruning rule is sound when each fault set has one execution. The simulator is
-//! deterministic except at a schedule choice, so a label is certified only if
-//! [`program_choices`] finds none anywhere in the program. A node is choice-free only if its
-//! kind is on the [`ALLOWED`] list. Anything else is a choice, including an IR kind added later.
+//! The simulator is deterministic except at a schedule choice, so a program in which
+//! [`program_choices`] finds none has one schedule per fault set without a mid-run crash. The
+//! races engine uses that to run such sets once and to treat every derivation as robust
+//! (`check/races_engine.rs`, `Shape::choice_free`). A node is choice-free only if its kind is on
+//! the [`ALLOWED`] list. Anything else is a choice, including an IR kind added later.
 
 use std::collections::HashSet;
 use std::fmt::{self, Display};

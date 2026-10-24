@@ -669,12 +669,12 @@ fn disagreement(
             )
         })
     };
-    // The same, for a search in a program with schedule choices, which proves nothing.
+    // The same, for a search that sampled schedules, which proves nothing.
     let missed = |k: usize, claim: &str| {
         b.breaking_within(k).map(|set| {
             format!(
-                "the search {claim}, but {} ({} crash(es)) breaks it (the program \
-                 has schedule choices: a miss of the search heuristic, not a false certificate)",
+                "the search {claim}, but {} ({} crash(es)) breaks it (schedules were \
+                 sampled: a miss of the sample, not a false certificate)",
                 show(set),
                 crash_count(set)
             )
