@@ -3,8 +3,7 @@ use std::rc::Rc;
 
 use super::*;
 use crate::search::{
-    Backend, CheckedCluster, CrashBounds, Dependency, Fault, FaultSet, HYPOTHESIS_BUDGET, Node,
-    Tolerance,
+    CheckedCluster, CrashBounds, Dependency, Fault, FaultSet, HYPOTHESIS_BUDGET, Node, Tolerance,
 };
 
 type M = String;
@@ -103,16 +102,7 @@ fn propose_faults(
 ) -> Option<FaultSet<M>> {
     let universe: Vec<Candidate<M>> = universe.iter().cloned().map(Candidate::Fault).collect();
     let tried: BTreeSet<Proposal<M>> = tried.iter().map(proposal_of).collect();
-    let proposal = propose(
-        &universe,
-        pairs,
-        ALIVE,
-        &tried,
-        bounds,
-        scope,
-        Backend::default(),
-        &(),
-    )?;
+    let proposal = propose(&universe, pairs, ALIVE, &tried, bounds, scope, &())?;
     assert!(proposal.iter().all(|c| c.fault().is_some()));
     Some(faults_of(&proposal))
 }

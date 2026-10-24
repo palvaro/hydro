@@ -141,17 +141,6 @@ impl CrashBounds {
     }
 }
 
-/// The ILP backend.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Backend {
-    /// `microlp`: pure Rust, branch-and-bound. The default.
-    #[default]
-    Microlp,
-    /// HiGHS, for cross-checking `microlp` (crate feature `highs`).
-    #[cfg(feature = "highs")]
-    Highs,
-}
-
 /// The weight of each candidate in a universe of `n`, by position: `1` plus a tie-break that
 /// prefers earlier (weaker) candidates. Each tie-break is below `0.5 / n`, so it never trades
 /// cardinality (the research branch's `0.5 / n` per position did, for sets of size ≥ 3; §4.4).

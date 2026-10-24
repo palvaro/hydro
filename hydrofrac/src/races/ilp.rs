@@ -15,7 +15,7 @@ use good_lp::{
 
 use super::clause::{Candidate, Dead, PairClause, PairKey, Pairs, Proposal};
 use super::literals::SendOrder;
-use crate::search::{Backend, CrashBounds, Fault, FaultSet, Node, weights};
+use crate::search::{CrashBounds, Fault, FaultSet, Node, weights};
 
 /// Which rows a proposal must satisfy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,10 +131,6 @@ fn pair_rows<P: PairKey, M: Ord + Clone>(
 ///
 /// The no-good of a tried set that no pair admits is left out, exactly: the other rows already
 /// exclude it.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the program's inputs, each distinct; the sweep is the usual caller"
-)]
 pub fn propose<P: PairKey, M: Ord + Clone>(
     universe: &[Candidate<M>],
     pairs: &Pairs<P, M>,
@@ -142,7 +138,6 @@ pub fn propose<P: PairKey, M: Ord + Clone>(
     tried: &BTreeSet<Proposal<M>>,
     bounds: &CrashBounds,
     scope: Scope,
-    backend: Backend,
     order: &dyn SendOrder<M>,
 ) -> Option<Proposal<M>> {
     let index: BTreeMap<&Candidate<M>, usize> =
@@ -237,29 +232,11 @@ pub fn propose<P: PairKey, M: Ord + Clone>(
         constraints.push(no_good.leq(inside.len() as f64 - 1.0));
     }
 
-    let chosen = match backend {
-        Backend::Microlp => {
-            let mut model = vars.minimise(objective).using(good_lp::microlp);
-            for c in constraints {
-                model.add_constraint(c);
-            }
-            read(model.solve(), &x)
-        }
-        #[cfg(feature = "highs")]
-        Backend::Highs => {
-            let mut model = vars
-                .minimise(objective)
-                .using(good_lp::highs)
-                .set_mip_rel_gap(0.0)
-                .expect("a zero gap is valid")
-                .set_mip_abs_gap(0.0)
-                .expect("a zero gap is valid");
-            for c in constraints {
-                model.add_constraint(c);
-            }
-            read(model.solve(), &x)
-        }
-    }?;
+    let mut model = vars.minimise(objective).using(good_lp::microlp);
+    for c in constraints {
+        model.add_constraint(c);
+    }
+    let chosen = read(model.solve(), &x)?;
     Some(chosen.into_iter().map(|i| universe[i].clone()).collect())
 }
 

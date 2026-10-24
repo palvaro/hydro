@@ -41,9 +41,7 @@ use super::clause::{
 };
 use super::ilp::{Scope, propose};
 use super::literals::{Literal, SendOrder, after};
-use crate::search::{
-    Backend, CrashAt, CrashBounds, Fault, FaultSet, HYPOTHESIS_BUDGET, Node, Tolerance,
-};
+use crate::search::{CrashAt, CrashBounds, Fault, FaultSet, HYPOTHESIS_BUDGET, Node, Tolerance};
 
 /// What the sweep says to do next.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,8 +80,6 @@ pub struct Sweep<M, F> {
     runs: usize,
     /// The hypothesis budget: how many sets may be run, counting the probe.
     pub budget: usize,
-    /// The solver.
-    pub backend: Backend,
 }
 
 impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
@@ -103,7 +99,6 @@ impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
             order: Rc::new(()),
             runs: 1,
             budget: HYPOTHESIS_BUDGET,
-            backend: Backend::default(),
         }
     }
 
@@ -249,7 +244,6 @@ impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
             &self.tried,
             &self.bounds,
             Scope::Any,
-            self.backend,
             &*self.order,
         )
         .is_none()
@@ -292,7 +286,6 @@ impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
                     &self.tried,
                     &bounds,
                     scope,
-                    self.backend,
                     &*self.order,
                 ) else {
                     continue;
