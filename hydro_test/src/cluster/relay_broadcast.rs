@@ -56,11 +56,62 @@ use serde::{Deserialize, Serialize};
 pub struct Source;
 pub struct Member;
 
-/// A relayed id. `from` is the relaying member's raw id.
+/// A request body. The source assigns each id exactly one body, and relays and re-sends copy it
+/// unchanged, so the id determines the body: bodies compare equal and hash to nothing, and a
+/// `(id, body)` pair is compared, ordered and deduplicated by its id alone, without touching the
+/// bytes. The bytes are shared (`Bytes`), so the copies a member keeps for re-sending, one per
+/// peer, cost a reference count rather than a copy of the body each.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Body(pub bytes::Bytes);
+
+impl PartialEq for Body {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for Body {}
+impl PartialOrd for Body {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Body {
+    fn cmp(&self, _: &Self) -> std::cmp::Ordering {
+        std::cmp::Ordering::Equal
+    }
+}
+impl std::hash::Hash for Body {
+    fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
+}
+
+/// One request from the source: an id and its body. The body is part of the offered workload
+/// (empty in most configurations); members relay, store and re-send it with the id, so a larger
+/// body makes every relay and re-send cost real bytes and CPU.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Request {
+    pub id: u64,
+    pub body: Body,
+}
+
+impl Request {
+    /// A request with an empty body.
+    pub fn new(id: u64) -> Self {
+        Self { id, body: Body::default() }
+    }
+
+    /// A request whose body is `len` bytes derived from `id`.
+    pub fn with_body(id: u64, len: usize) -> Self {
+        Self { id, body: Body(bytes::Bytes::from(vec![(id % 251) as u8; len])) }
+    }
+}
+
+/// A relayed request. `from` is the relaying member's raw id.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Relay {
     pub from: u32,
     pub id: u64,
+    pub body: Body,
 }
 
 /// Acknowledges that `from` has merged the relay of `id` sent by the receiver.
@@ -76,6 +127,7 @@ pub struct Ack {
 pub struct Arrival {
     pub relay_from: Option<u32>,
     pub id: u64,
+    pub body: Body,
 }
 
 /// How members repair a partial broadcast.
@@ -128,7 +180,7 @@ pub struct Outputs<'a> {
     pub merged: Stream<Arrival, Cluster<'a, Member>, Unbounded, TotalOrder, ExactlyOnce>,
     /// Every acknowledgement a member sends, as `(destination raw id, ack)`.
     pub acks_sent: Stream<(u32, Ack), Cluster<'a, Member>, Unbounded, TotalOrder, ExactlyOnce>,
-    /// Size of the outstanding-echo table at the end of each tick.
+    /// Size of the outstanding-echo table at the end of each tick that saw a timer element.
     pub outstanding_depth: Stream<usize, Cluster<'a, Member>, Unbounded, TotalOrder, ExactlyOnce>,
     /// Every id a member receives, from the source or from a relay, with duplicates.
     pub delivered:
@@ -167,7 +219,7 @@ impl<'a> sedge::Observed<'a> for Outputs<'a> {
     config = RelayConfig { policy: RelayPolicy::Echo, channel: RelayChannel::FailStop },
     timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
     round_data = |round, inputs| {
-        inputs.requests.send(round as u64);
+        inputs.requests.send(Request::new(round as u64));
     },
 ))]
 #[cfg_attr(feature = "cress", amplification_check(
@@ -178,7 +230,7 @@ impl<'a> sedge::Observed<'a> for Outputs<'a> {
     config = RelayConfig { policy: RelayPolicy::EchoResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
     timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
     round_data = |round, inputs| {
-        inputs.requests.send(round as u64);
+        inputs.requests.send(Request::new(round as u64));
     },
 ))]
 #[cfg_attr(feature = "cress", amplification_check(
@@ -189,7 +241,84 @@ impl<'a> sedge::Observed<'a> for Outputs<'a> {
     config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
     timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
     round_data = |round, inputs| {
-        inputs.requests.send(round as u64);
+        inputs.requests.send(Request::new(round as u64));
+    },
+))]
+#[cfg_attr(feature = "cress", amplification_check(
+    name = reliable_resend_n3,
+    members = 3,
+    workload_rounds = 125,
+    skip_consistency_assertions,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(Request::new(round as u64));
+    },
+))]
+#[cfg_attr(feature = "cress", amplification_check(
+    name = reliable_resend_n7,
+    members = 7,
+    workload_rounds = 125,
+    skip_consistency_assertions,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(Request::new(round as u64));
+    },
+))]
+#[cfg_attr(feature = "cress", amplification_check(
+    name = reliable_resend_n9,
+    members = 9,
+    workload_rounds = 40,
+    skip_consistency_assertions,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(Request::new(round as u64));
+    },
+))]
+#[cfg_attr(feature = "cress", amplification_check(
+    name = reliable_resend_n13,
+    members = 13,
+    workload_rounds = 40,
+    skip_consistency_assertions,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(Request::new(round as u64));
+    },
+))]
+#[cfg_attr(feature = "cress", amplification_check(
+    name = reliable_resend_n17,
+    members = 17,
+    workload_rounds = 40,
+    skip_consistency_assertions,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(Request::new(round as u64));
+    },
+))]
+#[cfg_attr(feature = "cress", amplification_check(
+    name = reliable_resend_n9_4k,
+    members = 9,
+    workload_rounds = 40,
+    skip_consistency_assertions,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(Request::with_body(round as u64, 4096));
+    },
+))]
+#[cfg_attr(feature = "cress", amplification_check(
+    name = reliable_resend_n13_4k,
+    members = 13,
+    workload_rounds = 40,
+    skip_consistency_assertions,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(Request::with_body(round as u64, 4096));
     },
 ))]
 #[cfg_attr(feature = "sedge", sedge::overload_check(
@@ -201,7 +330,7 @@ impl<'a> sedge::Observed<'a> for Outputs<'a> {
     cpu_period_us = 100_000,
     timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
     round_data = |round, inputs| {
-        inputs.requests.send(round as u64);
+        inputs.requests.send(Request::new(round as u64));
     },
 ))]
 #[cfg_attr(feature = "sedge", sedge::overload_check(
@@ -213,7 +342,7 @@ impl<'a> sedge::Observed<'a> for Outputs<'a> {
     cpu_period_us = 100_000,
     timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
     round_data = |round, inputs| {
-        inputs.requests.send(round as u64);
+        inputs.requests.send(Request::new(round as u64));
     },
 ))]
 #[cfg_attr(feature = "sedge", sedge::overload_check(
@@ -225,13 +354,97 @@ impl<'a> sedge::Observed<'a> for Outputs<'a> {
     cpu_period_us = 100_000,
     timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
     round_data = |round, inputs| {
-        inputs.requests.send(round as u64);
+        inputs.requests.send(Request::new(round as u64));
+    },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = reliable_resend_n3,
+    members = 3,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
+    mu = 500,
+    cpus(Member = 0.01),
+    cpu_period_us = 100_000,
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(Request::new(round as u64));
+    },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = reliable_resend_n7,
+    members = 7,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
+    mu = 500,
+    cpus(Member = 0.01),
+    cpu_period_us = 100_000,
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(Request::new(round as u64));
+    },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = reliable_resend_n9,
+    members = 9,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
+    mu = 500,
+    cpus(Member = 0.01),
+    cpu_period_us = 100_000,
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(Request::new(round as u64));
+    },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = reliable_resend_n13,
+    members = 13,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
+    mu = 500,
+    cpus(Member = 0.01),
+    cpu_period_us = 100_000,
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(Request::new(round as u64));
+    },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = reliable_resend_n17,
+    members = 17,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
+    mu = 500,
+    cpus(Member = 0.01),
+    cpu_period_us = 100_000,
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(Request::new(round as u64));
+    },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = reliable_resend_n9_4k,
+    members = 9,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
+    mu = 500,
+    cpus(Member = 0.01),
+    cpu_period_us = 100_000,
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(Request::with_body(round as u64, 4096));
+    },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = reliable_resend_n13_4k,
+    members = 13,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
+    mu = 500,
+    cpus(Member = 0.01),
+    cpu_period_us = 100_000,
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(Request::with_body(round as u64, 4096));
     },
 ))]
 pub fn relay_broadcast<'a>(
     source: &Process<'a, Source>,
     members: &Cluster<'a, Member>,
-    requests: Stream<u64, Process<'a, Source>, Unbounded, TotalOrder, ExactlyOnce>,
+    requests: Stream<Request, Process<'a, Source>, Unbounded, TotalOrder, ExactlyOnce>,
     timer: Stream<(), Cluster<'a, Member>, Unbounded, TotalOrder, ExactlyOnce>,
     report_tick: Stream<(), Cluster<'a, Member>, Unbounded, TotalOrder, ExactlyOnce>,
     config: RelayConfig,
@@ -269,6 +482,7 @@ pub fn relay_broadcast<'a>(
     let delivered = initial
         .clone()
         .weaken_consistency()
+        .map(q!(|r| r.id))
         .merge_unordered(relays_in.clone().map(q!(|r| r.id)))
         .assert_has_consistency_of::<Cluster<'a, Member, EventualConsistency>>(manual_proof!(
             /** reliable broadcast + resend-until-ack (`ReliableResend`): a member relays every
@@ -282,23 +496,40 @@ pub fn relay_broadcast<'a>(
 
     let arrivals_in = initial
         .weaken_consistency()
-        .map(q!(|id| Arrival {
+        .map(q!(|r| Arrival {
             relay_from: None,
-            id
+            id: r.id,
+            body: r.body
         }))
         .merge_unordered(relays_in.map(q!(|r| Arrival {
             relay_from: Some(r.from),
-            id: r.id
+            id: r.id,
+            body: r.body
         })));
+
+    // What a member relays: under `ReliableResend` the first receipt of each id from any sender,
+    // otherwise the source's broadcast (whose ids never repeat). Deduplicated across the whole
+    // run by a top-level `unique`, a persistent set that costs O(1) per arrival; a per-tick
+    // state rebuilt every tick would cost O(ids seen so far) per tick, and the member would slow
+    // down as the run goes on.
+    let first_receipts = arrivals_in
+        .clone()
+        .filter_map(q!(move |a| if echo_enabled && (relay_any || a.relay_from.is_none()) {
+            Some((a.id, a.body))
+        } else {
+            None
+        }))
+        .unique();
 
     let (wire, merged, acks_sent, resends, unacked, outstanding_depth) = sliced! {
         let clock = use::batch(timer.enumerate(), nondet!(/** batching only shifts which tick observes a timer element; each element still advances the protocol clock */));
         let arrivals = use::batch(arrivals_in, nondet!(/** how long an arrival waits before the member merges it; this is the delay the mechanism depends on */));
+        let first_receipts = use::batch(first_receipts, nondet!(/** how long a first receipt waits before the member relays it; relaying later only delays the fan-out */));
         let acks = use::batch(acks_in, nondet!(/** how long an acknowledgement waits before it clears the outstanding entry; late acknowledgements cause re-sends */));
-        let mut outstanding = use::state_null::<KeyedSingleton<(u32, u64), u64, Tick<_>, Bounded>>();
-        // Ids this member has already relayed (`ReliableResend` only; empty otherwise).
-        let mut relayed = use::state_null::<KeyedSingleton<u64, (), Tick<_>, Bounded>>();
+        // `(peer, id)` -> (tick last sent, body to re-send).
+        let mut outstanding = use::state_null::<KeyedSingleton<(u32, u64), (u64, Body), Tick<_>, Bounded>>();
         let mut now = use::state(|l| l.singleton(q!(0u64)));
+        let mut depth = use::state(|l| l.singleton(q!(0usize)));
         // The other members' raw ids: deploy-time metadata, identical on every member and never
         // reassigned, so this state is a constant.
         let mut peers = use::state(|l| l.singleton(q!({
@@ -322,37 +553,33 @@ pub fn relay_broadcast<'a>(
         let merged = arrivals.clone();
         let acks_sent = merged.clone().filter_map(q!(move |a| {
             let me = CLUSTER_SELF_ID.get_raw_id();
-            a.relay_from.map(move |peer| (peer, Ack { from: me, id: a.id }))
+            let id = a.id;
+            a.relay_from.map(move |peer| (peer, Ack { from: me, id }))
         }));
 
         // ---- Relay: echo each initial arrival to every peer, outstanding table, re-send -----
-        // `ReliableResend` relays on first receipt from any sender: every arrival's id, minus
-        // those already relayed, once per tick.
-        let to_relay = arrivals
-            .filter_map(q!(move |a| if echo_enabled && (relay_any || a.relay_from.is_none()) { Some(a.id) } else { None }))
-            .unique()
-            .filter_not_in(relayed.clone().keys());
-        relayed = relayed
-            .into_keyed_stream()
-            .chain(to_relay.clone().filter(q!(move |_| relay_any)).map(q!(|id| (id, ()))).into_keyed())
-            .first();
+        // The first receipts that reached this tick, deduplicated before the tick (see
+        // `first_receipts`).
+        let to_relay = first_receipts.sort();
         let echoes = to_relay
             .cross_singleton(peers.clone())
-            .flat_map_ordered(q!(|(id, peers)| peers.into_iter().map(move |peer| (peer, id))));
+            .flat_map_ordered(q!(|((id, body), peers)| peers.into_iter().map(move |peer| (peer, (id, body.clone())))));
 
         let acked_keys = acks.map(q!(|a| (a.from, a.id)));
         let still_waiting = outstanding.filter_key_not_in(acked_keys);
         // Per peer, the oldest outstanding echo that has waited past the timeout. This is the
         // operator where the mechanism lives; with `ack_timeout_ticks == 0` nothing passes.
+        // The table is scanned only on ticks that saw a timer element (`filter_if` ends the
+        // stream without pulling it otherwise), so a tick that only merges arrivals does not pay
+        // for the whole unacknowledged table.
         let due = still_waiting
             .clone()
-            .into_keyed_stream()
-            .cross_singleton(now_cur.clone())
-            .cross_singleton(pump)
             .entries()
-            .filter_map(q!(move |((peer, id), ((last_sent, now), pump))| {
-                if pump && ack_timeout_ticks > 0 && now - last_sent >= ack_timeout_ticks {
-                    Some((peer, id))
+            .filter_if(pump.clone())
+            .cross_singleton(now_cur.clone())
+            .filter_map(q!(move |(((peer, id), (last_sent, body)), now)| {
+                if ack_timeout_ticks > 0 && now - last_sent >= ack_timeout_ticks {
+                    Some((peer, (id, body)))
                 } else {
                     None
                 }
@@ -366,31 +593,37 @@ pub fn relay_broadcast<'a>(
         let resent = due
             .clone()
             .cross_singleton(now_cur.clone())
-            .map(q!(|((peer, id), now)| ((peer, id), now)))
+            .map(q!(|((peer, (id, body)), now)| ((peer, id), (now, body))))
             .into_keyed();
-        let kept = still_waiting.filter_key_not_in(due.clone()).into_keyed_stream();
+        let kept = still_waiting
+            .filter_key_not_in(due.clone().map(q!(|(peer, (id, _))| (peer, id))))
+            .into_keyed_stream();
         // Only `EchoResend` waits for acknowledgements; the plain echo keeps no table.
         let new_entries = echoes
             .clone()
             .filter(q!(move |_| ack_timeout_ticks > 0))
             .cross_singleton(now_cur.clone())
-            .map(q!(|((peer, id), now)| ((peer, id), now)))
+            .map(q!(|((peer, (id, body)), now)| ((peer, id), (now, body))))
             .into_keyed();
         outstanding = kept.chain(resent).chain(new_entries).first();
 
-        let wire = echoes.chain(due.clone()).map(q!(move |(peer, id)| (
+        let wire = echoes.chain(due.clone()).map(q!(move |(peer, (id, body))| (
             peer,
-            Relay { from: CLUSTER_SELF_ID.get_raw_id(), id }
+            Relay { from: CLUSTER_SELF_ID.get_raw_id(), id, body }
         )));
 
-        let depth = outstanding.clone().keys().count();
+        // The table's size, counted on timer ticks only (like the scan above) and held between
+        // them.
+        let depth_now = outstanding.clone().keys().filter_if(pump.clone()).count().filter_if(pump);
+        let depth_cur = depth_now.clone().unwrap_or(depth.clone());
+        depth = depth_cur.clone();
         (
             wire,
             merged,
             acks_sent,
             due,
-            depth.clone(),
-            depth.into_stream(),
+            depth_cur,
+            depth_now.into_stream(),
         )
     };
 

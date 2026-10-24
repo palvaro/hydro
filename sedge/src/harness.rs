@@ -326,7 +326,16 @@ pub struct RunConfig {
     /// that a slow peer never stalls a node: the default, since without it backpressure from the
     /// first slow link reaches the generator and the workload is no longer open-loop.
     pub unbounded_sends: bool,
+    /// The Cargo profile the deployed nodes are built with: [`DEPLOY_PROFILE`] by default (an
+    /// optimized build), or `dev` for a debug build (`--deploy-profile dev`).
+    pub deploy_profile: String,
 }
+
+/// The Cargo profile Sedge builds deployed nodes with unless `--deploy-profile` says otherwise:
+/// the workspace's `profile` profile (release with debug info, no LTO, symbols kept). μ and every
+/// verdict are about the program's real capacity, so its nodes must not carry a debug build's
+/// costs (debug assertions, overflow checks), even with `-C opt-level=3` in the rustflags.
+pub const DEPLOY_PROFILE: &str = "profile";
 
 impl Default for RunConfig {
     fn default() -> Self {
@@ -353,6 +362,7 @@ impl Default for RunConfig {
             probe_start: None,
             calibrate_only: false,
             unbounded_sends: true,
+            deploy_profile: DEPLOY_PROFILE.to_owned(),
         }
     }
 }
@@ -521,6 +531,7 @@ impl RunConfig {
                         }
                     }
                 }
+                "--deploy-profile" => cfg.deploy_profile = value("--deploy-profile")?,
                 "--probe-step" => cfg.probe_step = secs(&value("--probe-step")?, "--probe-step")?,
                 "--probe-start" => {
                     cfg.probe_start = Some(positive(&value("--probe-start")?, "--probe-start")?)
@@ -590,6 +601,8 @@ usage: sedge [options] <crate> [function-substring]
                            nodes' outgoing connections queue sends in memory (default unbounded,
                            so a slow peer never stalls a node and the workload stays open-loop),
                            or push back on the sending dataflow (Hydro's own default)
+  --deploy-profile NAME    Cargo profile the nodes are built with (default `profile`: release
+                           with debug info and no LTO; `dev` for a debug build)
  μ:
   --mu RPS                 take μ as given instead of measuring it
   --recalibrate            measure μ even if it is cached for these limits
@@ -927,6 +940,7 @@ impl TrialCapacity {
         };
         let mut h = TrybuildHost::new(host)
             .rustflags("-C opt-level=3 -C codegen-units=1 -C strip=none -C debuginfo=2 -C lto=off")
+            .profile(run.deploy_profile.clone())
             .feature("sedge");
         if run.unbounded_sends {
             h = h.env(SEND_BUFFER_ENV, "unbounded");
@@ -949,6 +963,7 @@ fn sanitize(s: &str) -> String {
 pub fn host(deployment: &mut Deployment, run: &RunConfig) -> TrybuildHost {
     let mut host = TrybuildHost::new(deployment.Localhost())
         .rustflags("-C opt-level=3 -C codegen-units=1 -C strip=none -C debuginfo=2 -C lto=off")
+        .profile(run.deploy_profile.clone())
         .feature("sedge");
     for f in &run.features {
         host = host.feature(f.clone());
@@ -1802,7 +1817,8 @@ where
         return (declared(), MuSource::Declared);
     }
     let roles: Vec<String> = meta.roles.iter().map(|r| r.to_string()).collect();
-    let key = run.capacity.key(meta, &roles);
+    // μ depends on how the nodes were built as much as on their limits.
+    let key = format!("{};build={}", run.capacity.key(meta, &roles), run.deploy_profile);
     if run.calibrate == Calibrate::Auto
         && let Some(mu) = cached_mu(run, meta, &key, host)
     {
@@ -2381,6 +2397,15 @@ mod tests {
         // Never below the kernel's 1 ms minimum.
         assert_eq!(q.divided(10.0).quota_us, 1000);
         assert_eq!(CpuQuota::from_cores(0.01, 10_000).quota_us, 1000);
+    }
+
+    #[test]
+    fn nodes_are_built_optimized_unless_asked() {
+        assert_eq!(parse(&[]).unwrap().deploy_profile, DEPLOY_PROFILE);
+        assert_eq!(
+            parse(&["--deploy-profile", "dev"]).unwrap().deploy_profile,
+            "dev"
+        );
     }
 
     #[test]
