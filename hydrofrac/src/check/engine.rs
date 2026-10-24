@@ -1,9 +1,7 @@
 //! The loop behind [`EcCheck::run`] (see the [module docs](super)).
 
 use std::cell::RefCell;
-use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::hash::{Hash, Hasher};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -14,10 +12,10 @@ use hydro_lang::sim::flow::SimFlow;
 use hydro_lang::sim::network_hook::IrPassStage;
 
 use super::results::{
-    Counterexample, LabelResult, NondetSite, Results, Stats, VacuousReason, Verdict,
+    ChoiceSite, Counterexample, LabelResult, Results, Stats, VacuousReason, Verdict,
     counterexample_facts, label_name, verdict_line,
 };
-use crate::fault::{Event, Fate, FaultHook, FaultPlan, InstanceRecord, MessageId, NodeId};
+use crate::fault::{Event, FaultHook, FaultPlan, InstanceRecord, MessageId, NodeId};
 use crate::lineage::{Lineage, Tables};
 use crate::observe::{Fact, Labels, TapPass, decode_output, tap_pass};
 use crate::report::ReportNames;
@@ -26,13 +24,18 @@ use crate::search::{
 };
 use crate::spec::{MemberView, Observation, evaluate, learn_domain};
 
-// Children of this module (they drive the engine), kept in their own files beside it.
+// The test-only honesty check (docs/design/hydrofrac-lite.md §7): a child of this module, as it
+// drives the engine.
+#[cfg(any(test, feature = "cross-check"))]
 #[path = "brute_force.rs"]
 mod brute;
-#[path = "enumerate.rs"]
-mod enumerate;
-#[doc(hidden)]
+#[cfg(any(test, feature = "cross-check"))]
 pub use brute::{BruteForce, BruteLabel, CrossCheck};
+
+// The races mode (docs/design/hydrofrac-races.md §4.4): a child of this module, as it drives
+// the engine.
+#[path = "races_engine.rs"]
+mod races_engine;
 
 /// Checks every `EventualConsistency` label of a program (see the [module docs](super)).
 ///
@@ -47,12 +50,29 @@ pub struct EcCheck {
     taps: Option<TapPass>,
     /// The operators the provenance rewrite left as opaque islands (filled at compile time).
     islands: Rc<RefCell<Vec<String>>>,
+    /// The program's fragile steps, if instrumented by [`Self::instrument_fragile`] (filled at
+    /// compile time).
+    fragile: Option<Rc<RefCell<Vec<crate::provenance::FragileSite>>>>,
+    /// Whether this is the races mode ([`Self::races`]).
+    races: bool,
 }
 
 impl EcCheck {
     /// A check with no cap on crashes, exploring every schedule.
     pub fn new() -> Self {
         EcCheck::default()
+    }
+
+    /// A check in races mode (docs/design/hydrofrac-races.md §4.4), for programs with
+    /// `nondet!` choices: [`Self::instrument`] tags records with the fragile steps they passed
+    /// through, and [`Self::run`] keeps clauses per (member, fact), skips only fault sets that
+    /// robust derivations cover, and explores the others over their schedules. No cap on
+    /// crashes, every schedule explored.
+    pub fn races() -> Self {
+        EcCheck {
+            races: true,
+            ..EcCheck::default()
+        }
     }
 
     /// Caps the crash sweep at `n` crashes: a label that holds at `n` is reported as holding
@@ -74,21 +94,49 @@ impl EcCheck {
     /// points, attaches record provenance, skips the program's own consistency assertions
     /// (the check is what checks them) and acknowledges lossy channels (the check injects their
     /// omissions itself). Compile the result and pass it to [`Self::run`].
+    ///
+    /// In races mode ([`Self::races`]) this is [`Self::instrument_fragile`].
     pub fn instrument<'a>(&mut self, flow: SimFlow<'a>) -> SimFlow<'a> {
-        let (taps, pass) = tap_pass();
-        self.taps = Some(taps);
-        // The tap pass runs before networks are compiled, so the provenance rewrite (a
-        // `PostNetwork` pass) traces the taps like any other operator.
-        let flow = flow
-            .skip_consistency_assertions()
-            .test_safety_only()
-            .with_network_hook_points()
-            .with_ir_pass(IrPassStage::PreNetwork, pass);
+        if self.races {
+            return self.instrument_fragile(flow);
+        }
+        let flow = self.instrument_taps(flow);
         // Record provenance (docs/design/hydrofrac-lite.md §5): a `PostNetwork` pass, so it
         // sees the taps' outputs and attaches each observed fact's lineage to them. Operators
         // it cannot see into are recorded as opaque islands; their records fall back to the
         // execution rule, which is sound.
         crate::provenance::install(flow, Some(self.islands.clone()))
+    }
+
+    /// Like [`Self::instrument`], with record provenance in fragile mode
+    /// (docs/design/hydrofrac-races.md §4.1): records also name the fragile steps they passed
+    /// through, which [`crate::lineage::Lineage::fragile_sites`] collects. Once the result is
+    /// compiled, [`Self::fragile_sites`] lists the program's fragile steps. [`Self::run`] works
+    /// on such a simulation unchanged: lite's lineage ignores the extra ids.
+    pub fn instrument_fragile<'a>(&mut self, flow: SimFlow<'a>) -> SimFlow<'a> {
+        let flow = self.instrument_taps(flow);
+        let sites = Rc::new(RefCell::new(vec![]));
+        self.fragile = Some(sites.clone());
+        crate::provenance::install_fragile(flow, Some(self.islands.clone()), sites)
+    }
+
+    /// The program's fragile steps, indexed by site: `Some` once a flow passed through
+    /// [`Self::instrument_fragile`] was compiled, else `None`.
+    pub fn fragile_sites(&self) -> Option<Vec<crate::provenance::FragileSite>> {
+        self.fragile.as_ref().map(|sites| sites.borrow().clone())
+    }
+
+    /// The instrumentation [`Self::instrument`] and [`Self::instrument_fragile`] share: taps,
+    /// hook points and the simulator settings the check needs.
+    fn instrument_taps<'a>(&mut self, flow: SimFlow<'a>) -> SimFlow<'a> {
+        let (taps, pass) = tap_pass();
+        self.taps = Some(taps);
+        // The tap pass runs before networks are compiled, so the provenance rewrite (a
+        // `PostNetwork` pass) traces the taps like any other operator.
+        flow.skip_consistency_assertions()
+            .test_safety_only()
+            .with_network_hook_points()
+            .with_ir_pass(IrPassStage::PreNetwork, pass)
     }
 
     /// Runs the check on `sim` (compiled from a flow passed through [`Self::instrument`]).
@@ -104,7 +152,11 @@ impl EcCheck {
             .expect("`EcCheck::run` needs a simulation compiled from `EcCheck::instrument`")
             .labels();
         let mut engine = Engine::new(self, sim, &labels, &mut body);
-        engine.check()
+        if self.races {
+            engine.check_races()
+        } else {
+            engine.check()
+        }
     }
 }
 
@@ -118,9 +170,9 @@ struct Target {
     cluster: LocationId,
     /// Its fact domain (from the probe).
     domain: BTreeSet<Fact>,
-    /// What makes it schedule-sensitive (empty if nothing does): then its search is a heuristic
-    /// and cannot certify it (docs/design/hydrofrac-lite.md §4.9).
-    sites: Vec<NondetSite>,
+    /// The program's schedule choices (empty if it has none). If there are any, the search is a
+    /// heuristic and cannot certify the label (docs/design/hydrofrac-lite.md §4.9).
+    sites: Vec<ChoiceSite>,
 }
 
 impl Target {
@@ -184,6 +236,18 @@ struct Failure {
     record: Rc<InstanceRecord>,
 }
 
+impl Failure {
+    /// A program that panics under injected faults breaks every label.
+    fn panic(message: &str, record: Rc<InstanceRecord>) -> Self {
+        Failure {
+            missing: vec![],
+            divergent: vec![],
+            panic: Some(message.to_owned()),
+            record,
+        }
+    }
+}
+
 /// What one run (a fault set over all its schedules) says about one label.
 #[derive(Default)]
 struct LabelRun {
@@ -199,18 +263,24 @@ struct Run {
     labels: BTreeMap<usize, LabelRun>,
     schedules: usize,
     wall: Duration,
-    opaque_fallbacks: usize,
     /// The probe only: each target's fact domain, by label index.
     domains: BTreeMap<usize, BTreeSet<Fact>>,
-    /// The message of the panic that ended the run, if a schedule panicked.
-    panic: Option<String>,
-    /// Every candidate fault its schedules revealed ([`enumerate::harvest`]).
-    faults: BTreeSet<Fault<MessageId>>,
 }
 
-/// A run being read one schedule at a time, as each finishes (see [`Engine::execute`]). What it
-/// keeps is bounded by what the run taught (distinct clauses, the first failure per label), not
-/// by its number of schedules: each record is dropped once read, unless it is a failure's.
+impl Run {
+    /// The cost of this run as the label's first hypothesis.
+    fn stats(&self) -> Stats {
+        Stats {
+            hypotheses: 1,
+            schedules: self.schedules,
+            wall: self.wall,
+            races: None,
+        }
+    }
+}
+
+/// A run being read one schedule at a time, each record dropped once read unless it is a
+/// failure's (see [`Engine::execute`]).
 struct RunFold<'t> {
     targets: &'t [Target],
     /// The run's crashes: the premises of its clauses.
@@ -218,13 +288,10 @@ struct RunFold<'t> {
     /// Whether this is the failure-free probe, which learns each target's domain as it reads.
     probe: bool,
     labels: BTreeMap<usize, LabelRun>,
-    /// Per label, its clauses' indices by the hash of their derivation, to drop the duplicate
-    /// derivations most schedules repeat without a linear scan.
-    seen: BTreeMap<usize, HashMap<u64, Vec<usize>>>,
+    /// Per label, the keys of its clauses, to drop the duplicates most schedules repeat.
+    seen: BTreeMap<usize, HashSet<ClauseKey>>,
     domains: BTreeMap<usize, BTreeSet<Fact>>,
-    faults: BTreeSet<Fault<MessageId>>,
     schedules: usize,
-    opaque_fallbacks: usize,
     /// The latest record, read when the next one arrives or at [`Self::finish`]: when a
     /// schedule panics, the run's last record is the panicking one.
     pending: Option<InstanceRecord>,
@@ -254,9 +321,7 @@ impl<'t> RunFold<'t> {
                 .collect(),
             seen: BTreeMap::new(),
             domains: BTreeMap::new(),
-            faults: BTreeSet::new(),
             schedules: 0,
-            opaque_fallbacks: 0,
             pending: None,
         }
     }
@@ -282,15 +347,17 @@ impl<'t> RunFold<'t> {
         let schedules = self.schedules;
         for lr in self.labels.values_mut() {
             lr.all_vacuous &= schedules > 0;
+            // The panicking schedule left no record: still a counterexample.
+            if let Some(panic) = &panic {
+                lr.all_vacuous = false;
+                lr.failure.get_or_insert_with(|| Rc::new(Failure::panic(panic, Rc::default())));
+            }
         }
         Run {
             labels: self.labels,
             schedules,
             wall,
-            opaque_fallbacks: self.opaque_fallbacks,
             domains: self.domains,
-            panic,
-            faults: self.faults,
         }
     }
 
@@ -303,7 +370,6 @@ impl<'t> RunFold<'t> {
         panicked: Option<&str>,
     ) {
         self.schedules += 1;
-        enumerate::harvest(&record, tables, &mut self.faults);
         let record = Rc::new(record);
         if self.probe {
             for t in self.targets {
@@ -316,14 +382,8 @@ impl<'t> RunFold<'t> {
             for t in self.targets {
                 let lr = self.labels.get_mut(&t.label).unwrap();
                 lr.all_vacuous = false;
-                lr.failure.get_or_insert_with(|| {
-                    Rc::new(Failure {
-                        missing: vec![],
-                        divergent: vec![],
-                        panic: Some(panic.to_owned()),
-                        record: record.clone(),
-                    })
-                });
+                lr.failure
+                    .get_or_insert_with(|| Rc::new(Failure::panic(panic, record.clone())));
             }
             return;
         }
@@ -354,17 +414,8 @@ impl<'t> RunFold<'t> {
                     };
                     // Schedules repeat derivations; keep one clause per kill relation (the send
                     // order matters to positional crashes, so it is part of the identity).
-                    let key = clause_key(&clause);
-                    let mut hasher = DefaultHasher::new();
-                    key.hash(&mut hasher);
-                    let same = self
-                        .seen
-                        .entry(t.label)
-                        .or_default()
-                        .entry(hasher.finish())
-                        .or_default();
-                    if !same.iter().any(|&i| clause_key(&lr.clauses[i]) == key) {
-                        same.push(lr.clauses.len());
+                    let seen = self.seen.entry(t.label).or_default();
+                    if seen.insert(clause_key(&clause)) {
                         lr.clauses.push(clause);
                     }
                 }
@@ -382,7 +433,6 @@ impl<'t> RunFold<'t> {
                 }
             }
         }
-        self.opaque_fallbacks += lineage.opaque_fallbacks();
     }
 }
 
@@ -460,12 +510,12 @@ fn outcome(
 
 /// What one label's search has learned from its runs.
 struct Learned {
-    /// Whether the label is schedule-sensitive (see [`Engine::search`]).
+    /// Whether the program has schedule choices (see [`Engine::search`]).
     sensitive: bool,
-    /// Not schedule-sensitive: every clause must be hit.
+    /// No schedule choices: every clause must be hit.
     clauses: Vec<Clause<MessageId>>,
     known: HashSet<(ClauseKey, FaultSet<MessageId>)>,
-    /// Schedule-sensitive: some clause of every group (one group per run).
+    /// Schedule choices: some clause of every group (one group per run).
     groups: Vec<Vec<Clause<MessageId>>>,
     known_groups: HashSet<Vec<ClauseKey>>,
 }
@@ -494,10 +544,7 @@ impl Learned {
             }
         } else {
             for clause in run_clauses {
-                if self
-                    .known
-                    .insert((clause_key(clause), clause.premises.clone()))
-                {
+                if self.known.insert((clause_key(clause), clause.premises.clone())) {
                     self.clauses.push(clause.clone());
                 }
             }
@@ -507,7 +554,8 @@ impl Learned {
     /// The sweep's next step given what was learned.
     fn next(&self, sweep: &mut Sweep<MessageId>) -> Next<MessageId> {
         if self.sensitive {
-            let groups: Vec<&[Clause<MessageId>]> = self.groups.iter().map(Vec::as_slice).collect();
+            let groups: Vec<&[Clause<MessageId>]> =
+                self.groups.iter().map(Vec::as_slice).collect();
             sweep.next_any(&groups)
         } else {
             sweep.next(&self.clauses)
@@ -526,6 +574,8 @@ struct Engine<'c, B> {
     sample_schedules: Option<usize>,
     /// Every run so far, by fault set; labels share them.
     runs: BTreeMap<FaultSet<MessageId>, Rc<Run>>,
+    /// The program's fragile steps, if the simulation was instrumented in fragile mode.
+    fragile: Option<Vec<crate::provenance::FragileSite>>,
 }
 
 /// The message of a panic payload.
@@ -550,30 +600,25 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
             max_crashes: check.max_crashes,
             sample_schedules: check.sample_schedules,
             runs: BTreeMap::new(),
+            fragile: check.fragile_sites(),
         }
     }
 
-    /// What makes the label `plan` schedule-sensitive: the static walk's sites, and, to be
-    /// conservative, every operator the provenance rewrite could not see into (an opaque
-    /// island's records fall back to the execution rule, and the walk cannot tell what flows
-    /// through it).
-    fn sites_of(&self, plan: &crate::observe::LabelPlan) -> Vec<NondetSite> {
-        let mut sites = plan.sites.clone();
+    /// The program's schedule choices: the scan's, and, to be conservative, every operator the
+    /// provenance rewrite could not see into (an opaque island's records fall back to the
+    /// execution rule, and the scan cannot tell what flows through it).
+    fn choices(&self) -> Vec<ChoiceSite> {
+        let mut choices = self.labels.choices.clone();
         for island in self.islands.borrow().iter() {
-            let site = NondetSite {
+            let choice = ChoiceSite {
+                op: "provenance_island".to_owned(),
                 site: island.clone(),
-                op: "provenance_island",
-                kind: "-",
-                location: plan.cluster().root().clone(),
-                local: true,
-                opaque: true,
-                send_order: false,
             };
-            if !sites.contains(&site) {
-                sites.push(site);
+            if !choices.contains(&choice) {
+                choices.push(choice);
             }
         }
-        sites
+        choices
     }
 
     /// The members of `cluster` (`None` for a process).
@@ -586,10 +631,8 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
             .map(|m| m.iter().copied().collect())
     }
 
-    /// Runs `faults` over every schedule (or the sample), folding each schedule's record into a
-    /// [`Run`] as soon as it finishes, so a run's memory is bounded by what it learned (distinct
-    /// clauses, the first failure per label) rather than by its number of schedules. `seen` gets
-    /// every record before it is folded. The probe (`probe`) also learns each target's domain.
+    /// Runs `faults` over every schedule (or the sample), folding each record into a [`Run`] as
+    /// it finishes (so memory is bounded by what the run taught). `seen` gets every record first.
     fn execute(
         &mut self,
         faults: &FaultSet<MessageId>,
@@ -661,7 +704,7 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
         let names = self.tables.names();
         CrashBounds {
             cap: self.max_crashes,
-            nodes: self.sim.node_count(),
+            nodes: names.crashable().len(),
             checked: Some(CheckedCluster::new(
                 target
                     .members
@@ -671,24 +714,13 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
         }
     }
 
-    /// One label's sweep, from the probe's run.
-    ///
-    /// For a label that is not schedule-sensitive each fault set has one execution, and a
-    /// hypothesis must kill every derivation seen so far (Molly's rule): running out of
-    /// hypotheses certifies the label. For a schedule-sensitive one that rule is unsound (a
-    /// derivation seen in one schedule need not recur in another), so the search is a heuristic
-    /// instead: each earlier run is one disjunctive group, and a hypothesis need only kill the
-    /// derivations of one of its schedules ([`Sweep::next_any`]). Running out of hypotheses then
-    /// ends [`Verdict::Exhausted`], not a certificate (docs/design/hydrofrac-lite.md §4.9).
+    /// One label's sweep, from the probe's run: Molly's rule (kill every derivation seen) in a
+    /// program with no schedule choices, else the [`Sweep::next_any`] heuristic, which ends
+    /// [`Verdict::Exhausted`] instead of certified (see the [module docs](super)).
     fn search(&mut self, target: &Target, probe: &Run, targets: &[Target]) -> (Verdict, Stats) {
         let start = Instant::now();
         let sensitive = target.sensitive();
-        let mut stats = Stats {
-            hypotheses: 1,
-            schedules: probe.schedules,
-            wall: probe.wall,
-            opaque_fallbacks: probe.opaque_fallbacks,
-        };
+        let mut stats = probe.stats();
         let probe_run = &probe.labels[&target.label];
         if let Some(failure) = &probe_run.failure {
             return (
@@ -699,18 +731,12 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
         let mut sweep: Sweep<MessageId> = Sweep::new(self.bounds(target));
         let mut learned = Learned::new(sensitive);
         learned.learn(&probe_run.clauses);
-        // Fault sets a bounded enumeration ran beyond the search's hypotheses.
-        let mut enumerated = 0;
         let verdict = loop {
             let next = learned.next(&mut sweep);
             match next {
                 Next::Try(set) => {
-                    let cached = self.runs.contains_key(&set);
                     let run = self.run(&set, targets);
                     stats.schedules += run.schedules;
-                    if !cached {
-                        stats.opaque_fallbacks += run.opaque_fallbacks;
-                    }
                     let lr = &run.labels[&target.label];
                     if let Some(failure) = &lr.failure {
                         break counterexample(
@@ -727,22 +753,10 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
                     }
                 }
                 Next::Certified(tolerates) if sensitive => {
-                    // The heuristic found nothing. A small enough fault-set space is enumerated
-                    // outright instead, for a bounded certificate (or the counterexample the
-                    // heuristic missed).
-                    let tried = sweep.hypotheses();
-                    match self.enumerate(target, targets, tolerates, &mut stats, tried) {
-                        Some(e) => {
-                            enumerated = e.new_sets;
-                            break e.verdict;
-                        }
-                        None => {
-                            break Verdict::Exhausted {
-                                tolerates,
-                                sites: target.sites.clone(),
-                            };
-                        }
-                    }
+                    break Verdict::Exhausted {
+                        tolerates,
+                        sites: target.sites.clone(),
+                    };
                 }
                 Next::Certified(tolerates) => break Verdict::Certified { tolerates },
                 Next::Budget => {
@@ -752,7 +766,7 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
                 }
             }
         };
-        stats.hypotheses = sweep.hypotheses() + enumerated;
+        stats.hypotheses = sweep.hypotheses();
         stats.wall += start.elapsed();
         (verdict, stats)
     }
@@ -764,7 +778,11 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
             verdicts[t.label] = Some(result);
         }
         self.write_diagrams(&mut verdicts);
+        self.results(verdicts)
+    }
 
+    /// The results, from every label's verdict (by label index).
+    fn results(&self, mut verdicts: Vec<Option<(Verdict, Stats)>>) -> Results {
         let plans = &self.labels.plans;
         Results {
             labels: plans
@@ -782,9 +800,9 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
                 .collect(),
             names: self.tables.names().clone(),
             islands: self.islands.borrow().clone(),
+            choices: self.choices(),
             channels: self.sim.channels().to_vec(),
             taps: self.labels.clone(),
-            test: crate::lamport::test_name(),
         }
     }
 
@@ -795,10 +813,37 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
         &mut self,
         seen: impl FnMut(&Tables, &InstanceRecord),
     ) -> (Vec<Option<(Verdict, Stats)>>, Vec<Target>, Rc<Run>) {
+        let (mut verdicts, mut targets) = self.label_targets();
+
+        // Hypothesis 0: the failure-free probe learns every label's fact domain as it reads
+        // each schedule (see `RunFold::read`).
+        let mut probe = self.execute(&FaultSet::new(), &targets, true, seen);
+        for t in &mut targets {
+            t.domain = probe.domains.remove(&t.label).unwrap_or_default();
+        }
+        let (empty, targets): (Vec<Target>, Vec<Target>) =
+            targets.into_iter().partition(|t| t.domain.is_empty());
+        for t in empty {
+            // Nothing to agree on, unless the probe panicked (a counterexample).
+            let verdict = match &probe.labels[&t.label].failure {
+                Some(f) => counterexample(FaultSet::new(), None, !t.sensitive(), 0, f),
+                None => Verdict::Vacuous(VacuousReason::EmptyDomain),
+            };
+            verdicts[t.label] = Some((verdict, probe.stats()));
+        }
+        let probe = Rc::new(probe);
+        self.runs.insert(FaultSet::new(), probe.clone());
+        (verdicts, targets, probe)
+    }
+
+    /// The labels that need no search, decided (by label index), and the labels left to search
+    /// (with empty fact domains).
+    fn label_targets(&self) -> (Vec<Option<(Verdict, Stats)>>, Vec<Target>) {
         let plans = &self.labels.plans;
         let mut verdicts: Vec<Option<(Verdict, Stats)>> = vec![None; plans.len()];
         // The searched labels with more than one member; the others are decided up front.
         let mut targets = vec![];
+        let choices = self.choices();
         for (i, plan) in plans.iter().enumerate() {
             if let Some(reason) = &plan.not_checked {
                 verdicts[i] = Some((Verdict::NotChecked(reason.clone()), Stats::default()));
@@ -811,7 +856,7 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
                         members,
                         cluster: plan.cluster().clone(),
                         domain: BTreeSet::new(),
-                        sites: self.sites_of(plan),
+                        sites: choices.clone(),
                     }),
                     _ => {
                         verdicts[i] = Some((
@@ -822,39 +867,11 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
                 }
             }
         }
-
-        // Hypothesis 0: the failure-free probe learns every label's fact domain as it reads
-        // each schedule (see `RunFold::read`).
-        let mut probe = self.execute(&FaultSet::new(), &targets, true, seen);
-        for t in &mut targets {
-            t.domain = probe.domains.remove(&t.label).unwrap_or_default();
-        }
-        let (empty, targets): (Vec<Target>, Vec<Target>) =
-            targets.into_iter().partition(|t| t.domain.is_empty());
-        for t in empty {
-            let lr = probe.labels.remove(&t.label).unwrap_or_default();
-            if probe.panic.is_some() {
-                // The probe panicked before the label saw anything: still a counterexample.
-                targets_panicked(&mut verdicts, &t, lr.failure.as_deref(), &probe);
-            } else {
-                verdicts[t.label] = Some((
-                    Verdict::Vacuous(VacuousReason::EmptyDomain),
-                    Stats {
-                        hypotheses: 1,
-                        schedules: probe.schedules,
-                        wall: probe.wall,
-                        opaque_fallbacks: 0,
-                    },
-                ));
-            }
-        }
-        let probe = Rc::new(probe);
-        self.runs.insert(FaultSet::new(), probe.clone());
-        (verdicts, targets, probe)
+        (verdicts, targets)
     }
 
     /// Writes each counterexample's Lamport diagram to `target/hydrofrac/<test>/<label>/`
-    /// (docs/design/hydrofrac-lite.md §4.8) and records where it went.
+    /// (docs/design/hydrofrac-lite.md §4.7) and records where it went.
     fn write_diagrams(&self, verdicts: &mut [Option<(Verdict, Stats)>]) {
         let labels = self.labels;
         let test = crate::lamport::test_name();
@@ -862,86 +879,33 @@ impl<'c, B: AsyncFnMut()> Engine<'c, B> {
             let Some((Verdict::Counterexample(cex), _)) = slot else {
                 continue;
             };
-            // Payloads by the `Debug` renderings their sends carried (`provenance::split_meta`).
-            let payloads = crate::report::payload_renderings(&cex.record.log);
+            let facts = counterexample_facts(cex, labels);
+            let names = ReportNames::new(self.tables.names(), self.sim.channels())
+                .with_facts(facts.iter())
+                .with_log(&cex.record.log);
             let lamport_labels = crate::lamport::Labels::default()
                 .with_channels(self.sim.channels())
-                .payloads(move |m| {
-                    payloads
-                        .get(&(m.channel, m.bytes.to_vec()))
-                        .cloned()
-                        .unwrap_or_else(|| crate::lamport::short_hex(&m.bytes))
-                })
-                .outputs(move |port, bytes| match labels.label_of_port(port) {
+                .payloads(|m| names.payload_full(&m.bytes))
+                .outputs(|port, bytes| match labels.label_of_port(port) {
                     Some(_) => decode_output(bytes).to_string(),
                     None => crate::lamport::short_hex(bytes),
                 });
-            let name = label_name(&labels.plans[index]);
             let trace = crate::lamport::trace_with(
                 &cex.record.log,
                 self.tables.names(),
                 &cex.faults,
                 &lamport_labels,
             );
-            let opts = crate::lamport::Options {
-                title: Some({
-                    let facts = counterexample_facts(cex, labels);
-                    let names = ReportNames::new(self.tables.names(), self.sim.channels())
-                        .with_facts(facts.iter())
-                        .with_log(&cex.record.log);
-                    let line = verdict_line(&Verdict::Counterexample(cex.clone()), &names, |j| {
-                        labels
-                            .plans
-                            .get(j)
-                            .map_or_else(|| format!("label {j}"), label_name)
-                    });
-                    format!("{name}: {line}")
-                }),
-                highlight: self.missing_support(index, cex),
-                ..crate::lamport::Options::default()
-            };
+            let name = label_name(&labels.plans[index]);
+            let line = verdict_line(&Verdict::Counterexample(cex.clone()), &names, |j| {
+                label_name(&labels.plans[j])
+            });
+            let title = format!("{name}: {line}");
             let dir = crate::lamport::claim(crate::lamport::default_dir(&test, &name));
-            cex.diagram = crate::lamport::write(&dir, "counterexample", &trace, &opts)
+            cex.diagram = crate::lamport::write(&dir, "counterexample", &trace, &title)
                 .ok()
                 .map(|w| w.path().to_path_buf());
         }
-    }
-
-    /// The deliveries to emphasize in a counterexample's diagram: how the members that do
-    /// hold a missing fact came to hold it (the support the run denied the others).
-    fn missing_support(&self, label: usize, cex: &Counterexample) -> BTreeSet<u64> {
-        let missing: BTreeSet<&Fact> = cex.missing.iter().map(|(_, fact)| fact).collect();
-        if missing.is_empty() {
-            return BTreeSet::new();
-        }
-        let lineage = Lineage::new(&cex.record.log, &self.tables);
-        let mut messages: BTreeSet<MessageId> = BTreeSet::new();
-        for o in lineage.observations() {
-            if self.labels.label_of_port(o.port) == Some(label)
-                && missing.contains(&decode_output(o.bytes))
-            {
-                messages.extend(
-                    lineage
-                        .derivation(o.event)
-                        .iter()
-                        .map(|d| d.message.clone()),
-                );
-            }
-        }
-        cex.record
-            .log
-            .events()
-            .iter()
-            .filter_map(|e| match e {
-                Event::Sent {
-                    id,
-                    msg,
-                    fate: Fate::Delivered,
-                    ..
-                } if messages.contains(msg) => Some(*id),
-                _ => None,
-            })
-            .collect()
     }
 }
 
@@ -977,35 +941,4 @@ fn counterexample(
         record: failure.record.clone(),
         diagram: None,
     }))
-}
-
-/// A label whose probe panicked before it observed anything; `failure` is the panic the probe's
-/// read recorded for it, if the panicking schedule left a record.
-fn targets_panicked(
-    verdicts: &mut [Option<(Verdict, Stats)>],
-    target: &Target,
-    failure: Option<&Failure>,
-    probe: &Run,
-) {
-    let record = failure.map_or_else(|| Rc::new(InstanceRecord::default()), |f| f.record.clone());
-    verdicts[target.label] = Some((
-        counterexample(
-            FaultSet::new(),
-            None,
-            target.sites.is_empty(),
-            0,
-            &Failure {
-                missing: vec![],
-                divergent: vec![],
-                panic: probe.panic.clone(),
-                record,
-            },
-        ),
-        Stats {
-            hypotheses: 1,
-            schedules: probe.schedules,
-            wall: probe.wall,
-            opaque_fallbacks: 0,
-        },
-    ));
 }

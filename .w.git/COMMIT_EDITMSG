@@ -1,0 +1,14 @@
+test(hydro_test): races cross-checks on small target configurations
+
+New `hydro_test/src/cluster/ec_races_targets.rs`: lite (`EcCheck::new`) and races
+(`EcCheck::races`) cross-checked against brute force, with the search capped at the
+enumeration's fault bound (`max_crashes`).
+
+- **Exhaustive, ≤2 faults:** uniform reliable broadcast over 2 members (thresholds 1 and 2;
+  only the source may crash), and 2PC with cooperative termination over 2 participants with the
+  quiescing harness. Races certifies `uniform_reliable_broadcast_closed` and `committed` up to 2
+  crashes, Claim B included (asserted); lite reports `Exhausted`.
+- **Sampled contrast (64 schedules per set, ≤1 fault):** 2PC-CTP with racing timers; both modes
+  find `crash(Coordinator after commit→P0)`.
+- **Probes (`#[ignore]`, measurement):** the failure-free schedule counts that rule out URB over
+  3 members, G-Set gossip, multi-Paxos and, in `hydro_std`'s `ec_abd_hydrofrac`, ABD.

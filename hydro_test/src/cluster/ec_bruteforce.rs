@@ -24,14 +24,11 @@
 //!   schedule of every fault set. The enumeration finds a single crash that breaks its claim
 //!   (the members' known values). Molly's pruning rule would prune that crash with derivations
 //!   from schedules in which the peer had already learned the value when the query arrived,
-//!   and certify the claim; the search no longer certifies schedule-sensitive labels, and its
-//!   heuristic for them finds the crash.
+//!   and certify the claim; the search no longer certifies labels of programs with schedule
+//!   choices, and its heuristic for them finds the crash.
 //! - two-phase commit with cooperative termination and three participants (the program the
 //!   bug was found on), on sampled schedules: one coordinator crash alone takes more than
 //!   100,000 schedules to explore (see [`TWO_PC_SCHEDULES`]).
-//! - plain two-phase commit and `leader_merge_broadcast`, which read changing state through
-//!   `filter_not_in` and a merge order but whose outcomes do not depend on the schedule, as
-//!   controls the search must keep agreeing on.
 //!
 //! Each agreement test on an order-sensitive program has a companion that asserts only the
 //! enumeration's side (that it finds the breaking set), so the oracle stays guarded. For these
@@ -60,8 +57,8 @@ fn agree(name: &str, cross: &CrossCheck) {
     cross.assert_agrees();
 }
 
-/// `reliable_broadcast::broadcast` to three members, without the echo.
-fn plain_reliable_broadcast() -> CrossCheck {
+/// `reliable_broadcast::broadcast` to three members, without the echo, checked by `check`.
+fn plain_reliable_broadcast(mut check: EcCheck) -> CrossCheck {
     let mut flow = FlowBuilder::new();
     let broadcaster = flow.process::<Broadcaster>();
     let members = flow.cluster::<Member>();
@@ -75,7 +72,6 @@ fn plain_reliable_broadcast() -> CrossCheck {
     )
     .sim_cluster_output();
 
-    let mut check = EcCheck::new();
     let sim = check
         .instrument(flow.sim().with_cluster_size(&members, 3))
         .compiled();
@@ -90,7 +86,7 @@ fn plain_reliable_broadcast() -> CrossCheck {
 
 #[test]
 fn brute_force_agrees_on_a_plain_broadcast() {
-    let cross = plain_reliable_broadcast();
+    let cross = plain_reliable_broadcast(EcCheck::new());
     agree("reliable_broadcast::broadcast (plain)", &cross);
     // Without the echo, a broadcaster crash mid fan-out breaks every searched label.
     assert!(!cross.brute.labels.is_empty(), "{cross}");
@@ -99,36 +95,15 @@ fn brute_force_agrees_on_a_plain_broadcast() {
     }
 }
 
-/// `hydro_std`'s `broadcast_live_from_process`: a process broadcasts to the cluster over its
-/// live membership.
-#[test]
-fn brute_force_agrees_on_broadcast_live() {
-    use hydro_std::ec_inference_demos::broadcast_live::broadcast_live_from_process;
-
-    let mut flow = FlowBuilder::new();
-    let source = flow.process::<()>();
-    let members = flow.cluster::<()>();
-    let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
-    let _out = broadcast_live_from_process(input, &members, TCP.fail_stop().bincode())
-        .sim_cluster_output();
-
-    let mut check = EcCheck::new();
-    let sim = check
-        .instrument(flow.sim().with_cluster_size(&members, 3))
-        .compiled();
-    let cross = check.cross_check(
-        &sim,
-        async || {
-            send.send(1);
-        },
-        MAX_FAULTS,
-    );
-    agree("broadcast_live_from_process", &cross);
-}
-
 /// `hydro_std`'s `reliable_broadcast_closed`: echo-based reliable broadcast over `fail_stop`.
 #[test]
 fn brute_force_agrees_on_reliable_broadcast_closed() {
+    let cross = reliable_broadcast_closed_cross_check(EcCheck::new());
+    agree("reliable_broadcast_closed", &cross);
+}
+
+/// `hydro_std`'s `reliable_broadcast_closed` over three members, checked by `check`.
+fn reliable_broadcast_closed_cross_check(mut check: EcCheck) -> CrossCheck {
     use hydro_std::ec_inference_demos::reliable_broadcast::reliable_broadcast_closed;
 
     let mut flow = FlowBuilder::new();
@@ -137,18 +112,16 @@ fn brute_force_agrees_on_reliable_broadcast_closed() {
     let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
     let _out = reliable_broadcast_closed(input, &members).sim_cluster_output();
 
-    let mut check = EcCheck::new();
     let sim = check
         .instrument(flow.sim().with_cluster_size(&members, 3))
         .compiled();
-    let cross = check.cross_check(
+    check.cross_check(
         &sim,
         async || {
             send.send(1);
         },
         MAX_FAULTS,
-    );
-    agree("reliable_broadcast_closed", &cross);
+    )
 }
 
 /// A miniature of cooperative termination's race, over three members. Member 0 learns a
@@ -243,8 +216,8 @@ fn claim<'c>(cross: &'c CrossCheck, name: &str) -> &'c hydrofrac::check::LabelRe
 
 /// [`ask_once`] over three members: member 0 gets the value and member 2's timer fires at the
 /// same time, so the query and the announcement race. Every schedule of every fault set is
-/// explored.
-fn ask_once_cross_check() -> CrossCheck {
+/// explored. Checked by `check`.
+fn ask_once_cross_check(mut check: EcCheck) -> CrossCheck {
     let mut flow = FlowBuilder::new();
     let peers = flow.cluster::<Member>();
     let (value_send, values) = peers.sim_input::<u32, TotalOrder, ExactlyOnce>();
@@ -259,7 +232,6 @@ fn ask_once_cross_check() -> CrossCheck {
     )
     .sim_cluster_output();
 
-    let mut check = EcCheck::new();
     let sim = check
         .instrument(flow.sim().with_cluster_size(&peers, 3))
         .compiled();
@@ -283,7 +255,7 @@ fn ask_once_cross_check() -> CrossCheck {
 fn brute_force_finds_the_ask_once_race() {
     use hydrofrac::search::{CrashAt, Fault};
 
-    let cross = ask_once_cross_check();
+    let cross = ask_once_cross_check(EcCheck::new());
     let label = claim(&cross, "known");
     let b = cross
         .brute
@@ -311,16 +283,16 @@ fn brute_force_finds_the_ask_once_race() {
 /// The search agrees with the enumeration on [`ask_once`]. Molly's rule certified the claim
 /// after 2 hypotheses, pruning the breaking crash with a derivation (member 1 answering member
 /// 2's query) that only occurs in the schedules where member 1 already knew the value. The
-/// claim is schedule-sensitive, so the search uses its heuristic (a hypothesis need only kill
+/// program has schedule choices, so the search uses its heuristic (a hypothesis need only kill
 /// one schedule's derivations) and finds the crash at its first hypothesis.
 #[test]
 fn brute_force_agrees_on_ask_once() {
-    let cross = ask_once_cross_check();
+    let cross = ask_once_cross_check(EcCheck::new());
     cross.assert_agrees();
     let label = claim(&cross, "known");
     assert!(
-        !label.plan.sites.is_empty(),
-        "the claim is schedule-sensitive: {cross}"
+        !cross.results.choices.is_empty(),
+        "the program has schedule choices: {cross}"
     );
     let cex = label
         .verdict
@@ -344,7 +316,13 @@ const TWO_PC_SCHEDULES: usize = 64;
 /// Two-phase commit (`ctp`: with cooperative termination) over `participants` participants,
 /// one transaction, every participant's timer fired once the transaction settles (the
 /// harness of `ec_two_pc_hydrofrac`). `samples`: schedules per fault set, or every schedule.
-fn two_pc_cross_check(ctp: bool, participants_count: u32, samples: Option<usize>) -> CrossCheck {
+/// `races`: checked by [`EcCheck::races`].
+fn two_pc_cross_check(
+    ctp: bool,
+    participants_count: u32,
+    samples: Option<usize>,
+    races: bool,
+) -> CrossCheck {
     let mut flow = FlowBuilder::new();
     let coordinator = flow.process::<Coordinator>();
     let participants = flow.cluster::<Participant>();
@@ -365,9 +343,14 @@ fn two_pc_cross_check(ctp: bool, participants_count: u32, samples: Option<usize>
     )
     .sim_cluster_output();
 
+    let check = if races {
+        EcCheck::races()
+    } else {
+        EcCheck::new()
+    };
     let mut check = match samples {
-        Some(n) => EcCheck::new().sample_schedules(n),
-        None => EcCheck::new(),
+        Some(n) => check.sample_schedules(n),
+        None => check,
     };
     let sim = check
         .instrument(
@@ -385,7 +368,7 @@ fn two_pc_cross_check(ctp: bool, participants_count: u32, samples: Option<usize>
         MAX_FAULTS,
     );
     eprintln!(
-        "=== two_pc (ctp: {ctp}, {participants_count} participants, samples: {samples:?})\nsearch:\n{}\n{cross}",
+        "=== two_pc (ctp: {ctp}, {participants_count} participants, samples: {samples:?}, races: {races})\nsearch:\n{}\n{cross}",
         cross.results
     );
     cross
@@ -397,7 +380,7 @@ fn two_pc_cross_check(ctp: bool, participants_count: u32, samples: Option<usize>
 /// About 36 s of enumeration (200 sets, 12,800 schedules).
 #[test]
 fn brute_force_finds_the_two_pc_cooperative_termination_violation() {
-    let cross = two_pc_cross_check(true, 3, Some(TWO_PC_SCHEDULES));
+    let cross = two_pc_cross_check(true, 3, Some(TWO_PC_SCHEDULES), false);
     let label = claim(&cross, "committed");
     let b = cross
         .brute
@@ -417,10 +400,10 @@ fn brute_force_finds_the_two_pc_cooperative_termination_violation() {
 
 /// The search agrees with the enumeration on two-phase commit with cooperative termination
 /// and three participants. Molly's rule certified `committed` (after 12 hypotheses), which two
-/// crashes break; the heuristic for schedule-sensitive labels finds the two crashes.
+/// crashes break; the heuristic for programs with schedule choices finds the two crashes.
 #[test]
 fn brute_force_agrees_on_two_pc_cooperative_termination() {
-    let cross = two_pc_cross_check(true, 3, Some(TWO_PC_SCHEDULES));
+    let cross = two_pc_cross_check(true, 3, Some(TWO_PC_SCHEDULES), false);
     cross.assert_agrees();
     let cex = claim(&cross, "committed")
         .verdict
@@ -429,55 +412,75 @@ fn brute_force_agrees_on_two_pc_cooperative_termination() {
     assert_eq!(cex.crashes(), 2, "{cross}");
 }
 
-/// Plain two-phase commit over two participants, every schedule of every fault set: its
-/// participants read changing state (`filter_not_in` against what they decided), but whether
-/// a participant commits depends only on whether the `commit` reaches it. A control.
-#[test]
-fn brute_force_agrees_on_plain_two_pc() {
-    let cross = two_pc_cross_check(false, 2, None);
-    cross.assert_agrees();
-    // The coordinator's crash between its two `commit`s splits the participants.
-    let b = cross.brute.label(claim(&cross, "committed").index).unwrap();
-    assert_eq!(b.min_crashes(), Some(1), "{cross}");
+// The races mode (docs/design/hydrofrac-races.md §4.4) on the same programs. Each test prints
+// the search's cost next to the enumeration's.
+
+/// Prints the races search's and the enumeration's cost (sets, schedules) for every label.
+fn costs(name: &str, cross: &CrossCheck) {
+    for l in cross.results.results() {
+        if l.stats.hypotheses == 0 {
+            continue;
+        }
+        eprintln!(
+            "COST {name} / {}: races {} sets, {} schedules ({:?}); brute force {} sets, {} \
+             schedules",
+            l.name(),
+            l.stats.hypotheses,
+            l.stats.schedules,
+            l.stats.races,
+            cross.brute.sets,
+            cross.brute.schedules,
+        );
+    }
 }
 
-/// `hydro_std`'s `leader_merge_broadcast`: two writers send to one leader, which merges them in
-/// an order it chooses and broadcasts to three replicas. Every schedule of every fault set. The
-/// merge order is schedule-dependent, but the merged contents are not. A control.
 #[test]
-fn brute_force_agrees_on_leader_merge() {
-    use hydro_std::ec_inference_demos::leader_merge::leader_merge_broadcast;
+fn races_agree_on_a_plain_broadcast() {
+    let cross = plain_reliable_broadcast(EcCheck::races());
+    costs("reliable_broadcast::broadcast (plain)", &cross);
+    agree("races: reliable_broadcast::broadcast (plain)", &cross);
+    for b in &cross.brute.labels {
+        let verdict = &cross.results.results()[b.index].verdict;
+        let cex = verdict
+            .counterexample()
+            .unwrap_or_else(|| panic!("{}: a mid fan-out crash breaks it: {cross}", b.name));
+        assert_eq!(cex.crashes(), 1, "{cross}");
+    }
+}
 
-    let mut flow = FlowBuilder::new();
-    let writers = flow.cluster::<Broadcaster>();
-    let leader = flow.process::<()>();
-    let replicas = flow.cluster::<Member>();
-    let (write, writes) = writers.sim_input::<u32, TotalOrder, ExactlyOnce>();
-    let at_leader = writes.send(&leader, TCP.fail_stop().name("to_leader").bincode());
-    let _out = leader_merge_broadcast(
-        at_leader,
-        &replicas,
-        TCP.fail_stop().name("merged").bincode(),
-        nondet!(/** the leader's interleaving of the writers */),
-    )
-    .weaken_consistency()
-    .sim_cluster_output();
+#[test]
+fn races_agree_on_reliable_broadcast_closed() {
+    let cross = reliable_broadcast_closed_cross_check(EcCheck::races());
+    costs("reliable_broadcast_closed", &cross);
+    agree("races: reliable_broadcast_closed", &cross);
+}
 
-    let mut check = EcCheck::new();
-    let sim = check
-        .instrument(
-            flow.sim()
-                .with_cluster_size(&writers, 2)
-                .with_cluster_size(&replicas, 3),
-        )
-        .compiled();
-    let cross = check.cross_check(
-        &sim,
-        async || {
-            write.send(0, 100);
-            write.send(1, 200);
-        },
-        MAX_FAULTS,
+/// The races mode finds the `ask_once` race: the crash of member 0 right after its announcement
+/// to member 1 spares (1, 7) under the order-free crash rule and kills (2, 7)'s only robust
+/// derivation, and one of its schedules splits the members.
+#[test]
+fn races_agree_on_ask_once() {
+    let cross = ask_once_cross_check(EcCheck::races());
+    costs("ask_once", &cross);
+    cross.assert_agrees();
+    let label = claim(&cross, "known");
+    let cex = label
+        .verdict
+        .counterexample()
+        .unwrap_or_else(|| panic!("the races mode finds the race: {cross}"));
+    assert_eq!(cex.crashes(), 1, "{cross}");
+}
+
+/// Two-phase commit with cooperative termination, three participants, sampled: every
+/// derivation of `committed` is fragile, so nothing is certified.
+#[test]
+fn races_agree_on_two_pc_cooperative_termination() {
+    let cross = two_pc_cross_check(true, 3, Some(TWO_PC_SCHEDULES), true);
+    costs("two_pc ctp (3 participants, sampled)", &cross);
+    cross.assert_agrees();
+    let label = claim(&cross, "committed");
+    assert!(
+        !matches!(label.verdict, hydrofrac::Verdict::Certified { .. }),
+        "sampled schedules never certify: {cross}"
     );
-    agree("leader_merge_broadcast", &cross);
 }

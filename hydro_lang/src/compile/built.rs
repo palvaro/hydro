@@ -197,7 +197,6 @@ impl<'a> BuiltFlow<'a> {
             operational_ports: self.operational_sim_ports,
             ir_passes: Vec::new(),
             network_hooks: false,
-            eager_locations: HashSet::new(),
             location_names: self.location_names,
             _phantom: PhantomData,
         }

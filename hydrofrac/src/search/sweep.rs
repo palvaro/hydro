@@ -1,34 +1,17 @@
-//! The crash sweep: one label's search, from zero crashes upwards.
+//! The crash sweep (docs/design/hydrofrac-lite.md §4.5): one label's search from zero crashes
+//! upwards, keeping clauses, tried sets and vacuous sets across bounds.
 //!
-//! The search starts with a crash bound of 0, so only omissions. When no admissible hypothesis
-//! is left at bound `k`, the label is certified for every fault set with at most `k` crashes.
-//! The sweep then raises the bound to `k + 1` and keeps everything it learned. A derivation is a
-//! fact about a run, not about the bound, so clauses, tried sets and vacuous sets all carry
-//! over. The caller stops the sweep at the first counterexample. The label then tolerates
-//! [`Sweep::tolerated`] crashes and breaks at [`Sweep::crash_bound`].
-//!
-//! Every hypothesis proposed at bound `k + 1` holds exactly `k + 1` crashes. Every set with at
-//! most `k` crashes was already excluded at bound `k`, and constraints only accumulate. So a
-//! counterexample found at bound `k + 1` really needs `k + 1` crashes, given what the search
-//! has seen.
-//!
-//! "Excluded at bound `k`" has to cover every positional fault set, not only those built from
-//! the candidates the clauses propose at the time. Those are each delivery's weakest killers;
-//! a run seen later can name an earlier crash point, one that hits clauses that no single old
-//! candidate hits together. So before concluding at a bound, the sweep asks once more over the
-//! universe extended by [`completion`] (chiefly `crash(n)` for every sender `n`), which admits
-//! a hitting set whenever any fault set is one. This makes the certificate at `k` a statement
-//! about all fault sets with at most `k` crashes, and with it the "exactly `k + 1`" above: a set
-//! with at most `k` crashes that hits every clause seen later also hits the clauses seen by then,
-//! and the completed universe would have admitted one.
+//! Every hypothesis proposed at bound `k + 1` holds exactly `k + 1` crashes, because bound `k`
+//! was exhausted first. That needs "exhausted" to cover every positional fault set, not only
+//! the weakest candidates the clauses propose, so before concluding at a bound the sweep asks
+//! once more over the universe extended by [`completion`].
 
 use std::collections::BTreeSet;
 
 use super::clause::{Clause, Fault, FaultSet, completion, universe};
 use super::ilp::{Backend, CrashBounds, group_is_unkillable, hitting_set_any};
 
-/// The default hypothesis budget, counting the failure-free probe. Once it is spent the verdict
-/// is [`Next::Budget`], not a certificate (docs/design/hydrofrac-lite.md §2).
+/// The hypothesis budget, counting the failure-free probe (§2).
 pub const HYPOTHESIS_BUDGET: usize = 1024;
 
 /// What the sweep says to do next.
@@ -38,19 +21,16 @@ pub enum Next<M> {
     Try(FaultSet<M>),
     /// No admissible hypothesis is left: the label holds.
     Certified(Tolerance),
-    /// The hypothesis budget is spent. The label holds with at most [`Sweep::tolerated`]
-    /// crashes, if that is `Some`.
+    /// The hypothesis budget is spent: not a certificate.
     Budget,
 }
 
 /// How many crashes a certified label tolerates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tolerance {
-    /// Every admissible fault set: any omissions, and any number of crashes short of the
-    /// vacuity bounds. Either the vacuity bounds stopped the sweep, or no crash beyond the
-    /// last bound could kill anything the search has seen.
+    /// Every admissible fault set (the vacuity bounds, or saturation, stopped the sweep).
     All,
-    /// Every fault set with at most this many crashes. The explicit cap stopped the sweep.
+    /// Every fault set with at most this many crashes (the `max_crashes` cap stopped it).
     UpTo(usize),
 }
 
@@ -58,18 +38,18 @@ pub enum Tolerance {
 #[derive(Clone, Debug)]
 pub struct Sweep<M> {
     bounds: CrashBounds,
-    bound: usize,
+    /// The current crash bound.
+    pub(super) bound: usize,
     tolerated: Option<usize>,
     tried: BTreeSet<FaultSet<M>>,
     vacuous: Vec<FaultSet<M>>,
-    extra: BTreeSet<Fault<M>>,
-    budget: usize,
-    backend: Backend,
+    /// The hypothesis budget, counting the probe.
+    pub(super) budget: usize,
+    pub(super) backend: Backend,
 }
 
 impl<M: Ord + Clone> Sweep<M> {
-    /// A sweep under `bounds`, starting at zero crashes. The failure-free probe counts as
-    /// tried: it is hypothesis 0.
+    /// A sweep under `bounds`, at zero crashes; the probe (the empty set) counts as tried.
     pub fn new(bounds: CrashBounds) -> Self {
         Sweep {
             bounds,
@@ -77,42 +57,17 @@ impl<M: Ord + Clone> Sweep<M> {
             tolerated: None,
             tried: BTreeSet::from([FaultSet::new()]),
             vacuous: vec![],
-            extra: BTreeSet::new(),
             budget: HYPOTHESIS_BUDGET,
             backend: Backend::default(),
         }
     }
 
-    /// Sets the hypothesis budget, counting the probe.
-    pub fn with_budget(mut self, budget: usize) -> Self {
-        self.budget = budget;
-        self
-    }
-
-    /// Sets the ILP backend.
-    pub fn with_backend(mut self, backend: Backend) -> Self {
-        self.backend = backend;
-        self
-    }
-
-    /// Adds candidate faults beyond those the clauses propose. With no clauses, these alone
-    /// make a blind enumeration of every admissible set by size.
-    pub fn add_candidates(&mut self, faults: impl IntoIterator<Item = Fault<M>>) {
-        self.extra.extend(faults);
-    }
-
-    /// Records that `set` gave a vacuous run, so neither it nor any superset is proposed again.
+    /// Records that `set` gave a vacuous run: neither it nor a superset is proposed again.
     pub fn mark_vacuous(&mut self, set: FaultSet<M>) {
         self.vacuous.push(set);
     }
 
-    /// The current crash bound.
-    pub fn crash_bound(&self) -> usize {
-        self.bound
-    }
-
-    /// The largest crash bound certified so far: the label holds under every fault set with at
-    /// most this many crashes. `None` while nothing is certified, not even omissions alone.
+    /// The largest crash bound certified so far (`None`: not even omissions alone).
     pub fn tolerated(&self) -> Option<usize> {
         self.tolerated
     }
@@ -122,28 +77,20 @@ impl<M: Ord + Clone> Sweep<M> {
         self.tried.len()
     }
 
-    /// The bounds.
-    pub fn bounds(&self) -> &CrashBounds {
-        &self.bounds
-    }
-
     /// The next step given every clause learned so far. A proposed set counts as tried.
     pub fn next(&mut self, clauses: &[Clause<M>]) -> Next<M> {
         let groups: Vec<&[Clause<M>]> = clauses.iter().map(std::slice::from_ref).collect();
         self.next_any(&groups)
     }
 
-    /// [`Self::next`] with disjunctive clauses (see [`super::hitting_set_any`]): a hypothesis
-    /// must satisfy some clause of every group. With one clause per group this is [`Self::next`].
-    ///
-    /// Used as a heuristic for schedule-sensitive labels, whose "certificates" are not proofs:
-    /// the caller decides what [`Next::Certified`] means.
+    /// [`Self::next`] with disjunctive clauses ([`super::hitting_set_any`]): the heuristic for
+    /// programs with schedule choices, whose [`Next::Certified`] the caller does not trust (§4.9).
     pub fn next_any(&mut self, groups: &[&[Clause<M>]]) -> Next<M> {
         if groups.iter().any(|g| group_is_unkillable(g)) {
             return Next::Certified(Tolerance::All);
         }
         let clauses: Vec<Clause<M>> = groups.iter().flat_map(|g| g.iter().cloned()).collect();
-        let universe = universe(&clauses, &self.extra);
+        let universe = universe(&clauses, []);
         // The most crashes any admissible set over this universe can hold: one per node, and
         // at most the checked cluster's cap among its members.
         let crash_nodes: BTreeSet<_> = universe.iter().filter_map(Fault::crashed_node).collect();
@@ -157,7 +104,8 @@ impl<M: Ord + Clone> Sweep<M> {
                 crash_nodes.len() - members + members.min(checked.cap)
             }
         };
-        // The completed universe, computed the first time the weakest candidates admit nothing.
+        // The completed universe, computed the first time the weakest candidates admit nothing:
+        // only then is "no hitting set" true of every fault set.
         let mut complete: Option<Option<Vec<Fault<M>>>> = None;
         loop {
             if self.tried.len() >= self.budget {
@@ -175,17 +123,12 @@ impl<M: Ord + Clone> Sweep<M> {
                 self.tried.insert(set.clone());
                 return Next::Try(set);
             }
-            // Before concluding anything at this bound, ask again over the completed universe
-            // (see [`completion`]): only then is "no hitting set" true of every fault set.
             let complete = complete.get_or_insert_with(|| {
                 let extra = completion(&clauses, &self.vacuous);
                 if extra.iter().all(|f| universe.contains(f)) {
                     None
                 } else {
-                    Some(super::clause::universe(
-                        &clauses,
-                        self.extra.iter().chain(extra.iter()),
-                    ))
+                    Some(super::clause::universe(&clauses, &extra))
                 }
             });
             if let Some(complete) = complete
