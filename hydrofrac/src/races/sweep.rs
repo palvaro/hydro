@@ -11,10 +11,12 @@
 //! sends are complete, [`Candidate::Unseen`] for each crashable node ([`candidates`]). Say the
 //! rule admits no untried proposal over them at bound `k`. Take any fault set `H` with at most `k`
 //! crashes, any schedule `σ` of it, and its [image] `H°`.
-//! - **`H°` is admissible for no pair.** For each pair `p`, either `H` crashes `p`'s member at
-//!   start, so it is not correct in `σ`, or some robust clause `D` of `p` is killed by no
-//!   candidate of `H°`. Then no fault of `H` kills `D`, except crashes that never fire ([image]).
-//!   By Lemma R (§5) `p` is held in `σ`, or its member crashed.
+//! - **`H°` is admissible for no pair.** For each pair `p`, either `H°` excuses `p`, or some
+//!   robust clause `D` of `p` is killed by no candidate of `H°`. If `H°` excuses `p`, so does `H`
+//!   ([image]): `H` crashes `p`'s member at start, so it is not correct in `σ`, or `H` holds a
+//!   set under which `p`'s fact is dead, so no correct member holds it in `σ`
+//!   ([`Sweep::mark_dead`]). Otherwise no fault of `H` kills `D`, except crashes that never fire
+//!   ([image]), and by Lemma R (§5) `p` is held in `σ`, or its member crashed.
 //! - **`H°` is admissible for some pair.** It is within the bounds, so it was tried. A tried
 //!   proposal that is still admissible was explored without stopping early (an exploration stops
 //!   early only once its set is pruned, and clauses only grow, so it stays pruned), and every
@@ -39,7 +41,9 @@ use super::clause::{
 };
 use super::ilp::{Scope, propose};
 use super::literals::{Literal, SendOrder, after};
-use crate::search::{Backend, CrashBounds, Fault, FaultSet, HYPOTHESIS_BUDGET, Node, Tolerance};
+use crate::search::{
+    Backend, CrashAt, CrashBounds, Fault, FaultSet, HYPOTHESIS_BUDGET, Node, Tolerance,
+};
 
 /// What the sweep says to do next.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,9 +64,9 @@ pub enum Next<M> {
     Budget,
 }
 
-/// One label's search state across crash bounds.
+/// One label's search state across crash bounds, for pairs whose facts are `F`.
 #[derive(Clone, Debug)]
-pub struct Sweep<M> {
+pub struct Sweep<M, F> {
     bounds: CrashBounds,
     bound: usize,
     tolerated: Option<usize>,
@@ -70,6 +74,7 @@ pub struct Sweep<M> {
     universe_len: usize,
     tried: BTreeSet<Proposal<M>>,
     in_full: BTreeSet<FaultSet<M>>,
+    dead: Vec<(FaultSet<M>, F)>,
     known: BTreeSet<Fault<M>>,
     latest: BTreeMap<Node, BTreeMap<M, u64>>,
     sends_complete: bool,
@@ -81,7 +86,7 @@ pub struct Sweep<M> {
     pub backend: Backend,
 }
 
-impl<M: Ord + Clone + 'static> Sweep<M> {
+impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
     /// A sweep under `bounds`, at zero crashes; the probe (the empty set) counts as tried.
     pub fn new(bounds: CrashBounds) -> Self {
         Sweep {
@@ -91,6 +96,7 @@ impl<M: Ord + Clone + 'static> Sweep<M> {
             universe_len: 0,
             tried: BTreeSet::from([Proposal::new()]),
             in_full: BTreeSet::new(),
+            dead: vec![],
             known: BTreeSet::new(),
             latest: BTreeMap::new(),
             sends_complete: false,
@@ -173,6 +179,57 @@ impl<M: Ord + Clone + 'static> Sweep<M> {
             })
     }
 
+    /// Records that `fact` is dead under `set`: no correct member holds it, in any schedule of
+    /// `set`. From then on `set` and every superset of it excuse every pair of `fact`
+    /// ([`super::excused`]), a row with no literal.
+    ///
+    /// **Preconditions** (the engine checks them; only the second is checked here):
+    /// - it has verified the loss in every schedule of `set`;
+    /// - every crash of `set` is a start crash (`crash(n)`, before any send), or an
+    ///   [exact](Self::is_exact) `crash(n after m)` of a node `n` that is not a member of the
+    ///   label's cluster;
+    /// - the program is fragile-free.
+    ///
+    /// **Why sound.** Suppose a superset `H ⊇ set` gave some correct member `c` a derivation `D`
+    /// of `fact` in some schedule. In a fragile-free program `D` is robust. No fault of `set`
+    /// kills it:
+    /// - an omission of `set` is in `H`, and `D`'s deliveries were not omitted;
+    /// - a start crash of `set` is in `H`, so its node sent nothing, and `D` has no delivery from
+    ///   it;
+    /// - for an exact `crash(n after m)` of `set` (also in `H`), every message `n` can send has a
+    ///   proved literal `after(·, m)`. A delivery `d` of `D` from `n` whose literal is true would
+    ///   be sent after `m`, which the crash in `H` cuts; so its literal is false, and the crash
+    ///   rule spares it.
+    ///
+    /// `c` is correct under `set` too: its start crashes are in `H`, where `c` is correct, and its
+    /// other crashes are of nodes outside the cluster. So by Lemma R, `c` holds `fact` in every
+    /// schedule of `set`: a contradiction. The argument uses only Lemma R and proved literals,
+    /// never the send order a run happened to show, so a crash point whose meaning moves with the
+    /// send order (S2) cannot reach it. In a program with fragile steps a superset can create
+    /// `fact`, so the engine must not call this there.
+    pub fn mark_dead(&mut self, set: FaultSet<M>, fact: F) {
+        assert!(
+            set.iter().all(|f| match f {
+                Fault::Omit(_)
+                | Fault::Crash {
+                    at: CrashAt::BeforeAnySend,
+                    ..
+                } => true,
+                Fault::Crash {
+                    node,
+                    at: CrashAt::After(m),
+                } => self.is_exact(node, m),
+            }),
+            "a dead set holds only omissions, start crashes and exact crash points"
+        );
+        self.dead.push((set, fact));
+    }
+
+    /// The dead sets recorded so far, with their facts.
+    pub fn dead(&self) -> &[(FaultSet<M>, F)] {
+        &self.dead
+    }
+
     /// The candidates of the program, as [candidates] gives them.
     pub fn universe(&self) -> Vec<Candidate<M>> {
         candidates(&self.known, &self.latest, !self.sends_complete)
@@ -184,10 +241,11 @@ impl<M: Ord + Clone + 'static> Sweep<M> {
     }
 
     /// Whether every set over the candidates within the full bounds was tried (for Claim B, §2).
-    pub fn covers_everything<P: PairKey>(&self, pairs: &Pairs<P, M>) -> bool {
+    pub fn covers_everything<P: PairKey<Fact = F>>(&self, pairs: &Pairs<P, M>) -> bool {
         propose(
             &self.universe(),
             pairs,
+            &self.dead,
             &self.tried,
             &self.bounds,
             Scope::Any,
@@ -198,7 +256,7 @@ impl<M: Ord + Clone + 'static> Sweep<M> {
     }
 
     /// The next step given every clause learned so far. A proposed set counts as tried.
-    pub fn next<P: PairKey>(&mut self, pairs: &Pairs<P, M>) -> Next<M> {
+    pub fn next<P: PairKey<Fact = F>>(&mut self, pairs: &Pairs<P, M>) -> Next<M> {
         let universe = self.universe();
         if universe.len() != self.universe_len {
             self.universe_len = universe.len();
@@ -230,6 +288,7 @@ impl<M: Ord + Clone + 'static> Sweep<M> {
                 let Some(proposal) = propose(
                     &universe,
                     pairs,
+                    &self.dead,
                     &self.tried,
                     &bounds,
                     scope,

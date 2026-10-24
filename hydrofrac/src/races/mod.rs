@@ -9,7 +9,7 @@ pub mod literals;
 pub mod sweep;
 
 pub use clause::{
-    Candidate, PairClause, PairKey, Pairs, Proposal, admissible_for, candidates, excused,
+    Candidate, Dead, PairClause, PairKey, Pairs, Proposal, admissible_for, candidates, excused,
     faults_of, image, kills, proposal_of, pruned, within_bounds,
 };
 pub use ilp::{Scope, propose};

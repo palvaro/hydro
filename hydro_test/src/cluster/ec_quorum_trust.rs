@@ -285,7 +285,7 @@ fn label<'r>(results: &'r hydrofrac::Results, name: &str) -> &'r hydrofrac::chec
 
 /// Three members, threshold 2: beyond brute force (its failure-free schedules alone pass
 /// 215,452 without finishing, `races_targets_probe_urb3`). The delivery label is certified for
-/// every admissible set of at most two crashes, one schedule per set (measured: 16 sets, 16
+/// every admissible set of at most two crashes, one schedule per set (measured: 18 sets, 18
 /// schedules). Two crashed members leave one live member, which agrees with itself; with at
 /// most one crashed member, the threshold of 2 means a delivered message was held by a live
 /// member, which echoes it.

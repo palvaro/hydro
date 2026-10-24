@@ -124,11 +124,25 @@ impl<M: Ord> PairClause<M> {
     }
 }
 
-/// Whether `set` crashes `pair`'s member at start (`crash(member)`, before any send). That fires
-/// at instance start in every schedule, so the member is never correct, and the pair needs
-/// nothing: a fact with no literal.
-pub fn excused<P: PairKey, M: Ord + Clone>(set: &FaultSet<M>, pair: &P) -> bool {
+/// Facts verified lost under a fault set, hence under every superset of it
+/// ([`super::Sweep::mark_dead`]): each entry is a fault set and a fact that no correct member
+/// holds under it, in any schedule, nor under any superset.
+pub type Dead<M, F> = [(FaultSet<M>, F)];
+
+/// Whether `pair` needs nothing under `set`, two facts with no literal:
+/// - **crashed at start:** `set` holds `crash(member)` before any send, which fires at instance
+///   start in every schedule, so the member is never correct;
+/// - **dead fact:** `set` is a superset of a set under which the pair's fact is dead
+///   ([`super::Sweep::mark_dead`]), so no correct member holds it under `set` either.
+pub fn excused<P: PairKey, M: Ord + Clone>(
+    set: &FaultSet<M>,
+    pair: &P,
+    dead: &Dead<M, P::Fact>,
+) -> bool {
     set.contains(&Fault::crash_after(pair.member().clone(), None))
+        || dead
+            .iter()
+            .any(|(lost, fact)| fact == pair.fact() && lost.is_subset(set))
 }
 
 /// Whether `set` is admissible for `pair`: it does not [excuse](excused) the pair, and it kills
@@ -138,9 +152,10 @@ pub fn admissible_for<P: PairKey, M: Ord + Clone>(
     set: &FaultSet<M>,
     pair: &P,
     clauses: &[PairClause<M>],
+    dead: &Dead<M, P::Fact>,
     order: &dyn SendOrder<M>,
 ) -> bool {
-    !excused(set, pair)
+    !excused(set, pair, dead)
         && clauses
             .iter()
             .filter(|c| c.is_robust())
@@ -153,11 +168,12 @@ pub fn admissible_for<P: PairKey, M: Ord + Clone>(
 pub fn pruned<P: PairKey, M: Ord + Clone>(
     set: &FaultSet<M>,
     pairs: &Pairs<P, M>,
+    dead: &Dead<M, P::Fact>,
     order: &dyn SendOrder<M>,
 ) -> bool {
     pairs
         .iter()
-        .all(|(pair, clauses)| !admissible_for(set, pair, clauses, order))
+        .all(|(pair, clauses)| !admissible_for(set, pair, clauses, dead, order))
 }
 
 /// Whether `set` is within `bounds`: at most one crash per node, the crash cap, the every-node
@@ -296,7 +312,8 @@ pub fn candidates<M: Ord + Clone>(
 ///
 /// What the sweep's soundness argument ([`super::sweep`]) uses of the image:
 /// - it crashes no more nodes than `set`, so it is within every bound `set` is;
-/// - it excuses a pair only if `set` does (only `crash(n)` excuses, and it is kept);
+/// - it excuses a pair only if `set` does: it is a subset of `set` but for its unseen crashes,
+///   which excuse nothing, and keeps every `crash(n)`;
 /// - a dropped omission names a message no run showed, so it kills no clause's delivery (every
 ///   delivery of a clause was shown by the run it was read from);
 /// - [`Candidate::Unseen`] kills every delivery of its node, so at least what the crash it

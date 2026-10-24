@@ -16,6 +16,9 @@ fn pair(member: &str, fact: F) -> P {
     (member.to_owned(), fact)
 }
 
+/// No dead sets.
+const ALIVE: &Dead<M, F> = &[];
+
 fn reliable(message: &str, sender: &str) -> Dependency<M> {
     Dependency {
         message: message.to_owned(),
@@ -103,6 +106,7 @@ fn propose_faults(
     let proposal = propose(
         &universe,
         pairs,
+        ALIVE,
         &tried,
         bounds,
         scope,
@@ -139,7 +143,7 @@ fn universe_of(pairs: &Pairs<P, M>) -> Vec<Fault<M>> {
 }
 
 /// A sweep under `bounds` that has seen the faults of `pairs`, and every send.
-fn sweep_of(bounds: CrashBounds, pairs: &Pairs<P, M>) -> Sweep<M> {
+fn sweep_of(bounds: CrashBounds, pairs: &Pairs<P, M>) -> Sweep<M, F> {
     let mut sweep = Sweep::new(bounds);
     for f in revealed(pairs) {
         sweep.saw_fault(f);
@@ -261,10 +265,10 @@ fn ask_once_crash_splits_the_members() {
     assert!(to2.hit_by_set(&h, &()));
     let pairs: Pairs<P, M> =
         BTreeMap::from([(pair("m1", "7"), vec![to1]), (pair("m2", "7"), vec![to2])]);
-    assert!(!pruned(&h, &pairs, &()));
+    assert!(!pruned(&h, &pairs, ALIVE, &()));
     let (two, one) = (pair("m2", "7"), pair("m1", "7"));
-    assert!(admissible_for(&h, &two, &pairs[&two], &()));
-    assert!(!admissible_for(&h, &one, &pairs[&one], &()));
+    assert!(admissible_for(&h, &two, &pairs[&two], ALIVE, &()));
+    assert!(!admissible_for(&h, &one, &pairs[&one], ALIVE, &()));
 }
 
 #[test]
@@ -351,10 +355,14 @@ fn proposals_are_the_sets_admissible_for_some_pair() {
     let expected: BTreeSet<FaultSet<M>> = subsets(&universe, universe.len())
         .into_iter()
         .filter(|s| within_bounds(s, &bounds))
-        .filter(|s| pairs.iter().any(|(p, c)| admissible_for(s, p, c, &())))
+        .filter(|s| {
+            pairs
+                .iter()
+                .any(|(p, c)| admissible_for(s, p, c, ALIVE, &()))
+        })
         .collect();
     assert_eq!(proposed, expected);
-    assert!(expected.iter().all(|s| !pruned(s, &pairs, &())));
+    assert!(expected.iter().all(|s| !pruned(s, &pairs, ALIVE, &())));
 }
 
 /// S1 (§4.3): a run under which `f` vanished at every member contributes no clause for `f`.
@@ -404,15 +412,15 @@ fn fragile_clauses_never_prune_but_steer_all_known() {
         ),
     ]);
     // Killing the fragile clause does not make a set admissible, nor does it stop one being so.
-    assert!(pruned(&set([omit("b")]), &pairs, &()));
-    assert!(!pruned(&set([omit("a")]), &pairs, &()));
-    assert!(!pruned(&set([omit("a"), omit("b")]), &pairs, &()));
+    assert!(pruned(&set([omit("b")]), &pairs, ALIVE, &()));
+    assert!(!pruned(&set([omit("a")]), &pairs, ALIVE, &()));
+    assert!(!pruned(&set([omit("a"), omit("b")]), &pairs, ALIVE, &()));
     // A pair with only fragile clauses keeps every set unpruned, even the empty one.
     let only_fragile: Pairs<P, M> = BTreeMap::from([(
         pair("mr", "r"),
         vec![PairClause::fragile([lossy("a", "n")])],
     )]);
-    assert!(!pruned(&FaultSet::new(), &only_fragile, &()));
+    assert!(!pruned(&FaultSet::new(), &only_fragile, ALIVE, &()));
 
     let universe = universe_of(&pairs);
     let tried = BTreeSet::from([FaultSet::new()]);
@@ -478,8 +486,8 @@ fn a_start_crash_of_the_member_excuses_its_pairs() {
     let p = pair("m1", "f");
     let pairs: Pairs<P, M> =
         BTreeMap::from([(p.clone(), vec![PairClause::robust([reliable("a", "m1")])])]);
-    assert!(excused(&set([crash("m1")]), &p));
-    assert!(!excused(&set([crash_after("m1", "b")]), &p));
+    assert!(excused(&set([crash("m1")]), &p, ALIVE));
+    assert!(!excused(&set([crash_after("m1", "b")]), &p, ALIVE));
     let mut sweep = sweep_of(cap(1), &pairs);
     sweep.saw_fault(crash_after("m1", "b"));
     // `crash(m1 after a)` spares `a`, `crash(m1)` excuses: `crash(m1 after b)` is the one.
@@ -564,7 +572,7 @@ fn sweep_certifies_up_to_the_cap_and_stops_at_the_budget() {
     let mut sweep = sweep_of(cap(1), &pairs);
     sweep.budget = 1;
     assert_eq!(sweep.next(&pairs), Next::Budget);
-    assert_eq!(HYPOTHESIS_BUDGET, Sweep::<M>::new(cap(0)).budget);
+    assert_eq!(HYPOTHESIS_BUDGET, Sweep::<M, F>::new(cap(0)).budget);
 
     // Two nodes to crash, a cap of one: certified up to one.
     let pairs: Pairs<P, M> = BTreeMap::from([(
@@ -684,13 +692,13 @@ fn a_fan_out_order_narrows_admissible_crash_points() {
         ),
     ]);
     let last = set([crash_after("s", "d2")]);
-    assert!(pruned(&last, &pairs, &order));
-    assert!(!pruned(&last, &pairs, &()));
+    assert!(pruned(&last, &pairs, ALIVE, &order));
+    assert!(!pruned(&last, &pairs, ALIVE, &()));
     let middle = set([crash_after("s", "d1")]);
     let admitting = |order: &dyn SendOrder<M>| -> Vec<P> {
         pairs
             .iter()
-            .filter(|(p, c)| admissible_for(&middle, *p, c, order))
+            .filter(|(p, c)| admissible_for(&middle, *p, c, ALIVE, order))
             .map(|(p, _)| p.clone())
             .collect()
     };
@@ -702,7 +710,7 @@ fn a_fan_out_order_narrows_admissible_crash_points() {
 /// all. Then `crash(s after d1)` touches only proved literals.
 #[test]
 fn a_crash_point_is_exact_when_every_send_lies_in_its_chain() {
-    let mut sweep: Sweep<M> =
+    let mut sweep: Sweep<M, F> =
         Sweep::new(cap(1)).with_order(Rc::new(Chains::new(&[["d0", "d1", "d2"]])));
     let s = "s".to_owned();
     for (i, d) in ["d0", "d1", "d2"].into_iter().enumerate() {
@@ -753,7 +761,7 @@ fn completion_covers_every_fault_set() {
         sender: Some((n.clone(), 0)),
         lossy: *l,
     };
-    let reveal = |sweep: &mut Sweep<M>, (m, n, l): &(String, String, bool)| {
+    let reveal = |sweep: &mut Sweep<M, F>, (m, n, l): &(String, String, bool)| {
         if *l {
             sweep.saw_fault(Fault::Omit(m.clone()));
         }
@@ -816,7 +824,7 @@ fn completion_covers_every_fault_set() {
                     // The runs answer every pair the set is admissible for.
                     let admitting: Vec<P> = pairs
                         .iter()
-                        .filter(|(p, c)| admissible_for(&set, *p, c, &()))
+                        .filter(|(p, c)| admissible_for(&set, *p, c, ALIVE, &()))
                         .map(|(p, _)| p.clone())
                         .collect();
                     for p in admitting {
@@ -886,8 +894,77 @@ fn completion_covers_every_fault_set() {
                     "seed {seed}: {h:?} (image {img:?}) admissible, untried"
                 );
             } else {
-                assert!(pruned(&h, &pairs, &()), "seed {seed}: {h:?} not pruned");
+                assert!(
+                    pruned(&h, &pairs, ALIVE, &()),
+                    "seed {seed}: {h:?} not pruned"
+                );
             }
         }
     }
+}
+
+/// A dead fact: once marked, the set and every superset excuse every pair of the fact, and the
+/// program proposes none of them for it.
+#[test]
+fn a_dead_fact_excuses_its_pairs_under_supersets() {
+    let (p1, p2) = (pair("m1", "f"), pair("m2", "f"));
+    let pairs: Pairs<P, M> = BTreeMap::from([
+        (p1.clone(), vec![PairClause::robust([reliable("a", "o")])]),
+        (p2.clone(), vec![PairClause::robust([reliable("b", "o")])]),
+    ]);
+    let mut sweep = sweep_of(cap(2), &pairs);
+    sweep.saw_fault(crash("m1"));
+    let origin = set([crash("o")]);
+    sweep.mark_dead(origin.clone(), "f");
+    let dead = sweep.dead().to_vec();
+    let bigger = set([crash("o"), crash("m1")]);
+    for p in [&p1, &p2] {
+        assert!(excused(&origin, p, &dead));
+        assert!(excused(&bigger, p, &dead));
+        assert!(!excused(&set([crash_after("o", "a")]), p, &dead));
+    }
+    // Another fact of a correct member is not excused.
+    let g = pair("m2", "g");
+    assert!(!excused(&bigger, &g, &dead));
+    // `crash(o after a)` spares `a` and kills `b`: admissible for (m2, f) only. No superset of
+    // `crash(o)` is ever proposed.
+    loop {
+        match sweep.next(&pairs) {
+            Next::Try { set, .. } => assert!(!origin.is_subset(&set), "{set:?}"),
+            Next::Certified(_) => break,
+            Next::Budget => panic!("budget"),
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "exact crash points")]
+fn a_dead_set_with_an_inexact_crash_point_is_refused() {
+    let mut sweep: Sweep<M, F> = Sweep::new(cap(1));
+    sweep.saw_send(&"o".to_owned(), "a".to_owned(), 0);
+    sweep.saw_send(&"o".to_owned(), "b".to_owned(), 1);
+    sweep.sends_complete();
+    // `after(b, a)` is free: no order is known.
+    sweep.mark_dead(set([crash_after("o", "a")]), "f");
+}
+
+/// An exact crash point may be part of a dead set: every send of `s` lies in one chain, and
+/// the sends are complete.
+#[test]
+fn an_exact_crash_point_may_be_part_of_a_dead_set() {
+    let mut sweep: Sweep<M, F> =
+        Sweep::new(cap(1)).with_order(Rc::new(Chains::new(&[["d0", "d1"]])));
+    let s = "s".to_owned();
+    sweep.saw_send(&s, "d0".to_owned(), 0);
+    sweep.saw_send(&s, "d1".to_owned(), 1);
+    sweep.sends_complete();
+    sweep.mark_dead(set([crash_after("s", "d0")]), "f");
+    let p = pair("m0", "f");
+    assert!(excused(
+        &set([crash_after("s", "d0"), omit("z")]),
+        &p,
+        sweep.dead()
+    ));
+    // Another crash point of `s` is not a superset.
+    assert!(!excused(&set([crash_after("s", "d1")]), &p, sweep.dead()));
 }

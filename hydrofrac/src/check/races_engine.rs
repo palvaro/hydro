@@ -54,9 +54,11 @@ struct Explored {
 enum Reading {
     /// `POST` failed.
     Fails(Failure),
-    /// `POST` held: a clause for every derivation of every held pair.
+    /// `POST` held: a clause for every derivation of every held pair, and the domain facts some
+    /// correct member holds.
     Holds {
         clauses: Vec<(Pair, PairClause<MessageId>)>,
+        held: BTreeSet<Fact>,
     },
 }
 
@@ -103,7 +105,7 @@ impl Revealed {
     }
 
     /// Tells `sweep` what this run revealed.
-    fn tell(&self, sweep: &mut races::Sweep<MessageId>) {
+    fn tell(&self, sweep: &mut races::Sweep<MessageId, Fact>) {
         for f in &self.faults {
             sweep.saw_fault(f.clone());
         }
@@ -205,7 +207,10 @@ fn read_schedule(
             clauses.push((key.clone(), clause));
         }
     }
-    Reading::Holds { clauses }
+    Reading::Holds {
+        clauses,
+        held: evaluation.required,
+    }
 }
 
 /// Whether every crash of `set` is a start crash (`crash(n)`, before any send), or a crash
@@ -394,7 +399,7 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
                     Reading::Fails(failure) => {
                         failures.entry(t.label).or_insert(failure);
                     }
-                    Reading::Holds { clauses } => {
+                    Reading::Holds { clauses, .. } => {
                         learned.entry(t.label).or_default().extend(clauses);
                     }
                 }
@@ -467,7 +472,7 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
             sampled: probe_sampled,
         };
         search.pairs.learn(probe_clauses);
-        let mut sweep: races::Sweep<MessageId> =
+        let mut sweep: races::Sweep<MessageId, Fact> =
             races::Sweep::new(self.bounds(target)).with_order(Rc::new(fan_out_order(self.sim)));
         for revealed in world.iter() {
             revealed.tell(&mut sweep);
@@ -525,7 +530,7 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
     fn explore_set(
         &mut self,
         search: &mut Search<'_>,
-        sweep: &mut races::Sweep<MessageId>,
+        sweep: &mut races::Sweep<MessageId, Fact>,
         world: &mut Vec<Revealed>,
         set: &FaultSet<MessageId>,
         shape: Shape,
@@ -538,9 +543,16 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
         };
         let labels = self.labels;
         let target = search.target;
+        let names = self.tables.names();
+        let members: BTreeSet<Node> = target
+            .members
+            .iter()
+            .map(|m| names.name(&NodeId::new(&target.cluster, Some(*m))))
+            .collect();
         let pairs = &mut search.pairs;
         let mut failure = None;
         let mut pruned = false;
+        let mut held_somewhere: BTreeSet<Fact> = BTreeSet::new();
         let explored = self.explore_races(set, policy, |tables, record| {
             let revealed = Revealed::of(&record, tables);
             revealed.tell(sweep);
@@ -559,11 +571,12 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
                     failure = Some(f);
                     true
                 }
-                Reading::Holds { clauses } => {
+                Reading::Holds { clauses, held } => {
                     pairs.learn(clauses);
+                    held_somewhere.extend(held);
                     if policy == Policy::All
                         && !in_full
-                        && races::pruned(set, &pairs.pairs, sweep.order())
+                        && races::pruned(set, &pairs.pairs, sweep.dead(), sweep.order())
                     {
                         pruned = true;
                     }
@@ -590,6 +603,17 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
             && (policy == Policy::All && !sampled || shape.choice_free)
         {
             sweep.explored_in_full(set.clone());
+        }
+        // A fragile-free program, a set of omissions, start crashes and exact crash points of
+        // nodes outside the cluster, its one schedule read in full: a domain fact no correct
+        // member holds is held by none under any superset either (`races::Sweep::mark_dead`).
+        let deadly = crashes_all(set, |n, m| !members.contains(n) && sweep.is_exact(n, m));
+        if failure.is_none() && policy == Policy::One && shape.fragile_free && deadly {
+            for fact in &target.domain {
+                if !held_somewhere.contains(fact) {
+                    sweep.mark_dead(set.clone(), fact.clone());
+                }
+            }
         }
         failure
     }

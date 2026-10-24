@@ -13,9 +13,9 @@ use good_lp::{
     Expression, ProblemVariables, ResolutionError, Solution, SolverModel, Variable, variable,
 };
 
-use super::clause::{Candidate, PairClause, PairKey, Pairs, Proposal};
+use super::clause::{Candidate, Dead, PairClause, PairKey, Pairs, Proposal};
 use super::literals::SendOrder;
-use crate::search::{Backend, CrashBounds, Fault, Node, weights};
+use crate::search::{Backend, CrashBounds, Fault, FaultSet, Node, weights};
 
 /// Which rows a proposal must satisfy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,18 +45,19 @@ impl Scope {
 type Row = BTreeSet<usize>;
 
 /// What the program needs of one pair: its cover rows (none: every set that does not excuse it is
-/// admissible for it), and the position of `crash(member)`, which excuses it.
+/// admissible for it), and its exemptions, each a set `E` of positions such that selecting all of
+/// `E` excuses the pair ([`super::excused`]).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct PairRows {
     rows: Vec<Row>,
-    excusal: Option<usize>,
+    exemptions: BTreeSet<Row>,
 }
 
 impl PairRows {
     /// Whether the set at these positions is admissible for the pair.
     fn admits(&self, inside: &BTreeSet<usize>) -> bool {
         self.rows.iter().all(|row| !row.is_disjoint(inside))
-            && self.excusal.is_none_or(|e| !inside.contains(&e))
+            && !self.exemptions.iter().any(|e| e.is_subset(inside))
     }
 }
 
@@ -68,6 +69,7 @@ fn pair_rows<P: PairKey, M: Ord + Clone>(
     index: &BTreeMap<&Candidate<M>, usize>,
     pair: &P,
     clauses: &[PairClause<M>],
+    dead: &Dead<M, P::Fact>,
     scope: Scope,
     order: &dyn SendOrder<M>,
 ) -> Option<PairRows> {
@@ -91,15 +93,24 @@ fn pair_rows<P: PairKey, M: Ord + Clone>(
             kept.push(row);
         }
     }
-    let excusal = index
-        .get(&Candidate::Fault(Fault::crash_after(
-            pair.member().clone(),
-            None,
-        )))
-        .copied();
+    // An exemption with a fault outside the universe can never be fully selected.
+    let inside = |set: &FaultSet<M>| -> Option<Row> {
+        set.iter()
+            .map(|f| index.get(&Candidate::Fault(f.clone())).copied())
+            .collect()
+    };
+    let crashed = FaultSet::from([Fault::crash_after(pair.member().clone(), None)]);
+    let exemptions = std::iter::once(&crashed)
+        .chain(
+            dead.iter()
+                .filter(|(_, fact)| fact == pair.fact())
+                .map(|(set, _)| set),
+        )
+        .filter_map(inside)
+        .collect();
     Some(PairRows {
         rows: kept,
-        excusal,
+        exemptions,
     })
 }
 
@@ -113,15 +124,21 @@ fn pair_rows<P: PairKey, M: Ord + Clone>(
 /// - `Σ_p z_p ≥ 1` (not for [`Scope::Any`]);
 /// - per pair `p` and in-scope clause `D` of `p`: `Σ { x_c : c kills a delivery of D } ≥ z_p`;
 /// - per pair `p` of member `m`: `z_p + x_{crash(m)} ≤ 1`;
+/// - per pair `p` of fact `f` and dead set `D` of `f`: `z_p + Σ_{g ∈ D} x_g ≤ |D|`;
 /// - at most one crash per node; `Σ_{crash} x_c ≤ min(cap, N − 1)`; at most the checked
 ///   cluster's cap among its members;
 /// - a no-good per tried set `T`: `Σ_{c ∈ T} x_c − Σ_{c ∉ T} x_c ≤ |T| − 1`.
 ///
 /// The no-good of a tried set that no pair admits is left out, exactly: the other rows already
 /// exclude it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the program's inputs, each distinct; the sweep is the usual caller"
+)]
 pub fn propose<P: PairKey, M: Ord + Clone>(
     universe: &[Candidate<M>],
     pairs: &Pairs<P, M>,
+    dead: &Dead<M, P::Fact>,
     tried: &BTreeSet<Proposal<M>>,
     bounds: &CrashBounds,
     scope: Scope,
@@ -135,7 +152,9 @@ pub fn propose<P: PairKey, M: Ord + Clone>(
     } else {
         pairs
             .iter()
-            .filter_map(|(pair, clauses)| pair_rows(universe, &index, pair, clauses, scope, order))
+            .filter_map(|(pair, clauses)| {
+                pair_rows(universe, &index, pair, clauses, dead, scope, order)
+            })
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect()
@@ -165,8 +184,8 @@ pub fn propose<P: PairKey, M: Ord + Clone>(
             for row in &pair.rows {
                 constraints.push(sum(row).geq(z));
             }
-            if let Some(e) = pair.excusal {
-                constraints.push((x[e] + z).leq(1.0));
+            for exemption in &pair.exemptions {
+                constraints.push((sum(exemption) + z).leq(exemption.len() as f64));
             }
             any += z;
         }
