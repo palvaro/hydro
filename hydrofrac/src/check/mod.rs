@@ -50,3 +50,6 @@ mod tests;
 
 #[cfg(test)]
 mod brute_tests;
+
+#[cfg(test)]
+mod fanout_tests;

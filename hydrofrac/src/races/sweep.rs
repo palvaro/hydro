@@ -17,8 +17,9 @@
 //! every schedule of `H`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
-use super::clause::{Candidate, PairKey, Pairs, candidates, excused, stuck_pairs};
+use super::clause::{Candidate, PairKey, Pairs, SendOrder, candidates, excused, stuck_pairs};
 use super::ilp::{Scope, propose};
 use crate::search::{
     Backend, CrashAt, CrashBounds, Fault, FaultSet, HYPOTHESIS_BUDGET, Node, Tolerance,
@@ -51,13 +52,14 @@ pub struct Sweep<M, F> {
     dead: Vec<(FaultSet<M>, F)>,
     sends: BTreeMap<Node, BTreeSet<M>>,
     sends_complete: bool,
+    order: Rc<dyn SendOrder<M>>,
     /// The hypothesis budget, counting the probe.
     pub budget: usize,
     /// The solver.
     pub backend: Backend,
 }
 
-impl<M: Ord + Clone, F: Ord + Clone> Sweep<M, F> {
+impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
     /// A sweep under `bounds`, at zero crashes; the probe (the empty set) counts as tried.
     pub fn new(bounds: CrashBounds) -> Self {
         Sweep {
@@ -68,6 +70,7 @@ impl<M: Ord + Clone, F: Ord + Clone> Sweep<M, F> {
             dead: vec![],
             sends: BTreeMap::new(),
             sends_complete: false,
+            order: Rc::new(()),
             budget: HYPOTHESIS_BUDGET,
             backend: Backend::default(),
         }
@@ -136,6 +139,17 @@ impl<M: Ord + Clone, F: Ord + Clone> Sweep<M, F> {
         self.sends.entry(node.clone()).or_default().extend(messages);
     }
 
+    /// Uses `order` (what is known of every run's send order) in the crash rule.
+    pub fn with_order(mut self, order: Rc<dyn SendOrder<M>>) -> Self {
+        self.order = order;
+        self
+    }
+
+    /// The send order the crash rule uses.
+    pub fn order(&self) -> &dyn SendOrder<M> {
+        &*self.order
+    }
+
     /// Records that [`Self::saw_sends`] has been told every message any node sends under any
     /// fault set, in any schedule. True of a fragile-free program once its failure-free run was
     /// read: every record under a fault set is computed from a derivation the fault set leaves
@@ -148,11 +162,17 @@ impl<M: Ord + Clone, F: Ord + Clone> Sweep<M, F> {
 
     /// The next step given every clause learned so far. A proposed set counts as tried.
     pub fn next<P: PairKey<Fact = F>>(&mut self, pairs: &Pairs<P, M>) -> Next<M, P> {
-        let stuck = stuck_pairs(&self.tried, pairs, &self.dead);
+        let stuck = stuck_pairs(&self.tried, pairs, &self.dead, &*self.order);
         if !stuck.is_empty() {
             return Next::Unconstrained(stuck);
         }
-        let universe = candidates(pairs, &self.dead, &self.sends, self.sends_complete);
+        let universe = candidates(
+            pairs,
+            &self.dead,
+            &self.sends,
+            self.sends_complete,
+            &*self.order,
+        );
         // The most crashes a set over this universe can hold: one per node, and at most the
         // checked cluster's cap among its members. Past it, a higher bound admits nothing new.
         let crash_nodes: BTreeSet<_> = universe
@@ -183,6 +203,7 @@ impl<M: Ord + Clone, F: Ord + Clone> Sweep<M, F> {
                     &bounds,
                     scope,
                     self.backend,
+                    &*self.order,
                 ) else {
                     continue;
                 };
@@ -213,7 +234,7 @@ impl<M: Ord + Clone, F: Ord + Clone> Sweep<M, F> {
     }
 }
 
-impl<M: Ord + Clone, F: Ord + Clone> Sweep<M, F> {
+impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
     /// The pairs `proposal` is admissible for at `scope`.
     fn admitting<P: PairKey<Fact = F>>(
         &self,
@@ -235,7 +256,7 @@ impl<M: Ord + Clone, F: Ord + Clone> Sweep<M, F> {
                     && clauses
                         .iter()
                         .filter(|c| scope == Scope::AllKnown || c.robust)
-                        .all(|c| proposal.iter().any(|f| f.hits(c)))
+                        .all(|c| proposal.iter().any(|f| f.hits(c, &*self.order)))
             })
             .map(|(p, _)| p.clone())
             .collect()

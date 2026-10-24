@@ -113,8 +113,15 @@ impl EcCheck {
     /// through, which [`crate::lineage::Lineage::fragile_sites`] collects. Once the result is
     /// compiled, [`Self::fragile_sites`] lists the program's fragile steps. [`Self::run`] works
     /// on such a simulation unchanged: lite's lineage ignores the extra ids.
+    ///
+    /// It also marks the closed-broadcast channels, whose fan-out order the races mode uses
+    /// (`crate::provenance::fanout`). The mark runs before the rewrite, on the program's own IR.
     pub fn instrument_fragile<'a>(&mut self, flow: SimFlow<'a>) -> SimFlow<'a> {
-        let flow = self.instrument_taps(flow);
+        let flow = self
+            .instrument_taps(flow)
+            .with_ir_pass(IrPassStage::PostNetwork, |ir| {
+                crate::provenance::fanout::mark(ir);
+            });
         let sites = Rc::new(RefCell::new(vec![]));
         self.fragile = Some(sites.clone());
         crate::provenance::install_fragile(flow, Some(self.islands.clone()), sites)

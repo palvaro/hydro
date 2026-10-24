@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 
-use super::clause::{Dead, PairKey, Pairs, pruned};
+use super::clause::{Dead, PairKey, Pairs, SendOrder, pruned};
 use crate::search::{CrashBounds, Fault, FaultSet, Node};
 
 /// Whether `set` is within `bounds`: at most one crash per node, the crash cap, the every-node
@@ -84,6 +84,7 @@ impl<M: Ord + Clone> Enumerator<M> {
         tried: &BTreeSet<FaultSet<M>>,
         pairs: &Pairs<P, M>,
         dead: &Dead<M, P::Fact>,
+        order: &dyn SendOrder<M>,
     ) -> Option<FaultSet<M>> {
         while let Some(positions) = self.cursor.take() {
             self.cursor = self.advance(&positions);
@@ -91,7 +92,10 @@ impl<M: Ord + Clone> Enumerator<M> {
                 .iter()
                 .map(|&i| self.universe[i].clone())
                 .collect();
-            if within_bounds(&set, bounds) && !tried.contains(&set) && !pruned(&set, pairs, dead) {
+            if within_bounds(&set, bounds)
+                && !tried.contains(&set)
+                && !pruned(&set, pairs, dead, order)
+            {
                 return Some(set);
             }
         }

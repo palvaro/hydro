@@ -675,3 +675,57 @@ fn races_certify_a_batched_echo() {
     // One schedule per set: start crashes run once, the others stop at their first schedule.
     assert_eq!(label.stats.schedules, label.stats.hypotheses, "{cross}");
 }
+
+/// A planted bug: an echo broadcast whose members re-forward nothing (the echo filters every
+/// value out). A crash of the source mid fan-out must still be found by the races mode, now
+/// that the fan-out order spares the members before the crash point.
+#[cfg(stageleft_runtime)]
+#[test]
+fn races_find_a_broadcast_whose_members_do_not_re_forward() {
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let initial = input
+        .broadcast_closed(&members, TCP.fail_stop().name("initial").bincode())
+        .weaken_consistency();
+    let echoed = initial
+        .clone()
+        .filter(q!(|_| false))
+        .broadcast_closed(&members, TCP.fail_stop().name("echo").bincode())
+        .values()
+        .weaken_consistency();
+    let delivered = initial
+        .weaken_ordering::<NoOrder>()
+        .merge_unordered(echoed)
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed (wrongly): recipients echo what they get */
+        ));
+    let _out = delivered.sim_cluster_output();
+
+    let mut check = EcCheck::races();
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 3))
+        .compiled();
+    let cross = check.cross_check(
+        &sim,
+        async || {
+            send.send(7);
+        },
+        MAX_FAULTS,
+    );
+    races_agree("broadcast without re-forwarding", &cross);
+    let (verdict, notes) = races_label(&cross, "delivered");
+    let cex = verdict
+        .counterexample()
+        .unwrap_or_else(|| panic!("a mid fan-out crash of the source breaks it: {cross}"));
+    assert_eq!(cex.crashes(), 1, "{cross}");
+    assert!(cex.faults.iter().all(|f| matches!(
+        f,
+        Fault::Crash {
+            at: crate::search::CrashAt::After(_),
+            ..
+        }
+    )));
+    assert_eq!(notes.enumerated_sets, 0, "found by the sweep: {cross}");
+}

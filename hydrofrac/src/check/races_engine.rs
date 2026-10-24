@@ -23,7 +23,7 @@ use hydro_lang::sim::compiled::quiesce;
 use super::*;
 use crate::check::RaceNotes;
 use crate::fault::{Fate, NodeNames};
-use crate::races::{self, PairClause, Pairs};
+use crate::races::{self, PairClause, Pairs, SendOrder};
 use crate::search::{CrashAt, HYPOTHESIS_BUDGET, Node, Tolerance, crash_count};
 
 /// The largest fault set the fallback enumeration runs.
@@ -214,6 +214,39 @@ fn start_crashes_only(set: &FaultSet<MessageId>) -> bool {
             }
         )
     })
+}
+
+/// The order of closed-broadcast fan-outs (`crate::provenance::fanout`): on a marked channel,
+/// a node sends each payload to the destination cluster's members in increasing id order, so
+/// `(v → j)` precedes `(v → k)` for `j < k`. Each `(channel, sender, payload)` is one chain.
+#[derive(Debug, Default)]
+pub(super) struct FanOutOrder {
+    channels: BTreeSet<usize>,
+}
+
+impl FanOutOrder {
+    /// The marked channels of `sim`.
+    fn of(sim: &CompiledSim) -> Self {
+        FanOutOrder {
+            channels: sim
+                .channels()
+                .iter()
+                .filter(|c| c.op.id == Some(crate::provenance::fanout::FANOUT_MARK))
+                .map(|c| c.id)
+                .collect(),
+        }
+    }
+}
+
+impl SendOrder<MessageId> for FanOutOrder {
+    fn precedes(&self, earlier: &MessageId, later: &MessageId) -> bool {
+        self.channels.contains(&later.channel)
+            && earlier.channel == later.channel
+            && earlier.from == later.from
+            && earlier.bytes == later.bytes
+            && earlier.to.location == later.to.location
+            && matches!((earlier.to.member, later.to.member), (Some(j), Some(k)) if j < k)
+    }
 }
 
 /// What the program is, for the races policy.
@@ -455,7 +488,8 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
             sampled: probe_sampled,
         };
         search.pairs.learn(probe_clauses);
-        let mut sweep: races::Sweep<MessageId, Fact> = races::Sweep::new(self.bounds(target));
+        let mut sweep: races::Sweep<MessageId, Fact> =
+            races::Sweep::new(self.bounds(target)).with_order(Rc::new(FanOutOrder::of(self.sim)));
         for (node, sent) in &world.sends {
             sweep.saw_sends(node, sent.iter().cloned());
         }
@@ -545,7 +579,9 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
                 Reading::Holds { clauses, held } => {
                     pairs.learn(clauses);
                     held_somewhere.extend(held);
-                    if policy == Policy::All && races::pruned(set, &pairs.pairs, sweep.dead()) {
+                    if policy == Policy::All
+                        && races::pruned(set, &pairs.pairs, sweep.dead(), sweep.order())
+                    {
                         pruned = true;
                     }
                     pruned
@@ -633,7 +669,7 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
             if sweep.tried().contains(&set) {
                 continue;
             }
-            if races::pruned(&set, &search.pairs.pairs, sweep.dead()) {
+            if races::pruned(&set, &search.pairs.pairs, sweep.dead(), sweep.order()) {
                 skipped += 1;
                 continue;
             }

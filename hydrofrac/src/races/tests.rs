@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use super::*;
 use crate::search::{
@@ -57,6 +58,34 @@ fn set(faults: impl IntoIterator<Item = Fault<M>>) -> FaultSet<M> {
     faults.into_iter().collect()
 }
 
+/// A test send order: chains of messages, each totally ordered (one sender per chain).
+#[derive(Debug, Default)]
+struct Chains(BTreeMap<M, (usize, usize)>);
+
+impl Chains {
+    fn new<S: AsRef<str>>(chains: &[impl AsRef<[S]>]) -> Self {
+        let mut at = BTreeMap::new();
+        for (c, chain) in chains.iter().enumerate() {
+            for (i, m) in chain.as_ref().iter().enumerate() {
+                assert!(
+                    at.insert(m.as_ref().to_owned(), (c, i)).is_none(),
+                    "disjoint chains"
+                );
+            }
+        }
+        Chains(at)
+    }
+}
+
+impl SendOrder<M> for Chains {
+    fn precedes(&self, earlier: &M, later: &M) -> bool {
+        match (self.0.get(earlier), self.0.get(later)) {
+            (Some((c, i)), Some((d, j))) => c == d && i < j,
+            _ => false,
+        }
+    }
+}
+
 fn unbounded() -> CrashBounds {
     CrashBounds::default()
 }
@@ -85,6 +114,7 @@ fn propose_faults(
         bounds,
         scope,
         Backend::default(),
+        &(),
     )?;
     Some(
         proposal
@@ -134,28 +164,28 @@ fn subsets(universe: &[Fault<M>], size: usize) -> Vec<FaultSet<M>> {
 
 #[test]
 fn omission_kills_only_its_own_lossy_message() {
-    assert!(kills(&omit("a"), &lossy("a", "n")));
-    assert!(!kills(&omit("a"), &reliable("a", "n")));
-    assert!(!kills(&omit("b"), &lossy("a", "n")));
+    assert!(kills(&omit("a"), &lossy("a", "n"), &()));
+    assert!(!kills(&omit("a"), &reliable("a", "n"), &()));
+    assert!(!kills(&omit("b"), &lossy("a", "n"), &()));
 }
 
 #[test]
 fn crash_before_any_send_kills_every_send_of_its_node() {
-    assert!(kills(&crash("n"), &reliable("a", "n")));
-    assert!(kills(&crash("n"), &lossy("a", "n")));
-    assert!(!kills(&crash("k"), &reliable("a", "n")));
+    assert!(kills(&crash("n"), &reliable("a", "n"), &()));
+    assert!(kills(&crash("n"), &lossy("a", "n"), &()));
+    assert!(!kills(&crash("k"), &reliable("a", "n"), &()));
     let unknown_sender = Dependency {
         sender: None,
         ..lossy("a", "n")
     };
-    assert!(!kills(&crash("n"), &unknown_sender));
+    assert!(!kills(&crash("n"), &unknown_sender, &()));
 }
 
 #[test]
 fn crash_after_a_message_spares_that_message_only() {
-    assert!(!kills(&crash_after("n", "a"), &reliable("a", "n")));
-    assert!(kills(&crash_after("n", "a"), &reliable("b", "n")));
-    assert!(!kills(&crash_after("n", "a"), &reliable("b", "k")));
+    assert!(!kills(&crash_after("n", "a"), &reliable("a", "n"), &()));
+    assert!(kills(&crash_after("n", "a"), &reliable("b", "n"), &()));
+    assert!(!kills(&crash_after("n", "a"), &reliable("b", "k"), &()));
     // The observed position is ignored: `b` was seen sent before `a`, but another schedule may
     // send it after.
     let early_b = Dependency {
@@ -166,17 +196,17 @@ fn crash_after_a_message_spares_that_message_only() {
         sender: Some(("n".to_owned(), 5)),
         ..reliable("a", "n")
     };
-    assert!(kills(&crash_after("n", "a"), &early_b));
-    assert!(!kills(&crash_after("n", "a"), &late_a));
+    assert!(kills(&crash_after("n", "a"), &early_b, &()));
+    assert!(!kills(&crash_after("n", "a"), &late_a, &()));
 
     // A clause whose only send of `n` is `a` survives `crash(n after a)`; one with two sends of
     // `n` does not.
     let one = PairClause::robust([reliable("a", "n"), reliable("x", "k")]);
     let two = PairClause::robust([reliable("a", "n"), reliable("b", "n")]);
-    assert!(!one.hit_by(&crash_after("n", "a")));
-    assert!(two.hit_by(&crash_after("n", "a")));
-    assert!(two.hit_by(&crash_after("n", "b")));
-    assert!(one.hit_by(&crash("n")));
+    assert!(!one.hit_by(&crash_after("n", "a"), &()));
+    assert!(two.hit_by(&crash_after("n", "a"), &()));
+    assert!(two.hit_by(&crash_after("n", "b"), &()));
+    assert!(one.hit_by(&crash("n"), &()));
 }
 
 /// `ask_once` (§6.1): member 0 announces to 1 and 2. Crashing it right after the announcement
@@ -186,14 +216,14 @@ fn ask_once_crash_splits_the_members() {
     let to1 = PairClause::robust([reliable("ann->1", "m0")]);
     let to2 = PairClause::robust([reliable("ann->2", "m0")]);
     let h = set([crash_after("m0", "ann->1")]);
-    assert!(!to1.hit_by_set(&h));
-    assert!(to2.hit_by_set(&h));
+    assert!(!to1.hit_by_set(&h, &()));
+    assert!(to2.hit_by_set(&h, &()));
     let pairs: Pairs<P, M> =
         BTreeMap::from([(pair("m1", "7"), vec![to1]), (pair("m2", "7"), vec![to2])]);
-    assert!(!pruned(&h, &pairs, ALIVE));
+    assert!(!pruned(&h, &pairs, ALIVE, &()));
     let (two, one) = (pair("m2", "7"), pair("m1", "7"));
-    assert!(admissible_for(&h, &two, &pairs[&two], ALIVE));
-    assert!(!admissible_for(&h, &one, &pairs[&one], ALIVE));
+    assert!(admissible_for(&h, &two, &pairs[&two], ALIVE, &()));
+    assert!(!admissible_for(&h, &one, &pairs[&one], ALIVE, &()));
 }
 
 #[test]
@@ -244,10 +274,14 @@ fn proposals_are_the_sets_admissible_for_some_pair() {
     let expected: BTreeSet<FaultSet<M>> = subsets(&universe, universe.len())
         .into_iter()
         .filter(|s| within_bounds(s, &bounds))
-        .filter(|s| pairs.iter().any(|(p, c)| admissible_for(s, p, c, ALIVE)))
+        .filter(|s| {
+            pairs
+                .iter()
+                .any(|(p, c)| admissible_for(s, p, c, ALIVE, &()))
+        })
         .collect();
     assert_eq!(proposed, expected);
-    assert!(expected.iter().all(|s| !pruned(s, &pairs, ALIVE)));
+    assert!(expected.iter().all(|s| !pruned(s, &pairs, ALIVE, &())));
 }
 
 /// S1 (§4.3): a run under which `f` vanished at every member contributes no clause for `f`.
@@ -297,15 +331,15 @@ fn fragile_clauses_never_prune_but_steer_all_known() {
         ),
     ]);
     // Killing the fragile clause does not make a set admissible, nor does it stop one being so.
-    assert!(pruned(&set([omit("b")]), &pairs, ALIVE));
-    assert!(!pruned(&set([omit("a")]), &pairs, ALIVE));
-    assert!(!pruned(&set([omit("a"), omit("b")]), &pairs, ALIVE));
+    assert!(pruned(&set([omit("b")]), &pairs, ALIVE, &()));
+    assert!(!pruned(&set([omit("a")]), &pairs, ALIVE, &()));
+    assert!(!pruned(&set([omit("a"), omit("b")]), &pairs, ALIVE, &()));
     // A pair with only fragile clauses keeps every set unpruned, even the empty one.
     let only_fragile: Pairs<P, M> = BTreeMap::from([(
         pair("mr", "r"),
         vec![PairClause::fragile([lossy("a", "n")])],
     )]);
-    assert!(!pruned(&FaultSet::new(), &only_fragile, ALIVE));
+    assert!(!pruned(&FaultSet::new(), &only_fragile, ALIVE, &()));
     assert_eq!(unconstrained_pairs(&only_fragile), vec![pair("mr", "r")]);
     assert_eq!(unconstrained_pairs(&pairs), Vec::<P>::new());
 
@@ -493,11 +527,27 @@ fn completion_covers_every_fault_set() {
     let (mut certified, mut handed_over, mut deaths) = (0, 0, 0);
     for seed in 1..=60u64 {
         let mut rng = Rng(0x2545_f491_4f6c_dd1d ^ seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        // Two seeds in three know some send order: each node's five messages, shuffled, cut
+        // into two chains (named and unnamed messages mixed).
+        let mut chains: Vec<Vec<String>> = vec![];
+        if seed % 3 != 0 {
+            for n in &nodes {
+                let mut own: Vec<String> = (0..5).map(|i| format!("{n}:{i}")).collect();
+                for i in (1..own.len()).rev() {
+                    own.swap(i, rng.below(i + 1));
+                }
+                let cut = rng.below(own.len() + 1);
+                let rest = own.split_off(cut);
+                chains.push(own);
+                chains.push(rest);
+            }
+        }
+        let order = Rc::new(Chains::new(&chains));
         let random_deps = |rng: &mut Rng, avoid: &FaultSet<M>| -> Vec<Dependency<M>> {
             let len = 1 + rng.below(3);
             (0..len)
                 .map(|_| dep(named[rng.below(named.len())]))
-                .filter(|d| !avoid.iter().any(|f| kills(f, d)))
+                .filter(|d| !avoid.iter().any(|f| kills(f, d, &*order)))
                 .collect()
         };
         let mut pairs: Pairs<P, M> = BTreeMap::new();
@@ -513,7 +563,7 @@ fn completion_covers_every_fault_set() {
             pairs.insert(key, clauses);
         }
         let bounds = cap(rng.below(3));
-        let mut sweep = Sweep::new(bounds.clone());
+        let mut sweep = Sweep::new(bounds.clone()).with_order(order.clone());
         let told = seed % 2 == 0;
         if told {
             for (m, n, _) in messages.iter().filter(|(m, _, _)| !m.ends_with(":4")) {
@@ -525,7 +575,7 @@ fn completion_covers_every_fault_set() {
                 Next::Try(set) => {
                     assert!(within_bounds(&set, &sweep_bounds(&bounds, &sweep)));
                     assert!(
-                        !pruned(&set, &pairs, sweep.dead()),
+                        !pruned(&set, &pairs, sweep.dead(), &*order),
                         "seed {seed}: proposed a pruned set"
                     );
                     let deadly = set.iter().all(|f| {
@@ -540,7 +590,7 @@ fn completion_covers_every_fault_set() {
                     });
                     let admitted: Vec<P> = pairs
                         .iter()
-                        .filter(|(p, c)| admissible_for(&set, *p, c, sweep.dead()))
+                        .filter(|(p, c)| admissible_for(&set, *p, c, sweep.dead(), &*order))
                         .map(|(p, _)| p.clone())
                         .collect();
                     for p in admitted {
@@ -554,7 +604,9 @@ fn completion_covers_every_fault_set() {
                     }
                 }
                 Next::Certified(tolerance) => break Some(tolerance),
-                Next::Unconstrained(stuck) if !told => {
+                // Without a crash point after an unnamed message no named message precedes, the
+                // label goes to the enumerator.
+                Next::Unconstrained(stuck) => {
                     assert!(!stuck.is_empty());
                     break None;
                 }
@@ -573,7 +625,7 @@ fn completion_covers_every_fault_set() {
         for h in &candidates {
             if within_bounds(h, &within) {
                 assert!(
-                    pruned(h, &pairs, sweep.dead()),
+                    pruned(h, &pairs, sweep.dead(), &*order),
                     "seed {seed}: {h:?} is admissible after {tolerance:?}, pairs {pairs:?}, \
                      dead {:?}",
                     sweep.dead()
@@ -582,7 +634,10 @@ fn completion_covers_every_fault_set() {
         }
     }
     assert_eq!(certified + handed_over, 60);
-    assert!(certified >= 30, "{certified} certified");
+    assert!(
+        certified >= 30,
+        "{certified} certified, {handed_over} handed over"
+    );
     assert!(deaths > 0);
 }
 
@@ -598,7 +653,7 @@ fn enumeration_goes_by_size_then_position() {
     assert_eq!(e.universe(), &[omit("a"), omit("b"), omit("c")]);
     let tried = BTreeSet::from([FaultSet::new()]);
     let mut out = vec![];
-    while let Some(s) = e.next(&unbounded(), &tried, &pairs, ALIVE) {
+    while let Some(s) = e.next(&unbounded(), &tried, &pairs, ALIVE, &()) {
         out.push(s);
     }
     assert_eq!(
@@ -612,7 +667,7 @@ fn enumeration_goes_by_size_then_position() {
             set([omit("b"), omit("c")]),
         ]
     );
-    assert_eq!(e.next(&unbounded(), &tried, &pairs, ALIVE), None);
+    assert_eq!(e.next(&unbounded(), &tried, &pairs, ALIVE, &()), None);
 }
 
 #[test]
@@ -628,7 +683,7 @@ fn enumeration_respects_bounds_and_skips_tried_and_pruned_sets() {
     let mut tried = BTreeSet::from([FaultSet::new(), set([omit("a")])]);
     let mut e = Enumerator::new(universe, 3);
     let mut out = vec![];
-    while let Some(s) = e.next(&cap(1), &tried, &pairs, ALIVE) {
+    while let Some(s) = e.next(&cap(1), &tried, &pairs, ALIVE, &()) {
         out.push(s);
     }
     // Admissible: kills `a` (`omit(a)` or `crash(n)`, for p) or `b` (`crash(k)`, for q); at most
@@ -648,7 +703,7 @@ fn enumeration_respects_bounds_and_skips_tried_and_pruned_sets() {
     assert!(e.extend([omit("z")]));
     assert!(!e.extend([omit("z")]));
     let mut again = vec![];
-    while let Some(s) = e.next(&cap(1), &tried, &pairs, ALIVE) {
+    while let Some(s) = e.next(&cap(1), &tried, &pairs, ALIVE, &()) {
         again.push(s);
     }
     assert_eq!(
@@ -679,8 +734,14 @@ fn a_start_crash_of_the_member_excuses_its_pairs() {
     )]);
     assert!(excused(&set([crash("m1")]), &p, ALIVE));
     assert!(!excused(&set([crash_after("m1", "a")]), &p, ALIVE));
-    assert!(!admissible_for(&set([crash("m1")]), &p, &pairs[&p], ALIVE));
-    assert!(pruned(&set([crash("m1"), omit("x")]), &pairs, ALIVE));
+    assert!(!admissible_for(
+        &set([crash("m1")]),
+        &p,
+        &pairs[&p],
+        ALIVE,
+        &()
+    ));
+    assert!(pruned(&set([crash("m1"), omit("x")]), &pairs, ALIVE, &()));
     // Over the plain universe only `crash(m1)` kills both, and it excuses the pair.
     let plain = universe(pairs.values().flatten());
     assert!(plain.contains(&crash("m1")));
@@ -746,7 +807,7 @@ fn a_dead_fact_excuses_its_pairs_under_supersets() {
     }
     // Not for other facts.
     assert!(!excused(&bigger, &g, &dead));
-    assert!(admissible_for(&bigger, &g, &pairs[&g], &dead));
+    assert!(admissible_for(&bigger, &g, &pairs[&g], &dead, &()));
     // The sweep moves on: first `g`'s omission, then crashes of `o` after one of its sends, and
     // never `crash(o)` again (it can only matter for `f`).
     assert_eq!(sweep.next(&pairs), Next::Try(set([omit("c")])));
@@ -755,7 +816,7 @@ fn a_dead_fact_excuses_its_pairs_under_supersets() {
         // Every run held: the pairs it was admissible for were re-derived out of its reach.
         let last = proposed.last().cloned().unwrap_or_else(|| set([omit("c")]));
         for (p, clauses) in pairs.iter_mut() {
-            if admissible_for(&last, p, clauses, &dead) {
+            if admissible_for(&last, p, clauses, &dead, &()) {
                 clauses.push(PairClause::robust([]));
             }
         }
@@ -786,9 +847,112 @@ fn enumeration_skips_supersets_of_dead_sets() {
     let dead = [(set([omit("a")]), "f")];
     let mut e = Enumerator::new([omit("a"), omit("b"), crash("m1")], 2);
     let mut out = vec![];
-    while let Some(s) = e.next(&unbounded(), &BTreeSet::new(), &pairs, &dead) {
+    while let Some(s) = e.next(&unbounded(), &BTreeSet::new(), &pairs, &dead, &()) {
         out.push(s);
     }
     // Not `{omit(a)}` nor its supersets (dead), nor sets crashing the member at start.
     assert_eq!(out, vec![FaultSet::new(), set([omit("b")])]);
+}
+
+/// With a known order (`a` before `b` before `c`, all of `n`), `crash(n after b)` spares `a`
+/// and `b` and kills `c` and any other send of `n`.
+#[test]
+fn a_known_send_order_spares_what_precedes_the_crash_point() {
+    let order = Chains::new(&[["a", "b", "c"]]);
+    let after_b = crash_after("n", "b");
+    assert!(!kills(&after_b, &reliable("a", "n"), &order));
+    assert!(!kills(&after_b, &reliable("b", "n"), &order));
+    assert!(kills(&after_b, &reliable("c", "n"), &order));
+    assert!(kills(&after_b, &reliable("x", "n"), &order));
+    // Without the order, `a` counts as killed.
+    assert!(kills(&after_b, &reliable("a", "n"), &()));
+    let ab = PairClause::robust([reliable("a", "n"), reliable("b", "n")]);
+    let ac = PairClause::robust([reliable("a", "n"), reliable("c", "n")]);
+    assert!(!ab.hit_by(&after_b, &order));
+    assert!(ac.hit_by(&after_b, &order));
+}
+
+/// A closed broadcast `d0, d1, d2` from `s` to three members: with the fan-out order, crashing
+/// `s` after `d2` cuts nothing, and after `d1` cuts only `d2`. A run of `crash(s after d1)` that
+/// spares `(m0, f)` and `(m1, f)` leaves only `(m2, f)` to cover.
+#[test]
+fn a_fan_out_order_narrows_admissible_crash_points() {
+    let order = Chains::new(&[["d0", "d1", "d2"]]);
+    let pairs: Pairs<P, M> = BTreeMap::from([
+        (
+            pair("m0", "f"),
+            vec![PairClause::robust([reliable("d0", "s")])],
+        ),
+        (
+            pair("m1", "f"),
+            vec![PairClause::robust([reliable("d1", "s")])],
+        ),
+        (
+            pair("m2", "f"),
+            vec![PairClause::robust([reliable("d2", "s")])],
+        ),
+    ]);
+    let last = set([crash_after("s", "d2")]);
+    assert!(pruned(&last, &pairs, ALIVE, &order));
+    assert!(!pruned(&last, &pairs, ALIVE, &()));
+    let middle = set([crash_after("s", "d1")]);
+    let tried = BTreeSet::from([FaultSet::new(), middle]);
+    assert_eq!(
+        stuck_pairs(&tried, &pairs, ALIVE, &order),
+        vec![pair("m2", "f")]
+    );
+    assert_eq!(
+        stuck_pairs(&tried, &pairs, ALIVE, &()),
+        vec![pair("m0", "f"), pair("m2", "f")]
+    );
+}
+
+/// Completion with an order: a crash after an unnamed message `x` is as good as the crash after
+/// the last named message before `x` in its chain. With `y` named and `x` unnamed after it, no
+/// set over the candidates beats `crash(n after x)`, so the sweep concludes the same.
+#[test]
+fn a_crash_after_an_unnamed_message_maps_to_the_last_named_before_it() {
+    let order = Chains::new(&[["y", "x", "z"]]);
+    let pairs: Pairs<P, M> = BTreeMap::from([
+        (
+            pair("m0", "f"),
+            vec![PairClause::robust([reliable("y", "n")])],
+        ),
+        (
+            pair("m1", "f"),
+            vec![PairClause::robust([reliable("z", "n")])],
+        ),
+    ]);
+    // `crash(n after x)` spares `y` and kills `z`, like `crash(n after y)`.
+    for c in pairs.values().flatten() {
+        assert_eq!(
+            c.hit_by(&crash_after("n", "x"), &order),
+            c.hit_by(&crash_after("n", "y"), &order)
+        );
+    }
+    let mut sweep = Sweep::new(cap(1)).with_order(Rc::new(order));
+    // `crash(n after y)` is the weakest set that kills (m1, f)'s only clause.
+    assert_eq!(sweep.next(&pairs), Next::Try(set([crash_after("n", "y")])));
+}
+
+/// The stand-in for `crash(member)` must kill every named delivery of the member: a crash after
+/// an unnamed message that a named one precedes spares that one, so it does not qualify.
+#[test]
+fn a_witness_crash_point_has_no_named_predecessor() {
+    let p = pair("m1", "f");
+    let pairs: Pairs<P, M> = BTreeMap::from([(
+        p.clone(),
+        vec![
+            PairClause::robust([reliable("a", "m1")]),
+            PairClause::robust([reliable("b", "m1")]),
+        ],
+    )]);
+    let mut sweep = Sweep::new(cap(1)).with_order(Rc::new(Chains::new(&[["a", "w"]])));
+    sweep.saw_sends(&"m1".to_owned(), ["a", "b", "w"].map(str::to_owned));
+    // `crash(m1 after w)` spares `a`; a crash after a message no run showed kills both.
+    assert_eq!(sweep.next(&pairs), Next::Unconstrained(vec![p.clone()]));
+    let mut sweep = Sweep::new(cap(1)).with_order(Rc::new(Chains::new(&[["a", "w"]])));
+    sweep.saw_sends(&"m1".to_owned(), ["a", "b", "w", "v"].map(str::to_owned));
+    // `v` precedes nothing named: it stands in.
+    assert_eq!(sweep.next(&pairs), Next::Try(set([crash_after("m1", "v")])));
 }

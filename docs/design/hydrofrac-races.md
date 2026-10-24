@@ -163,6 +163,34 @@ iff it uses any send of `n`.
   everything any other crash of `n` kills. That still holds.
 - **Firing is unchanged.** It is lite's `FaultHook`: the crash fires when `m` is sent before the heal.
 
+**Refinement: closed-broadcast fan-out order.** `crash(n after m)` also spares a send `d` of `n`
+that is always sent before `m`. One case is known for sure: `broadcast_closed`.
+- **The shape.** It lowers to `cross_product(data, ClusterIds)` → map → `demux`. The cross
+  product is a `join_multiset_half` with key `()`. Its build side is the cluster's member ids,
+  which the simulator lists as `0..n`, all pushed by one `source_iter`. It is read in full
+  before the probe side. Each probe record `v` comes out as `(v → 0), …, (v → n−1)`, in that
+  order. The maps and the cast before the network are one to one, and the network sends its
+  items in order.
+- **The claim.** On such a channel, if `n` sends `m = (v → k)`, it has already sent `(v → j)`
+  for every `j < k`: in every run, under every fault set. So `crash(n after (v → k))` spares
+  them.
+- **Recognised strictly.** `provenance::fanout::mark` matches the exact IR, closures by their
+  text in `hydro_lang`'s source, and the id source by the destination cluster's key. It marks
+  the `Network` node, and the engine reads the mark from `CompiledSim::channels`. A
+  hand-written fan-out, or anything else in between, is not matched, and keeps the
+  conservative rule.
+- **Checked.** `check/fanout_tests.rs` runs a process broadcast and a batched cluster broadcast
+  under every schedule (1,332 of them for one test). On each, it asserts that every payload
+  goes to members in increasing id order.
+- **Completion.** Each `(channel, sender, payload)` is one totally ordered chain, and chains are
+  disjoint.
+  - A crash after a message `x` that no clause names has an image: the crash after the last
+    named message that precedes `x` in its chain. Both spare the same named sends, so both
+    kill the same named deliveries.
+  - If no named message precedes `x`, the image is `crash(n)`, as before.
+  - The stand-in for `crash(n)` used with exemptions must be a crash after an unnamed message
+    that no named message precedes.
+
 ### 4.3 Clauses per pair
 
 Lite learns one clause per schedule: the union of the derivations of every pair required in that run. A

@@ -33,6 +33,10 @@ pub mod choices;
 /// exist or not depending on the schedule.
 #[cfg(stageleft_runtime)]
 pub mod fragile;
+/// Closed-broadcast channels, whose sends to each member follow a fixed order
+/// (docs/design/hydrofrac-races.md §4.2).
+#[cfg(stageleft_runtime)]
+pub mod fanout;
 pub mod rewrite;
 
 #[cfg(stageleft_runtime)]

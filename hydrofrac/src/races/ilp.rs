@@ -12,7 +12,7 @@ use good_lp::{
     Expression, ProblemVariables, ResolutionError, Solution, SolverModel, Variable, variable,
 };
 
-use super::clause::{Candidate, Dead, PairClause, PairKey, Pairs};
+use super::clause::{Candidate, Dead, PairClause, PairKey, Pairs, SendOrder};
 use crate::search::{Backend, CrashBounds, Fault, FaultSet, Node, weights};
 
 /// Which clauses of a pair a proposal must kill.
@@ -64,13 +64,14 @@ fn pair_rows<P: PairKey, M: Ord + Clone>(
     clauses: &[PairClause<M>],
     dead: &Dead<M, P::Fact>,
     scope: Scope,
+    order: &dyn SendOrder<M>,
 ) -> Option<PairRows> {
     let rows: BTreeSet<Row> = clauses
         .iter()
         .filter(|c| scope.includes(c))
         .map(|c| {
             (0..universe.len())
-                .filter(|&i| universe[i].hits(c))
+                .filter(|&i| universe[i].hits(c, order))
                 .collect()
         })
         .collect();
@@ -121,6 +122,10 @@ fn pair_rows<P: PairKey, M: Ord + Clone>(
 ///
 /// The no-good of a tried set that no pair admits is left out, exactly, as in lite: the other
 /// rows already exclude it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the program's inputs, each distinct; the sweep is the usual caller"
+)]
 pub fn propose<P: PairKey, M: Ord + Clone>(
     universe: &[Candidate<M>],
     pairs: &Pairs<P, M>,
@@ -129,6 +134,7 @@ pub fn propose<P: PairKey, M: Ord + Clone>(
     bounds: &CrashBounds,
     scope: Scope,
     backend: Backend,
+    order: &dyn SendOrder<M>,
 ) -> Option<BTreeSet<Candidate<M>>> {
     let index: BTreeMap<&Fault<M>, usize> = universe
         .iter()
@@ -140,7 +146,9 @@ pub fn propose<P: PairKey, M: Ord + Clone>(
         .collect();
     let pair_rows: Vec<PairRows> = pairs
         .iter()
-        .filter_map(|(pair, clauses)| pair_rows(universe, &index, pair, clauses, dead, scope))
+        .filter_map(|(pair, clauses)| {
+            pair_rows(universe, &index, pair, clauses, dead, scope, order)
+        })
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();

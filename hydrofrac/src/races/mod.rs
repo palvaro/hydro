@@ -10,8 +10,8 @@ pub mod ilp;
 pub mod sweep;
 
 pub use clause::{
-    Candidate, Dead, PairClause, PairKey, Pairs, admissible_for, candidates, excused, kills,
-    pruned, stuck_pairs, unconstrained_pairs, universe,
+    Candidate, Dead, PairClause, PairKey, Pairs, SendOrder, admissible_for, candidates, excused,
+    kills, pruned, stuck_pairs, unconstrained_pairs, universe,
 };
 pub use enumerate::{Enumerator, within_bounds};
 pub use ilp::{Scope, propose};

@@ -7,6 +7,7 @@
 //! used to skip fault sets; fragile ones only steer the counterexample heuristic.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Debug;
 
 use crate::search::{CrashAt, Dependency, Derivation, Fault, FaultSet, Node};
 
@@ -47,13 +48,33 @@ impl<F: Ord + Clone> PairKey for (Node, F) {
 /// fact that no correct member holds under it, in any schedule.
 pub type Dead<M, F> = [(FaultSet<M>, F)];
 
+/// What is known, in every run, of the order in which a node sends its messages.
+///
+/// `precedes(d, m)` claims: in every run (any fault set, any schedule) in which `m`'s sender
+/// sends `m`, it has already sent `d`. It must be false unless `d` and `m` have the same sender.
+/// The completion argument ([`universe`], [`candidates`]) also needs it to be a union of
+/// disjoint chains: each message lies in at most one chain, and the chain is totally ordered.
+pub trait SendOrder<M>: Debug {
+    /// Whether every run that sends `later` has sent `earlier` before it (see the trait docs).
+    fn precedes(&self, earlier: &M, later: &M) -> bool;
+}
+
+/// No order known: every pair of sends may come in either order.
+impl<M> SendOrder<M> for () {
+    fn precedes(&self, _: &M, _: &M) -> bool {
+        false
+    }
+}
+
 /// Whether `fault` kills the delivery `dep`, in every schedule (§4.2):
 /// - `omit(m)` kills it iff `dep` is `m` on a lossy channel;
 /// - `crash(n)` kills it iff `n` sent it;
-/// - `crash(n after m)` kills it iff `n` sent it and it is not `m` itself.
+/// - `crash(n after m)` kills it iff `n` sent it, it is not `m` itself, and `order` does not
+///   say it is always sent before `m`.
 ///
 /// The send's position in the run it was observed in (`dep.sender`'s ordinal) is ignored on
-/// purpose: another schedule may order `n`'s sends differently.
+/// purpose: another schedule may order `n`'s sends differently. Only `order`, which holds in
+/// every run, is trusted.
 ///
 /// **Why this is sound in every schedule.** The rule only claims that a delivery *survives*
 /// when the crash cannot cut it whatever the order:
@@ -62,9 +83,17 @@ pub type Dead<M, F> = [(FaultSet<M>, F)];
 ///   schedule in which it is sent at all (the crash fires right after it), and if `m` is never
 ///   sent the crash never fires.
 ///
-/// So if a clause's only send from `n` is `m`, `crash(n after m)` spares it in every schedule.
-/// Every other delivery from `n` may come after `m` in some schedule, so it counts as killed.
-pub fn kills<M: PartialEq>(fault: &Fault<M>, dep: &Dependency<M>) -> bool {
+/// - a delivery `d` that `order` says always precedes `m` is sent before `m`, so before the
+///   crash, in every schedule in which the crash fires.
+///
+/// So if a clause's only sends from `n` are `m` and messages that always precede it,
+/// `crash(n after m)` spares it in every schedule. Every other delivery from `n` may come after
+/// `m` in some schedule, so it counts as killed.
+pub fn kills<M: PartialEq>(
+    fault: &Fault<M>,
+    dep: &Dependency<M>,
+    order: &dyn SendOrder<M>,
+) -> bool {
     match fault {
         Fault::Omit(m) => dep.lossy && dep.message == *m,
         Fault::Crash { node, at } => {
@@ -74,7 +103,7 @@ pub fn kills<M: PartialEq>(fault: &Fault<M>, dep: &Dependency<M>) -> bool {
             sender == node
                 && match at {
                     CrashAt::BeforeAnySend => true,
-                    CrashAt::After(m) => dep.message != *m,
+                    CrashAt::After(m) => dep.message != *m && !order.precedes(&dep.message, m),
                 }
         }
     }
@@ -98,13 +127,13 @@ impl<M: Ord> PairClause<M> {
     }
 
     /// Whether `fault` kills some delivery of this clause.
-    pub fn hit_by(&self, fault: &Fault<M>) -> bool {
-        self.deps.iter().any(|dep| kills(fault, dep))
+    pub fn hit_by(&self, fault: &Fault<M>, order: &dyn SendOrder<M>) -> bool {
+        self.deps.iter().any(|dep| kills(fault, dep, order))
     }
 
     /// Whether some fault of `set` kills some delivery of this clause.
-    pub fn hit_by_set(&self, set: &FaultSet<M>) -> bool {
-        set.iter().any(|fault| self.hit_by(fault))
+    pub fn hit_by_set(&self, set: &FaultSet<M>, order: &dyn SendOrder<M>) -> bool {
+        set.iter().any(|fault| self.hit_by(fault, order))
     }
 }
 
@@ -132,12 +161,13 @@ pub fn admissible_for<P: PairKey, M: Ord + Clone>(
     pair: &P,
     clauses: &[PairClause<M>],
     dead: &Dead<M, P::Fact>,
+    order: &dyn SendOrder<M>,
 ) -> bool {
     !excused(set, pair, dead)
         && clauses
             .iter()
             .filter(|c| c.robust)
-            .all(|c| c.hit_by_set(set))
+            .all(|c| c.hit_by_set(set, order))
 }
 
 /// Whether `set` can be skipped (§4.3, the corollary of Lemma R): it is admissible for no pair.
@@ -148,10 +178,11 @@ pub fn pruned<P: PairKey, M: Ord + Clone>(
     set: &FaultSet<M>,
     pairs: &Pairs<P, M>,
     dead: &Dead<M, P::Fact>,
+    order: &dyn SendOrder<M>,
 ) -> bool {
     pairs
         .iter()
-        .all(|(pair, clauses)| !admissible_for(set, pair, clauses, dead))
+        .all(|(pair, clauses)| !admissible_for(set, pair, clauses, dead, order))
 }
 
 /// The pairs with no robust clause. Each makes every fault set that does not excuse it
@@ -174,13 +205,14 @@ pub fn stuck_pairs<P: PairKey, M: Ord + Clone>(
     tried: &BTreeSet<FaultSet<M>>,
     pairs: &Pairs<P, M>,
     dead: &Dead<M, P::Fact>,
+    order: &dyn SendOrder<M>,
 ) -> Vec<P> {
     pairs
         .iter()
         .filter(|(pair, clauses)| {
             tried
                 .iter()
-                .any(|t| admissible_for(t, *pair, clauses, dead))
+                .any(|t| admissible_for(t, *pair, clauses, dead, order))
         })
         .map(|(p, _)| p.clone())
         .collect()
@@ -193,9 +225,17 @@ pub fn stuck_pairs<P: PairKey, M: Ord + Clone>(
 ///
 /// **Completion.** Every fault set `H` maps into this universe without losing a hit on any
 /// clause: drop its faults that kill no delivery of any clause, and replace each crash of `n`
-/// outside the universe by `crash(n)`. Such a crash is `crash(n after m)` for an `m` no clause
-/// names, so it kills every delivery from `n`: exactly what `crash(n)` kills. The image crashes
-/// a subset of `H`'s nodes, so it is within every crash bound `H` is. Hence "no admissible set
+/// outside the universe, `crash(n after x)` for an `x` no clause names, by:
+/// - `crash(n after y)`, where `y` is the last message some clause names that precedes `x` in
+///   its chain of the [`SendOrder`], if there is one. Both spare exactly the named messages of
+///   the chain up to `y`: a named `d` precedes `x` iff it is `y` or precedes `y` (no named
+///   message lies between `y` and `x`), and a message outside the chain precedes neither. So
+///   both kill the same named deliveries;
+/// - `crash(n)` otherwise: no named message precedes `x`, so `crash(n after x)` kills every
+///   named delivery from `n`, exactly what `crash(n)` kills.
+///
+/// The image crashes the same nodes as `H` (after dropping), so it is within every crash bound
+/// `H` is. Hence "no admissible set
 /// over the universe" is a statement about every fault set, as long as no pair is [excused]:
 /// `crash(n)` can excuse a pair where the crash it replaces did not, so [`candidates`] adds a
 /// replacement that excuses nothing.
@@ -242,17 +282,18 @@ pub fn universe<'a, M: Ord + Clone + 'a>(
 pub enum Candidate<M> {
     /// A fault.
     Fault(Fault<M>),
-    /// `crash(n after m)` for a message `m` of `n` that no clause names, when no run has shown
-    /// such a message: it kills every delivery from `n`, as `crash(n)` does, but excuses nothing.
-    /// It cannot be run; a proposal that needs it goes to the enumerator.
+    /// `crash(n after m)` for a message `m` of `n` that no clause names and no named message
+    /// precedes, when no run has shown such a message: it kills every delivery from `n`, as
+    /// `crash(n)` does, but excuses nothing. It cannot be run; a proposal that needs it goes to
+    /// the enumerator.
     Unnamed(Node),
 }
 
 impl<M: Ord> Candidate<M> {
     /// Whether this candidate kills some delivery of `clause`.
-    pub fn hits(&self, clause: &PairClause<M>) -> bool {
+    pub fn hits(&self, clause: &PairClause<M>, order: &dyn SendOrder<M>) -> bool {
         match self {
-            Candidate::Fault(fault) => clause.hit_by(fault),
+            Candidate::Fault(fault) => clause.hit_by(fault, order),
             Candidate::Unnamed(node) => clause
                 .deps
                 .iter()
@@ -273,15 +314,16 @@ impl<M: Ord> Candidate<M> {
 /// whose `crash(n)` can excuse a pair (`n` is a pair's member, or `crash(n)` is part of a dead
 /// set), a crash of `n` right after a message no clause names, placed right after `crash(n)`.
 /// That is `crash(n after w)` for the first such `w` in `sends[n]` (every message the runs
-/// showed `n` sending), or [`Candidate::Unnamed`] if there is none. With `sends_complete`
+/// showed `n` sending) that no named message precedes ([`SendOrder`]), or
+/// [`Candidate::Unnamed`] if there is none. With `sends_complete`
 /// (`sends` holds every message any node sends under any fault set, in any schedule) there is
 /// no replacement when there is no such `w`: a crash after a message `n` never sends never
 /// fires, so a set holding it runs exactly as the set without it.
 ///
 /// **Completion with exemptions.** Map a fault set `H` admissible for a pair `p` as in
-/// [universe], but replace a crash of an exempting node `n` after a message no clause names by
-/// this candidate rather than by `crash(n)`. It kills every delivery from `n`, as the crash it
-/// replaces does. The image holds `crash(n)` only where `H` does, and dead sets hold only
+/// [universe], but where [universe] would replace a crash of an exempting node `n` after an
+/// unnamed message by `crash(n)` (no named message precedes it), use this candidate instead. It
+/// kills every named delivery from `n`, as the crash it replaces does. The image holds `crash(n)` only where `H` does, and dead sets hold only
 /// omissions and start crashes, so the image excuses `p` only if `H` does: it is still
 /// admissible for `p`.
 pub fn candidates<P: PairKey, M: Ord + Clone>(
@@ -289,6 +331,7 @@ pub fn candidates<P: PairKey, M: Ord + Clone>(
     dead: &Dead<M, P::Fact>,
     sends: &BTreeMap<Node, BTreeSet<M>>,
     sends_complete: bool,
+    order: &dyn SendOrder<M>,
 ) -> Vec<Candidate<M>> {
     let named: BTreeSet<&M> = pairs
         .values()
@@ -309,10 +352,10 @@ pub fn candidates<P: PairKey, M: Ord + Clone>(
             Fault::Crash {
                 node,
                 at: CrashAt::BeforeAnySend,
-            } if exempting.contains(node) => match sends
-                .get(node)
-                .and_then(|sent| sent.iter().find(|m| !named.contains(m)))
-            {
+            } if exempting.contains(node) => match sends.get(node).and_then(|sent| {
+                sent.iter()
+                    .find(|w| !named.contains(w) && !named.iter().any(|d| order.precedes(d, w)))
+            }) {
                 Some(w) => Some(Candidate::Fault(Fault::crash_after(
                     node.clone(),
                     Some(w.clone()),
