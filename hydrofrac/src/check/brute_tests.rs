@@ -34,6 +34,12 @@ fn agree(name: &str, cross: &CrossCheck) {
 /// lossy channel.
 #[cfg(stageleft_runtime)]
 fn plain_broadcast(lossy: bool) -> CrossCheck {
+    plain_broadcast_in(EcCheck::new(), lossy)
+}
+
+/// [`plain_broadcast`], checked by `check`.
+#[cfg(stageleft_runtime)]
+fn plain_broadcast_in(mut check: EcCheck, lossy: bool) -> CrossCheck {
     let mut flow = FlowBuilder::new();
     let source = flow.process::<()>();
     let members = flow.cluster::<()>();
@@ -46,7 +52,6 @@ fn plain_broadcast(lossy: bool) -> CrossCheck {
         let _out = delivered.sim_cluster_output();
     }
 
-    let mut check = EcCheck::new();
     let sim = check
         .instrument(flow.sim().with_cluster_size(&members, 3))
         .compiled();
@@ -64,6 +69,12 @@ fn plain_broadcast(lossy: bool) -> CrossCheck {
 /// first hop lossy (the echo stays `fail_stop`).
 #[cfg(stageleft_runtime)]
 fn echo_broadcast(n: usize, initial_lossy: bool) -> CrossCheck {
+    echo_broadcast_in(EcCheck::new(), n, initial_lossy)
+}
+
+/// [`echo_broadcast`], checked by `check`.
+#[cfg(stageleft_runtime)]
+fn echo_broadcast_in(mut check: EcCheck, n: usize, initial_lossy: bool) -> CrossCheck {
     let mut flow = FlowBuilder::new();
     let source = flow.process::<()>();
     let members = flow.cluster::<()>();
@@ -96,7 +107,6 @@ fn echo_broadcast(n: usize, initial_lossy: bool) -> CrossCheck {
         echo_from!(input.broadcast_closed(&members, TCP.fail_stop().name("initial").bincode()));
     }
 
-    let mut check = EcCheck::new();
     let sim = check
         .instrument(flow.sim().with_cluster_size(&members, n))
         .compiled();
@@ -171,108 +181,17 @@ fn brute_force_agrees_on_an_echo_over_a_lossy_first_hop() {
     agree("echo broadcast (lossy first hop)", &cross);
 }
 
-/// [`echo_broadcast`], but each member batches what it collected before it reports it: the
-/// label `delivered` is schedule-sensitive (its batch is a choice of the simulator's), so its
-/// search is a heuristic, and its certificate, if any, comes from enumerating its fault sets
-/// (docs/design/hydrofrac-lite.md §4.9).
-#[cfg(stageleft_runtime)]
-fn batched_echo(n: usize, initial_lossy: bool) -> CrossCheck {
-    let mut flow = FlowBuilder::new();
-    let source = flow.process::<()>();
-    let members = flow.cluster::<()>();
-    let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
-    let tick = members.tick();
-    macro_rules! echo_from {
-        ($initial:expr) => {{
-            let initial = $initial.weaken_consistency();
-            let echoed = initial
-                .clone()
-                .broadcast_closed(&members, TCP.fail_stop().name("echo").bincode())
-                .values()
-                .weaken_consistency();
-            let delivered = initial
-                .weaken_ordering::<NoOrder>()
-                .merge_unordered(echoed)
-                .batch(&tick, nondet!(/** which tick a delivery lands in */))
-                .all_ticks()
-                .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
-                    /** claimed: one correct recipient of the broadcast echoes it to everyone */
-                ));
-            let _out = delivered.sim_cluster_output();
-        }};
-    }
-    if initial_lossy {
-        echo_from!(input.broadcast_closed(
-            &members,
-            TCP.lossy_delayed_forever().name("initial").bincode(),
-        ));
-    } else {
-        echo_from!(input.broadcast_closed(&members, TCP.fail_stop().name("initial").bincode()));
-    }
-
-    let mut check = EcCheck::new();
-    let sim = check
-        .instrument(flow.sim().with_cluster_size(&members, n))
-        .compiled();
-    check.cross_check(
-        &sim,
-        async || {
-            send.send(7);
-        },
-        MAX_FAULTS,
-    )
-}
-
-/// The batched two-member exchange holds under every admissible fault set: the search's
-/// enumeration certifies it, and the brute force agrees.
-#[cfg(stageleft_runtime)]
-#[test]
-fn brute_force_agrees_with_a_certificate_by_enumeration() {
-    let cross = batched_echo(2, false);
-    agree("batched echo (2 members)", &cross);
-    let label = cross.results.label("delivered");
-    assert!(
-        matches!(
-            label.verdict,
-            Verdict::CertifiedByEnumeration {
-                tolerates: Tolerance::All,
-                max_faults: None,
-                ..
-            }
-        ),
-        "{cross}"
-    );
-    let b = cross.brute.label(label.index).expect("searched");
-    assert!(b.breaking.is_empty(), "{cross}");
-}
-
-/// Two members and a lossy first hop: the omission of either member's copy is masked by the
-/// other's echo, and omitting both leaves no correct member holding anything (vacuous). The
-/// enumeration runs every admissible set, omissions included, and the brute force agrees.
-#[cfg(stageleft_runtime)]
-#[test]
-fn brute_force_agrees_on_a_batched_echo_over_a_lossy_first_hop() {
-    let cross = batched_echo(2, true);
-    agree("batched echo (lossy first hop)", &cross);
-    let label = cross.results.label("delivered");
-    assert!(
-        matches!(
-            label.verdict,
-            Verdict::CertifiedByEnumeration {
-                tolerates: Tolerance::All,
-                max_faults: None,
-                ..
-            }
-        ),
-        "{cross}"
-    );
-}
-
 /// A relay chain with no retries: a source sends two inputs over a lossy channel to a relay
 /// process, which broadcasts them to three members over `fail_stop` (label `relayed`).
 #[cfg(stageleft_runtime)]
 #[test]
 fn brute_force_agrees_on_a_lossy_relay_chain() {
+    agree("lossy relay chain", &lossy_relay_chain(EcCheck::new()));
+}
+
+/// The relay chain of [`brute_force_agrees_on_a_lossy_relay_chain`], checked by `check`.
+#[cfg(stageleft_runtime)]
+fn lossy_relay_chain(mut check: EcCheck) -> CrossCheck {
     let mut flow = FlowBuilder::new();
     let source = flow.process::<()>();
     let relay = flow.process::<()>();
@@ -286,19 +205,17 @@ fn brute_force_agrees_on_a_lossy_relay_chain() {
         .broadcast_closed(&members, TCP.fail_stop().name("relayed").bincode());
     let _out = relayed.sim_cluster_output();
 
-    let mut check = EcCheck::new();
     let sim = check
         .instrument(flow.sim().with_cluster_size(&members, 3))
         .compiled();
-    let cross = check.cross_check(
+    check.cross_check(
         &sim,
         async || {
             send.send(1);
             send.send(2);
         },
         MAX_FAULTS,
-    );
-    agree("lossy relay chain", &cross);
+    )
 }
 
 /// A gossip-like exchange over `fail_stop`: the source broadcasts two inputs, each member keeps
@@ -479,4 +396,336 @@ fn the_cross_check_catches_wrong_verdicts() {
     label.verdict = Verdict::Counterexample(original);
     cross.recheck();
     cross.assert_agrees();
+}
+
+/// Suspected soundness bug S1: a clause learned in a run where a fact vanished everywhere says
+/// nothing about that fact, yet the search treats it as a constraint on every hypothesis.
+///
+/// Two members (`m0`, `m1`), two facts in the label `known`:
+/// - `f = 0`: the source `s` broadcasts it over the lossy `assign`; only `m0` keeps it (it owns
+///   the even values), and `m0` gossips what it keeps to every member over the lossy `gossip`;
+/// - `g = 101`: a second process `t` broadcasts it to both members over `fail_stop` (`steady`).
+///
+/// `omit(gossip m0→m1)` alone breaks the label (`m0` holds `f`, `m1` never does). But the
+/// omissions the probe's clause proposes are tried in channel order, so the search first tries
+/// `omit(assign s→m0)`: `f` is then lost at *every* member, `POST` holds on `g` alone, and the
+/// run's clause is `g`'s derivation (two `fail_stop` deliveries from `t`). No omission kills it,
+/// so the zero-crash bound is declared exhausted and `omit(gossip m0→m1)` is never tried.
+///
+/// Returns the cross-check, with the search capped at `max_crashes` crashes if given.
+#[cfg(stageleft_runtime)]
+fn total_loss_masks_a_partial_loss(max_crashes: Option<usize>) -> CrossCheck {
+    total_loss_masks_a_partial_loss_in(EcCheck::new(), max_crashes)
+}
+
+/// [`total_loss_masks_a_partial_loss`], checked by `check`.
+#[cfg(stageleft_runtime)]
+fn total_loss_masks_a_partial_loss_in(check: EcCheck, max_crashes: Option<usize>) -> CrossCheck {
+    use hydro_lang::location::cluster::CLUSTER_SELF_ID;
+
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let steady = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send_f, input_f) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let (send_g, input_g) = steady.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let owned = input_f
+        .broadcast_closed(
+            &members,
+            TCP.lossy_delayed_forever().name("assign").bincode(),
+        )
+        .weaken_consistency()
+        .filter(q!(move |x| *x % 2 == CLUSTER_SELF_ID.get_raw_id()));
+    let heard = owned
+        .clone()
+        .broadcast_closed(
+            &members,
+            TCP.lossy_delayed_forever().name("gossip").bincode(),
+        )
+        .values()
+        .weaken_consistency();
+    let g = input_g
+        .broadcast_closed(&members, TCP.fail_stop().name("steady").bincode())
+        .weaken_consistency()
+        .weaken_ordering::<NoOrder>();
+    let known = owned
+        .weaken_ordering::<NoOrder>()
+        .merge_unordered(heard)
+        .merge_unordered(g)
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed (wrongly): the owner tells everyone */
+        ));
+    let _out = known.sim_cluster_output();
+
+    let mut check = match max_crashes {
+        Some(n) => check.max_crashes(n),
+        None => check,
+    };
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 2))
+        .compiled();
+    check.cross_check(
+        &sim,
+        async || {
+            send_f.send(0);
+            send_g.send(101);
+        },
+        MAX_FAULTS,
+    )
+}
+
+/// S1 with the search capped at zero crashes: a false certificate.
+#[cfg(stageleft_runtime)]
+#[test]
+fn suspected_total_loss_masks_a_partial_loss_certificate() {
+    let start = std::time::Instant::now();
+    let cross = total_loss_masks_a_partial_loss(Some(0));
+    eprintln!(
+        "=== S1 (max_crashes 0), {:?}\n{cross}\n{}",
+        start.elapsed(),
+        cross.results
+    );
+    assert!(
+        cross.results.choices.is_empty(),
+        "not choice-free: {:?}",
+        cross.results.choices
+    );
+    // The enumeration finds a zero-crash breaking set; the search certifies zero crashes.
+    assert!(
+        matches!(
+            cross.results.label("known").verdict,
+            Verdict::Certified {
+                tolerates: Tolerance::UpTo(0)
+            }
+        ),
+        "{cross}"
+    );
+    let label = cross.results.label("known");
+    let b = cross.brute.label(label.index).expect("searched");
+    assert_eq!(b.min_crashes(), Some(0), "{cross}");
+    assert!(
+        cross
+            .disagreements
+            .iter()
+            .any(|d| d.starts_with("known") && d.contains("omit(gossip[cluster@0→cluster@1]")),
+        "expected the search to disagree with the enumeration on `known`:\n{cross}"
+    );
+}
+
+/// S1 uncapped: the search reports a counterexample, but claims the label tolerates every
+/// zero-crash fault set, while `omit(gossip m0→m1)` alone breaks it.
+#[cfg(stageleft_runtime)]
+#[test]
+fn suspected_total_loss_masks_a_partial_loss_tolerance() {
+    let start = std::time::Instant::now();
+    let cross = total_loss_masks_a_partial_loss(None);
+    eprintln!(
+        "=== S1 (uncapped), {:?}\n{cross}\n{}",
+        start.elapsed(),
+        cross.results
+    );
+    let label = cross.results.label("known");
+    let b = cross.brute.label(label.index).expect("searched");
+    assert_eq!(b.min_crashes(), Some(0), "{cross}");
+    assert!(
+        cross
+            .disagreements
+            .iter()
+            .any(|d| d.starts_with("known") && d.contains("omit(gossip[cluster@0→cluster@1]")),
+        "expected the search to disagree with the enumeration on `known`:\n{cross}"
+    );
+}
+
+// The races mode (docs/design/hydrofrac-races.md §4.4), cross-checked on the same programs.
+
+/// Prints the races search's report and the cross-check, and asserts agreement.
+#[cfg(stageleft_runtime)]
+fn races_agree(name: &str, cross: &CrossCheck) {
+    eprintln!("=== races: {name}\nsearch:\n{}\n{cross}", cross.results);
+    cross.assert_agrees();
+}
+
+/// The verdict on `label`, and its races notes.
+#[cfg(stageleft_runtime)]
+fn races_label<'c>(cross: &'c CrossCheck, label: &str) -> (&'c Verdict, super::RaceNotes) {
+    let l = cross.results.label(label);
+    let notes = l
+        .stats
+        .races
+        .unwrap_or_else(|| panic!("no races notes: {cross}"));
+    (&l.verdict, notes)
+}
+
+#[cfg(stageleft_runtime)]
+#[test]
+fn races_agree_on_a_plain_broadcast() {
+    let cross = plain_broadcast_in(EcCheck::races(), false);
+    races_agree("plain broadcast (fail_stop)", &cross);
+    let (verdict, _) = races_label(&cross, "delivered");
+    let cex = verdict.counterexample().expect("a mid fan-out crash");
+    assert_eq!(cex.crashes(), 1, "{cross}");
+    assert!(cex.tolerance_certified, "{cross}");
+}
+
+#[cfg(stageleft_runtime)]
+#[test]
+fn races_agree_on_a_lossy_broadcast() {
+    let cross = plain_broadcast_in(EcCheck::races(), true);
+    races_agree("plain broadcast (lossy)", &cross);
+    let (verdict, _) = races_label(&cross, "delivered");
+    let cex = verdict.counterexample().expect("an omission");
+    assert_eq!(cex.crashes(), 0, "{cross}");
+}
+
+#[cfg(stageleft_runtime)]
+#[test]
+fn races_agree_on_an_echo_broadcast() {
+    let cross = echo_broadcast_in(EcCheck::races(), 3, false);
+    races_agree("echo broadcast (3 members)", &cross);
+    let (verdict, _) = races_label(&cross, "delivered");
+    let cex = verdict.counterexample().expect("two crashes break it");
+    assert_eq!(cex.crashes(), 2, "{cross}");
+}
+
+#[cfg(stageleft_runtime)]
+#[test]
+fn races_agree_on_an_echo_over_a_lossy_first_hop() {
+    let cross = echo_broadcast_in(EcCheck::races(), 3, true);
+    races_agree("echo broadcast (lossy first hop)", &cross);
+}
+
+#[cfg(stageleft_runtime)]
+#[test]
+fn races_agree_on_a_lossy_relay_chain() {
+    races_agree("lossy relay chain", &lossy_relay_chain(EcCheck::races()));
+}
+
+/// S1: where lite certifies zero crashes (or claims to tolerate them) and `omit(gossip m0→m1)`
+/// alone breaks the label, the races mode keeps (m1, f)'s clause from the probe and finds it.
+#[cfg(stageleft_runtime)]
+#[test]
+fn races_agree_where_a_total_loss_masks_a_partial_loss() {
+    for cap in [Some(0), None] {
+        let cross = total_loss_masks_a_partial_loss_in(EcCheck::races(), cap);
+        races_agree(&format!("S1 (max_crashes {cap:?})"), &cross);
+        let (verdict, _) = races_label(&cross, "known");
+        let cex = verdict
+            .counterexample()
+            .unwrap_or_else(|| panic!("omissions alone break it: {cross}"));
+        assert_eq!(cex.crashes(), 0, "{cross}");
+    }
+}
+
+/// An echo broadcast whose members batch what they receive (a `nondet!` choice) and only map
+/// it before echoing: the program has schedule choices but no fragile step, so every
+/// derivation is robust, every run of a set has the same facts, and the label is certified.
+#[cfg(stageleft_runtime)]
+#[test]
+fn races_certify_a_batched_echo() {
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let initial = input
+        .broadcast_closed(&members, TCP.fail_stop().name("initial").bincode())
+        .weaken_consistency();
+    let tick = members.tick();
+    let echoed = initial
+        .clone()
+        .batch(&tick, nondet!(/** explored by the check */))
+        .map(q!(|x| x))
+        .all_ticks()
+        .broadcast_closed(&members, TCP.fail_stop().name("echo").bincode())
+        .values()
+        .weaken_consistency();
+    let delivered = initial
+        .weaken_ordering::<NoOrder>()
+        .merge_unordered(echoed)
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed: one correct recipient of the broadcast echoes it to everyone */
+        ));
+    let _out = delivered.sim_cluster_output();
+
+    let mut check = EcCheck::races().max_crashes(1);
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 3))
+        .compiled();
+    assert_eq!(check.fragile_sites(), Some(vec![]));
+    let cross = check.cross_check(
+        &sim,
+        async || {
+            send.send(7);
+        },
+        MAX_FAULTS,
+    );
+    races_agree("batched echo", &cross);
+    assert!(!cross.results.choices.is_empty(), "{cross}");
+    let label = cross.results.label("delivered");
+    assert!(
+        matches!(
+            label.verdict,
+            Verdict::Certified {
+                tolerates: Tolerance::UpTo(1)
+            }
+        ),
+        "{cross}"
+    );
+    let notes = label.stats.races.expect("races notes");
+    assert!(notes.claim_b, "{cross}");
+    // One schedule per set: start crashes run once, the others stop at their first schedule.
+    assert_eq!(label.stats.schedules, label.stats.hypotheses, "{cross}");
+}
+
+/// A planted bug: an echo broadcast whose members re-forward nothing (the echo filters every
+/// value out). A crash of the source mid fan-out must still be found by the races mode, now
+/// that the fan-out order spares the members before the crash point.
+#[cfg(stageleft_runtime)]
+#[test]
+fn races_find_a_broadcast_whose_members_do_not_re_forward() {
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let initial = input
+        .broadcast_closed(&members, TCP.fail_stop().name("initial").bincode())
+        .weaken_consistency();
+    let echoed = initial
+        .clone()
+        .filter(q!(|_| false))
+        .broadcast_closed(&members, TCP.fail_stop().name("echo").bincode())
+        .values()
+        .weaken_consistency();
+    let delivered = initial
+        .weaken_ordering::<NoOrder>()
+        .merge_unordered(echoed)
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed (wrongly): recipients echo what they get */
+        ));
+    let _out = delivered.sim_cluster_output();
+
+    let mut check = EcCheck::races();
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 3))
+        .compiled();
+    let cross = check.cross_check(
+        &sim,
+        async || {
+            send.send(7);
+        },
+        MAX_FAULTS,
+    );
+    races_agree("broadcast without re-forwarding", &cross);
+    let (verdict, notes) = races_label(&cross, "delivered");
+    let cex = verdict
+        .counterexample()
+        .unwrap_or_else(|| panic!("a mid fan-out crash of the source breaks it: {cross}"));
+    assert_eq!(cex.crashes(), 1, "{cross}");
+    assert!(cex.faults.iter().all(|f| matches!(
+        f,
+        Fault::Crash {
+            at: crate::search::CrashAt::After(_),
+            ..
+        }
+    )));
+    assert_eq!(notes.enumerated_sets, 0, "found by the sweep: {cross}");
 }

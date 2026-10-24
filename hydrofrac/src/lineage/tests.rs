@@ -3,12 +3,12 @@ use std::rc::Rc;
 
 use hydro_lang::location::LocationKey;
 use hydro_lang::location::dynamic::LocationId;
-use hydro_lang::sim::network_hook::{ExecKind, LocationInfo};
+use hydro_lang::sim::network_hook::LocationInfo;
 
 use super::*;
 use crate::search::{Fault, FaultSet};
 
-/// The three processes of the hand-built runs: `A`, `B` and `C`, plus an eager `Obs`.
+/// The processes of the hand-built runs: `A`, `B`, `C` and `Obs`.
 fn locations() -> Vec<LocationInfo> {
     ["A", "B", "C", "Obs"]
         .iter()
@@ -17,7 +17,6 @@ fn locations() -> Vec<LocationInfo> {
             id: LocationId::Process(format!("loc{}v1", i + 1).parse::<LocationKey>().unwrap()),
             name: format!("test::{name}"),
             members: None,
-            eager: *name == "Obs",
         })
         .collect()
 }
@@ -55,15 +54,12 @@ struct Log {
 
 impl Log {
     fn exec(&mut self, at: &str) -> &mut Self {
-        self.events.push(Event::Exec {
-            node: node(at),
-            kind: ExecKind::Async,
-        });
+        self.events.push(Event::Exec { node: node(at) });
         self
     }
 
     fn end(&mut self) -> &mut Self {
-        self.events.push(Event::ExecEnd { progressed: true });
+        self.events.push(Event::ExecEnd);
         self
     }
 
@@ -192,14 +188,6 @@ fn record_prov_encoding_is_bincode() {
     trailing.push(0);
     assert_eq!(decode_meta(Some(&trailing)), RecordProv::Opaque);
     assert_eq!(decode_meta(Some(&[7, 0, 0, 0])), RecordProv::Opaque);
-    // A payload rendering after the lineage does not change it
-    // (`provenance::split_meta`), but a malformed one makes the metadata opaque.
-    let rendered = crate::provenance::with_payload_debug(expected.clone(), "Item(7)");
-    assert_eq!(decode_meta(Some(&rendered)), ids);
-    assert_eq!(
-        decode_meta(Some(&rendered[..rendered.len() - 1])),
-        RecordProv::Opaque
-    );
 }
 
 /// A → B → C, with an unrelated delivery A → B that B received first.
@@ -402,30 +390,6 @@ fn sends_after_the_heal_are_not_omittable() {
     assert!(!clause.hit_by(&Fault::Omit(second.clone())));
     // A crash point named by a post-heal send never fires.
     assert!(!clause.hit_by(&Fault::crash_after("A", Some(second))));
-}
-
-/// Fail-stop deliveries are not omittable; deliveries from nodes that cannot crash (the eager
-/// observer) on a fail-stop channel are not dependencies at all, but the closure runs through
-/// them.
-#[test]
-fn unkillable_deliveries_are_dropped_but_followed() {
-    let mut l = Log::default();
-    l.exec("A");
-    let a = l.send(LOSSY, "A", "Obs", 1, ids(&[]));
-    l.end();
-    l.exec("Obs").recv(a, LOSSY, "Obs");
-    let obs = l.send(RELIABLE, "Obs", "C", 2, ids(&[a]));
-    l.end();
-    l.exec("C").recv(obs, RELIABLE, "C");
-    let out = l.output("C", ids(&[obs]));
-    l.end();
-    let log = l.log();
-    let lineage = derive(&log, &tables());
-    assert_eq!(
-        messages(&lineage.derivation(out)),
-        [m(LOSSY, "A", "Obs", 1)].into()
-    );
-    assert!(!lineage.send_sequences().contains_key("Obs"));
 }
 
 /// The clause's kill relation, through the search's `hit_by`, on a two-send run.

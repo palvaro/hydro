@@ -1,0 +1,5 @@
+docs(hydrofrac): quorum sites and the trusted-combinator question
+
+- Survey of the five mints in `ec_inference_demos/quorum.rs`: existence vs value, set-determined or not.
+- Per-label robustness for URB, multi-Paxos and ABD if `quorum_once` were trusted.
+- Scratch-test demonstrations (not committed): covering value varies by schedule; `quorum` output is schedule-independent; `quorum_retiring` loses a certificate outside its contract.

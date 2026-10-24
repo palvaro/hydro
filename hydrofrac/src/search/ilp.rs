@@ -1,7 +1,6 @@
 //! The hitting-set integer program (docs/design/hydrofrac-lite.md §4.4).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::{self, Display};
 
 use good_lp::{
     Expression, ProblemVariables, ResolutionError, Solution, SolverModel, Variable, variable,
@@ -9,32 +8,26 @@ use good_lp::{
 
 use super::clause::{Clause, Fault, FaultSet, Node};
 
-/// The bounds on the crashes of one hypothesis.
+/// The bounds on the crashes of one hypothesis (docs/design/hydrofrac-lite.md §4.5).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CrashBounds {
-    /// An explicit cap on the number of crashes. `None` is unbounded.
+    /// The `max_crashes` cap; `None` is unbounded.
     pub cap: Option<usize>,
-    /// The number of nodes of the program. Crashing every node is vacuous, so a hypothesis
-    /// holds at most `nodes - 1` crashes. `0` means no such bound (for tests).
+    /// The number of nodes: at most `nodes - 1` crash (`0`: no such bound, for tests).
     pub nodes: usize,
-    /// The members of the checked cluster, and how many of them may crash in one hypothesis.
-    /// `None` when nothing is checked at a cluster.
+    /// The checked cluster, if the label lives on one.
     pub checked: Option<CheckedCluster>,
 }
 
-/// The members of the cluster a label is checked at, and the cap on how many of them one
-/// hypothesis may crash.
+/// The members of the checked cluster, and how many of them one hypothesis may crash.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckedCluster {
-    /// The members.
     pub nodes: BTreeSet<Node>,
-    /// At most this many of `nodes` crash in one hypothesis.
     pub cap: usize,
 }
 
 impl CheckedCluster {
-    /// The checked cluster made of `members`, with the cap `|members| − 2`: crashing all of
-    /// them, or all but one, is vacuous, since a single survivor agrees with itself.
+    /// The cap is `|members| − 2`: a single survivor agrees with itself.
     pub fn new(members: impl IntoIterator<Item = Node>) -> Self {
         let nodes: BTreeSet<Node> = members.into_iter().collect();
         let cap = nodes.len().saturating_sub(2);
@@ -43,16 +36,7 @@ impl CheckedCluster {
 }
 
 impl CrashBounds {
-    /// Bounds with an explicit cap and nothing else.
-    pub fn cap(crashes: usize) -> Self {
-        CrashBounds {
-            cap: Some(crashes),
-            ..CrashBounds::default()
-        }
-    }
-
-    /// The largest number of crashes any hypothesis may hold under these bounds, if any. This
-    /// counts the cap and the every-node bound; the checked-cluster cap bounds only a subset.
+    /// The most crashes any hypothesis may hold: the cap and the every-node bound.
     pub fn max_crashes(&self) -> Option<usize> {
         let all_nodes = (self.nodes >= 1).then(|| self.nodes - 1);
         match (self.cap, all_nodes) {
@@ -70,27 +54,6 @@ impl CrashBounds {
     }
 }
 
-impl Display for CrashBounds {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.cap {
-            Some(cap) => write!(f, "at most {cap} crash(es)")?,
-            None => write!(f, "crashes unbounded")?,
-        }
-        if self.nodes >= 1 {
-            write!(f, "; not all {} nodes at once", self.nodes)?;
-        }
-        if let Some(checked) = &self.checked {
-            write!(
-                f,
-                "; at most {} of the checked cluster's {} member(s)",
-                checked.cap,
-                checked.nodes.len()
-            )?;
-        }
-        Ok(())
-    }
-}
-
 /// The ILP backend.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Backend {
@@ -103,73 +66,33 @@ pub enum Backend {
 }
 
 /// The weight of each candidate in a universe of `n`, by position: `1` plus a tie-break that
-/// prefers earlier (weaker) candidates.
-///
-/// The tie-break must never trade cardinality. Every set of `k` candidates must cost less than
-/// every set of `k + 1`. Each tie-break is below `0.5 / n`, so even a set of all `n` candidates
-/// gains less than `0.5` in total. (The research branch's `0.5 / n` per position let a
-/// `k`-set of late candidates cost more than a `(k+1)`-set of early ones once `k ≥ 3`.)
+/// prefers earlier (weaker) candidates. Each tie-break is below `0.5 / n`, so it never trades
+/// cardinality (the research branch's `0.5 / n` per position did, for sets of size ≥ 3; §4.4).
 pub fn weights(n: usize) -> impl Iterator<Item = f64> {
     let tie_break = 0.5 / (n as f64 * n as f64);
     (0..n).map(move |i| 1.0 + tie_break * i as f64)
 }
 
 /// The next hypothesis: a minimum-weight subset of `universe` (sorted weakest first, see
-/// [`super::universe`]) that kills some dependency of every clause, keeps crashes within
-/// `bounds` and at most one crash per node, is no superset of a vacuous set, and has not been
-/// tried. Returns `None` when no such set exists.
+/// [`super::universe`]) that satisfies some clause of every group, keeps crashes within `bounds`
+/// and at most one per node, is no superset of a vacuous set, and has not been tried. `None`
+/// when no such set exists (proven: the MIP gap is zero).
 ///
-/// With no clauses this enumerates every admissible subset by weight: the blind search used to
-/// cross-check the lineage.
-///
-/// The integer program:
-/// - a binary `x_f` per candidate fault `f`;
-/// - minimize `Σ w_f x_f` ([`weights`]);
-/// - cover: for every clause `D` with premises `P`,
-///   `Σ { x_f : f kills some d ∈ D } + Σ_{p ∈ P} (1 − x_p) ≥ 1`. A premise outside the universe
-///   can never be selected, so its clause applies to no hypothesis and is dropped;
-/// - `Σ_{f = crash(n, ·)} x_f ≤ 1` per node. An earlier crash of the same node dominates a later
-///   one;
-/// - the crash bounds: `Σ_{crash} x_f ≤ cap`; `Σ_{crash} x_f ≤ N − 1`; and
-///   `Σ_{crash of a member of C} x_f ≤ |C| − 2` for the checked cluster `C`;
+/// The integer program (§4.4), with a binary `x_f` per candidate, minimizing `Σ w_f x_f`
+/// ([`weights`]):
+/// - cover, per clause `D` with premises `P`: `Σ { x_f : f kills some d ∈ D } + Σ_{p ∈ P}
+///   (1 − x_p) ≥ 1` (a premise outside the universe can never be selected: no row). A group of
+///   several clauses gets a binary `y_c ≤` that left-hand side per clause, and `Σ_c y_c ≥ 1`:
+///   the heuristic for programs with schedule choices, where a hypothesis need only kill one
+///   schedule's derivations (§4.9);
+/// - at most one crash per node; `Σ_{crash} x_f ≤ min(cap, N − 1)`; at most `|C| − 2` crashes
+///   in the checked cluster `C`;
 /// - no superset of a vacuous set `V`: `Σ_{f ∈ V} x_f ≤ |V| − 1`;
-/// - a no-good per tried set `T`: `Σ_{f ∈ T} x_f − Σ_{f ∉ T} x_f ≤ |T| − 1`, excluding exactly `T`.
-///   A tried set with a fault outside the universe cannot be proposed, so it needs no row.
+/// - a no-good per tried set `T`: `Σ_{f ∈ T} x_f − Σ_{f ∉ T} x_f ≤ |T| − 1`.
 ///
-/// Only the rows that can cut something off are written: a tried set gets a no-good only when no
-/// other row already excludes it (`already_excluded`), and implied cover rows are left out
-/// (`cover_rows`). Both are exact: the feasible region is that of the full program. No-good
-/// rows are dense (one nonzero per candidate) and were what made the program slow as tried sets
-/// accumulated; in a search where every run that holds yields a new derivation, none is needed.
-///
-/// The MIP gap is zero, so a returned set is proven optimal, and `None` is proven infeasible.
-pub fn hitting_set<M: Ord + Clone>(
-    universe: &[Fault<M>],
-    clauses: &[Clause<M>],
-    tried: &BTreeSet<FaultSet<M>>,
-    vacuous: &[FaultSet<M>],
-    bounds: &CrashBounds,
-    backend: Backend,
-) -> Option<FaultSet<M>> {
-    solve(
-        universe,
-        clauses,
-        tried,
-        vacuous,
-        bounds,
-        backend,
-        Model::Lean,
-    )
-}
-
-/// [`hitting_set`] with disjunctive clauses: each group is satisfied when the hypothesis kills
-/// *some* clause of it (or misses one of that clause's premises), rather than every one. A group
-/// of one clause is an ordinary cover row; a group with several gets a binary per clause,
-/// `y_c ≤ Σ { x_f : f kills some d ∈ c } + Σ_{p ∈ P_c} (1 − x_p)`, and the row `Σ_c y_c ≥ 1`.
-///
-/// This is the search heuristic for schedule-sensitive labels (docs/design/hydrofrac-lite.md
-/// §4.9): a run's group is the derivations its schedules observed, and a hypothesis need only
-/// kill one schedule's. It is not a pruning rule a certificate can rest on.
+/// Only rows that can cut something off are written ([`cover_rows`],
+/// [`already_excluded_by_groups`]); both omissions are exact. The dense no-good rows were what
+/// made the program slow as tried sets accumulated.
 pub fn hitting_set_any<M: Ord + Clone>(
     universe: &[Fault<M>],
     groups: &[&[Clause<M>]],
@@ -197,50 +120,21 @@ pub(crate) fn group_is_unkillable<M: Ord + Clone>(group: &[Clause<M>]) -> bool {
 /// How much of the integer program is written out. Both have the same feasible region.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Model {
-    /// Only the rows that can cut something off: no-goods only for tried sets nothing else
-    /// excludes ([`already_excluded`]), and cover rows without the implied ones
-    /// ([`cover_rows`]). What [`hitting_set`] uses.
+    /// Only the rows that can cut something off.
     Lean,
-    /// Every row, as the model's definition reads. The reference the lean model is tested
-    /// against.
-    #[cfg_attr(not(test), expect(dead_code, reason = "test reference"))]
+    /// Every row: the reference the lean model is tested against.
+    #[cfg(test)]
     Full,
 }
 
-/// Whether the rows other than `tried`'s own no-good already exclude the tried set `tried`, so
-/// its no-good can be left out without changing the feasible set.
+/// Whether rows other than its own no-good already exclude the tried set `T`, so the no-good
+/// can be left out exactly (it removes only the point `x = T`). Checked on the host:
+/// - a group all of whose clauses `T` misses with all their premises in `T` (each cover row
+///   sums to `−|P| < 1 − |P|` at `x = T`);
+/// - a vacuous set `V ⊆ T`.
 ///
-/// The no-good of `T` removes exactly one point, `x = T`, from the feasible region. If some other
-/// row already rejects `x = T`, then the region with and without the no-good is the same, so the
-/// optimum, and infeasibility, are unchanged: the omission is exact, not a relaxation. Two kinds
-/// of row reject `x = T` and are checked here, on the host, without the solver:
-/// - **a cover row** of a clause `D` with premises `P`, when no fault of `T` kills a delivery of
-///   `D` and `P ⊆ T`. Then the left-hand side at `x = T` is `0 − |P|`, below the bound `1 − |P|`.
-///   The row exists: `P ⊆ T` and `T` lies inside the universe (otherwise `T` needs no row
-///   anyway), so every premise is a candidate.
-/// - **a vacuous row** of a vacuous set `V ⊆ T`: at `x = T` it sums to `|V| > |V| − 1`. If `V`
-///   has a fault outside the universe then so does `T`, which then needs no row anyway.
-///
-/// This is the common case. Once a hypothesis `T` has run and the label held, the run's
-/// derivations are clauses, and `T` did not kill them (it ran and they were observed), so `T`
-/// fails to hit one of them. An explicit no-good is only needed for a `T` whose run taught the
-/// search nothing it did not already know.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the one-clause-per-group form, for the tests")
-)]
-pub(crate) fn already_excluded<M: Ord + Clone>(
-    tried: &FaultSet<M>,
-    clauses: &[Clause<M>],
-    vacuous: &[FaultSet<M>],
-) -> bool {
-    let groups: Vec<&[Clause<M>]> = clauses.iter().map(std::slice::from_ref).collect();
-    already_excluded_by_groups(tried, &groups, vacuous)
-}
-
-/// [`already_excluded`] with disjunctive groups: a group rejects `x = T` when it rejects it
-/// through every clause, each missed by `T` with all its premises in `T` (its `y` binaries are
-/// then all forced to 0, and its row `Σ y ≥ 1` fails).
+/// This is the common case: a tried set that held left its derivations alive, and they became
+/// clauses it misses.
 pub(crate) fn already_excluded_by_groups<M: Ord + Clone>(
     tried: &FaultSet<M>,
     groups: &[&[Clause<M>]],
@@ -259,20 +153,9 @@ pub(crate) fn already_excluded_by_groups<M: Ord + Clone>(
 /// positions of its premises. Read as "some hit is selected, or some premise is not".
 pub(crate) type CoverRow = (BTreeSet<usize>, BTreeSet<usize>);
 
-/// The cover rows of `clauses` over `universe`, without the rows that cannot cut anything off.
-///
-/// Dropping a row that every point satisfying the kept rows also satisfies leaves the feasible
-/// region unchanged, so this is exact:
-/// - a clause with a premise outside the universe binds no hypothesis (the premise can never be
-///   selected);
-/// - a row with a premise that is also a hit is always satisfied: either it is selected, a hit,
-///   or not, a missing premise;
-/// - a row `(H, P)` is implied by any row `(H', P')` with `H' ⊆ H` and `P' ⊆ P`: a point that
-///   selects a hit of `H'` selects one of `H`, and a point missing a premise of `P'` misses one
-///   of `P`. In particular, duplicates collapse to one.
-///
-/// Clauses repeat a lot in practice: every run of a hypothesis that leaves a derivation intact
-/// observes it again.
+/// The cover rows of `clauses` over `universe`, without those that cannot cut anything off
+/// (exact): a row with a premise that is also a hit always holds, and a row `(H, P)` is implied
+/// by any `(H', P')` with `H' ⊆ H`, `P' ⊆ P` (so duplicates collapse).
 pub(crate) fn cover_rows<M: Ord + Clone>(
     universe: &[Fault<M>],
     clauses: &[Clause<M>],
@@ -296,7 +179,7 @@ pub(crate) fn cover_rows<M: Ord + Clone>(
     kept
 }
 
-/// One cover row per clause whose premises are all candidates: the program as defined.
+/// One cover row per clause whose premises are all candidates (the others bind nothing).
 pub(crate) fn all_cover_rows<M: Ord + Clone>(
     universe: &[Fault<M>],
     clauses: &[Clause<M>],
@@ -317,19 +200,6 @@ pub(crate) fn all_cover_rows<M: Ord + Clone>(
             Some((hits, premises))
         })
         .collect()
-}
-
-pub(crate) fn solve<M: Ord + Clone>(
-    universe: &[Fault<M>],
-    clauses: &[Clause<M>],
-    tried: &BTreeSet<FaultSet<M>>,
-    vacuous: &[FaultSet<M>],
-    bounds: &CrashBounds,
-    backend: Backend,
-    model: Model,
-) -> Option<FaultSet<M>> {
-    let groups: Vec<&[Clause<M>]> = clauses.iter().map(std::slice::from_ref).collect();
-    solve_groups(universe, &groups, tried, vacuous, bounds, backend, model)
 }
 
 pub(crate) fn solve_groups<M: Ord + Clone>(
@@ -371,6 +241,7 @@ pub(crate) fn solve_groups<M: Ord + Clone>(
 
     let rows = match model {
         Model::Lean => cover_rows(universe, &clauses),
+        #[cfg(test)]
         Model::Full => all_cover_rows(universe, &clauses),
     };
     let satisfied = |(hits, premises): &CoverRow| -> Expression {
@@ -385,35 +256,12 @@ pub(crate) fn solve_groups<M: Ord + Clone>(
     for row in rows {
         constraints.push(satisfied(&row).geq(1.0));
     }
-    // A disjunction: some clause of the group is satisfied. A clause whose row is always
-    // satisfied (a premise outside the universe, or a premise that is also a hit) satisfies
-    // the group outright, so the group needs no row.
+    // A disjunction: some clause of the group is satisfied. A clause whose row always holds
+    // (a premise outside the universe, or one that is also a hit) satisfies the group outright.
     let mut disjunction_rows: BTreeSet<Vec<CoverRow>> = BTreeSet::new();
     for group in &disjunctions {
-        let index: BTreeMap<&Fault<M>, usize> =
-            universe.iter().enumerate().map(|(i, f)| (f, i)).collect();
-        let mut rows: Vec<CoverRow> = vec![];
-        let mut always = false;
-        for clause in group.iter() {
-            let Some(premises) = clause
-                .premises
-                .iter()
-                .map(|p| index.get(p).copied())
-                .collect::<Option<BTreeSet<usize>>>()
-            else {
-                always = true;
-                break;
-            };
-            let hits: BTreeSet<usize> = (0..universe.len())
-                .filter(|&i| clause.hit_by(&universe[i]))
-                .collect();
-            if !hits.is_disjoint(&premises) {
-                always = true;
-                break;
-            }
-            rows.push((hits, premises));
-        }
-        if always {
+        let mut rows = all_cover_rows(universe, group);
+        if rows.len() < group.len() || rows.iter().any(|(h, p)| !h.is_disjoint(p)) {
             continue;
         }
         rows.sort();
@@ -434,14 +282,12 @@ pub(crate) fn solve_groups<M: Ord + Clone>(
         constraints.push(any.geq(1.0));
     }
 
-    let crashes: Vec<usize> = (0..universe.len())
-        .filter(|&i| universe[i].crashed_node().is_some())
-        .collect();
     let crash_sum = |pick: &dyn Fn(&Node) -> bool| -> Expression {
-        crashes
+        universe
             .iter()
-            .filter(|&&i| universe[i].crashed_node().is_some_and(pick))
-            .map(|&i| Expression::from(x[i]))
+            .zip(&x)
+            .filter(|(f, _)| f.crashed_node().is_some_and(pick))
+            .map(|(_, &v)| Expression::from(v))
             .sum()
     };
     // With at most one crash per node (below), the sum of the crash variables is the number of
@@ -452,10 +298,7 @@ pub(crate) fn solve_groups<M: Ord + Clone>(
     if let Some(checked) = &bounds.checked {
         constraints.push(crash_sum(&|n| checked.nodes.contains(n)).leq(checked.cap as f64));
     }
-    let nodes: BTreeSet<&Node> = crashes
-        .iter()
-        .filter_map(|&i| universe[i].crashed_node())
-        .collect();
+    let nodes: BTreeSet<&Node> = universe.iter().filter_map(Fault::crashed_node).collect();
     for node in nodes {
         constraints.push(crash_sum(&|n| n == node).leq(1.0));
     }
