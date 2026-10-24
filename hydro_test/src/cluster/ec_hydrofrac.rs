@@ -259,14 +259,14 @@ mod tests {
         assert!(node.starts_with("Broadcaster"), "{plain}");
 
         // The echoing broadcast's members batch what they receive (`reliable_broadcast.rs`'s
-        // tick), so its deliveries are schedule-sensitive: the search finds no counterexample
-        // under any admissible crash set, but cannot certify it (docs/design/hydrofrac-lite.md
-        // §4.9).
+        // tick), so the program has schedule choices: the search finds no counterexample for
+        // its deliveries under any admissible crash set, but cannot certify them
+        // (docs/design/hydrofrac-lite.md §4.9).
         let reliable = echo_broadcast(true, EcCheck::new().sample_schedules(ECHO_SCHEDULES));
         eprintln!("{reliable}");
         let deliveries = label(&reliable, "reliable_broadcast.rs", "deliveries", 0);
         assert!(
-            deliveries.plan.sites.iter().any(|s| s.op == "batch"),
+            reliable.choices.iter().any(|s| s.op == "batch"),
             "{reliable}"
         );
         assert!(

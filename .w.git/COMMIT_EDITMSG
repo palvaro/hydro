@@ -1,0 +1,10 @@
+test(hydro_std): ABD-KV with two concurrent requests, as a blind target
+
+- New `ec_inference_demos::ec_abd_kv_hydrofrac` (all `#[ignore]`d measurements): 3 replicas,
+  1 client, two writes to different keys sent back to back with no `quiesce()` between them
+  (deliberately outside `abd_kv_register`'s one-outstanding-operation contract).
+- `abd_kv_two_writes_lite` / `abd_kv_two_writes_races`: `EcCheck::new()` / `EcCheck::races()`
+  over every EC label (`ABD_KV_SAMPLES`, `ABD_KV_MAX_CRASHES` env knobs).
+- `abd_kv_two_writes_failure_free_completion`: plain failure-free exploration (exhaustive, or
+  `ABD_KV_FUZZ=n` random schedules) counting runs in which some write is never acked;
+  `ABD_KV_PANIC=1` replays the first such run with the simulator's schedule log.

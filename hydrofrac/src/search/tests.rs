@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
 
 use super::*;
 
@@ -21,6 +20,65 @@ fn reliable(channel: &'static str, payload: u32, sender: &str, ordinal: u64) -> 
         sender: Some((sender.to_owned(), ordinal)),
         lossy: false,
     }
+}
+
+/// A clause of a run in which every send of `sends` happened before the heal.
+fn new_clause(
+    deps: impl IntoIterator<Item = Dependency<M>>,
+    sends: Rc<SendSequences<M>>,
+) -> Clause<M> {
+    let pre_heal_sends = Rc::new(sends.iter().map(|(n, seq)| (n.clone(), seq.len())).collect());
+    Clause {
+        deps: deps.into_iter().collect(),
+        sends,
+        pre_heal_sends,
+        premises: BTreeSet::new(),
+    }
+}
+
+/// Bounds with an explicit cap and nothing else.
+fn cap_bounds(crashes: usize) -> CrashBounds {
+    CrashBounds {
+        cap: Some(crashes),
+        ..CrashBounds::default()
+    }
+}
+
+fn singletons(clauses: &[Clause<M>]) -> Vec<&[Clause<M>]> {
+    clauses.iter().map(std::slice::from_ref).collect()
+}
+
+/// The program with one clause per group, in either model.
+fn solve_model(
+    universe: &[Fault<M>],
+    clauses: &[Clause<M>],
+    tried: &BTreeSet<FaultSet<M>>,
+    vacuous: &[FaultSet<M>],
+    bounds: &CrashBounds,
+    backend: Backend,
+    model: ilp::Model,
+) -> Option<FaultSet<M>> {
+    let groups = singletons(clauses);
+    ilp::solve_groups(universe, &groups, tried, vacuous, bounds, backend, model)
+}
+
+fn hitting_set(
+    universe: &[Fault<M>],
+    clauses: &[Clause<M>],
+    tried: &BTreeSet<FaultSet<M>>,
+    vacuous: &[FaultSet<M>],
+    bounds: &CrashBounds,
+    backend: Backend,
+) -> Option<FaultSet<M>> {
+    solve_model(universe, clauses, tried, vacuous, bounds, backend, ilp::Model::Lean)
+}
+
+fn already_excluded(
+    tried: &FaultSet<M>,
+    clauses: &[Clause<M>],
+    vacuous: &[FaultSet<M>],
+) -> bool {
+    ilp::already_excluded_by_groups(tried, &singletons(clauses), vacuous)
 }
 
 fn no_sends() -> Rc<SendSequences<M>> {
@@ -72,29 +130,29 @@ fn crashed_nodes(h: &FaultSet<M>) -> BTreeSet<&str> {
 #[test]
 fn hitting_sets_grow_by_size_and_skip_tried() {
     let clauses = vec![
-        Clause::new([lossy("req", 1), lossy("ack", 1)], no_sends()),
-        Clause::new([lossy("req", 2), lossy("ack", 2)], no_sends()),
+        new_clause([lossy("req", 1), lossy("ack", 1)], no_sends()),
+        new_clause([lossy("req", 2), lossy("ack", 2)], no_sends()),
     ];
     let mut tried = BTreeSet::new();
     // Every minimal hitting set (one literal per clause) comes first, each exactly once...
     for _ in 0..4 {
-        let h = solve(&clauses, &tried, &CrashBounds::cap(0)).unwrap();
+        let h = solve(&clauses, &tried, &cap_bounds(0)).unwrap();
         assert_eq!(h.len(), 2);
         assert!(tried.insert(h));
     }
     // ...and only then the non-minimal ones.
-    let h = solve(&clauses, &tried, &CrashBounds::cap(0)).unwrap();
+    let h = solve(&clauses, &tried, &cap_bounds(0)).unwrap();
     assert_eq!(h.len(), 3);
 }
 
 #[test]
 fn empty_clause_has_no_hitting_set() {
     let clauses = vec![
-        Clause::new([lossy("req", 1)], no_sends()),
-        Clause::new([], no_sends()),
+        new_clause([lossy("req", 1)], no_sends()),
+        new_clause([], no_sends()),
     ];
     assert_eq!(
-        solve(&clauses, &BTreeSet::new(), &CrashBounds::cap(0)),
+        solve(&clauses, &BTreeSet::new(), &cap_bounds(0)),
         None
     );
 }
@@ -104,9 +162,9 @@ fn empty_clause_has_no_hitting_set() {
 #[test]
 fn an_empty_derivation_under_a_crash_binds_only_worlds_with_that_crash() {
     let sends = Rc::new(SendSequences::from([("s".to_owned(), vec![("to", 1)])]));
-    let mut under_crash = Clause::new([], sends.clone());
+    let mut under_crash = new_clause([], sends.clone());
     under_crash.premises = set([crash("s")]);
-    let clauses = vec![Clause::new([reliable("to", 1, "s", 0)], sends), under_crash];
+    let clauses = vec![new_clause([reliable("to", 1, "s", 0)], sends), under_crash];
     // The only candidate is `crash(s)`, which is the premise: no hypothesis remains.
     assert_eq!(
         solve(&clauses, &BTreeSet::new(), &CrashBounds::default()),
@@ -124,7 +182,7 @@ fn an_empty_derivation_under_a_crash_binds_only_worlds_with_that_crash() {
 /// A premise that is not a candidate can never be selected: the clause applies to no hypothesis.
 #[test]
 fn a_clause_whose_premise_is_not_a_candidate_is_dropped() {
-    let mut clause = Clause::new([lossy("req", 1)], no_sends());
+    let mut clause = new_clause([lossy("req", 1)], no_sends());
     clause.premises = set([crash("elsewhere")]);
     let clauses = vec![clause];
     // Nothing binds, so the empty set is the minimum; once tried, the omission follows.
@@ -142,18 +200,18 @@ fn crash_kills_later_sends_and_respects_the_cap() {
     // The sender's fan-out to two members: sends `m0` then `m1`.
     let (m0, m1) = (("to@0", 42), ("to@1", 42));
     let sends = Rc::new(SendSequences::from([("s".to_owned(), vec![m0, m1])]));
-    let clauses = vec![Clause::new(
+    let clauses = vec![new_clause(
         [reliable("to@0", 42, "s", 0), reliable("to@1", 42, "s", 1)],
         sends.clone(),
     )];
     assert_eq!(
-        solve(&clauses, &BTreeSet::new(), &CrashBounds::cap(0)),
+        solve(&clauses, &BTreeSet::new(), &cap_bounds(0)),
         None,
         "a reliable channel admits no omission; with no crashes allowed nothing can be done"
     );
     // Weakest first: the crash after `m0` (killing only `m1`) is tried before the crash before
     // any send (killing both).
-    let first = solve(&clauses, &BTreeSet::new(), &CrashBounds::cap(1)).unwrap();
+    let first = solve(&clauses, &BTreeSet::new(), &cap_bounds(1)).unwrap();
     let later = Fault::crash_after("s", Some(m0));
     assert_eq!(first, set([later.clone()]));
     let pre_heal = &clauses[0].pre_heal_sends;
@@ -223,7 +281,7 @@ fn three_senders() -> Vec<Clause<M>> {
         ("m@1".to_owned(), vec![("to", 2)]),
         ("m@2".to_owned(), vec![("to", 3)]),
     ]));
-    vec![Clause::new(
+    vec![new_clause(
         [
             reliable("to", 1, "m@0", 0),
             reliable("to", 2, "m@1", 0),
@@ -266,7 +324,7 @@ fn crashing_every_candidate_node_is_proposed_when_another_node_remains() {
     assert_eq!(crashed_nodes(&proposed[6]).len(), 3, "{proposed:?}");
     // A single sender among others: its crash is admissible.
     let sends = Rc::new(SendSequences::from([("s".to_owned(), vec![("to", 1)])]));
-    let clauses = vec![Clause::new([reliable("to", 1, "s", 0)], sends)];
+    let clauses = vec![new_clause([reliable("to", 1, "s", 0)], sends)];
     let proposed = all_hypotheses(&clauses, &program_of(2));
     assert_eq!(proposed.len(), 1, "{proposed:?}");
     assert_eq!(crashed_nodes(&proposed[0]), BTreeSet::from(["s"]));
@@ -282,7 +340,7 @@ fn never_crashes_all_but_one_member_of_the_checked_cluster() {
         ("src".to_owned(), vec![("in", 9)]),
         ("m@0".to_owned(), vec![("to", 1)]),
     ]));
-    clauses.push(Clause::new(
+    clauses.push(new_clause(
         [reliable("in", 9, "src", 0), reliable("to", 1, "m@0", 0)],
         sends,
     ));
@@ -325,7 +383,7 @@ fn an_explicit_crash_cap_still_bounds() {
     let proposed = all_hypotheses(&clauses, &one);
     assert_eq!(proposed.len(), 3, "{proposed:?}");
     assert!(proposed.iter().all(|h| h.len() == 1), "{proposed:?}");
-    assert!(all_hypotheses(&clauses, &CrashBounds::cap(0)).is_empty());
+    assert!(all_hypotheses(&clauses, &cap_bounds(0)).is_empty());
     // A cap above the vacuity bound changes nothing.
     let two = CrashBounds {
         cap: Some(2),
@@ -340,8 +398,8 @@ fn an_explicit_crash_cap_still_bounds() {
 #[test]
 fn no_superset_of_a_vacuous_set_is_proposed() {
     let clauses = vec![
-        Clause::new([lossy("req", 1), lossy("ack", 1)], no_sends()),
-        Clause::new([lossy("req", 2), lossy("ack", 2)], no_sends()),
+        new_clause([lossy("req", 1), lossy("ack", 1)], no_sends()),
+        new_clause([lossy("req", 2), lossy("ack", 2)], no_sends()),
     ];
     let vacuous = vec![set([Fault::Omit(("req", 1))])];
     let mut tried = BTreeSet::new();
@@ -384,7 +442,7 @@ fn the_minimum_cardinality_set_wins_over_cheaper_positions() {
     let ch = "c";
     let clauses: Vec<Clause<M>> = [(0, 97), (1, 98), (2, 99), (3, 97), (3, 98), (3, 99)]
         .into_iter()
-        .map(|(a, b)| Clause::new([lossy(ch, a), lossy(ch, b)], no_sends()))
+        .map(|(a, b)| new_clause([lossy(ch, a), lossy(ch, b)], no_sends()))
         .collect();
     let extra: Vec<Fault<M>> = (0..100).map(|p| Fault::Omit((ch, p))).collect();
     let universe = universe(&clauses, &extra);
@@ -410,7 +468,7 @@ fn the_minimum_cardinality_set_wins_over_cheaper_positions() {
 
 #[test]
 fn a_tried_set_outside_the_universe_constrains_nothing() {
-    let clauses = vec![Clause::new([lossy("req", 1)], no_sends())];
+    let clauses = vec![new_clause([lossy("req", 1)], no_sends())];
     let tried = BTreeSet::from([set([Fault::Omit(("req", 1)), Fault::Omit(("gone", 7))])]);
     assert_eq!(
         solve(&clauses, &tried, &CrashBounds::default()),
@@ -427,7 +485,7 @@ fn drain(sweep: &mut Sweep<M>, clauses: &[Clause<M>]) -> (Vec<(usize, FaultSet<M
     loop {
         match sweep.next(clauses) {
             Next::Try(h) => {
-                proposed.push((sweep.crash_bound(), h));
+                proposed.push((sweep.bound, h));
                 assert!(proposed.len() < 1000);
             }
             done => return (proposed, done),
@@ -499,34 +557,35 @@ fn the_sweep_stops_when_more_crashes_cannot_kill_more() {
 #[test]
 fn clauses_learned_at_one_bound_carry_over_to_the_next() {
     let sends = Rc::new(SendSequences::from([("s".to_owned(), vec![("to", 1)])]));
-    let mut clauses = vec![Clause::new([lossy("in", 1)], sends.clone())];
+    let mut clauses = vec![new_clause([lossy("in", 1)], sends.clone())];
     let mut sweep = Sweep::new(program_of(3));
     assert_eq!(
         sweep.next(&clauses),
         Next::Try(set([Fault::Omit(("in", 1))]))
     );
-    assert_eq!(sweep.crash_bound(), 0);
+    assert_eq!(sweep.bound, 0);
     // Under that omission the fact was derived anyway, from a reliable delivery.
-    clauses.push(Clause::new([reliable("to", 1, "s", 0)], sends));
+    clauses.push(new_clause([reliable("to", 1, "s", 0)], sends));
     assert_eq!(
         sweep.next(&clauses),
         Next::Try(set([Fault::Omit(("in", 1)), crash("s")]))
     );
-    assert_eq!(sweep.crash_bound(), 1);
+    assert_eq!(sweep.bound, 1);
     assert_eq!(sweep.tolerated(), Some(0));
 }
 
 #[test]
 fn an_unkillable_derivation_certifies_at_once() {
     let mut sweep = Sweep::new(program_of(3));
-    let clauses = vec![Clause::new([], no_sends())];
+    let clauses = vec![new_clause([], no_sends())];
     assert_eq!(sweep.next(&clauses), Next::Certified(Tolerance::All));
     assert_eq!(sweep.hypotheses(), 1);
 }
 
 #[test]
 fn the_budget_counts_the_probe() {
-    let mut sweep = Sweep::new(program_of(3)).with_budget(3);
+    let mut sweep = Sweep::new(program_of(3));
+    sweep.budget = 3;
     let (proposed, done) = drain(&mut sweep, &three_senders());
     assert_eq!(proposed.len(), 2);
     assert_eq!(done, Next::Budget);
@@ -545,30 +604,7 @@ fn a_vacuous_hypothesis_excludes_its_supersets_across_bounds() {
     assert_eq!(proposed.len(), 3);
 }
 
-/// With no clauses and explicit candidates, the sweep is a blind enumeration of every admissible
-/// set, by crash count and then by size: the brute-force cross-check's engine.
-#[test]
-fn with_no_clauses_the_sweep_enumerates_every_admissible_set() {
-    let mut sweep = Sweep::new(program_of(3));
-    sweep.add_candidates([
-        Fault::Omit(("a", 1)),
-        Fault::Omit(("b", 1)),
-        crash("n@0"),
-        crash("n@1"),
-    ]);
-    let (proposed, done) = drain(&mut sweep, &[]);
-    assert_eq!(done, Next::Certified(Tolerance::All));
-    // 2^4 subsets, minus the probe's empty set.
-    assert_eq!(proposed.len(), 15, "{proposed:?}");
-    let mut counts: Vec<usize> = proposed.iter().map(|(_, h)| crash_count(h)).collect();
-    assert!(counts.is_sorted(), "{counts:?}");
-    counts.dedup();
-    assert_eq!(counts, [0, 1, 2]);
-}
-
-// Benchmarks.
-
-/// A small deterministic PRNG (xorshift64), so the benchmark instance needs no dependency.
+/// A small deterministic PRNG (xorshift64), so random instances need no dependency.
 struct Rng(u64);
 
 impl Rng {
@@ -587,6 +623,7 @@ impl Rng {
 /// A synthetic instance shaped like the largest research searches: `nodes` senders each with
 /// `sends` messages, half of them on lossy channels, and `clauses` derivations of 4 to 12
 /// deliveries each.
+#[cfg(feature = "highs")]
 fn synthetic(nodes: usize, sends: usize, clauses: usize, seed: u64) -> Vec<Clause<M>> {
     let mut rng = Rng(seed);
     let names: Vec<String> = (0..nodes).map(|n| format!("n@{n}")).collect();
@@ -613,50 +650,27 @@ fn synthetic(nodes: usize, sends: usize, clauses: usize, seed: u64) -> Vec<Claus
                     lossy: i.is_multiple_of(2),
                 }
             });
-            Clause::new(deps, sequences.clone())
+            new_clause(deps, sequences.clone())
         })
         .collect()
 }
 
 /// Runs a sweep on `clauses` for up to `hypotheses` proposals, as if none broke the label; returns
-/// the proposals' sizes and the time spent.
-fn time_sweep(
-    clauses: &[Clause<M>],
-    hypotheses: usize,
-    backend: Backend,
-) -> (Vec<usize>, Duration) {
+/// the proposals' sizes.
+#[cfg(feature = "highs")]
+fn sweep_sizes(clauses: &[Clause<M>], hypotheses: usize, backend: Backend) -> Vec<usize> {
     let mut sweep = Sweep::new(CrashBounds {
         cap: Some(2),
         nodes: 6,
         checked: None,
-    })
-    .with_backend(backend)
-    .with_budget(hypotheses + 1);
-    let start = Instant::now();
+    });
+    sweep.backend = backend;
+    sweep.budget = hypotheses + 1;
     let mut sizes = vec![];
     while let Next::Try(h) = sweep.next(clauses) {
         sizes.push(h.len());
     }
-    (sizes, start.elapsed())
-}
-
-/// The worst case: the clauses never grow, so every tried set needs an explicit no-good. A real
-/// search does not look like this (see [`bench_lean_vs_full_model`]).
-///
-/// `cargo test -p hydrofrac --release -- --ignored --nocapture --test-threads 1 bench_`
-#[test]
-#[ignore = "benchmark"]
-fn bench_microlp() {
-    for (clauses, hypotheses) in [(20, 100), (40, 200), (60, 300)] {
-        let instance = synthetic(6, 20, clauses, 0x9e37_79b9_7f4a_7c15);
-        let universe = universe(&instance, []).len();
-        let (sizes, took) = time_sweep(&instance, hypotheses, Backend::Microlp);
-        println!(
-            "microlp: {clauses} clauses, {universe} candidates, {} hypotheses: {took:?} ({:?}/hypothesis)",
-            sizes.len(),
-            took / sizes.len().max(1) as u32
-        );
-    }
+    sizes
 }
 
 /// The solver check (docs/design/hydrofrac-lite.md §7): both backends propose sets of the same
@@ -665,26 +679,9 @@ fn bench_microlp() {
 #[test]
 fn microlp_and_highs_agree_on_sizes() {
     let instance = synthetic(6, 10, 15, 7);
-    let (micro, _) = time_sweep(&instance, 60, Backend::Microlp);
-    let (highs, _) = time_sweep(&instance, 60, Backend::Highs);
+    let micro = sweep_sizes(&instance, 60, Backend::Microlp);
+    let highs = sweep_sizes(&instance, 60, Backend::Highs);
     assert_eq!(micro, highs);
-}
-
-#[cfg(feature = "highs")]
-#[test]
-#[ignore = "benchmark"]
-fn bench_microlp_vs_highs() {
-    for (clauses, hypotheses) in [(20, 100), (40, 200), (60, 300)] {
-        let instance = synthetic(6, 20, clauses, 0x9e37_79b9_7f4a_7c15);
-        let universe = universe(&instance, []).len();
-        let (micro, micro_took) = time_sweep(&instance, hypotheses, Backend::Microlp);
-        let (highs, highs_took) = time_sweep(&instance, hypotheses, Backend::Highs);
-        println!(
-            "{clauses} clauses, {universe} candidates, {} hypotheses: microlp {micro_took:?}, highs {highs_took:?}",
-            micro.len()
-        );
-        assert_eq!(micro, highs);
-    }
 }
 
 // Lazy no-goods.
@@ -715,7 +712,7 @@ fn surviving_clause(
         return None;
     }
     let deps = (0..1 + rng.below(3)).map(|_| spared[rng.below(spared.len())].clone());
-    let mut clause = Clause::new(deps, sends.clone());
+    let mut clause = new_clause(deps, sends.clone());
     clause.premises = tried
         .iter()
         .filter(|f| f.crashed_node().is_some())
@@ -782,7 +779,7 @@ fn the_lean_model_is_exact() {
         for step in 0..40 {
             let universe = universe(&clauses, []);
             let solve = |model| {
-                ilp::solve(
+                solve_model(
                     &universe,
                     &clauses,
                     &tried,
@@ -838,11 +835,11 @@ fn implied_and_always_satisfied_cover_rows_are_dropped() {
     let a = lossy("a", 1);
     let b = lossy("b", 2);
     let r = reliable("r", 1, "n", 0);
-    let narrow = Clause::new([a.clone()], sends.clone());
-    let wide = Clause::new([a.clone(), b.clone()], sends.clone());
-    let mut under_crash = Clause::new([a.clone()], sends.clone());
+    let narrow = new_clause([a.clone()], sends.clone());
+    let wide = new_clause([a.clone(), b.clone()], sends.clone());
+    let mut under_crash = new_clause([a.clone()], sends.clone());
     under_crash.premises = set([crash("n")]);
-    let mut always = Clause::new([r], sends.clone());
+    let mut always = new_clause([r], sends.clone());
     always.premises = set([crash("n")]);
     let clauses = [
         wide.clone(),
@@ -865,102 +862,25 @@ fn a_tried_set_that_a_clause_excludes_needs_no_no_good() {
     let b = lossy("b", 2);
     let tried = set([Fault::Omit(a.message)]);
     // The run under `tried` observed a derivation through `b`, which `tried` does not kill.
-    let clause = Clause::new([b], sends.clone());
-    assert!(ilp::already_excluded(
+    let clause = new_clause([b], sends.clone());
+    assert!(already_excluded(
         &tried,
         std::slice::from_ref(&clause),
         &[]
     ));
     // A derivation `tried` kills does not exclude it.
-    let killed = Clause::new([a], sends.clone());
-    assert!(!ilp::already_excluded(&tried, &[killed], &[]));
+    let killed = new_clause([a], sends.clone());
+    assert!(!already_excluded(&tried, &[killed], &[]));
     // Nor does one observed under a crash `tried` lacks.
     let mut under_crash = clause;
     under_crash.premises = set([crash("n")]);
-    assert!(!ilp::already_excluded(&tried, &[under_crash], &[]));
+    assert!(!already_excluded(&tried, &[under_crash], &[]));
     // A vacuous subset does.
-    assert!(ilp::already_excluded(
+    assert!(already_excluded(
         &tried,
         &[],
         std::slice::from_ref(&tried)
     ));
-}
-
-/// A search shaped like a real one: every hypothesis's run yields a derivation it does not kill
-/// (so explicit no-goods are rarely needed, and derivations repeat). Returns the proposals'
-/// sizes, the time spent, and the final model's rows as (cover rows, no-goods).
-fn time_learning_search(
-    nodes: usize,
-    sends: usize,
-    hypotheses: usize,
-    model: ilp::Model,
-) -> (Vec<usize>, Duration, (usize, usize)) {
-    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
-    let (pool, sequences) = random_pool(&mut rng, nodes, sends);
-    let bounds = CrashBounds {
-        cap: Some(2),
-        nodes,
-        checked: None,
-    };
-    let mut clauses: Vec<Clause<M>> = (0..3)
-        .filter_map(|_| surviving_clause(&pool, &sequences, &FaultSet::new(), &mut rng))
-        .collect();
-    let mut tried = BTreeSet::from([FaultSet::new()]);
-    let mut sizes = vec![];
-    let start = Instant::now();
-    while sizes.len() < hypotheses {
-        let universe = universe(&clauses, []);
-        let Some(h) = ilp::solve(
-            &universe,
-            &clauses,
-            &tried,
-            &[],
-            &bounds,
-            Backend::Microlp,
-            model,
-        ) else {
-            break;
-        };
-        sizes.push(h.len());
-        clauses.extend(surviving_clause(&pool, &sequences, &h, &mut rng));
-        tried.insert(h);
-    }
-    let took = start.elapsed();
-    let universe = universe(&clauses, []);
-    let rows = match model {
-        ilp::Model::Full => (ilp::all_cover_rows(&universe, &clauses).len(), tried.len()),
-        ilp::Model::Lean => (
-            ilp::cover_rows(&universe, &clauses).len(),
-            tried
-                .iter()
-                .filter(|t| !ilp::already_excluded(t, &clauses, &[]))
-                .count(),
-        ),
-    };
-    (sizes, took, rows)
-}
-
-/// `cargo test -p hydrofrac --release -- --ignored --nocapture --test-threads 1 bench_`
-#[test]
-#[ignore = "benchmark"]
-fn bench_lean_vs_full_model() {
-    for hypotheses in [100, 200, 300] {
-        let (full, full_took, full_rows) =
-            time_learning_search(6, 20, hypotheses, ilp::Model::Full);
-        let (lean, lean_took, lean_rows) =
-            time_learning_search(6, 20, hypotheses, ilp::Model::Lean);
-        println!(
-            "learning, {} hypotheses: full {full_took:?} ({:?}/h; {} covers, {} no-goods), \
-             lean {lean_took:?} ({:?}/h; {} covers, {} no-goods)",
-            lean.len(),
-            full_took / full.len().max(1) as u32,
-            full_rows.0,
-            full_rows.1,
-            lean_took / lean.len().max(1) as u32,
-            lean_rows.0,
-            lean_rows.1,
-        );
-    }
 }
 
 /// A disjunctive group (one run's schedules) is satisfied by killing *one* of its clauses;
@@ -968,8 +888,8 @@ fn bench_lean_vs_full_model() {
 /// schedules' derivations of the same run.
 #[test]
 fn a_group_needs_only_one_of_its_clauses_killed() {
-    let a = Clause::new([lossy("a", 1)], no_sends());
-    let b = Clause::new([lossy("b", 1)], no_sends());
+    let a = new_clause([lossy("a", 1)], no_sends());
+    let b = new_clause([lossy("b", 1)], no_sends());
     let clauses = [a.clone(), b.clone()];
     let universe = universe(&clauses, []);
     let tried = BTreeSet::from([FaultSet::new()]);
@@ -979,7 +899,7 @@ fn a_group_needs_only_one_of_its_clauses_killed() {
         &clauses,
         &tried,
         &[],
-        &CrashBounds::cap(0),
+        &cap_bounds(0),
         Backend::Microlp,
     )
     .unwrap();
@@ -993,7 +913,7 @@ fn a_group_needs_only_one_of_its_clauses_killed() {
         &group,
         &tried,
         &[],
-        &CrashBounds::cap(0),
+        &cap_bounds(0),
         Backend::Microlp,
     ) {
         assert!(tried.insert(h.clone()), "a hypothesis is proposed once");
@@ -1003,7 +923,7 @@ fn a_group_needs_only_one_of_its_clauses_killed() {
     assert_eq!(proposed[1].len(), 1, "{proposed:?}");
     assert_eq!(proposed.len(), 3, "both singletons, then the pair: {proposed:?}");
     // Two groups: each must be satisfied.
-    let c = Clause::new([lossy("c", 1)], no_sends());
+    let c = new_clause([lossy("c", 1)], no_sends());
     let universe = super::universe(&[a.clone(), b.clone(), c.clone()], []);
     let groups: [&[Clause<M>]; 2] = [&clauses, std::slice::from_ref(&c)];
     let h = hitting_set_any(
@@ -1011,7 +931,7 @@ fn a_group_needs_only_one_of_its_clauses_killed() {
         &groups,
         &BTreeSet::from([FaultSet::new()]),
         &[],
-        &CrashBounds::cap(0),
+        &cap_bounds(0),
         Backend::Microlp,
     )
     .unwrap();
@@ -1023,23 +943,23 @@ fn a_group_needs_only_one_of_its_clauses_killed() {
 /// enough to propose a hypothesis. A group with one clause is Molly's cover row.
 #[test]
 fn a_group_is_unkillable_only_if_every_clause_is() {
-    let dead = Clause::new([], no_sends());
-    let live = Clause::new([lossy("a", 1)], no_sends());
+    let dead = new_clause([], no_sends());
+    let live = new_clause([lossy("a", 1)], no_sends());
     let mixed = [dead.clone(), live.clone()];
-    let mut sweep: Sweep<M> = Sweep::new(CrashBounds::cap(0));
+    let mut sweep: Sweep<M> = Sweep::new(cap_bounds(0));
     let groups: [&[Clause<M>]; 1] = [&mixed];
     assert_eq!(
         sweep.next_any(&groups),
         Next::Try(set([Fault::Omit(("a", 1))]))
     );
-    let mut sweep: Sweep<M> = Sweep::new(CrashBounds::cap(0));
+    let mut sweep: Sweep<M> = Sweep::new(cap_bounds(0));
     let both_dead = [dead.clone(), dead.clone()];
     let groups: [&[Clause<M>]; 1] = [&both_dead];
     assert_eq!(sweep.next_any(&groups), Next::Certified(Tolerance::All));
     // One clause per group is `next`.
-    let mut by_next: Sweep<M> = Sweep::new(CrashBounds::cap(0));
-    let mut by_groups: Sweep<M> = Sweep::new(CrashBounds::cap(0));
-    let clauses = [live.clone(), Clause::new([lossy("b", 1)], no_sends())];
+    let mut by_next: Sweep<M> = Sweep::new(cap_bounds(0));
+    let mut by_groups: Sweep<M> = Sweep::new(cap_bounds(0));
+    let clauses = [live.clone(), new_clause([lossy("b", 1)], no_sends())];
     let singletons: Vec<&[Clause<M>]> = clauses.iter().map(std::slice::from_ref).collect();
     assert_eq!(by_next.next(&clauses), by_groups.next_any(&singletons));
 }
@@ -1056,8 +976,8 @@ fn an_earlier_crash_point_hits_clauses_no_weakest_candidate_hits_together() {
     let ab = Rc::new(SendSequences::from([("n".to_owned(), vec![a, b])]));
     let ba = Rc::new(SendSequences::from([("n".to_owned(), vec![b, a])]));
     let clauses = vec![
-        Clause::new([reliable("x", 2, "n", 1)], ab),
-        Clause::new([reliable("x", 1, "n", 1)], ba),
+        new_clause([reliable("x", 2, "n", 1)], ab),
+        new_clause([reliable("x", 1, "n", 1)], ba),
     ];
     // The weakest candidates are the crash after `a` and the crash after `b`; neither hits both.
     let weakest = universe(&clauses, []);
@@ -1080,7 +1000,7 @@ fn an_earlier_crash_point_hits_clauses_no_weakest_candidate_hits_together() {
 fn a_premise_crash_completes_with_every_crash_point_of_its_node() {
     let (a, b, c) = (("x", 1), ("x", 2), ("x", 3));
     let abc = Rc::new(SendSequences::from([("n".to_owned(), vec![a, b, c])]));
-    let mut clause = Clause::new([reliable("x", 3, "n", 2)], abc);
+    let mut clause = new_clause([reliable("x", 3, "n", 2)], abc);
     clause.premises = set([crash("n")]);
     let completed = completion(std::slice::from_ref(&clause), &[]);
     assert_eq!(
@@ -1180,7 +1100,7 @@ fn reordered_surviving_clause(
         return None;
     }
     let deps = (0..1 + rng.below(3)).map(|_| deliveries[rng.below(deliveries.len())].clone());
-    let mut clause = Clause::new(deps, sends);
+    let mut clause = new_clause(deps, sends);
     clause.premises = tried
         .iter()
         .filter(|f| f.crashed_node().is_some())
@@ -1245,9 +1165,9 @@ fn certificates_hold_over_every_positional_fault_set() {
                 Next::Try(h) => {
                     assert_eq!(
                         crash_count(&h),
-                        sweep.crash_bound(),
+                        sweep.bound,
                         "seed {seed}: {h:?} proposed at bound {}",
-                        sweep.crash_bound()
+                        sweep.bound
                     );
                     tried.push(h.clone());
                     match reordered_surviving_clause(&mut rng, &names, &messages, &lossy, &h) {

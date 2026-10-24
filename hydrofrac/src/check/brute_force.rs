@@ -27,10 +27,10 @@
 //! counterexample with at most `c` crashes (it tolerates fewer than `c`); and when the
 //! enumeration finds none, the search must not report one within the enumerated sizes.
 //!
-//! A schedule-sensitive label is never certified ([`Verdict::Exhausted`]), and its tolerances
-//! are only what its heuristic search found. The same comparison still applies to it, as a
-//! check of the heuristic rather than of a proof: `Exhausted` agrees only where the enumeration
-//! finds no breaking set within the bound the search swept, and a counterexample that
+//! A label of a program with schedule choices is never certified ([`Verdict::Exhausted`]), and
+//! its tolerances are only what its heuristic search found. The same comparison still applies
+//! to it, as a check of the heuristic rather than of a proof: `Exhausted` agrees only where the
+//! enumeration finds no breaking set within the bound the search swept, and a counterexample that
 //! "tolerated" `t` crashes must not have missed one with fewer. A disagreement there is a miss
 //! of the heuristic, not a false certificate, and the report says so.
 
@@ -41,10 +41,10 @@ use std::time::{Duration, Instant};
 
 use hydro_lang::sim::compiled::CompiledSim;
 
-use super::enumerate::{admissible, harvest};
 use super::{EcCheck, Engine, Run};
 use crate::check::results::{LabelResult, Results, Verdict, label_name};
-use crate::fault::MessageId;
+use crate::fault::{Event, Fate, InstanceRecord, MessageId, NodeId};
+use crate::lineage::Tables;
 use crate::report::ReportNames;
 use crate::search::{CrashBounds, Fault, FaultSet, Tolerance, crash_count};
 
@@ -245,6 +245,53 @@ impl EcCheck {
     }
 }
 
+/// Adds the candidate faults `record` reveals to `universe`.
+fn harvest(record: &InstanceRecord, tables: &Tables, universe: &mut BTreeSet<Fault<MessageId>>) {
+    let names = tables.names();
+    let crashable: BTreeSet<&NodeId> = names.crashable().iter().collect();
+    for node in &crashable {
+        universe.insert(Fault::crash_after(names.name(node), None));
+    }
+    for event in record.log.events() {
+        match event {
+            // Neither omissions nor new crashes fire after the heal.
+            Event::Heal => break,
+            Event::Sent { msg, fate, .. } if *fate != Fate::SenderDead => {
+                if crashable.contains(&msg.from) {
+                    universe.insert(Fault::crash_after(names.name(&msg.from), Some(msg.clone())));
+                }
+                if tables.is_faulty(msg.channel) {
+                    universe.insert(Fault::Omit(msg.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Whether `set` is admissible under `bounds`: at most one crash per node, and within the
+/// crash cap, the vacuity bound and the checked cluster's cap.
+fn admissible(set: &FaultSet<MessageId>, bounds: &CrashBounds) -> bool {
+    let crashed: Vec<&String> = set.iter().filter_map(Fault::crashed_node).collect();
+    let distinct: BTreeSet<&String> = crashed.iter().copied().collect();
+    if distinct.len() != crashed.len() {
+        return false;
+    }
+    if bounds.max_crashes().is_some_and(|max| crashed.len() > max) {
+        return false;
+    }
+    match &bounds.checked {
+        Some(checked) => {
+            crashed
+                .iter()
+                .filter(|n| checked.nodes.contains(**n))
+                .count()
+                <= checked.cap
+        }
+        None => true,
+    }
+}
+
 /// Every subset of `universe` of exactly `size` faults, in order.
 fn subsets(universe: &[Fault<MessageId>], size: usize) -> Vec<FaultSet<MessageId>> {
     fn go(
@@ -406,12 +453,12 @@ fn disagreement(
             )
         })
     };
-    // The same, for a schedule-sensitive label's search, which proves nothing.
+    // The same, for a search in a program with schedule choices, which proves nothing.
     let missed = |k: usize, claim: &str| {
         b.breaking_within(k).map(|set| {
             format!(
-                "the search {claim}, but {} ({} crash(es)) breaks it (the label is \
-                 schedule-sensitive: a miss of the search heuristic, not a false certificate)",
+                "the search {claim}, but {} ({} crash(es)) breaks it (the program \
+                 has schedule choices: a miss of the search heuristic, not a false certificate)",
                 show(set),
                 crash_count(set)
             )
@@ -434,48 +481,13 @@ fn disagreement(
         Verdict::Exhausted {
             tolerates: Tolerance::UpTo(k),
             ..
-        } => missed(
-            *k,
-            &format!("found no counterexample with up to {k} crash(es)"),
-        ),
-        // A bounded certificate covers the sets of at most `max_faults` faults (all, if
-        // `None`) with at most `tolerates` crashes.
-        Verdict::CertifiedByEnumeration {
-            tolerates,
-            max_faults,
-            ..
-        } => {
-            let k = match tolerates {
-                Tolerance::All => usize::MAX,
-                Tolerance::UpTo(k) => *k,
-            };
-            b.breaking
-                .iter()
-                .find(|s| crash_count(s) <= k && max_faults.is_none_or(|f| s.len() <= f))
-                .map(|set| {
-                    format!(
-                        "the search's enumeration says it holds for every admissible set of up to \
-                         {} fault(s) with up to {} crash(es), but {} ({} crash(es)) breaks it",
-                        max_faults.map_or_else(|| "any number of".to_owned(), |f| f.to_string()),
-                        if k == usize::MAX {
-                            "any".to_owned()
-                        } else {
-                            k.to_string()
-                        },
-                        show(set),
-                        crash_count(set)
-                    )
-                })
-        }
+        } => missed(*k, &format!("found no counterexample with up to {k} crash(es)")),
         Verdict::Counterexample(cex) => {
             if let Some(t) = cex.tolerates {
                 let problem = if cex.tolerance_certified {
                     refuted(t, &format!("tolerates {t} crash(es)"))
                 } else {
-                    missed(
-                        t,
-                        &format!("found no counterexample with up to {t} crash(es)"),
-                    )
+                    missed(t, &format!("found no counterexample with up to {t} crash(es)"))
                 };
                 if let Some(problem) = problem {
                     return Some(problem);
