@@ -37,7 +37,9 @@ struct Inner {
     /// When each round was offered.
     rounds: Vec<Duration>,
     /// Every record of every observed output stream, by stream name: `(time, sample)`.
-    streams: BTreeMap<String, Vec<(Duration, Sample)>>,
+    /// Per stream: arrival time, sample, and how many records the sample stands for (a
+    /// counter's increment is kept as one entry, however large).
+    streams: BTreeMap<String, Vec<(Duration, Sample, u64)>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -114,7 +116,7 @@ impl Recorder {
         g.streams
             .entry(name.to_owned())
             .or_default()
-            .push((t, sample));
+            .push((t, sample, 1));
     }
 
     /// The names of every stream that has produced a record so far.
@@ -127,7 +129,7 @@ impl Recorder {
         let g = self.inner.lock().unwrap();
         g.streams
             .get(name)
-            .is_some_and(|v| v.iter().any(|(_, s)| s.id.is_some()))
+            .is_some_and(|v| v.iter().any(|(_, s, _)| s.id.is_some()))
     }
 
     /// Whether every record of `name` so far carried a numeric value.
@@ -135,7 +137,7 @@ impl Recorder {
         let g = self.inner.lock().unwrap();
         g.streams
             .get(name)
-            .is_some_and(|v| !v.is_empty() && v.iter().all(|(_, s)| s.value.is_some()))
+            .is_some_and(|v| !v.is_empty() && v.iter().all(|(_, s, _)| s.value.is_some()))
     }
 
     /// The program reported request `id` complete. Only the first report of a fate for an id
@@ -180,10 +182,20 @@ impl Recorder {
 
     /// A program-reported count of events since its last report (re-sends, requests served).
     /// Recorded as `increment` records of stream `name` (rounded).
+    /// The increment is kept as one entry standing for that many records, so a large report (a
+    /// starved node's backlog of counts arriving at once) costs the harness no more than a small
+    /// one; pushing one record per unit stalled the generator's task for hundreds of milliseconds.
     pub fn counter(&self, name: &str, increment: f64) {
-        for _ in 0..increment.round().max(0.0) as u64 {
-            self.record(name, Sample::default());
+        let n = increment.round().max(0.0) as u64;
+        if n == 0 {
+            return;
         }
+        let mut g = self.inner.lock().unwrap();
+        let t = g.start.elapsed();
+        g.streams
+            .entry(name.to_owned())
+            .or_default()
+            .push((t, Sample::default(), n));
     }
 
     /// Buckets everything recorded so far into one-second rows covering `total`. When
@@ -196,7 +208,7 @@ impl Recorder {
         if let Some(name) = completion_stream
             && let Some(samples) = g.streams.get(name).cloned()
         {
-            for (t, s) in samples {
+            for (t, s, _) in samples {
                 if let Some(id) = s.id
                     && let Some(r) = g.requests.get_mut(&id)
                     && r.fate.is_none()
@@ -248,9 +260,9 @@ impl Recorder {
             // "member", `None`): each member's depth is its own, and the program's backlog is
             // their total.
             let mut latest_by_member: BTreeMap<Option<u32>, f64> = BTreeMap::new();
-            for &(t, s) in samples.iter().filter(|(t, _)| *t < total) {
+            for &(t, s, n) in samples.iter().filter(|(t, _, _)| *t < total) {
                 let b = &mut buckets[idx(t)];
-                *b.stream_records.entry(name.clone()).or_default() += 1;
+                *b.stream_records.entry(name.clone()).or_default() += n;
                 if let Some(v) = s.value {
                     // The last sample in the second wins; samples are pushed in time order.
                     latest_by_member.insert(s.member, v);
@@ -268,7 +280,7 @@ impl Recorder {
         let stream_names: Vec<String> = g.streams.keys().cloned().collect();
         let valued_names: Vec<String> = stream_names
             .iter()
-            .filter(|n| g.streams[*n].iter().any(|(_, s)| s.value.is_some()))
+            .filter(|n| g.streams[*n].iter().any(|(_, s, _)| s.value.is_some()))
             .cloned()
             .collect();
         let mut last: BTreeMap<String, f64> = BTreeMap::new();
@@ -483,6 +495,16 @@ mod tests {
         let tsv = t.to_tsv();
         assert!(tsv.starts_with("second\trounds\toffered\toffered_completed\toffered_abandoned\toffered_outstanding\toffered_p50_ms\toffered_p99_ms\tcompleted\tabandoned\tp50_ms\tp99_ms\tmax_ms\tbacklog_n\tretried_n\tbacklog_v\n"), "{tsv}");
         assert_eq!(tsv.lines().count(), 4);
+    }
+
+    #[test]
+    fn a_large_counter_report_is_one_entry() {
+        let r = Recorder::new();
+        r.counter("resent", 2_000_000.0);
+        r.counter("resent", 0.0);
+        assert_eq!(r.inner.lock().unwrap().streams["resent"].len(), 1);
+        let t = r.trace(Duration::from_secs(1), None);
+        assert_eq!(t.buckets[0].stream_records["resent"], 2_000_000);
     }
 
     #[test]
