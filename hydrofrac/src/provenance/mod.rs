@@ -38,6 +38,9 @@ pub mod fragile;
 #[cfg(stageleft_runtime)]
 pub mod fanout;
 pub mod rewrite;
+/// Trusted `quorum` (docs/design/hydrofrac-races.md §8.2): its mint gives each certificate the
+/// lineage of its fact's attestations, and none of its steps is fragile.
+mod quorum;
 
 #[cfg(stageleft_runtime)]
 pub use fragile::FragileSite;

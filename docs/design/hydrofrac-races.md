@@ -398,7 +398,7 @@ was released.
   The quorum step (`collect_quorum`: count over retained responses, then a threshold) is a different shape. It
   needs its own rule ("state retained until the record it supports is emitted"), which is not designed yet.
 
-### 8.2 Thresholds over state hidden in closures (open)
+### 8.2 Thresholds over state hidden in closures (`quorum` trusted; the rest open)
 
 The uniform broadcast, multi-Paxos and ABD mints all have the same form: one closure over `by_mut` state that adds
 each response to a pending set and emits once the set reaches a threshold.
@@ -409,13 +409,48 @@ each response to a pending set and emits once the set reaches a threshold.
   monotone in its state is a property of user code. The Paxos acceptor shows the danger: its closure over state
   refuses accepts below its promise, which is not monotone.
 
-There are three ways out, none of them in v1:
+There are three ways out. Only (1) is implemented, and only for `quorum` (below):
 1. **Trust a small vetted combinator.** A library threshold (`quorum` / `collect_quorum`) declared monotone, like
    `unique` is today. The certificate would then name every combinator it trusts.
 2. **Ask programs to express the mint with structural operators** whose semantics the table covers.
 3. **Pay brute-force cost** for these labels.
 
 I recommend (1). It moves the trust from arbitrary closures to one audited function.
+
+#### Trusted `quorum` (implemented)
+
+Option (1) is implemented for `hydro_std::ec_inference_demos::quorum::quorum` (`hydrofrac/src/provenance/quorum.rs`).
+
+- **What is trusted.** Its code, `hydro_std/src/ec_inference_demos/quorum.rs:121-185`, read and audited, the way
+  `unique` is trusted. Nothing is derived by the checker. Only the exact compiled form is recognised: the mint
+  closure (`:158-171`), the fold (`:144-150`) and the state initialisers (`:142-143`, `:156`), matched by their text
+  as stageleft quotes them from that file, plus the shape of the state cells. A copy of the same logic written
+  elsewhere stays fragile. There is no user knob.
+- **Why it is sound (Lemma R's step, §5).**
+  - `acks.unique()` (`:133`) keeps one attestation per `(fact, attestor)`.
+  - `pending` (`:142`) keeps the attestors of each unfired fact across ticks and only adds to them.
+  - `fired` (`:143`) makes each fact fire at most once.
+  - The test `attestors.len() >= threshold` (`:162`) is monotone.
+
+  So if a run delivers the attestations of `f` from `threshold` distinct attestors, the run emits `Durable(f)`,
+  however those attestations are batched. Quiescence releases every batch. Each attestation either reaches
+  `pending` or finds `f` already fired, and in that case `Durable(f)` was already emitted.
+- **What the rewrite does.**
+  - The batch (`:136`), fold, state cells and mint closure are left out of the fragile sites, so uniform reliable
+    broadcast has none.
+  - The fold keeps each attestation tagged.
+  - `pending` carries the lineage of each unfired fact's attestations next to the attestor sets.
+  - The mint closure runs unchanged, on untagged views of its state.
+  - Each `Durable(f)` gets the lineage of `f`'s own attestations, and nothing else. That lineage is every
+    attestation of `f` received while `f` was unfired, up to the tick it fired: the first `threshold` of them and
+    possibly others from the same tick. A larger lineage is a superset, so it is still sound.
+- **Effect** (`hydro_test`: `ec_races_targets`, `ec_quorum_trust`).
+  - Uniform reliable broadcast over two members, cross-checked by brute force: one schedule per set (2 sets at
+    threshold 1, 3 at threshold 2). Before, both modes needed 4 sets and 169 schedules.
+  - Over three members at threshold 2, where brute force cannot finish even the failure-free run: certified up to
+    two crashes in 16 sets and 16 schedules.
+  - A planted bug through the real `quorum` (each member certifies on its own receipt, threshold 1) is still found:
+    the source crashing after its first send. Both modes agree with brute force.
 
 ### 8.3 Fixing irrelevant choices inside an explored hypothesis (not proposed for v1)
 

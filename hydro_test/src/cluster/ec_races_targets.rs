@@ -12,7 +12,8 @@
 //! schedules next to the enumeration's.
 //!
 //! Skipped, because brute force cannot exhaust even their failure-free run (measured by the probes
-//! below): uniform reliable broadcast over three members, G-Set gossip, multi-Paxos and ABD.
+//! below): uniform reliable broadcast over three members (checked by the races mode alone in
+//! `ec_quorum_trust`), G-Set gossip, multi-Paxos and ABD.
 //! Uniform reliable broadcast runs over two members instead, where only the source may crash.
 //! Cooperative termination with racing timers is sampled; it is a counterexample-finding
 //! contrast only.
@@ -410,6 +411,18 @@ fn assert_certified(cross: &CrossCheck, name: &str) {
     );
 }
 
+/// The trusted `quorum` (docs/design/hydrofrac-races.md §8.2) leaves the label no fragile step:
+/// the races mode runs one schedule per set (measured: 2 sets at threshold 1, 3 at threshold 2,
+/// against brute force's 4 sets and 169 schedules).
+fn assert_one_schedule_per_set(cross: &CrossCheck, name: &str) {
+    let l = label(cross, name);
+    assert_eq!(
+        l.stats.schedules, l.stats.hypotheses,
+        "{name}: one schedule per set\n{}",
+        cross.results
+    );
+}
+
 /// Uniform reliable broadcast, two members (so no member may crash: only the source), one item.
 #[test]
 fn races_targets_urb2_threshold1_lite() {
@@ -432,6 +445,7 @@ fn races_targets_urb2_threshold1_races() {
     );
     c.assert_agrees();
     assert_certified(&c, "uniform_reliable_broadcast_closed");
+    assert_one_schedule_per_set(&c, "uniform_reliable_broadcast_closed");
 }
 
 #[test]
@@ -455,6 +469,7 @@ fn races_targets_urb2_threshold2_races() {
     );
     c.assert_agrees();
     assert_certified(&c, "uniform_reliable_broadcast_closed");
+    assert_one_schedule_per_set(&c, "uniform_reliable_broadcast_closed");
 }
 
 /// Two-phase commit with cooperative termination, two participants, the quiescing harness

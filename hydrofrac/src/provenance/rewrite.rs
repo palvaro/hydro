@@ -81,7 +81,7 @@ fn hydro_lang_crate() -> TokenStream {
 
 /// The runtime representation: `hydro_lang`'s provenance types (`Tagged<T>` with a set of
 /// `Tag`s). A delivery is the tag [`delivery_tag`]; [`opaque_tag`] marks unknown lineage.
-fn prov() -> TokenStream {
+pub(crate) fn prov() -> TokenStream {
     let root = hydro_lang_crate();
     quote!(#root::sim::provenance)
 }
@@ -682,6 +682,9 @@ struct Ctx {
     /// The fragile steps to tag, by their key before the rewrite ([`node_key`]) to site
     /// index. Empty unless the rewrite runs in fragile mode.
     fragile: std::collections::HashMap<usize, usize>,
+    /// The trusted `quorum` mints ([`super::quorum`]). Empty unless the rewrite runs in fragile
+    /// mode.
+    quorum: super::quorum::Mints,
 }
 
 /// Wraps `node` in a `Map` applying `f`; the map inherits `node`'s (already retyped) metadata.
@@ -788,10 +791,102 @@ fn transform_node(node: &mut HydroNode, ctx: &Ctx) {
     } else {
         ctx.fragile.get(&node_key(node)).copied()
     };
-    transform_node_inner(node, ctx);
+    if !quorum_node(node, ctx) {
+        transform_node_inner(node, ctx);
+    }
     // After a fragile step, every record it emits names its site.
     if let Some(index) = fragile {
         wrap_after(node, add_fragile_tag(index, kind_of(node), &ty_of(node)));
+    }
+}
+
+/// Rewrites the fold and the mint closure of a trusted `quorum` ([`super::quorum`]), keeping
+/// each attestation's lineage and giving each `Durable(f)` the lineage of `f`'s attestations
+/// only. Whether `node` was one of them.
+fn quorum_node(node: &mut HydroNode, ctx: &Ctx) -> bool {
+    if ctx.quorum.mints.is_empty() || matches!(node, HydroNode::Placeholder) {
+        return false;
+    }
+    let key = node_key(node);
+    let p = prov();
+    match node {
+        HydroNode::Fold {
+            init,
+            acc,
+            metadata,
+            ..
+        } => {
+            let Some(item) = ctx.quorum.folds.get(&key) else {
+                return false;
+            };
+            // Each attestation is kept with its own lineage; the fold itself adds none.
+            *init = plain_closure(quote!(
+                || #p::Tagged::pristine(::std::vec::Vec::<#p::Tagged<#item>>::new())
+            ));
+            *acc = plain_closure(quote!(
+                |__prov_acc: &mut #p::Tagged<::std::vec::Vec<#p::Tagged<#item>>>,
+                 __prov_item: #p::Tagged<#item>| {
+                    __prov_acc.value.push(__prov_item);
+                }
+            ));
+            retype(metadata);
+            true
+        }
+        HydroNode::FlatMap { f, metadata, .. } => {
+            let Some((item, _)) = ctx.quorum.mints.get(&key) else {
+                return false;
+            };
+            let (r0, r1, r2) = (
+                handoff_ref_ident(0),
+                handoff_ref_ident(1),
+                handoff_ref_ident(2),
+            );
+            let (orig, refs) = f.clone().into_parts();
+            let orig = &orig.0;
+            let expr: syn::Expr = parse_quote!({
+                let __prov_q0 = &*#r0;
+                let __prov_q1 = &mut *#r1;
+                let __prov_q2 = &mut *#r2;
+                move |__prov_item: #p::Tagged<()>| {
+                    let __prov_x = __prov_item.value;
+                    let (__prov_att, __prov_lin) = &mut __prov_q2.value;
+                    // The lineage of each unfired fact's attestations, persisted with `pending`.
+                    for __prov_a in __prov_q0.value.iter() {
+                        if !__prov_q1.value.contains(&__prov_a.value.0) {
+                            __prov_lin
+                                .entry(::core::clone::Clone::clone(&__prov_a.value.0))
+                                .or_default()
+                                .extend(__prov_a.tags.iter().copied());
+                        }
+                    }
+                    let __prov_view: ::std::vec::Vec<#item> = __prov_q0
+                        .value
+                        .iter()
+                        .map(|__prov_a| ::core::clone::Clone::clone(&__prov_a.value))
+                        .collect();
+                    // `quorum`'s own closure, on untagged views of its state.
+                    let __prov_out: ::std::vec::Vec<_> = {
+                        let #r0 = &__prov_view;
+                        let #r1 = &mut __prov_q1.value;
+                        let #r2 = &mut *__prov_att;
+                        #[allow(unused_mut)]
+                        let mut __prov_f = #orig;
+                        ::core::iter::IntoIterator::into_iter(__prov_f(__prov_x)).collect()
+                    };
+                    __prov_out
+                        .into_iter()
+                        .map(|__prov_d| {
+                            let __prov_t = __prov_lin.remove(__prov_d.fact()).unwrap_or_default();
+                            #p::Tagged::from_parts(__prov_t, false, __prov_d)
+                        })
+                        .collect::<::std::vec::Vec<_>>()
+                }
+            });
+            *f = ClosureExpr::new(DebugExpr::from(expr), refs);
+            retype(metadata);
+            true
+        }
+        _ => false,
     }
 }
 
@@ -1414,10 +1509,12 @@ pub fn install_fragile<'a>(
     flow.with_network_hook_points().with_ir_pass(
         hydro_lang::sim::network_hook::IrPassStage::PostNetwork,
         move |ir| {
-            let (found, fragile) = super::fragile::classify(ir);
+            let quorum = super::quorum::prepare(ir);
+            let (found, fragile) = super::fragile::classify(ir, &quorum.inside);
             *sites.borrow_mut() = found;
             let ctx = Ctx {
                 fragile,
+                quorum,
                 ..Ctx::default()
             };
             let found = rewrite_with(ir, ctx);

@@ -60,14 +60,21 @@ impl Display for FragileSite {
 }
 
 /// Every fragile step of `ir` (see the [module docs](self)), with site indices from 0 in the
-/// order the scan meets them, and a map from [`node_key`] to site index.
-pub(crate) fn classify(ir: &[HydroRoot]) -> (Vec<FragileSite>, HashMap<usize, usize>) {
+/// order the scan meets them, and a map from [`node_key`] to site index. The nodes keyed in
+/// `trusted` (those inside a trusted `quorum`, [`super::quorum`]) are not sites.
+pub(crate) fn classify(
+    ir: &[HydroRoot],
+    trusted: &HashSet<usize>,
+) -> (Vec<FragileSite>, HashMap<usize, usize>) {
     let scan = View::new(ir);
     let mut sites = vec![];
     let mut by_key = HashMap::new();
     for ptr in scan.nodes() {
         // SAFETY: every pointer points into `ir`, which is borrowed for the whole scan.
         let node = unsafe { &*ptr };
+        if trusted.contains(&node_key(node)) {
+            continue;
+        }
         if let Some(op) = scan.fragile(node) {
             by_key.insert(node_key(node), sites.len());
             sites.push(FragileSite {
