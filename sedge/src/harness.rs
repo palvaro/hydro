@@ -44,8 +44,8 @@ use hydro_lang::compile::deploy::DeployResult;
 use hydro_lang::deploy::{HydroDeploy, TrybuildHost};
 
 use crate::capacity::{
-    CapacityBackend, CpuQuota, CpuStat, DockerBackend, Handle, Limits, NodeSpec, Nodes,
-    host_fingerprint,
+    CapacityBackend, CpuQuota, CpuStat, DockerBackend, Handle, Limits, NodeSpec, Nodes, ProcIo,
+    ProcSampler, host_fingerprint,
 };
 use crate::generator::drive;
 use hydro_deploy_integration::SEND_BUFFER_ENV;
@@ -326,6 +326,11 @@ pub struct RunConfig {
     /// that a slow peer never stalls a node: the default, since without it backpressure from the
     /// first slow link reaches the generator and the workload is no longer open-loop.
     pub unbounded_sends: bool,
+    /// Roles whose nodes get bounded send queues even when `unbounded_sends` is set
+    /// (`--send-buffer bounded:ROLE,...`): their sends push back on their own dataflow, while
+    /// every other node (the load's entry point in particular) keeps unbounded queues and the
+    /// feed stays open-loop.
+    pub bounded_send_roles: Vec<String>,
     /// The Cargo profile the deployed nodes are built with: [`DEPLOY_PROFILE`] by default (an
     /// optimized build), or `dev` for a debug build (`--deploy-profile dev`).
     pub deploy_profile: String,
@@ -362,6 +367,7 @@ impl Default for RunConfig {
             probe_start: None,
             calibrate_only: false,
             unbounded_sends: true,
+            bounded_send_roles: Vec::new(),
             deploy_profile: DEPLOY_PROFILE.to_owned(),
         }
     }
@@ -521,12 +527,21 @@ impl RunConfig {
                 "--no-calibrate" => cfg.calibrate = Calibrate::Off,
                 "--calibrate-only" => cfg.calibrate_only = true,
                 "--send-buffer" => {
-                    cfg.unbounded_sends = match value("--send-buffer")?.as_str() {
-                        "unbounded" => true,
-                        "bounded" => false,
+                    let v = value("--send-buffer")?;
+                    match v.as_str() {
+                        "unbounded" => cfg.unbounded_sends = true,
+                        "bounded" => cfg.unbounded_sends = false,
+                        v if v.starts_with("bounded:") => {
+                            cfg.unbounded_sends = true;
+                            cfg.bounded_send_roles = v["bounded:".len()..]
+                                .split(',')
+                                .map(|r| r.trim().to_owned())
+                                .filter(|r| !r.is_empty())
+                                .collect();
+                        }
                         v => {
                             return Err(format!(
-                                "--send-buffer wants unbounded or bounded, got `{v}`"
+                                "--send-buffer wants unbounded, bounded or bounded:ROLE,..., got `{v}`"
                             ));
                         }
                     }
@@ -597,10 +612,11 @@ usage: sedge [options] <crate> [function-substring]
   --harness-cpus LIST      cores the harness is pinned to (default: lower half; `none`)
   --image IMAGE            container image (default amazonlinux:latest)
   --memory-mb M            memory limit per node
-  --send-buffer unbounded|bounded
+  --send-buffer unbounded|bounded|bounded:ROLE,...
                            nodes' outgoing connections queue sends in memory (default unbounded,
                            so a slow peer never stalls a node and the workload stays open-loop),
-                           or push back on the sending dataflow (Hydro's own default)
+                           or push back on the sending dataflow (Hydro's own default); with
+                           `bounded:ROLE,...` only those roles push back
   --deploy-profile NAME    Cargo profile the nodes are built with (default `profile`: release
                            with debug info and no LTO; `dev` for a debug build)
  μ:
@@ -890,7 +906,7 @@ static NODE_SEQ: AtomicU64 = AtomicU64::new(0);
 /// handles to their containers. Dropping it removes the containers.
 pub struct TrialCapacity {
     pub nodes: Option<Nodes>,
-    prefix: String,
+    pub prefix: String,
 }
 
 impl TrialCapacity {
@@ -942,7 +958,12 @@ impl TrialCapacity {
             .rustflags("-C opt-level=3 -C codegen-units=1 -C strip=none -C debuginfo=2 -C lto=off")
             .profile(run.deploy_profile.clone())
             .feature("sedge");
-        if run.unbounded_sends {
+        if run.unbounded_sends
+            && !run
+                .bounded_send_roles
+                .iter()
+                .any(|r| r.eq_ignore_ascii_case(role))
+        {
             h = h.env(SEND_BUFFER_ENV, "unbounded");
         }
         for f in &run.features {
@@ -1181,6 +1202,9 @@ pub struct Executed {
     pub feed_max_lag: Duration,
     pub usage: Vec<NodeUsage>,
     pub limits: String,
+    /// Nodes that were no longer running when the run ended, in words (`Member:3 was OOM-killed
+    /// at its memory limit`). Any makes the trial INVALID: a dead node is not an overloaded one.
+    pub node_failures: Vec<String>,
 }
 
 /// The largest fraction of records that may enter the program late for a run to count as open
@@ -1207,14 +1231,18 @@ impl Executed {
 
 /// Samples every node's `cpu.stat` once a second from `start` until the returned flag is set,
 /// and applies `dip` in the profile's trigger window.
+/// With a `procs` sampler, also reads every node's `/proc` accounting each second.
+type CapacitySamples = (Vec<Vec<Option<CpuStat>>>, Vec<Vec<Option<ProcIo>>>);
+
 fn spawn_capacity_tasks(
     nodes: &Nodes,
     start: Instant,
     profile: Profile,
     dip: Option<CpuDip>,
+    procs: Option<Arc<ProcSampler>>,
 ) -> (
     Arc<std::sync::atomic::AtomicBool>,
-    tokio::task::JoinHandle<Vec<Vec<Option<CpuStat>>>>,
+    tokio::task::JoinHandle<CapacitySamples>,
     Option<tokio::task::JoinHandle<()>>,
 ) {
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1227,19 +1255,28 @@ fn spawn_capacity_tasks(
         tokio::spawn(async move {
             // samples[s][node]: cumulative stat at second s.
             let mut samples: Vec<Vec<Option<CpuStat>>> = Vec::new();
+            let mut io: Vec<Vec<Option<ProcIo>>> = Vec::new();
             let mut s = 0u32;
             loop {
                 tokio::time::sleep_until((start + Duration::from_secs(s as u64)).into()).await;
                 let hs = handles.clone();
                 let b = backend.clone();
-                let row = tokio::task::spawn_blocking(move || {
-                    hs.iter().map(|h| b.cpu_stat(h)).collect::<Vec<_>>()
+                let p = procs.clone();
+                let (row, io_row) = tokio::task::spawn_blocking(move || {
+                    let row = hs.iter().map(|h| b.cpu_stat(h)).collect::<Vec<_>>();
+                    let io_row = p.map(|p| {
+                        let pids: Vec<Vec<u32>> = hs.iter().map(|h| b.pids(h)).collect();
+                        p.set_pids(&pids);
+                        p.read(hs.len())
+                    });
+                    (row, io_row.unwrap_or_default())
                 })
                 .await
                 .unwrap_or_default();
                 samples.push(row);
+                io.push(io_row);
                 if stop.load(Ordering::Relaxed) {
-                    return samples;
+                    return (samples, io);
                 }
                 s += 1;
             }
@@ -1398,6 +1435,24 @@ where
         streams.push((s.name, s.mode, (s.connect)(nodes).await));
     }
     let explicit_ids = completions.is_some();
+    // The nodes' `/proc` accounting, read from outside them: what each node really wrote to its
+    // sockets, even when it is too starved to report.
+    let proc_sampler = match &capacity.nodes {
+        Some(n) => {
+            let backend = n.backend.clone();
+            let name = format!("{}-procstat", capacity.prefix);
+            let dir = std::env::temp_dir().join("sedge-procstat").join(&name);
+            let cpuset = run.capacity.harness_cpuset.clone();
+            tokio::task::spawn_blocking(move || {
+                backend.proc_sampler(&name, &dir, cpuset.as_deref())
+            })
+            .await
+            .ok()
+            .flatten()
+            .map(Arc::new)
+        }
+        None => None,
+    };
     deployment.start().await.expect("deployment did not start");
     // Let the processes settle before time zero; the timers start with the trial.
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -1412,10 +1467,9 @@ where
         futures::future::pending::<()>().await;
     };
     let mut writers = std::pin::pin!(writers);
-    let capacity_tasks = capacity
-        .nodes
-        .as_ref()
-        .map(|n| spawn_capacity_tasks(n, start, profile, spec.cpu_dip.clone()));
+    let capacity_tasks = capacity.nodes.as_ref().map(|n| {
+        spawn_capacity_tasks(n, start, profile, spec.cpu_dip.clone(), proc_sampler.clone())
+    });
     // Only a timing fault's timers are driven from here; with none, this never completes.
     let driven_timers = !timers.is_empty();
     let timers_running = futures::future::join_all(timers.into_iter().map(|t| {
@@ -1564,9 +1618,33 @@ where
         if let Some(d) = dipper {
             d.abort();
         }
-        let samples = sampler.await.unwrap_or_default();
+        let (samples, io) = sampler.await.unwrap_or_default();
         usage = usage_from_samples(&n.handles(), &samples);
         let len = trace.buckets.len();
+        if proc_sampler.is_some() {
+            for (i, h) in n.handles().iter().enumerate() {
+                let tag = h.node.to_string().replace(':', "_");
+                let at = |s: usize| io.get(s).and_then(|row| row.get(i).copied().flatten());
+                // Per second s: the change from sample s to s+1, as for the CPU columns.
+                let delta = |f: &dyn Fn(&ProcIo) -> u64, scale: f64| -> Vec<f64> {
+                    (0..len)
+                        .map(|s| match (at(s), at(s + 1)) {
+                            (Some(a), Some(b)) => f(&b).saturating_sub(f(&a)) as f64 / scale,
+                            _ => f64::NAN,
+                        })
+                        .collect()
+                };
+                trace.extra.push((format!("wchar_kb_{tag}"), delta(&|p| p.wchar, 1024.0)));
+                trace.extra.push((format!("rchar_kb_{tag}"), delta(&|p| p.rchar, 1024.0)));
+                trace.extra.push((format!("syscw_{tag}"), delta(&|p| p.syscw, 1.0)));
+                trace.extra.push((
+                    format!("rss_mb_{tag}"),
+                    (0..len)
+                        .map(|s| at(s + 1).map(|p| p.rss_kb as f64 / 1024.0).unwrap_or(f64::NAN))
+                        .collect(),
+                ));
+            }
+        }
         for u in &usage {
             let col = |f: &dyn Fn(&(f64, u64, f64)) -> f64| -> Vec<f64> {
                 (0..len)
@@ -1581,6 +1659,33 @@ where
             trace.extra.push((format!("throttled_ms_{tag}"), col(&|s| s.2)));
         }
     }
+    // Before the deployment is stopped: which nodes had already died, and how.
+    let node_failures = match &capacity.nodes {
+        Some(n) => {
+            let handles = n.handles();
+            let backend = n.backend.clone();
+            tokio::task::spawn_blocking(move || {
+                handles
+                    .iter()
+                    .filter_map(|h| {
+                        backend.exit(h).map(|e| {
+                            if e.oom_killed {
+                                format!("{} was OOM-killed at its memory limit", h.node)
+                            } else {
+                                format!("{} exited with code {}", h.node, e.exit_code)
+                            }
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .unwrap_or_default()
+        }
+        None => Vec::new(),
+    };
+    for f in &node_failures {
+        eprintln!("  node failure: {f}");
+    }
     if let Err(e) = deployment.stop().await {
         eprintln!("  (deployment did not stop cleanly: {e})");
     }
@@ -1593,6 +1698,9 @@ where
                     .or_insert_with(|| h.limits.to_string());
             }
             n.remove_all();
+            // A node that was dying (an OOM kill) when it was removed can survive `rm -f`; sweep
+            // everything of this trial by name.
+            n.backend.remove_prefix(&format!("{}-", capacity.prefix));
             by_role
                 .into_iter()
                 .map(|(r, l)| format!("{r}: {l}"))
@@ -1601,6 +1709,7 @@ where
         }
         None => "uncapped (no backend)".to_owned(),
     };
+    drop(proc_sampler);
     drop(capacity);
     Executed {
         trace,
@@ -1613,6 +1722,7 @@ where
         feed_max_lag,
         usage,
         limits,
+        node_failures,
     }
 }
 
@@ -1698,6 +1808,15 @@ where
                 verdict.reason = format!(
                     "the generator fell behind on {} arrivals while no node was ever throttled: the harness, not the program, was the bottleneck (the program's own reading was {}: {})",
                     ex.late, verdict.outcome, verdict.reason
+                );
+                verdict.outcome = Outcome::Invalid;
+            }
+            if !ex.node_failures.is_empty() {
+                verdict.reason = format!(
+                    "a node died during the run ({}), so this is a crash, not an overload (the program's own reading was {}: {})",
+                    ex.node_failures.join("; "),
+                    verdict.outcome,
+                    verdict.reason
                 );
                 verdict.outcome = Outcome::Invalid;
             }
