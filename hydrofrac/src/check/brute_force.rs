@@ -12,8 +12,8 @@
 //!
 //! A set is admissible for a label under the same bounds the search uses: at most one crash per
 //! node, never every node, never all or all but one of the checked cluster, and the
-//! [`EcCheck::max_crashes`] cap. Each set runs over the same schedules, with the same driving,
-//! heal and quiesce, as the search's, and the runs are read by the same evaluation of the
+//! [`EcCheck::max_crashes`] cap. Each set runs over the same schedules, with the same two
+//! phases (inputs under faults, heal, recovery) and quiesces, as the search's, and the runs are read by the same evaluation of the
 //! specification. Everything else is the oracle's own: its execution loop ([`Engine::execute`]
 //! here) reads the outputs straight from the event log, with no lineage, no provenance and no
 //! pruning. So agreement tests the lineage, the literals and the hitting-set program.
@@ -39,9 +39,11 @@ use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use hydro_lang::sim::compiled::{CompiledSim, quiesce};
+use hydro_lang::sim::compiled::CompiledSim;
 
-use super::{EcCheck, Engine, Failure, Target, correct_members, panic_message, record_domain};
+use super::{
+    EcCheck, Engine, Failure, Target, correct_members, drive, program_panic, record_domain,
+};
 use crate::check::results::{LabelResult, Results, Verdict, label_name};
 use crate::fault::{Event, Fate, FaultHook, FaultPlan, InstanceRecord, MessageId, NodeId};
 use crate::lineage::Tables;
@@ -221,21 +223,37 @@ impl EcCheck {
     /// the enumeration is exponential in `max_faults`.
     ///
     /// # Panics
-    /// If `sim` was not instrumented by this check.
+    /// As [`Self::run`].
     #[doc(hidden)]
     pub fn cross_check(
         &self,
         sim: &CompiledSim,
-        mut body: impl AsyncFnMut(),
+        inputs: impl AsyncFnMut(),
         max_faults: usize,
     ) -> CrossCheck {
-        let results = self.run(sim, &mut body);
+        self.cross_check_then_recover(sim, inputs, async || {}, max_faults)
+    }
+
+    /// [`Self::cross_check`] for [`Self::run_then_recover`]: both sides run the same two
+    /// phases.
+    ///
+    /// # Panics
+    /// As [`Self::run_then_recover`].
+    #[doc(hidden)]
+    pub fn cross_check_then_recover(
+        &self,
+        sim: &CompiledSim,
+        mut inputs: impl AsyncFnMut(),
+        mut recover: impl AsyncFnMut(),
+        max_faults: usize,
+    ) -> CrossCheck {
+        let results = self.run_then_recover(sim, &mut inputs, &mut recover);
         let labels = self
             .taps
             .as_ref()
             .expect("`EcCheck::cross_check` needs a simulation compiled from `EcCheck::instrument`")
             .labels();
-        let mut engine = Engine::new(self, sim, &labels, &mut body);
+        let mut engine = Engine::new(self, sim, &labels, &mut inputs, &mut recover);
         let (brute, confirmed) = engine.brute_force(max_faults, &results);
         let disagreements = disagreements(&results, &brute, &confirmed);
         CrossCheck {
@@ -461,7 +479,7 @@ impl<'t> RunFold<'t> {
     }
 }
 
-impl<B: AsyncFnMut()> Engine<'_, B> {
+impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
     /// Runs `faults` over every schedule (or the sample), folding each record into a [`Run`] as
     /// it finishes. `seen` gets every record first.
     fn execute(
@@ -490,15 +508,9 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
         };
         let outcome = {
             let healer = AssertUnwindSafe(hook.clone());
-            let mut body = AssertUnwindSafe(&mut *self.body);
-            let thunk = async || {
-                (*body)().await;
-                // As the search: faults are admitted while the body drives inputs and while the
-                // work it caused settles; then the network heals.
-                quiesce().await;
-                healer.heal();
-                quiesce().await;
-            };
+            let mut inputs = AssertUnwindSafe(&mut *self.inputs);
+            let mut recover = AssertUnwindSafe(&mut *self.recover);
+            let thunk = async || drive(&mut *inputs, &mut *recover, &healer).await;
             let after = || absorb(hook.drain_instances());
             let sim = self.sim;
             let sample = self.sample_schedules;
@@ -512,7 +524,7 @@ impl<B: AsyncFnMut()> Engine<'_, B> {
         self.sim.clear_network_hook();
         // The schedule that panicked (and any replay of it) never reached `after`.
         absorb(hook.drain_instances());
-        let panic = outcome.err().map(|p| panic_message(&*p));
+        let panic = outcome.err().map(|p| program_panic(&*p));
         fold.into_inner().finish(labels, panic)
     }
 

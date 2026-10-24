@@ -15,7 +15,7 @@
 //! `ec_quorum_trust`), G-Set gossip, multi-Paxos and ABD.
 //! Uniform reliable broadcast runs over two members instead, where only the source may crash.
 //! Cooperative termination with racing timers is sampled; it is a counterexample-finding
-//! contrast only.
+//! contrast only. With its timers firing only after the faults stop, it is exhaustive.
 //!
 //! The `races_targets_probe_*` tests only measure the failure-free schedule space of a
 //! configuration (search and enumeration both capped at zero crashes); they are `#[ignore]`d.
@@ -25,7 +25,6 @@ use hydro_lang::prelude::*;
 use hydrofrac::EcCheck;
 use hydrofrac::check::{CrossCheck, Verdict};
 
-use super::two_pc_ctp::{Coordinator, Participant, Txn, two_pc};
 
 pub struct Source;
 pub struct Member;
@@ -177,8 +176,9 @@ fn races_targets_probe_urb2() {
 // --- 2. G-Set gossip (closed) -----------------------------------------------------------------
 
 /// `g_set_gossip` among `members` members; `updates` members (0, 1, ...) each contribute one
-/// element, then a quiesce, then `rounds` × (a gossip tick at each member of `tickers`,
-/// quiesce).
+/// element in the fault phase, then the recovery phase runs `rounds` × (a gossip tick at each
+/// member of `tickers`, quiesce). Its failure-free runs are those of the barrier harness this
+/// replaces (updates, quiesce, rounds), so the measurements below stand.
 fn gossip(
     members_count: u32,
     updates: u32,
@@ -198,13 +198,14 @@ fn gossip(
                     .with_cluster_size(&members, members_count as usize),
             )
             .compiled();
-        check.cross_check(
+        check.cross_check_then_recover(
             &sim,
             async || {
                 for m in 0..updates {
                     update.send(m, 10 + m);
                 }
-                hydro_lang::sim::compiled::quiesce().await;
+            },
+            async || {
                 for _ in 0..rounds {
                     tick.send_many(tickers.iter().map(|m| (*m, ())));
                     hydro_lang::sim::compiled::quiesce().await;
@@ -248,7 +249,7 @@ fn races_targets_probe_gossip3_one_ticker() {
 
 // --- 3. Multi-Paxos ---------------------------------------------------------------------------
 
-/// `multi_paxos`: one proposer leads round 1, quiesce, then `commands` commands; three
+/// `multi_paxos`: one proposer leads round 1 and gets `commands` commands, together; three
 /// acceptors (majority two), `learners` learners.
 fn paxos(commands: u32, learners_count: usize) -> impl FnOnce(EcCheck, usize) -> CrossCheck {
     move |mut check, max_faults| {
@@ -273,7 +274,6 @@ fn paxos(commands: u32, learners_count: usize) -> impl FnOnce(EcCheck, usize) ->
             &sim,
             async || {
                 lead.send(0, 1);
-                hydro_lang::sim::compiled::quiesce().await;
                 for c in 0..commands {
                     command.send(0, 7 + c);
                 }
@@ -283,7 +283,8 @@ fn paxos(commands: u32, learners_count: usize) -> impl FnOnce(EcCheck, usize) ->
     }
 }
 
-/// Measured: passed 21,861 schedules (about 106 per second) in 10 minutes without finishing.
+/// Measured with a barrier between the lead and the commands (now dropped, which only adds
+/// schedules): passed 21,861 schedules (about 106 per second) in 10 minutes without finishing.
 #[test]
 #[ignore = "measurement"]
 fn races_targets_probe_paxos() {
@@ -300,42 +301,14 @@ fn races_targets_probe_paxos() {
 // --- 5. Two-phase commit with cooperative termination -----------------------------------------
 
 /// Two-phase commit with cooperative termination, coordinator + `n` participants, one
-/// transaction. `quiesce`: the timers fire after the transaction settles (the quiescing
-/// harness); otherwise together with it (racing timers).
-fn ctp(n: u32, quiesce: bool) -> impl FnOnce(EcCheck, usize) -> CrossCheck {
-    move |mut check, max_faults| {
-        let mut flow = FlowBuilder::new();
-        let coordinator = flow.process::<Coordinator>();
-        let participants = flow.cluster::<Participant>();
-        let (txn_send, txns) = coordinator.sim_input::<Txn, TotalOrder, ExactlyOnce>();
-        let (timeout_send, timeouts) = participants.sim_input::<(), TotalOrder, ExactlyOnce>();
-        let _committed = two_pc(
-            &coordinator,
-            &participants,
-            n as usize,
-            txns,
-            timeouts,
-            true,
-            nondet!(/** explored by the check */),
-            nondet!(/** explored by the check */),
-            nondet!(/** explored by the check */),
-            nondet!(/** explored by the check */),
-            nondet!(/** explored by the check */),
-        )
-        .sim_cluster_output();
-        let sim = check
-            .instrument(flow.sim().with_cluster_size(&participants, n as usize))
-            .compiled();
-        check.cross_check(
-            &sim,
-            async || {
-                txn_send.send(Txn(1));
-                if quiesce {
-                    hydro_lang::sim::compiled::quiesce().await;
-                }
-                timeout_send.send_many((0..n).map(|p| (p, ())));
-            },
-            max_faults,
+/// transaction (the harness of `ec_two_pc_hydrofrac`). `racing`: every participant's timer
+/// fires with the transaction, in the fault phase; otherwise the timers fire only in the
+/// recovery phase. `ticks`: the recovery ticks.
+#[cfg(stageleft_runtime)]
+fn ctp(n: u32, racing: bool, ticks: usize) -> impl FnOnce(EcCheck, usize) -> CrossCheck {
+    move |check, max_faults| {
+        super::ec_two_pc_hydrofrac::TwoPc::with(check, true, n).cross_check(
+            racing, ticks, max_faults,
         )
     }
 }
@@ -343,15 +316,16 @@ fn ctp(n: u32, quiesce: bool) -> impl FnOnce(EcCheck, usize) -> CrossCheck {
 /// Measured: 32 schedules.
 #[test]
 #[ignore = "measurement"]
-fn races_targets_probe_ctp_quiescing() {
-    probe("ctp (2 participants, quiescing)", ctp(2, true));
+fn races_targets_probe_ctp_timers_after_the_faults() {
+    probe("ctp (2 participants, timers after the faults)", ctp(2, false, 1));
 }
 
-/// Measured: passed 31,957 schedules in 10 minutes without finishing.
+/// Measured (with the barrier harness's racing variant, the same failure-free runs): passed
+/// 31,957 schedules in 10 minutes without finishing.
 #[test]
 #[ignore = "measurement"]
 fn races_targets_probe_ctp_racing() {
-    probe("ctp (2 participants, racing timers)", ctp(2, false));
+    probe("ctp (2 participants, racing timers)", ctp(2, true, 0));
 }
 
 // --- Agreement tests ----------------------------------------------------------------------------
@@ -427,16 +401,21 @@ fn races_targets_urb2_threshold2() {
     assert_one_schedule_per_set(&c, "uniform_reliable_broadcast_closed");
 }
 
-/// Two-phase commit with cooperative termination, two participants, the quiescing harness
-/// (transaction → quiesce → timeouts), every schedule of every set of at most two faults.
+/// Two-phase commit with cooperative termination, two participants, the timers firing only in
+/// the recovery phase (transaction; heal; timeouts), every schedule of every set of at most two
+/// faults.
 #[test]
-fn races_targets_ctp2_quiescing() {
-    let c = cross("ctp (2 participants, quiescing)", MAX_FAULTS, ctp(2, true));
+fn races_targets_ctp2_timers_after_the_faults() {
+    let c = cross(
+        "ctp (2 participants, timers after the faults)",
+        MAX_FAULTS,
+        ctp(2, false, 1),
+    );
     c.assert_agrees();
     assert_certified(&c, "committed");
 }
 
-/// The contrast: the same program with the timers racing the transaction (no quiesce). Its
+/// The contrast: the same program with one-shot timers racing the transaction. Its
 /// failure-free run alone passed 31,957 schedules in 10 minutes without finishing, so this is
 /// sampled (64 schedules per set, one fault): it can find the one-crash counterexample, never
 /// certify.
@@ -447,7 +426,7 @@ fn races_targets_ctp2_racing_sampled() {
     let c = cross(
         "ctp (2 participants, racing timers, sampled)",
         1,
-        sampled(RACING_SAMPLES, ctp(2, false)),
+        sampled(RACING_SAMPLES, ctp(2, true, 0)),
     );
     c.assert_agrees();
     let cex = label(&c, "committed")

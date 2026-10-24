@@ -23,7 +23,8 @@
 //!   derivations skip fault sets;
 //! - its sweep ([`crate::races::Sweep`]) proposes fault sets from zero crashes upwards, and
 //!   each set is explored over its schedules (or [`EcCheck::sample_schedules`] of them) until
-//!   they cover it. When the body returns the network heals and the run quiesces.
+//!   they cover it. Each run has a fault phase (the inputs, which may not place a barrier), a
+//!   heal, and an optional fault-free recovery phase ([`EcCheck::run_then_recover`]).
 //!
 //! A label is certified when no untried fault set over the faults the runs revealed is
 //! admissible. A sampled search certifies nothing ([`Verdict::Exhausted`]).
