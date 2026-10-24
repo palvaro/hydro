@@ -11,6 +11,7 @@
 #[cfg(stageleft_runtime)]
 hydro_lang::setup!();
 
+pub mod fault;
 #[cfg(stageleft_runtime)]
 pub mod search;
 
