@@ -98,7 +98,26 @@ pub enum RelayPolicy {
     ReliableResend {
         /// Ticks a relay may wait for its acknowledgement before it is re-sent.
         ack_timeout_ticks: u64,
+        /// Re-sends allowed per peer per resend opportunity: the `resend_batch` oldest timed-out
+        /// relays to that peer go back on the wire. `1` re-sends only the oldest.
+        resend_batch: usize,
+        /// Whether a tick that sees several timer elements (missed timer periods, delivered
+        /// together after the member was descheduled) gets one resend opportunity per element,
+        /// so the resend schedule catches up with wall-clock time, rather than one per tick.
+        resend_catch_up: bool,
     },
+}
+
+impl RelayPolicy {
+    /// `ReliableResend` as originally specified: re-send the oldest timed-out relay per peer,
+    /// once per tick that sees the timer.
+    pub const fn reliable_resend(ack_timeout_ticks: u64) -> Self {
+        RelayPolicy::ReliableResend {
+            ack_timeout_ticks,
+            resend_batch: 1,
+            resend_catch_up: false,
+        }
+    }
 }
 
 /// The failure model of the relay channel, chosen when the graph is built. The rest of the
@@ -186,7 +205,7 @@ impl<'a> sedge::Observed<'a> for Outputs<'a> {
     members = 5,
     workload_rounds = 125,
     skip_consistency_assertions,
-    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
+    config = RelayConfig { policy: RelayPolicy::reliable_resend(3), channel: RelayChannel::FailStop },
     timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
     round_data = |round, inputs| {
         inputs.requests.send(round as u64);
@@ -219,7 +238,148 @@ impl<'a> sedge::Observed<'a> for Outputs<'a> {
 #[cfg_attr(feature = "sedge", sedge::overload_check(
     name = reliable_resend,
     members = 5,
-    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
+    config = RelayConfig { policy: RelayPolicy::reliable_resend(3), channel: RelayChannel::FailStop },
+    mu = 500,
+    cpus(Member = 0.01),
+    cpu_period_us = 100_000,
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(round as u64);
+    },
+))]
+// Retry-volume variants of `ReliableResend`: `rr_k<k>` re-sends the k oldest timed-out relays
+// per peer per tick; `rr_catchup*` re-sends once per timer element, so a member that was
+// descheduled for several timer periods catches up. Same CPU cap as `reliable_resend`.
+#[cfg_attr(feature = "cress", amplification_check(
+    name = rr_k2,
+    members = 5,
+    workload_rounds = 125,
+    skip_consistency_assertions,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3, resend_batch: 2, resend_catch_up: false }, channel: RelayChannel::FailStop },
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(round as u64);
+    },
+))]
+#[cfg_attr(feature = "cress", amplification_check(
+    name = rr_k4,
+    members = 5,
+    workload_rounds = 125,
+    skip_consistency_assertions,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3, resend_batch: 4, resend_catch_up: false }, channel: RelayChannel::FailStop },
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(round as u64);
+    },
+))]
+#[cfg_attr(feature = "cress", amplification_check(
+    name = rr_k6,
+    members = 5,
+    workload_rounds = 125,
+    skip_consistency_assertions,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3, resend_batch: 6, resend_catch_up: false }, channel: RelayChannel::FailStop },
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(round as u64);
+    },
+))]
+#[cfg_attr(feature = "cress", amplification_check(
+    name = rr_k8,
+    members = 5,
+    workload_rounds = 125,
+    skip_consistency_assertions,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3, resend_batch: 8, resend_catch_up: false }, channel: RelayChannel::FailStop },
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(round as u64);
+    },
+))]
+#[cfg_attr(feature = "cress", amplification_check(
+    name = rr_catchup,
+    members = 5,
+    workload_rounds = 125,
+    skip_consistency_assertions,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3, resend_batch: 1, resend_catch_up: true }, channel: RelayChannel::FailStop },
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(round as u64);
+    },
+))]
+#[cfg_attr(feature = "cress", amplification_check(
+    name = rr_catchup_t1,
+    members = 5,
+    workload_rounds = 125,
+    skip_consistency_assertions,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 1, resend_batch: 1, resend_catch_up: true }, channel: RelayChannel::FailStop },
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(round as u64);
+    },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = rr_k2,
+    members = 5,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3, resend_batch: 2, resend_catch_up: false }, channel: RelayChannel::FailStop },
+    mu = 500,
+    cpus(Member = 0.01),
+    cpu_period_us = 100_000,
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(round as u64);
+    },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = rr_k4,
+    members = 5,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3, resend_batch: 4, resend_catch_up: false }, channel: RelayChannel::FailStop },
+    mu = 500,
+    cpus(Member = 0.01),
+    cpu_period_us = 100_000,
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(round as u64);
+    },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = rr_k6,
+    members = 5,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3, resend_batch: 6, resend_catch_up: false }, channel: RelayChannel::FailStop },
+    mu = 500,
+    cpus(Member = 0.01),
+    cpu_period_us = 100_000,
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(round as u64);
+    },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = rr_k8,
+    members = 5,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3, resend_batch: 8, resend_catch_up: false }, channel: RelayChannel::FailStop },
+    mu = 500,
+    cpus(Member = 0.01),
+    cpu_period_us = 100_000,
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(round as u64);
+    },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = rr_catchup,
+    members = 5,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3, resend_batch: 1, resend_catch_up: true }, channel: RelayChannel::FailStop },
+    mu = 500,
+    cpus(Member = 0.01),
+    cpu_period_us = 100_000,
+    timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
+    round_data = |round, inputs| {
+        inputs.requests.send(round as u64);
+    },
+))]
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = rr_catchup_t1,
+    members = 5,
+    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 1, resend_batch: 1, resend_catch_up: true }, channel: RelayChannel::FailStop },
     mu = 500,
     cpus(Member = 0.01),
     cpu_period_us = 100_000,
@@ -241,11 +401,17 @@ pub fn relay_broadcast<'a>(
     // The policy is fixed when the graph is built: whether members echo at all, and after how
     // many ticks an unacknowledged echo is re-sent (zero: never).
     // `relay_any`: relay ids first received from a peer as well, deduplicated per member.
-    let (echo_enabled, relay_any, ack_timeout_ticks) = match policy {
-        RelayPolicy::None => (false, false, 0u64),
-        RelayPolicy::Echo => (true, false, 0u64),
-        RelayPolicy::EchoResend { ack_timeout_ticks } => (true, false, ack_timeout_ticks),
-        RelayPolicy::ReliableResend { ack_timeout_ticks } => (true, true, ack_timeout_ticks),
+    // `resend_batch`/`resend_catch_up`: how many timed-out relays per peer go back on the wire
+    // per tick (see `RelayPolicy::ReliableResend`).
+    let (echo_enabled, relay_any, ack_timeout_ticks, resend_batch, resend_catch_up) = match policy {
+        RelayPolicy::None => (false, false, 0u64, 1usize, false),
+        RelayPolicy::Echo => (true, false, 0u64, 1usize, false),
+        RelayPolicy::EchoResend { ack_timeout_ticks } => (true, false, ack_timeout_ticks, 1usize, false),
+        RelayPolicy::ReliableResend {
+            ack_timeout_ticks,
+            resend_batch,
+            resend_catch_up,
+        } => (true, true, ack_timeout_ticks, resend_batch, resend_catch_up),
     };
 
     let LocationId::Cluster(cluster_key) = Location::id(members) else {
@@ -313,8 +479,17 @@ pub fn relay_broadcast<'a>(
 
         let now_cur = clock.clone().map(q!(|(i, _)| i as u64)).max().unwrap_or(now.clone());
         now = now_cur.clone();
-        // Whether this tick saw a timer element: re-sends are judged once per protocol tick.
-        let pump = clock.count().map(q!(|c| c > 0));
+        // How many re-sends per peer this tick may make: none without a timer element; otherwise
+        // `resend_batch`, once per tick or (`resend_catch_up`) once per timer element seen.
+        let allowance = clock.count().map(q!(move |c| {
+            if c == 0 {
+                0usize
+            } else if resend_catch_up {
+                c * resend_batch
+            } else {
+                resend_batch
+            }
+        }));
 
         let arrivals = arrivals.sort();
 
@@ -342,16 +517,16 @@ pub fn relay_broadcast<'a>(
 
         let acked_keys = acks.map(q!(|a| (a.from, a.id)));
         let still_waiting = outstanding.filter_key_not_in(acked_keys);
-        // Per peer, the oldest outstanding echo that has waited past the timeout. This is the
-        // operator where the mechanism lives; with `ack_timeout_ticks == 0` nothing passes.
+        // Per peer, the `allowance` oldest outstanding echoes that have waited past the timeout.
+        // This is the operator where the mechanism lives; with `ack_timeout_ticks == 0` nothing
+        // passes.
         let due = still_waiting
             .clone()
             .into_keyed_stream()
             .cross_singleton(now_cur.clone())
-            .cross_singleton(pump)
             .entries()
-            .filter_map(q!(move |((peer, id), ((last_sent, now), pump))| {
-                if pump && ack_timeout_ticks > 0 && now - last_sent >= ack_timeout_ticks {
+            .filter_map(q!(move |((peer, id), (last_sent, now))| {
+                if ack_timeout_ticks > 0 && now - last_sent >= ack_timeout_ticks {
                     Some((peer, id))
                 } else {
                     None
@@ -359,7 +534,9 @@ pub fn relay_broadcast<'a>(
             }))
             .into_keyed()
             .sort()
-            .first()
+            .enumerate()
+            .cross_singleton(allowance)
+            .filter_map(q!(|((index, id), allowance)| if index < allowance { Some(id) } else { None }))
             .entries()
             .sort();
 

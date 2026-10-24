@@ -57,16 +57,18 @@ mod tests {
 
     const MEMBERS: u32 = 3;
     /// Where `delivered` gets its label (the `assert_has_consistency_of`).
-    const DELIVERED: &str = "relay_broadcast.rs:273";
+    const DELIVERED: &str = "relay_broadcast.rs:439";
     /// Where `initial` gets its label (the source's `broadcast_closed`).
-    const INITIAL: &str = "relay_broadcast.rs:260";
+    const INITIAL: &str = "relay_broadcast.rs:426";
 
     /// Timer rounds after the cut: enough for the oldest echo to pass `ack_timeout_ticks`,
     /// be re-sent, and be merged and acknowledged.
     fn rounds_after_cut(policy: RelayPolicy) -> u64 {
         let timeout = match policy {
             RelayPolicy::EchoResend { ack_timeout_ticks }
-            | RelayPolicy::ReliableResend { ack_timeout_ticks } => ack_timeout_ticks,
+            | RelayPolicy::ReliableResend {
+                ack_timeout_ticks, ..
+            } => ack_timeout_ticks,
             RelayPolicy::None | RelayPolicy::Echo => 0,
         };
         timeout + 3
@@ -235,9 +237,7 @@ mod tests {
         assert!(crashes(&faults, "member"), "{results}");
     }
 
-    const RELIABLE: RelayPolicy = RelayPolicy::ReliableResend {
-        ack_timeout_ticks: 3,
-    };
+    const RELIABLE: RelayPolicy = RelayPolicy::reliable_resend(3);
 
     /// The final repair, reliable broadcast with retransmission: a member relays every id on
     /// its first receipt from any sender, so a relayer crashing part-way through its fan-out
