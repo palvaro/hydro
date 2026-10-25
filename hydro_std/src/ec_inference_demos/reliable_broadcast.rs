@@ -284,15 +284,48 @@ pub fn reliable_broadcast_closed_from_cluster<
     new_messages
 }
 
-// These tests were written against the `eventual_consistency` branch's simulator
-// (`SimFlow::with_crashable_cluster`, `SimClusterReceiver::collect_n_sorted`, driven
-// membership), which this branch does not have; its fault injection is hydrofrac
-// (`hydro_test/src/cluster/ec_demos_ldfi.rs`). Kept verbatim, compiled out.
-#[cfg(any())]
+#[cfg(test)]
 mod tests {
     use hydro_lang::prelude::*;
 
-    use super::{reliable_broadcast_closed, reliable_broadcast_live};
+    use super::{
+        reliable_broadcast_closed, reliable_broadcast_closed_from_cluster, reliable_broadcast_live,
+    };
+
+    /// `reliable_broadcast_closed_from_cluster` delivers every source member's message to every
+    /// member, keyed by its sender.
+    #[test]
+    fn reliable_broadcast_closed_from_cluster_delivers_to_all() {
+        use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
+        use hydro_lang::location::MemberId;
+
+        let mut flow = FlowBuilder::new();
+        let sources = flow.cluster::<()>();
+        let cluster = flow.cluster::<()>();
+
+        let (in_send, data) = sources.sim_input::<u32, TotalOrder, ExactlyOnce>();
+
+        let out_recv = reliable_broadcast_closed_from_cluster(data, &cluster)
+            .map(q!(|(sender, v)| (sender.into_tagless(), v)))
+            .sim_cluster_output();
+
+        flow.sim()
+            .skip_consistency_assertions()
+            .with_cluster_size(&sources, 2)
+            .with_cluster_size(&cluster, 3)
+            .exhaustive(async || {
+                in_send.send(0, 10);
+                in_send.send(1, 11);
+                let expected = vec![
+                    (MemberId::<()>::from_raw_id(0).into_tagless(), 10),
+                    (MemberId::<()>::from_raw_id(1).into_tagless(), 11),
+                ];
+                for member in 0..3u32 {
+                    let got: Vec<_> = out_recv.collect_n_sorted(member, 2).await;
+                    assert_eq!(got, expected, "member {member} did not deliver both");
+                }
+            });
+    }
 
     /// Baseline: `reliable_broadcast_closed` (static membership) delivers the
     /// broadcast message to every cluster member.

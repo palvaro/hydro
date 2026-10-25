@@ -108,7 +108,6 @@ async fn main() {
         heartbeat_timer_interrupts,
         RaftConfig {
             cluster_size: CLUSTER_SIZE,
-            election_restriction_ignores_term: false,
         },
         || TCP.fail_stop().bincode(),
         nondet!(

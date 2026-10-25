@@ -306,11 +306,7 @@ where
     outputs
 }
 
-// These tests were written against the `eventual_consistency` branch's simulator
-// (`SimFlow::with_crashable_cluster`, `SimClusterReceiver::collect_n_sorted`, driven
-// membership), which this branch does not have; its fault injection is hydrofrac
-// (`hydro_test/src/cluster/ec_demos_ldfi.rs`). Kept verbatim, compiled out.
-#[cfg(any())]
+#[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 

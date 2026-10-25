@@ -26,7 +26,7 @@ use super::{
 /// async fn main() {
 ///     let mut hf = dfir_syntax! {
 ///         source_interval(Duration::from_secs(1))
-///             -> map(|()| { Instant::now() } )
+///             -> map(|_| { Instant::now() } )
 ///             -> for_each(|time| println!("This runs every second: {:?}", time));
 ///     };
 ///

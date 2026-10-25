@@ -12,7 +12,7 @@ use std::time::SystemTime;
 #[cfg(feature = "runtime_support")]
 use dfir_rs::Never;
 #[cfg(feature = "runtime_support")]
-use dfir_rs::scheduled::metrics::{DfirMetrics, DfirMetricsIntervals};
+use dfir_rs::scheduled::metrics::{DfirMetrics, DfirMetricsIntervals, StageTopology};
 #[cfg(feature = "runtime_support")]
 use futures::FutureExt;
 use quote::quote;
@@ -74,14 +74,8 @@ impl Sidecar for RecordMetricsSidecar {
         };
 
         parse_quote! {
-            #root::telemetry::emf::record_metrics_sidecar(#dfir_ident.metrics_intervals(), #namespace, #location_name, #file_path, #interval)
+            #root::telemetry::emf::record_metrics_sidecar(#dfir_ident.metrics_intervals(), #root::runtime_support::dfir_rs::scheduled::metrics::StageTopology::from_graph(#dfir_ident.meta_graph().expect("DFIR meta graph required for stage telemetry")), #namespace, #location_name, #file_path, #interval)
         }
-    }
-
-    /// Opts in to DFIR runtime metrics tracking, so that there are metrics to record.
-    #[cfg(feature = "build")]
-    fn edit_as_code_options(&self, options: &mut dfir_lang::graph::AsCodeOptions) {
-        options.include_metrics_tracking = true;
     }
 }
 
@@ -90,6 +84,7 @@ impl Sidecar for RecordMetricsSidecar {
 #[doc(hidden)]
 pub fn record_metrics_sidecar(
     mut dfir_intervals: DfirMetricsIntervals,
+    stage_topology: StageTopology,
     namespace: &'static str,
     location_name: &'static str,
     file_path: &'static str,
@@ -111,7 +106,7 @@ pub fn record_metrics_sidecar(
         let mut rt_intervals = rt_monitor.intervals();
 
         loop {
-            let () = tokio::time::sleep(interval).await;
+            let _ = tokio::time::sleep(interval).await;
 
             let dfir_metrics = dfir_intervals.take_interval();
             let rt_metrics = rt_intervals.next().unwrap();
@@ -132,10 +127,21 @@ pub fn record_metrics_sidecar(
                 record_metrics_dfir(
                     namespace,
                     location_name,
-                    timestamp,
-                    dfir_metrics,
-                    &mut writer,
-                )
+                      timestamp,
+                      &dfir_metrics,
+                      &mut writer,
+                  )
+                  .await
+                  .unwrap();
+
+                  record_metrics_stages(
+                      namespace,
+                      location_name,
+                      timestamp,
+                      &dfir_metrics,
+                      &stage_topology,
+                      &mut writer,
+                  )
                 .await
                 .unwrap();
 
@@ -162,7 +168,7 @@ async fn record_metrics_dfir<W>(
     namespace: &str,
     location_name: &str,
     timestamp: SystemTime,
-    metrics: DfirMetrics,
+    metrics: &DfirMetrics,
     writer: &mut W,
 ) -> Result<(), std::io::Error>
 where
@@ -231,6 +237,51 @@ where
         writer.write_u8(b'\n').await?;
     }
 
+    Ok(())
+}
+
+#[cfg(feature = "runtime_support")]
+async fn record_metrics_stages<W>(
+    namespace: &str,
+    location_name: &str,
+    timestamp: SystemTime,
+    metrics: &DfirMetrics,
+    topology: &StageTopology,
+    writer: &mut W,
+) -> Result<(), std::io::Error>
+where
+    W: AsyncWrite + Unpin,
+{
+    let ts_millis = timestamp
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    for stage in metrics.by_stage_topology(topology) {
+        let record = json!({
+            "_aws": { "Timestamp": ts_millis },
+            "Namespace": namespace,
+            "LocationName": location_name,
+            "MetricKind": "Stage",
+            "SubgraphId": format!("{:?}", stage.subgraph_id),
+            "OperatorTags": stage.operator_tags,
+            "OperatorNames": stage.operator_names,
+            "RunCount": stage.run_count,
+            "PollCount": stage.poll_count,
+            "PollDurationMicros": stage.poll_duration.as_micros(),
+            "NetworkMessageCount": stage.network_message_count,
+            "NetworkByteCount": stage.network_byte_count,
+            "InputItems": stage.input_items(),
+            "FeedbackInputItems": stage.feedback_input_items(),
+            "OutputItems": stage.output_items(),
+            "BufferedItems": stage.inputs.iter().map(|input| input.buffered_items).sum::<usize>(),
+            "RetainedStateReads": stage.retained_state_reads,
+            "RetainedStateWrites": stage.retained_state_writes,
+            "HasIntervalSource": stage.has_interval_source(),
+        })
+        .to_string();
+        writer.write_all(record.as_bytes()).await?;
+        writer.write_u8(b'\n').await?;
+    }
     Ok(())
 }
 

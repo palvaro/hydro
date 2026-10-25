@@ -323,7 +323,7 @@ impl<Tick: TickClosure> Dfir<Tick> {
     /// Run a single tick. Returns `true` if any subgraph received input data.
     ///
     /// Checks both handoff buffers (via `work_done` flag set in generated recv port code)
-    /// and external events (via `can_start_tick` set by `waker`/`schedule_subgraph`).
+    /// and external events (via `can_start_tick` set by wakers/schedule_subgraph).
     pub async fn run_tick(&mut self) -> bool {
         #[cfg(feature = "tokio")]
         self.spawn_tasks();
@@ -408,9 +408,9 @@ impl<Tick: TickClosure> Dfir<Tick> {
 }
 
 impl<Tick> Dfir<Tick> {
-    /// Replace the tick closure, keeping the wake state, context and metadata. For wrappers
-    /// around the closure (e.g. the sim runtime's panic guard, which must sit on the same
-    /// side of a dynamic-library boundary as the code it guards).
+    /// Replaces the tick closure with `f(tick_closure)`, keeping the rest of the dataflow (its
+    /// context, wake state and meta graph). Lets a runner wrap every tick, e.g. to catch panics
+    /// raised by the dataflow at the boundary of the code that compiled it.
     #[doc(hidden)]
     pub fn map_tick_closure<Tick2>(self, f: impl FnOnce(Tick) -> Tick2) -> Dfir<Tick2> {
         Dfir {

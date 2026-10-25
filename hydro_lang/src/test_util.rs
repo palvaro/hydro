@@ -80,12 +80,12 @@ pub fn assert_panics_with_message(func: impl FnOnce(), msg: &'static str) {
     let err = catch_unwind(AssertUnwindSafe(func)).expect_err("Didn't panic!");
 
     let chk = |panic_msg: &'_ str| {
-        assert!(
-            panic_msg.contains(msg),
-            "Expected a panic message containing `{}`; got: `{}`.",
-            msg,
-            panic_msg
-        );
+        if !panic_msg.contains(msg) {
+            panic!(
+                "Expected a panic message containing `{}`; got: `{}`.",
+                msg, panic_msg
+            );
+        }
     };
 
     err.downcast::<String>()

@@ -74,7 +74,7 @@ pub fn leader_merge_broadcast<'a, K, V, Leader, Replicas, O, R, N>(
     at_leader: KeyedStream<K, V, Process<'a, Leader>, Unbounded, O, R>,
     replicas: &Cluster<'a, Replicas>,
     via: N,
-    _nondet_interleaving: NonDet,
+    nondet_interleaving: NonDet,
 ) -> Stream<
     (K, V),
     Cluster<'a, Replicas, N::ConsistencyGuarantee>,
@@ -94,10 +94,7 @@ where
 {
     // The leader manufactures THE interleaving. `nondet!` (run-contingent
     // choice); no consistency downgrade on a Process (DropConsistency = Self).
-    let merged = at_leader.entries_partially_ordered(nondet!(
-        /// the caller's `nondet_interleaving`: the interleaving of writers at the merge point
-        /// is the documented non-determinism; no hook is bound here.
-    ));
+    let merged = at_leader.entries_partially_ordered(nondet_interleaving);
 
     // Leader → replicas: FIFO broadcast of the chosen sequence. TO,EC — but
     // F = {leader}, untracked (see module docs).
@@ -138,7 +135,7 @@ where
 pub fn leader_merge_keyed_from_member<'a, T, W, C, L2, R>(
     local: Stream<T, Cluster<'a, W, C>, Unbounded, TotalOrder, R>,
     cluster: &Cluster<'a, L2>,
-    _nondet_interleaving: NonDet,
+    nondet_interleaving: NonDet,
 ) -> KeyedStream<
     MemberId<L2>,
     (MemberId<W>, T),
@@ -163,10 +160,7 @@ where
     // Step 2: The distinguished member manufactures THE interleaving (the one
     // nondet!). TotalOrder at the cluster location, NoConsistency — honestly,
     // since the types cannot see that only member 0 has data.
-    let merged = at_member.entries_partially_ordered(nondet!(
-        /// the caller's `nondet_interleaving`: the interleaving of writers at the merge point
-        /// is the documented non-determinism; no hook is bound here.
-    ));
+    let merged = at_member.entries_partially_ordered(nondet_interleaving);
 
     // Step 3: Broadcast, and stop. The keyed output is the honest type:
     // per-sender TO,EC (the single-writer row, per key). At runtime every
@@ -225,7 +219,7 @@ where
 pub fn leader_merge_slots_from_member<'a, T, W, C, L2>(
     local: Stream<T, Cluster<'a, W, C>, Unbounded, TotalOrder, ExactlyOnce>,
     cluster: &Cluster<'a, L2>,
-    _nondet_interleaving: NonDet,
+    nondet_interleaving: NonDet,
 ) -> Stream<
     (usize, (MemberId<W>, T)),
     Cluster<'a, L2, EventualConsistency>,
@@ -252,10 +246,7 @@ where
     // Only member 0 has input, but the types cannot see that — which is
     // exactly why the naive port fails and this one does not need it to.
     let slotted = at_member
-        .entries_partially_ordered(nondet!(
-            /// the caller's `nondet_interleaving`: the interleaving of writers at the merge point
-            /// is the documented non-determinism; no hook is bound here.
-        ))
+        .entries_partially_ordered(nondet_interleaving)
         .enumerate();
 
     // Step 3: Broadcast the slot facts to the whole cluster. values() keeps
@@ -266,11 +257,7 @@ where
         .values()
 }
 
-// These tests were written against the `eventual_consistency` branch's simulator
-// (`SimFlow::with_crashable_cluster`, `SimClusterReceiver::collect_n_sorted`, driven
-// membership), which this branch does not have; its fault injection is hydrofrac
-// (`hydro_test/src/cluster/ec_demos_ldfi.rs`). Kept verbatim, compiled out.
-#[cfg(any())]
+#[cfg(test)]
 mod tests {
     use hydro_lang::live_collections::keyed_stream::KeyedStream;
     use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};

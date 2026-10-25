@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 
 use dfir_lang::graph::{
@@ -38,6 +39,10 @@ pub struct BuiltFlow<'a> {
     /// [`Cluster::next_version`](crate::location::Cluster::next_version)).
     #[cfg(feature = "sim")]
     pub(super) location_version_group_root: SecondaryMap<LocationKey, LocationKey>,
+
+    /// Sim input ports declared as operational stimuli (see `sim_input_operational`).
+    #[cfg(feature = "sim")]
+    pub(super) operational_sim_ports: std::collections::BTreeSet<super::builder::ExternalPortId>,
 
     pub(super) _phantom: Invariant<'a>,
 }
@@ -83,7 +88,7 @@ impl<'a> BuiltFlow<'a> {
         &self.location_names
     }
 
-    /// Get a `GraphApi` instance for this built flow
+    /// Get a GraphApi instance for this built flow
     #[cfg(stageleft_runtime)]
     #[cfg(feature = "viz")]
     pub fn graph_api(&self) -> GraphApi<'_> {
@@ -174,33 +179,26 @@ impl<'a> BuiltFlow<'a> {
             }
         }
 
-        // The observer process of a fault-injection specification (`sim::spec`) runs its
-        // ticks eagerly: it only consumes, so its interleaving is not a schedule choice.
-        #[cfg(feature = "ldfi")]
-        let eager_locations = self
-            .location_names
-            .iter()
-            .filter(|(_, name)| *name == std::any::type_name::<crate::sim::spec::Observer>())
-            .map(|(key, _)| crate::location::dynamic::LocationId::Process(key))
-            .collect();
-        #[cfg(not(feature = "ldfi"))]
-        let eager_locations = Default::default();
-
         SimFlow {
             ir: self.ir,
             processes,
             clusters,
             externals,
-            eager_locations,
             cluster_max_sizes: SparseSecondaryMap::new(),
+            dynamic_membership: HashSet::new(),
+            crashable: HashMap::new(),
             externals_port_registry: Default::default(),
             location_version: self.location_version,
             location_version_group_root: self.location_version_group_root,
-            location_names: self.location_names,
             test_safety_only: false,
             skip_consistency_assertions: false,
-            provenance: false,
             unit_test_fuzz_iterations: 8192,
+            refuse_sim_faults: None,
+            provenance: false,
+            operational_ports: self.operational_sim_ports,
+            ir_passes: Vec::new(),
+            network_hooks: false,
+            location_names: self.location_names,
             _phantom: PhantomData,
         }
     }
@@ -215,7 +213,6 @@ impl<'a> BuiltFlow<'a> {
             clusters,
             externals,
             sidecars: self.sidecars,
-            as_code_options: Default::default(),
             flow_name: self.flow_name,
             _phantom: PhantomData,
         }

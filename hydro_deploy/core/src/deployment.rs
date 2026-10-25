@@ -145,7 +145,7 @@ impl Deployment {
 
                 futures::stream::iter(services_future)
                     .buffer_unordered(16)
-                    .try_fold((), |(), ()| async { Ok(()) })
+                    .try_fold((), |_, _| async { Ok(()) })
             })
             .await?;
 

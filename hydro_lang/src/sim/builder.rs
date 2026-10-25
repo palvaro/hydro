@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use dfir_lang::graph::FlatGraphBuilder;
 use proc_macro2::Span;
@@ -10,6 +10,7 @@ use crate::compile::ir::{
     CollectionKind, DebugExpr, DfirBuilder, HydroIrOpMetadata, KeyedSingletonBoundKind,
     StreamOrder, StreamRetry,
 };
+use crate::location::LocationKey;
 use crate::location::dynamic::LocationId;
 use crate::staging_util::get_this_crate;
 
@@ -20,7 +21,7 @@ use crate::staging_util::get_this_crate;
 /// "top-level" operators guarantee "eventual determinism" (per Flo), we do not need to simulate
 /// every possible interleaving of message arrivals and processing. Instead, we only need to
 /// simulate sources of non-determinism at the points in the program where a user intentionally
-/// observes them (such as batch or `assume_ordering`).
+/// observes them (such as batch or assume_ordering).
 ///
 /// Because each tick relies on a set of decisions being made to select their inputs (batch,
 /// snapshot), we emit each tick's code into a separate DFIR graph. Each non-deterministic input
@@ -38,13 +39,23 @@ pub struct SimBuilder {
     pub next_hoff_id: crate::Counter<HandoffId>,
     pub test_safety_only: bool,
     pub skip_consistency_assertions: bool,
-    /// The IR was rewritten with record-level provenance: network sends and external
-    /// outputs receive `(value, Vec<delivery id>)` and record the ids.
-    pub provenance: bool,
     pub channel_tables: BTreeMap<u32, syn::Ident>,
-    /// Tracks which operators sim hook handles have been bound to, to report double-binds
-    /// at flow build time with both operator locations.
-    pub bound_sim_hooks: HashMap<usize, String>,
+    /// Locations opted into crash-fault injection, mapped to their fault budget
+    /// (max crashes in the fault domain). For clusters the budget is shared
+    /// across all members; see [`Self::crash_channels_ident`]. Populated from
+    /// `SimFlow::with_crashable_process` / `SimFlow::with_crashable_cluster`.
+    pub crashable: BTreeMap<LocationKey, usize>,
+    /// Per crashable location: the ident of its staged-channel registry, emitted
+    /// (along with its `CrashHook` registration) on first use.
+    pub crash_channel_vecs: BTreeMap<LocationKey, syn::Ident>,
+    /// Emit network hook points (see [`super::network_hook`]).
+    pub network_hooks: bool,
+    /// The channel table, one entry per `Network` node, in emission order.
+    pub channels: Vec<super::network_hook::ChannelInfo>,
+    /// Set by `network_metadata`, consumed by the `create_network` that follows.
+    pub pending_network_meta: Option<(StmtId, Option<String>, HydroIrOpMetadata)>,
+    /// Set by `external_output_metadata`, consumed by the `create_external_output` that follows.
+    pub pending_output_port: Option<(StmtId, usize)>,
 }
 
 impl SimBuilder {
@@ -57,10 +68,7 @@ impl SimBuilder {
             LocationId::Process(_) => self.process_graphs.entry(location.clone()).or_default(),
             LocationId::Cluster(_) => self.cluster_graphs.entry(location.clone()).or_default(),
             LocationId::Atomic(tick) => self.get_dfir_mut(tick.as_ref()),
-            LocationId::Tick {
-                tick: _,
-                parent_location,
-            } => match parent_location.root() {
+            LocationId::Tick(_, l) => match l.root() {
                 LocationId::Process(_) => {
                     self.process_tick_dfirs.entry(location.clone()).or_default()
                 }
@@ -88,209 +96,111 @@ impl SimBuilder {
     }
 
     fn add_hook(&mut self, in_location: &LocationId, out_location: &LocationId, expr: syn::Expr) {
-        let root = get_this_crate();
         let out_location_ser = serde_json::to_string(out_location).unwrap();
-        // Tick-input hooks are keyed by their tick's location; observation hooks by the
-        // top-level process/cluster location. Route each to the map with the matching
-        // trait-object type (`TickInputHook` vs `ObservationHook`).
-        let map: syn::Ident = match out_location {
-            LocationId::Tick { .. } => syn::parse_quote!(__hydro_hooks),
-            LocationId::Process(_) | LocationId::Cluster(_) => {
-                syn::parse_quote!(__hydro_observation_hooks)
-            }
-            _ => unreachable!("hooks are keyed by a tick or top-level location"),
-        };
         match in_location {
             LocationId::Process(_) => {
                 self.add_extra_stmt_internal(
                     in_location,
                     syn::parse_quote! {
-                        #map.entry(#root::sim::runtime::SimLocation { location: #root::sim::runtime::parse_location(#out_location_ser), cluster_id: None }).or_default().push(#expr);
+                        __hydro_hooks.entry((#out_location_ser, None)).or_default().push(#expr);
                     },
                 );
             }
             LocationId::Cluster(_) => {
                 self.add_extra_stmt_internal(in_location, syn::parse_quote! {
-                    #map.entry(#root::sim::runtime::SimLocation { location: #root::sim::runtime::parse_location(#out_location_ser), cluster_id: Some(__current_cluster_id) }).or_default().push(#expr);
+                    __hydro_hooks.entry((#out_location_ser, Some(__current_cluster_id))).or_default().push(#expr);
                 });
             }
             _ => unreachable!(),
         }
     }
 
-    /// Registers a scripted hook (one bound to a sim hook handle): emits the shared
-    /// `Rc<RefCell<...>>`, registers it by handle ID in the per-instance registry
-    /// (`__hydro_scripted_registry`) for the test-side handle, and pushes it into the
-    /// location-keyed scripted-hook map matching its kind (`__hydro_scripted_hooks` for
-    /// tick inputs, `__hydro_scripted_observation_hooks` for top-level observations).
-    ///
-    /// On a cluster, these statements are emitted inside the per-member instantiation
-    /// loop (where `__current_cluster_id` is bound), so every member gets its own
-    /// independent hook instance, registered under `(handle_id, Some(member))` and
-    /// targeting that member's tick/observation.
-    fn add_scripted_hook(
-        &mut self,
-        hook_id: usize,
-        in_location: &LocationId,
-        out_location: &LocationId,
-        hook_rc_ident: &syn::Ident,
-        op_location: &str,
-        core_expr: syn::Expr,
-    ) {
-        if let Some(prev) = self.bound_sim_hooks.insert(hook_id, op_location.to_owned()) {
-            panic!(
-                "the same sim hook handle was bound to two different operators:\n  first:  {}\n  second: {}",
-                prev, op_location
-            );
-        }
-
-        let root = get_this_crate();
-        let out_location_ser = serde_json::to_string(out_location).unwrap();
-        // The member the hook instance belongs to: `None` on a process, the loop
-        // variable of the per-member instantiation loop on a cluster.
-        let cluster_id_expr: syn::Expr = match in_location {
-            LocationId::Process(_) => syn::parse_quote!(None),
-            LocationId::Cluster(_) => syn::parse_quote!(Some(__current_cluster_id)),
-            _ => unreachable!("scripted hooks are emitted at a top-level location"),
-        };
-        // Like `add_hook`, tick-input and observation hooks go to separately typed maps
-        // (`ScriptedTickHooks` vs `ScriptedObservationHooks`), matching the target kind.
-        let (target, map): (syn::Expr, syn::Ident) = match out_location {
-            LocationId::Tick { .. } => (
-                syn::parse_quote! {
-                    #root::sim::runtime::ScriptTarget::Tick {
-                        location: #root::sim::runtime::SimLocation {
-                            location: #root::sim::runtime::parse_location(#out_location_ser),
-                            cluster_id: #cluster_id_expr,
-                        },
-                    }
-                },
-                syn::parse_quote!(__hydro_scripted_hooks),
-            ),
-            LocationId::Process(_) | LocationId::Cluster(_) => (
-                syn::parse_quote! {
-                    #root::sim::runtime::ScriptTarget::Observation {
-                        location: #root::sim::runtime::SimLocation {
-                            location: #root::sim::runtime::parse_location(#out_location_ser),
-                            cluster_id: #cluster_id_expr,
-                        },
-                        hook_id: #hook_id,
-                    }
-                },
-                syn::parse_quote!(__hydro_scripted_observation_hooks),
-            ),
-            _ => unreachable!("scripted hooks are keyed by a tick or top-level location"),
-        };
-
-        self.add_extra_stmt_internal(
-            in_location,
-            syn::parse_quote! {
-                let #hook_rc_ident = ::std::rc::Rc::new(::std::cell::RefCell::new(
-                    #root::sim::runtime::Scripted::new(#core_expr, #target)
-                ));
-            },
-        );
-
-        self.add_extra_stmt_internal(
-            in_location,
-            syn::parse_quote! {
-                assert!(
-                    __hydro_scripted_registry.insert((#hook_id, #cluster_id_expr), #hook_rc_ident.clone()).is_none(),
-                    "a sim hook handle was bound to multiple operators"
-                );
-            },
-        );
-
-        self.add_extra_stmt_internal(in_location, syn::parse_quote! {
-            #map.entry(#root::sim::runtime::SimLocation { location: #root::sim::runtime::parse_location(#out_location_ser), cluster_id: #cluster_id_expr }).or_default().push(#hook_rc_ident);
-        });
-    }
-
-    /// Registers a scripted inline hook. The concrete wrapper is shared between the
-    /// handle-facing registry and the tick-keyed inline-hook map, but exposed through the
-    /// separate trait surfaces each side needs.
-    ///
-    /// Like [`Self::add_scripted_hook`], on a cluster these statements run once per
-    /// member (inside the loop binding `__current_cluster_id`), yielding one independent
-    /// hook instance per member.
-    fn add_scripted_inline_hook(
-        &mut self,
-        hook_id: usize,
-        tick_location: &LocationId,
-        hook_rc_ident: &syn::Ident,
-        op_location: &str,
-        core_expr: syn::Expr,
-    ) {
-        if let Some(prev) = self.bound_sim_hooks.insert(hook_id, op_location.to_owned()) {
-            panic!(
-                "the same sim hook handle was bound to two different operators:\n  first:  {}\n  second: {}",
-                prev, op_location
-            );
-        }
-
-        let root = get_this_crate();
-        let tick_location_ser = serde_json::to_string(tick_location).unwrap();
-        let cluster_id_expr: syn::Expr = match tick_location.root() {
-            LocationId::Process(_) => syn::parse_quote!(None),
-            LocationId::Cluster(_) => syn::parse_quote!(Some(__current_cluster_id)),
-            _ => unreachable!("ticks are rooted at a top-level location"),
-        };
-
-        self.add_extra_stmt_internal(
-            tick_location.root(),
-            syn::parse_quote! {
-                let #hook_rc_ident = ::std::rc::Rc::new(::std::cell::RefCell::new(
-                    #root::sim::runtime::ScriptedInline::new(
-                        #core_expr,
-                        #root::sim::runtime::ScriptTarget::Tick {
-                            location: #root::sim::runtime::SimLocation {
-                                location: #root::sim::runtime::parse_location(#tick_location_ser),
-                                cluster_id: #cluster_id_expr,
-                            },
-                        },
-                    )
-                ));
-            },
-        );
-        self.add_extra_stmt_internal(
-            tick_location.root(),
-            syn::parse_quote! {
-                assert!(
-                    __hydro_scripted_registry.insert((#hook_id, #cluster_id_expr), #hook_rc_ident.clone()).is_none(),
-                    "a sim hook handle was bound to multiple operators"
-                );
-            },
-        );
-        self.add_extra_stmt_internal(tick_location.root(), syn::parse_quote! {
-            __hydro_scripted_inline_hooks.entry(#root::sim::runtime::SimLocation { location: #root::sim::runtime::parse_location(#tick_location_ser), cluster_id: #cluster_id_expr }).or_default().push(#hook_rc_ident);
-        });
-    }
-
     fn add_inline_hook(&mut self, tick_location: &LocationId, expr: syn::Expr) {
-        let root = get_this_crate();
         let tick_location_ser = serde_json::to_string(tick_location).unwrap();
         match tick_location {
-            LocationId::Tick {
-                tick: _,
-                parent_location,
-            } => match parent_location.root() {
+            LocationId::Tick(_, l) => match l.root() {
                 LocationId::Process(_) => {
                     self.add_extra_stmt_internal(
-                        parent_location.root(),
+                        l.root(),
                         syn::parse_quote! {
-                            __hydro_inline_hooks.entry(#root::sim::runtime::SimLocation { location: #root::sim::runtime::parse_location(#tick_location_ser), cluster_id: None }).or_default().push(#expr);
+                            __hydro_inline_hooks.entry((#tick_location_ser, None)).or_default().push(#expr);
                         },
                     );
                 }
                 LocationId::Cluster(_) => {
-                    self.add_extra_stmt_internal(parent_location.root(), syn::parse_quote! {
-                        __hydro_inline_hooks.entry(#root::sim::runtime::SimLocation { location: #root::sim::runtime::parse_location(#tick_location_ser), cluster_id: Some(__current_cluster_id) }).or_default().push(#expr);
+                    self.add_extra_stmt_internal(l.root(), syn::parse_quote! {
+                        __hydro_inline_hooks.entry((#tick_location_ser, Some(__current_cluster_id))).or_default().push(#expr);
                     });
                 }
                 _ => unreachable!(),
             },
             _ => unreachable!(),
         }
+    }
+
+    /// If `from` is a location opted into crash-fault injection, returns the
+    /// ident of its staged-channel registry
+    /// (`Rc<RefCell<Vec<Box<dyn StagedNetChannel>>>>`), emitting the registry,
+    /// the shared fault budget, and the
+    /// [`CrashHook`](crate::sim::runtime::CrashHook) registration on first use.
+    /// Returns `None` for non-crashable senders, in which case network sends are
+    /// emitted direct (unstaged), exactly as before.
+    ///
+    /// For a process, the registry and hook live in the global scope. For a
+    /// cluster, the emitted statements go into the per-member scope (where
+    /// `__current_cluster_id` is live), so **each member gets its own registry
+    /// and hook** — but all members share one budget cell, bounding the number
+    /// of crashes in the whole cluster (the `F` of the fault model).
+    fn crash_channels_ident(&mut self, from: &LocationId) -> Option<syn::Ident> {
+        let key = match from {
+            LocationId::Process(key) | LocationId::Cluster(key) => key,
+            _ => return None,
+        };
+        let Some(&budget) = self.crashable.get(key) else {
+            return None;
+        };
+        if let Some(ident) = self.crash_channel_vecs.get(key) {
+            return Some(ident.clone());
+        }
+
+        let root = get_this_crate();
+        let ident = syn::Ident::new(
+            &format!("__hydro_crash_channels_{}", key),
+            Span::call_site(),
+        );
+        let budget_ident =
+            syn::Ident::new(&format!("__hydro_crash_budget_{}", key), Span::call_site());
+        let loc_ser = serde_json::to_string(from).unwrap();
+
+        // One budget cell per fault domain, in the global scope (shared by all
+        // members of a crashable cluster).
+        self.extra_stmts_global.push(syn::parse_quote! {
+            let #budget_ident: ::std::rc::Rc<::std::cell::Cell<usize>> =
+                ::std::rc::Rc::new(::std::cell::Cell::new(#budget));
+        });
+
+        let member_key: syn::Expr = if matches!(from, LocationId::Cluster(_)) {
+            syn::parse_quote!(Some(__current_cluster_id))
+        } else {
+            syn::parse_quote!(None)
+        };
+
+        self.add_extra_stmt_internal(from, syn::parse_quote! {
+            let #ident: ::std::rc::Rc<::std::cell::RefCell<::std::vec::Vec<::std::boxed::Box<dyn #root::sim::runtime::StagedNetChannel>>>> =
+                ::std::rc::Rc::new(::std::cell::RefCell::new(::std::vec::Vec::new()));
+        });
+        self.add_extra_stmt_internal(from, syn::parse_quote! {
+            __hydro_hooks.entry((#loc_ser, #member_key)).or_default().push(::std::boxed::Box::new(
+                #root::sim::runtime::CrashHook::new(
+                    #ident.clone(),
+                    #budget_ident.clone(),
+                    (#loc_ser, "crash-fault injection", ""),
+                )
+            ));
+        });
+
+        self.crash_channel_vecs.insert(*key, ident.clone());
+        Some(ident)
     }
 
     fn channel_elem_ty(
@@ -482,27 +392,6 @@ impl DfirBuilder for SimBuilder {
             .add_dfir(dfir, None, operator_tag);
     }
 
-    /// Places the source directly in the tick's own graph.
-    fn add_tick_source(
-        &mut self,
-        location: &LocationId,
-        source_rhs: proc_macro2::TokenStream,
-        out_ident: &syn::Ident,
-        replay_each_tick: bool,
-        operator_tag: Option<&str>,
-    ) {
-        let dfir = if replay_each_tick {
-            parse_quote! {
-                #out_ident = #source_rhs -> persist::<'static>();
-            }
-        } else {
-            parse_quote! {
-                #out_ident = #source_rhs;
-            }
-        };
-        self.add_dfir_at(location, dfir, operator_tag);
-    }
-
     fn batch(
         &mut self,
         in_ident: syn::Ident,
@@ -514,13 +403,6 @@ impl DfirBuilder for SimBuilder {
         fold_hooked_idents: &HashSet<String>,
     ) {
         if let LocationId::Atomic(_) = in_location {
-            assert!(
-                op_meta.sim_hook_id.is_none(),
-                "sim hooks are not supported on `batch_atomic` / `snapshot_atomic`: the \
-                 non-deterministic decision happens where the stream *enters* the atomic \
-                 context, not at the atomic batch (at {})",
-                location_for_op(op_meta).0
-            );
             let builder = self.get_dfir_mut(in_location);
             builder.add_dfir(
                 parse_quote! {
@@ -572,37 +454,20 @@ impl DfirBuilder for SimBuilder {
                     self.add_extra_stmt_internal(in_location, syn::parse_quote! {
                         let #buffered_ident = ::std::rc::Rc::new(::std::cell::RefCell::new(::std::collections::VecDeque::new()));
                     });
-
-                    let inner_hook: syn::Expr = syn::parse_quote!(
-                        #root::sim::runtime::StreamHook::<_, #order_ty> {
-                            input: #buffered_ident.clone(),
-                            to_release: None,
-                            output: #hoff_send_ident,
-                            batch_location: #root::sim::runtime::HookLocationMeta { location: #batch_location, line: #line, caret_indent: #caret },
-                            format_item_debug: #root::__maybe_debug__!(#element_type),
-                            _order: std::marker::PhantomData,
-                        }
+                    self.add_hook(
+                        in_location,
+                        out_location,
+                        syn::parse_quote!(
+                            Box::new(#root::sim::runtime::StreamHook::<_, #order_ty> {
+                                input: #buffered_ident.clone(),
+                                to_release: None,
+                                output: #hoff_send_ident,
+                                batch_location: (#batch_location, #line, #caret),
+                                format_item_debug: #root::__maybe_debug__!(#element_type),
+                                _order: std::marker::PhantomData,
+                            })
+                        ),
                     );
-                    if let Some(hook_id) = op_meta.sim_hook_id {
-                        let hook_rc_ident = syn::Ident::new(
-                            &format!("__scripted_hook_{hoff_id}"),
-                            Span::call_site(),
-                        );
-                        self.add_scripted_hook(
-                            hook_id,
-                            in_location,
-                            out_location,
-                            &hook_rc_ident,
-                            &batch_location,
-                            inner_hook,
-                        );
-                    } else {
-                        self.add_hook(
-                            in_location,
-                            out_location,
-                            syn::parse_quote!(Box::new(#inner_hook)),
-                        );
-                    }
 
                     self.get_dfir_mut(in_location).add_dfir(
                         parse_quote! {
@@ -653,37 +518,20 @@ impl DfirBuilder for SimBuilder {
                     self.add_extra_stmt_internal(in_location, syn::parse_quote! {
                         let #buffered_ident = ::std::rc::Rc::new(::std::cell::RefCell::new(__root_dfir_rs::rustc_hash::FxHashMap::<_, ::std::collections::VecDeque<_>>::default()));
                     });
-
-                    let inner_hook: syn::Expr = syn::parse_quote!(
-                        #root::sim::runtime::KeyedStreamHook::<_, _, #order_ty> {
-                            input: #buffered_ident.clone(),
-                            to_release: None,
-                            output: #hoff_send_ident,
-                            batch_location: #root::sim::runtime::HookLocationMeta { location: #batch_location, line: #line, caret_indent: #caret },
-                            format_item_debug: #root::__maybe_debug__!((#key_type, #value_type)),
-                            _order: std::marker::PhantomData,
-                        }
+                    self.add_hook(
+                        in_location,
+                        out_location,
+                        syn::parse_quote!(
+                            Box::new(#root::sim::runtime::KeyedStreamHook::<_, _, #order_ty> {
+                                input: #buffered_ident.clone(),
+                                to_release: None,
+                                output: #hoff_send_ident,
+                                batch_location: (#batch_location, #line, #caret),
+                                format_item_debug: #root::__maybe_debug__!((#key_type, #value_type)),
+                                _order: std::marker::PhantomData,
+                            })
+                        ),
                     );
-                    if let Some(hook_id) = op_meta.sim_hook_id {
-                        let hook_rc_ident = syn::Ident::new(
-                            &format!("__scripted_hook_{hoff_id}"),
-                            Span::call_site(),
-                        );
-                        self.add_scripted_hook(
-                            hook_id,
-                            in_location,
-                            out_location,
-                            &hook_rc_ident,
-                            &batch_location,
-                            inner_hook,
-                        );
-                    } else {
-                        self.add_hook(
-                            in_location,
-                            out_location,
-                            syn::parse_quote!(Box::new(#inner_hook)),
-                        );
-                    }
 
                     self.get_dfir_mut(in_location).add_dfir(
                         parse_quote! {
@@ -713,70 +561,37 @@ impl DfirBuilder for SimBuilder {
                     let hoff_recv_ident =
                         syn::Ident::new(&format!("__hoff_recv_{hoff_id}"), Span::call_site());
 
+                    let hook_expr: syn::Expr = if fold_hooked_idents.contains(&in_ident.to_string())
+                    {
+                        // The fold hook already controls when new values are produced.
+                        // Use a PassthroughSingletonHook that always releases the latest
+                        // value without non-deterministic decisions.
+                        syn::parse_quote!(
+                            Box::new(#root::sim::runtime::PassthroughSingletonHook::<_>::new(
+                                #buffered_ident.clone(),
+                                #hoff_send_ident,
+                                (#batch_location, #line, #caret),
+                                #root::__maybe_debug__!(#element_type),
+                            ))
+                        )
+                    } else {
+                        syn::parse_quote!(
+                            Box::new(#root::sim::runtime::SingletonHook::<_>::new(
+                                #buffered_ident.clone(),
+                                #hoff_send_ident,
+                                (#batch_location, #line, #caret),
+                                #root::__maybe_debug__!(#element_type),
+                            ))
+                        )
+                    };
+
                     self.add_extra_stmt_internal(in_location, syn::parse_quote! {
                         let (#hoff_send_ident, #hoff_recv_ident) = __root_dfir_rs::util::unsync::mpsc::unbounded();
                     });
                     self.add_extra_stmt_internal(in_location, syn::parse_quote! {
                         let #buffered_ident = ::std::rc::Rc::new(::std::cell::RefCell::new(::std::collections::VecDeque::new()));
                     });
-
-                    if fold_hooked_idents.contains(&in_ident.to_string()) {
-                        assert!(
-                            op_meta.sim_hook_id.is_none(),
-                            "sim hooks are not yet supported on snapshots of top-level folds \
-                             over unordered streams: the fold's input order is fuzzed \
-                             separately (at {})",
-                            batch_location
-                        );
-                        // The fold hook already controls when new values are produced.
-                        // Use a PassthroughSingletonHook that always releases the latest
-                        // value without non-deterministic decisions.
-                        self.add_hook(
-                            in_location,
-                            out_location,
-                            syn::parse_quote!(
-                                Box::new(#root::sim::runtime::PassthroughSingletonHook::<_>::new(
-                                    #buffered_ident.clone(),
-                                    #hoff_send_ident,
-                                    #root::sim::runtime::HookLocationMeta { location: #batch_location, line: #line, caret_indent: #caret },
-                                    #root::__maybe_debug__!(#element_type),
-                                ))
-                            ),
-                        );
-                    } else if let Some(hook_id) = op_meta.sim_hook_id {
-                        let hook_rc_ident = syn::Ident::new(
-                            &format!("__scripted_hook_{hoff_id}"),
-                            Span::call_site(),
-                        );
-                        self.add_scripted_hook(
-                            hook_id,
-                            in_location,
-                            out_location,
-                            &hook_rc_ident,
-                            &batch_location,
-                            syn::parse_quote!(
-                                #root::sim::runtime::SingletonHook::<_>::new(
-                                    #buffered_ident.clone(),
-                                    #hoff_send_ident,
-                                    #root::sim::runtime::HookLocationMeta { location: #batch_location, line: #line, caret_indent: #caret },
-                                    #root::__maybe_debug__!(#element_type),
-                                )
-                            ),
-                        );
-                    } else {
-                        self.add_hook(
-                            in_location,
-                            out_location,
-                            syn::parse_quote!(
-                                Box::new(#root::sim::runtime::SingletonHook::<_>::new(
-                                    #buffered_ident.clone(),
-                                    #hoff_send_ident,
-                                    #root::sim::runtime::HookLocationMeta { location: #batch_location, line: #line, caret_indent: #caret },
-                                    #root::__maybe_debug__!(#element_type),
-                                ))
-                            ),
-                        );
-                    }
+                    self.add_hook(in_location, out_location, hook_expr);
 
                     self.get_dfir_mut(in_location).add_dfir(
                         parse_quote! {
@@ -825,36 +640,19 @@ impl DfirBuilder for SimBuilder {
                     self.add_extra_stmt_internal(in_location, syn::parse_quote! {
                         let #buffered_ident = ::std::rc::Rc::new(::std::cell::RefCell::new(__root_dfir_rs::rustc_hash::FxHashMap::<_, ::std::collections::VecDeque<_>>::default()));
                     });
-
-                    let inner_hook: syn::Expr = syn::parse_quote!(
-                        #root::sim::runtime::KeyedSingletonHook::<_, _>::new(
-                            #buffered_ident.clone(),
-                            #hoff_send_ident,
-                            #root::sim::runtime::HookLocationMeta { location: #batch_location, line: #line, caret_indent: #caret },
-                            #root::__maybe_debug__!(#key_type),
-                            #root::__maybe_debug__!(#value_type),
-                        )
+                    self.add_hook(
+                        in_location,
+                        out_location,
+                        syn::parse_quote! (
+                            Box::new(#root::sim::runtime::KeyedSingletonHook::<_, _>::new(
+                                #buffered_ident.clone(),
+                                #hoff_send_ident,
+                                (#batch_location, #line, #caret),
+                                #root::__maybe_debug__!(#key_type),
+                                #root::__maybe_debug__!(#value_type),
+                            ))
+                        ),
                     );
-                    if let Some(hook_id) = op_meta.sim_hook_id {
-                        let hook_rc_ident = syn::Ident::new(
-                            &format!("__scripted_hook_{hoff_id}"),
-                            Span::call_site(),
-                        );
-                        self.add_scripted_hook(
-                            hook_id,
-                            in_location,
-                            out_location,
-                            &hook_rc_ident,
-                            &batch_location,
-                            inner_hook,
-                        );
-                    } else {
-                        self.add_hook(
-                            in_location,
-                            out_location,
-                            syn::parse_quote!(Box::new(#inner_hook)),
-                        );
-                    }
 
                     self.get_dfir_mut(in_location).add_dfir(
                         parse_quote! {
@@ -872,14 +670,14 @@ impl DfirBuilder for SimBuilder {
                         None,
                     );
                 }
-                CollectionKind::Optional { element_type, .. } => {
-                    // `InitNone` optionals (null prefix, then monotone presence) are exactly what
-                    // `OptionalInitNoneHook` models. A top-level `Unbounded` optional is a stream
-                    // of versions in the simulator (`singleton_intermediates`), which has no
-                    // representation of a return to null, so it is snapshotted the same way: the
-                    // snapshot is null until the first version and then some version. This is
-                    // what `Optional::or` / `unwrap_or` / `into_singleton` on a top-level
-                    // aggregate (`max`, `reduce`, `first`) need, whose presence is monotone.
+                CollectionKind::Optional {
+                    bound: crate::compile::ir::BoundKind::Unbounded,
+                    element_type,
+                } => {
+                    // A top-level unbounded optional (such as a `reduce` or `max`) is a stream
+                    // of versions in the simulator; its snapshot is null until the first
+                    // version, then some version. Its presence is monotone: the simulator has
+                    // no representation of a return to null.
                     debug_assert!(in_location.is_top_level());
 
                     let hoff_id = self.next_hoff_id.get_and_increment();
@@ -891,6 +689,8 @@ impl DfirBuilder for SimBuilder {
                     let hoff_recv_ident =
                         syn::Ident::new(&format!("__hoff_recv_{hoff_id}"), Span::call_site());
 
+                    let passthrough = fold_hooked_idents.contains(&in_ident.to_string());
+
                     self.add_extra_stmt_internal(in_location, syn::parse_quote! {
                         let (#hoff_send_ident, #hoff_recv_ident) = __root_dfir_rs::util::unsync::mpsc::unbounded();
                     });
@@ -901,10 +701,11 @@ impl DfirBuilder for SimBuilder {
                         in_location,
                         out_location,
                         syn::parse_quote!(
-                            Box::new(#root::sim::runtime::OptionalInitNoneHook::<_>::new(
+                            Box::new(#root::sim::runtime::OptionalHook::<_>::new(
                                 #buffered_ident.clone(),
                                 #hoff_send_ident,
-                                #root::sim::runtime::HookLocationMeta { location: #batch_location, line: #line, caret_indent: #caret },
+                                #passthrough,
+                                (#batch_location, #line, #caret),
                                 #root::__maybe_debug__!(#element_type),
                             ))
                         ),
@@ -1007,28 +808,11 @@ impl DfirBuilder for SimBuilder {
                         );
                     }
                 } else {
-                    // NOTE: `Optional::latest()` is non-monotone (it reflects the latest tick's
-                    // value, "including whether the optional is null or not"), so it cannot be
-                    // modeled by the monotone `OptionalInitNoneHook`. Simulating it soundly needs a
-                    // representation that conveys per-tick nullness, which is not yet implemented.
-                    // (`Singleton::latest()` lowering yields via the `Singleton` arm above, so it
-                    // does not depend on this path.)
                     todo!("Non-atomic yield of an Optional is not yet supported");
                 }
             }
             o => todo!("Not yet supported, yield collection type {:?}", o),
         }
-    }
-
-    /// This implementation is the identity: simulation does not emit production
-    /// `loop { ... }` contexts, so no un-windowing operator is required.
-    fn unwindow_for_consume(
-        &mut self,
-        in_ident: syn::Ident,
-        _in_location: &LocationId,
-        _out_location: &LocationId,
-    ) -> syn::Ident {
-        in_ident
     }
 
     fn begin_atomic(
@@ -1060,18 +844,9 @@ impl DfirBuilder for SimBuilder {
         out_ident: &syn::Ident,
     ) {
         if let LocationId::Atomic(tick) = in_location
-            && let LocationId::Tick {
-                tick: _,
-                parent_location,
-            } = tick.as_ref()
+            && let LocationId::Tick(_, outer) = tick.as_ref()
         {
-            self.yield_from_tick(
-                in_ident,
-                in_location,
-                in_kind,
-                out_ident,
-                parent_location.as_ref(),
-            );
+            self.yield_from_tick(in_ident, in_location, in_kind, out_ident, outer.as_ref());
         } else {
             unreachable!()
         }
@@ -1090,8 +865,7 @@ impl DfirBuilder for SimBuilder {
         // A retry cast alone (`AtLeastOnce` → `ExactlyOnce`, same order and boundedness, as
         // `fold` with an idempotence proof performs on its input) is the identity in the
         // simulator: the simulated network never duplicates a delivery, so there is no
-        // decision to explore. (Injecting duplicates to exercise idempotence proofs would be
-        // a hook of its own; none exists.)
+        // decision to explore.
         let retry_cast_only = matches!(
             (in_kind, out_kind),
             (
@@ -1168,29 +942,17 @@ impl DfirBuilder for SimBuilder {
                         let #buffered_ident = ::std::rc::Rc::new(::std::cell::RefCell::new(None));
                     });
 
-                    let inner_hook: syn::Expr = syn::parse_quote!(
-                        #root::sim::runtime::StreamOrderHook::<_>::new(
-                            #buffered_ident.clone(),
-                            #hoff_send_ident,
-                            #root::sim::runtime::HookLocationMeta { location: #assume_location, line: #line, caret_indent: #caret },
-                            #root::__maybe_debug__!(#element_type),
-                        )
+                    self.add_inline_hook(
+                        location,
+                        syn::parse_quote!(
+                            Box::new(#root::sim::runtime::StreamOrderHook::<_>::new(
+                                #buffered_ident.clone(),
+                                #hoff_send_ident,
+                                (#assume_location, #line, #caret),
+                                #root::__maybe_debug__!(#element_type),
+                            ))
+                        ),
                     );
-                    if let Some(hook_id) = op_meta.sim_hook_id {
-                        let hook_rc_ident = syn::Ident::new(
-                            &format!("__scripted_inline_hook_{hoff_id}"),
-                            Span::call_site(),
-                        );
-                        self.add_scripted_inline_hook(
-                            hook_id,
-                            location,
-                            &hook_rc_ident,
-                            &assume_location,
-                            inner_hook,
-                        );
-                    } else {
-                        self.add_inline_hook(location, syn::parse_quote!(Box::new(#inner_hook)));
-                    }
 
                     let builder = self.get_dfir_mut(location);
                     builder.add_dfir(
@@ -1253,30 +1015,18 @@ impl DfirBuilder for SimBuilder {
                         let #buffered_ident = ::std::rc::Rc::new(::std::cell::RefCell::new(None));
                     });
 
-                    let inner_hook: syn::Expr = syn::parse_quote!(
-                        #root::sim::runtime::KeyedStreamOrderHook::<_, _>::new(
-                            #buffered_ident.clone(),
-                            #hoff_send_ident,
-                            #root::sim::runtime::HookLocationMeta { location: #assume_location, line: #line, caret_indent: #caret },
-                            #root::__maybe_debug__!(#key_type),
-                            #root::__maybe_debug__!(#value_type),
-                        )
+                    self.add_inline_hook(
+                        location,
+                        syn::parse_quote!(
+                            Box::new(#root::sim::runtime::KeyedStreamOrderHook::<_, _>::new(
+                                #buffered_ident.clone(),
+                                #hoff_send_ident,
+                                (#assume_location, #line, #caret),
+                                #root::__maybe_debug__!(#key_type),
+                                #root::__maybe_debug__!(#value_type),
+                            ))
+                        ),
                     );
-                    if let Some(hook_id) = op_meta.sim_hook_id {
-                        let hook_rc_ident = syn::Ident::new(
-                            &format!("__scripted_inline_hook_{hoff_id}"),
-                            Span::call_site(),
-                        );
-                        self.add_scripted_inline_hook(
-                            hook_id,
-                            location,
-                            &hook_rc_ident,
-                            &assume_location,
-                            inner_hook,
-                        );
-                    } else {
-                        self.add_inline_hook(location, syn::parse_quote!(Box::new(#inner_hook)));
-                    }
 
                     let builder = self.get_dfir_mut(location);
                     builder.add_dfir(
@@ -1339,30 +1089,18 @@ impl DfirBuilder for SimBuilder {
                         let #buffered_ident = ::std::rc::Rc::new(::std::cell::RefCell::new(None));
                     });
 
-                    let inner_hook: syn::Expr = syn::parse_quote!(
-                        #root::sim::runtime::PartiallyOrderedStreamHook::<_, _>::new(
-                            #buffered_ident.clone(),
-                            #hoff_send_ident,
-                            #root::sim::runtime::HookLocationMeta { location: #assume_location, line: #line, caret_indent: #caret },
-                            #root::__maybe_debug__!(#key_type),
-                            #root::__maybe_debug__!(#value_type),
-                        )
+                    self.add_inline_hook(
+                        location,
+                        syn::parse_quote!(
+                            Box::new(#root::sim::runtime::PartiallyOrderedStreamHook::<_, _>::new(
+                                #buffered_ident.clone(),
+                                #hoff_send_ident,
+                                (#assume_location, #line, #caret),
+                                #root::__maybe_debug__!(#key_type),
+                                #root::__maybe_debug__!(#value_type),
+                            ))
+                        ),
                     );
-                    if let Some(hook_id) = op_meta.sim_hook_id {
-                        let hook_rc_ident = syn::Ident::new(
-                            &format!("__scripted_inline_hook_{hoff_id}"),
-                            Span::call_site(),
-                        );
-                        self.add_scripted_inline_hook(
-                            hook_id,
-                            location,
-                            &hook_rc_ident,
-                            &assume_location,
-                            inner_hook,
-                        );
-                    } else {
-                        self.add_inline_hook(location, syn::parse_quote!(Box::new(#inner_hook)));
-                    }
 
                     let builder = self.get_dfir_mut(location);
                     builder.add_dfir(
@@ -1431,31 +1169,19 @@ impl DfirBuilder for SimBuilder {
                     self.add_extra_stmt_internal(location, syn::parse_quote! {
                         let #buffered_ident = ::std::rc::Rc::new(::std::cell::RefCell::new(::std::collections::VecDeque::new()));
                     });
-                    let inner_hook: syn::Expr = syn::parse_quote!(
-                        #root::sim::runtime::TopLevelStreamOrderHook::<_> {
-                            input: #buffered_ident.clone(),
-                            to_release: None,
-                            output: #hoff_send_ident,
-                            location: #root::sim::runtime::HookLocationMeta { location: #assume_location, line: #line, caret_indent: #caret },
-                            format_item_debug: #root::__maybe_debug__!(#element_type),
-                        }
+                    self.add_hook(
+                        location,
+                        location,
+                        syn::parse_quote!(
+                            Box::new(#root::sim::runtime::TopLevelStreamOrderHook::<_> {
+                                input: #buffered_ident.clone(),
+                                to_release: None,
+                                output: #hoff_send_ident,
+                                location: (#assume_location, #line, #caret),
+                                format_item_debug: #root::__maybe_debug__!(#element_type),
+                            })
+                        ),
                     );
-                    if let Some(hook_id) = op_meta.sim_hook_id {
-                        let hook_rc_ident = syn::Ident::new(
-                            &format!("__scripted_observation_hook_{hoff_id}"),
-                            Span::call_site(),
-                        );
-                        self.add_scripted_hook(
-                            hook_id,
-                            location,
-                            location,
-                            &hook_rc_ident,
-                            &assume_location,
-                            inner_hook,
-                        );
-                    } else {
-                        self.add_hook(location, location, syn::parse_quote!(Box::new(#inner_hook)));
-                    }
 
                     self.get_dfir_mut(location).add_dfir(
                         parse_quote! {
@@ -1502,31 +1228,19 @@ impl DfirBuilder for SimBuilder {
                     self.add_extra_stmt_internal(location, syn::parse_quote! {
                         let #buffered_ident = ::std::rc::Rc::new(::std::cell::RefCell::new(__root_dfir_rs::rustc_hash::FxHashMap::default()));
                     });
-                    let inner_hook: syn::Expr = syn::parse_quote!(
-                        #root::sim::runtime::TopLevelKeyedStreamOrderHook::<_, _> {
-                            input: #buffered_ident.clone(),
-                            to_release: None,
-                            output: #hoff_send_ident,
-                            location: #root::sim::runtime::HookLocationMeta { location: #assume_location, line: #line, caret_indent: #caret },
-                            format_item_debug: #root::__maybe_debug__!((#key_type, #value_type)),
-                        }
+                    self.add_hook(
+                        location,
+                        location,
+                        syn::parse_quote!(
+                            Box::new(#root::sim::runtime::TopLevelKeyedStreamOrderHook::<_, _> {
+                                input: #buffered_ident.clone(),
+                                to_release: None,
+                                output: #hoff_send_ident,
+                                location: (#assume_location, #line, #caret),
+                                format_item_debug: #root::__maybe_debug__!((#key_type, #value_type)),
+                            })
+                        ),
                     );
-                    if let Some(hook_id) = op_meta.sim_hook_id {
-                        let hook_rc_ident = syn::Ident::new(
-                            &format!("__scripted_observation_hook_{hoff_id}"),
-                            Span::call_site(),
-                        );
-                        self.add_scripted_hook(
-                            hook_id,
-                            location,
-                            location,
-                            &hook_rc_ident,
-                            &assume_location,
-                            inner_hook,
-                        );
-                    } else {
-                        self.add_hook(location, location, syn::parse_quote!(Box::new(#inner_hook)));
-                    }
 
                     self.get_dfir_mut(location).add_dfir(
                         parse_quote! {
@@ -1573,31 +1287,19 @@ impl DfirBuilder for SimBuilder {
                     self.add_extra_stmt_internal(location, syn::parse_quote! {
                         let #buffered_ident = ::std::rc::Rc::new(::std::cell::RefCell::new(__root_dfir_rs::rustc_hash::FxHashMap::default()));
                     });
-                    let inner_hook: syn::Expr = syn::parse_quote!(
-                        #root::sim::runtime::TopLevelPartiallyOrderedStreamHook::<_, _> {
-                            input: #buffered_ident.clone(),
-                            to_release: None,
-                            output: #hoff_send_ident,
-                            location: #root::sim::runtime::HookLocationMeta { location: #assume_location, line: #line, caret_indent: #caret },
-                            format_item_debug: #root::__maybe_debug__!((#key_type, #value_type)),
-                        }
+                    self.add_hook(
+                        location,
+                        location,
+                        syn::parse_quote!(
+                            Box::new(#root::sim::runtime::TopLevelPartiallyOrderedStreamHook::<_, _> {
+                                input: #buffered_ident.clone(),
+                                to_release: None,
+                                output: #hoff_send_ident,
+                                location: (#assume_location, #line, #caret),
+                                format_item_debug: #root::__maybe_debug__!((#key_type, #value_type)),
+                            })
+                        ),
                     );
-                    if let Some(hook_id) = op_meta.sim_hook_id {
-                        let hook_rc_ident = syn::Ident::new(
-                            &format!("__scripted_observation_hook_{hoff_id}"),
-                            Span::call_site(),
-                        );
-                        self.add_scripted_hook(
-                            hook_id,
-                            location,
-                            location,
-                            &hook_rc_ident,
-                            &assume_location,
-                            inner_hook,
-                        );
-                    } else {
-                        self.add_hook(location, location, syn::parse_quote!(Box::new(#inner_hook)));
-                    }
 
                     self.get_dfir_mut(location).add_dfir(
                         parse_quote! {
@@ -1610,6 +1312,36 @@ impl DfirBuilder for SimBuilder {
                     self.get_dfir_mut(location).add_dfir(
                         parse_quote! {
                             #out_ident = source_stream(#hoff_recv_ident);
+                        },
+                        None,
+                        None,
+                    );
+                }
+                // A retry upgrade (AtLeastOnce -> ExactlyOnce) with the ordering
+                // unchanged — e.g. `fold`'s idempotence proof compiling to
+                // `assume_retries`. Unlike ordering assumptions, a retry relabel
+                // has no runtime content for the simulator to explore: whatever
+                // duplicates genuinely arise (protocol-level re-offers, or
+                // transports that actually retry) already flow through and are
+                // explored via their producers' own nondeterminism, while
+                // injecting synthetic duplicates would explore executions
+                // impossible under the configured transport. So: identity
+                // passthrough, no hook.
+                (
+                    CollectionKind::Stream {
+                        order: in_order,
+                        retry: StreamRetry::AtLeastOnce,
+                        ..
+                    },
+                    CollectionKind::Stream {
+                        order: out_order,
+                        retry: StreamRetry::ExactlyOnce,
+                        ..
+                    },
+                ) if in_order == out_order => {
+                    self.get_dfir_mut(location).add_dfir(
+                        parse_quote! {
+                            #out_ident = #in_ident -> map(|v| v);
                         },
                         None,
                         None,
@@ -1705,55 +1437,31 @@ impl DfirBuilder for SimBuilder {
             });
 
             if is_keyed {
-                let inner_hook: syn::Expr = syn::parse_quote!(
-                    #root::sim::runtime::KeyedMergeOrderedHook::<_, _>::new(
-                        #buffered_first_ident.clone(),
-                        #buffered_second_ident.clone(),
-                        #hoff_send_ident,
-                        #root::sim::runtime::HookLocationMeta { location: #assume_location, line: #line, caret_indent: #caret },
-                        #root::__maybe_debug__!(#element_type),
-                    )
+                self.add_inline_hook(
+                    location,
+                    syn::parse_quote!(
+                        Box::new(#root::sim::runtime::KeyedMergeOrderedHook::<_, _>::new(
+                            #buffered_first_ident.clone(),
+                            #buffered_second_ident.clone(),
+                            #hoff_send_ident,
+                            (#assume_location, #line, #caret),
+                            #root::__maybe_debug__!(#element_type),
+                        ))
+                    ),
                 );
-                if let Some(hook_id) = op_meta.sim_hook_id {
-                    let hook_rc_ident = syn::Ident::new(
-                        &format!("__scripted_inline_hook_{hoff_id}"),
-                        Span::call_site(),
-                    );
-                    self.add_scripted_inline_hook(
-                        hook_id,
-                        location,
-                        &hook_rc_ident,
-                        &assume_location,
-                        inner_hook,
-                    );
-                } else {
-                    self.add_inline_hook(location, syn::parse_quote!(Box::new(#inner_hook)));
-                }
             } else {
-                let inner_hook: syn::Expr = syn::parse_quote!(
-                    #root::sim::runtime::MergeOrderedHook::<_>::new(
-                        #buffered_first_ident.clone(),
-                        #buffered_second_ident.clone(),
-                        #hoff_send_ident,
-                        #root::sim::runtime::HookLocationMeta { location: #assume_location, line: #line, caret_indent: #caret },
-                        #root::__maybe_debug__!(#element_type),
-                    )
+                self.add_inline_hook(
+                    location,
+                    syn::parse_quote!(
+                        Box::new(#root::sim::runtime::MergeOrderedHook::<_>::new(
+                            #buffered_first_ident.clone(),
+                            #buffered_second_ident.clone(),
+                            #hoff_send_ident,
+                            (#assume_location, #line, #caret),
+                            #root::__maybe_debug__!(#element_type),
+                        ))
+                    ),
                 );
-                if let Some(hook_id) = op_meta.sim_hook_id {
-                    let hook_rc_ident = syn::Ident::new(
-                        &format!("__scripted_inline_hook_{hoff_id}"),
-                        Span::call_site(),
-                    );
-                    self.add_scripted_inline_hook(
-                        hook_id,
-                        location,
-                        &hook_rc_ident,
-                        &assume_location,
-                        inner_hook,
-                    );
-                } else {
-                    self.add_inline_hook(location, syn::parse_quote!(Box::new(#inner_hook)));
-                }
             }
 
             let builder = self.get_dfir_mut(location);
@@ -1830,33 +1538,21 @@ impl DfirBuilder for SimBuilder {
                 self.add_extra_stmt_internal(location, syn::parse_quote! {
                     let #buffered_second_ident = ::std::rc::Rc::new(::std::cell::RefCell::new(__root_dfir_rs::rustc_hash::FxHashMap::default()));
                 });
-                let inner_hook: syn::Expr = syn::parse_quote!(
-                    #root::sim::runtime::TopLevelKeyedMergeOrderedHook::<_, _> {
-                        first: #buffered_first_ident.clone(),
-                        second: #buffered_second_ident.clone(),
-                        to_release: None,
-                        release_source: None,
-                        output: #hoff_send_ident,
-                        location: #root::sim::runtime::HookLocationMeta { location: #assume_location, line: #line, caret_indent: #caret },
-                        format_item_debug: #root::__maybe_debug__!(#element_type),
-                    }
+                self.add_hook(
+                    location,
+                    location,
+                    syn::parse_quote!(
+                        Box::new(#root::sim::runtime::TopLevelKeyedMergeOrderedHook::<_, _> {
+                            first: #buffered_first_ident.clone(),
+                            second: #buffered_second_ident.clone(),
+                            to_release: None,
+                            release_source: None,
+                            output: #hoff_send_ident,
+                            location: (#assume_location, #line, #caret),
+                            format_item_debug: #root::__maybe_debug__!(#element_type),
+                        })
+                    ),
                 );
-                if let Some(hook_id) = op_meta.sim_hook_id {
-                    let hook_rc_ident = syn::Ident::new(
-                        &format!("__scripted_observation_hook_{hoff_id}"),
-                        Span::call_site(),
-                    );
-                    self.add_scripted_hook(
-                        hook_id,
-                        location,
-                        location,
-                        &hook_rc_ident,
-                        &assume_location,
-                        inner_hook,
-                    );
-                } else {
-                    self.add_hook(location, location, syn::parse_quote!(Box::new(#inner_hook)));
-                }
 
                 self.get_dfir_mut(location).add_dfir(
                     parse_quote! {
@@ -1880,33 +1576,21 @@ impl DfirBuilder for SimBuilder {
                 self.add_extra_stmt_internal(location, syn::parse_quote! {
                     let #buffered_second_ident = ::std::rc::Rc::new(::std::cell::RefCell::new(::std::collections::VecDeque::new()));
                 });
-                let inner_hook: syn::Expr = syn::parse_quote!(
-                    #root::sim::runtime::TopLevelMergeOrderedHook::<_> {
-                        first: #buffered_first_ident.clone(),
-                        second: #buffered_second_ident.clone(),
-                        to_release: None,
-                        release_source: None,
-                        output: #hoff_send_ident,
-                        location: #root::sim::runtime::HookLocationMeta { location: #assume_location, line: #line, caret_indent: #caret },
-                        format_item_debug: #root::__maybe_debug__!(#element_type),
-                    }
+                self.add_hook(
+                    location,
+                    location,
+                    syn::parse_quote!(
+                        Box::new(#root::sim::runtime::TopLevelMergeOrderedHook::<_> {
+                            first: #buffered_first_ident.clone(),
+                            second: #buffered_second_ident.clone(),
+                            to_release: None,
+                            release_source: None,
+                            output: #hoff_send_ident,
+                            location: (#assume_location, #line, #caret),
+                            format_item_debug: #root::__maybe_debug__!(#element_type),
+                        })
+                    ),
                 );
-                if let Some(hook_id) = op_meta.sim_hook_id {
-                    let hook_rc_ident = syn::Ident::new(
-                        &format!("__scripted_observation_hook_{hoff_id}"),
-                        Span::call_site(),
-                    );
-                    self.add_scripted_hook(
-                        hook_id,
-                        location,
-                        location,
-                        &hook_rc_ident,
-                        &assume_location,
-                        inner_hook,
-                    );
-                } else {
-                    self.add_hook(location, location, syn::parse_quote!(Box::new(#inner_hook)));
-                }
 
                 self.get_dfir_mut(location).add_dfir(
                     parse_quote! {
@@ -1935,6 +1619,23 @@ impl DfirBuilder for SimBuilder {
         }
     }
 
+    fn network_metadata(
+        &mut self,
+        tag_id: StmtId,
+        name: Option<&str>,
+        metadata: &crate::compile::ir::HydroIrMetadata,
+    ) {
+        self.pending_network_meta = Some((tag_id, name.map(str::to_owned), metadata.op.clone()));
+    }
+
+    fn external_output_metadata(
+        &mut self,
+        tag_id: StmtId,
+        port: crate::compile::builder::ExternalPortId,
+    ) {
+        self.pending_output_port = Some((tag_id, port.into_inner()));
+    }
+
     fn create_network(
         &mut self,
         from: &LocationId,
@@ -1946,7 +1647,6 @@ impl DfirBuilder for SimBuilder {
         source: syn::Expr,
         deserialize: Option<&DebugExpr>,
         external_element_type: Option<&syn::Type>,
-        input_element_type: Option<&syn::Type>,
         tag_id: StmtId,
         networking_info: &crate::networking::NetworkingInfo,
     ) {
@@ -1982,380 +1682,269 @@ impl DfirBuilder for SimBuilder {
         }
 
         let root = get_this_crate();
-        let channel_id = tag_id.into_inner();
-        let provenance = self.provenance;
-        // Embedded (raw-element) channels carry no serialized payload: they are not fault
-        // points, carry no delivery id, and are not recorded.
-        let embedded = external_element_type.is_some();
 
-        // The wire format. A serialized channel carries `(delivery id, bytes)`: the id is
-        // minted by the filter at the send half (see `sim::runtime::lineage`) and recorded by
-        // the receive half, so a delivery is attributed to its send exactly.
+        // For embedded (external) serialization, the raw payload type flows across the in-memory
+        // channel instead of serialized `Bytes`.
         let payload: syn::Type = match external_element_type {
             Some(ty) => ty.clone(),
-            None => parse_quote!((u64, __root_dfir_rs::bytes::Bytes)),
+            None => parse_quote!(__root_dfir_rs::bytes::Bytes),
         };
 
         // Bincode channels wrap the received value in a transport `Result` (matching real
         // deployments) which the bincode deserialize expression then unwraps. Embedded channels
         // deliver the raw payload directly, so no such wrapper is inserted.
-        let from_ser = serde_json::to_string(from).unwrap();
-        let to_ser = serde_json::to_string(to).unwrap();
-
-        // The filter: every send is recorded against the execution that produced it and
-        // the fault state decides whether it reaches the wire (omission; the sender's crash).
-        let lineage_ident =
-            syn::Ident::new(&format!("__lineage_send_{}", tag_id), Span::call_site());
-        self.add_extra_stmt_internal(
-            from,
-            syn::parse_quote! {
-                let #lineage_ident = (
-                    __hydro_lineage.clone(),
-                    #root::sim::runtime::parse_location(#from_ser),
-                    #root::sim::runtime::parse_location(#to_ser),
-                );
-            },
-        );
-        // The receive half records every arrival (by delivery id, before deserialization)
-        // against the execution that took it off the channel.
-        let recv_ident = syn::Ident::new(&format!("__lineage_recv_{}", tag_id), Span::call_site());
-        self.add_extra_stmt_internal(
-            to,
-            syn::parse_quote! {
-                let #recv_ident = (
-                    __hydro_lineage.clone(),
-                    #root::sim::runtime::parse_location(#to_ser),
-                );
-            },
-        );
-        let to_member_recv: proc_macro2::TokenStream = if matches!(to, LocationId::Cluster(_)) {
-            quote::quote!(Some(__current_cluster_id))
+        let ok_wrap: proc_macro2::TokenStream = if external_element_type.is_some() {
+            proc_macro2::TokenStream::new()
         } else {
-            quote::quote!(None)
+            quote::quote!(-> map(|v| -> ::std::result::Result<_, ()> { Ok(v) }))
         };
 
-        // The payload's `Debug` rendering for reports, when its type has one. The IR names
-        // the element type of the input stream: `Tagged<T>` in provenance mode (the value in
-        // hand is the plain `T`), and `(MemberId, T)` for a cluster-targeted send (the value
-        // in hand is `T`).
-        let display_fn: Option<syn::Expr> = (!embedded)
-            .then_some(input_element_type)
-            .flatten()
-            .map(|ty| {
-                let ty = if provenance {
-                    super::provenance::plain_type(ty)
-                } else {
-                    ty.clone()
-                };
-                let ty = match (&ty, to) {
-                    (syn::Type::Tuple(tuple), LocationId::Cluster(_)) if tuple.elems.len() == 2 => {
-                        tuple.elems[1].clone()
-                    }
-                    _ => ty,
-                };
-                parse_quote!(#root::__maybe_debug__!(#ty))
+        let from_cluster = match from {
+            LocationId::Cluster(_) => true,
+            LocationId::Process(_) => false,
+            _ => panic!(
+                "Simulations do not yet support network between {:?} and {:?}",
+                from, to
+            ),
+        };
+        let to_cluster = match to {
+            LocationId::Cluster(_) => true,
+            LocationId::Process(_) => false,
+            _ => panic!(
+                "Simulations do not yet support network between {:?} and {:?}",
+                from, to
+            ),
+        };
+
+        let Some((meta_id, name, op)) = self.pending_network_meta.take() else {
+            panic!("SimBuilder: network_metadata was not called before create_network")
+        };
+        assert_eq!(meta_id, tag_id, "SimBuilder: network_metadata for another network");
+        // Hook points intercept bincode channels only: embedded channels carry typed values.
+        let intercepted = self.network_hooks && external_element_type.is_none();
+        let channel_id = tag_id.into_inner();
+        self.channels.push(super::network_hook::ChannelInfo {
+            id: channel_id,
+            name,
+            from: from.clone(),
+            to: to.clone(),
+            networking: networking_info.clone(),
+            intercepted,
+            op,
+        });
+
+        // What the sender puts on the wire: cluster senders tag the payload with their member id,
+        // and intercepted channels carry the hook's `u64` tag.
+        let elem: syn::Type = if from_cluster {
+            parse_quote!((#root::__staged::location::TaglessMemberId, #payload))
+        } else {
+            payload
+        };
+        let wire: syn::Type = if intercepted {
+            parse_quote!((u64, #elem))
+        } else {
+            elem
+        };
+
+        // The channel itself: one queue for a process receiver, one per member for a cluster.
+        if to_cluster {
+            let sink_writer = syn::Ident::new(
+                &format!("__cloned_{}", sink.to_token_stream()),
+                Span::call_site(),
+            );
+            self.extra_stmts_global.push(syn::parse_quote! {
+                let #sink: ::std::rc::Rc<::std::cell::RefCell<Vec<__root_dfir_rs::util::unsync::mpsc::Sender<#wire>>>> = ::std::rc::Rc::new(::std::cell::RefCell::new(Vec::new()));
             });
-        let display_ident =
-            syn::Ident::new(&format!("__lineage_display_{}", tag_id), Span::call_site());
-        // The rendering is taken before serialization consumes the value (the element type
-        // need not be `Clone`), and travels alongside the bytes to the filter.
-        let targeted = matches!(to, LocationId::Cluster(_));
-        let render: proc_macro2::TokenStream = if let Some(f) = &display_fn {
+            self.extra_stmts_global.push(syn::parse_quote! {
+                let #sink_writer = #sink.clone();
+            });
+            if from_cluster {
+                self.add_extra_stmt_internal(
+                    from,
+                    syn::parse_quote! {
+                        let #sink = #sink.clone();
+                    },
+                );
+            }
+            self.add_extra_stmt_internal(
+                to,
+                syn::parse_quote! {
+                    let #source = {
+                        let (__sink, __source) = __root_dfir_rs::util::unsync::mpsc::unbounded::<#wire>();
+                        #sink_writer.borrow_mut().push(__sink);
+                        __source
+                    };
+                },
+            );
+        } else {
+            self.extra_stmts_global.push(syn::parse_quote! {
+                let (#sink, #source) = __root_dfir_rs::util::unsync::mpsc::unbounded::<#wire>();
+            });
+            if from_cluster {
+                self.add_extra_stmt_internal(
+                    from,
+                    syn::parse_quote! {
+                        let #sink = #sink.clone();
+                    },
+                );
+            }
+        }
+
+        // The send site. Pieces: the closure pattern, the recipient index (for crash staging),
+        // the item put on the wire, and the delivery into the recipient's queue.
+        let send_pat: syn::Pat = if to_cluster {
+            parse_quote!((target_member_id, v))
+        } else {
+            parse_quote!(v)
+        };
+        let recipient: syn::Expr = if to_cluster {
+            parse_quote!(#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize)
+        } else {
+            parse_quote!(0)
+        };
+        let elem_expr: syn::Expr = if from_cluster {
+            parse_quote!((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v))
+        } else {
+            parse_quote!(v)
+        };
+        let item: syn::Expr = if intercepted {
+            parse_quote!((__hydro_net_tag, #elem_expr))
+        } else {
+            elem_expr
+        };
+        let deliver = |sink: &syn::Expr, recipient: &syn::Expr, item: &syn::Expr| -> syn::Expr {
+            if to_cluster {
+                parse_quote!((#sink.borrow())[#recipient].try_send(#item).unwrap())
+            } else {
+                parse_quote!(#sink.try_send(#item).unwrap())
+            }
+        };
+
+        // For a crashable sender, stage sends per recipient so the CrashHook can cut an
+        // independent per-recipient suffix at a crash point (the partial-broadcast state a real
+        // sender crash produces).
+        let send_stmt: syn::Expr = if let Some(chvec) = self.crash_channels_ident(from) {
+            let stage = syn::Ident::new(
+                &format!("__hydro_crash_stage_{}", tag_id),
+                Span::call_site(),
+            );
             self.add_extra_stmt_internal(
                 from,
                 syn::parse_quote! {
-                    let #display_ident = #f;
+                    let #stage = ::std::rc::Rc::new(::std::cell::RefCell::new(
+                        ::std::vec::Vec::<::std::collections::VecDeque<#wire>>::new()
+                    ));
                 },
             );
-            if targeted {
-                quote::quote!(#root::sim::runtime::codegen::display_payload(#display_ident, &__v))
-            } else {
-                quote::quote!(#display_ident(&__v))
-            }
+            let recipient_pat = syn::Ident::new(
+                if to_cluster { "__recipient" } else { "_recipient" },
+                Span::call_site(),
+            );
+            let staged_deliver = deliver(
+                &parse_quote!(__crash_sink),
+                &parse_quote!(#recipient_pat),
+                &parse_quote!(v),
+            );
+            self.add_extra_stmt_internal(
+                from,
+                syn::parse_quote! {
+                    {
+                        let __crash_sink = #sink.clone();
+                        #chvec.borrow_mut().push(::std::boxed::Box::new(
+                            #root::sim::runtime::StagedChannel {
+                                buffers: #stage.clone(),
+                                deliver: ::std::boxed::Box::new(move |#recipient_pat, v| {
+                                    #staged_deliver
+                                }),
+                            }
+                        ));
+                    }
+                },
+            );
+            parse_quote!(#root::sim::runtime::stage_push(&#stage, #recipient, #item))
         } else {
-            quote::quote!(None)
+            deliver(&parse_quote!(#sink), &recipient, &item)
         };
-
-        // With record-level provenance the input items are `(payload, Vec<delivery id>)`
-        // (see `sim::provenance`): serialize the payload, record the ids with the send.
-        let send_guard = |from_member: proc_macro2::TokenStream,
-                          to_member: proc_macro2::TokenStream|
-         -> proc_macro2::TokenStream {
-            if provenance {
-                quote::quote!(#lineage_ident.0.record_sent_with(#channel_id, &#lineage_ident.1, #from_member, &#lineage_ident.2, #to_member, &v, __display, __prov))
-            } else {
-                quote::quote!(#lineage_ident.0.record_sent(#channel_id, &#lineage_ident.1, #from_member, &#lineage_ident.2, #to_member, &v, __display))
-            }
-        };
-        let ser_map: proc_macro2::TokenStream = match (serialize, provenance) {
-            (Some(serialize_pipeline), true) => {
-                quote::quote!(-> map(|(__v, __prov)| { let __display: Option<String> = #render; (#root::sim::runtime::codegen::apply(__v, #serialize_pipeline), __display, __prov) }))
-            }
-            (Some(serialize_pipeline), false) => {
-                quote::quote!(-> map(|__v| { let __display: Option<String> = #render; (#root::sim::runtime::codegen::apply(__v, #serialize_pipeline), __display) }))
-            }
-            (None, _) => proc_macro2::TokenStream::new(),
-        };
-        let pat_single: proc_macro2::TokenStream = if provenance {
-            quote::quote!((v, __display, __prov))
-        } else {
-            quote::quote!((v, __display))
-        };
-        let pat_targeted: proc_macro2::TokenStream = if provenance {
-            quote::quote!(((target_member_id, v), __display, __prov))
-        } else {
-            quote::quote!(((target_member_id, v), __display))
-        };
-        let send_p2p = send_guard(quote::quote!(None), quote::quote!(None));
-        let send_c2p = send_guard(
-            quote::quote!(Some(__current_cluster_id)),
-            quote::quote!(None),
-        );
-        let send_p2c = send_guard(
-            quote::quote!(None),
-            quote::quote!(Some(#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id))),
-        );
-        let send_c2c = send_guard(
-            quote::quote!(Some(__current_cluster_id)),
-            quote::quote!(Some(#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id))),
-        );
-
-        // The receive half: record the arrival, unwrap the wire format into what the
-        // deserializer expects (a transport `Result`), and in provenance mode tag the record
-        // with its delivery id.
-        let tag_recv: proc_macro2::TokenStream = if provenance {
-            quote::quote!(-> map(|(__id, __v)| #root::sim::runtime::codegen::tag_recv(__id, __v)))
-        } else {
-            quote::quote!(-> map(|(_, __v)| __v))
-        };
-        let recv_from_process: proc_macro2::TokenStream = quote::quote! {
-            -> map(|(__id, v)| {
-                #recv_ident.0.record_recv(#channel_id, &#recv_ident.1, #to_member_recv, __id);
-                (__id, ::std::result::Result::<_, ()>::Ok(v))
-            })
-        };
-        let recv_from_cluster: proc_macro2::TokenStream = quote::quote! {
-            -> map(|(__m, (__id, v))| {
-                #recv_ident.0.record_recv(#channel_id, &#recv_ident.1, #to_member_recv, __id);
-                (__id, ::std::result::Result::<_, ()>::Ok((__m, v)))
-            })
-        };
-        let deser: proc_macro2::TokenStream = match deserialize {
-            Some(deserialize_pipeline) => {
-                quote::quote!(-> map(|(__id, __v)| (__id, #root::sim::runtime::codegen::apply(__v, #deserialize_pipeline))))
-            }
-            None => proc_macro2::TokenStream::new(),
-        };
-        // The complete receive pipeline after `source_stream`.
-        let recv_pipeline = |from_cluster: bool| -> proc_macro2::TokenStream {
-            if embedded {
-                match deserialize {
-                    Some(deserialize_pipeline) => quote::quote!(-> map(#deserialize_pipeline)),
-                    None => proc_macro2::TokenStream::new(),
-                }
-            } else {
-                let tap = if from_cluster {
-                    &recv_from_cluster
+        let send_closure: syn::Expr = if intercepted {
+            let member = |cluster: bool, id: syn::Expr| -> syn::Expr {
+                if cluster {
+                    parse_quote!(::core::option::Option::Some(#id))
                 } else {
-                    &recv_from_process
-                };
-                quote::quote!(#tap #deser #tag_recv)
+                    parse_quote!(::core::option::Option::None)
+                }
+            };
+            let from_member = member(from_cluster, parse_quote!(__current_cluster_id));
+            let to_member = member(
+                to_cluster,
+                parse_quote!(#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id)),
+            );
+            parse_quote! {
+                |#send_pat| {
+                    if let ::core::option::Option::Some(__hydro_net_tag) = #root::sim::network_hook::rt::on_send(
+                        #channel_id,
+                        #from_member,
+                        #to_member,
+                        ::core::convert::AsRef::<[u8]>::as_ref(&v),
+                    ) {
+                        #send_stmt;
+                    }
+                }
             }
+        } else {
+            parse_quote!(|#send_pat| #send_stmt)
         };
-        if embedded {
-            assert!(
-                !provenance,
-                "record-level provenance does not support embedded network channels"
+
+        if let Some(serialize_pipeline) = serialize {
+            self.get_dfir_mut(from).add_dfir(
+                parse_quote! {
+                    #input_ident -> map(#serialize_pipeline) -> for_each(#send_closure);
+                },
+                None,
+                Some(&format!("send{}", tag_id)),
+            );
+        } else {
+            self.get_dfir_mut(from).add_dfir(
+                parse_quote! {
+                    #input_ident -> for_each(#send_closure);
+                },
+                None,
+                Some(&format!("send{}", tag_id)),
             );
         }
 
-        match (from, to) {
-            (LocationId::Process(_), LocationId::Process(_)) => {
-                self.extra_stmts_global.push(syn::parse_quote! {
-                    let (#sink, #source) = __root_dfir_rs::util::unsync::mpsc::unbounded::<#payload>();
-                });
-
-                if embedded {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> for_each(|v| #sink.try_send(v).unwrap());
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                } else {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident #ser_map -> for_each(|#pat_single| if let Some(__id) = #send_p2p { #sink.try_send((__id, v)).unwrap() });
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                }
-
-                let pipeline = recv_pipeline(false);
-                self.get_dfir_mut(to).add_dfir(
-                    parse_quote! {
-                        #out_ident = source_stream(#source) #pipeline;
-                    },
-                    None,
-                    Some(&format!("recv{}", tag_id)),
-                );
+        // Intercepted receives report to the hook (and expose the tag to a wrapped deserialize).
+        let recv_strip = if intercepted {
+            let to_member: syn::Expr = if to_cluster {
+                parse_quote!(::core::option::Option::Some(__current_cluster_id))
+            } else {
+                parse_quote!(::core::option::Option::None)
+            };
+            quote::quote! {
+                -> map(|(__hydro_net_tag, __hydro_net_item)| {
+                    #root::sim::network_hook::rt::on_recv(#channel_id, #to_member, __hydro_net_tag);
+                    __hydro_net_item
+                })
             }
-            (LocationId::Cluster(_), LocationId::Process(_)) => {
-                self.extra_stmts_global.push(syn::parse_quote! {
-                    let (#sink, #source) = __root_dfir_rs::util::unsync::mpsc::unbounded::<(#root::__staged::location::TaglessMemberId, #payload)>();
-                });
+        } else {
+            proc_macro2::TokenStream::new()
+        };
 
-                self.extra_stmts_cluster
-                    .entry(from.clone())
-                    .or_default()
-                    .push(syn::parse_quote! {
-                        let #sink = #sink.clone();
-                    });
-
-                if embedded {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> for_each(|v| #sink.try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap());
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                } else {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident #ser_map -> for_each(|#pat_single| if let Some(__id) = #send_c2p { #sink.try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), (__id, v))).unwrap() });
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                }
-
-                let pipeline = recv_pipeline(true);
-                self.get_dfir_mut(to).add_dfir(
-                    parse_quote! {
-                        #out_ident = source_stream(#source) #pipeline;
-                    },
-                    None,
-                    Some(&format!("recv{}", tag_id)),
-                );
-            }
-            (LocationId::Process(_), LocationId::Cluster(_)) => {
-                let sink_writer = syn::Ident::new(
-                    &format!("__cloned_{}", sink.to_token_stream()),
-                    Span::call_site(),
-                );
-                self.extra_stmts_global.push(syn::parse_quote! {
-                    let #sink: ::std::rc::Rc<::std::cell::RefCell<Vec<__root_dfir_rs::util::unsync::mpsc::Sender<#payload>>>> = ::std::rc::Rc::new(::std::cell::RefCell::new(Vec::new()));
-                });
-
-                self.extra_stmts_global.push(syn::parse_quote! {
-                    let #sink_writer = #sink.clone();
-                });
-
-                self.extra_stmts_cluster
-                    .entry(to.clone())
-                    .or_default()
-                    .push(syn::parse_quote! {
-                        let #source = {
-                            let (__sink, __source) = __root_dfir_rs::util::unsync::mpsc::unbounded::<#payload>();
-                            #sink_writer.borrow_mut().push(__sink);
-                            __source
-                        };
-                    });
-
-                if embedded {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> for_each(|(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send(v).unwrap());
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                } else {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident #ser_map -> for_each(|#pat_targeted| if let Some(__id) = #send_p2c { (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send((__id, v)).unwrap() });
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                }
-
-                let pipeline = recv_pipeline(false);
-                self.get_dfir_mut(to).add_dfir(
-                    parse_quote! {
-                        #out_ident = source_stream(#source) #pipeline;
-                    },
-                    None,
-                    Some(&format!("recv{}", tag_id)),
-                );
-            }
-            (LocationId::Cluster(_), LocationId::Cluster(_)) => {
-                let sink_writer = syn::Ident::new(
-                    &format!("__cloned_{}", sink.to_token_stream()),
-                    Span::call_site(),
-                );
-                self.extra_stmts_global.push(syn::parse_quote! {
-                    let #sink: ::std::rc::Rc<::std::cell::RefCell<Vec<__root_dfir_rs::util::unsync::mpsc::Sender<(#root::__staged::location::TaglessMemberId, #payload)>>>> = ::std::rc::Rc::new(::std::cell::RefCell::new(Vec::new()));
-                });
-
-                self.extra_stmts_global.push(syn::parse_quote! {
-                    let #sink_writer = #sink.clone();
-                });
-
-                self.extra_stmts_cluster
-                    .entry(from.clone())
-                    .or_default()
-                    .push(syn::parse_quote! {
-                        let #sink = #sink.clone();
-                    });
-
-                self.extra_stmts_cluster
-                    .entry(to.clone())
-                    .or_default()
-                    .push(syn::parse_quote! {
-                        let #source = {
-                            let (__sink, __source) = __root_dfir_rs::util::unsync::mpsc::unbounded::<(#root::__staged::location::TaglessMemberId, #payload)>();
-                            #sink_writer.borrow_mut().push(__sink);
-                            __source
-                        };
-                    });
-
-                if embedded {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident -> for_each(|(target_member_id, v)| (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), v)).unwrap());
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                } else {
-                    self.get_dfir_mut(from).add_dfir(
-                        parse_quote! {
-                            #input_ident #ser_map -> for_each(|#pat_targeted| if let Some(__id) = #send_c2c { (#sink.borrow())[#root::__staged::location::TaglessMemberId::get_raw_id(&target_member_id) as usize].try_send((#root::__staged::location::TaglessMemberId::from_raw_id(__current_cluster_id), (__id, v))).unwrap() });
-                        },
-                        None,
-                        Some(&format!("send{}", tag_id)),
-                    );
-                }
-
-                let pipeline = recv_pipeline(true);
-                self.get_dfir_mut(to).add_dfir(
-                    parse_quote! {
-                        #out_ident = source_stream(#source) #pipeline;
-                    },
-                    None,
-                    Some(&format!("recv{}", tag_id)),
-                );
-            }
-            _ => {
-                panic!(
-                    "Simulations do not yet support network between {:?} and {:?}",
-                    from, to
-                );
-            }
+        if let Some(deserialize_pipeline) = deserialize {
+            self.get_dfir_mut(to).add_dfir(
+                parse_quote! {
+                    #out_ident = source_stream(#source) #recv_strip #ok_wrap -> map(#deserialize_pipeline);
+                },
+                None,
+                Some(&format!("recv{}", tag_id)),
+            );
+        } else {
+            self.get_dfir_mut(to).add_dfir(
+                parse_quote! {
+                    #out_ident = source_stream(#source) #recv_strip;
+                },
+                None,
+                Some(&format!("recv{}", tag_id)),
+            );
         }
     }
 
@@ -2395,30 +1984,43 @@ impl DfirBuilder for SimBuilder {
         tag_id: StmtId,
     ) {
         let grabbed_ident = syn::Ident::new(&format!("__sink_{tag_id}"), Span::call_site());
-        // The sink is a `LineageOutputSender` (see `SimDeploy::o2e_sink` / `m2e_sink`); naming
-        // its node lets it honor that node's crash.
-        let root = get_this_crate();
-        let on_ser = serde_json::to_string(on).unwrap();
-        let sink_id = tag_id.into_inner();
         self.add_extra_stmt_internal(
             on,
             syn::parse_quote! {
-                let #grabbed_ident = #sink_expr.at(#root::sim::runtime::parse_location(#on_ser), #sink_id);
+                let #grabbed_ident = #sink_expr;
             },
         );
 
-        // With record-level provenance the input items are `(payload, Vec<delivery id>)`.
-        let ser_map: proc_macro2::TokenStream = match (serialize, self.provenance) {
-            (Some(serialize_pipeline), true) => {
-                quote::quote!(-> map(|(__v, __prov)| ((#serialize_pipeline)(__v), __prov)))
-            }
-            (Some(serialize_pipeline), false) => quote::quote!(-> map(#serialize_pipeline)),
-            (None, _) => proc_macro2::TokenStream::new(),
+        let Some((port_id, port)) = self.pending_output_port.take() else {
+            panic!("SimBuilder: external_output_metadata was not called before create_external_output")
         };
-        if self.provenance {
+        assert_eq!(port_id, tag_id, "SimBuilder: external_output_metadata for another output");
+        let send_closure: syn::Expr = if self.network_hooks {
+            let root = get_this_crate();
+            let member: syn::Expr = if matches!(on.root(), LocationId::Cluster(_)) {
+                parse_quote!(::core::option::Option::Some(__current_cluster_id))
+            } else {
+                parse_quote!(::core::option::Option::None)
+            };
+            parse_quote! {
+                |v| {
+                    if #root::sim::network_hook::rt::on_output(
+                        #port,
+                        #member,
+                        ::core::convert::AsRef::<[u8]>::as_ref(&v),
+                    ) {
+                        #grabbed_ident.try_send(v).unwrap();
+                    }
+                }
+            }
+        } else {
+            parse_quote!(|v| #grabbed_ident.try_send(v).unwrap())
+        };
+
+        if let Some(serialize_pipeline) = serialize {
             self.get_dfir_mut(on).add_dfir(
                 parse_quote! {
-                    #input_ident #ser_map -> for_each(|(v, __prov)| #grabbed_ident.try_send_with(v, __prov).unwrap());
+                    #input_ident -> map(#serialize_pipeline) -> for_each(#send_closure);
                 },
                 None,
                 Some(&format!("send{}", tag_id)),
@@ -2426,7 +2028,7 @@ impl DfirBuilder for SimBuilder {
         } else {
             self.get_dfir_mut(on).add_dfir(
                 parse_quote! {
-                    #input_ident #ser_map -> for_each(|v| #grabbed_ident.try_send(v).unwrap());
+                    #input_ident -> for_each(#send_closure);
                 },
                 None,
                 Some(&format!("send{}", tag_id)),
@@ -2484,29 +2086,17 @@ impl DfirBuilder for SimBuilder {
                 },
             );
 
-            let inner_hook: syn::Expr = syn::parse_quote!(
-                #root::sim::runtime::StreamOrderHook::<_>::new(
-                    #buffered_ident.clone(),
-                    #hoff_send_ident,
-                    #root::sim::runtime::HookLocationMeta { location: #assume_location, line: #line, caret_indent: #caret },
-                    #root::__maybe_debug__!(#element_type),
-                )
+            self.add_inline_hook(
+                tick_location,
+                syn::parse_quote!(
+                    Box::new(#root::sim::runtime::StreamOrderHook::<_>::new(
+                        #buffered_ident.clone(),
+                        #hoff_send_ident,
+                        (#assume_location, #line, #caret),
+                        #root::__maybe_debug__!(#element_type),
+                    ))
+                ),
             );
-            if let Some(hook_id) = op_meta.sim_hook_id {
-                let hook_rc_ident = syn::Ident::new(
-                    &format!("__scripted_inline_fold_hook_{hoff_id}"),
-                    Span::call_site(),
-                );
-                self.add_scripted_inline_hook(
-                    hook_id,
-                    tick_location,
-                    &hook_rc_ident,
-                    &assume_location,
-                    inner_hook,
-                );
-            } else {
-                self.add_inline_hook(tick_location, syn::parse_quote!(Box::new(#inner_hook)));
-            }
 
             let builder = self.get_dfir_mut(tick_location);
             builder.add_dfir(
@@ -2570,31 +2160,19 @@ impl DfirBuilder for SimBuilder {
         self.add_extra_stmt_internal(location, syn::parse_quote! {
             let #buffered_ident = ::std::rc::Rc::new(::std::cell::RefCell::new(::std::collections::VecDeque::new()));
         });
-        let inner_hook: syn::Expr = syn::parse_quote!(
-            #root::sim::runtime::TopLevelFoldHook::<_> {
-                input: #buffered_ident.clone(),
-                to_release: None,
-                output: #hoff_send_ident,
-                location: #root::sim::runtime::HookLocationMeta { location: #assume_location, line: #line, caret_indent: #caret },
-                format_item_debug: #root::__maybe_debug__!(#debug_type),
-            }
+        self.add_hook(
+            location,
+            location,
+            syn::parse_quote!(
+                Box::new(#root::sim::runtime::TopLevelFoldHook::<_> {
+                    input: #buffered_ident.clone(),
+                    to_release: None,
+                    output: #hoff_send_ident,
+                    location: (#assume_location, #line, #caret),
+                    format_item_debug: #root::__maybe_debug__!(#debug_type),
+                })
+            ),
         );
-        if let Some(hook_id) = op_meta.sim_hook_id {
-            let hook_rc_ident = syn::Ident::new(
-                &format!("__scripted_fold_hook_{hoff_id}"),
-                Span::call_site(),
-            );
-            self.add_scripted_hook(
-                hook_id,
-                location,
-                location,
-                &hook_rc_ident,
-                &assume_location,
-                inner_hook,
-            );
-        } else {
-            self.add_hook(location, location, syn::parse_quote!(Box::new(#inner_hook)));
-        }
 
         self.get_dfir_mut(location).add_dfir(
             parse_quote! {
@@ -2700,32 +2278,21 @@ impl DfirBuilder for SimBuilder {
     }
 }
 
-/// The source position an operator stands for, as `(file:line:col, source line text, caret
-/// indent)`, for hook identities, hook error messages, and the per-tick trace. The return type
-/// mirrors `HookLocationMeta`, but with owned `String`s that will be inlined into the generated
-/// sources.
+/// Extract a location string, line, and caret indent from an op's metadata backtrace.
 ///
-/// An operator created by `sliced!` carries the position of the user's `use::batch(...)` or
-/// `use::snapshot(...)` expression, recorded while the macro expanded (see
-/// [`crate::compile::ir::backtrace::UserLocation`]); that is preferred, because the backtrace
-/// of such an operator names the `sliced!` invocation when the macro is expanded in another
-/// crate. Every other operator is positioned by the first frame of its backtrace.
+/// The return type mirrors `HookLocationMeta`, but with owned `String` that will be inlined
+/// into the generated sources.
 fn location_for_op(op_meta: &HydroIrOpMetadata) -> (String, String, String) {
-    let position = op_meta
+    op_meta
         .backtrace
-        .user_location()
-        .and_then(|u| Some((u.file?.to_owned(), u.line, u.column.saturating_sub(1))))
-        .or_else(|| {
-            op_meta
-                .backtrace
-                .elements()
-                .next()
-                .and_then(|e| Some((e.filename.as_deref()?.to_owned(), e.lineno?, e.colno?)))
-        });
+        .elements()
+        .next()
+        .and_then(|e| {
+            let filename = e.filename.as_deref()?;
+            let lineno = e.lineno?;
+            let colno = e.colno?;
 
-    position
-        .map(|(filename, lineno, colno)| {
-            let line = std::fs::read_to_string(&filename)
+            let line = std::fs::read_to_string(filename)
                 .ok()
                 .and_then(|s| {
                     s.lines()
@@ -2734,26 +2301,21 @@ fn location_for_op(op_meta: &HydroIrOpMetadata) -> (String, String, String) {
                 })
                 .unwrap_or_default();
 
-            // Show the path relative to the working directory, or failing that to the nearest
-            // ancestor that contains it (the workspace root for a file in a sibling crate).
             let relative_path = (|| {
-                let cwd = std::env::current_dir().ok()?;
-                let path = std::path::Path::new(&filename);
-                cwd.ancestors()
-                    .filter(|base| base.parent().is_some())
-                    .find_map(|base| path.strip_prefix(base).ok())
-                    .map(|p| p.to_path_buf())
+                std::path::Path::new(filename)
+                    .strip_prefix(std::env::current_dir().ok()?)
+                    .ok()
             })();
 
             let filename_display = relative_path
                 .map(|p| p.display().to_string())
-                .unwrap_or_else(|| filename.clone());
+                .unwrap_or_else(|| filename.to_owned());
 
-            (
+            Some((
                 format!("{}:{}:{}", filename_display, lineno, colno),
                 line,
-                format!("{:>1$}", "", colno.saturating_sub(1).try_into().unwrap()),
-            )
+                format!("{:>1$}", "", (colno - 1).try_into().unwrap()),
+            ))
         })
-        .unwrap_or_else(|| ("unknown location".to_owned(), String::new(), String::new()))
+        .unwrap_or_else(|| ("unknown location".to_owned(), "".to_owned(), "".to_owned()))
 }
