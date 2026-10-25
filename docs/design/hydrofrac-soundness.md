@@ -354,7 +354,10 @@ premises when `choice_free` (`hf/check/races_engine.rs:198`).
 allowlist too: an operator is choice-free only if its kind is in `ALLOWED` (`hf/provenance/choices.rs:22`) and no
 special rule names it. A `batch`, a snapshot, an untrusted `observe_nondet`, a fold over an unordered input, an
 unordered external input, an ordered lossy network, any source but iterators, membership and external networks, a
-closure that names outside state (`impure_closure`, §3), and every unlisted kind are choices.
+closure or source expression that is not known pure (`impure_closure`, §3: the purity allowlist), and every unlisted
+kind are choices. So the shortcut never stands one schedule for others through a closure that owns state or calls an
+unlisted function (`review2a_an_owned_counter_makes_a_false_vacuous_verdict`, §17 fix 6), and neither does the
+choice-free case of Claim B (§13).
 
 **Proof.**
 - Each fault set has exactly one schedule (A1, with no hook decisions to make).
