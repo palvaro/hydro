@@ -1365,3 +1365,63 @@ fn the_choice_free_shortcut_runs_one_schedule_and_aims_the_search() {
         "{cross}"
     );
 }
+
+/// A process broadcasts two harness inputs to two members, which batch what they got (a schedule
+/// choice) and echo it to every member; the label `delivered` is the union. The first broadcast
+/// is sequenced (docs/design/hydrofrac-soundness.md §6.4), so each crash point of the process is
+/// exact: every literal `after(·, m)` of its sends is proved, by fan-out within a payload and by
+/// the harness order between payloads. Its crash sets then run one schedule each, where without
+/// the sequence proof (`after(2 → m0, 1 → m1)` free) they ran every schedule. Brute force agrees.
+#[cfg(stageleft_runtime)]
+#[test]
+fn a_sequenced_broadcast_runs_each_crash_point_of_its_sender_once() {
+    let mut check = EcCheck::new();
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let initial = input
+        .broadcast_closed(&members, TCP.fail_stop().name("initial").bincode())
+        .weaken_consistency();
+    let tick = members.tick();
+    let echoed = initial
+        .clone()
+        .batch(&tick, nondet!(/** explored */))
+        .all_ticks()
+        .broadcast_closed(&members, TCP.fail_stop().name("echo").bincode())
+        .values()
+        .weaken_consistency();
+    let delivered = initial
+        .weaken_ordering::<NoOrder>()
+        .merge_unordered(echoed)
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed: one correct recipient of the broadcast echoes it to everyone */
+        ));
+    let _out = delivered.sim_cluster_output();
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 2))
+        .compiled();
+    let cross = check.cross_check(
+        &sim,
+        async || {
+            send.send(1);
+            send.send(2);
+        },
+        1,
+    );
+    agree("sequenced echo", &cross);
+    let label = cross.results.label("delivered");
+    let notes = label.stats.races.expect("a races search");
+    eprintln!(
+        "sets {} schedules {} single-schedule sets {}",
+        label.stats.hypotheses, label.stats.schedules, notes.single_schedule_sets
+    );
+    assert!(
+        matches!(label.verdict, Verdict::Certified { .. }),
+        "{cross}"
+    );
+    // Without the sequence proof: 6 sets, 24 schedules, 2 of the sets on one schedule. With it:
+    // 4 sets, every one on one schedule.
+    assert_eq!(label.stats.schedules, label.stats.hypotheses, "{cross}");
+    assert_eq!(notes.single_schedule_sets, label.stats.hypotheses, "{cross}");
+}
