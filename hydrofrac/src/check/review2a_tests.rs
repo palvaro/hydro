@@ -234,3 +234,89 @@ fn review2a_a_crash_inside_a_resend_is_outside_the_fault_model() {
         "and oracle 2 breaks it: {cross}"
     );
 }
+
+/// Lemma R's "Duplicates" paragraph (§2) says a dependency on a later copy of `m` is served by
+/// the first copy. That holds for set-preserving steps, not for `enumerate`, which the
+/// choice-free shortcut (§3.1) treats as robust. Within hydrofrac's own fault model:
+///
+/// A source broadcasts `10` twice to three members over `fail_stop`; each member numbers its
+/// deliveries (`enumerate`) and holds `(0, 10)` locally. Member 2, on its first delivery,
+/// broadcasts a token to the cluster, and member 0 turns the token into `(1, 10)`.
+/// Failure-free every member holds {(0, 10), (1, 10)}.
+///
+/// Under `crash(source after (10 → member 2))`, the first round completes and the whole second
+/// round is cut: members 1 and 2 hold only (0, 10), while member 0 also holds (1, 10) from the
+/// token. The clauses of `(member 1, (1, 10))` and `(member 0, (1, 10))` are second copies,
+/// whose ids are the first copies', which the fan-out literal proves precede `(10 → member 2)`;
+/// that of `(member 2, (1, 10))` is `m` itself. So the kill rule spares every pair, the set is
+/// pruned unrun, and the search certifies. Every crash earlier in the first round leaves
+/// member 2 without a delivery, so no token and no `(1, 10)` anywhere: the label holds there.
+#[cfg(stageleft_runtime)]
+fn later_copy() -> CrossCheck {
+    use hydro_lang::location::cluster::CLUSTER_SELF_ID;
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let delivered = input
+        .broadcast_closed(&members, TCP.fail_stop().name("twice").bincode())
+        .weaken_consistency();
+    let token = delivered
+        .clone()
+        .filter(q!(move |_| CLUSTER_SELF_ID.get_raw_id() == 2))
+        .broadcast_closed(&members, TCP.fail_stop().name("token").bincode())
+        .values()
+        .weaken_consistency()
+        .filter(q!(move |_| CLUSTER_SELF_ID.get_raw_id() == 0))
+        .map(q!(|x: u32| (1usize, x)))
+        .weaken_ordering::<NoOrder>();
+    let numbered = delivered.enumerate().weaken_ordering::<NoOrder>();
+    let local = members
+        .source_iter(q!([(0usize, 10u32)]))
+        .weaken_consistency()
+        .weaken_ordering::<NoOrder>();
+    let later_copy = numbered
+        .merge_unordered(local.into())
+        .merge_unordered(token)
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed (wrongly): every member numbers the same deliveries */
+        ));
+    let _out = later_copy.sim_cluster_output();
+    let mut check = EcCheck::new().max_crashes(1);
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 3))
+        .compiled();
+    eprintln!("fragile sites: {:?}", check.fragile_sites());
+    check.cross_check(
+        &sim,
+        async || {
+            send.send(10);
+            send.send(10);
+        },
+        MAX_FAULTS,
+    )
+}
+
+#[cfg(stageleft_runtime)]
+#[test]
+fn review2a_a_crash_cuts_a_later_copy_the_kill_rule_spares() {
+    let cross = later_copy();
+    eprintln!("=== later copy\n{cross}");
+    eprintln!("disagreements: {:#?}", cross.disagreements);
+    let label = cross.results.label("later_copy");
+    eprintln!(
+        "later_copy: certified = {}",
+        matches!(label.verdict, Verdict::Certified { .. })
+    );
+    assert!(
+        matches!(label.verdict, Verdict::Certified { .. }),
+        "the search certifies `later_copy`: {cross}"
+    );
+    assert!(
+        cross
+            .disagreements
+            .iter()
+            .any(|d| !d.starts_with("oracle 2") && d.contains("later_copy")),
+        "and brute force breaks it: {cross}"
+    );
+}
