@@ -142,6 +142,15 @@ fn review2b_fault_created_panic_beside_a_robust_fact() {
         MAX_FAULTS,
     );
     agree("fault-created panic beside a robust fact", &cross);
+    // `arrived` breaks only by the panic, which names no broken fact: its diagram is the whole
+    // run, less the other labels' outputs and the raw bytes of `sim_cluster_output`.
+    let label = cross.results.label("arrived");
+    let cex = label.verdict.counterexample().expect("the panic breaks it");
+    let diagram = cex.diagram.as_ref().expect("the diagram was written");
+    let dot = std::fs::read_to_string(diagram.with_extension("dot")).unwrap();
+    assert!(dot.contains("⇒ 1\""), "{dot}");
+    assert!(!dot.contains("⇒ 10") && !dot.contains("⇒ 0a000000"), "{dot}");
+    assert!(dot.contains("unrelated outputs not shown"), "{dot}");
 }
 
 /// A race with no fault: each member reports 1 as missing if the probe for 1 lands in a tick

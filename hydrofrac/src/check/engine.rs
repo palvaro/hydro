@@ -454,6 +454,23 @@ impl<'c, B: AsyncFnMut(), R: AsyncFnMut()> Engine<'c, B, R> {
                     }
                     _ => false,
                 });
+            // Only this label's decoded outputs: the focus already keeps no others, unless it
+            // fell back to the whole run (a panic).
+            let other = |e: &Event| match e {
+                Event::Output { port, .. } => labels.label_of_port(*port) != Some(index),
+                _ => false,
+            };
+            let dropped = focused.events().iter().filter(|e| other(e)).count();
+            let focused =
+                crate::fault::EventLog(focused.0.into_iter().filter(|e| !other(e)).collect());
+            let caption = match dropped {
+                0 => caption,
+                n => Some(format!(
+                    "{}{n} unrelated output{} not shown",
+                    caption.map_or(String::new(), |c| c + "; "),
+                    if n == 1 { "" } else { "s" }
+                )),
+            };
             let _ = draw(log, "counterexample-full", &title);
             let title = match caption {
                 Some(caption) => format!("{title}\n{caption}"),

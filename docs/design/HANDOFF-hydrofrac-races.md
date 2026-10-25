@@ -173,3 +173,36 @@ On `hydrofrac-races`, i.e. the merge of B's review fixes and N's item D, plus th
 - Clippy: NOT RUN.
 - Merge note: the code merged without conflicts. Only three hunks of `hydrofrac-soundness.md` conflicted, and they
   were resolved by hand (§12 claim, A6–A8, §18 heal/liveness bullets).
+
+## 10. Teaching examples and diagrams
+
+`hydro_test/src/cluster/ec_teaching.rs` holds five minimal programs. Each one shows a way a broadcast loses
+agreement, or keeps it. To run all five, one at a time, with the checker's report printed:
+
+```sh
+cargo test -p hydro_test --lib -- cluster::ec_teaching:: --test-threads=1 --nocapture
+```
+
+To run just one, name it:
+
+```sh
+cargo test -p hydro_test --lib -- cluster::ec_teaching::one_lost_message_leaves_a_receiver_without_the_item --nocapture
+```
+
+Every counterexample writes its diagrams to `target/hydrofrac/<test>/<label>/`, or under `$CARGO_TARGET_DIR` when
+that is set:
+- `counterexample.svg` (and `.dot`): the focused diagram. It shows the broken fact's lineage, the faults and the
+  heal, and only the reported label's decoded outputs. Its caption counts what it left out
+  (`2 unrelated messages and 8 unrelated outputs not shown`). This is the one the report's `diagram:` line names.
+- `counterexample-full.svg` (and `.dot`): the whole run, with every output, including other labels' and the raw
+  bytes of `sim_cluster_output` ports.
+
+The `.svg` is written only when Graphviz's `neato` is on the `PATH`. Otherwise run `neato -n2 -Tsvg <file>.dot`.
+
+| test | label dir | what the focused diagram shows |
+|---|---|---|
+| `a_sender_crash_mid_broadcast_leaves_a_receiver_without_the_item` | `received_ec_teaching.rs` | 3 lanes, 2 arrows, the sender's crash |
+| `one_lost_message_leaves_a_receiver_without_the_item` | `received_ec_teaching.rs` | 3 lanes, 2 arrows, the omitted one red |
+| `a_cluster_sender_crash_mid_broadcast_leaves_a_receiver_without_the_item` | `received_ec_teaching.rs` | 3 lanes, 2 arrows, the crash |
+| `receivers_that_echo_survive_a_sender_crash` | `from_sender_ec_teaching.rs` | 3 lanes, 8 arrows (bcast and echoes). The raw single-hop label breaks, but `delivered` is certified |
+| `two_senders_survive_one_crash_but_not_two` | `items_ec_teaching.rs`, `received_ec_teaching.rs` | `items`: 4 lanes, 4 arrows, both crashes |
