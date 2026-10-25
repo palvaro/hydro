@@ -324,7 +324,7 @@ mod tests {
     /// Each counterexample's Lamport diagram is written under
     /// `target/hydrofrac/<test>/<label>/` with nothing asked of the test, and the report names
     /// it. The `.dot` is always there and draws the crash; the `.svg` is there when Graphviz is
-    /// installed.
+    /// installed. It is focused on the missing fact, with the whole run in `counterexample-full`.
     #[test]
     fn ec_broadcast_closed_all_labels_writes_diagrams() {
         let results = process_to_cluster(Transport::FailStop);
@@ -347,6 +347,12 @@ mod tests {
             source.contains('☠'),
             "the source's crash is drawn: {source}"
         );
+        // It shows only what `Item(2)` depended on, and says so; the whole run is beside it.
+        assert!(source.contains("bcast: Item(2)"), "{source}");
+        assert!(!source.contains("bcast: Item(1)"), "{source}");
+        assert!(source.contains("unrelated messages"), "{source}");
+        let full = std::fs::read_to_string(dot.with_file_name("counterexample-full.dot")).unwrap();
+        assert!(full.contains("bcast: Item(1)"), "{full}");
 
         let neato = std::process::Command::new("neato")
             .arg("-V")
