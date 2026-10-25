@@ -64,3 +64,6 @@ mod review2b_tests;
 
 #[cfg(test)]
 mod review_c_tests;
+
+#[cfg(test)]
+mod review3b_tests;
