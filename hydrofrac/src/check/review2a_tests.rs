@@ -93,3 +93,74 @@ fn review2a_a_closure_owning_its_state_escapes_the_impurity_guard() {
         "and the oracles break it: {cross}"
     );
 }
+
+/// The same owned counter, aimed at §13 (Claim B and `Vacuous`). Each member numbers its
+/// delivery from `a` and a local constant `7`, and keeps the constant only if it came first.
+/// Failure-free `a`'s value always comes first, so no member holds anything: the domain is
+/// empty, and since the program is fragile-free (and choice-free), §13 says faults create no
+/// fact, and the label is `Vacuous` with no search. A crash of `a` right after it sends to
+/// member 0 makes members 1 and 2 number the constant first and hold `7`, while member 0 holds
+/// nothing: a divergence that only a fault creates.
+#[cfg(stageleft_runtime)]
+fn owned_counter_alarm() -> CrossCheck {
+    let mut flow = FlowBuilder::new();
+    let a = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send_a, in_a) = a.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let from_a = in_a
+        .broadcast_closed(&members, TCP.fail_stop().name("a").bincode())
+        .weaken_consistency()
+        .weaken_ordering::<NoOrder>();
+    let local = members
+        .source_iter(q!([7u32]))
+        .weaken_consistency()
+        .weaken_ordering::<NoOrder>();
+    let alarm = from_a
+        .merge_unordered(local.into())
+        .map(q!({
+            let (tx, rx) = std::sync::mpsc::channel::<u32>();
+            move |x: u32| {
+                let n = rx.try_recv().unwrap_or(0) + 1;
+                tx.send(n).unwrap();
+                (n, x)
+            }
+        }))
+        .filter_map(q!(|(n, x): (u32, u32)| (n == 1 && x == 7).then_some(x)))
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed (wrongly): no member ever numbers the constant first */
+        ));
+    let _out = alarm.sim_cluster_output();
+    let mut check = EcCheck::new().max_crashes(1);
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 3))
+        .compiled();
+    eprintln!("fragile sites: {:?}", check.fragile_sites());
+    check.cross_check(
+        &sim,
+        async || {
+            send_a.send(10);
+        },
+        MAX_FAULTS,
+    )
+}
+
+#[cfg(stageleft_runtime)]
+#[test]
+fn review2a_an_owned_counter_makes_a_false_vacuous_verdict() {
+    let cross = owned_counter_alarm();
+    eprintln!("=== owned counter alarm\n{cross}");
+    eprintln!("disagreements: {:#?}", cross.disagreements);
+    let label = cross.results.label("owned_counter_alarm");
+    eprintln!(
+        "alarm: vacuous = {}",
+        matches!(label.verdict, Verdict::Vacuous(_))
+    );
+    assert!(
+        matches!(label.verdict, Verdict::Vacuous(_)),
+        "the search calls `alarm` vacuous without a search: {cross}"
+    );
+    assert!(
+        cross.disagreements.iter().any(|d| d.contains("owned_counter_alarm")),
+        "and the oracles break it: {cross}"
+    );
+}
