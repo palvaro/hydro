@@ -18,7 +18,7 @@
 //!   cluster are tapped; scalars and nodes inside ticks are listed as skipped. Each element
 //!   leaves as `bincode(element)`, or as nothing when its type is not `Serialize` (the
 //!   collection is then reported as not compared).
-//! - **Its own faults** ([`Hook`]). An omission drops every copy of one message (channel,
+//! - **Its own faults** ([`Hook`]). An omission drops the `k`-th send of one content (channel,
 //!   sender, receiver, payload) on a lossy channel; a crash halts a node before its first send,
 //!   or right after its `k`-th send (counting all its sends, from 0). Faults act only until the
 //!   harness heals, like the search's: the inputs run (with phase barriers forbidden), the run
@@ -502,12 +502,13 @@ type Node = (LocationId, Option<u32>);
 enum Fault {
     /// Halts `node` before its first send (`None`) or right after its `k`-th send (from 0).
     Crash { node: Node, after: Option<u64> },
-    /// Drops every pre-heal copy of a message on a lossy channel.
+    /// Drops the `copy`-th send (from 0) of a content on a lossy channel, if it is pre-heal.
     Omit {
         channel: usize,
         from: Node,
         to: Node,
         bytes: Rc<[u8]>,
+        copy: u32,
     },
 }
 
@@ -521,6 +522,9 @@ impl Fault {
 }
 
 type FaultSet = BTreeSet<Fault>;
+
+/// A message's content: channel, sender, receiver and payload.
+type Content = (usize, Node, Node, Rc<[u8]>);
 
 fn crashes(set: &FaultSet) -> usize {
     set.iter().filter(|f| f.crashed().is_some()).count()
@@ -553,6 +557,8 @@ struct Instance {
     started: bool,
     healed: bool,
     sends: HashMap<Node, u64>,
+    /// How many sends of each content so far.
+    copies: HashMap<Content, u32>,
     halts: Vec<Node>,
     record: Record,
 }
@@ -573,7 +579,7 @@ struct Hook {
     /// Tap port → its cluster.
     ports: BTreeMap<usize, LocationId>,
     crashes: BTreeMap<Node, Option<u64>>,
-    omits: BTreeSet<(usize, Node, Node, Rc<[u8]>)>,
+    omits: BTreeSet<(Content, u32)>,
     current: RefCell<Instance>,
     finished: RefCell<Vec<Record>>,
 }
@@ -593,8 +599,9 @@ impl Hook {
                     from,
                     to,
                     bytes,
+                    copy,
                 } => {
-                    omits.insert((*channel, from.clone(), to.clone(), bytes.clone()));
+                    omits.insert(((*channel, from.clone(), to.clone(), bytes.clone()), *copy));
                 }
             }
         }
@@ -671,10 +678,16 @@ impl SimNetworkHook for Hook {
             *n += 1;
             *n - 1
         };
+        let bytes: Rc<[u8]> = payload.into();
+        let content: Content = (channel, from.clone(), to.clone(), bytes.clone());
+        let copy = {
+            let n = current.copies.entry(content.clone()).or_default();
+            *n += 1;
+            *n - 1
+        };
         if current.record.crashed.contains(&from) {
             return None;
         }
-        let bytes: Rc<[u8]> = payload.into();
         let mut delivered = true;
         if !current.healed {
             current.record.revealed.insert(Fault::Crash {
@@ -682,13 +695,13 @@ impl SimNetworkHook for Hook {
                 after: Some(ordinal),
             });
             if *lossy {
-                let omit = (channel, from.clone(), to.clone(), bytes.clone());
-                delivered = !self.omits.contains(&omit);
+                delivered = !self.omits.contains(&(content, copy));
                 current.record.revealed.insert(Fault::Omit {
                     channel,
                     from: from.clone(),
                     to,
                     bytes,
+                    copy,
                 });
             }
             if self.crashes.get(&from) == Some(&Some(ordinal)) {
@@ -980,13 +993,15 @@ impl Names {
                     from,
                     to,
                     bytes,
+                    copy,
                 } => {
                     let hex: String = bytes.iter().take(8).map(|b| format!("{b:02x}")).collect();
                     format!(
-                        "omit(c{channel} {}→{} {hex}{})",
+                        "omit(c{channel} {}→{} {hex}{}{})",
                         self.node(from),
                         self.node(to),
-                        if bytes.len() > 8 { "…" } else { "" }
+                        if bytes.len() > 8 { "…" } else { "" },
+                        if *copy > 0 { format!("#{copy}") } else { String::new() }
                     )
                 }
             })

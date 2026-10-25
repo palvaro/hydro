@@ -377,7 +377,7 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
         let mut world: Vec<Revealed> = vec![];
 
         // Hypothesis 0: the failure-free probe, one schedule if every run has the same facts.
-        let policy = shape.policy(&FaultSet::new(), |_| false);
+        let policy = shape.policy(&FaultSet::new(), |set| set.is_empty());
         let mut domains: BTreeMap<usize, BTreeSet<Fact>> = BTreeMap::new();
         let mut learned: BTreeMap<usize, Vec<(Pair, PairClause<MessageId>)>> = BTreeMap::new();
         let mut failures: BTreeMap<usize, Failure> = BTreeMap::new();

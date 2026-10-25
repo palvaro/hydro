@@ -178,16 +178,17 @@ fn review_c_omitting_one_of_two_identical_messages_is_not_modelled() {
         broken.borrow()
     );
     assert!(
-        certified,
-        "hydrofrac did not certify (so this is not a false certificate): {}",
-        cross.results
-    );
-    assert!(
         !broken.borrow().is_empty(),
         "dropping one copy did not break the label"
     );
-    // Neither oracle can express the fault either: all three agree on the false certificate.
-    assert!(cross.disagreements.is_empty(), "{cross}");
+    // Fixed: omissions name copies, so the search and both oracles lose one copy.
+    assert!(!certified, "{cross}");
+    super::review2a_tests::assert_found(
+        &cross,
+        "review_c_omitting_one_of_two_identical_messages_is_not_modelled",
+        1,
+        0,
+    );
 }
 
 /// **A label computed from local inputs passes `assert_holds` while members disagree with no
@@ -438,23 +439,14 @@ fn review_c_crash_between_two_identical_messages_is_not_modelled() {
         views.borrow()
     );
     assert!(
-        matches!(label.verdict, Verdict::Certified { .. }),
-        "hydrofrac did not certify `agreed`: {verdict}\n{}",
-        cross.results
-    );
-    assert!(
         views.borrow().contains("[[1], [1], []]"),
         "the crash did not break the label: {:?}",
         views.borrow()
     );
-    // The brute-force enumeration shares the blind spot; oracle 2 (ordinal crash points) does
-    // not, and is the only one that disagrees.
-    let b = cross.brute.label(label.index).expect("searched");
-    assert!(b.breaking.is_empty(), "{cross}");
-    assert!(
-        cross.disagreements.iter().all(|d| d.starts_with("oracle 2:")) && !cross.disagreements.is_empty(),
-        "{cross}"
-    );
+    // Fixed: crash points name copies, so `crash(S after 7#1 → member 1)` is a fault of the
+    // search and of the brute force, as oracle 2's ordinal crash points always were.
+    eprintln!("agreed: {verdict}");
+    super::review2a_tests::assert_found(&cross, "agreed", 1, 1);
 }
 
 /// **The choice-free shortcut treats a count-sensitive `scan` as robust, and the crash rule
@@ -524,12 +516,7 @@ fn review_c_choice_free_scan_over_a_repeated_message_is_pruned_wrongly() {
         2,
     );
     eprintln!("=== hydrofrac\n{}\n=== cross-check\n{cross}", cross.results);
-    let label = cross.results.label("known");
-    assert!(
-        matches!(label.verdict, Verdict::Certified { .. }),
-        "hydrofrac did not certify `known`:\n{cross}"
-    );
-    let b = cross.brute.label(label.index).expect("searched");
-    assert_eq!(b.min_crashes(), Some(1), "{cross}");
-    assert!(!cross.disagreements.is_empty(), "{cross}");
+    // Fixed: member 1's derivation of `2` uses `7#1`, so it keeps the `scan`'s premise and
+    // protects nothing; the search runs `crash(S after 7 → member 1)` and finds it.
+    super::review2a_tests::assert_found(&cross, "known", 1, 1);
 }

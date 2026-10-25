@@ -17,6 +17,23 @@ use super::{CrossCheck, EcCheck, Verdict};
 #[cfg(stageleft_runtime)]
 const MAX_FAULTS: usize = 2;
 
+/// Asserts that the search finds a counterexample to `label` of `faults` faults, `crashes` of
+/// them crashes, that the brute force's smallest breaking set has as many crashes, and that
+/// both oracles agree (oracle 2 matches it with a set no larger) and the rerun breaks it again.
+#[cfg(stageleft_runtime)]
+pub(super) fn assert_found(cross: &CrossCheck, label: &str, faults: usize, crashes: usize) {
+    let found = cross.results.label(label);
+    let Verdict::Counterexample(c) = &found.verdict else {
+        panic!("no counterexample to `{label}`: {cross}");
+    };
+    assert_eq!(c.faults.len(), faults, "{cross}");
+    assert_eq!(crate::search::crash_count(&c.faults), crashes, "{cross}");
+    let brute = cross.brute.label(found.index).expect("searched");
+    assert_eq!(brute.min_crashes(), Some(crashes), "{cross}");
+    assert!(cross.disagreements.is_empty(), "{cross}");
+    assert_eq!(cross.confirmed.get(&found.index), Some(&true), "{cross}");
+}
+
 /// A source `a` broadcasts one value to three members. Each member numbers what reaches it, its
 /// delivery from `a` and a local constant, with a counter that the `map` closure *owns*: a block
 /// expression whose closure keeps its count in a `std::sync::mpsc` channel it created. The
@@ -169,12 +186,12 @@ fn review2a_an_owned_counter_makes_a_false_vacuous_verdict() {
 /// over `fail_stop`, and each member numbers its deliveries with `enumerate`; each member also
 /// holds `(0, 10)` locally. Failure-free every member holds {(0, 10), (1, 10)}.
 ///
-/// hydrofrac's crash point `crash(n after m)` fires after the *first* copy of `m` (§0), so no
-/// crash it can express falls inside the second round of sends: a crash in the first round
+/// Before crash points named copies, `crash(n after m)` fired after the *first* copy of `m`, so
+/// no crash it could express fell inside the second round of sends: a crash in the first round
 /// leaves no member a second delivery, so every member holds just (0, 10), and the label holds.
 /// A real crash of the source right after its second send to member 0 (oracle 2's "crash after
 /// send #3") leaves member 0 with {(0, 10), (1, 10)} and members 1 and 2 with {(0, 10)}: fact
-/// `(1, 10)` is missing at two correct members. The search certifies.
+/// `(1, 10)` is missing at two correct members. The search certified; it now finds that crash.
 #[cfg(stageleft_runtime)]
 fn numbered_resend() -> CrossCheck {
     let mut flow = FlowBuilder::new();
@@ -214,28 +231,13 @@ fn numbered_resend() -> CrossCheck {
 #[cfg(stageleft_runtime)]
 #[test]
 fn review2a_a_crash_inside_a_resend_is_outside_the_fault_model() {
+    // Fixed: crash points name copies, so `crash(source after 10#1 → member 0)` is a fault.
     let cross = numbered_resend();
     eprintln!("=== numbered resend\n{cross}");
-    eprintln!("disagreements: {:#?}", cross.disagreements);
-    let label = cross.results.label("numbered_resend");
-    eprintln!(
-        "numbered_resend: certified = {}",
-        matches!(label.verdict, Verdict::Certified { .. })
-    );
-    assert!(
-        matches!(label.verdict, Verdict::Certified { .. }),
-        "the search certifies `numbered_resend`: {cross}"
-    );
-    assert!(
-        cross
-            .disagreements
-            .iter()
-            .any(|d| d.starts_with("oracle 2") && d.contains("numbered_resend")),
-        "and oracle 2 breaks it: {cross}"
-    );
+    assert_found(&cross, "numbered_resend", 1, 1);
 }
 
-/// Lemma R's "Duplicates" paragraph (§2) says a dependency on a later copy of `m` is served by
+/// Lemma R's "Duplicates" paragraph (§2) said a dependency on a later copy of `m` is served by
 /// the first copy. That holds for set-preserving steps, not for `enumerate`, which the
 /// choice-free shortcut (§3.1) treats as robust. Within hydrofrac's own fault model:
 ///
@@ -249,8 +251,10 @@ fn review2a_a_crash_inside_a_resend_is_outside_the_fault_model() {
 /// token. The clauses of `(member 1, (1, 10))` and `(member 0, (1, 10))` are second copies,
 /// whose ids are the first copies', which the fan-out literal proves precede `(10 → member 2)`;
 /// that of `(member 2, (1, 10))` is `m` itself. So the kill rule spares every pair, the set is
-/// pruned unrun, and the search certifies. Every crash earlier in the first round leaves
+/// pruned unrun, and the search certified. Every crash earlier in the first round leaves
 /// member 2 without a delivery, so no token and no `(1, 10)` anywhere: the label holds there.
+/// Now the second copies are `10#1`, which the crash does cut, and the derivations that count
+/// them keep `enumerate`'s premise, so the search runs the set and finds it.
 #[cfg(stageleft_runtime)]
 fn later_copy() -> CrossCheck {
     use hydro_lang::location::cluster::CLUSTER_SELF_ID;
@@ -300,23 +304,9 @@ fn later_copy() -> CrossCheck {
 #[cfg(stageleft_runtime)]
 #[test]
 fn review2a_a_crash_cuts_a_later_copy_the_kill_rule_spares() {
+    // Fixed: the second copies are their own dependencies, and a choice-free derivation that
+    // uses one keeps its premises, so the crash is not pruned.
     let cross = later_copy();
     eprintln!("=== later copy\n{cross}");
-    eprintln!("disagreements: {:#?}", cross.disagreements);
-    let label = cross.results.label("later_copy");
-    eprintln!(
-        "later_copy: certified = {}",
-        matches!(label.verdict, Verdict::Certified { .. })
-    );
-    assert!(
-        matches!(label.verdict, Verdict::Certified { .. }),
-        "the search certifies `later_copy`: {cross}"
-    );
-    assert!(
-        cross
-            .disagreements
-            .iter()
-            .any(|d| !d.starts_with("oracle 2") && d.contains("later_copy")),
-        "and brute force breaks it: {cross}"
-    );
+    assert_found(&cross, "later_copy", 1, 1);
 }
