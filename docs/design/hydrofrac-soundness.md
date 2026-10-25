@@ -764,7 +764,8 @@ nodes with one key (a helper labelling on one line, called twice) are matched as
 one-to-one assignment of its collections to its labels has no disagreement. It restates the harness's phases (fault
 phase with barriers forbidden, quiesce, heal, quiesce, recovery, quiesce) and refuses the simulator's own faults and
 time-bounded exhaustive runs, like the search. Agreement:
-a claim of holding with up to `k` crashes is refuted by any oracle-2 breaking set with at most `k` crashes; a
+a claim of holding with up to `k` crashes (a `Vacuous` verdict claims every `k`) is refuted by any oracle-2 breaking
+set with at most `k` crashes; a
 counterexample of `n <= max_faults` faults and `c` crashes must be matched by an oracle-2 breaking set with at most
 `n` faults and `c` crashes; and both failure-free runs agree on vacuity. It is stricter than the search where a node
 resends a payload (it can crash after the second copy), and weaker within a same-key group (another assignment may

@@ -9,7 +9,7 @@ use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
 use hydro_lang::prelude::*;
 
 #[cfg(stageleft_runtime)]
-use super::{Counterexample, CrossCheck, EcCheck, Verdict};
+use super::{Counterexample, CrossCheck, EcCheck, VacuousReason, Verdict};
 #[cfg(stageleft_runtime)]
 use crate::search::{FaultSet, Tolerance};
 
@@ -133,6 +133,14 @@ fn oracle2_catches_wrong_verdicts_on_its_own() {
     );
     caught_by_oracle2(&cross, "a bogus counterexample");
 
+    // An empty domain left unsearched passes `assert_holds`: oracle 2 refutes it too.
+    plant(
+        &mut cross,
+        index,
+        Verdict::Vacuous(VacuousReason::EmptyDomain),
+    );
+    caught_by_oracle2(&cross, "a wrong vacuity");
+
     plant(&mut cross, index, Verdict::Counterexample(original));
     cross.assert_agrees();
 }
@@ -207,4 +215,38 @@ fn oracle2_matches_same_key_collections_as_a_group() {
         },
     );
     caught_by_oracle2(&cross, "a wrong certificate within a same-key group");
+}
+
+/// R3-F5 on oracle 2's side: a label whose failure-free runs hold no fact, reported `Vacuous`
+/// without a search (the search's behaviour before the fix), is refuted by oracle 2 alone. In
+/// `brute_tests::missing_alarm`, a single crash of the source right after it sends `x` to one
+/// member makes the other two members report `x` missing and the first not.
+#[cfg(stageleft_runtime)]
+#[test]
+fn oracle2_refutes_a_vacuous_label_that_faults_break() {
+    let mut cross = super::brute_tests::missing_alarm(EcCheck::new());
+    cross.assert_agrees();
+    let index = cross.results.label("missing").index;
+    let collection = cross
+        .oracle2
+        .collections
+        .iter()
+        .find(|c| c.labels == [index])
+        .expect("oracle 2 taps `missing`");
+    assert!(!collection.failure_free_facts, "{cross}");
+    assert_eq!(
+        collection.breaking.first().map(|b| b.crashes),
+        Some(1),
+        "{cross}"
+    );
+
+    cross.brute.labels.clear();
+    cross.recheck();
+    cross.assert_agrees();
+    plant(
+        &mut cross,
+        index,
+        Verdict::Vacuous(VacuousReason::EmptyDomain),
+    );
+    caught_by_oracle2(&cross, "an unsearched empty domain that a crash breaks");
 }

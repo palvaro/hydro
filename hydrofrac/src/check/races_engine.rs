@@ -428,6 +428,8 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
                 claim_b: false,
                 ..RaceNotes::default()
             }),
+            // Each target's, below.
+            domain: 0,
         };
         if let Some((message, record)) = &probe.panic {
             for t in &targets {
@@ -439,6 +441,10 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
 
         for mut target in targets {
             target.domain = domains.remove(&target.label).unwrap_or_default();
+            let probe_stats = Stats {
+                domain: target.domain.len(),
+                ..probe_stats
+            };
             let failure = failures.remove(&target.label);
             let result = if let Some(failure) = failure {
                 let verdict = counterexample(FaultSet::new(), None, !probe_sampled, 0, &failure);

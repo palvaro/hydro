@@ -1231,7 +1231,7 @@ fn a_time_bounded_exhaustive_run_is_refused() {
 /// so the label is empty in every failure-free schedule. The program batches (a choice), so no
 /// proof says faults create no fact.
 #[cfg(stageleft_runtime)]
-fn missing_alarm(mut check: EcCheck) -> CrossCheck {
+pub(super) fn missing_alarm(mut check: EcCheck) -> CrossCheck {
     let mut flow = FlowBuilder::new();
     let source = flow.process::<()>();
     let prober = flow.process::<()>();

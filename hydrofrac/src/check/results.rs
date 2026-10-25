@@ -145,6 +145,9 @@ pub struct Stats {
     pub wall: Duration,
     /// How the search spent its hypotheses; `None` for a label decided without a run.
     pub races: Option<RaceNotes>,
+    /// The facts in the label's domain: what its correct members held in the failure-free
+    /// probe (0 for a label decided without a run).
+    pub domain: usize,
 }
 
 /// How a label's search (docs/design/hydrofrac-races.md §4.4) spent its hypotheses.

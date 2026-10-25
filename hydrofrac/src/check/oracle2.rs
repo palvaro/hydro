@@ -48,13 +48,15 @@
 //! **Agreement** ([`disagreements`]), for every label the search searched and oracle 2 has a
 //! compared collection of:
 //! - a claim that the label holds with up to `k` crashes (a certificate, a budget's cleared
-//!   bound, a counterexample's certified tolerance, or a sampled search's "nothing found") is
-//!   refuted by any breaking set of oracle 2 with at most `k` crashes;
+//!   bound, a counterexample's certified tolerance, a sampled search's "nothing found", or a
+//!   `Vacuous` verdict, which holds for every `k`) is refuted by any breaking set of oracle 2
+//!   with at most `k` crashes;
 //! - a counterexample of `n ≤ max_faults` faults and `c` crashes (schedules not sampled) must be
 //!   matched by a breaking set of oracle 2 with at most `n` faults and `c` crashes: each of the
 //!   search's faults is one of oracle 2's in the run that breaks;
-//! - the failure-free runs agree on vacuity: the search found an empty domain exactly when no
-//!   correct member emitted anything at oracle 2's collections of the label.
+//! - the failure-free runs agree on vacuity: the search's probe found an empty domain
+//!   (`Stats::domain`) exactly when no correct member emitted anything failure-free at oracle
+//!   2's collection of the label.
 //!
 //! **Where it is weaker or different.**
 //! - Same-key nodes are matched as a group: a wrong verdict hides if some other assignment of
@@ -1365,32 +1367,31 @@ fn label_disagreements(
                 .map(|b| (collection, b))
         };
         let with_facts = collection.failure_free_facts;
-        let searched = match &label.verdict {
-            Verdict::Vacuous(VacuousReason::EmptyDomain) => {
-                if with_facts {
-                    push(
-                        "the search's failure-free run held no facts, but oracle 2's correct \
-                         members emitted some"
-                            .to_owned(),
-                    );
-                }
-                false
-            }
-            Verdict::Certified { .. }
-            | Verdict::Counterexample(_)
-            | Verdict::Budget { .. }
-            | Verdict::Exhausted { .. } => true,
-            _ => false,
-        };
-        if !searched {
+        // Every label with a failure-free probe: the search's domain is empty exactly when
+        // oracle 2's correct members emitted nothing failure-free.
+        let probed = matches!(
+            label.verdict,
+            Verdict::Vacuous(VacuousReason::EmptyDomain)
+                | Verdict::Certified { .. }
+                | Verdict::Counterexample(_)
+                | Verdict::Budget { .. }
+                | Verdict::Exhausted { .. }
+        );
+        if !probed {
             return out;
         }
-        if !with_facts {
-            push(
-                "the search found facts in its failure-free run, but oracle 2's correct members \
-                 emitted none"
+        match (label.stats.domain > 0, with_facts) {
+            (false, true) => push(
+                "the search's failure-free run held no facts, but oracle 2's correct members \
+                 emitted some"
                     .to_owned(),
-            );
+            ),
+            (true, false) => push(format!(
+                "the search's failure-free run held {} fact(s), but oracle 2's correct members \
+                 emitted none",
+                label.stats.domain
+            )),
+            _ => {}
         }
         // A claim that the label holds with up to `k` crashes, and whether it is a sample's.
         let claim: Option<(usize, String, bool)> = match &label.verdict {
@@ -1401,6 +1402,8 @@ fn label_disagreements(
                 "holds under every admissible fault set".into(),
                 false,
             )),
+            // An empty domain with no search: vacuous, so it holds under every set.
+            Verdict::Vacuous(_) => Some((usize::MAX, "is vacuous".into(), false)),
             Verdict::Certified {
                 tolerates: Tolerance::UpTo(k),
             } => Some((*k, format!("holds with up to {k} crash(es)"), false)),
