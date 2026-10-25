@@ -198,7 +198,7 @@ mod tests {
     fn check_graph(edges: Vec<(u32, u32)>, expect_redundancy: bool) {
         let expected = reference_closure(&edges);
         let max_steps = expected.len() + 1;
-        let expected_for_run = expected.clone();
+        let expected_for_run = expected;
 
         let mut flow = FlowBuilder::new();
         let process = flow.process::<()>();

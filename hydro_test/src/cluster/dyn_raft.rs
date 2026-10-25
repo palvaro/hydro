@@ -748,13 +748,14 @@ pub fn dyn_raft_step_with_policy<T: Clone, C>(
         }
     }
 
-    if was_leader && state.role != RaftState::Leader {
-        if let Some(pending) = state.pending.take() {
-            reconfiguration_results.push(ReconfigurationResult::NotLeader {
-                request_id: pending.request.request_id,
-                leader: state.known_leader.clone(),
-            });
-        }
+    if was_leader
+        && state.role != RaftState::Leader
+        && let Some(pending) = state.pending.take()
+    {
+        reconfiguration_results.push(ReconfigurationResult::NotLeader {
+            request_id: pending.request.request_id,
+            leader: state.known_leader.clone(),
+        });
     }
 
     for command in commands {
@@ -1032,6 +1033,7 @@ pub struct DynRaftOutputs<'a, T, C> {
 
 /// Hosts [`dyn_raft_step`] in one Hydro tick per member. Physical cluster membership is
 /// read only as a fixed address universe; logical configurations live solely in the log.
+#[expect(clippy::too_many_arguments, reason = "the server's inputs are its interface")]
 pub fn dyn_raft_server<'a, T, C, O, RO, Net>(
     cluster: &Cluster<'a, C>,
     commands: Stream<T, Cluster<'a, C>, Unbounded, O>,
@@ -1074,7 +1076,7 @@ where
         key: cluster_key,
         _phantom: PhantomData,
     };
-    let cluster_members_for_state = cluster_members.clone();
+    let cluster_members_for_state = cluster_members;
     let initial_voter_count = config.initial_voter_count;
 
     #[expect(clippy::type_complexity, reason = "explicit protocol outputs")]
@@ -1159,7 +1161,6 @@ where
     }
 }
 
-#[expect(clippy::type_complexity, reason = "public guarantees are explicit")]
 pub fn dyn_raft<'a, T, C, Con, O, RO, Net>(
     commands: Stream<T, Cluster<'a, C, Con>, Unbounded, O>,
     reconfigurations: Stream<ReconfigurationRequest<C>, Cluster<'a, C>, Unbounded, RO>,
@@ -1226,6 +1227,7 @@ pub struct DynRaftUnpatchedOutputs<'a, T, C> {
 /// Physical Hydro cluster membership stays static; logical Raft configurations remain
 /// subsets of that fixed universe, exactly as in the production server.
 #[doc(hidden)]
+#[expect(clippy::too_many_arguments, reason = "the server's inputs are its interface")]
 pub fn dyn_raft_server_unpatched_for_simulation<'a, T, C, O, RO, Net>(
     cluster: &Cluster<'a, C>,
     commands: Stream<T, Cluster<'a, C>, Unbounded, O>,
@@ -1268,7 +1270,7 @@ where
         key: cluster_key,
         _phantom: PhantomData,
     };
-    let cluster_members_for_state = cluster_members.clone();
+    let cluster_members_for_state = cluster_members;
     let initial_voter_count = config.initial_voter_count;
 
     #[expect(clippy::type_complexity, reason = "explicit protocol outputs")]

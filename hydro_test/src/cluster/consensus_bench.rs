@@ -794,12 +794,20 @@ mod tests {
         }
 
         // (a) PROGRESS: at least ~3 distinct slots committed under sustained load.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a set's size, membership, max and sorted contents do not depend on its order"
+        )]
         let slots: HashSet<usize> = slot_to_msg.keys().copied().collect();
         assert!(
             slots.len() >= 3,
             "expected at least 3 committed slots under sustained load, saw {} (slots: {:?})",
             slots.len(),
             {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "a set's size, membership, max and sorted contents do not depend on its order"
+                )]
                 let mut s: Vec<usize> = slots.iter().copied().collect();
                 s.sort_unstable();
                 s
@@ -808,6 +816,10 @@ mod tests {
 
         // (c) CONTIGUITY (gap-fill): committed slots include slot 0 and are
         // gap-free up to the max observed slot.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a set's size, membership, max and sorted contents do not depend on its order"
+        )]
         let max_slot = *slots.iter().max().unwrap();
         assert!(
             slots.contains(&0),
