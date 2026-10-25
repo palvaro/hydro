@@ -143,3 +143,84 @@ fn review2b_fault_created_panic_beside_a_robust_fact() {
     );
     agree("fault-created panic beside a robust fact", &cross);
 }
+
+/// A race with no fault: each member reports 1 as missing if the probe for 1 lands in a tick
+/// before the data does (the `missing_alarm` shape, with the probe sent in the fault phase).
+/// The members can disagree in failure-free schedules.
+#[cfg(stageleft_runtime)]
+fn racy_alarm(
+    check: &mut EcCheck,
+) -> (
+    hydro_lang::sim::compiled::CompiledSim,
+    impl FnMut() + use<>,
+) {
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let prober = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let (send_probe, probe) = prober.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let tick = members.tick();
+    let arrived = input
+        .broadcast_closed(&members, TCP.fail_stop().name("data").bincode())
+        .batch(&tick, nondet!(/** which tick a delivery lands in */))
+        .weaken_ordering::<NoOrder>();
+    let (handle, prev) = tick.cycle::<Stream<u32, _, Bounded, NoOrder>, _>();
+    let heard = prev.chain(arrived);
+    handle.complete_next_tick(heard.clone());
+    let probes = probe.broadcast_closed(&members, TCP.fail_stop().name("probe").bincode());
+    let missing = probes
+        .batch(&tick, nondet!(/** which tick a probe lands in */))
+        .weaken_ordering::<NoOrder>()
+        .filter_not_in(heard)
+        .all_ticks()
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed (wrongly): the probe never overtakes the data */
+        ));
+    let _out = missing.sim_cluster_output();
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 3))
+        .compiled();
+    (sim, move || {
+        send.send(1);
+        send_probe.send(1);
+    })
+}
+
+/// The parent's question: does a sampled verdict that missed the breaking schedule pass as a
+/// certificate? Exhaustively, `missing` breaks with no fault. Sampled with one schedule per set,
+/// the sample may miss the race; whenever it does, the verdict must be `Exhausted` and
+/// `assert_holds` must refuse it.
+#[cfg(stageleft_runtime)]
+#[test]
+fn review2b_a_sampled_miss_is_not_accepted_by_assert_holds() {
+    use super::Verdict;
+    let mut check = EcCheck::new().max_crashes(0);
+    let (sim, mut inputs) = racy_alarm(&mut check);
+    let full = check.run(&sim, async || inputs());
+    let label = full.label("missing");
+    assert!(
+        label.verdict.counterexample().is_some_and(|c| c.faults.is_empty()),
+        "exhaustively, the race breaks it with no fault: {full}"
+    );
+    let mut misses = 0;
+    for _ in 0..20 {
+        let mut check = EcCheck::new().max_crashes(0).sample_schedules(1);
+        let (sim, mut inputs) = racy_alarm(&mut check);
+        let results = check.run(&sim, async || inputs());
+        let verdict = &results.label("missing").verdict;
+        assert!(
+            !matches!(verdict, Verdict::Certified { .. } | Verdict::Vacuous(_)),
+            "a sampled search certified: {results}"
+        );
+        if matches!(verdict, Verdict::Exhausted { .. }) {
+            misses += 1;
+            assert!(!results.holds(), "{results}");
+            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                results.assert_holds()
+            }));
+            assert!(refused.is_err(), "assert_holds accepted a sampled miss: {results}");
+        }
+    }
+    eprintln!("sampled misses (Exhausted) in 20 runs: {misses}");
+}
