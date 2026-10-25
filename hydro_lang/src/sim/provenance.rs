@@ -1012,7 +1012,7 @@ mod tests {
             net(&[d1, d2, t1]), // Reactivated, 2 data tags (dominated) -> grows with state
         ];
         let mut gates = BTreeMap::new();
-        gates.insert("requests".to_string(), Gate::Absent);
+        gates.insert("requests".to_owned(), Gate::Absent);
         let table = buffer_table(&records, &gates, false);
         assert_eq!(table.len(), 1);
         let b = &table[0];

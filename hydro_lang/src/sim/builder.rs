@@ -152,13 +152,10 @@ impl SimBuilder {
     /// and hook** — but all members share one budget cell, bounding the number
     /// of crashes in the whole cluster (the `F` of the fault model).
     fn crash_channels_ident(&mut self, from: &LocationId) -> Option<syn::Ident> {
-        let key = match from {
-            LocationId::Process(key) | LocationId::Cluster(key) => key,
-            _ => return None,
-        };
-        let Some(&budget) = self.crashable.get(key) else {
+        let (LocationId::Process(key) | LocationId::Cluster(key)) = from else {
             return None;
         };
+        let &budget = self.crashable.get(key)?;
         if let Some(ident) = self.crash_channel_vecs.get(key) {
             return Some(ident.clone());
         }

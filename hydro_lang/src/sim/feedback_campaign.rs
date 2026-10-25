@@ -959,7 +959,7 @@ impl EvidenceMatrix {
                 "{}\t{:?}\t{}\t{}\t{}\t{}\n",
                 port.port,
                 port.direction,
-                port.role.map_or("-".to_owned(), |r| format!("{r:?}")),
+                port.role.map_or_else(|| "-".to_owned(), |r| format!("{r:?}")),
                 port.location,
                 port.many,
                 port.type_name,
@@ -1380,7 +1380,7 @@ pub async fn run_feedback_campaign(
     let mut epochs = Vec::new();
     let mut admitted = 0;
 
-    let mut observe = |history: &mut Vec<EmissionRecord>,
+    let observe = |history: &mut Vec<EmissionRecord>,
                        seen_tags: &mut BTreeSet<Tag>,
                        scale: usize,
                        action: CampaignAction,

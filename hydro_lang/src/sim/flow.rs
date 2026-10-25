@@ -439,7 +439,8 @@ impl<'a> SimFlow<'a> {
             test_safety_only: self.test_safety_only,
             skip_consistency_assertions: self.skip_consistency_assertions,
             channel_tables: BTreeMap::new(),
-            crashable: self.crashable.iter().map(|(k, v)| (*k, *v)).collect(),
+            // Collected into a `BTreeMap`, so the `HashMap`'s order does not matter.
+            crashable: self.crashable.clone().into_iter().collect(),
             crash_channel_vecs: BTreeMap::new(),
             network_hooks: self.network_hooks,
             channels: vec![],
