@@ -79,7 +79,7 @@ pub struct Sweep<M, F> {
     latest: BTreeMap<Node, BTreeMap<M, u64>>,
     sends_complete: bool,
     order: Rc<dyn SendOrder<M>>,
-    hits: Hits<M>,
+    hits: Hits<M, F>,
     runs: usize,
     /// The hypothesis budget: how many sets may be run, counting the probe.
     pub budget: usize,

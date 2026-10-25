@@ -18,7 +18,7 @@ use super::literals::SendOrder;
 use crate::search::{CrashBounds, Fault, FaultSet, Node, weights};
 
 /// Which rows a proposal must satisfy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Scope {
     /// Kill the robust clauses of some pair: the admissibility rule, the only one a certificate
     /// rests on.
@@ -44,25 +44,42 @@ impl Scope {
 /// One cover row: the positions of the candidates that kill some delivery of a clause.
 type Row = BTreeSet<usize>;
 
-/// Every candidate×clause hit test done so far ([`Candidate::hits`]), so that each is done once
-/// per sweep: a clause keeps one entry per candidate id. The send order is fixed for a sweep, so a
-/// test's answer never changes.
+/// What [`propose`] keeps across one sweep's calls, so that each clause is read once:
+/// - every candidate×clause hit test ([`Candidate::hits`]), by a permanent id per candidate (the
+///   send order is fixed for a sweep, so an answer never changes);
+/// - per pair and scope, how many of its clauses were read, and their minimal rows, over the
+///   universe they were read against.
+///
+/// Between calls, a pair's clauses must only grow at the end, as the engine learns them. A pair
+/// whose list shrank, or whose last read clause changed, is read again.
 #[derive(Clone, Debug)]
-pub struct Hits<M> {
+pub struct Hits<M, F> {
     ids: BTreeMap<Candidate<M>, usize>,
     tested: BTreeMap<PairClause<M>, Vec<Option<bool>>>,
+    pairs: BTreeMap<(Node, F, Scope), Read<M>>,
 }
 
-impl<M> Default for Hits<M> {
+impl<M, F> Default for Hits<M, F> {
     fn default() -> Self {
         Hits {
             ids: BTreeMap::new(),
             tested: BTreeMap::new(),
+            pairs: BTreeMap::new(),
         }
     }
 }
 
-impl<M: Ord + Clone> Hits<M> {
+/// One pair's clauses read so far, over the universe with candidate ids `ids`: how many, the
+/// last one, and the minimal rows by size, then position (the order the program lists them in).
+#[derive(Clone, Debug)]
+struct Read<M> {
+    ids: Vec<usize>,
+    count: usize,
+    last: Option<PairClause<M>>,
+    minimal: BTreeSet<(usize, Row)>,
+}
+
+impl<M: Ord + Clone, F: Ord + Clone> Hits<M, F> {
     /// The ids of `universe`'s candidates, assigning new ones.
     fn ids(&mut self, universe: &[Candidate<M>]) -> Vec<usize> {
         universe
@@ -117,7 +134,7 @@ impl PairRows {
 fn pair_rows<P: PairKey, M: Ord + Clone>(
     universe: &[Candidate<M>],
     index: &BTreeMap<&Candidate<M>, usize>,
-    hits: &mut Hits<M>,
+    hits: &mut Hits<M, P::Fact>,
     ids: &[usize],
     pair: &P,
     clauses: &[PairClause<M>],
@@ -125,21 +142,40 @@ fn pair_rows<P: PairKey, M: Ord + Clone>(
     scope: Scope,
     order: &dyn SendOrder<M>,
 ) -> Option<PairRows> {
-    let rows: BTreeSet<Row> = clauses
-        .iter()
-        .filter(|c| scope.includes(c))
-        .map(|c| hits.row(c, universe, ids, order))
-        .collect();
-    if rows.iter().any(BTreeSet::is_empty) {
-        return None;
+    let key = (pair.member().clone(), pair.fact().clone(), scope);
+    let mut read = hits.pairs.remove(&key).unwrap_or(Read {
+        ids: vec![],
+        count: 0,
+        last: None,
+        minimal: BTreeSet::new(),
+    });
+    if read.ids != ids
+        || clauses.len() < read.count
+        || read.count > 0 && clauses.get(read.count - 1) != read.last.as_ref()
+    {
+        read = Read {
+            ids: ids.to_vec(),
+            count: 0,
+            last: None,
+            minimal: BTreeSet::new(),
+        };
     }
-    let mut rows: Vec<Row> = rows.into_iter().collect();
-    rows.sort_by_key(BTreeSet::len);
-    let mut kept: Vec<Row> = vec![];
-    for row in rows {
-        if !kept.iter().any(|k| k.is_subset(&row)) {
-            kept.push(row);
+    // The minimal rows: a row another one is a subset of is implied by it.
+    for clause in clauses[read.count..].iter().filter(|c| scope.includes(c)) {
+        let row = hits.row(clause, universe, ids, order);
+        if !read.minimal.iter().any(|(_, m)| m.is_subset(&row)) {
+            read.minimal.retain(|(_, m)| !row.is_subset(m));
+            read.minimal.insert((row.len(), row));
         }
+    }
+    if read.count < clauses.len() {
+        read.count = clauses.len();
+        read.last = clauses.last().cloned();
+    }
+    let rows: Vec<Row> = read.minimal.iter().map(|(_, row)| row.clone()).collect();
+    hits.pairs.insert(key, read);
+    if rows.first().is_some_and(BTreeSet::is_empty) {
+        return None;
     }
     // An exemption with a fault outside the universe can never be fully selected.
     let inside = |set: &FaultSet<M>| -> Option<Row> {
@@ -156,10 +192,7 @@ fn pair_rows<P: PairKey, M: Ord + Clone>(
         )
         .filter_map(inside)
         .collect();
-    Some(PairRows {
-        rows: kept,
-        exemptions,
-    })
+    Some(PairRows { rows, exemptions })
 }
 
 /// The next hypothesis: a minimum-weight subset of `universe` (weakest first, see
@@ -187,7 +220,7 @@ pub fn propose<P: PairKey, M: Ord + Clone>(
     bounds: &CrashBounds,
     scope: Scope,
     order: &dyn SendOrder<M>,
-    hits: &mut Hits<M>,
+    hits: &mut Hits<M, P::Fact>,
 ) -> Option<Proposal<M>> {
     let index: BTreeMap<&Candidate<M>, usize> =
         universe.iter().enumerate().map(|(i, c)| (c, i)).collect();
