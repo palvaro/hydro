@@ -176,8 +176,11 @@ On `hydrofrac-races`, i.e. the merge of B's review fixes and N's item D, plus th
 
 ## 10. Teaching examples and diagrams
 
-`hydro_test/src/cluster/ec_teaching.rs` holds five minimal programs. Each one shows a way a broadcast loses
-agreement, or keeps it. To run all five, one at a time, with the checker's report printed:
+`hydro_test/src/cluster/ec_teaching.rs` holds five minimal programs, written the way a user would write them: a
+Hydro sim test, plus `EcCheck::new()`, `check.instrument(..)`, `check.run(..)`, `println!("{results}")` and one
+user-level assertion on a collection by its binding name (`results.label("received").verdict.is_counterexample()`).
+Each one shows a way a broadcast loses agreement, or keeps it. To run all five, one at a time, with the checker's
+report printed:
 
 ```sh
 cargo test -p hydro_test --lib -- cluster::ec_teaching:: --test-threads=1 --nocapture
@@ -189,8 +192,19 @@ To run just one, name it:
 cargo test -p hydro_test --lib -- cluster::ec_teaching::one_lost_message_leaves_a_receiver_without_the_item --nocapture
 ```
 
+`hydro_test/src/cluster/ec_teaching_checks.rs` runs the same five programs as hydrofrac regression tests: it
+asserts the exact faults (which node crashes and where, which message is lost), the crash tolerance and the
+certificate, and cross-checks every verdict against brute-force enumeration (`cross_check`, up to 2 faults). To
+run both files:
+
+```sh
+cargo test -p hydro_test --lib -- cluster::ec_teaching --test-threads=1 --nocapture
+```
+
 Every counterexample writes its diagrams to `target/hydrofrac/<test>/<label>/`, or under `$CARGO_TARGET_DIR` when
-that is set:
+that is set. The label directory is the binding name and the file (`received_ec_teaching.rs`, or
+`received_ec_teaching_checks.rs` for the regression tests), so the two files do not overwrite each other. A second
+run of the same label in one test gets a `-2` suffix.
 - `counterexample.svg` (and `.dot`): the focused diagram. It shows the broken fact's lineage, the faults and the
   heal, and only the reported label's decoded outputs. Its caption counts what it left out
   (`2 unrelated messages and 8 unrelated outputs not shown`). This is the one the report's `diagram:` line names.
@@ -199,10 +213,18 @@ that is set:
 
 The `.svg` is written only when Graphviz's `neato` is on the `PATH`. Otherwise run `neato -n2 -Tsvg <file>.dot`.
 
-| test | label dir | what the focused diagram shows |
+| test (`ec_teaching.rs`) | label dir | what the focused diagram shows |
 |---|---|---|
 | `a_sender_crash_mid_broadcast_leaves_a_receiver_without_the_item` | `received_ec_teaching.rs` | 3 lanes, 2 arrows, the sender's crash |
 | `one_lost_message_leaves_a_receiver_without_the_item` | `received_ec_teaching.rs` | 3 lanes, 2 arrows, the omitted one red |
 | `a_cluster_sender_crash_mid_broadcast_leaves_a_receiver_without_the_item` | `received_ec_teaching.rs` | 3 lanes, 2 arrows, the crash |
-| `receivers_that_echo_survive_a_sender_crash` | `from_sender_ec_teaching.rs` | 3 lanes, 8 arrows (bcast and echoes). The raw single-hop label breaks, but `delivered` is certified |
-| `two_senders_survive_one_crash_but_not_two` | `items_ec_teaching.rs`, `received_ec_teaching.rs` | `items`: 4 lanes, 4 arrows, both crashes |
+| `receivers_that_echo_survive_a_sender_crash` | `from_sender_ec_teaching.rs` | 3 lanes, 8 arrows (bcast and echoes). The raw single-hop label breaks, but `delivered` holds |
+| `two_redundant_senders_survive_one_crash_but_not_two` | `received_ec_teaching.rs` (and `-2`), `items_ec_teaching.rs` | `items`: 4 lanes, 4 arrows, both crashes |
+
+API notes from writing the teaching file:
+- `Results` has no `counterexample()` and `LabelResult` has no `holds()`, so a user asserts through
+  `results.label(name).verdict` (`is_counterexample()`, `!fails()`).
+- `.weaken_consistency()` does not retract a claim: the `broadcast_closed` it is applied to is still a minted
+  `EventualConsistency` collection, and hydrofrac still checks it (it exits at the cast). So a program built on a
+  closed broadcast (the echo, the redundant senders) always reports the raw hop's counterexample, and
+  `results.assert_holds()` cannot certify it; the examples assert the collection that matters by name.
