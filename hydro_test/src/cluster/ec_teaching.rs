@@ -20,6 +20,12 @@
 //! | [`receivers_that_echo_survive_a_sender_crash`] | sender, 2 receivers | none (certified) |
 //! | [`two_senders_survive_one_crash_but_not_two`] | 2 cluster senders, 2 receivers | 2 crashes |
 //!
+//! The check taps every collection a broadcast labels `EventualConsistency`, and every output
+//! of the program. The first three programs have no output (their streams are dropped once
+//! built), since the broadcast's own label is the one that breaks and an output would only add
+//! notes to the diagram. The last two output the collection whose agreement is the point
+//! (`delivered`, `items`), which is what makes the check check it.
+//!
 //! Run one with, for example,
 //! `cargo test -p hydro_test --lib ec_teaching::a_sender_crash_mid_broadcast -- --nocapture`.
 
@@ -69,7 +75,7 @@ fn faults<'l>(cross: &CrossCheck, label: &'l LabelResult) -> Vec<&'l Fault<hydro
 enum Transport {
     /// Messages are never lost, but a node may crash (and stay down).
     FailStop,
-    /// Messages may be lost (delayed forever), but no node crashes.
+    /// As [`Self::FailStop`], and messages may also be lost (delayed forever).
     LossyDelayedForever,
 }
 
@@ -84,14 +90,14 @@ fn one_item_to_two_receivers(transport: Transport) -> CrossCheck {
         Transport::FailStop => {
             let received =
                 item.broadcast_closed(&receivers, TCP.fail_stop().name("bcast").bincode());
-            let _out = received.sim_cluster_output();
+            drop(received);
         }
         Transport::LossyDelayedForever => {
             let received = item.broadcast_closed(
                 &receivers,
                 TCP.lossy_delayed_forever().name("bcast").bincode(),
             );
-            let _out = received.sim_cluster_output();
+            drop(received);
         }
     }
 
@@ -129,7 +135,7 @@ fn a_sender_crash_mid_broadcast_leaves_a_receiver_without_the_item() {
 
 /// **One lost message.** The same broadcast over a link that may lose messages. Nothing
 /// resends, so losing the one message to one receiver leaves it without the item while the
-/// other has it. No crash is needed.
+/// other has it. No crash is needed: hydrofrac reports that omissions alone break it.
 #[test]
 fn one_lost_message_leaves_a_receiver_without_the_item() {
     let cross = one_item_to_two_receivers(Transport::LossyDelayedForever);
@@ -138,6 +144,8 @@ fn one_lost_message_leaves_a_receiver_without_the_item() {
     let [Fault::Omit(_)] = faults(&cross, received)[..] else {
         panic!("expected one lost message:\n{}", cross.results);
     };
+    let cex = received.verdict.counterexample().expect("a counterexample");
+    assert_eq!(cex.tolerates, None, "no crash is needed:\n{}", cross.results);
 }
 
 /// **A cluster sender's crash.** The sender is now a member of a cluster (of one), sending to a
@@ -151,7 +159,7 @@ fn a_cluster_sender_crash_mid_broadcast_leaves_a_receiver_without_the_item() {
     let receivers = flow.cluster::<Receiver>();
     let (send, item) = senders.sim_input::<u32, TotalOrder, ExactlyOnce>();
     let received = item.broadcast_closed(&receivers, TCP.fail_stop().name("bcast").bincode());
-    let _out = received.entries().sim_cluster_output();
+    drop(received);
 
     let mut check = EcCheck::new();
     let sim = check
@@ -182,6 +190,11 @@ fn a_cluster_sender_crash_mid_broadcast_leaves_a_receiver_without_the_item() {
 /// receiver 0, receiver 0 forwards the item to receiver 1. And if a receiver crashes, the only
 /// correct receiver left agrees with itself. hydrofrac certifies the deliveries under every
 /// admissible crash set. Two receivers are the fewest that have anything to agree on.
+///
+/// What the receivers got *straight from the sender* (`from_sender`) is still the broken
+/// broadcast of [`a_sender_crash_mid_broadcast_leaves_a_receiver_without_the_item`], and
+/// hydrofrac still reports it, with the same crash. Only `delivered`, which also counts the
+/// echoes, is fixed.
 #[test]
 fn receivers_that_echo_survive_a_sender_crash() {
     let mut flow = FlowBuilder::new();
@@ -213,6 +226,11 @@ fn receivers_that_echo_survive_a_sender_crash() {
         "the echo is certified under every admissible crash set:\n{}",
         cross.results
     );
+    let from_sender = verdict(&cross, "from_sender");
+    let [Fault::Crash { node, .. }] = faults(&cross, from_sender)[..] else {
+        panic!("the plain broadcast underneath still breaks:\n{}", cross.results);
+    };
+    assert!(node.starts_with("Sender"), "{}", cross.results);
 }
 
 /// The echo broadcast of [`receivers_that_echo_survive_a_sender_crash`]: deliver what arrives
