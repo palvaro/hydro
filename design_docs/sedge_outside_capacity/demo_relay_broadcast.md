@@ -80,8 +80,8 @@ Raw data, all under [`relay_broadcast_lossy/`](relay_broadcast_lossy/) (its
   `probes_index.tsv`: the μ probes.
 - `cress/`: the three Cress reports and `console.txt` with their verdict lines.
 - `earlier/`: the unbounded and `bounded:Member` runs that ruled out those deployments.
-- [`relay_broadcast_amplification/hydrofrac.txt`](relay_broadcast_amplification/hydrofrac.txt):
-  the HydroFrac verdicts.
+- [`demo_relay_broadcast/hydrofrac.txt`](demo_relay_broadcast/hydrofrac.txt): the HydroFrac
+  verdicts (16 tests, re-run on commit `52597a61df`).
 - [`relay_broadcast_amplification/`](relay_broadcast_amplification/): the earlier per-peer and
   unbounded-buffer study that §5 refers to, with the scripts `summarize.py` and `analyze2.py`.
 
@@ -304,41 +304,45 @@ The setup comes from `hydro_test/src/cluster/relay_broadcast_ldfi.rs`:
 - **Schedules are sampled:** 8 per fault set (`Exploration::Fuzz { instances: 8 }`).
 
 The excerpts below are from the committed log,
-[`relay_broadcast_amplification/hydrofrac.txt`](relay_broadcast_amplification/hydrofrac.txt)
-(12 tests), with `...` marking cuts. TODO(hydrofrac): commit the log of the re-run on commit
-`1b692e68ce` (16 tests, all passing, with the same verdicts), and update the fault-set counts
-below from it.
+[`demo_relay_broadcast/hydrofrac.txt`](demo_relay_broadcast/hydrofrac.txt), of a re-run on
+commit `52597a61df`: 16 tests (12 HydroFrac tests and 4 unit tests of the outstanding table),
+all passing. `...` marks cuts. Each test prints its verdict lines just before its header line.
 
 ```
-$ cargo test -p hydro_test --lib cluster::relay_broadcast -- --nocapture --test-threads=3
+$ cargo test -j 6 -p hydro_test --lib cluster::relay_broadcast -- --nocapture --test-threads=3
   delivered  :576                    DIVERGES under omit(relay Relay { from: 0, id: 2, body: Body(b"") } member 0→member 1) + crash(source after sending bcast Request { id: 2, body: Body(b"") } to member 0)
-relay_broadcast Echo over LossyDelayedForever, 0 timer rounds before the cut: 2.6s
+relay_broadcast Echo over LossyDelayedForever, 0 timer rounds before the cut: 2.8s
 ...
   delivered  :576                    DIVERGES under omit(relay Relay { from: 0, id: 2, body: Body(b"") } member 0→member 1) + omit(relay Relay { from: 0, id: 2, body: Body(b"") } member 0→member 2) + crash(source after sending bcast Request { id: 2, body: Body(b"") } to member 0)
-relay_broadcast ReliableResendPerEntry { ack_timeout_ticks: 3, max_attempts: Some(3) } over LossyDelayedForever, 10 timer rounds before the cut: 12.2s
-relay_broadcast ReliableResendPerEntry { ack_timeout_ticks: 3, max_attempts: Some(5) } over LossyDelayedForever, 16 timer rounds before the cut: 16.1s
+relay_broadcast ReliableResendPerEntry { ack_timeout_ticks: 3, max_attempts: Some(3) } over LossyDelayedForever, 10 timer rounds before the cut: 12.0s
 ...
-  delivered  :576                    no violation found (247 fault sets, 8 sampled schedules each)
-relay_broadcast ReliableResendPerEntry { ack_timeout_ticks: 3, max_attempts: None } over LossyDelayedForever, 0 timer rounds before the cut: 154.2s
+  delivered  :576                    DIVERGES under omit(relay Relay { from: 0, id: 2, body: Body(b"") } member 0→member 1) + omit(relay Relay { from: 0, id: 2, body: Body(b"") } member 0→member 2) + crash(source after sending bcast Request { id: 2, body: Body(b"") } to member 0)
+relay_broadcast ReliableResendPerEntry { ack_timeout_ticks: 3, max_attempts: Some(5) } over LossyDelayedForever, 16 timer rounds before the cut: 15.3s
 ...
-  delivered  :576                    no violation found (239 fault sets, 8 sampled schedules each)
-relay_broadcast ReliableResendPerEntry { ack_timeout_ticks: 3, max_attempts: None } over LossyDelayedForever, 10 timer rounds before the cut: 191.5s
+  delivered  :576                    no violation found (249 fault sets, 8 sampled schedules each)
+relay_broadcast ReliableResendPerEntry { ack_timeout_ticks: 3, max_attempts: None } over LossyDelayedForever, 0 timer rounds before the cut: 167.5s
 ...
-test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 244 filtered out; finished in 716.55s
+  delivered  :576                    no violation found (243 fault sets, 8 sampled schedules each)
+relay_broadcast ReliableResendPerEntry { ack_timeout_ticks: 3, max_attempts: None } over LossyDelayedForever, 10 timer rounds before the cut: 197.3s
+...
+  delivered  :576                    no violation found (311 fault sets, 8 sampled schedules each)
+relay_broadcast ReliableResend { ack_timeout_ticks: 3 } over LossyDelayedForever, 0 timer rounds before the cut: 226.6s
+...
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 240 filtered out; finished in 509.31s
 ```
-
-Each verdict line is printed just before its test's header line. The trimmed log does not
-keep the verdict line for `max_attempts: Some(5)` with 16 rounds before the cut. That test's
-name (`relay_per_entry_5_diverges_when_every_attempt_is_omitted`) asserts the divergence, and
-it passed.
 
 | policy | timer rounds before the cut | result |
 |---|---|---|
 | `Echo` | 0 | counterexample: omit relay 0→1 of id 2, plus a source crash |
-| PerEntry, max_attempts 3 / 5 / none, unbounded crashes | 0 | no violation (256 / 241 / 247 fault sets) |
+| PerEntry, max_attempts 3 / 5 / none, unbounded crashes | 0 | no violation (253 / 248 / 249 fault sets) |
 | PerEntry, max_attempts 3 | 10 | counterexample |
 | PerEntry, max_attempts 5 | 16 | counterexample |
-| PerEntry, max_attempts none | 10 | no violation (239 fault sets) |
+| PerEntry, max_attempts none | 10 | no violation (243 fault sets) |
+| `ReliableResend`, unbounded crashes / 1 crash | 0 | no violation (311 / 160 fault sets) |
+
+The fault-set counts differ by a few between runs, because the schedules are sampled; the
+previous run found, for example, 247 and 239 for the two `max_attempts: None` rows. The verdicts
+were the same in every run.
 
 **Reading.**
 
