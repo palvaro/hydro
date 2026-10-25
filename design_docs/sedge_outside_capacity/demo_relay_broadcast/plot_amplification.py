@@ -18,7 +18,7 @@ It also prints (d) as a table, for pasting into the demo.
 usage:
   python3 plot_amplification.py --burst TRACE.tsv --control TRACE.tsv --out DIR --prefix NAME \
       [--title TEXT] [--trigger-start 10] [--trigger 5] [--tail 60] [--memory-mb 400] \
-      [--quota 0.01]
+      [--quota 0.01] [--period-us 100000]
 
 Every input is a Sedge per-second trace (`traces/<group>/factor<f>.trial<n>.tsv`); nothing is
 re-run.
@@ -45,6 +45,20 @@ members' own queues:
              the traces so far `rchar` is 0 throughout (the members' socket reads are `recv*`
              calls, which `rchar` does not count), so this series is dropped when it is all 0
 
+Out of band, counted in the transport (`--send-buffer lossy:N:ROLE`), not in the program: each
+member's lossy send queues count the sends the dataflow handed them and the ones they dropped
+because the queue was full. The member process publishes the counters five times a second and
+Sedge differences them per second. A starved member publishes late, so one second can read 0 and
+the next carry two seconds' worth; the plots therefore draw a centred 3 s mean of these two
+series (window means and the table use the raw seconds, which sum correctly):
+
+  att_x      sum of `sendq_attempted_kb_Member_*` / RELAY_BYTES: relay-sized sends attempted
+  drop_x     sum of `sendq_dropped_kb_Member_*` / RELAY_BYTES: of those, dropped at a full queue
+
+`att_x - drop_x` is what reached the kernel, so it should track `wire_x`. These two columns are
+the outside evidence that the amplified work exists when `wire_x` falls: the members spend their
+quota producing re-sends that the full queues throw away.
+
 When the in-band reports stop (a starved or dead member), the in-band series undercount. Seconds
 with fewer than MEMBERS reports are marked with a grey tick along the bottom of each in-band
 panel; in (d) and the table, an in-band stream whose tail window averaged fewer than MEMBERS
@@ -66,7 +80,6 @@ from matplotlib.ticker import FixedLocator, FuncFormatter, NullLocator
 MEMBERS = 9
 PEERS = MEMBERS - 1
 RELAY_BYTES = 4120.0  # bincode Relay {u32, u64, 4096-byte body} plus framing
-PERIODS_PER_S = 10  # 100 ms CFS period
 BASELINE_FROM = 5  # Sedge's baseline window starts after warm-up
 
 
@@ -110,7 +123,17 @@ def averaged(cols, prefix, fn=None):
     return out
 
 
-def series(path):
+def smooth(xs, k=3):
+    """Centred k-second mean, ignoring NaNs (for the lossy-queue counters, see the top)."""
+    h = k // 2
+    out = []
+    for i in range(len(xs)):
+        w = [x for x in xs[max(0, i - h):i + h + 1] if not math.isnan(x)]
+        out.append(sum(w) / len(w) if w else math.nan)
+    return out
+
+
+def series(path, periods_per_s):
     """Every stream this script draws, per second, keyed by name."""
     c = load(path)
     n = len(c["second"])
@@ -127,6 +150,8 @@ def series(path):
     delivered, acks = blank(delivered), blank(acks)
     wchar = summed(c, "wchar_kb_")
     rchar = summed(c, "rchar_kb_")
+    att = summed(c, "sendq_attempted_kb_") if members(c, "sendq_attempted_kb_") else [math.nan] * n
+    drop = summed(c, "sendq_dropped_kb_") if members(c, "sendq_dropped_kb_") else [math.nan] * n
     return {
         "t": get("second"),
         "rounds": rounds,
@@ -138,11 +163,13 @@ def series(path):
         "acks_sent": acks,
         "wire_x": [w * 1024 / RELAY_BYTES for w in wchar],
         "recv_x": [w * 1024 / RELAY_BYTES for w in rchar],
+        "att_x": [w * 1024 / RELAY_BYTES for w in att],
+        "drop_x": [w * 1024 / RELAY_BYTES for w in drop],
         "wchar_mb": [w * 1024 / 1e6 for w in wchar],
         "rss_mean": averaged(c, "rss_mb_"),
         "rss_max": averaged(c, "rss_mb_", max),
         "cpu": averaged(c, "cpu_"),
-        "thr": [x / PERIODS_PER_S for x in averaged(c, "nr_throttled_")],
+        "thr": [x / periods_per_s for x in averaged(c, "nr_throttled_")],
     }
 
 
@@ -220,6 +247,14 @@ def fig_wire(b, c, args, out):
            label="burst run: relays written (outside: wchar / 4120 B)")
     a.plot(c["t"], c["wire_x"], color="tab:blue", lw=1.0, ls="--", alpha=0.7,
            label="no-burst control: relays written (outside)")
+    if present(b, "att_x"):
+        a.plot(b["t"], smooth(b["att_x"]), color="tab:red", lw=1.6,
+               label="burst run: relay-sized sends handed to the lossy queues (outside, 3 s mean)")
+        a.plot(c["t"], smooth(c["att_x"]), color="tab:red", lw=1.0, ls="--", alpha=0.7,
+               label="no-burst control: sends handed to the lossy queues")
+    if present(b, "drop_x"):
+        a.plot(b["t"], smooth(b["drop_x"]), color="tab:orange", lw=1.2,
+               label="burst run: of those, dropped at a full queue (outside, 3 s mean)")
     if present(b, "recv_x"):
         a.plot(b["t"], b["recv_x"], color="tab:cyan", lw=1.0,
                label="burst run: relays read (outside: rchar / 4120 B)")
@@ -227,7 +262,8 @@ def fig_wire(b, c, args, out):
     a.plot(b["t"], first, color="black", lw=1, ls=":",
            label=f"first relays needed: {PEERS * MEMBERS} × offered rounds/s")
     a.set_ylabel("relays/s, measured outside")
-    a.legend(loc="upper right", fontsize=8)
+    a.set_yscale("symlog", linthresh=100)
+    a.legend(loc="lower left", fontsize=7)
     a.set_title(args.title or f"{args.prefix}: wire traffic measured outside", fontsize=11)
     a = axes[1]
     a.plot(b["t"], b["rss_mean"], color="tab:purple", lw=1.6, label="burst run: member RSS, mean")
@@ -266,6 +302,8 @@ STREAMS = [
     ("merged", "merged = delivered (in band)", "tab:orange"),
     ("acks_sent", "acks_sent (derived)", "tab:green"),
     ("wire_x", "wire, outside (wchar)", "navy"),
+    ("att_x", "sends attempted, outside (lossy queue)", "tab:red"),
+    ("drop_x", "sends dropped, outside (lossy queue)", "tab:orange"),
     ("recv_x", "merged input, outside (rchar)", "darkorange"),
 ]
 
@@ -286,8 +324,9 @@ def fig_streams(b, c, args, out):
         ref = window_mean(c, key, BASELINE_FROM, c["t"][-1] + 1)
         if not ref or math.isnan(ref):
             continue
-        lw = 1.0 if key in ("wire_x", "recv_x") else 1.6
-        ax.plot(b["t"], [x / ref if x > 0 else math.nan for x in b[key]], color=colour, lw=lw,
+        lw = 1.0 if key in ("wire_x", "recv_x", "att_x") else 1.6
+        ys = smooth(b[key]) if key in ("att_x", "drop_x") else b[key]
+        ax.plot(b["t"], [x / ref if x > 0 else math.nan for x in ys], color=colour, lw=lw,
                 label=f"burst run: {label}")
     ax.axhline(1, color="black", ls=":", lw=1, label="control's mean = 1")
     ax.set_yscale("log")
@@ -328,31 +367,41 @@ def tail_ratios(s, args):
 
 def fig_tail(b, c, args, out):
     rb, rc = tail_ratios(b, args), tail_ratios(c, args)
-    streams = tail_streams(b, c)
+    # Drops have no pre-trigger baseline (0 without a burst): they go in the note, not a bar.
+    streams = [(k, l) for k, l in tail_streams(b, c) if k != "drop_x"]
     fig, ax = plt.subplots(figsize=(10, 4.5))
     xs = range(len(streams))
     w = 0.38
-    clean = lambda v: v if v and not math.isnan(v) and v > 0 else 1e-3
+    ok = lambda v: v is not None and not math.isnan(v) and v > 0
+    floor = 1e-3
     for s, r, off, colour, label in ((b, rb, -w / 2, "tab:red", "burst run"),
                                      (c, rc, w / 2, "tab:gray", "no-burst control")):
         is_dark = dark(s, args)
         for i, (x, (k, _)) in enumerate(zip(xs, streams)):
             d = is_dark and k in IN_BAND
-            ax.bar(x + off, clean(r[k][2]), w, color="white" if d else colour, edgecolor=colour,
-                   hatch="//" if d else None, label=label if i == 0 else None)
             v = r[k][2]
-            txt = "dark" if d else ("n/a" if math.isnan(v) else (f"{v:.0f}×" if v >= 10 else f"{v:.2f}×"))
-            ax.text(x + off, clean(v) * 1.1, txt, ha="center", fontsize=7)
+            if d or ok(v):
+                ax.bar(x + off, v if ok(v) else floor, w, color="white" if d else colour,
+                       edgecolor=colour, hatch="//" if d else None,
+                       label=label if i == 0 else None)
+            txt = "dark" if d else ("n/a" if not ok(v) else (f"{v:.0f}×" if v >= 10 else f"{v:.2f}×"))
+            ax.text(x + off, (v if ok(v) else (floor if d else 1)) * 1.1, txt, ha="center",
+                    fontsize=7)
     ax.axhline(1, color="black", ls=":", lw=1)
     ax.set_yscale("log")
     lo, hi = ax.get_ylim()
-    ax.set_ylim(lo, hi * 3)
+    ax.set_ylim(min(lo, 0.5), hi * 3)
     log_ticks(ax)
     ax.set_xticks(list(xs))
     ax.set_xticklabels([l for _, l in streams], fontsize=8, rotation=12)
     a, z = tail_window(args)
     ax.set_ylabel(f"tail [{a:g},{z:g}) mean ÷ pre-trigger mean")
-    ax.legend(loc="upper left", fontsize=8, ncol=2)
+    h, l = ax.get_legend_handles_labels()
+    ax.legend(h, l, loc="upper left", fontsize=8, ncol=2)
+    att, drop = rb["att_x"][1], rb["drop_x"][1]
+    if ok(att) and not math.isnan(drop):
+        ax.text(0.99, 0.97, f"burst run, tail: {100 * drop / att:.1f}% of attempted sends dropped "
+                f"at a full queue", transform=ax.transAxes, ha="right", va="top", fontsize=8)
     ax.set_title(args.title or f"{args.prefix}: tail against baseline", fontsize=11)
     fig.tight_layout()
     fig.savefig(out, dpi=110)
@@ -389,9 +438,11 @@ def main():
     p.add_argument("--tail", type=float, default=60, help="Sedge --tail, s")
     p.add_argument("--memory-mb", type=float, default=None, help="per-node limit, for the RSS panel")
     p.add_argument("--quota", type=float, default=0.01, help="member CPU quota, cores")
+    p.add_argument("--period-us", type=float, default=100000, help="member CFS period, us")
     args = p.parse_args()
     os.makedirs(args.out, exist_ok=True)
-    b, c = series(args.burst), series(args.control)
+    pps = 1e6 / args.period_us
+    b, c = series(args.burst, pps), series(args.control, pps)
     o = lambda name: os.path.join(args.out, f"{args.prefix}_{name}.png")
     fig_resends(b, c, args, o("resends"))
     fig_wire(b, c, args, o("wire"))
