@@ -57,6 +57,7 @@ fn assert_fan_out_order(sim: &CompiledSim, members: u32, mut body: impl AsyncFnM
                 from,
                 to,
                 bytes,
+                ..
             } = msg;
             if channels.contains(channel) {
                 order
@@ -430,6 +431,49 @@ fn a_payload_sent_twice_is_not_ranked() {
         send.send(1);
         send.send(2);
         send.send(1);
+    });
+    let mut order = crate::races::FanOutOrder::new([], channels);
+    let sends: Vec<MessageId> = records[0]
+        .log
+        .sends()
+        .map(|(_, m, _, _)| m.clone())
+        .collect();
+    order.learn(&sends);
+    for e in &sends {
+        for l in &sends {
+            if e.bytes != l.bytes {
+                assert!(!order.precedes(e, l), "{e} before {l}");
+            }
+        }
+    }
+}
+
+/// A payload the harness sends twice back to back is not ranked either: with copies named, the
+/// second copy opens a block of its own (the conservative reading of the rule).
+#[cfg(stageleft_runtime)]
+#[test]
+fn a_payload_sent_twice_back_to_back_is_not_ranked() {
+    use crate::races::SendOrder;
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let _out = input
+        .broadcast_closed(&members, TCP.fail_stop().name("first").bincode())
+        .sim_cluster_output();
+    let sim = flow
+        .sim()
+        .with_cluster_size(&members, 2)
+        .with_network_hook_points()
+        .with_ir_pass(IrPassStage::PostNetwork, |ir| {
+            fanout::mark(ir);
+        })
+        .compiled();
+    let channels: Vec<usize> = sim.channels().iter().map(|c| c.id).collect();
+    let records = records_under(&sim, Default::default(), &mut async || {
+        send.send(1);
+        send.send(1);
+        send.send(2);
     });
     let mut order = crate::races::FanOutOrder::new([], channels);
     let sends: Vec<MessageId> = records[0]

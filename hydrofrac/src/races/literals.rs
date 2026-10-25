@@ -43,8 +43,10 @@ pub enum Literal {
 
 /// What is known, in every run, of the order in which a node sends its messages.
 ///
-/// `precedes(d, m)` claims: in every run (any fault set, any schedule) in which `m`'s sender
-/// sends `m`, it has already sent `d`. It must be false unless `d` and `m` have the same sender.
+/// `precedes(d, m)` claims: in every run (any fault set, any schedule), every copy of `m`'s
+/// content its sender sends comes after some copy of `d`'s content. It reads contents only:
+/// copies ([`crate::search::Copies`]) are numbered per run. It must be false unless `d` and `m`
+/// have the same sender.
 /// It must also be a union of disjoint chains: each message lies in at most one chain, and the
 /// chain is totally ordered ([`super::Sweep::is_exact`] relies on it).
 pub trait SendOrder<M>: Debug {
@@ -81,13 +83,19 @@ pub fn after<M>(order: &dyn SendOrder<M>, d: &M, m: &M) -> Literal {
 /// The proved order of closed-broadcast sends (`crate::provenance::fanout`).
 ///
 /// - **Fan-out** (every marked channel): a node sends each payload to the destination cluster's
-///   members in increasing id order, so `(v → j)` precedes `(v → k)` for `j < k`.
+///   members in increasing id order, so `(v → j)` precedes `(v → k)` for `j < k`: each copy of
+///   `(v → k)` follows the copy of `(v → j)` of the same fan-out.
 /// - **Sequence** (sequenced channels only, [`crate::provenance::fanout::SEQUENCED_MARK`]): the
 ///   sender sends whole payloads in the order the harness sent them, so if `a` came before `b`
 ///   in the probe, every `(a → j)` precedes every `(b → k)`. The rank of each payload is read
 ///   from the failure-free probe ([`Self::learn`]), and every later run is checked against it
 ///   ([`Self::check`]): a contradicting run panics. A payload the probe did not show, or one the
-///   harness sent twice, is not ranked, and its literals stay free (but for fan-out).
+///   harness sent twice, is not ranked, and its literals stay free (but for fan-out). Ranks are
+///   of contents (payloads), as [`SendOrder`] requires; a later copy (`copy > 0`) of a payload
+///   always opens a new block, even right after its first, so a payload sent twice, apart or
+///   back to back, unranks its `(channel, sender)` in the probe and trips [`Self::check`] in a
+///   run against ranks that never showed it twice (conservative: one block per ranked payload,
+///   one copy per member).
 ///
 /// The chains: per `(channel, sender)`, the ranked payloads' sends form one chain (by rank, then
 /// member); each other payload's sends form one chain (by member).
@@ -118,7 +126,7 @@ pub struct FanOutOrder {
 }
 
 /// Per sequenced `(channel, sender)`, the payloads one run sent, one entry per block of
-/// consecutive sends of one payload.
+/// consecutive first-copy sends of one payload (each later copy is a block of its own).
 type Blocks = BTreeMap<(usize, NodeId), Vec<Rc<[u8]>>>;
 
 impl FanOutOrder {
@@ -141,7 +149,8 @@ impl FanOutOrder {
         for m in sends {
             if self.sequenced.contains(&m.channel) {
                 let seq = blocks.entry((m.channel, m.from.clone())).or_default();
-                if seq.last() != Some(&m.bytes) {
+                // A later copy is a second send of the payload: always a new block.
+                if m.copy > 0 || seq.last() != Some(&m.bytes) {
                     seq.push(m.bytes.clone());
                 }
             }

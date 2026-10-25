@@ -55,3 +55,9 @@ mod oracle2_tests;
 
 #[cfg(test)]
 mod fanout_tests;
+
+#[cfg(test)]
+mod review2a_tests;
+
+#[cfg(test)]
+mod review_c_tests;

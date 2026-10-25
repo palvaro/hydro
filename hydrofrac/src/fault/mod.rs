@@ -3,10 +3,10 @@
 //!
 //! [`FaultHook`] is the simulator network hook (`hydro_lang::sim::network_hook`) that applies a
 //! [`FaultPlan`] to every intercepted send:
-//! - an **omission** discards every copy of one [`MessageId`] on a lossy channel;
+//! - an **omission** discards one [`MessageId`] (one copy of a content) on a lossy channel;
 //! - a **positional crash** `crash(node after m)` lets the node perform its sends up to and
-//!   including `m`, then halts it, so nothing after `m` leaves it (`crash(node)` halts it
-//!   before its first send).
+//!   including the copy `m`, then halts it, so nothing after `m` leaves it (`crash(node)` halts
+//!   it before its first send).
 //!
 //! Faults only happen before [`FaultHook::heal`]: after it, no omission applies and no crash
 //! fires, but crashes that already fired persist (§4.6).
@@ -23,7 +23,7 @@ use hydro_lang::networking::{NetworkingInfo, TcpFault};
 use hydro_lang::sim::compiled::CompiledSim;
 use hydro_lang::sim::network_hook::{ChannelInfo, LocationInfo, SimNetworkHook};
 
-use crate::search::{CrashAt, Fault, FaultSet, Node};
+use crate::search::{Copies, CrashAt, Fault, FaultSet, Node};
 
 /// One node of the program: a process, or one member of a cluster.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -148,8 +148,9 @@ impl NodeNames {
     }
 }
 
-/// The identity of a message: `(channel, sender, destination, wire bytes)` (§3). Omitting it
-/// discards every copy; it is the search's message type `M`.
+/// The identity of one send: `(channel, sender, destination, wire bytes)`, its *content*, and
+/// which copy of that content it is in its run (§3). Omitting it discards that copy only, and
+/// a crash after it fires after that copy. It is the search's message type `M` ([`Copies`]).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct MessageId {
     /// The channel ([`ChannelInfo::id`]).
@@ -160,6 +161,34 @@ pub struct MessageId {
     pub to: NodeId,
     /// The serialized payload.
     pub bytes: Rc<[u8]>,
+    /// Which send of this content (channel, sender, destination, payload) it is in its run,
+    /// from 0, counting every attempt, dropped or not.
+    pub copy: u32,
+}
+
+impl MessageId {
+    /// The first copy of this content.
+    pub fn first(channel: usize, from: NodeId, to: NodeId, bytes: Rc<[u8]>) -> Self {
+        MessageId {
+            channel,
+            from,
+            to,
+            bytes,
+            copy: 0,
+        }
+    }
+}
+
+impl Copies for MessageId {
+    fn same_content(&self, other: &Self) -> bool {
+        self.channel == other.channel
+            && self.from == other.from
+            && self.to == other.to
+            && self.bytes == other.bytes
+    }
+    fn copy(&self) -> u32 {
+        self.copy
+    }
 }
 
 impl Display for MessageId {
@@ -170,6 +199,9 @@ impl Display for MessageId {
         }
         if self.bytes.len() > 8 {
             write!(f, "…")?;
+        }
+        if self.copy > 0 {
+            write!(f, "#{}", self.copy)?;
         }
         Ok(())
     }
@@ -312,6 +344,8 @@ struct Instance {
     log: Vec<Event>,
     next_id: DeliveryId,
     ordinals: HashMap<NodeId, u64>,
+    /// How many sends of each content so far.
+    copies: HashMap<MessageId, u32>,
     dead: BTreeSet<NodeId>,
     halts: Vec<(LocationId, Option<u32>)>,
     healed: bool,
@@ -432,7 +466,6 @@ impl FaultHook {
         }
         finished
     }
-
 }
 
 /// Whether a channel with this networking may lose messages (so omissions apply to it):
@@ -474,13 +507,16 @@ impl SimNetworkHook for FaultHook {
             .channels
             .get(&channel)
             .unwrap_or_else(|| panic!("send on unknown channel {channel}"));
-        let msg = MessageId {
+        let mut msg = MessageId::first(
             channel,
-            from: NodeId::new(&info.from, from_member),
-            to: NodeId::new(&info.to, to_member),
-            bytes: payload.into(),
-        };
+            NodeId::new(&info.from, from_member),
+            NodeId::new(&info.to, to_member),
+            payload.into(),
+        );
         let mut cur = self.current.borrow_mut();
+        let copies = cur.copies.entry(msg.clone()).or_default();
+        msg.copy = *copies;
+        *copies += 1;
         let id = cur.next_id;
         cur.next_id += 1;
         let ordinal = {
@@ -538,7 +574,10 @@ impl SimNetworkHook for FaultHook {
             .exec
             .clone()
             .unwrap_or_else(|| panic!("output on port {port} outside an execution"));
-        assert_eq!(node.member, member, "output on port {port} from another member");
+        assert_eq!(
+            node.member, member,
+            "output on port {port} from another member"
+        );
         // A crashed node emits nothing, like it sends nothing (between its crash firing and the
         // scheduler halting it, its current execution may still run).
         if cur.dead.contains(&node) {

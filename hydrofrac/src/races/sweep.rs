@@ -41,7 +41,9 @@ use super::clause::{
 };
 use super::ilp::{Scope, propose};
 use super::literals::{Literal, SendOrder, after};
-use crate::search::{CrashAt, CrashBounds, Fault, FaultSet, HYPOTHESIS_BUDGET, Node, Tolerance};
+use crate::search::{
+    Copies, CrashAt, CrashBounds, Fault, FaultSet, HYPOTHESIS_BUDGET, Node, Tolerance,
+};
 
 /// What the sweep says to do next.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,7 +86,7 @@ pub struct Sweep<M, F> {
     pub budget: usize,
 }
 
-impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
+impl<M: Ord + Clone + Copies + 'static, F: Ord + Clone> Sweep<M, F> {
     /// A sweep under `bounds`, at zero crashes; the probe (the empty set) counts as tried.
     pub fn new(bounds: CrashBounds) -> Self {
         Sweep {
@@ -165,15 +167,57 @@ impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
     }
 
     /// Whether `crash(node after m)` touches only proved literals: the runs have shown every
-    /// message `node` can send ([`Self::sends_complete`]), and for each of them `w ≠ m` the literal
-    /// `after(w, m)` is fixed. Then in every run the crash cuts exactly the sends `w` whose literal
-    /// is true.
+    /// message `node` can send ([`Self::sends_complete`]), and for each of them `w` of another
+    /// content the literal `after(w, m)` is fixed. Then in every run the crash cuts exactly the
+    /// sends `w` whose literal is true, and spares every copy of `m`'s content, as the crash rule
+    /// says. A literal is proved of contents, so a crash after a later copy (`m.copy() > 0`)
+    /// is exact only if no literal is true: the copies of `w` before `m` would escape it.
     pub fn is_exact(&self, node: &Node, m: &M) -> bool {
         self.sends_complete
             && self.first.get(node).is_none_or(|sent| {
-                sent.keys()
-                    .all(|w| w == m || after(&*self.order, w, m) != Literal::Free)
+                sent.keys().all(|w| {
+                    w.same_content(m)
+                        || match after(&*self.order, w, m) {
+                            Literal::Free => false,
+                            Literal::Fixed(true) => m.copy() == 0,
+                            Literal::Fixed(false) => true,
+                        }
+                })
             })
+    }
+
+    /// Whether `omit(m)` kills exactly what the crash rule says: every send of `m`'s content if
+    /// it is the first copy, none if it is a later one. A first copy qualifies only once the runs
+    /// have shown every message ([`Self::sends_complete`]) and no second copy of its content:
+    /// then it is the only one in every run (§6.2 of docs/design/hydrofrac-soundness.md).
+    pub fn omission_is_exact(&self, m: &M) -> bool {
+        m.copy() > 0
+            || self.sends_complete
+                && !self.known.iter().any(|f| match f {
+                    Fault::Omit(w) => w.copy() > 0 && w.same_content(m),
+                    Fault::Crash {
+                        at: CrashAt::After(w),
+                        ..
+                    } => w.copy() > 0 && w.same_content(m),
+                    Fault::Crash { .. } => false,
+                })
+    }
+
+    /// Whether every fault of `set` is exact: an exact omission ([`Self::omission_is_exact`]),
+    /// a start crash, or a crash point `crash_point` accepts (an exact one, [`Self::is_exact`],
+    /// with whatever the caller adds).
+    pub fn is_exact_set(&self, set: &FaultSet<M>, crash_point: impl Fn(&Node, &M) -> bool) -> bool {
+        set.iter().all(|f| match f {
+            Fault::Omit(m) => self.omission_is_exact(m),
+            Fault::Crash {
+                at: CrashAt::BeforeAnySend,
+                ..
+            } => true,
+            Fault::Crash {
+                node,
+                at: CrashAt::After(m),
+            } => crash_point(node, m) && self.is_exact(node, m),
+        })
     }
 
     /// Records that `fact` is dead under `set`: no correct member holds it, in any schedule of
@@ -182,21 +226,24 @@ impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
     ///
     /// **Preconditions** (the engine checks them; only the second is checked here):
     /// - it has verified the loss in every schedule of `set`;
-    /// - every crash of `set` is a start crash (`crash(n)`, before any send), or an
-    ///   [exact](Self::is_exact) `crash(n after m)` of a node `n` that is not a member of the
-    ///   label's cluster;
+    /// - every omission of `set` is [exact](Self::omission_is_exact), and every crash is a start
+    ///   crash (`crash(n)`, before any send), or an [exact](Self::is_exact) `crash(n after m)`
+    ///   of a node `n` that is not a member of the label's cluster;
     /// - the program is fragile-free.
     ///
     /// **Why sound.** Suppose a superset `H ⊇ set` gave some correct member `c` a derivation `D`
     /// of `fact` in some schedule. In a fragile-free program `D` is robust. No fault of `set`
     /// kills it:
-    /// - an omission of `set` is in `H`, and `D`'s deliveries were not omitted;
+    /// - an omission of `set` is in `H`, and `D`'s deliveries were not omitted. A later copy's
+    ///   omission kills nothing. A first copy's is exact: its content has one copy in every run,
+    ///   so a delivery of that content is that copy, not omitted;
     /// - a start crash of `set` is in `H`, so its node sent nothing, and `D` has no delivery from
     ///   it;
     /// - for an exact `crash(n after m)` of `set` (also in `H`), every message `n` can send has a
     ///   proved literal `after(·, m)`. A delivery `d` of `D` from `n` whose literal is true would
-    ///   be sent after `m`, which the crash in `H` cuts; so its literal is false, and the crash
-    ///   rule spares it.
+    ///   be sent after `m`, which the crash in `H` cuts (`m` is a first copy, so every copy of
+    ///   `d`'s content follows it); so its literal is false, and the crash rule spares it. A
+    ///   delivery of `m`'s own content is spared by the rule.
     ///
     /// `c` is correct under `set` too: its start crashes are in `H`, where `c` is correct, and its
     /// other crashes are of nodes outside the cluster. So by Lemma R, `c` holds `fact` in every
@@ -206,18 +253,8 @@ impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
     /// `fact`, so the engine must not call this there.
     pub fn mark_dead(&mut self, set: FaultSet<M>, fact: F) {
         assert!(
-            set.iter().all(|f| match f {
-                Fault::Omit(_)
-                | Fault::Crash {
-                    at: CrashAt::BeforeAnySend,
-                    ..
-                } => true,
-                Fault::Crash {
-                    node,
-                    at: CrashAt::After(m),
-                } => self.is_exact(node, m),
-            }),
-            "a dead set holds only omissions, start crashes and exact crash points"
+            self.is_exact_set(&set, |_, _| true),
+            "a dead set holds only exact omissions, start crashes and exact crash points"
         );
         self.dead.push((set, fact));
     }

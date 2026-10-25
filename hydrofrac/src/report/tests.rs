@@ -45,6 +45,7 @@ fn message(names: &NodeNames, channel: usize, from: &str, to: &str, bytes: &[u8]
         from: names.id(from).unwrap().clone(),
         to: names.id(to).unwrap().clone(),
         bytes: Rc::from(bytes),
+        copy: 0,
     }
 }
 

@@ -137,6 +137,7 @@ fn msg(channel: usize, from: &NodeId, to: &NodeId, byte: u8) -> MessageId {
         from: from.clone(),
         to: to.clone(),
         bytes: Rc::from(vec![byte]),
+        copy: 0,
     }
 }
 
