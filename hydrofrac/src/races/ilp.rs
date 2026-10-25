@@ -79,7 +79,7 @@ struct Read<M> {
     minimal: BTreeSet<(usize, Row)>,
 }
 
-impl<M: Ord + Clone, F: Ord + Clone> Hits<M, F> {
+impl<M: Ord + Clone + Copies, F: Ord + Clone> Hits<M, F> {
     /// The ids of `universe`'s candidates, assigning new ones.
     fn ids(&mut self, universe: &[Candidate<M>]) -> Vec<usize> {
         universe
