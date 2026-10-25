@@ -53,7 +53,7 @@ pub fn uniform_reliable_broadcast_closed<
     L,
     L2: 'a,
     B: Boundedness,
-    O: hydro_lang::live_collections::stream::Ordering,
+    O,
     R: hydro_lang::live_collections::stream::Retries,
 >(
     source: Stream<T, Process<'a, L>, B, O, R>,
@@ -61,7 +61,8 @@ pub fn uniform_reliable_broadcast_closed<
     threshold: usize,
 ) -> Stream<T, Cluster<'a, L2, EventualConsistency>, Unbounded, NoOrder, ExactlyOnce>
 where
-    O: hydro_lang::live_collections::stream::MinOrder<
+    O: hydro_lang::live_collections::stream::Ordering
+        + hydro_lang::live_collections::stream::MinOrder<
             hydro_lang::live_collections::stream::TotalOrder,
         >,
 {
