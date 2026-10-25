@@ -205,17 +205,17 @@ fn read_schedule(
             pair.fact.clone(),
         );
         for &event in &pair.supports {
-            // In a choice-free program each fault set has one schedule, so every derivation
-            // holds in it, and needs no premise.
-            let premises = if all_robust {
+            // In a choice-free program each fault set has one schedule, so a derivation holds
+            // in it and needs no premise, unless it counts copies: the kill rule reads contents,
+            // which serves a set-preserving step, but not a fold, scan or `enumerate` that saw a
+            // later copy (docs/design/hydrofrac-soundness.md §3.1).
+            let deps = (*lineage.derivation(event)).clone();
+            let premises = if all_robust && deps.iter().all(|d| d.message.copy == 0) {
                 BTreeSet::new()
             } else {
                 (*lineage.fragile_sites(event)).clone()
             };
-            let clause = PairClause {
-                deps: (*lineage.derivation(event)).clone(),
-                premises,
-            };
+            let clause = PairClause { deps, premises };
             clauses.push((key.clone(), clause));
         }
     }
@@ -259,17 +259,13 @@ struct Shape {
 
 impl Shape {
     /// Every run of `set` has the same facts (Lemma R both ways), so explore one schedule, if
-    /// the program has no choices, or is fragile-free and every crash of `set` is a start crash
-    /// or `exact` (`races::Sweep::is_exact`: every crash literal it touches is proved). Then the
-    /// crash rule is exact for `set`, so a derivation one run shows survives the rule, and holds
-    /// in every run.
-    fn policy(
-        self,
-        set: &FaultSet<MessageId>,
-        exact: impl Fn(&Node, &MessageId) -> bool,
-    ) -> Policy {
+    /// the program has no choices, or is fragile-free and every fault of `set` is `exact`
+    /// (`races::Sweep::is_exact_set`: an omission of a content's only copy or of a later copy,
+    /// a start crash, or a crash point whose every literal is proved). Then the kill rule is
+    /// exact for `set`, so a derivation one run shows survives the rule, and holds in every run.
+    fn policy(self, set: &FaultSet<MessageId>, exact: impl Fn(&FaultSet<MessageId>) -> bool) -> Policy {
         let one = self.choice_free && crashes_all(set, |_, _| false)
-            || self.fragile_free && crashes_all(set, exact);
+            || self.fragile_free && exact(set);
         if one { Policy::One } else { Policy::All }
     }
 }
@@ -381,7 +377,7 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
         let mut world: Vec<Revealed> = vec![];
 
         // Hypothesis 0: the failure-free probe, one schedule if every run has the same facts.
-        let policy = shape.policy(&FaultSet::new(), |_, _| false);
+        let policy = shape.policy(&FaultSet::new(), |_| false);
         let mut domains: BTreeMap<usize, BTreeSet<Fact>> = BTreeMap::new();
         let mut learned: BTreeMap<usize, Vec<(Pair, PairClause<MessageId>)>> = BTreeMap::new();
         let mut failures: BTreeMap<usize, Failure> = BTreeMap::new();
@@ -559,7 +555,7 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
         let policy = if in_full {
             Policy::All
         } else {
-            shape.policy(set, |n, m| sweep.is_exact(n, m))
+            shape.policy(set, |set| sweep.is_exact_set(set, |_, _| true))
         };
         let labels = self.labels;
         let target = search.target;
@@ -627,7 +623,7 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
         // A fragile-free program, a set of omissions, start crashes and exact crash points of
         // nodes outside the cluster, its one schedule read in full: a domain fact no correct
         // member holds is held by none under any superset either (`races::Sweep::mark_dead`).
-        let deadly = crashes_all(set, |n, m| !members.contains(n) && sweep.is_exact(n, m));
+        let deadly = sweep.is_exact_set(set, |n, _| !members.contains(n));
         if failure.is_none() && policy == Policy::One && shape.fragile_free && deadly {
             for fact in &target.domain {
                 if !held_somewhere.contains(fact) {

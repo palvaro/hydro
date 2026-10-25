@@ -15,7 +15,7 @@ use good_lp::{
 
 use super::clause::{Candidate, Dead, PairClause, PairKey, Pairs, Proposal};
 use super::literals::SendOrder;
-use crate::search::{CrashBounds, Fault, FaultSet, Node, weights};
+use crate::search::{Copies, CrashBounds, Fault, FaultSet, Node, weights};
 
 /// Which rows a proposal must satisfy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,7 +64,7 @@ impl PairRows {
 /// The cover rows of one pair's in-scope clauses over `universe`, without those another row
 /// implies (`A ⊆ B`: hitting `A` hits `B`). `None` if some row is empty: no set over the universe
 /// kills that clause, so the pair can never be chosen.
-fn pair_rows<P: PairKey, M: Ord + Clone>(
+fn pair_rows<P: PairKey, M: Ord + Clone + Copies>(
     universe: &[Candidate<M>],
     index: &BTreeMap<&Candidate<M>, usize>,
     pair: &P,
@@ -131,7 +131,7 @@ fn pair_rows<P: PairKey, M: Ord + Clone>(
 ///
 /// The no-good of a tried set that no pair admits is left out, exactly: the other rows already
 /// exclude it.
-pub fn propose<P: PairKey, M: Ord + Clone>(
+pub fn propose<P: PairKey, M: Ord + Clone + Copies>(
     universe: &[Candidate<M>],
     pairs: &Pairs<P, M>,
     dead: &Dead<M, P::Fact>,

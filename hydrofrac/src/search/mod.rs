@@ -12,7 +12,7 @@ pub type Node = String;
 /// One fault. The derived order is only for sets; `races::candidates` orders candidates.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Fault<M> {
-    /// Discard every copy of this message on its channel (lossy channels only).
+    /// Discard this message (one copy, [`Copies`]) on its channel (lossy channels only).
     Omit(M),
     /// The node dies at the point `at` names, and stays dead for the rest of the run.
     Crash {
@@ -24,7 +24,7 @@ pub enum Fault<M> {
 }
 
 /// Where a crashed node dies: Molly's positional crash, `crash(node after m)` (it sends up to
-/// and including `m`). Named by a message, not a count, so it means the same in every run.
+/// and including `m`, one copy of a content, [`Copies`]).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum CrashAt<M> {
     /// Before its first send.
@@ -67,6 +67,27 @@ impl<M: Display> Display for Fault<M> {
                 at: CrashAt::After(m),
             } => write!(f, "crash({node} after {m})"),
         }
+    }
+}
+
+/// A message name that tells copies apart: the `k`-th of several sends with the same content
+/// (channel, sender, destination and bytes) in one run is copy `k`. Faults name single copies,
+/// so "lose one of two identical sends" and "crash between them" are faults. The kill rule
+/// (`races::kills`) reasons about contents (docs/design/hydrofrac-soundness.md §2).
+pub trait Copies {
+    /// Whether `self` and `other` are copies of one content.
+    fn same_content(&self, other: &Self) -> bool;
+    /// Which copy of its content this is, from 0.
+    fn copy(&self) -> u32;
+}
+
+/// Plain names (the search's unit tests): one copy each.
+impl Copies for String {
+    fn same_content(&self, other: &Self) -> bool {
+        self == other
+    }
+    fn copy(&self) -> u32 {
+        0
     }
 }
 

@@ -69,6 +69,7 @@ impl Log {
             from,
             to: node(to),
             bytes: Rc::from(payload.as_bytes()),
+            copy: 0,
         };
         self.events.push(Event::Sent {
             id,
@@ -275,6 +276,7 @@ fn a_crash_that_never_fired_is_named() {
         from: node("C"),
         to: node("A"),
         bytes: Rc::from(&b"y"[..]),
+        copy: 0,
     };
     let faults = [Fault::crash_after("C", Some(point))].into_iter().collect();
     let (trace, out) = render(&log, &faults);

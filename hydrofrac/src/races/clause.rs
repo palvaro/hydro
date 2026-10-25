@@ -10,7 +10,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::literals::{Literal, SendOrder, after};
-use crate::search::{CrashAt, CrashBounds, Dependency, Derivation, Fault, FaultSet, Node};
+use crate::search::{
+    Copies, CrashAt, CrashBounds, Dependency, Derivation, Fault, FaultSet, Node,
+};
 
 /// One derivation of one pair, with the premises it needs.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -46,26 +48,28 @@ impl<F: Ord + Clone> PairKey for (Node, F) {
 }
 
 /// Whether `fault` kills the delivery `dep`, once every free literal is set the adversary's way
-/// ([`super::literals`]):
-/// - `omit(m)` kills it iff `dep` is `m` on a lossy channel;
+/// ([`super::literals`]). The rule reads contents, not copies ([`Copies`]):
+/// - `omit(m)` kills it iff `dep` is on a lossy channel, has `m`'s content, and `m` is the first
+///   copy;
 /// - `crash(n)` kills it iff `n` sent it;
-/// - `crash(n after m)` kills it iff `n` sent it, it is not `m` itself, and the literal
-///   `after(dep, m)` is not proved false.
+/// - `crash(n after m)` kills it iff `n` sent it, it does not have `m`'s content, and the
+///   literal `after(dep, m)` is not proved false.
 ///
-/// The send's position in the run it was observed in (`dep.sender`'s ordinal) is ignored on
-/// purpose: another schedule may order `n`'s sends differently. Only proved literals are trusted.
+/// The send's position in the run it was observed in (`dep.sender`'s ordinal), and its copy
+/// index, are ignored on purpose: another schedule or fault set may order or number `n`'s sends
+/// differently. Only proved literals are trusted.
 ///
-/// **Why "not killed" is true in every schedule.** A delivery from a node the fault does not crash
-/// is never cut by it. Under `crash(n after m)`, `m` itself is sent before `n` dies in every
-/// schedule in which it is sent at all, and if `m` is never sent the crash never fires. A `d` whose
-/// `after(d, m)` is proved false is sent before `m`, so before the crash.
-pub fn kills<M: PartialEq>(
-    fault: &Fault<M>,
-    dep: &Dependency<M>,
-    order: &dyn SendOrder<M>,
-) -> bool {
+/// **Why "not killed" is true in every schedule**, for a step that needs some copy of `dep`'s
+/// content (every robust step, which is set-preserving, docs/design/hydrofrac-soundness.md §2):
+/// the first copy of that content is sent (`dep`'s own send, or an earlier one) and survives.
+/// A node the fault does not crash cuts nothing. An omission of a later copy leaves the first.
+/// Under `crash(n after m)`, every copy of `m`'s content up to `m` is sent before `n` dies,
+/// and if `m` is never sent the crash never fires. A `d` whose `after(d, m)` is proved false
+/// has some copy sent before `m`, so before the crash. A step that counts copies needs more,
+/// and the engine never lets such a derivation protect a pair (`races_engine`, `read_schedule`).
+pub fn kills<M: Copies>(fault: &Fault<M>, dep: &Dependency<M>, order: &dyn SendOrder<M>) -> bool {
     match fault {
-        Fault::Omit(m) => dep.lossy && dep.message == *m,
+        Fault::Omit(m) => dep.lossy && m.copy() == 0 && dep.message.same_content(m),
         Fault::Crash { node, at } => {
             let Some((sender, _ordinal)) = &dep.sender else {
                 return false;
@@ -74,7 +78,8 @@ pub fn kills<M: PartialEq>(
                 && match at {
                     CrashAt::BeforeAnySend => true,
                     CrashAt::After(m) => {
-                        dep.message != *m && after(order, &dep.message, m) != Literal::Fixed(false)
+                        !dep.message.same_content(m)
+                            && after(order, &dep.message, m) != Literal::Fixed(false)
                     }
                 }
         }
@@ -88,7 +93,7 @@ impl<M> PairClause<M> {
     }
 }
 
-impl<M: Ord> PairClause<M> {
+impl<M: Ord + Copies> PairClause<M> {
     /// A robust clause.
     pub fn robust(deps: impl IntoIterator<Item = Dependency<M>>) -> Self {
         PairClause {
@@ -134,7 +139,7 @@ pub type Dead<M, F> = [(FaultSet<M>, F)];
 ///   start in every schedule, so the member is never correct;
 /// - **dead fact:** `set` is a superset of a set under which the pair's fact is dead
 ///   ([`super::Sweep::mark_dead`]), so no correct member holds it under `set` either.
-pub fn excused<P: PairKey, M: Ord + Clone>(
+pub fn excused<P: PairKey, M: Ord + Clone + Copies>(
     set: &FaultSet<M>,
     pair: &P,
     dead: &Dead<M, P::Fact>,
@@ -148,7 +153,7 @@ pub fn excused<P: PairKey, M: Ord + Clone>(
 /// Whether `set` is admissible for `pair`: it does not [excuse](excused) the pair, and it kills
 /// every robust clause of it. A pair with no robust clause makes every set that does not excuse
 /// it admissible.
-pub fn admissible_for<P: PairKey, M: Ord + Clone>(
+pub fn admissible_for<P: PairKey, M: Ord + Clone + Copies>(
     set: &FaultSet<M>,
     pair: &P,
     clauses: &[PairClause<M>],
@@ -165,7 +170,7 @@ pub fn admissible_for<P: PairKey, M: Ord + Clone>(
 /// Whether `set` can be skipped (§4.3, the corollary of Lemma R): it is admissible for no pair.
 /// For each pair, either some robust clause survives it, so in every schedule of `set` the pair
 /// is held or its member crashed, or `set` [excuses](excused) the pair.
-pub fn pruned<P: PairKey, M: Ord + Clone>(
+pub fn pruned<P: PairKey, M: Ord + Clone + Copies>(
     set: &FaultSet<M>,
     pairs: &Pairs<P, M>,
     dead: &Dead<M, P::Fact>,
@@ -211,7 +216,7 @@ pub enum Candidate<M> {
 /// A proposed set of candidates.
 pub type Proposal<M> = BTreeSet<Candidate<M>>;
 
-impl<M: Ord + Clone> Candidate<M> {
+impl<M: Ord + Copies> Candidate<M> {
     /// Whether this candidate kills some delivery of `clause`.
     pub fn hits(&self, clause: &PairClause<M>, order: &dyn SendOrder<M>) -> bool {
         match self {
@@ -223,6 +228,9 @@ impl<M: Ord + Clone> Candidate<M> {
         }
     }
 
+}
+
+impl<M> Candidate<M> {
     /// The node this candidate crashes, if it is a crash.
     pub fn crashed_node(&self) -> Option<&Node> {
         match self {

@@ -57,6 +57,7 @@ fn assert_fan_out_order(sim: &CompiledSim, members: u32, mut body: impl AsyncFnM
                 from,
                 to,
                 bytes,
+                ..
             } = msg;
             if channels.contains(channel) {
                 order

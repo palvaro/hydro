@@ -41,8 +41,10 @@ pub enum Literal {
 
 /// What is known, in every run, of the order in which a node sends its messages.
 ///
-/// `precedes(d, m)` claims: in every run (any fault set, any schedule) in which `m`'s sender
-/// sends `m`, it has already sent `d`. It must be false unless `d` and `m` have the same sender.
+/// `precedes(d, m)` claims: in every run (any fault set, any schedule), every copy of `m`'s
+/// content its sender sends comes after some copy of `d`'s content. It reads contents only:
+/// copies ([`crate::search::Copies`]) are numbered per run. It must be false unless `d` and `m`
+/// have the same sender.
 /// It must also be a union of disjoint chains: each message lies in at most one chain, and the
 /// chain is totally ordered ([`super::Sweep::is_exact`] relies on it).
 pub trait SendOrder<M>: Debug {
@@ -78,7 +80,8 @@ pub fn after<M>(order: &dyn SendOrder<M>, d: &M, m: &M) -> Literal {
 
 /// The order of closed-broadcast fan-outs (`crate::provenance::fanout`): on a marked channel, a
 /// node sends each payload to the destination cluster's members in increasing id order, so
-/// `(v → j)` precedes `(v → k)` for `j < k`. Each `(channel, sender, payload)` is one chain.
+/// `(v → j)` precedes `(v → k)` for `j < k`: each copy of `(v → k)` follows the copy of
+/// `(v → j)` of the same fan-out. Each `(channel, sender, payload)` is one chain.
 ///
 /// **Proof.** `broadcast_closed` lowers to `cross_product(data, ClusterIds)` → map → `demux`. The
 /// cross product is a `join_multiset_half` with key `()`, whose build side (the member ids, which
