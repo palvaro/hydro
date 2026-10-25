@@ -63,6 +63,27 @@ same label in the same test now.
   7. **CTP-2 quiescing `prepares`** (2.0× sets, 52× schedules). This row is stronger: lite's tolerance (`tol=Some(0)`)
      was not certified, and now it is. The search ran every schedule of the sets that certify it.
 
+## Update: item C (sequenced broadcasts, then the tie-break)
+
+Measured with the same per-label print, over the 280 label rows of the three suites (`hydrofrac --features
+cross-check`, `hydro_std --lib hydrofrac`, `hydro_test --lib cluster::ec_`), from `664c60e2f1`:
+
+| step | fault sets | schedules | rows cheaper / dearer | verdicts |
+|---|---|---|---|---|
+| before | 3,615 | 80,409 | | |
+| + sequenced broadcasts (§6.4 of `hydrofrac-soundness.md`) | 2,639 | 55,660 | 26 / 4 | 1 stronger: `ec_demo_uniform_broadcast` label 0's one-crash tolerance is now certified: its crash sets run one schedule, exactly. That demo has no brute-force cross-check, so this rests on §6.4 (ARGUED) |
+| + tie-break by proved strength | 2,555 | 52,295 | 29 / 38 against the previous step | none: same kind, fault count, tolerance and certification. 2 rows find another one-crash counterexample (2 missing pairs instead of 1) |
+
+- **Group 1 is resolved.** `reliable_broadcast_closed` `new_messages`: 2 payloads 134 → 24 sets, 3 payloads 281 → 49
+  (lite: 25, 46). The payloads come from one harness input, so the order between their broadcasts is now proved.
+  Also: plain broadcast with 3 payloads 9,920 → 2 schedules, the uniform broadcast demo's two sampled labels 282 → 78 and 80 sets.
+- **Group 6 is mixed.** Proposing the earliest-sent of equally strong crash points first helps where the break is an
+  early crash, and costs where it is a late one.
+  - Cheaper: ABD `queries` 5 → 3 (both ABD tests), the G-Set gossip demo's first label 50 → 12 (its two runs
+    summed), Multi-Paxos `prepares` 16 → 6, `accepts_fwd` 12 → 8, `accepts` 15 → 8.
+  - Dearer: several CTP labels 3 → 5, ABD `initial` 3 → 5, Multi-Paxos `initial` 7 → 14.
+  - On balance it saves 3% of sets and 6% of schedules.
+
 ## Every matched row
 
 | test | label | lite verdict | new verdict | comparison | lite sets / schedules | new sets / schedules | sets × | schedules × |

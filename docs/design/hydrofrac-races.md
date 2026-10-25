@@ -565,6 +565,10 @@ it deletes, and the one place where I think the direction needs a correction.
   - **fan-out order:** `after(d, m)` is false when `d` precedes `m` in one `broadcast_closed` fan-out (§4.2,
     verified at the IR level);
   - **send-free nodes:** a node that never sent `m` never fires `crash(n after m)`.
+  - **sequence order** (item C, `hydrofrac-soundness.md` §6.4): on a closed broadcast whose data is directly a
+    `TotalOrder`, `ExactlyOnce` harness input of a process, `after(d, m)` is false when `d`'s payload came before
+    `m`'s in the probe. The claim is restricted to that shape because only there no fault and no schedule can change
+    what reaches the sender, or in which order (S2).
 
   Barrier order (v2, §8.1) would be a third proof: `before_n(x, y)` is true when `x`'s derivation is robust and
   finishes before a `quiesce()` that precedes `y`'s harness input.

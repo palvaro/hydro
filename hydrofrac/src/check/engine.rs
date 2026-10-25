@@ -260,6 +260,9 @@ struct Engine<'c, B, R> {
     sample_schedules: Option<usize>,
     /// The program's fragile steps.
     fragile: Option<Vec<crate::provenance::FragileSite>>,
+    /// The proved send order, its ranks learned from the races search's probe; every later run of
+    /// the search is checked against it.
+    order: Rc<crate::races::FanOutOrder>,
 }
 
 /// The message of a panic payload.
@@ -291,6 +294,7 @@ impl<'c, B: AsyncFnMut(), R: AsyncFnMut()> Engine<'c, B, R> {
             max_crashes: check.max_crashes,
             sample_schedules: check.sample_schedules,
             fragile: check.fragile_sites(),
+            order: Rc::default(),
         }
     }
 

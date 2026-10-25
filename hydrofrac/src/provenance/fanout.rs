@@ -25,12 +25,24 @@
 //! record `v` the probe side emits is sent as `(v → 0), (v → 1), …, (v → n−1)`, in that order,
 //! and the bytes on the wire are those of `v` alone.
 
-use hydro_lang::compile::ir::{HydroNode, HydroRoot, HydroSource};
+use hydro_lang::compile::ir::{
+    CollectionKind, HydroNode, HydroRoot, HydroSource, StreamOrder, StreamRetry,
+};
 use hydro_lang::location::dynamic::LocationId;
 
 /// The `op.id` a marked `Network` carries; [`hydro_lang::sim::network_hook::ChannelInfo::op`]
 /// copies it, so `CompiledSim::channels` tells marked channels apart. Nothing else sets `op.id`.
 pub const FANOUT_MARK: usize = usize::MAX - 0xFA0;
+
+/// The `op.id` of a marked `Network` whose payloads are, moreover, *sequenced*: the data its join
+/// fans out is exactly a harness input of the sending process (see [`is_sequenced`]). Such a
+/// channel is a closed broadcast too, so [`FANOUT_MARK`]'s order holds on it as well.
+pub const SEQUENCED_MARK: usize = usize::MAX - 0xFA1;
+
+/// Whether `op_id` (a channel's `op.id`) marks a closed broadcast, sequenced or not.
+pub fn is_fan_out(op_id: Option<usize>) -> bool {
+    matches!(op_id, Some(FANOUT_MARK | SEQUENCED_MARK))
+}
 
 /// The text of a closure or expression, without whitespace.
 fn squash(s: &str) -> String {
@@ -65,8 +77,13 @@ pub fn mark(ir: &mut [HydroRoot]) -> usize {
         ir,
         &mut |_| {},
         &mut |node| {
-            if is_closed_broadcast(node) {
-                node.metadata_mut().op.id = Some(FANOUT_MARK);
+            if let Some(data) = closed_broadcast_data(node) {
+                let mark = if is_sequenced(data) {
+                    SEQUENCED_MARK
+                } else {
+                    FANOUT_MARK
+                };
+                node.metadata_mut().op.id = Some(mark);
                 marked += 1;
             }
         },
@@ -75,45 +92,79 @@ pub fn mark(ir: &mut [HydroRoot]) -> usize {
     marked
 }
 
-/// Whether `node` is a `Network` of exactly `broadcast_closed`'s shape.
-fn is_closed_broadcast(node: &HydroNode) -> bool {
+/// Whether `data`, the stream a closed broadcast fans out, is *sequenced*: exactly a harness input
+/// of one process, `TotalOrder` and `ExactlyOnce`, with nothing in between (no cast, tee, batch or
+/// network). On such a channel the payloads are sent in the order the harness sent them, under
+/// every fault set (docs/design/hydrofrac-soundness.md §6.4):
+/// - the harness sends one fixed sequence (A8), and a run delivers a prefix of it;
+/// - the simulator feeds a harness input through an unbounded FIFO channel into `source_stream`
+///   (`hydro_lang/src/sim/builder.rs`, the external input), with no schedule hook;
+/// - `join_multiset_half` emits its probe items in arrival order (§6.1), the maps and the cast
+///   are one to one, and the network sends in order (A10);
+/// - a crash of the process cuts a suffix of its sends (A11); an omission drops a delivery, never
+///   a send.
+///
+/// A broadcast of data that arrives over the network (as in S2's relay) is not sequenced: the
+/// arrival order there depends on the schedule and on the faults.
+fn is_sequenced(data: &HydroNode) -> bool {
+    let HydroNode::ExternalInput {
+        from_many: false,
+        metadata,
+        ..
+    } = data
+    else {
+        return false;
+    };
+    matches!(metadata.location_id, LocationId::Process(_))
+        && matches!(
+            metadata.collection_kind,
+            CollectionKind::Stream {
+                order: StreamOrder::TotalOrder,
+                retry: StreamRetry::ExactlyOnce,
+                ..
+            }
+        )
+}
+
+/// If `node` is a `Network` of exactly `broadcast_closed`'s shape, the data it fans out.
+fn closed_broadcast_data(node: &HydroNode) -> Option<&HydroNode> {
     let HydroNode::Network {
         input, metadata, ..
     } = node
     else {
-        return false;
+        return None;
     };
     let LocationId::Cluster(key) = metadata.location_id.root() else {
-        return false;
+        return None;
     };
     let HydroNode::Cast { inner: swapped, .. } = &**input else {
-        return false;
+        return None;
     };
     if !is_map(
         swapped,
         "networking",
         "[][|(data,member_id)|(member_id,data)]",
     ) {
-        return false;
+        return None;
     }
     let HydroNode::Map { input: unit, .. } = &**swapped else {
-        return false;
+        return None;
     };
     if !is_map(unit, "mod", "[][|((),(v1,v2))|(v1,v2)]") {
-        return false;
+        return None;
     }
     let HydroNode::Map { input: join, .. } = &**unit else {
-        return false;
+        return None;
     };
     let HydroNode::JoinHalf { left, right, .. } = &**join else {
-        return false;
+        return None;
     };
     let keyed = |n: &HydroNode| is_map(n, "mod", "[][|v|((),v)]");
     if !keyed(left) || !keyed(right) {
-        return false;
+        return None;
     }
     let HydroNode::Map { input: ids, .. } = &**right else {
-        return false;
+        return None;
     };
     // The cluster broadcast asserts the ids' consistency first: an identity on every item.
     let ids = match &**ids {
@@ -125,11 +176,14 @@ fn is_closed_broadcast(node: &HydroNode) -> bool {
         ..
     } = ids
     else {
-        return false;
+        return None;
     };
     let body = format!(
         "[cluster_ids__free=__hydro_lang_cluster_ids_{key},]\
          [cluster_ids__free.iter().map(|id|MemberId::from_tagless(id.clone()))]"
     );
-    quoted_in(&expr.to_string(), "networking", &body)
+    let HydroNode::Map { input: data, .. } = &**left else {
+        return None;
+    };
+    quoted_in(&expr.to_string(), "networking", &body).then_some(&**data)
 }

@@ -18,7 +18,6 @@ use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
 use std::time::Instant;
 
-
 use super::*;
 use crate::check::RaceNotes;
 use crate::fault::{Fate, NodeNames};
@@ -237,15 +236,17 @@ fn crashes_all(set: &FaultSet<MessageId>, allowed: impl Fn(&Node, &MessageId) ->
     })
 }
 
-/// The proved send order of `sim`: its marked closed-broadcast channels
-/// ([`races::FanOutOrder`]).
+/// The proved send order of `sim`: its marked closed-broadcast channels, and which of them are
+/// sequenced ([`races::FanOutOrder`]); the ranks are learned from the probe.
 fn fan_out_order(sim: &CompiledSim) -> races::FanOutOrder {
-    races::FanOutOrder::new(
+    use crate::provenance::fanout::{FANOUT_MARK, SEQUENCED_MARK};
+    let marked = |mark| {
         sim.channels()
             .iter()
-            .filter(|c| c.op.id == Some(crate::provenance::fanout::FANOUT_MARK))
-            .map(|c| c.id),
-    )
+            .filter(move |c| c.op.id == Some(mark))
+            .map(|c| c.id)
+    };
+    races::FanOutOrder::new(marked(FANOUT_MARK), marked(SEQUENCED_MARK))
 }
 
 /// What the program is, for the races policy.
@@ -385,7 +386,9 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
         let mut domains: BTreeMap<usize, BTreeSet<Fact>> = BTreeMap::new();
         let mut learned: BTreeMap<usize, Vec<(Pair, PairClause<MessageId>)>> = BTreeMap::new();
         let mut failures: BTreeMap<usize, Failure> = BTreeMap::new();
+        let mut order = fan_out_order(self.sim);
         let probe = self.explore_races(&FaultSet::new(), policy, |tables, record| {
+            order.learn(record.log.sends().map(|(_, m, _, _)| m));
             world.push(Revealed::of(&record, tables));
             let lineage = Lineage::new(&record.log, tables);
             for t in &targets {
@@ -439,6 +442,7 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
             }
         }
 
+        self.order = Rc::new(order);
         for mut target in targets {
             target.domain = domains.remove(&target.label).unwrap_or_default();
             let probe_stats = Stats {
@@ -493,7 +497,7 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
         };
         search.pairs.learn(probe_clauses);
         let mut sweep: races::Sweep<MessageId, Fact> =
-            races::Sweep::new(self.bounds(target)).with_order(Rc::new(fan_out_order(self.sim)));
+            races::Sweep::new(self.bounds(target)).with_order(self.order.clone());
         for revealed in world.iter() {
             revealed.tell(&mut sweep);
         }
@@ -569,11 +573,13 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
             .iter()
             .map(|m| names.name(&NodeId::new(&target.cluster, Some(*m))))
             .collect();
+        let order = self.order.clone();
         let pairs = &mut search.pairs;
         let mut failure = None;
         let mut pruned = false;
         let mut held_somewhere: BTreeSet<Fact> = BTreeSet::new();
         let explored = self.explore_races(set, policy, |tables, record| {
+            order.check(record.log.sends().map(|(_, m, _, _)| m));
             let revealed = Revealed::of(&record, tables);
             revealed.tell(sweep);
             world.push(revealed);

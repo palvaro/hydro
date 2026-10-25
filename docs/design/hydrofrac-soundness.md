@@ -384,12 +384,13 @@ every schedule in which its sending record exists.
 
 **Proof.**
 - **`d = m`:** the crash fires right after `m`'s first send, so `m` is sent.
-- **`after(d, m)` proved false:** `d` is sent before `m` in every run (§6.1), and the crash fires only once `m` is sent.
+- **`after(d, m)` proved false:** `d` is sent before `m` in every run (§6.1, §6.4), and the crash fires only once `m` is sent.
 - **Otherwise the rule says the crash kills `d`**, so there is nothing to prove.
 - **Never sent:** if `m` is never sent, the crash never fires (`hf/fault/mod.rs:475-477`).
 
 The observed position of a send in a run (the ordinal) is never used to decide a kill (`hf/races/clause.rs:62`). It
-is only a tie-break for weights. Lite's positional rule, which decided kills from one run's send order, was unsound
+is only a tie-break for weights: among equally strong crash points of a node, the earliest observed is proposed
+first (`candidates`). Lite's positional rule, which decided kills from one run's send order, was unsound
 in both directions (S1, S2: `hf/check/brute_tests.rs` `suspected_*`) and is deleted. **Proved.**
 
 **Where.** `hf/races/clause.rs:62`, `hf/races/literals.rs:69` (`after`).
@@ -452,6 +453,57 @@ order).
 `crash(n after m)` is *exact* if sends are complete and every message `n` can send has a proved literal `after(·, m)`
 (`hf/races/sweep.rs:169`). Then in every run the crash cuts exactly the sends whose literal is true. **Proved**, from
 6.1 and 6.2.
+
+### 6.4 Sequenced broadcasts: the harness order between payloads
+
+**Claim.** On a channel marked *sequenced*, if the failure-free probe sent payload `a` before payload `b`, then whenever
+the sender sends `(b → k)`, it has already sent `(a → j)`, for all members `j`, `k`. This holds in every run, under
+every fault set.
+
+**Why the claim needs a restriction (S2).** Order between payloads is a fact about where the payloads come from. If they
+arrive over the network, faults move it: in S2's relay an omission on one hop made the relay send `→m1` before `→m0`,
+where the probe sent `→m0` first. A rule that read the order off a run was wrong for other fault sets. So the claim is
+made only where no fault and no schedule can change what reaches the sender, or in which order.
+
+**Recognition** (`hf/provenance/fanout.rs`, `is_sequenced`). A closed broadcast (§6.1) is marked sequenced
+(`SEQUENCED_MARK`) only if the data its join fans out is, with nothing in between, an `ExternalInput` with
+`from_many: false` on a **process**, whose collection kind is `Stream { TotalOrder, ExactlyOnce }`. That is a harness
+`sim_input`. A map, a cast (for example an unordered input), a tee, a batch or a network in between, or a cluster's
+input, leaves it unmarked. Such a channel keeps only the fan-out order.
+
+**Proof.**
+- The harness sends one fixed sequence of inputs, in every schedule of every fault set (A8). A wait that never returns
+  ends the sequence early, so a run is given a prefix of it.
+- The simulator feeds a harness input through an unbounded FIFO channel into `source_stream`
+  (`hydro_lang/src/sim/builder.rs`, the external input path). No hook sits on it, so no schedule reorders it.
+- `join_multiset_half` emits whole fan-outs, one per probe item, in probe order (§6.1). The maps and the cast after it
+  are one to one, and the network sends in order (A10).
+- A crash of the sender cuts a suffix of its sends (A11). An omission drops a delivery, never a send. No other fault
+  touches the sender.
+- So every run sends a prefix of one sequence of payload blocks `(v₁ → 0..n−1), (v₂ → 0..n−1), …`, and the failure-free
+  probe shows that sequence.
+
+**Ranks** (`hf/races/literals.rs`, `FanOutOrder::learn`). Each payload's rank is its block's index in the probe's
+runs. If the harness sends one payload twice, apart, no payload of that channel is ranked: the two copies share one
+`MessageId` (A4), so "every send of `a`" would include a send after `b`. A payload the probe never sent is not ranked.
+Unranked literals stay free, except for fan-out.
+
+**Checked in code** (`FanOutOrder::check`). Every run the search executes is compared with the ranks: its `i`-th block
+must have rank `i`, and a block past the ranked ones must be unranked. A run that disagrees panics (A8 is broken),
+and the set is reported as a failure, never certified. The check does not cover runs the search prunes; those rest
+on the proof.
+
+**ARGUED**, given A2, A8, A10, A11 and the cited simulator code. **Tested:**
+- `hf/check/fanout_tests.rs` `only_a_direct_harness_input_of_a_process_is_sequenced`: of six broadcasts (direct, through
+  a map, unordered input, relayed, a cluster's input, teed), only the direct one is marked.
+- `sequenced_broadcasts_keep_the_harness_order_under_every_fault_set`: a sequenced broadcast over a lossy channel beside
+  a relay of S2's shape, under every schedule of every fault set of at most two faults (341 sets, 1,621 runs).
+  Every run agrees with the ranks, and 18,350 precedences between payloads hold. **Mutation:** marking the relay
+  sequenced fails the test. An omission on its hop makes it send `1, 3` against the ranks `1, 2, 3`.
+- `a_payload_sent_twice_is_not_ranked`, `a_run_against_the_ranks_panics`: the two guards.
+- `hf/check/brute_tests.rs` `a_sequenced_broadcast_runs_each_crash_point_of_its_sender_once`: brute force and oracle 2
+  agree. The proof makes every crash point of the sender exact (§6.3): 4 sets, 4 schedules, against 6 sets and
+  24 schedules without it.
 
 ## 7. Trusted `quorum`
 
@@ -790,9 +842,9 @@ explain a wrong verdict).
 | A5 | The provenance rewrite over-approximates every record's dependencies and tags every fragile step's outputs; opaque operators fall back to the execution rule | TESTED (`hf/lineage/*tests*.rs`, provenance tests, every brute-force cross-check); not proved |
 | A6 | Quiescence means no tick can run (`SimTick::can_run`, `hydro_lang/src/sim/compiled.rs:2022`): a tick runs only when every one of its hooks is ready and some hook can release. A hook that is not ready blocks its tick even with input pending: a snapshot of a singleton that never got a value (`SingletonHook::is_ready`, `hydro_lang/src/sim/runtime.rs:591`; every other hook is always ready, `:78`). So a batch's pending input is released at quiescence only if its tick snapshots no singleton (§3, `batch_beside_snapshot`). Nothing else makes a tick run (§17, fix 2). Under the `hydrofrac` feature such a stuck tick no longer aborts the process: the run quiesces with that member never running the tick (`compiled.rs`, the "never became ready" check) | CHECKED IN CODE (`compiled.rs:2022`, `quiesce` at `:292`) |
 | A7 | The simulated network delivers every send that no injected omission drops; lossy channels are intercepted by the fault hook | CHECKED IN CODE (`hf/fault/mod.rs:348-353` asserts interception) |
-| A8 | The harness, in both phases, is deterministic: the same inputs, in the same order, in every schedule; it may wait for outputs but does not branch on them | ASSUMED |
+| A8 | The harness, in both phases, is deterministic: the same inputs, in the same order, in every schedule of every fault set; it may wait for outputs but does not branch on them (a wait that never returns ends the sequence early: a prefix) | ASSUMED; for sequenced broadcasts (§6.4) CHECKED IN CODE on every run the search executes (`FanOutOrder::check`) |
 | A9 | The rewrite preserves the program's behaviour (records carry tags but compute the same values) | TESTED (`hf/check/tests.rs`, `hydrofrac_provenance_tests` in `hydro_test` and `hydro_std`) |
-| A10 | Messages are sent one at a time, in production order, per channel | ASSUMED (simulator `for_each(send)`); used by §6.1 |
+| A10 | Messages are sent one at a time, in production order, per channel | ASSUMED (simulator `for_each(send)`); used by §6.1 and §6.4 |
 | A11 | A crash fires right after the first send of its message and halts the node (no further sends or outputs) | CHECKED IN CODE (`hf/fault/mod.rs:468-489`, `:516-534`) |
 | A12 | Cluster ids are listed `0..n` by one `source_iter` | ASSUMED from `hydro_lang/src/sim/graph.rs`; TESTED by `fanout_tests` |
 | A13 | A Hydro program with no schedule choice is monotone: non-monotone operators need a bounded input, which only a tick provides, and outside data enters a tick only through a batch (a choice) | ASSUMED (Hydro's type system); used only for Claim B in choice-free programs (§13) |
@@ -891,8 +943,8 @@ and fixed structurally:
   and are argued only by exploration.
 - **Claim B for choice-free programs** (§13) rests on A13 (monotonicity from Hydro's types), not on the search.
   Outside the three certified cases, Claim B is checked only in explored runs, and the report says so.
-- **Trusted code.** `quorum.rs:121-185` (§7), the fragile table's DFIR semantics (§3), and the fan-out lowering (§6.1)
-  are trusted by reading, and checked only by the tests cited.
+- **Trusted code.** `quorum.rs:121-185` (§7), the fragile table's DFIR semantics (§3), the fan-out lowering (§6.1) and
+  the simulator's FIFO external-input path (§6.4) are trusted by reading, and checked only by the tests cited.
 - **Impurity beyond the textual guard** (A3). A closure that calls a function with hidden state, or a type whose
   `Clone` or `Hash` is impure, is not detected.
 - **Fact identity** (A4, §11). A custom `Serialize` that drops data (`#[serde(skip)]`) can make two facts one.
@@ -907,5 +959,6 @@ and fixed structurally:
 - **Panics in pruned sets.** Claim A covers the runs of completed schedules: a set the search prunes is not run, so a
   program panic only that set would cause is not reported.
 - **Other order-observed rules.** None remain. The kill rule never reads an observed order (§5), and dead facts use
-  only proved literals (§8). The weights' tie-break uses observed positions, but only to order proposals, never to
-  decide soundness.
+  only proved literals (§8). The ranks of sequenced broadcasts (§6.4) are read from the probe, but only where the
+  proof says every run sends a prefix of the probe's sequence, and every executed run is checked against them. The
+  weights' tie-break uses observed positions, but only to order proposals, never to decide soundness.
