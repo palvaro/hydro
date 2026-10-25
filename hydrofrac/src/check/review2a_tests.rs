@@ -164,3 +164,73 @@ fn review2a_an_owned_counter_makes_a_false_vacuous_verdict() {
         "and the oracles break it: {cross}"
     );
 }
+
+/// A source broadcasts the same value `10` twice (the harness sends it twice) to three members
+/// over `fail_stop`, and each member numbers its deliveries with `enumerate`; each member also
+/// holds `(0, 10)` locally. Failure-free every member holds {(0, 10), (1, 10)}.
+///
+/// hydrofrac's crash point `crash(n after m)` fires after the *first* copy of `m` (§0), so no
+/// crash it can express falls inside the second round of sends: a crash in the first round
+/// leaves no member a second delivery, so every member holds just (0, 10), and the label holds.
+/// A real crash of the source right after its second send to member 0 (oracle 2's "crash after
+/// send #3") leaves member 0 with {(0, 10), (1, 10)} and members 1 and 2 with {(0, 10)}: fact
+/// `(1, 10)` is missing at two correct members. The search certifies.
+#[cfg(stageleft_runtime)]
+fn numbered_resend() -> CrossCheck {
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let numbered = input
+        .broadcast_closed(&members, TCP.fail_stop().name("twice").bincode())
+        .weaken_consistency()
+        .enumerate()
+        .weaken_ordering::<NoOrder>();
+    let local = members
+        .source_iter(q!([(0usize, 10u32)]))
+        .weaken_consistency()
+        .weaken_ordering::<NoOrder>();
+    let numbered_resend = numbered
+        .merge_unordered(local.into())
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed (wrongly): every member numbers the same deliveries */
+        ));
+    let _out = numbered_resend.sim_cluster_output();
+    let mut check = EcCheck::new().max_crashes(1);
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 3))
+        .compiled();
+    eprintln!("fragile sites: {:?}", check.fragile_sites());
+    check.cross_check(
+        &sim,
+        async || {
+            send.send(10);
+            send.send(10);
+        },
+        MAX_FAULTS,
+    )
+}
+
+#[cfg(stageleft_runtime)]
+#[test]
+fn review2a_a_crash_inside_a_resend_is_outside_the_fault_model() {
+    let cross = numbered_resend();
+    eprintln!("=== numbered resend\n{cross}");
+    eprintln!("disagreements: {:#?}", cross.disagreements);
+    let label = cross.results.label("numbered_resend");
+    eprintln!(
+        "numbered_resend: certified = {}",
+        matches!(label.verdict, Verdict::Certified { .. })
+    );
+    assert!(
+        matches!(label.verdict, Verdict::Certified { .. }),
+        "the search certifies `numbered_resend`: {cross}"
+    );
+    assert!(
+        cross
+            .disagreements
+            .iter()
+            .any(|d| d.starts_with("oracle 2") && d.contains("numbered_resend")),
+        "and oracle 2 breaks it: {cross}"
+    );
+}
