@@ -11,7 +11,10 @@
 
 mod dot;
 mod out;
-#[cfg(all(test, stageleft_runtime))]
+// Two attributes, not `cfg(all(..))`: stageleft keeps the module out of the staged copy only on an
+// exact `#[cfg(stageleft_runtime)]`, and the copy cannot call `Log`'s methods.
+#[cfg(test)]
+#[cfg(stageleft_runtime)]
 mod tests;
 
 use std::collections::{BTreeSet, HashMap};
