@@ -288,8 +288,13 @@ impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
                     scope,
                     &*self.order,
                 ) else {
+                    trace(format_args!("propose b={} {scope:?} -> none", self.bound));
                     continue;
                 };
+                trace(format_args!(
+                    "propose b={} {scope:?} -> {proposal:?}",
+                    self.bound
+                ));
                 self.tried.insert(proposal.clone());
                 let set = faults_of(&proposal);
                 let unseen = set.len() != proposal.len();
