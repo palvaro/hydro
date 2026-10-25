@@ -22,8 +22,8 @@
 //! - each label keeps one clause per derivation of each `(member, fact)` pair, and only robust
 //!   derivations skip fault sets;
 //! - its sweep ([`crate::races::Sweep`]) proposes fault sets from zero crashes upwards, and
-//!   each set is explored over its schedules (or [`EcCheck::sample_schedules`] of them) until
-//!   they cover it. Each run has a fault phase (the inputs, which may not place a barrier), a
+//!   each set is explored over its schedules (or a fixed sample of them, past the schedule
+//!   budget: see [`EcCheck`]) until they cover it. Each run has a fault phase (the inputs, which may not place a barrier), a
 //!   heal, and an optional fault-free recovery phase ([`EcCheck::run_then_recover`]).
 //!
 //! A label is certified when no untried fault set over the faults the runs revealed is

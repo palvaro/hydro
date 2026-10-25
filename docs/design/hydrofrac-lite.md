@@ -69,12 +69,13 @@ Across the EC harnesses, the per-test variation beyond inputs and cluster sizes 
 - `end_of_finite_failures()` (`gossip_all_labels`, `ec_demos_ldfi.rs:404`; also ISR's harness, now out of scope);
 - restricted crashable sets (2PC `…with_the_coordinator_correct`, ISR `…with_the_harness_fault_model`).
 
-The first two become the only knobs. The last two become conventions: heal (§4.6) and the crash sweep (§4.5).
+The second becomes the only knob. The others become conventions: the schedule budget (exhaustive within a fixed
+budget, a fixed seeded sample past it; hydrofrac-soundness.md §14; this replaced an earlier `.sample_schedules(n)`
+knob), heal (§4.6) and the crash sweep (§4.5).
 
 | knob | default | why it can't be a convention |
 |---|---|---|
 | `.max_crashes(n)` | no cap: the sweep stops only at a counterexample or at the vacuity bounds (§4.5) | caps the crash sweep. Multi-Paxos is impractical unbounded, and nothing in the program says how many crashes matter |
-| `.sample_schedules(n)` | exhaustive | racy programs (G-Set, uniform broadcast) have too many schedules (uniform broadcast's probe alone: >359k) |
 
 Conventions that replace the research branch's per-harness calls:
 - **every process and every cluster member is crashable**; there are no restricted crashable sets. What a
@@ -191,7 +192,8 @@ The execution rule is sound for every program; it only costs precision. The rese
    - The probe's POST is evaluated against the domain it has just learned, so members that disagree with no fault
      are a counterexample at hypothesis 0. Its clauses come from the tap observations, like every run's (§4.7).
 2. For each label, starting at crash bound 0: propose the minimal admissible fault set that kills every
-   derivation seen so far. Run it over all schedules, or over `sample_schedules(n)` of them.
+   derivation seen so far. Run it over all schedules, or, past the schedule budget, over a fixed seeded sample of them
+   (hydrofrac-soundness.md §14).
 3. If a correct member lacks a fact, report a counterexample. Otherwise the run's derivations become new
    clauses.
 4. When no admissible set exists at bound k, ask once more over the completed universe (§4.5). If that admits

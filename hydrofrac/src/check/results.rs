@@ -45,8 +45,8 @@ pub struct Counterexample {
     /// search found.
     pub tolerates: Option<usize>,
     /// Whether [`Self::tolerates`] is a certificate. It is unless the search sampled schedules
-    /// ([`crate::EcCheck::sample_schedules`]): then it says only that the sample showed no
-    /// counterexample with fewer crashes.
+    /// (a hypothesis past the check's schedule budget, see [`crate::EcCheck`]): then it says
+    /// only that the sample showed no counterexample with fewer crashes.
     pub tolerance_certified: bool,
     /// The index of the hypothesis in the label's search (0 is the failure-free probe).
     pub hypothesis: usize,
@@ -91,8 +91,9 @@ pub enum Verdict {
         /// unless schedules were sampled).
         tolerates: Option<usize>,
     },
-    /// A label whose search sampled schedules ([`crate::EcCheck::sample_schedules`]) and found
-    /// no counterexample: **not a certificate**, as a schedule outside the sample may break it.
+    /// A label whose search sampled schedules (a hypothesis past the check's schedule budget,
+    /// see [`crate::EcCheck`]) and found no counterexample: **not a certificate**, as a
+    /// schedule outside the sample may break it.
     Exhausted {
         /// How far the search went: every crash bound up to the vacuity bounds
         /// ([`Tolerance::All`]), or up to the `max_crashes` cap.
@@ -260,7 +261,7 @@ impl Results {
     }
 
     /// Panics with the report unless every label holds (see [`Self::holds`]). A sampled search
-    /// certifies nothing, so with [`crate::EcCheck::sample_schedules`] use
+    /// certifies nothing, so for a program past the check's schedule budget use
     /// [`Self::assert_no_counterexample`]. A label that is not checked is not certified: assert
     /// the labels that are, one by one ([`Self::label`]).
     #[track_caller]

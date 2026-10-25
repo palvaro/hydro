@@ -21,9 +21,9 @@ pub struct Client;
 const REPLICAS: usize = 3;
 
 /// Every label of the register after one client write, phase 2 over `broadcast_closed` or, if
-/// `reliable`, over reliable broadcast; `samples` sampled schedules per hypothesis.
+/// `reliable`, over reliable broadcast.
 #[cfg(stageleft_runtime)]
-fn check(reliable: bool, samples: usize) -> hydrofrac::Results {
+fn check(reliable: bool) -> hydrofrac::Results {
     let mut flow = FlowBuilder::new();
     let replicas = flow.cluster::<Replica>();
     let clients = flow.cluster::<Client>();
@@ -37,7 +37,7 @@ fn check(reliable: bool, samples: usize) -> hydrofrac::Results {
     let _done = outs.write_done.sim_cluster_output();
     let _read = outs.read_result.sim_cluster_output();
 
-    let mut check = hydrofrac::EcCheck::new().sample_schedules(samples);
+    let mut check = hydrofrac::EcCheck::new();
     let sim = check
         .instrument(
             flow.sim()
@@ -133,7 +133,7 @@ fn no_counterexample(results: &hydrofrac::Results, label: &hydrofrac::check::Lab
 /// (through its input) breaks at one crash, as do the query and phase-2 hops.
 #[test]
 fn the_register_breaks_when_the_client_crashes_mid_phase_two() {
-    let results = check(false, 8);
+    let results = check(false);
     breaks_at_one_crash_of(&results, register(&results), "Client");
     for name in ["queries", "phase2", "phase2_fwd"] {
         breaks_at_one_crash_of(&results, searched(&results, name), "Client");
@@ -155,7 +155,7 @@ fn the_register_breaks_when_the_client_crashes_mid_phase_two() {
 /// verdict is informational once the hops merge.
 #[test]
 fn reliable_phase_two_certifies_the_register() {
-    let results = check(true, 8);
+    let results = check(true);
     no_counterexample(&results, register(&results));
     no_counterexample(&results, searched(&results, "phase2_fwd"));
     breaks_at_one_crash_of(&results, searched(&results, "queries"), "Client");

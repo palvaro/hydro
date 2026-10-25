@@ -1024,6 +1024,7 @@ impl EcCheck {
         recover: &mut R,
         max_faults: usize,
         results: &Results,
+        sample: Option<usize>,
     ) -> Oracle2 {
         let start = Instant::now();
         let Some(program) = &self.oracle2 else {
@@ -1079,7 +1080,6 @@ impl EcCheck {
             .iter()
             .map(|t| (t.port, t.cluster.clone()))
             .collect();
-        let sample = self.sample_schedules;
 
         // One fault set over all its schedules.
         let mut execute = |faults: &FaultSet, universe: &mut BTreeSet<Fault>| -> Run {
@@ -1141,7 +1141,7 @@ impl EcCheck {
                 };
                 let after = || read(hook.drain());
                 std::panic::catch_unwind(AssertUnwindSafe(move || match sample {
-                    Some(n) => sim.fuzz_bounded_then(n, thunk, after),
+                    Some(n) => sim.sample_then(n, thunk, after),
                     None => {
                         sim.exhaustive_then(thunk, after);
                     }

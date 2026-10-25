@@ -119,6 +119,35 @@ Round-3 test branches (local, not merged): `hydrofrac-review3-a`, `hydrofrac-rev
     (>223k schedules), so there is no certificate.
   - Gossip and multi-Paxos demos: barriers removed or moved to recovery; their expectations are unchanged.
 
+## 5a. No sampling knob (branch `hydrofrac-knob`)
+
+- **API:** `EcCheck::sample_schedules(n)` is gone. `EcCheck` has one knob, `max_crashes`, which is part of the claim
+  (the tolerance asked for), not exploration tuning.
+- **Convention** (hydrofrac-soundness.md §14): the search enumerates each hypothesis until its schedules have sent
+  40,000 messages. If the enumeration finishes first, the hypothesis is exhaustive. If not, the search samples 8
+  seeded schedules (`CompiledSim::sample_then`, which repeats run to run) and marks the label's search sampled: never
+  `Certified` or `Vacuous`, at best `Exhausted`. The rest of that label's search samples at once. DEMONSTRATED by
+  `review2b_a_sampled_miss_is_not_accepted_by_assert_holds`, rewritten for the convention.
+- **Oracles** stay exhaustive, with no budget, except the racing-timer CTP cross-checks
+  (`RACING_ORACLE_SAMPLES` = 64 per set, through the test-only `cross_check_sampling_oracles`). Those cross-checks
+  are weaker.
+- **Determinism:** sampling used to draw OS-seeded bolero inputs, so sampled verdicts could change between runs. They
+  no longer do (`sim_sample_then_is_seeded`).
+- **Verdict changes**, all DEMONSTRATED:
+  - `plain_two_pc_breaks_at_one_coordinator_crash` used to sample 8 schedules per set. It now fits the budget (6
+    hypotheses, 6,372 schedules), so it is exhaustive. `peer_in` and `peer` went from `Exhausted` to **Certified**
+    (any crashes). `prepares`, `commits` and `committed` keep their one-crash counterexamples, now with a certified
+    tolerance of 0. Both exhaustive oracles agree, over every set of at most two faults (checked once with a
+    throwaway cross-check, not kept as a test).
+  - In the sampled racing CTP-2 tests, `peer_in` and `peer` still break at one crash, but the sample now finds a
+    different crash point (after a `Query` rather than a `Decided`).
+  - Every other verdict in hydro_std and hydro_test is unchanged. The comparison covers 186 label rows in hydro_test
+    and 11 in hydro_std.
+- **Cost** (wall time, base `c17d6c0051` → this branch): hydrofrac cross-check 90.5 s → 88.6 s; hydro_std
+  `hydrofrac` 48.0 s → 55.5 s; hydro_test `cluster::ec_` 335.6 s → 354.7 s. Per test, the budget's enumeration costs
+  most where schedules are slow and the probe is past the budget: gossip went from 43–64 s to 97–138 s,
+  multi-Paxos from 38–39 s to 102 s, and uniform broadcast from 5–9 s to 58 s.
+
 ## 6. Queued (in order)
 
 1. ~~Merge oracle 2~~ (done, 752079ddfb); run it over every cross-checked program.

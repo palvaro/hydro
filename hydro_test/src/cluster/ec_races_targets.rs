@@ -14,8 +14,8 @@
 //! below): uniform reliable broadcast over three members (checked by the races mode alone in
 //! `ec_quorum_trust`), G-Set gossip, multi-Paxos and ABD.
 //! Uniform reliable broadcast runs over two members instead, where only the source may crash.
-//! Cooperative termination with racing timers is sampled; it is a counterexample-finding
-//! contrast only. With its timers firing only after the faults stop, it is exhaustive.
+//! Cooperative termination with racing timers is sampled (past the check's schedule budget, and
+//! the oracles' too); it is a counterexample-finding contrast only. With its timers firing only after the faults stop, it is exhaustive.
 //!
 //! The `races_targets_probe_*` tests only measure the failure-free schedule space of a
 //! configuration (search and enumeration both capped at zero crashes); they are `#[ignore]`d.
@@ -302,12 +302,20 @@ fn races_targets_probe_paxos() {
 /// Two-phase commit with cooperative termination, coordinator + `n` participants, one
 /// transaction (the harness of `ec_two_pc_hydrofrac`). `racing`: every participant's timer
 /// fires with the transaction, in the fault phase; otherwise the timers fire only in the
-/// recovery phase. `ticks`: the recovery ticks.
+/// recovery phase. `ticks`: the recovery ticks. `oracle_samples`: as in `TwoPc::cross_check`.
 #[cfg(stageleft_runtime)]
-fn ctp(n: u32, racing: bool, ticks: usize) -> impl FnOnce(EcCheck, usize) -> CrossCheck {
+fn ctp(
+    n: u32,
+    racing: bool,
+    ticks: usize,
+    oracle_samples: Option<usize>,
+) -> impl FnOnce(EcCheck, usize) -> CrossCheck {
     move |check, max_faults| {
         super::ec_two_pc_hydrofrac::TwoPc::with(check, true, n).cross_check(
-            racing, ticks, max_faults,
+            racing,
+            ticks,
+            max_faults,
+            oracle_samples,
         )
     }
 }
@@ -316,7 +324,7 @@ fn ctp(n: u32, racing: bool, ticks: usize) -> impl FnOnce(EcCheck, usize) -> Cro
 #[test]
 #[ignore = "measurement"]
 fn races_targets_probe_ctp_timers_after_the_faults() {
-    probe("ctp (2 participants, timers after the faults)", ctp(2, false, 1));
+    probe("ctp (2 participants, timers after the faults)", ctp(2, false, 1, None));
 }
 
 /// Measured (with the barrier harness's racing variant, the same failure-free runs): passed
@@ -324,19 +332,10 @@ fn races_targets_probe_ctp_timers_after_the_faults() {
 #[test]
 #[ignore = "measurement"]
 fn races_targets_probe_ctp_racing() {
-    probe("ctp (2 participants, racing timers)", ctp(2, true, 0));
+    probe("ctp (2 participants, racing timers)", ctp(2, true, 0, None));
 }
 
 // --- Agreement tests ----------------------------------------------------------------------------
-
-/// `build`, on `n` sampled schedules per fault set (for counterexample-finding contrasts only:
-/// a sampled run certifies nothing).
-fn sampled(
-    n: usize,
-    build: impl FnOnce(EcCheck, usize) -> CrossCheck,
-) -> impl FnOnce(EcCheck, usize) -> CrossCheck {
-    move |check, max_faults| build(check.sample_schedules(n), max_faults)
-}
 
 /// The label `name` (by display name) among the searched labels.
 fn label<'c>(cross: &'c CrossCheck, name: &str) -> &'c hydrofrac::check::LabelResult {
@@ -408,24 +407,30 @@ fn races_targets_ctp2_timers_after_the_faults() {
     let c = cross(
         "ctp (2 participants, timers after the faults)",
         MAX_FAULTS,
-        ctp(2, false, 1),
+        ctp(2, false, 1, None),
     );
     c.assert_agrees();
     assert_certified(&c, "committed");
 }
 
 /// The contrast: the same program with one-shot timers racing the transaction. Its
-/// failure-free run alone passed 31,957 schedules in 10 minutes without finishing, so this is
-/// sampled (64 schedules per set, one fault): it can find the one-crash counterexample, never
-/// certify.
-const RACING_SAMPLES: usize = 64;
-
+/// failure-free run alone passed 31,957 schedules in 10 minutes without finishing, far past
+/// the check's schedule budget, so the check samples it (one fault): it can find the one-crash
+/// counterexample, never certify. The oracles cannot enumerate it either: they sample
+/// (`ec_two_pc_hydrofrac::RACING_ORACLE_SAMPLES`), so this cross-check is weaker.
 #[test]
 fn races_targets_ctp2_racing_sampled() {
     let c = cross(
         "ctp (2 participants, racing timers, sampled)",
         1,
-        sampled(RACING_SAMPLES, ctp(2, true, 0)),
+        // Racing CTP is past what the oracles can enumerate: they sample, so this
+        // cross-check is weaker.
+        ctp(
+            2,
+            true,
+            0,
+            Some(super::ec_two_pc_hydrofrac::RACING_ORACLE_SAMPLES),
+        ),
     );
     c.assert_agrees();
     let cex = label(&c, "committed")

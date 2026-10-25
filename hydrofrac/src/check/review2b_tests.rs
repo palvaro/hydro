@@ -153,12 +153,16 @@ fn review2b_fault_created_panic_beside_a_robust_fact() {
     assert!(dot.contains("unrelated outputs not shown"), "{dot}");
 }
 
-/// A race with no fault: each member reports 1 as missing if the probe for 1 lands in a tick
-/// before the data does (the `missing_alarm` shape, with the probe sent in the fault phase).
-/// The members can disagree in failure-free schedules.
+/// A race with no fault: `source` broadcasts `1..=items`, and each member reports `probed` as
+/// missing if the probe for it lands in a tick before the data does (the `missing_alarm` shape,
+/// with the probe sent in the fault phase). With `probed` 1 the members can disagree in
+/// failure-free schedules; with a probe for a value never sent, every member reports it, in
+/// every schedule. More items, more schedules.
 #[cfg(stageleft_runtime)]
 fn racy_alarm(
     check: &mut EcCheck,
+    items: u32,
+    probed: u32,
 ) -> (
     hydro_lang::sim::compiled::CompiledSim,
     impl FnMut() + use<>,
@@ -191,47 +195,71 @@ fn racy_alarm(
         .instrument(flow.sim().with_cluster_size(&members, 3))
         .compiled();
     (sim, move || {
-        send.send(1);
-        send_probe.send(1);
+        for item in 1..=items {
+            send.send(item);
+        }
+        send_probe.send(probed);
     })
 }
 
 /// The parent's question: does a sampled verdict that missed the breaking schedule pass as a
-/// certificate? Exhaustively, `missing` breaks with no fault. Sampled with one schedule per set,
-/// the sample may miss the race; whenever it does, the verdict must be `Exhausted` and
-/// `assert_holds` must refuse it.
+/// certificate? With one item, `racy_alarm` is within the check's schedule budget, and the race
+/// breaks `missing` with no fault, a certified counterexample. With `ITEMS` items it is past the
+/// budget, so the probe, and with it every label's search, is sampled. Then:
+/// - with the racing probe, whatever the sample shows is no certificate: a counterexample's
+///   tolerance is not certified, and a miss is `Exhausted`, which `assert_holds` refuses;
+/// - with a probe that cannot race, every label holds in every schedule. That is what a sampled
+///   miss looks like to the search, which cannot tell a label that holds from one whose
+///   breaking schedule fell outside the sample: every verdict must be `Exhausted`, and
+///   `assert_holds` must refuse it.
 #[cfg(stageleft_runtime)]
 #[test]
 fn review2b_a_sampled_miss_is_not_accepted_by_assert_holds() {
     use super::Verdict;
-    let mut check = EcCheck::new().max_crashes(0);
-    let (sim, mut inputs) = racy_alarm(&mut check);
-    let full = check.run(&sim, async || inputs());
-    let label = full.label("missing");
+    const ITEMS: u32 = 3;
+    let refuses = |results: &super::Results| {
+        assert!(!results.holds(), "{results}");
+        let refused =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| results.assert_holds()));
+        assert!(refused.is_err(), "assert_holds accepted a sampled search: {results}");
+    };
+    let run = |items, probed| {
+        let mut check = EcCheck::new().max_crashes(0);
+        let (sim, mut inputs) = racy_alarm(&mut check, items, probed);
+        check.run(&sim, async || inputs())
+    };
+
+    let full = run(1, 1);
+    let cex = full.label("missing").verdict.counterexample();
     assert!(
-        label.verdict.counterexample().is_some_and(|c| c.faults.is_empty()),
+        cex.is_some_and(|c| c.faults.is_empty() && c.tolerance_certified),
         "exhaustively, the race breaks it with no fault: {full}"
     );
-    let mut misses = 0;
-    for _ in 0..20 {
-        let mut check = EcCheck::new().max_crashes(0).sample_schedules(1);
-        let (sim, mut inputs) = racy_alarm(&mut check);
-        let results = check.run(&sim, async || inputs());
-        let verdict = &results.label("missing").verdict;
-        assert!(
-            !matches!(verdict, Verdict::Certified { .. } | Verdict::Vacuous(_)),
-            "a sampled search certified: {results}"
-        );
-        if matches!(verdict, Verdict::Exhausted { .. }) {
-            misses += 1;
-            assert!(!results.holds(), "{results}");
-            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                results.assert_holds()
-            }));
-            assert!(refused.is_err(), "assert_holds accepted a sampled miss: {results}");
+
+    let racing = run(ITEMS, 1);
+    for label in racing.results() {
+        match &label.verdict {
+            Verdict::Counterexample(cex) => assert!(!cex.tolerance_certified, "{racing}"),
+            Verdict::Exhausted { .. } => {}
+            _ => panic!("a sampled search must not certify `{}`: {racing}", label.name()),
         }
     }
-    eprintln!("sampled misses (Exhausted) in 20 runs: {misses}");
+    refuses(&racing);
+
+    let holding = run(ITEMS, 0);
+    for label in holding.results() {
+        assert!(
+            matches!(label.verdict, Verdict::Exhausted { .. }),
+            "a sampled search must not certify `{}`: {holding}",
+            label.name()
+        );
+    }
+    holding.assert_no_counterexample();
+    refuses(&holding);
+    let message = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| holding.assert_holds()))
+        .expect_err("refused above");
+    let message = message.downcast_ref::<String>().expect("a formatted message");
+    assert!(message.contains("schedules were sampled"), "{message}");
 }
 
 /// A fragile-free program with schedule choices (batches that snapshot nothing) and duplicate
@@ -248,7 +276,10 @@ fn relay_with_batches(crashes: usize) -> CrossCheck {
     let members = flow.cluster::<()>();
     let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
     let direct = input
-        .broadcast_closed(&members, TCP.lossy_delayed_forever().name("direct").bincode())
+        .broadcast_closed(
+            &members,
+            TCP.lossy_delayed_forever().name("direct").bincode(),
+        )
         .weaken_consistency();
     let tick = members.tick();
     let up = direct

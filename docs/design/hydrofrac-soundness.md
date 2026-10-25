@@ -68,7 +68,7 @@ have regression tests. They are recorded in §17.
 ## 1. The certificate theorem
 
 **Claim (Claim A).** Suppose `EcCheck::run` reports `Certified { tolerates }` for a label, and the search was not
-sampled. Then for every fault set `H` within the bounds (with at most `k` crashes, where `k` is the tolerance), and
+sampled (§14; a sampled search never reports `Certified`). Then for every fault set `H` within the bounds (with at most `k` crashes, where `k` is the tolerance), and
 every schedule `σ` of `H` the harness permits, POST holds for that label at the end of `σ`.
 
 **Assumptions.** Everything in §16. In particular: the program is a Hydro program, the simulator explores every
@@ -829,8 +829,28 @@ finds the divergence; both oracles agree.
 
 ## 14. Exploration policies
 
-- **Every schedule** (`Policy::All`): exhaustive over hook decisions (`hydro_lang/src/sim/compiled.rs:816`), or a
-  sample (no certificate).
+- **Every schedule** (`Policy::All`): exhaustive over hook decisions (`hydro_lang/src/sim/compiled.rs:816`), within
+  a fixed budget, or else a sample (no certificate). There is no user setting for it: `explore_schedules`
+  (`hf/check/engine.rs`) enumerates a hypothesis until its schedules have sent `SEND_BUDGET` (40,000) messages. If
+  the enumeration ends first, the hypothesis was explored exhaustively. If not, the enumeration stops, and the
+  hypothesis runs `SAMPLED_SCHEDULES` (8) seeded schedules instead (`CompiledSim::sample_then`: schedule `i` reads
+  its choices from a fixed pseudo-random stream seeded by `i`, so every run of the check repeats). Either way the
+  runs are real runs of the hypothesis, so whatever they show (clauses, revealed faults, failures) is sound to use.
+  But they are not every schedule, so the hypothesis is marked sampled:
+  - a sampled probe marks every label's search sampled;
+  - a sampled set marks its label's search sampled, unless the set was pruned (early stop) or failed;
+  - a sampled search never ends `Certified`: `races::Next::Certified` becomes `Verdict::Exhausted`
+    (`search_races`). It is never `Vacuous` either: the empty-domain shortcut requires an unsampled probe
+    (`check`), and a sampled probe goes to the search instead;
+  - a counterexample found by a sampled search is real, but its `tolerates` is not certified
+    (`tolerance_certified: false`).
+
+  Once a hypothesis is sampled, the rest of its label's search samples at once, with no enumeration first: the label
+  can no longer be certified, so enumerating up to the budget again would only cost time. The budget counts
+  messages, not schedules, so that it bounds time: a G-Set gossip schedule sends about 45 messages and costs 35–85
+  ms, while a CTP-2 schedule sends about 12 and costs 4–7 ms. 40,000 messages covers the largest
+  hypothesis an exhaustive test certifies today (CTP-2 with timers after the faults: 2,112 schedules, 24,704
+  messages), with 60% headroom. It costs a gossip probe about 900 schedules (about 30 s) before it samples.
 - **Early stop** (`hf/check/races_engine.rs:580`): an exploration stops when its set is pruned by the clauses learned
   so far. The remaining schedules are covered by the pruning corollary (§2). Disabled for `in_full` runs.
 - **One schedule** (`Policy::One`, `hf/check/races_engine.rs:254`), in two cases:
@@ -850,6 +870,12 @@ finds the divergence; both oracles agree.
   to a fixpoint (`:251`, `:298`, `:533`).
 - **Its own execution loop** (`:467`): it reads outputs straight from the event log (`:338`), with no lineage,
   provenance reading or pruning.
+- **Every schedule** of every set, with no budget: the search's schedule budget (§14) does not apply to the oracles.
+  The one exception is the racing-timer CTP cross-checks (`hydro_test`'s `RACING_ORACLE_SAMPLES`), whose schedule
+  space no exhaustive oracle finishes (the CTP-2 failure-free run alone passed 31,957 schedules in 10 minutes). There
+  both oracles sample 64 seeded schedules per set through the test-only `EcCheck::cross_check_sampling_oracles`, so
+  those cross-checks are weaker: a sampled oracle misses what its sample misses, and brute force does not rerun
+  counterexamples.
 - **Agreement** (`:630`):
   - a certificate for `k` crashes means no enumerated set with at most `k` crashes breaks the label;
   - a counterexample after tolerating `t` means none with at most `t` crashes does, and the counterexample has
@@ -1041,8 +1067,8 @@ and fixed structurally:
   a liveness question.
 - **Order of facts.** The specification compares sets of facts per member, not their order. Two members holding the
   same facts in different orders agree.
-- **Sampled searches.** `sample_schedules` certifies nothing (`Verdict::Exhausted`), except that a fragile-free
-  program's one-schedule sets are exact (§14).
+- **Sampled searches.** A hypothesis past the schedule budget is sampled (§14), and a sampled search certifies
+  nothing (`Verdict::Exhausted`). A fragile-free program's one-schedule sets are exact (§14) and need no budget.
 - **Covering values / aggregates.** `covering_quorum` (ABD, synod) is not trusted, so its labels pay brute-force cost
   and are argued only by exploration.
 - **Claim B for fragile-free and choice-free programs** (§13) rests on Lemma R and A13 (monotonicity from Hydro's

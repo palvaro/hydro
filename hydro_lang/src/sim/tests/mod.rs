@@ -1160,6 +1160,41 @@ fn sim_first_schedule_is_deterministic() {
     assert_eq!(seen[0].iter().sum::<usize>(), 3);
 }
 
+/// `sample_then` runs the requested number of executions, varies them, and runs the same ones
+/// every time.
+#[test]
+fn sim_sample_then_is_seeded() {
+    let mut flow = FlowBuilder::new();
+    let node = flow.process::<()>();
+    let tick = node.tick();
+    let (in_send, input) = node.sim_input::<i32, TotalOrder, ExactlyOnce>();
+    let out_recv = input
+        .batch(&tick, nondet!(/** test */))
+        .count()
+        .all_ticks()
+        .sim_output();
+
+    let sim = flow.sim().compiled();
+    let sample = || {
+        let mut batches: Vec<Vec<usize>> = Vec::new();
+        let this_run = std::sync::Mutex::new(Vec::new());
+        sim.sample_then(
+            16,
+            async || {
+                in_send.send_many([1, 2, 3, 4]);
+                let got = out_recv.collect().await;
+                *this_run.lock().unwrap() = got;
+            },
+            || batches.push(std::mem::take(&mut *this_run.lock().unwrap())),
+        );
+        batches
+    };
+    let first = sample();
+    assert_eq!(first.len(), 16);
+    assert!(first.iter().any(|b| b != &first[0]), "{first:?}");
+    assert_eq!(sample(), first);
+}
+
 /// The simulator does not yet support non-atomic yield of an Optional (i.e., `latest()`
 /// on a tick-level Optional that produces a top-level Unbounded Optional).
 /// This snapshot test verifies the panic message.

@@ -114,11 +114,8 @@ fn broadcast_check(which: Broadcast) -> Results {
 
     // The echo cycles of the reliable variants are small enough to explore exhaustively;
     // uniform broadcast's threshold logic over the echoes is not (the research probe ran past
-    // 240,000 interleavings), so it is sampled.
-    let mut check = match which {
-        Broadcast::Uniform(_) => EcCheck::new().sample_schedules(8),
-        _ => EcCheck::new(),
-    };
+    // 240,000 interleavings), so the check samples it.
+    let mut check = EcCheck::new();
     let sim = check
         .instrument(flow.sim().with_cluster_size(&members, MEMBERS))
         .compiled();
@@ -150,8 +147,8 @@ fn gossip_check(live: bool) -> Results {
         g_set_gossip(&members, updates, ticks)
     };
 
-    // Gossip rounds among three members multiply interleavings; sampled schedules.
-    let mut check = EcCheck::new().sample_schedules(8);
+    // Gossip rounds among three members multiply interleavings: the check samples them.
+    let mut check = EcCheck::new();
     let sim = check
         .instrument(flow.sim().with_cluster_size(&members, MEMBERS))
         .compiled();
@@ -230,7 +227,7 @@ fn multi_paxos_check() -> Results {
     let outputs = multi_paxos(&acceptors, &learners, 2, leads, commands);
     let _learned = outputs.learned.weaken_consistency().sim_cluster_output();
 
-    let mut check = EcCheck::new().sample_schedules(8).max_crashes(1);
+    let mut check = EcCheck::new().max_crashes(1);
     let sim = check
         .instrument(
             flow.sim()

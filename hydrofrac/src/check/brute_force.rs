@@ -250,9 +250,25 @@ impl EcCheck {
     pub fn cross_check_then_recover(
         &self,
         sim: &CompiledSim,
+        inputs: impl AsyncFnMut(),
+        recover: impl AsyncFnMut(),
+        max_faults: usize,
+    ) -> CrossCheck {
+        self.cross_check_sampling_oracles(sim, inputs, recover, max_faults, None)
+    }
+
+    /// [`Self::cross_check_then_recover`], with both oracles running `samples` seeded schedules
+    /// of each fault set instead of every schedule ([`CompiledSim::sample_then`]), if
+    /// `samples` is set. Only for programs whose schedule space the oracles cannot enumerate,
+    /// and weaker: a sampled oracle misses what its sample misses.
+    #[doc(hidden)]
+    pub fn cross_check_sampling_oracles(
+        &self,
+        sim: &CompiledSim,
         mut inputs: impl AsyncFnMut(),
         mut recover: impl AsyncFnMut(),
         max_faults: usize,
+        samples: Option<usize>,
     ) -> CrossCheck {
         let results = self.run_then_recover(sim, &mut inputs, &mut recover);
         let labels = self
@@ -260,11 +276,12 @@ impl EcCheck {
             .as_ref()
             .expect("`EcCheck::cross_check` needs a simulation compiled from `EcCheck::instrument`")
             .labels();
-        let (brute, confirmed) = Engine::new(self, sim, &labels, &mut inputs, &mut recover)
-            .brute_force(max_faults, &results);
+        let mut engine = Engine::new(self, sim, &labels, &mut inputs, &mut recover);
+        engine.oracle_samples = samples;
+        let (brute, confirmed) = engine.brute_force(max_faults, &results);
         let mut disagreements = disagreements(&results, &brute, &confirmed);
         // The second oracle runs the same harness on its own program.
-        let oracle2 = self.oracle2(&mut inputs, &mut recover, max_faults, &results);
+        let oracle2 = self.oracle2(&mut inputs, &mut recover, max_faults, &results, samples);
         disagreements.extend(oracle2::disagreements(&results, &oracle2));
         CrossCheck {
             results,
@@ -491,7 +508,7 @@ impl<'t> RunFold<'t> {
 }
 
 impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
-    /// Runs `faults` over every schedule (or the sample), folding each record into a [`Run`] as
+    /// Runs `faults` over every schedule (or the oracles' sample), folding each record into a [`Run`] as
     /// it finishes. `seen` gets every record first.
     fn execute(
         &mut self,
@@ -524,12 +541,12 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
             let thunk = async || drive(&mut *inputs, &mut *recover, &healer).await;
             let after = || absorb(hook.drain_instances());
             let sim = self.sim;
-            let sample = self.sample_schedules;
+            let sample = self.oracle_samples;
             if sample.is_none() {
                 super::races_engine::refuse_truncated_exhaustive();
             }
             std::panic::catch_unwind(AssertUnwindSafe(move || match sample {
-                Some(n) => sim.fuzz_bounded_then(n, thunk, after),
+                Some(n) => sim.sample_then(n, thunk, after),
                 None => {
                     sim.exhaustive_then(thunk, after);
                 }
@@ -618,7 +635,7 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
         // Rerun every counterexample's set (outside the enumeration if it is larger), unless
         // schedules are sampled: a sample may miss the failing schedule.
         let mut confirmed = BTreeMap::new();
-        if self.sample_schedules.is_none() {
+        if self.oracle_samples.is_none() {
             for label in results.results() {
                 let Some(cex) = label.verdict.counterexample() else {
                     continue;

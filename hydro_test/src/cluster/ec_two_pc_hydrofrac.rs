@@ -17,8 +17,8 @@
 //! once, and a query that reached a peer before the peer decided is never repeated.
 //!
 //! Racing timers explode the schedule space (one racing timer over two participants passed 10
-//! minutes of exhaustive exploration without finishing), so they are sampled. Timers that fire
-//! only in the recovery phase are exhaustive, but certify a narrower claim: no crash strikes
+//! minutes of exhaustive exploration without finishing), so the check samples them. Timers that
+//! fire only in the recovery phase are exhaustive, but certify a narrower claim: no crash strikes
 //! the peer exchange.
 
 use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
@@ -35,6 +35,15 @@ use super::two_pc_ctp::{Coordinator, Participant, Txn, two_pc};
 #[cfg(stageleft_runtime)]
 const RECOVERY_TICKS: usize = 1;
 
+/// Schedules per fault set the oracles sample in a cross-check with racing timers (the 64 they
+/// sampled when the check took a sample size). Racing CTP's schedule space is past what the
+/// oracles can enumerate: with two participants the failure-free run alone passed 31,957
+/// schedules in 10 minutes without finishing, and with three and a recovery tick it has more
+/// than 223,000. So the cross-checks that use this are weaker: a sampled oracle misses what
+/// its sample misses.
+#[cfg(stageleft_runtime)]
+pub(super) const RACING_ORACLE_SAMPLES: usize = 64;
+
 /// 2PC (`ctp`: with cooperative termination) compiled for a check, with its inputs.
 #[cfg(stageleft_runtime)]
 pub(super) struct TwoPc {
@@ -47,13 +56,8 @@ pub(super) struct TwoPc {
 
 #[cfg(stageleft_runtime)]
 impl TwoPc {
-    /// `samples`: schedules per hypothesis, or every schedule.
-    fn new(ctp: bool, participants: u32, samples: Option<usize>) -> Self {
-        let check = match samples {
-            Some(n) => hydrofrac::EcCheck::new().sample_schedules(n),
-            None => hydrofrac::EcCheck::new(),
-        };
-        TwoPc::with(check, ctp, participants)
+    fn new(ctp: bool, participants: u32) -> Self {
+        TwoPc::with(hydrofrac::EcCheck::new(), ctp, participants)
     }
 
     /// The program, for `check`.
@@ -128,18 +132,24 @@ impl TwoPc {
     }
 
     /// The check cross-checked by brute force over every set of at most `max_faults` faults,
-    /// with `racing` timers and `ticks` recovery ticks.
+    /// with `racing` timers and `ticks` recovery ticks. The oracles run `oracle_samples`
+    /// seeded schedules per set if set (see [`RACING_ORACLE_SAMPLES`]), else every schedule.
     pub(super) fn cross_check(
         &self,
         racing: bool,
         ticks: usize,
         max_faults: usize,
+        oracle_samples: Option<usize>,
     ) -> hydrofrac::check::CrossCheck {
         let (inputs, recover) = self.phases(racing, ticks);
         let start = std::time::Instant::now();
-        let cross = self
-            .check
-            .cross_check_then_recover(&self.sim, inputs, recover, max_faults);
+        let cross = self.check.cross_check_sampling_oracles(
+            &self.sim,
+            inputs,
+            recover,
+            max_faults,
+            oracle_samples,
+        );
         eprintln!(
             "2PC ({} participants, racing timers: {racing}, {ticks} recovery ticks, cross-checked \
              up to {max_faults} faults): {:.1}s\nsearch:\n{}\n{cross}",
@@ -200,7 +210,7 @@ fn breaks_at_one_coordinator_crash(
 /// break the same way.
 #[test]
 fn plain_two_pc_breaks_at_one_coordinator_crash() {
-    let results = TwoPc::new(false, 2, Some(8)).run(true, RECOVERY_TICKS);
+    let results = TwoPc::new(false, 2).run(true, RECOVERY_TICKS);
     breaks_at_one_coordinator_crash(&results, results.label("prepares"));
     breaks_at_one_coordinator_crash(&results, results.label("commits"));
     breaks_at_one_coordinator_crash(&results, committed(&results));
@@ -459,11 +469,13 @@ fn ctp2_racing_timers_split_by_direct_injection() {
 /// The regression for barrier-free harnesses: with a one-shot timer (no recovery ticks), the
 /// check finds unaided that a single crash of the coordinator, right after its `commit` to
 /// participant 0, leaves participant 1 never committing (its one query reached participant 0
-/// before the `commit` did, or it fired before participant 1 had voted). Sampled (64 schedules
-/// per set), cross-checked by brute force over every single fault.
+/// before the `commit` did, or it fired before participant 1 had voted). Sampled (the schedule
+/// space is past the check's budget), cross-checked by brute force over every single fault.
+/// Racing CTP is past what the oracles can enumerate too: they sample, so this cross-check is
+/// weaker.
 #[test]
 fn ctp2_one_shot_timer_breaks_at_one_coordinator_crash() {
-    let cross = TwoPc::new(true, 2, Some(64)).cross_check(true, 0, 1);
+    let cross = TwoPc::new(true, 2).cross_check(true, 0, 1, Some(RACING_ORACLE_SAMPLES));
     cross.assert_agrees();
     breaks_at_one_coordinator_crash(&cross.results, committed(&cross.results));
 }
@@ -472,10 +484,12 @@ fn ctp2_one_shot_timer_breaks_at_one_coordinator_crash() {
 /// so participant 1 learns the decision from participant 0. With two participants that is
 /// every admissible fault set for agreement (a participant's crash leaves one correct
 /// participant). Sampled, so not a certificate; cross-checked by brute force over every set of
-/// at most two faults.
+/// at most two faults. Racing CTP is past what the oracles can enumerate too: they sample, so
+/// this cross-check is weaker.
 #[test]
 fn ctp2_with_a_recurring_timer_survives_the_coordinators_crash() {
-    let cross = TwoPc::new(true, 2, Some(64)).cross_check(true, RECOVERY_TICKS, 2);
+    let cross =
+        TwoPc::new(true, 2).cross_check(true, RECOVERY_TICKS, 2, Some(RACING_ORACLE_SAMPLES));
     cross.assert_agrees();
     let results = &cross.results;
     breaks_at_one_coordinator_crash(results, results.label("prepares"));
@@ -498,7 +512,7 @@ fn ctp2_with_a_recurring_timer_survives_the_coordinators_crash() {
 /// racing one above: no crash strikes the peer exchange.
 #[test]
 fn ctp2_with_timers_after_the_faults_is_certified() {
-    let cross = TwoPc::new(true, 2, None).cross_check(false, RECOVERY_TICKS, 2);
+    let cross = TwoPc::new(true, 2).cross_check(false, RECOVERY_TICKS, 2, None);
     cross.assert_agrees();
     assert!(
         matches!(
@@ -516,12 +530,14 @@ fn ctp2_with_timers_after_the_faults_is_certified() {
 /// `brute_force_agrees_on_two_pc_cooperative_termination`). The split of the barrier
 /// harness, where participant 0 dies after answering participant 1 but before answering
 /// participant 2, is repaired: participant 2 asks again in the recovery phase, and participant
-/// 1 answers. Sampled (64 schedules per set), so not a certificate; cross-checked by brute force
-/// over every set of at most two faults (200 sets, 12,800 schedules; the search runs the same,
-/// as every derivation is fragile). About 2 minutes.
+/// 1 answers. Sampled (the schedule space is past the check's budget), so not a certificate;
+/// cross-checked by brute force over every set of at most two faults. Racing CTP-3 (more than
+/// 223,000 schedules) is past what the oracles can enumerate too: they sample 64 schedules per
+/// set (200 sets, 12,800 schedules), so this cross-check is weaker. About 3 minutes.
 #[test]
 fn ctp3_with_a_recurring_timer_survives_two_crashes() {
-    let cross = TwoPc::new(true, 3, Some(64)).cross_check(true, RECOVERY_TICKS, 2);
+    let cross =
+        TwoPc::new(true, 3).cross_check(true, RECOVERY_TICKS, 2, Some(RACING_ORACLE_SAMPLES));
     cross.assert_agrees();
     assert!(
         matches!(

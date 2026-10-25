@@ -47,6 +47,8 @@ struct Explored {
     schedules: usize,
     /// The callback stopped it.
     stopped: bool,
+    /// It ran past the schedule budget (`explore_schedules`), so its schedules were sampled.
+    sampled: bool,
     /// The program panicked: the message and the last record.
     panic: Option<(String, Rc<InstanceRecord>)>,
 }
@@ -71,7 +73,7 @@ pub(super) fn refuse_truncated_exhaustive() {
     if let Ok(limit) = std::env::var("BOLERO_RANDOM_TEST_TIME_MS") {
         panic!(
             "hydrofrac: BOLERO_RANDOM_TEST_TIME_MS={limit} would silently cut the exhaustive \
-             exploration short; unset it (or use `sample_schedules`, which never certifies)"
+             exploration short; unset it"
         );
     }
 }
@@ -307,6 +309,7 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
         ));
         self.sim.set_network_hook(hook.clone());
         let stopped = Cell::new(false);
+        let sampled = Cell::new(false);
         let schedules = Cell::new(0usize);
         let on_record = RefCell::new(on_record);
         let tables = &self.tables;
@@ -328,20 +331,19 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
             let mut recover = AssertUnwindSafe(&mut *self.recover);
             let thunk = async || drive(&mut *inputs, &mut *recover, &healer).await;
             let after = || {
-                if absorb(hook.drain_instances()) {
+                let records = hook.drain_instances();
+                let sends = records.iter().map(|r| r.log.sends().count()).sum();
+                if absorb(records) {
                     std::panic::resume_unwind(Box::new(EarlyStop));
                 }
+                sends
             };
-            let sim = self.sim;
-            let sample = self.sample_schedules;
-            if policy == Policy::All && sample.is_none() {
-                refuse_truncated_exhaustive();
-            }
-            std::panic::catch_unwind(AssertUnwindSafe(move || match (policy, sample) {
-                (Policy::One, _) => sim.first_schedule(thunk),
-                (Policy::All, Some(n)) => sim.fuzz_bounded_then(n, thunk, after),
-                (Policy::All, None) => {
-                    sim.exhaustive_then(thunk, after);
+            let (sim, over) = (self.sim, &self.over_budget);
+            let discard = || drop(hook.drain_instances());
+            std::panic::catch_unwind(AssertUnwindSafe(|| match policy {
+                Policy::One => sim.first_schedule(thunk),
+                Policy::All => {
+                    sampled.set(explore_schedules(sim, over, thunk, after, discard));
                 }
             }))
         };
@@ -362,6 +364,7 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
         Explored {
             schedules: schedules.get(),
             stopped: stopped.get(),
+            sampled: sampled.get(),
             panic,
         }
     }
@@ -421,7 +424,7 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
             }
             false
         });
-        let probe_sampled = policy == Policy::All && self.sample_schedules.is_some();
+        let probe_sampled = probe.sampled;
         // A sampled probe counts as run in full too (a sampled search certifies nothing).
         let probe_in_full = policy == Policy::All || shape.choice_free;
         let probe_stats = Stats {
@@ -456,13 +459,19 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
             let result = if let Some(failure) = failure {
                 let verdict = counterexample(FaultSet::new(), None, !probe_sampled, 0, &failure);
                 (verdict, probe_stats)
-            } else if target.domain.is_empty() && (shape.fragile_free || shape.choice_free) {
+            } else if target.domain.is_empty()
+                && (shape.fragile_free || shape.choice_free)
+                && !probe_sampled
+            {
                 // No fault creates a fact outside the domain (Claim B, §13 of
                 // docs/design/hydrofrac-soundness.md), so no run holds a fact at all. Otherwise
                 // faults may create facts (a failover's output), and the search below runs every
                 // set within the bounds to check them (`races::Sweep::next`, no pairs).
                 (Verdict::Vacuous(VacuousReason::EmptyDomain), probe_stats)
             } else {
+                // Each label's search is sampled from its first set past the budget on (or from
+                // the start, if the probe was).
+                self.over_budget.set(probe_sampled);
                 let clauses = learned.remove(&target.label).unwrap_or_default();
                 self.search_races(
                     &target,
@@ -630,8 +639,7 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
             Policy::All if pruned => search.notes.early_stops += 1,
             Policy::All => {}
         }
-        let sampled = policy == Policy::All && self.sample_schedules.is_some();
-        if sampled && !explored.stopped && failure.is_none() {
+        if explored.sampled && !explored.stopped && failure.is_none() {
             search.sampled = true;
         }
         if failure.is_none() && !explored.stopped && (policy == Policy::All || shape.choice_free) {

@@ -44,14 +44,6 @@ mod tests {
     const MEMBERS: usize = 3;
     #[cfg(stageleft_runtime)]
     const SOURCES: usize = 2;
-    /// Schedules sampled per hypothesis for the echoing broadcast. With plain `batch` at every
-    /// member, its schedule space is too large to enumerate: the failure-free probe alone ran
-    /// past 266,000 schedules without finishing. The research harness enumerated it (4,076
-    /// schedules over 21 hypotheses) because its batches were driven by `BatchHook`s, which
-    /// lite does not have.
-    #[cfg(stageleft_runtime)]
-    const ECHO_SCHEDULES: usize = 64;
-
     #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
     pub struct Item(u32);
 
@@ -248,8 +240,9 @@ mod tests {
     /// deliveries break at one crash of the broadcaster (exhaustively); the echoing broadcast's
     /// survive every admissible combination of crashes (any number of them, as long as two
     /// members are left correct). The echoing broadcast is fragile-free, so each fault set runs
-    /// on one schedule even with [`ECHO_SCHEDULES`] sampled per hypothesis, and the certificate
-    /// holds.
+    /// on one schedule, and the certificate holds. (Its schedule space is far past the check's
+    /// budget: with plain `batch` at every member, the failure-free probe alone ran past 266,000
+    /// schedules without finishing. A fault set needing every schedule would be sampled.)
     #[test]
     fn ec_generated_spec_separates_plain_from_reliable_broadcast() {
         let plain = echo_broadcast(false, EcCheck::new());
@@ -264,7 +257,7 @@ mod tests {
         // tick), so the program has schedule choices, but no fragile step: every derivation is
         // robust, and its deliveries are certified under any admissible crash set
         // (docs/design/hydrofrac-races.md §4.4).
-        let reliable = echo_broadcast(true, EcCheck::new().sample_schedules(ECHO_SCHEDULES));
+        let reliable = echo_broadcast(true, EcCheck::new());
         eprintln!("{reliable}");
         let deliveries = label(&reliable, "reliable_broadcast.rs", "deliveries", 0);
         assert!(

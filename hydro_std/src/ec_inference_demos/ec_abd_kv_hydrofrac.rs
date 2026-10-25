@@ -66,19 +66,13 @@ fn ec_check(mut check: hydrofrac::EcCheck, mode: &str) -> hydrofrac::Results {
     results
 }
 
-/// `EcCheck::new()` (lite) with sampled schedules.
-/// `EcCheck::new()`, exhaustive per hypothesis unless `ABD_KV_SAMPLES` is set.
+/// `EcCheck::new()` (lite): each hypothesis exhaustive within the check's schedule budget,
+/// sampled past it.
 #[cfg(stageleft_runtime)]
 #[test]
 #[ignore = "measurement"]
 fn abd_kv_two_writes() {
     let mut check = hydrofrac::EcCheck::new();
-    if let Some(n) = std::env::var("ABD_KV_SAMPLES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-    {
-        check = check.sample_schedules(n);
-    }
     if let Some(n) = std::env::var("ABD_KV_MAX_CRASHES")
         .ok()
         .and_then(|s| s.parse().ok())

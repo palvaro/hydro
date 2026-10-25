@@ -27,8 +27,8 @@
 //!   and certify the claim. The search marks those derivations fragile (they pass a "trigger
 //!   meets state" step), so they protect nothing, and it finds the crash.
 //! - two-phase commit with cooperative termination and three participants (the program the
-//!   bug was found on), with racing one-shot timers, on sampled schedules (see
-//!   [`TWO_PC_SCHEDULES`]).
+//!   bug was found on), with racing one-shot timers, on sampled schedules (its schedule space
+//!   is past the check's budget).
 //!
 //! Each agreement test on an order-sensitive program has a companion that asserts only the
 //! enumeration's side (that it finds the breaking set), so the oracle stays guarded.
@@ -314,21 +314,20 @@ fn brute_force_agrees_on_ask_once() {
     assert!(cex.tolerance_certified, "{cross}");
 }
 
-/// Schedules sampled per fault set for two-phase commit with cooperative termination. Its
-/// schedule space is too large to enumerate: with racing timers, one racing timer over two
-/// participants passed 10 minutes of exhaustive exploration without finishing. Bolero's random
-/// engine draws fresh seeds from the OS for every iteration (`BOLERO_RANDOM_SEED` only adds one
-/// fixed input), so the sample is not reproducible.
-#[cfg(stageleft_runtime)]
-const TWO_PC_SCHEDULES: usize = 64;
-
 /// Two-phase commit with cooperative termination over three participants, one transaction,
 /// every participant's timer racing it, and the timer one-shot (no recovery tick): the harness
-/// of `ec_two_pc_hydrofrac`, sampled.
+/// of `ec_two_pc_hydrofrac`. Its schedule space is too large to enumerate (one racing timer
+/// over two participants passed 10 minutes of exhaustive exploration without finishing), so the
+/// check samples it, and so do the oracles (`ec_two_pc_hydrofrac::RACING_ORACLE_SAMPLES`):
+/// the two tests on it are weaker cross-checks.
 #[cfg(stageleft_runtime)]
 fn two_pc_cross_check() -> CrossCheck {
-    let check = EcCheck::new().sample_schedules(TWO_PC_SCHEDULES);
-    super::ec_two_pc_hydrofrac::TwoPc::with(check, true, 3).cross_check(true, 0, MAX_FAULTS)
+    super::ec_two_pc_hydrofrac::TwoPc::with(EcCheck::new(), true, 3).cross_check(
+        true,
+        0,
+        MAX_FAULTS,
+        Some(super::ec_two_pc_hydrofrac::RACING_ORACLE_SAMPLES),
+    )
 }
 
 /// The enumeration finds that one crash breaks cooperative termination with three

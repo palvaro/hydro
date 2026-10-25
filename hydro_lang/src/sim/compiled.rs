@@ -950,6 +950,59 @@ impl CompiledSim {
         );
     }
 
+    /// [`Self::fuzz_bounded_then`], but reproducible: execution `i` (for `i` in `1..=iterations`)
+    /// reads its scheduling and batching choices from a fixed pseudo-random byte stream seeded by
+    /// `i`, so every call explores the same executions. An execution that fails a
+    /// [`continue_if!`](crate::continue_if) assumption is discarded (it does not reach `after`).
+    pub fn sample_then(
+        &self,
+        iterations: usize,
+        mut thunk: impl AsyncFnMut() + RefUnwindSafe,
+        mut after: impl FnMut(),
+    ) {
+        self.with_instantiator(
+            |instantiator| {
+                for seed in 1..=iterations as u64 {
+                    // An xorshift64 stream, which the bytes driver maps to choices. 256 KiB is far
+                    // more than an execution reads; a driver that ran out would fail the
+                    // execution like a `continue_if!`.
+                    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+                    let mut bytes = vec![0u8; 1 << 18];
+                    for chunk in bytes.chunks_exact_mut(8) {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        chunk.copy_from_slice(&state.to_le_bytes());
+                    }
+                    let instance = instantiator();
+                    let driver = Box::new(bolero::bolero_engine::driver::object::Object(
+                        bolero::bolero_engine::driver::bytes::Driver::new(
+                            bytes,
+                            &Default::default(),
+                        ),
+                    ));
+                    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        bolero::bolero_engine::any::scope::with(driver, || {
+                            tokio::runtime::Builder::new_current_thread()
+                                .build()
+                                .unwrap()
+                                .block_on(instance.run(&mut thunk));
+                        })
+                    }));
+                    match run {
+                        Ok(_) => after(),
+                        Err(payload)
+                            if payload
+                                .downcast_ref::<bolero::generator::bolero_generator::any::Error>()
+                                .is_some() => {}
+                        Err(payload) => std::panic::resume_unwind(payload),
+                    }
+                }
+            },
+            false,
+        );
+    }
+
     /// Runs exactly one execution: the first schedule [`Self::exhaustive`] explores, with every
     /// scheduling and batching choice resolved to its first alternative by an all-zero entropy
     /// source.

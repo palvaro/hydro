@@ -194,18 +194,6 @@ fn a_label_that_sees_nothing_without_faults_is_vacuous() {
 
 #[cfg(stageleft_runtime)]
 #[test]
-fn sampled_schedules_find_the_same_counterexample() {
-    let results = plain_broadcast(EcCheck::new().sample_schedules(4), false);
-    let label = results.label("delivered");
-    let Verdict::Counterexample(cex) = &label.verdict else {
-        panic!("expected a counterexample:\n{results}");
-    };
-    assert_eq!(cex.tolerates, Some(0), "{results}");
-    assert_eq!(cex.crashes(), 1, "{results}");
-}
-
-#[cfg(stageleft_runtime)]
-#[test]
 #[should_panic(expected = "hydrofrac: a label does not hold")]
 fn assert_holds_panics_with_the_report() {
     plain_broadcast(EcCheck::new(), false).assert_holds();
@@ -438,14 +426,14 @@ fn a_schedule_choice_with_robust_derivations_is_certified() {
 }
 
 /// A sampled search certifies nothing: `assert_holds` rejects it, and says why;
-/// `assert_no_counterexample` accepts it. (A fragile-free program like the exchange is certified
-/// even when sampled, since one schedule of a set shows all its facts; so the verdict here is set
-/// by hand. The sampled CTP targets in `hydro_test` reach it through the engine.)
+/// `assert_no_counterexample` accepts it. (A fragile-free program like the exchange runs one
+/// schedule per set, so it is never sampled; the verdict here is set by hand.
+/// `review2b_a_sampled_miss_is_not_accepted_by_assert_holds` reaches it through the engine.)
 #[cfg(stageleft_runtime)]
 #[test]
 #[should_panic(expected = "schedules were sampled, so the search of label")]
 fn assert_holds_rejects_a_sampled_search() {
-    let mut results = batched_exchange(EcCheck::new().max_crashes(0).sample_schedules(4));
+    let mut results = batched_exchange(EcCheck::new().max_crashes(0));
     let sites = results.choices.clone();
     let index = results.label("delivered").index;
     results.labels[index].verdict = Verdict::Exhausted {
@@ -564,7 +552,9 @@ fn the_recovery_phase_runs_healed() {
 /// error, not the program's counterexample.
 #[cfg(stageleft_runtime)]
 #[test]
-#[should_panic(expected = "a phase barrier (`quiesce()`, or input after an observation that forced quiescence) inside the inputs")]
+#[should_panic(
+    expected = "a phase barrier (`quiesce()`, or input after an observation that forced quiescence) inside the inputs"
+)]
 fn a_barrier_in_the_fault_phase_panics() {
     let mut flow = FlowBuilder::new();
     let source = flow.process::<()>();
@@ -635,7 +625,9 @@ fn a_labelled_type_without_serialize_is_refused() {
         .weaken_consistency()
         .weaken_ordering::<NoOrder>()
         .merge_unordered(local.into())
-        .map(q!(|value| std::rc::Rc::new(value) as std::rc::Rc<dyn std::any::Any>))
+        .map(q!(
+            |value| std::rc::Rc::new(value) as std::rc::Rc<dyn std::any::Any>
+        ))
         .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
             /** claimed: every member holds `1`, and `2` once the source sends it */
         ));

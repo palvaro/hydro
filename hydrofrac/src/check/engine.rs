@@ -2,8 +2,9 @@
 //! (`races_engine.rs`, docs/design/hydrofrac-races.md), and what it shares with the test-only
 //! brute-force oracle (`brute_force.rs`).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
+use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
 
 use hydro_lang::location::dynamic::LocationId;
@@ -44,14 +45,13 @@ mod races_engine;
 
 /// Checks every `EventualConsistency` label of a program (see the [module docs](super)).
 ///
-/// Two knobs; everything else is a convention (docs/design/hydrofrac-lite.md §2):
-/// - [`Self::max_crashes`] caps the crash sweep;
-/// - [`Self::sample_schedules`] explores a random sample of each hypothesis's schedules instead
-///   of all of them.
+/// One knob, [`Self::max_crashes`], which caps the crash sweep; everything else is a convention
+/// (docs/design/hydrofrac-lite.md §2). In particular each hypothesis is explored over every
+/// schedule if they fit the check's schedule budget, and over a fixed sample of them otherwise;
+/// a label whose search sampled is never certified ([`Verdict::Exhausted`]).
 #[derive(Default)]
 pub struct EcCheck {
     max_crashes: Option<usize>,
-    sample_schedules: Option<usize>,
     taps: Option<TapPass>,
     /// The operators the provenance rewrite left as opaque islands (filled at compile time).
     islands: Rc<RefCell<Vec<String>>>,
@@ -63,7 +63,7 @@ pub struct EcCheck {
 }
 
 impl EcCheck {
-    /// A check with no cap on crashes, exploring every schedule.
+    /// A check with no cap on crashes.
     pub fn new() -> Self {
         EcCheck::default()
     }
@@ -72,14 +72,6 @@ impl EcCheck {
     /// with up to `n` crashes ([`crate::search::Tolerance::UpTo`]).
     pub fn max_crashes(mut self, n: usize) -> Self {
         self.max_crashes = Some(n);
-        self
-    }
-
-    /// Runs each hypothesis over `n` randomly scheduled executions instead of every schedule,
-    /// for programs whose schedule space is too large to explore. Then nothing is certified: a
-    /// label that holds on the sample is [`Verdict::Exhausted`].
-    pub fn sample_schedules(mut self, n: usize) -> Self {
-        self.sample_schedules = Some(n);
         self
     }
 
@@ -169,6 +161,70 @@ impl EcCheck {
 
 /// The panic of a phase barrier in the fault phase.
 const BARRIER_IN_FAULT_PHASE: &str = "hydrofrac: a phase barrier (`quiesce()`, or input after an observation that forced quiescence) inside the inputs of `EcCheck::run`. The fault phase explores every interleaving of the inputs with the program's work; a barrier there hides the interleavings it cuts. Move the rounds that come after the faults (timeouts, retries) into the recovery closure of `EcCheck::run_then_recover`, or drop the barrier.";
+
+/// The work, in messages sent summed over its schedules, up to which the search explores a
+/// hypothesis exhaustively: past it, [`explore_schedules`] samples instead. It counts messages
+/// rather than schedules so that it bounds time: a G-Set gossip schedule sends about 45
+/// messages and costs 35-85 ms, a CTP-2 one about 12 and 4-7 ms. 40,000 covers the largest
+/// hypothesis the exhaustive tests certify (CTP-2 with its timers after the faults: 2,112
+/// schedules, 24,704 messages) with 60% to spare, and costs a gossip probe about 900 schedules
+/// (some 30 s) before it samples (docs/design/hydrofrac-soundness.md §14).
+const SEND_BUDGET: usize = 40_000;
+
+/// The schedules [`explore_schedules`] samples from a hypothesis past [`SEND_BUDGET`]: the
+/// sample size most callers chose when it was a knob, and few enough for G-Set gossip's 82
+/// hypotheses.
+const SAMPLED_SCHEDULES: usize = 8;
+
+/// The panic payload that ends an exhaustive exploration past [`SEND_BUDGET`].
+struct OverBudget;
+
+/// The search's exploration of one hypothesis (docs/design/hydrofrac-soundness.md §14). Runs
+/// `thunk` over every schedule of `sim`, calling `after` once each finishes (see
+/// [`CompiledSim::exhaustive_then`]); `after` returns how many messages the schedule sent.
+/// Once the schedules so far sent more than `SEND_BUDGET` messages, the enumeration stops and
+/// `SAMPLED_SCHEDULES` seeded schedules run instead ([`CompiledSim::sample_then`]: the same ones
+/// on every run of the check). `discard` drops what the schedule past the budget (and the
+/// simulator's replay of it) left behind, before the sample starts. Returns whether the
+/// schedules were sampled: a sampled search certifies nothing ([`Verdict::Exhausted`]).
+///
+/// `over_budget` is the label's memory: set once a hypothesis ran past the budget, after which
+/// every hypothesis is sampled at once. The label can no longer be certified, so enumerating up
+/// to the budget again would only cost time.
+///
+/// A panic of `thunk` or `after` ends the exploration, as in [`CompiledSim::exhaustive_then`].
+pub(super) fn explore_schedules(
+    sim: &CompiledSim,
+    over_budget: &Cell<bool>,
+    mut thunk: impl AsyncFnMut() + std::panic::RefUnwindSafe,
+    mut after: impl FnMut() -> usize,
+    discard: impl FnOnce(),
+) -> bool {
+    if !over_budget.get() {
+        races_engine::refuse_truncated_exhaustive();
+        let mut sends = 0;
+        let exhaustive = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            sim.exhaustive_then(&mut thunk, || {
+                if sends > SEND_BUDGET {
+                    std::panic::resume_unwind(Box::new(OverBudget));
+                }
+                sends += after();
+            });
+        }));
+        match exhaustive {
+            Ok(()) => return false,
+            Err(payload) if payload.is::<OverBudget>() => {
+                over_budget.set(true);
+                discard();
+            }
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+    sim.sample_then(SAMPLED_SCHEDULES, thunk, || {
+        after();
+    });
+    true
+}
 
 /// One instance of a harness: the fault phase (`inputs`, with barriers forbidden), quiesce,
 /// heal, the recovery phase (`recover`, with no faults), quiesce.
@@ -261,7 +317,11 @@ struct Engine<'c, B, R> {
     recover: &'c mut R,
     tables: Tables,
     max_crashes: Option<usize>,
-    sample_schedules: Option<usize>,
+    /// The current label's search ran a hypothesis past `SEND_BUDGET` ([`explore_schedules`]).
+    over_budget: Cell<bool>,
+    /// The oracles' schedules per fault set, if they sample (`cross_check_sampling_oracles`).
+    #[cfg(any(test, feature = "cross-check"))]
+    oracle_samples: Option<usize>,
     /// The program's fragile steps.
     fragile: Option<Vec<crate::provenance::FragileSite>>,
     /// The proved send order, its ranks learned from the races search's probe; every later run of
@@ -296,7 +356,9 @@ impl<'c, B: AsyncFnMut(), R: AsyncFnMut()> Engine<'c, B, R> {
             recover,
             tables: Tables::new(sim.channels(), sim.locations()),
             max_crashes: check.max_crashes,
-            sample_schedules: check.sample_schedules,
+            over_budget: Cell::new(false),
+            #[cfg(any(test, feature = "cross-check"))]
+            oracle_samples: None,
             fragile: check.fragile_sites(),
             order: Rc::default(),
         }
