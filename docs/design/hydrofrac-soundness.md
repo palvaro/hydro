@@ -357,10 +357,15 @@ closure that names outside state (`impure_closure`, §3), and every unlisted kin
   `wrap_acc`; `:628`, `wrap_scan`).
 - So a derivation whose dependencies all survive `H` is recomputed under `H`, which is Lemma R's conclusion.
 
-**Proved**, given A1, A2 and A13. **Not tested** by any gate at `dd5c4d05a5`:
-- the choice-free corpus programs (`reliable_broadcast_closed`, S1, S2) are also fragile-free, so the shortcut decides
-  nothing there that the fragile-free rule would not;
-- forcing `choice_free = false` changes no gate's verdict (found by the dead-code audit).
+**Proved**, given A1, A2 and A13.
+
+**Tested** by `the_choice_free_shortcut_runs_one_schedule_and_aims_the_search` (`hf/check/brute_tests.rs`), on a
+program that is choice-free but not fragile-free: two sources broadcast the same input, and each member passes each
+source's stream through a `scan`. With the shortcut, the probe runs one schedule and its clauses are robust, so no
+one-crash set is admissible: 1 set, Claim B certified. With `choice_free` forced to false, 12 sets, none on one
+schedule (measured). The test pins the first, and brute force agrees. The choice-free corpus programs
+(`reliable_broadcast_closed`, S1, S2) are also fragile-free, so there the shortcut decides nothing the fragile-free
+rule would not.
 
 ## 4. Premise literals
 

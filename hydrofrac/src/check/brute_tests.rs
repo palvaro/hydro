@@ -1292,3 +1292,76 @@ fn a_fact_only_faults_create_is_checked() {
     );
     assert!(label.stats.races.is_some_and(|r| r.claim_b), "{cross}");
 }
+
+/// A choice-free program that is not fragile-free: two sources each broadcast the same input
+/// over `fail_stop`, and each member passes each source's stream through a `scan` (a fragile
+/// step) and merges the two (label `either`). Either source alone delivers every fact.
+#[cfg(stageleft_runtime)]
+fn redundant_scans() -> CrossCheck {
+    let mut flow = FlowBuilder::new();
+    let first = flow.process::<()>();
+    let second = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send_first, input_first) = first.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let (send_second, input_second) = second.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let from_first = input_first
+        .broadcast_closed(&members, TCP.fail_stop().name("first").bincode())
+        .scan(q!(|| 0u32), q!(|count, x| {
+            *count += 1;
+            Some(x)
+        }))
+        .weaken_consistency()
+        .weaken_ordering::<NoOrder>();
+    let from_second = input_second
+        .broadcast_closed(&members, TCP.fail_stop().name("second").bincode())
+        .scan(q!(|| 0u32), q!(|count, x| {
+            *count += 1;
+            Some(x)
+        }))
+        .weaken_consistency()
+        .weaken_ordering::<NoOrder>();
+    let either = from_first
+        .merge_unordered(from_second)
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed: either source delivers every fact */
+        ));
+    let _out = either.sim_cluster_output();
+    let mut check = EcCheck::new().max_crashes(1);
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 3))
+        .compiled();
+    assert!(check.fragile_sites().is_some_and(|s| !s.is_empty()), "the scans are fragile");
+    check.cross_check(
+        &sim,
+        async || {
+            send_first.send(1);
+            send_second.send(1);
+        },
+        MAX_FAULTS,
+    )
+}
+
+/// The choice-free shortcut (`provenance/choices.rs`; soundness §3.1, §14). [`redundant_scans`]
+/// has no schedule choice, so each set runs one schedule, and every derivation counts as robust
+/// although `scan` is fragile. One source's crash then leaves every pair a derivation through
+/// the other source, which protects it, so few sets are run. Without the shortcut every
+/// derivation is fragile, no pair is protected, and the search runs every one-crash set.
+#[cfg(stageleft_runtime)]
+#[test]
+fn the_choice_free_shortcut_runs_one_schedule_and_aims_the_search() {
+    let cross = redundant_scans();
+    agree("redundant scans", &cross);
+    let label = cross.results.label("either");
+    assert!(
+        matches!(label.verdict, Verdict::Certified { tolerates: Tolerance::UpTo(1) }),
+        "{cross}"
+    );
+    // Only the probe runs: its robust clauses leave no admissible one-crash set. With the
+    // shortcut forced off, this search ran 12 sets, none on one schedule (measured).
+    let notes = label.stats.races.expect("a races search");
+    assert_eq!(
+        (label.stats.hypotheses, notes.single_schedule_sets, notes.claim_b),
+        (1, 1, true),
+        "{cross}"
+    );
+}
