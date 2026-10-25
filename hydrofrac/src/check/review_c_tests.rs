@@ -26,6 +26,8 @@ use hydro_lang::sim::network_hook::SimNetworkHook;
 
 #[cfg(stageleft_runtime)]
 use super::{EcCheck, Verdict};
+#[cfg(stageleft_runtime)]
+use crate::observe::NotCheckedReason;
 
 /// A hand-written fault: drops only the `nth` (0-based) send whose destination member is `to`
 /// and whose payload is `payload`, on any channel. Every other send is delivered.
@@ -196,11 +198,12 @@ fn review_c_omitting_one_of_two_identical_messages_is_not_modelled() {
     );
 }
 
-/// **A label computed from local inputs passes `assert_holds` while members disagree with no
-/// fault at all.** Each member labels `[its own id]` `EventualConsistency`. The plan classifies
-/// the label `NotChecked(LocalInputsOnly)` ("no fault can withhold its inputs"), and
-/// [`super::Results::holds`] counts `NotChecked` as holding, so `assert_holds` passes. Yet the
-/// three members end with `{0}`, `{1}` and `{2}` in the failure-free run.
+/// **A label computed from local inputs passed `assert_holds` while members disagree with no
+/// fault at all** (fixed). Each member labels `[its own id]` `EventualConsistency`. The plan
+/// classified the label `NotChecked(LocalInputsOnly)` ("no fault can withhold its inputs"), and
+/// [`super::Results::holds`] counted `NotChecked` as holding, so `assert_holds` passed. Yet the
+/// three members end with `{0}`, `{1}` and `{2}` in the failure-free run. Now a local-only label
+/// is checked like any other, and the probe breaks it; both oracles agree.
 #[cfg(stageleft_runtime)]
 #[test]
 fn review_c_local_only_label_that_disagrees_passes_assert_holds() {
@@ -218,8 +221,8 @@ fn review_c_local_only_label_that_disagrees_passes_assert_holds() {
     let sim = check
         .instrument(flow.sim().with_cluster_size(&members, 3))
         .compiled();
-    let results = check.run(&sim, async || {});
-    eprintln!("=== hydrofrac\n{results}");
+    let cross = check.cross_check(&sim, async || {}, 1);
+    eprintln!("=== hydrofrac\n{cross}");
 
     let views = AssertUnwindSafe(RefCell::new(BTreeSet::new()));
     sim.exhaustive(async || {
@@ -232,13 +235,97 @@ fn review_c_local_only_label_that_disagrees_passes_assert_holds() {
         views.borrow_mut().insert(format!("{held:?}"));
     });
     eprintln!("hand run, no faults: member views {:?}", views.borrow());
-    assert!(results.holds(), "hydrofrac flagged it: {results}");
-    results.assert_holds();
     assert!(
         views.borrow().iter().all(|v| v == "[[0], [1], [2]]"),
         "{:?}",
         views.borrow()
     );
+    let label = cross.results.label("mine");
+    assert!(
+        label.verdict.counterexample().is_some_and(|c| c.faults.is_empty()),
+        "the probe breaks it: {cross}"
+    );
+    assert!(!cross.results.holds(), "{cross}");
+    cross.assert_agrees();
+}
+
+/// A labelled `Singleton` is not checked (its versions are not facts, §11 of
+/// docs/design/hydrofrac-soundness.md), and an unchecked label is not a certificate: here every
+/// member's value is its own id, so the members disagree with no fault, and `holds` is false.
+#[cfg(stageleft_runtime)]
+#[test]
+fn review_c_a_singleton_label_is_not_a_certificate() {
+    use hydro_lang::location::cluster::CLUSTER_SELF_ID;
+
+    let mut check = EcCheck::new();
+    let mut flow = FlowBuilder::new();
+    let members = flow.cluster::<()>();
+    let tick = members.tick();
+    let mine = members
+        .source_iter(q!(vec![CLUSTER_SELF_ID.get_raw_id()]))
+        .fold(q!(|| 0u32), q!(|acc, x| *acc = x))
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed (wrongly): every member has the same id */
+        ));
+    let _out = mine
+        .snapshot(&tick, nondet!(/** test observation */))
+        .all_ticks()
+        .sim_cluster_output();
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 3))
+        .compiled();
+    let results = check.run(&sim, async || {});
+    eprintln!("=== hydrofrac\n{results}");
+    let label = results.label("mine");
+    assert!(
+        matches!(&label.verdict, Verdict::NotChecked(NotCheckedReason::NotAStream(k)) if k == "Singleton"),
+        "{results}"
+    );
+    assert!(!results.holds(), "{results}");
+    let refused =
+        std::panic::catch_unwind(AssertUnwindSafe(|| results.assert_holds())).expect_err("refused");
+    let message = refused.downcast_ref::<String>().expect("a message");
+    assert!(message.contains("is not checked"), "{message}");
+}
+
+/// A label minted inside a tick is not checked (its per-tick contents are not the collection's),
+/// and an unchecked label is not a certificate: `holds` is false even where every checked label
+/// is certified. Here each member labels its batch of a local constant inside a tick.
+#[cfg(stageleft_runtime)]
+#[test]
+fn review_c_a_label_inside_a_tick_is_not_a_certificate() {
+    let mut check = EcCheck::new();
+    let mut flow = FlowBuilder::new();
+    let members = flow.cluster::<()>();
+    let tick = members.tick();
+    let in_tick = members
+        .source_iter(q!(vec![1u32]))
+        .batch(&tick, nondet!(/** test */))
+        .assert_has_consistency_of::<Tick<Cluster<'_, (), EventualConsistency>>>(manual_proof!(
+            /** test: a batch of a constant */
+        ))
+        .map(q!(|x| x * 10));
+    let _out = in_tick
+        .all_ticks()
+        .weaken_consistency()
+        .sim_cluster_output();
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 3))
+        .compiled();
+    let results = check.run(&sim, async || {});
+    eprintln!("=== hydrofrac\n{results}");
+    assert!(
+        results
+            .results()
+            .iter()
+            .any(|l| matches!(l.verdict, Verdict::NotChecked(NotCheckedReason::InsideTick))),
+        "{results}"
+    );
+    assert!(!results.holds(), "{results}");
+    let refused =
+        std::panic::catch_unwind(AssertUnwindSafe(|| results.assert_holds())).expect_err("refused");
+    let message = refused.downcast_ref::<String>().expect("a message");
+    assert!(message.contains("is not checked"), "{message}");
 }
 
 /// A hand-written crash: halts the sender of channel `channel` right after its `nth` (1-based)

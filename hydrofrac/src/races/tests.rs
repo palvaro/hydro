@@ -543,6 +543,7 @@ fn an_unprotected_pair_gets_every_set_then_a_certificate() {
     sweep.saw_fault(omit("a"));
     sweep.saw_fault(omit("b"));
     sweep.sends_complete();
+    sweep.explored_in_full(set([]));
     let mut proposed = BTreeSet::new();
     let verdict = loop {
         match sweep.next(&pairs) {
@@ -555,15 +556,32 @@ fn an_unprotected_pair_gets_every_set_then_a_certificate() {
     };
     // No node can crash: every bound is the same.
     assert_eq!(verdict, Next::Certified(Tolerance::All));
+    let every = BTreeSet::from([
+        set([omit("a")]),
+        set([omit("b")]),
+        set([omit("a"), omit("b")]),
+    ]);
+    assert_eq!(proposed, every);
+    // Claim B: every set again, in full, but those already run in full.
+    sweep.explored_in_full(set([omit("b")]));
+    sweep.check_claim_b();
+    assert!(sweep.checks_claim_b(&pairs));
+    let mut again = BTreeSet::new();
+    let verdict = loop {
+        match sweep.next(&pairs) {
+            Next::Try { set, in_full } => {
+                assert!(in_full);
+                sweep.explored_in_full(set.clone());
+                assert!(again.insert(set));
+            }
+            other => break other,
+        }
+    };
+    assert_eq!(verdict, Next::Certified(Tolerance::All));
     assert_eq!(
-        proposed,
-        BTreeSet::from([
-            set([omit("a")]),
-            set([omit("b")]),
-            set([omit("a"), omit("b")])
-        ])
+        again,
+        BTreeSet::from([set([omit("a")]), set([omit("a"), omit("b")])])
     );
-    assert!(sweep.covers_everything(&pairs));
 }
 
 /// A set that was run and is still admissible (its run gave the pair only fragile derivations)

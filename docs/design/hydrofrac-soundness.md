@@ -54,9 +54,9 @@ have regression tests. They are recorded in §17.
 
   A *member view* is the union of what the member's tap emitted. It never shrinks.
 
-  Every run the search explores is checked for both. A certificate claims POST in every run within the bounds
-  (Claim A, §1). It claims no divergence in every such run only where §13 says (Claim B), and the report says which.
-  A label with an empty domain has no POST to check, so its only claim is Claim B (§11).
+  Every run the search explores is checked for both. A certificate claims both in every run within the bounds: POST
+  (Claim A, §1) and no divergence (Claim B, §13). A label with an empty domain has no POST to check, so its only claim
+  is Claim B (§11).
 - **Bounds** (§10). A fault set is *within the bounds* if:
   - it holds at most one crash per node;
   - it crashes at most `max_crashes` nodes, if the check sets that cap;
@@ -692,20 +692,27 @@ bounds for the oracle).
   node by address, and panics unless every searched label is tapped at exactly one node (`hf/observe/tap.rs`, `tap`).
   Two collections labelled on one source line (a helper called twice, a library function instantiated twice) are two
   labels, named `#1`, `#2`, ... (§17, fix 7).
-- **Not checked: local inputs only.** A collection no network delivery can reach. Inside a tick, a node is also fed by
-  whatever feeds that tick's entry points (its `batch`es and `atomic`s, `tick_entries`): if no delivery reaches them
-  the tick never runs, so its constants and cycles are fed by the network too (§17, fix 3).
+- **Local inputs only are checked.** A collection no network delivery can reach is checked like any other: no fault
+  can withhold its inputs, but its members can disagree without any fault (each holds its own id), and the probe
+  sees that (§17, fix 15).
 - **Not checked: scalars.** A labelled singleton, optional or keyed singleton is not checked, even when it folds a
-  checked stream: the specification compares sets of facts, and members agreeing on a stream's set can disagree on a
-  fold of it (a count or a sum over duplicates, any fold that is not idempotent). The IR does not say whether a fold
-  is idempotent (§17, fix 8).
+  checked stream (`EcCollection::covered_by`): the specification compares sets of facts, and members agreeing on a
+  stream's set can disagree on a fold of it (a count or a sum over duplicates, any fold that is not idempotent). The
+  IR does not say whether a fold is idempotent, so a cover is not a proof (§17, fix 8).
+- **Not checked: inside a tick.** A label minted inside a tick: its per-tick contents are not the collection's.
+- **Not checked is not certified.** `Verdict::NotChecked` fails: `Results::holds` is false and `assert_holds` panics
+  ("label ... is not checked"). A user who argues such a label by other means (a G-Set's union is idempotent, so its
+  covering stream's verdict carries over) asserts the labels hydrofrac checks one by one.
 - **Fact identity** (A4): a fact is its element's `bincode` encoding, so a labelled element type must be `Serialize`
   (`hf/observe/tap.rs`, `tap_closure`). A type that is not stops the check with the harness's error, not a verdict
   (`NO_IDENTITY`, re-raised by `program_panic`). `Debug` text or a hash digest, the fallbacks before, could make two
   different facts one and hide a member's missing fact (§17, fix 13). `hydro_std`'s `Durable` is `Serialize` but not
   `Deserialize`, so it still cannot be sent. Two identities can only err one way: equal values with different bytes
   (a `HashSet`'s iteration order, `0.0` and `-0.0`) make two facts of one, which can report a false counterexample
-  but never hide a missing fact.
+  but never hide a missing fact. The other way is assumed away (A4): a `Serialize` that drops data
+  (`#[serde(skip)]`, a lossy custom impl) gives two different values one identity, so members holding values that
+  differ only in the dropped data look like they agree, and a disagreement is hidden. Neither oracle can see it
+  either (both identify facts by `bincode`).
 
 **Claims and proofs.**
 - **Monotone view.** A member's view is the union of its tap's emissions (`hf/spec.rs:45`). A tap emits each record
@@ -729,7 +736,8 @@ bounds for the oracle).
     The label is `Vacuous`, with no search (`hf/check/races_engine.rs`, `check`).
   - **Otherwise** the label is searched for Claim B alone. With no pair, the sweep proposes every set within the
     bounds over the revealed faults, and runs each one in every schedule, without stopping early (`hf/races/sweep.rs`,
-    `next`; `Scope::Any`). The result is a counterexample, a certificate with Claim B certified, or `Budget`.
+    `next`; `Scope::Any`). The result is a counterexample, a certificate (which covers Claim B), or `Budget`. A label
+    with a domain gets the same sweep once Claim A is certified, unless §13 proves Claim B.
   - Brute force checks such labels like any other. A `Vacuous` verdict that some set breaks is a disagreement.
   - **Tested:** `a_fact_only_faults_create_is_checked` (§17, fix 12).
 
@@ -786,19 +794,35 @@ above.
 
 ## 13. Claims A and B
 
-- **Claim A** (§1): POST for every fault set within the bounds and every schedule. Certified by `Certified`.
-- **Claim B**: no divergence on facts outside the domain, for every such fault set and schedule. Certified (`claim_b`,
-  `hf/check/races_engine.rs:519`) when the label is certified, and one of:
-  - **the program is fragile-free.** Every fact under `H` has a robust derivation, which survives no-faults, so by
-    Lemma R it is in the domain. No fact is outside the domain. **Proved**;
-  - **the program is choice-free.** Then it is monotone (A13): a non-monotone operator needs a bounded input, only a
-    tick provides one, and a tick's outside input arrives through a batch, which is a choice. In a monotone program
-    faults only remove facts. Every fact under `H` is also a failure-free fact (its derivation's dependencies exist
-    without faults, and every step is monotone), so it is in the domain. No fact is outside the domain. **Proved**,
-    given A13;
-  - **no early stop, and every set over `U` within the bounds was tried** (`Sweep::covers_everything`, a program with
-    no admissibility rows). Then every `H` maps to a tried set explored in full, and its divergence was checked.
-    **Proved.**
+- **Claim A** (§1): POST for every fault set within the bounds and every schedule.
+- **Claim B**: no divergence on facts outside the domain, for every such fault set and schedule.
+
+`Certified` claims both (`claim_b` in the report is true of every certificate). The sweep first certifies Claim A
+(§1). Then Claim B holds without more runs in two cases:
+- **the program is fragile-free.** Every fact under `H` has a robust derivation, which survives no-faults, so by
+  Lemma R it is in the domain. No fact is outside the domain. **Proved**;
+- **the program is choice-free.** Then it is monotone (A13): a non-monotone operator needs a bounded input, only a
+  tick provides one, and a tick's outside input arrives through a batch, which is a choice. In a monotone program
+  faults only remove facts. Every fact under `H` is also a failure-free fact (its derivation's dependencies exist
+  without faults, and every step is monotone), so it is in the domain. No fact is outside the domain. **Proved**,
+  given A13 and A3 (an impure closure is a choice, §3, so it cannot make a choice-free program compute a new fact).
+
+Otherwise the search checks Claim B (`hf/check/races_engine.rs`, `search_races`; `Sweep::check_claim_b`): the sweep
+starts over from zero crashes and proposes every set within the bounds over the candidates (`Scope::Any`, no pair
+prunes anything), running each in every schedule without stopping early, except sets already run so. A set that was
+only explored until it was pruned is run again: pruning (Lemma R) says the domain's pairs survive it, nothing about
+facts outside the domain. When this sweep concludes, the theorem of §1 applies with no pair pruning anything: every
+`H` within the bounds maps to a set that was run in full (or whose unseen crashes never fire), so every schedule of
+`H` is a schedule of a set whose every run was checked for both POST and divergence. **Proved.** The result is a
+counterexample, a certificate, or `Budget` (the hypothesis budget, not a certificate).
+
+The same holds of panics (§18, "Panics"): a run that panics breaks every label, and the full sweep runs every set.
+
+**Regression:** `review2b_fault_created_divergence_beside_a_robust_fact` (review 2, reviewer B). One label holds a
+constant every member has (robust, the whole domain) and an alarm that only a crash raises at some members. A crash
+of the source kills no derivation of the constant, so Claim A pruned it, and the label was `Certified` with Claim B
+"not certified", which `assert_holds` accepted, while both oracles break it. Now the Claim B sweep runs that crash and
+finds the divergence; both oracles agree.
 
 ## 14. Exploration policies
 
@@ -924,7 +948,8 @@ and fixed structurally:
 3. **Constants inside a tick** (`tick.singleton`, `optional_first_tick`, a tick's `source_iter`).
    - They were robust, with empty lineage, so no fault could kill them. They are emitted in every tick that runs, and
      only if one runs, which depends on the tick's deliveries.
-   - Also, the label planning called such a collection "local inputs only" and did not check it.
+   - Also, the label planning called such a collection "local inputs only" and did not check it (since fix 15 such
+     collections are checked anyway).
    - Now: `tick_constant` is fragile (except a dedup idiom's initial state), the constant exemption no longer covers
      `DeferTick`, and a node inside a tick is fed by whatever feeds the tick's entry points.
    - Regression: `tick_constants_are_fragile` (certified before the fix; omitting the delivery that triggers the tick
@@ -988,6 +1013,14 @@ and fixed structurally:
     used a later copy, and exactness (§6.3) covers omissions too. All five find their counterexample, and both
     oracles agree.
 
+15. **Unchecked labels counted as holding** (review 2, reviewer C). `Results::holds` counted `NotChecked` as
+    holding. In `review_c_local_only_label_that_disagrees_passes_assert_holds` each member labels `[its own id]`: the
+    plan called it "local inputs only" and did not check it, and `assert_holds` passed while the members hold `{0}`,
+    `{1}` and `{2}` with no fault. Now local-only labels are checked (the probe breaks that one, and both oracles
+    agree), and `NotChecked` (scalars, labels inside a tick) fails `holds` and `assert_holds`
+    (`review_c_a_singleton_label_is_not_a_certificate`, `review_c_a_label_inside_a_tick_is_not_a_certificate`).
+    The unused `Verdict::CoveredBy` is gone.
+
 ## 18. Known gaps: what certificates do not cover
 
 - **Harness quiescing.** A `quiesce()` between two inputs removes every interleaving across it
@@ -1009,15 +1042,19 @@ and fixed structurally:
   program's one-schedule sets are exact (§14).
 - **Covering values / aggregates.** `covering_quorum` (ABD, synod) is not trusted, so its labels pay brute-force cost
   and are argued only by exploration.
-- **Claim B for choice-free programs** (§13) rests on A13 (monotonicity from Hydro's types), not on the search.
-  Outside the three certified cases, Claim B is checked only in explored runs, and the report says so.
+- **Claim B for fragile-free and choice-free programs** (§13) rests on Lemma R and A13 (monotonicity from Hydro's
+  types), not on runs. In every other program a certificate's Claim B costs a full sweep: every set within the bounds,
+  in every schedule (§13), which the hypothesis budget may stop (`Budget`, not a certificate).
 - **Trusted code.** `quorum.rs:121-185` (§7), the fragile table's DFIR semantics (§3), the fan-out lowering (§6.1) and
   the simulator's FIFO external-input path (§6.4) are trusted by reading, and checked only by the tests cited.
 - **Impurity behind a listed name** (A3). The purity allowlist trusts names, not their resolution: a user's method
   named like a listed `std` method, or a type whose `Clone`, `PartialEq`, `Hash` or arithmetic is impure, is not
   detected. A closure that calls any unlisted function is treated as impure, so this needs a listed name.
-- **Fact identity** (A4, §11). A custom `Serialize` that drops data (`#[serde(skip)]`) can make two facts one.
-- **Unchecked labels.** Scalars (§11) and collections inside a tick are reported, not checked.
+- **Fact identity** (A4, §11). A `Serialize` that drops data (`#[serde(skip)]`, a lossy custom impl) makes two
+  different values one fact, which can hide a disagreement on the dropped data. Not detected, by the search or the
+  oracles.
+- **Unchecked labels.** Scalars (§11) and collections inside a tick are reported, not checked, and `holds` rejects
+  them: a program with one is never certified as a whole.
 - **Empty domains cost a full enumeration** (§11). Outside fragile-free and choice-free programs, a label with an
   empty domain runs every set within the bounds, in full; the hypothesis budget may stop it (`Budget`, not a
   certificate).
@@ -1028,8 +1065,22 @@ and fixed structurally:
   is argued from the allowlist, not checked.
 - **Stuck ticks are the simulator's semantics.** A tick blocked on a snapshot that never got a value never runs in
   the simulator (A6); a deployment might run it with an empty snapshot. hydrofrac reports what the simulator does.
-- **Panics in pruned sets.** Claim A covers the runs of completed schedules: a set the search prunes is not run, so a
-  program panic only that set would cause is not reported.
+- **Panics.** A run that panics breaks every label, in the search and in both oracles. The search runs a set only if
+  it may break the label, so a certificate claims no panic only by the argument of §13:
+  - **in a program that is neither fragile-free nor choice-free** a certificate needs the Claim B sweep (§13), which
+    runs every set within the bounds in every schedule: every panic within the bounds is found. **Proved**;
+  - **in a fragile-free or choice-free program** every record under a fault set `H` is a record of the failure-free
+    runs (the argument of §13 is about every record, not only the label's facts). Program code panics only in a
+    closure applied to records, and a pure closure (A3; one that is not known pure is a choice, §3) panics on a
+    record wherever it panics on it. So a panic under `H` is a panic without faults, which the probe runs first and
+    reports as a counterexample with no faults. The harness does not branch on what it observes (A8), so it panics
+    under `H` only if it panics without faults. **Argued**, given A3, A8 and A13.
+
+  So a pruned set never hides a panic within the bounds. Not covered: a program whose every label is decided without
+  a run (`Vacuous(SingleMember)`, `NotChecked`) is never run under faults. Regression:
+  `review2b_fault_created_panic_beside_a_robust_fact` (review 2, reviewer B): the label's fact survives a crash that
+  makes the run panic, so the crash was pruned and the label certified, while both oracles break it; the program
+  batches, so the Claim B sweep now runs that crash and reports the panic.
 - **Other order-observed rules.** None remain. The kill rule never reads an observed order (§5), and dead facts use
   only proved literals (§8). The ranks of sequenced broadcasts (§6.4) are read from the probe, but only where the
   proof says every run sends a prefix of the probe's sequence, and every executed run is checked against them. The

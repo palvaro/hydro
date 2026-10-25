@@ -19,7 +19,8 @@ pub struct EcCollection {
     pub op: String,
     /// The cluster the collection lives on.
     pub location: LocationId,
-    /// Whether a network channel feeds it (transitively): only then can a fault withhold it.
+    /// Whether a network channel feeds it (transitively): only then can a fault withhold it. A
+    /// collection fed by none is still checked (its members can disagree without faults).
     pub fed_by_network: bool,
     /// The kind of the collection, as the enumerated IR typed it.
     pub collection_kind: CollectionKind,

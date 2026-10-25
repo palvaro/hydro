@@ -8,9 +8,12 @@
 //!   has no schedule choices) and every crash literal the set touches is proved;
 //! - otherwise every schedule (or the sample), stopping early.
 //!
-//! The label is certified when the hitting-set program has no untried solution over the faults the
-//! runs revealed ([`races::Sweep`]). There is no fallback and no size bound beyond the crash
-//! bound: a pair no robust derivation protects makes the program propose every set.
+//! Claim A (POST) is certified when the hitting-set program has no untried solution over the
+//! faults the runs revealed ([`races::Sweep`]). There is no fallback and no size bound beyond the
+//! crash bound: a pair no robust derivation protects makes the program propose every set. Claim B
+//! (no divergence outside the domain) is then proved for a fragile-free or choice-free program,
+//! and otherwise checked by a second sweep that runs every set within the bounds in full
+//! ([`races::Sweep::check_claim_b`]); only then is the label certified.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -529,6 +532,17 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
                         sites: target.sites.clone(),
                     };
                 }
+                // Claim A holds. Claim B (no divergence outside the domain) holds too in a
+                // fragile-free or choice-free program, where faults create no fact outside the
+                // domain (§13 of docs/design/hydrofrac-soundness.md). Otherwise check it: run
+                // every set within the bounds in full.
+                races::Next::Certified(_)
+                    if !(shape.fragile_free
+                        || shape.choice_free
+                        || sweep.checks_claim_b(&search.pairs.pairs)) =>
+                {
+                    sweep.check_claim_b();
+                }
                 races::Next::Certified(tolerates) => break Verdict::Certified { tolerates },
                 races::Next::Budget => {
                     break Verdict::Budget {
@@ -537,12 +551,8 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
                 }
             }
         };
-        // Claim B (§2): faults create no fact outside the domain in a fragile-free or choice-free
-        // program; otherwise only if every set was run in every schedule.
-        search.notes.claim_b = matches!(verdict, Verdict::Certified { .. })
-            && (shape.fragile_free
-                || shape.choice_free
-                || search.notes.early_stops == 0 && sweep.covers_everything(&search.pairs.pairs));
+        // A certificate covers Claim B too: the loop above checks it before certifying.
+        search.notes.claim_b = matches!(verdict, Verdict::Certified { .. });
         search.stats.races = Some(search.notes);
         search.stats.wall += start.elapsed();
         (verdict, search.stats)

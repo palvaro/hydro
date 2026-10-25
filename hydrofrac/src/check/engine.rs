@@ -214,7 +214,11 @@ struct Failure {
 }
 
 impl Failure {
-    /// A program that panics under injected faults breaks every label.
+    /// A program that panics under injected faults breaks every label. A pruned set never hides
+    /// such a panic within the bounds (docs/design/hydrofrac-soundness.md §18, "Panics"): outside
+    /// fragile-free and choice-free programs the Claim B sweep runs every set, and inside them
+    /// every record under faults is a failure-free record, so a pure closure that panics on it
+    /// panics in the probe.
     fn panic(message: &str, record: Rc<InstanceRecord>) -> Self {
         Failure {
             missing: vec![],
@@ -376,8 +380,6 @@ impl<'c, B: AsyncFnMut(), R: AsyncFnMut()> Engine<'c, B, R> {
         for (i, plan) in plans.iter().enumerate() {
             if let Some(reason) = &plan.not_checked {
                 verdicts[i] = Some((Verdict::NotChecked(reason.clone()), Stats::default()));
-            } else if let Some(by) = plan.covered_by {
-                verdicts[i] = Some((Verdict::CoveredBy(by), Stats::default()));
             } else {
                 match self.members_of(plan.cluster()) {
                     Some(members) if members.len() > 1 => targets.push(Target {
@@ -426,9 +428,7 @@ impl<'c, B: AsyncFnMut(), R: AsyncFnMut()> Engine<'c, B, R> {
                 &lamport_labels,
             );
             let name = label_name(&labels.plans[index]);
-            let line = verdict_line(&Verdict::Counterexample(cex.clone()), &names, |j| {
-                label_name(&labels.plans[j])
-            });
+            let line = verdict_line(&Verdict::Counterexample(cex.clone()), &names);
             let title = format!("{name}: {line}");
             let dir = crate::lamport::claim(crate::lamport::default_dir(&test, &name));
             cex.diagram = crate::lamport::write(&dir, "counterexample", &trace, &title)
