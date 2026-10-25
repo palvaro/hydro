@@ -112,3 +112,96 @@ What the numbers say:
 - `cress/`: the three Cress reports, and `console.txt` with their verdict lines.
 - `earlier/`: the unbounded and `bounded:Member` runs at the same cap, and the calibrations that came out invalid
   before Sedge's probe fix (`invalid_calibrations_before_probe_fix.txt`).
+
+# Later rounds: repeats, boundaries, and two caveats that change how to read them
+
+## Caveat 1: hyperthread siblings (rounds 1 and 2)
+
+This host has 8 physical cores with 2 threads each, and the siblings are cpu *n* and *n* + 8. The four parallel slots
+of rounds 1 and 2 put nodes on cpus 3-4, 7-8, 11-12 and 14-15. Those overlap physically:
+
+- slot A's nodes (3, 4) are the siblings of slot C's nodes (11, 12);
+- slot B's node 7 is the sibling of slot D's node 15.
+
+A CFS quota caps CPU *time*, not work done. A member whose sibling thread is busy (a neighbouring slot in a
+collapsed storm, say) does less per CPU-millisecond. So μ shifted with the neighbours' state: re-calibrations of
+the same slot gave 460–730 rounds/s (`calibration_per_slot/`).
+
+- **Results with a large margin hold.** These are: `per_entry` stuck after 2μ for 5 s at every f, all controls flat,
+  `per_entry3` recovering at f ≥ 3, and `reliable_resend` draining.
+- **Boundary readings from rounds 1 and 2 are not used.** That covers the trigger map and the `per_entry3` flip.
+
+Round 3 uses two SMT-isolated slots: S1 is harness cpu 1 with nodes on 2-3, and S2 is harness cpu 5 with nodes on
+6-7. Their siblings (9-11 and 13-15) are left idle, and cpu 0/8 is used for builds and Cress only. Each slot was
+calibrated 3 times while the other slot ran a collapsing `per_entry` burst (`calibration_smt_isolated/`):
+
+- S1: μ = 654.3, 654.3, 713.5;
+- S2: μ = 713.5, 654.3, 778.1.
+
+Every calibration kept up at 654.3, and none kept up at 848.5. Near 700 the probe's outcome is stochastic: a probe
+near capacity can itself start `per_entry`'s spurious-retry storm. So μ is known to about ±5–9 %, not ±3 %.
+Round 3 sets `--mu` to the slot's own value (S1 654.3, S2 713.5), and pins each boundary to a single slot.
+
+## Caveat 2: the silent-tail rule was changed once, and every run was re-scored
+
+A tail with no in-band report in more than 20 % of its seconds is judged from outside. If the capped nodes' kernel
+writes are at most 50 % of their baseline, the run is COLLAPSED; otherwise it is INVALID ("cannot be read").
+
+Before round 3 the writes were averaged over the whole tail. Now they are averaged over its **second half**, as
+the levels' trend is. The reason: a run that storms on the wire for a while and then goes silent should be judged
+by where it ends up. The change was made in Sedge before the round-3 runs, and every earlier run was re-scored
+with `../relay_broadcast_amplification/rescore_silent.py`:
+
+- 157 trials in all, 29 of them judged through this rule;
+- 4 labels change, all from INVALID to COLLAPSED: `r2_A_pe_f4_m1.5_d1.5_s5` trials 1–3 (whole-tail writes
+  0.51–0.76 against second-half 0.03–0.04), and `r2_A_pe_f4_m2_d0.5_t180_s5` trial 2 (0.63 against 0.01).
+
+## Round 2 (four slots, siblings shared; `runs/r2_*`)
+
+- **`per_entry`, 3 more seeds each at f = 2, 4, 8 (2μ for 5 s): all COLLAPSED, 9 of 9.** Their 9 controls are flat.
+- **`per_entry`, no-trigger controls of 300 s at f = 2 and f = 4:** no excursion. Re-sends were at most 4 in any
+  second (5 in all), nothing was dropped, and unacked peaked at 381 and 167.
+- **`reliable_resend`, 180 s tails:** RECOVERED in every valid run. The backlog drains back to baseline 85–110 s
+  after the trigger (peaks of 163–192 k). The drain time barely depends on f, because re-sends are capped by the
+  pump at about 1.4 k/s, and that cap is the drain rate. One run is INVALID: 2 of 59 534 records were 51–53 ms
+  late.
+
+## Round 3 (SMT-isolated slots; `runs/r3_*`)
+
+**`per_entry`, S2, f = 4, μ = 713.5 (λ = 178), 5 seeds each, with 5-seed controls of matching length:**
+
+| trigger | outcome | in the tail |
+|---|---|---|
+| 1.5μ for 1.5 s | 5 COLLAPSED | silent; writes 2 % of baseline; transport handed 28–29× baseline, 99.9 % dropped |
+| 2μ for 1 s | 5 COLLAPSED | the same |
+| 1.5μ for 1 s | 4 COLLAPSED, 1 RECOVERED | mixed |
+| 2μ for 0.5 s, 60 s tail | 4 COLLAPSED, 1 INVALID | mostly still storming on the wire at 60 s: 93–159 k re-sends/s, writes 0.6–3× |
+| 2μ for 0.5 s, 180 s tail | 2 COLLAPSED, 2 DRAINING, 1 INVALID | see below |
+| controls (0.5, 1, 1.5 and 0.5 s × 180) | flat, 20 of 20 | writes 0.95–1.0×, nothing dropped |
+
+At 2μ for 0.5 s, every seed first goes through a re-send storm **on the wire**, sustained by re-sends alone:
+100–187 k re-sends/s, members writing 2.2–3.7× their baseline bytes to the kernel, and reports still flowing.
+Offered load is a quarter of μ. The storm lasts 30–140 s, then resolves:
+
+- 2 of 5 drain back to baseline (seeds 32 and 33, at about 120 s and 60 s);
+- 3 of 5 fall into the black hole: writes 1–2 % of baseline, the transport handed about 30× baseline, CPU at 100 %
+  (seeds 31, 34 and 35, at about 60, 150 and 150 s).
+
+Seed 35 is INVALID because the second half of its tail still holds about 40 s of storm before the black hole.
+
+**`per_entry3`, S1, μ = 654.3, 2μ for 5 s, 5 seeds per point, with 5-seed controls:**
+
+| f | 3λ/μ (μ = 654) | 60 s tail | 180 s tail |
+|---|---|---|---|
+| 2 | 1.50 | 2 COLLAPSED, 3 DRAINING; all still storming at 60 s (37–43 k re-sends/s, writes 2.0–2.2×) | 5 of 5 drain to baseline by 60–120 s (4 RECOVERED, 1 DRAINING) |
+| 2.22 | 1.35 | 5 DRAINING; still storming at 60 s (4–20 k re-sends/s, writes 1.2–1.7×) | 5 of 5 drain by about 60 s (4 labelled DRAINING on flat tails, 1 RECOVERED) |
+| 2.5 | 1.20 | 4 RECOVERED, 1 DRAINING on a flat trace | — |
+| 2.73 | 1.10 | recovered (2 labelled DRAINING on flat traces) | — |
+| 3 | 1.00 | recovered (1 labelled DRAINING on a flat trace) | — |
+| 3.33 | 0.90 | recovered (3 labelled DRAINING on flat traces) | — |
+
+All 40 controls are flat.
+
+- **With a retry limit of 3, the storm is a transient that ends.** It never got stuck in a 180 s tail on this slot.
+- In a 60 s tail, storms are still present at 3λ/μ ≥ 1.35 and gone at ≤ 1.20. With μ uncertain by up to 19 %
+  (654–778), that flip lies at **3λ/μ ≈ 1.0–1.35**.
