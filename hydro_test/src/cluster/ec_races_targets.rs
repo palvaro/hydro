@@ -61,7 +61,6 @@ fn verdict(cross: &CrossCheck, v: &Verdict) -> String {
         Verdict::Budget { tolerates } => format!("BUDGET (tolerates {tolerates:?})"),
         Verdict::Vacuous(r) => format!("vacuous ({r:?})"),
         Verdict::NotChecked(r) => format!("not checked ({r:?})"),
-        Verdict::CoveredBy(i) => format!("covered by label #{i}"),
     }
 }
 

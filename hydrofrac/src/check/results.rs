@@ -100,21 +100,22 @@ pub enum Verdict {
         /// The program's schedule choices ([`Results::choices`]).
         sites: Vec<ChoiceSite>,
     },
-    /// The generated specification does not apply to the collection.
+    /// The generated specification does not apply to the collection: **not a certificate**
+    /// (members may disagree on it; [`Results::holds`] rejects it).
     NotChecked(NotCheckedReason),
-    /// A labelled scalar checked at the labelled stream it aggregates: the label with this
-    /// index, whose verdict is this one's.
-    CoveredBy(usize),
 }
 
 impl Verdict {
     /// Whether the verdict is not a certificate of a label that needs checking: a
-    /// counterexample, an exhausted budget, or a sampled search (what [`Results::assert_holds`]
-    /// rejects).
+    /// counterexample, an exhausted budget, a sampled search, or a label the specification
+    /// does not check (what [`Results::assert_holds`] rejects).
     pub fn fails(&self) -> bool {
         matches!(
             self,
-            Verdict::Counterexample(_) | Verdict::Budget { .. } | Verdict::Exhausted { .. }
+            Verdict::Counterexample(_)
+                | Verdict::Budget { .. }
+                | Verdict::Exhausted { .. }
+                | Verdict::NotChecked(_)
         )
     }
 
@@ -250,17 +251,34 @@ impl Results {
         first
     }
 
-    /// Whether every label is certified (or needs no check): no counterexample, no exhausted
-    /// budget, and no label whose sampled search merely found nothing ([`Verdict::Exhausted`]).
+    /// Whether every label is certified (or vacuous): no counterexample, no exhausted budget,
+    /// no label whose sampled search merely found nothing ([`Verdict::Exhausted`]), and no label
+    /// the specification does not check ([`Verdict::NotChecked`]: a scalar, or a collection
+    /// inside a tick, on which members may disagree).
     pub fn holds(&self) -> bool {
         !self.labels.iter().any(|l| l.verdict.fails())
     }
 
     /// Panics with the report unless every label holds (see [`Self::holds`]). A sampled search
     /// certifies nothing, so with [`crate::EcCheck::sample_schedules`] use
-    /// [`Self::assert_no_counterexample`].
+    /// [`Self::assert_no_counterexample`]. A label that is not checked is not certified: assert
+    /// the labels that are, one by one ([`Self::label`]).
     #[track_caller]
     pub fn assert_holds(&self) {
+        let unchecked = self.labels.iter().find_map(|l| match &l.verdict {
+            Verdict::NotChecked(reason) => Some((l, reason)),
+            _ => None,
+        });
+        if let Some((l, reason)) = unchecked
+            && self.labels.iter().all(|l| {
+                !l.verdict.fails() || matches!(l.verdict, Verdict::NotChecked(_))
+            })
+        {
+            panic!(
+                "hydrofrac: label `{}` is not checked ({reason}), so it is not certified\n{self}",
+                l.name()
+            );
+        }
         if let Some(l) = self
             .labels
             .iter()
@@ -348,12 +366,8 @@ fn crashes(n: usize) -> String {
     plural(n, "crash", "crashes")
 }
 
-/// The verdict line of a label, naming faults with `names` and other labels with `label`.
-pub(crate) fn verdict_line(
-    verdict: &Verdict,
-    names: &ReportNames<'_>,
-    label: impl Fn(usize) -> String,
-) -> String {
+/// The verdict line of a label, naming faults with `names`.
+pub(crate) fn verdict_line(verdict: &Verdict, names: &ReportNames<'_>) -> String {
     match verdict {
         Verdict::Certified {
             tolerates: Tolerance::All,
@@ -405,8 +419,7 @@ pub(crate) fn verdict_line(
                 site_list(sites)
             )
         }
-        Verdict::NotChecked(reason) => format!("not checked: {reason}"),
-        Verdict::CoveredBy(j) => format!("covered by [{j}] {}", label(*j)),
+        Verdict::NotChecked(reason) => format!("not checked: {reason}; not a certificate"),
     }
 }
 
@@ -427,11 +440,7 @@ impl Results {
             kind_name(&c.collection_kind),
             c.label
         )?;
-        let line = verdict_line(&l.verdict, names, |j| {
-            self.labels
-                .get(j)
-                .map_or_else(|| format!("label {j}"), |o| o.plan.collection.display_name().to_owned())
-        });
+        let line = verdict_line(&l.verdict, names);
         writeln!(f, ": {line}")?;
         if let Verdict::Counterexample(cx) = &l.verdict {
             let cluster = self.names.label(l.plan.cluster()).unwrap_or("member");

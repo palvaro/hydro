@@ -156,7 +156,7 @@ fn a_closed_broadcast_is_one_searched_label_named_after_its_binding() {
 
 #[cfg(stageleft_runtime)]
 #[test]
-fn a_label_with_local_inputs_only_is_not_checked() {
+fn a_label_with_local_inputs_only_is_checked() {
     let mut flow = FlowBuilder::new();
     let members = flow.cluster::<()>();
     let local = members
@@ -168,7 +168,10 @@ fn a_label_with_local_inputs_only_is_not_checked() {
 
     let plans = plans_of(flow);
     let (_, plan) = find(&plans, "local");
-    assert_eq!(plan.not_checked, Some(NotCheckedReason::LocalInputsOnly));
+    // No fault can withhold its inputs, but members can still disagree on it without any fault
+    // (`review_c_local_only_label_that_disagrees_passes_assert_holds`), so it is checked.
+    assert!(!plan.collection.fed_by_network, "{plan:?}");
+    assert!(plan.is_searched(), "{plan:?}");
 }
 
 /// Uniform reliable broadcast delivers through a closure that reads the quorum's state by
@@ -219,7 +222,6 @@ fn gossip_state_is_not_covered_by_the_stream_it_folds() {
     assert!(all_elements.is_searched());
     let (_, state) = find(&plans, "gset_state");
     assert_eq!(state.collection.covered_by, Some(all));
-    assert_eq!(state.covered_by, None);
     assert!(matches!(state.not_checked, Some(NotCheckedReason::NotAStream(_))), "{state:?}");
     assert!(!state.is_searched());
     for hop in ["initial", "echo"] {
@@ -347,7 +349,6 @@ fn an_overwritten_singleton_is_not_tapped() {
         Some(NotCheckedReason::NotAStream("Singleton".to_owned())),
         "an overwritten singleton must not be checked by a union view: {plan:?}"
     );
-    assert_eq!(plan.covered_by, None);
     assert_eq!(ports_of(&labels, label).count(), 0);
     // The broadcast in the same statement is a label of its own (a stream, so it is checked),
     // and it is the only one tapped.

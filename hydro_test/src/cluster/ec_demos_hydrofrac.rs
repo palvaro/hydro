@@ -264,7 +264,8 @@ fn labels_in<'r>(results: &'r Results, file: &'r str) -> impl Iterator<Item = &'
 /// The verdict a label is judged by here: its own, or for a scalar folding a labelled stream
 /// (which hydrofrac does not check: agreeing streams can still fold to different values) the
 /// verdict of that stream. For an idempotent fold such as a G-Set's union, agreeing streams do
-/// fold to the same value, by reading.
+/// fold to the same value, by reading. That reading is this test's argument, not hydrofrac's:
+/// hydrofrac reports the scalar `NotChecked`, which [`Results::holds`] rejects, cover or not.
 #[cfg(stageleft_runtime)]
 fn effective<'r>(results: &'r Results, label: &'r LabelResult) -> &'r Verdict {
     match (&label.verdict, label.plan.collection.covered_by) {
@@ -405,6 +406,10 @@ fn ec_demo_g_set_gossip_certifies() {
             .filter(|l| l.plan.collection.covered_by.is_some())
             .collect();
         assert_eq!(set.len(), 1, "live: {live}\n{results}");
+        assert!(
+            matches!(set[0].verdict, Verdict::NotChecked(_)) && set[0].verdict.fails(),
+            "hydrofrac itself certifies nothing about the G-Set (live: {live})\n{results}"
+        );
         assert!(
             exhausted(effective(&results, set[0]), Tolerance::All),
             "live: {live}\n{results}"

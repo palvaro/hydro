@@ -598,20 +598,27 @@ bounds for the oracle).
   node by address, and panics unless every searched label is tapped at exactly one node (`hf/observe/tap.rs`, `tap`).
   Two collections labelled on one source line (a helper called twice, a library function instantiated twice) are two
   labels, named `#1`, `#2`, ... (§17, fix 7).
-- **Not checked: local inputs only.** A collection no network delivery can reach. Inside a tick, a node is also fed by
-  whatever feeds that tick's entry points (its `batch`es and `atomic`s, `tick_entries`): if no delivery reaches them
-  the tick never runs, so its constants and cycles are fed by the network too (§17, fix 3).
+- **Local inputs only are checked.** A collection no network delivery can reach is checked like any other: no fault
+  can withhold its inputs, but its members can disagree without any fault (each holds its own id), and the probe
+  sees that (§17, fix 14).
 - **Not checked: scalars.** A labelled singleton, optional or keyed singleton is not checked, even when it folds a
-  checked stream: the specification compares sets of facts, and members agreeing on a stream's set can disagree on a
-  fold of it (a count or a sum over duplicates, any fold that is not idempotent). The IR does not say whether a fold
-  is idempotent (§17, fix 8).
+  checked stream (`EcCollection::covered_by`): the specification compares sets of facts, and members agreeing on a
+  stream's set can disagree on a fold of it (a count or a sum over duplicates, any fold that is not idempotent). The
+  IR does not say whether a fold is idempotent, so a cover is not a proof (§17, fix 8).
+- **Not checked: inside a tick.** A label minted inside a tick: its per-tick contents are not the collection's.
+- **Not checked is not certified.** `Verdict::NotChecked` fails: `Results::holds` is false and `assert_holds` panics
+  ("label ... is not checked"). A user who argues such a label by other means (a G-Set's union is idempotent, so its
+  covering stream's verdict carries over) asserts the labels hydrofrac checks one by one.
 - **Fact identity** (A4): a fact is its element's `bincode` encoding, so a labelled element type must be `Serialize`
   (`hf/observe/tap.rs`, `tap_closure`). A type that is not stops the check with the harness's error, not a verdict
   (`NO_IDENTITY`, re-raised by `program_panic`). `Debug` text or a hash digest, the fallbacks before, could make two
   different facts one and hide a member's missing fact (§17, fix 13). `hydro_std`'s `Durable` is `Serialize` but not
   `Deserialize`, so it still cannot be sent. Two identities can only err one way: equal values with different bytes
   (a `HashSet`'s iteration order, `0.0` and `-0.0`) make two facts of one, which can report a false counterexample
-  but never hide a missing fact.
+  but never hide a missing fact. The other way is assumed away (A4): a `Serialize` that drops data
+  (`#[serde(skip)]`, a lossy custom impl) gives two different values one identity, so members holding values that
+  differ only in the dropped data look like they agree, and a disagreement is hidden. Neither oracle can see it
+  either (both identify facts by `bincode`).
 
 **Claims and proofs.**
 - **Monotone view.** A member's view is the union of its tap's emissions (`hf/spec.rs:45`). A tap emits each record
@@ -849,7 +856,8 @@ and fixed structurally:
 3. **Constants inside a tick** (`tick.singleton`, `optional_first_tick`, a tick's `source_iter`).
    - They were robust, with empty lineage, so no fault could kill them. They are emitted in every tick that runs, and
      only if one runs, which depends on the tick's deliveries.
-   - Also, the label planning called such a collection "local inputs only" and did not check it.
+   - Also, the label planning called such a collection "local inputs only" and did not check it (since fix 14 such
+     collections are checked anyway).
    - Now: `tick_constant` is fragile (except a dedup idiom's initial state), the constant exemption no longer covers
      `DeferTick`, and a node inside a tick is fed by whatever feeds the tick's entry points.
    - Regression: `tick_constants_are_fragile` (certified before the fix; omitting the delivery that triggers the tick
@@ -901,6 +909,14 @@ and fixed structurally:
     after it sends `2` to one member, leaves the other two without `2`, yet the check certified the label (with
     Claim B). Now a labelled type must be `Serialize` (§11).
 
+14. **Unchecked labels counted as holding** (review 2, reviewer C). `Results::holds` counted `NotChecked` as
+    holding. In `review_c_local_only_label_that_disagrees_passes_assert_holds` each member labels `[its own id]`: the
+    plan called it "local inputs only" and did not check it, and `assert_holds` passed while the members hold `{0}`,
+    `{1}` and `{2}` with no fault. Now local-only labels are checked (the probe breaks that one, and both oracles
+    agree), and `NotChecked` (scalars, labels inside a tick) fails `holds` and `assert_holds`
+    (`review_c_a_singleton_label_is_not_a_certificate`, `review_c_a_label_inside_a_tick_is_not_a_certificate`).
+    The unused `Verdict::CoveredBy` is gone.
+
 ## 18. Known gaps: what certificates do not cover
 
 - **Harness quiescing.** A `quiesce()` between two inputs removes every interleaving across it
@@ -930,8 +946,11 @@ and fixed structurally:
 - **Impurity behind a listed name** (A3). The purity allowlist trusts names, not their resolution: a user's method
   named like a listed `std` method, or a type whose `Clone`, `PartialEq`, `Hash` or arithmetic is impure, is not
   detected. A closure that calls any unlisted function is treated as impure, so this needs a listed name.
-- **Fact identity** (A4, §11). A custom `Serialize` that drops data (`#[serde(skip)]`) can make two facts one.
-- **Unchecked labels.** Scalars (§11) and collections inside a tick are reported, not checked.
+- **Fact identity** (A4, §11). A `Serialize` that drops data (`#[serde(skip)]`, a lossy custom impl) makes two
+  different values one fact, which can hide a disagreement on the dropped data. Not detected, by the search or the
+  oracles.
+- **Unchecked labels.** Scalars (§11) and collections inside a tick are reported, not checked, and `holds` rejects
+  them: a program with one is never certified as a whole.
 - **Empty domains cost a full enumeration** (§11). Outside fragile-free and choice-free programs, a label with an
   empty domain runs every set within the bounds, in full; the hypothesis budget may stop it (`Budget`, not a
   certificate).
