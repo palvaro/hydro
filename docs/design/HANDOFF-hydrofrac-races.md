@@ -30,7 +30,7 @@ Details: `hydrofrac-races.md` (§2 the claim, §4 the mechanism, §11 results, �
 | branch | tip | what |
 |---|---|---|
 | `hydrofrac-races` | the commit adding this file | **The work.** Base: lean + races engine + review fixes (B) + harness discipline (D) + this file |
-| `hydrofrac-races-wip-oracle2` | cb5b07d1e1 | WIP second oracle, on dd5c4d05a5, **not merged** (see §4) |
+| `hydrofrac-races-wip-oracle2` | cb5b07d1e1 | WIP second oracle, on dd5c4d05a5; **merged** into `hydrofrac-races` as 752079ddfb |
 | `hydrofrac-races-wip-soundness` | 1171c0137d | worker B's review fixes alone (merged into `hydrofrac-races`) |
 | `hydrofrac-races-wip-harness` | 14b674c97a | worker N's item D alone, on dd5c4d05a5 (merged into `hydrofrac-races`) |
 | `hydrofrac-lite-lean` | 58d0b3bcbf | **Retired** baseline, UNSOUND: S1 and S2 below |
@@ -72,10 +72,10 @@ Status: **fixed+tested** (named test), **fixed untested**, **documented only**, 
 | R3-F1 | **FATAL.** Collections labelled on the same source line were merged into one label, masking a member's missing fact | fixed+tested `one_labelling_line_twice_is_two_labels`. Labels are keyed by IR node; the tap asserts one node per label |
 | R3-F2 | **FATAL.** `BOLERO_RANDOM_TEST_TIME_MS` silently truncates "exhaustive" runs in both the search and brute force | fixed+tested `a_time_bounded_exhaustive_run_is_refused`. Both refuse to run when it is set. Other bolero limits are NOT CHECKED |
 | R3-F3 | Fact identity falls back to `Debug` text or a 64-bit hash for non-`Serialize` types | fixed+tested `a_labelled_type_without_serialize_is_refused` (a false certificate before: `Rc<dyn Any>` facts all read `Any { .. }`). Labelled types must be `Serialize`; `Durable` is now `Serialize` (still not `Deserialize`) |
-| R3-F4 | Covered scalars inherited the stream's certificate; count/sum can diverge while sets agree | fixed: scalars are never covered (NotChecked). Tested in hydrofrac/hydro_std; the hydro_test `effective` change is untested |
+| R3-F4 | Covered scalars inherited the stream's certificate; count/sum can diverge while sets agree | fixed: scalars are never covered (NotChecked). Tested in hydrofrac/hydro_std; the hydro_test `effective` change passes `ec_demo_g_set_gossip_certifies` and `_all_labels` (closed and live: the G-Set is `NotChecked`, and its stream `all_elements` finds no counterexample under any crash set on sampled schedules) |
 | R3-F5 | Empty domain gives Vacuous without a search; facts that appear only under faults are never checked | fixed+tested `a_fact_only_faults_create_is_checked`: `Vacuous` only in fragile-free or choice-free programs (§13 proves no fact exists); otherwise the label is searched for Claim B over every set within the bounds; brute force no longer drops such labels, and refutes a breakable `Vacuous` |
 | R3-F6/F7/F8 | §15 shared components; the oracle's ≤2-fault limit; the missing nodes−1 bound; omission drops every content-identical copy; heal/timer wording; panics in pruned sets; ABD-KV is an exploration gap | documented (§15, §18) |
-| oracle 2 | A second brute force sharing as little as possible: plain taps, no provenance rewrite, one output per collection | **in progress**, branch `hydrofrac-races-wip-oracle2`. 92/143 tests passed before the move, 0 failed, no disagreement on 17 brute tests; its planted-bug test has not run. To merge: `SimFlow::try_fork` must copy `refuse_sim_faults` (marked `// merge:`), and its `CrossCheck` changes must be reconciled in `brute_force.rs` |
+| oracle 2 | A second brute force sharing as little as possible: plain taps, no provenance rewrite, one output per collection | **merged** in 752079ddfb (`hydrofrac/src/check/oracle2.rs`); runs in every `EcCheck::cross_check` and reports its disagreements prefixed `oracle 2:`. `SimFlow::try_fork` copies `refuse_sim_faults`, and the `CrossCheck` changes are reconciled in `brute_force.rs` |
 
 ## 5. Item D: harness discipline (merged)
 
@@ -105,7 +105,7 @@ Status: **fixed+tested** (named test), **fixed untested**, **documented only**, 
 
 ## 6. Queued (in order)
 
-1. Merge oracle 2; run it over every cross-checked program.
+1. ~~Merge oracle 2~~ (done, 752079ddfb); run it over every cross-checked program.
 2. Close R3-F3 (require `Serialize` for labelled types) and R1-F4/F5 wording.
 3. **Second review round:** fresh adversarial reviewers on the fixed code.
 4. **C:**

@@ -261,6 +261,10 @@ where
                           .or_insert_with(HashSet::new)
                           .insert(attestor);
                   }
+                  #[expect(
+                      clippy::disallowed_methods,
+                      reason = "`reached` only feeds `flat_map_unordered`, a `NoOrder` stream"
+                  )]
                   let reached: Vec<_> = active_ids_ref
                       .keys()
                       .filter(|fact| {
@@ -398,10 +402,11 @@ where
 
 /// Request-scoped covering quorum with bounded history.
 ///
-/// `active` opens a unique request and carries the metadata needed after phase
-/// 1. At quorum, the aggregate and metadata are emitted together and all
+/// `active` opens a unique request and carries the metadata needed after
+/// phase 1. At quorum, the aggregate and metadata are emitted together and all
 /// per-request state is removed. Late replies are ignored because completed
 /// request IDs are never reused.
+#[expect(clippy::type_complexity, reason = "staged stream signature")]
 pub fn covering_quorum_retiring<'a, K, M, X, L, L2>(
     threshold: usize,
     active: Stream<(K, M), L, Unbounded, NoOrder, ExactlyOnce>,
@@ -464,6 +469,10 @@ where
                         .entry(responder)
                         .or_insert(payload);
                 }
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "`reached` only feeds `flat_map_unordered`, a `NoOrder` stream"
+                )]
                 let reached: Vec<_> = active_ref
                     .keys()
                     .filter(|key| {
@@ -475,7 +484,12 @@ where
                 for key in reached {
                     let responders = pending_ref.remove(&key).unwrap_or_default();
                     let mut max = None;
-                    for payload in responders.values().flatten() {
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "max by `Ts`, which is unique per writer: order-independent"
+                    )]
+                    let payloads = responders.values().flatten();
+                    for payload in payloads {
                         let dominated = match max.as_ref() {
                             Some((ts, _)) => ts < &payload.0,
                             None => true,

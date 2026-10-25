@@ -119,7 +119,7 @@ fn abd_kv_two_writes_failure_free_completion() {
         hydro_lang::sim::compiled::quiesce().await;
         let got: Vec<(u64, (u32, Ts))> = done.collect_sorted(0).await;
         let run = RUNS.fetch_add(1, Ordering::Relaxed) + 1;
-        if run % 20_000 == 0 {
+        if run.is_multiple_of(20_000) {
             eprintln!(
                 "progress: {run} schedules, incomplete {}, write 1 missing {}, write 2 missing {}",
                 INCOMPLETE.load(Ordering::Relaxed),

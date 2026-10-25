@@ -544,7 +544,7 @@ pub(super) fn apply_dynamic_membership(
             __membership_recv
         }};
 
-        *expr = syn::Expr::from(hook_block).into();
+        *expr = hook_block.into();
     };
 
     let mut seen = HashMap::new();

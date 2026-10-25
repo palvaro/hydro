@@ -35,7 +35,7 @@ mod tests {
     /// logs the survey already writes.
     fn dump_table(title: &str, table: &[BufferAdmissions]) {
         let path = std::env::var("HYDRO_PROVENANCE_DUMP")
-            .unwrap_or_else(|_| "target/provenance_dump.txt".to_string());
+            .unwrap_or_else(|_| "target/provenance_dump.txt".to_owned());
         let _ = std::fs::create_dir_all("target");
         let Ok(mut out) = std::fs::OpenOptions::new()
             .create(true)
@@ -47,9 +47,8 @@ mod tests {
         let _ = writeln!(out, "== buffer table: {title}");
         let _ = writeln!(
             out,
-            "{:<10} {:<12} {:>4}->{:<4} {:>4} {:>5} {:>5} {:>5}  {:<10} {:<8} {}",
-            "kind", "name", "send", "recv", "adm", "novel", "react", "redun", "growth", "gate",
-            "verdict"
+            "{:<10} {:<12} {:>4}->{:<4} {:>4} {:>5} {:>5} {:>5}  {:<10} {:<8} verdict",
+            "kind", "name", "send", "recv", "adm", "novel", "react", "redun", "growth", "gate"
         );
         for b in table {
             let verdict = if !b.re_admits() {
@@ -66,8 +65,14 @@ mod tests {
                 "{:<10} {:<12} {:>4}->{:<4} {:>4} {:>5} {:>5} {:>5}  {:<10} {:<8} {}",
                 format!("{:?}", b.id.kind),
                 b.id.name,
-                b.id.channel.0.map(|m| m.to_string()).unwrap_or("-".into()),
-                b.id.channel.2.map(|m| m.to_string()).unwrap_or("-".into()),
+                b.id.channel
+                    .0
+                    .map(|m| m.to_string())
+                    .unwrap_or_else(|| "-".into()),
+                b.id.channel
+                    .2
+                    .map(|m| m.to_string())
+                    .unwrap_or_else(|| "-".into()),
                 b.admissions,
                 b.novel,
                 b.reactivated,
@@ -112,8 +117,8 @@ mod tests {
         // completion but its lineage is coarse queue state, so it re-admits without a request-id
         // gate too — recorded, but the queue is the buffer we care about.
         let mut gates = BTreeMap::new();
-        gates.insert("requests".to_string(), Gate::Absent);
-        gates.insert("responses".to_string(), Gate::Absent);
+        gates.insert("requests".to_owned(), Gate::Absent);
+        gates.insert("responses".to_owned(), Gate::Absent);
 
         flow.sim()
             .with_provenance()
@@ -199,7 +204,7 @@ mod tests {
 
         // The frontier cycle carries an `anti_join` gate against the known set.
         let mut gates = BTreeMap::new();
-        gates.insert("output".to_string(), Gate::Present);
+        gates.insert("output".to_owned(), Gate::Present);
 
         flow.sim()
             .with_provenance()

@@ -394,10 +394,7 @@ impl<T: Clone + Eq, ClusterTag> DecisionState<T, ClusterTag> {
             TranscriptMsg::AcceptAck { ballot, slot, from } => {
                 // Insert sender into ack_sets[(slot, ballot)].
                 // HashSet::insert is naturally idempotent.
-                let ack_set = self
-                    .ack_sets
-                    .entry((slot, ballot))
-                    .or_insert_with(HashSet::new);
+                let ack_set = self.ack_sets.entry((slot, ballot)).or_default();
                 ack_set.insert(from);
 
                 // Check if quorum reached and slot not already committed.
@@ -625,6 +622,10 @@ impl<T: Clone + Eq, ClusterTag> MessageGenState<T, ClusterTag> {
     ///
     /// Used when emitting a Promise message to report previously-accepted state
     /// to the candidate.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a Promise's entries are merged per slot by max ballot, so their order is free"
+    )]
     fn accepted_entries(&self) -> Vec<(Slot, Ballot, T)> {
         self.accepted
             .iter()
@@ -711,7 +712,7 @@ impl<T: Clone + Eq, ClusterTag> MessageGenState<T, ClusterTag> {
                         };
                         self.promises_received
                             .entry(*ballot)
-                            .or_insert_with(Vec::new)
+                            .or_default()
                             .push(promise);
 
                         // Check if quorum reached and phase1 not already complete
@@ -735,7 +736,7 @@ impl<T: Clone + Eq, ClusterTag> MessageGenState<T, ClusterTag> {
                                 for (slot, accepted_ballot, value) in p.accepted.iter() {
                                     let entry = recovery_slots
                                         .entry(*slot)
-                                        .or_insert((*accepted_ballot, value.clone()));
+                                        .or_insert_with(|| (*accepted_ballot, value.clone()));
                                     if *accepted_ballot > entry.0 {
                                         *entry = (*accepted_ballot, value.clone());
                                     }
@@ -831,7 +832,7 @@ impl<T: Clone + Eq, ClusterTag> MessageGenState<T, ClusterTag> {
                 // emitted. The proposer must count itself toward the quorum.
                 outbound.push(TranscriptMsg::Promise {
                     ballot: new_ballot,
-                    from: me.clone(),
+                    from: me,
                     accepted: self.accepted_entries(),
                 });
             }
@@ -1366,7 +1367,6 @@ mod tests {
                         from: test_member(member),
                         accepted: accepted
                             .into_iter()
-                            .map(|(slot, bal, val)| (slot, bal, val))
                             .collect(),
                     })
                     .boxed(),
@@ -1427,7 +1427,6 @@ mod tests {
                         from: test_member(member),
                         accepted: accepted
                             .into_iter()
-                            .map(|(slot, bal, val)| (slot, bal, val))
                             .collect(),
                     })
                     .boxed(),
@@ -1547,7 +1546,7 @@ mod tests {
                 TranscriptMsg::Accept {
                     ballot: 1,
                     slot: 0,
-                    value: "x".to_string(),
+                    value: "x".to_owned(),
                 },
                 quorum,
             );
@@ -1576,7 +1575,7 @@ mod tests {
                 TranscriptMsg::Accept {
                     ballot: 1,
                     slot: 0,
-                    value: "x".to_string(),
+                    value: "x".to_owned(),
                 },
                 quorum,
             );
@@ -1608,7 +1607,7 @@ mod tests {
                 TranscriptMsg::Accept {
                     ballot: 1,
                     slot: 0,
-                    value: "x".to_string(),
+                    value: "x".to_owned(),
                 },
                 quorum,
             );
@@ -1625,7 +1624,7 @@ mod tests {
                 TranscriptMsg::Accept {
                     ballot: 1,
                     slot: 0,
-                    value: "y".to_string(),
+                    value: "y".to_owned(),
                 },
                 quorum,
             );
@@ -1673,7 +1672,7 @@ mod tests {
             }
 
             // Shuffle the messages using the random seed for a true permutation
-            let mut shuffled = msgs.clone();
+            let mut shuffled = msgs;
             let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
             shuffled.shuffle(&mut rng);
 
@@ -1902,6 +1901,7 @@ mod tests {
             );
 
             // For each committed slot, values must agree
+            #[expect(clippy::disallowed_methods, reason = "every slot is checked; order is free")]
             for slot in state1.committed_slots.iter() {
                 let entry1 = state1.committed_log.iter().find(|e| e.slot == *slot);
                 let entry2 = state2.committed_log.iter().find(|e| e.slot == *slot);
@@ -2121,8 +2121,8 @@ mod tests {
             let output2 = state.process_tick(
                 &[],
                 false,
-                vec!["request1".to_string(), "request2".to_string()],
-                me.clone(),
+                vec!["request1".to_owned(), "request2".to_owned()],
+                me,
                 member_index,
                 cluster_size,
             );
@@ -2249,7 +2249,7 @@ mod tests {
                 TranscriptMsg::Promise {
                     ballot,
                     from: test_member(1),
-                    accepted: vec![(slot, low_ballot, low_value.clone())],
+                    accepted: vec![(slot, low_ballot, low_value)],
                 },
                 TranscriptMsg::Promise {
                     ballot,
@@ -2412,7 +2412,7 @@ mod tests {
             let accept = TranscriptMsg::Accept {
                 ballot: stale_ballot,
                 slot,
-                value: value.clone(),
+                value,
             };
 
             let output = state.process_tick(
@@ -2465,7 +2465,7 @@ mod tests {
             TranscriptMsg::Accept {
                 ballot: 1,
                 slot: 0,
-                value: "hello".to_string(),
+                value: "hello".to_owned(),
             },
             quorum,
         );
@@ -2502,7 +2502,7 @@ mod tests {
             TranscriptMsg::Accept {
                 ballot: 1,
                 slot: 0,
-                value: "x".to_string(),
+                value: "x".to_owned(),
             },
             quorum,
         );
@@ -2529,7 +2529,7 @@ mod tests {
             TranscriptMsg::Accept {
                 ballot: 1,
                 slot: 1,
-                value: "second".to_string(),
+                value: "second".to_owned(),
             },
             quorum,
         );
@@ -2559,7 +2559,7 @@ mod tests {
             TranscriptMsg::Accept {
                 ballot: 1,
                 slot: 0,
-                value: "first".to_string(),
+                value: "first".to_owned(),
             },
             quorum,
         );
@@ -2597,7 +2597,7 @@ mod tests {
             TranscriptMsg::Accept {
                 ballot: 1,
                 slot: 0,
-                value: "x".to_string(),
+                value: "x".to_owned(),
             },
             quorum,
         );
@@ -2744,7 +2744,7 @@ mod tests {
             TranscriptMsg::Accept {
                 ballot: 1,
                 slot: 0,
-                value: "a".to_string(),
+                value: "a".to_owned(),
             },
             quorum,
         );
@@ -2771,7 +2771,7 @@ mod tests {
             TranscriptMsg::Accept {
                 ballot: 1,
                 slot: 1,
-                value: "b".to_string(),
+                value: "b".to_owned(),
             },
             quorum,
         );
@@ -2837,7 +2837,7 @@ mod tests {
         let output = state.process_tick(
             &[],
             false,
-            vec!["req1".to_string(), "req2".to_string()],
+            vec!["req1".to_owned(), "req2".to_owned()],
             me,
             0,
             3,
@@ -2875,7 +2875,7 @@ mod tests {
     fn msggen_higher_ballot_prepare_emits_promise() {
         let mut state = MessageGenState::<String, TestCluster>::new();
         state.max_promised = 3;
-        state.accepted.insert(0, (2, "old_val".to_string()));
+        state.accepted.insert(0, (2, "old_val".to_owned()));
         let me = test_member(0);
 
         let prepare = TranscriptMsg::Prepare {
@@ -2925,7 +2925,7 @@ mod tests {
         state.current_round = 1;
         let ballot = make_ballot(1, member_index, cluster_size); // = 3
         state.max_promised = ballot;
-        state.pending_requests.push_back("proposal_1".to_string());
+        state.pending_requests.push_back("proposal_1".to_owned());
 
         // Quorum = 2 promises needed
         let promises = vec![
@@ -2981,7 +2981,7 @@ mod tests {
         let stale_accept = TranscriptMsg::Accept {
             ballot: 5,
             slot: 0,
-            value: "stale".to_string(),
+            value: "stale".to_owned(),
         };
         let output = state.process_tick(&[stale_accept], false, vec![], me, 0, 3);
 
@@ -3020,13 +3020,13 @@ mod tests {
         let accept = TranscriptMsg::Accept {
             ballot: 3,
             slot: 0,
-            value: "x".to_string(),
+            value: "x".to_owned(),
         };
         let _ = state.process_tick(&[accept], false, vec![], me.clone(), 1, 3);
 
         // Window 2: election timer fires. Because leader activity was observed,
         // the follower must NOT campaign.
-        let out = state.process_tick(&[], true, vec![], me.clone(), 1, 3);
+        let out = state.process_tick(&[], true, vec![], me, 1, 3);
 
         let prepares: Vec<_> = out
             .outbound
@@ -3050,7 +3050,7 @@ mod tests {
         let me = test_member(1);
 
         // No transcript activity at all; election timer fires → must campaign.
-        let out = state.process_tick(&[], true, vec![], me.clone(), 1, 3);
+        let out = state.process_tick(&[], true, vec![], me, 1, 3);
 
         let prepares: Vec<_> = out
             .outbound
@@ -3078,7 +3078,7 @@ mod tests {
         let accept = TranscriptMsg::Accept {
             ballot: 3,
             slot: 0,
-            value: "x".to_string(),
+            value: "x".to_owned(),
         };
         let _ = state.process_tick(&[accept], false, vec![], me.clone(), 1, 3);
 
@@ -3093,7 +3093,7 @@ mod tests {
         );
 
         // Second timer firing with NO new activity: must campaign.
-        let out2 = state.process_tick(&[], true, vec![], me.clone(), 1, 3);
+        let out2 = state.process_tick(&[], true, vec![], me, 1, 3);
         assert!(
             out2.outbound
                 .iter()
@@ -3147,8 +3147,7 @@ mod tests {
 
             // Each member gets a random SUBSET of the shuffled trace
             let mut member_states: Vec<DecisionState<String, TestCluster>> = Vec::new();
-            for member_idx in 0..cluster_size {
-                let mask = &delivery_masks[member_idx];
+            for mask in &delivery_masks[..cluster_size] {
                 let mut state = DecisionState::<String, TestCluster>::new();
 
                 for (i, msg) in shuffled_trace.iter().enumerate() {
@@ -3218,7 +3217,7 @@ mod tests {
                 TranscriptMsg::Promise { ballot, from: test_member(1), accepted: vec![] },
                 TranscriptMsg::Promise { ballot, from: test_member(2), accepted: vec![] },
             ];
-            let output2 = msg_gen.process_tick(&promises, false, proposals.clone(), me.clone(), 0, cluster_size);
+            let output2 = msg_gen.process_tick(&promises, false, proposals.clone(), me, 0, cluster_size);
             // Process all outbound messages (Accept messages) through decision
             for msg in &output2.outbound {
                 decision.process(msg.clone(), quorum);
@@ -3489,7 +3488,7 @@ mod tests {
         /// Submit a request to a member (must be leader).
         /// Drives one tick with the request, collecting outbound Accept messages.
         fn submit(&mut self, member: usize, payload: &str) {
-            self.tick_with_msgs(member, &[], false, vec![payload.to_string()]);
+            self.tick_with_msgs(member, &[], false, vec![payload.to_owned()]);
         }
 
         /// Submit a request and immediately deliver until quiet.
@@ -3564,7 +3563,7 @@ mod tests {
                 if v.is_empty() {
                     store.remove(k);
                 } else {
-                    store.insert(k.to_string(), v.to_string());
+                    store.insert(k.to_owned(), v.to_owned());
                 }
             }
             store
@@ -3944,7 +3943,7 @@ mod tests {
         let mut expected = HashMap::new();
         for w in writes {
             let (k, v) = w.split_once('=').unwrap();
-            expected.insert(k.to_string(), v.to_string());
+            expected.insert(k.to_owned(), v.to_owned());
         }
 
         assert_eq!(
@@ -4091,7 +4090,7 @@ mod tests {
         let mut expected = HashMap::new();
         for w in writes {
             let (k, v) = w.split_once('=').unwrap();
-            expected.insert(k.to_string(), v.to_string());
+            expected.insert(k.to_owned(), v.to_owned());
         }
 
         for member in 0..5 {
@@ -4159,8 +4158,7 @@ mod tests {
             shuffled_trace.shuffle(&mut rng);
 
             let mut member_states: Vec<DecisionState<String, TestCluster>> = Vec::new();
-            for member_idx in 0..cluster_size {
-                let mask = &delivery_masks[member_idx];
+            for mask in &delivery_masks[..cluster_size] {
                 let mut state = DecisionState::<String, TestCluster>::new();
                 for (i, msg) in shuffled_trace.iter().enumerate() {
                     if i < mask.len() && mask[i] {
@@ -4178,7 +4176,7 @@ mod tests {
                     if v.is_empty() {
                         store.remove(k);
                     } else {
-                        store.insert(k.to_string(), v.to_string());
+                        store.insert(k.to_owned(), v.to_owned());
                     }
                 }
                 store

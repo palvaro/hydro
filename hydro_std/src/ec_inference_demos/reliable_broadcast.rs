@@ -77,14 +77,15 @@ pub fn reliable_broadcast_closed<
     L,
     L2: 'a,
     B: Boundedness,
-    O: hydro_lang::live_collections::stream::Ordering,
+    O,
     R: hydro_lang::live_collections::stream::Retries,
 >(
     source: Stream<T, Process<'a, L>, B, O, R>,
     cluster: &Cluster<'a, L2>,
 ) -> Stream<T, Cluster<'a, L2, EventualConsistency>, Unbounded, NoOrder, ExactlyOnce>
 where
-    O: hydro_lang::live_collections::stream::MinOrder<
+    O: hydro_lang::live_collections::stream::Ordering
+        + hydro_lang::live_collections::stream::MinOrder<
             hydro_lang::live_collections::stream::TotalOrder,
         >,
 {
@@ -99,13 +100,14 @@ where
 /// message", which is exactly the input a quorum certificate mint wants.
 /// [`uniform_reliable_broadcast_closed`](crate::ec_inference_demos::uniform_broadcast::uniform_reliable_broadcast_closed)
 /// is a five-line client of this function.
+#[expect(clippy::type_complexity, reason = "staged stream signature")]
 pub fn reliable_broadcast_closed_with_echoes<
     'a,
     T: Clone + Eq + Hash + Serialize + DeserializeOwned + 'a,
     L,
     L2: 'a,
     B: Boundedness,
-    O: hydro_lang::live_collections::stream::Ordering,
+    O,
     R: hydro_lang::live_collections::stream::Retries,
 >(
     source: Stream<T, Process<'a, L>, B, O, R>,
@@ -122,7 +124,8 @@ pub fn reliable_broadcast_closed_with_echoes<
     >,
 )
 where
-    O: hydro_lang::live_collections::stream::MinOrder<
+    O: hydro_lang::live_collections::stream::Ordering
+        + hydro_lang::live_collections::stream::MinOrder<
             hydro_lang::live_collections::stream::TotalOrder,
         >,
 {
@@ -189,14 +192,15 @@ pub fn reliable_broadcast_live<
     L: 'a,
     L2: 'a,
     B: Boundedness,
-    O: hydro_lang::live_collections::stream::Ordering,
+    O,
     R: hydro_lang::live_collections::stream::Retries,
 >(
     source: Stream<T, Process<'a, L>, B, O, R>,
     cluster: &Cluster<'a, L2>,
 ) -> Stream<T, Cluster<'a, L2, EventualConsistency>, Unbounded, NoOrder, ExactlyOnce>
 where
-    O: hydro_lang::live_collections::stream::MinOrder<
+    O: hydro_lang::live_collections::stream::Ordering
+        + hydro_lang::live_collections::stream::MinOrder<
             hydro_lang::live_collections::stream::TotalOrder,
         >,
 {

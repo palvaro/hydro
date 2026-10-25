@@ -33,7 +33,7 @@ mod tests {
         use std::io::Write;
         // Written to a file because the fuzz harness captures the test's stderr.
         let path = std::env::var("HYDRO_PROVENANCE_DUMP")
-            .unwrap_or_else(|_| "target/provenance_dump.txt".to_string());
+            .unwrap_or_else(|_| "target/provenance_dump.txt".to_owned());
         let _ = std::fs::create_dir_all("target");
         let mut out = std::fs::OpenOptions::new()
             .create(true)
@@ -63,8 +63,12 @@ mod tests {
                 "{:<17} {:<10} {:>3}->{:<3} {:<32} {}{}B",
                 format!("{:?}", c.label),
                 r.name,
-                r.member.map(|m| m.to_string()).unwrap_or("-".into()),
-                r.recipient.map(|m| m.to_string()).unwrap_or("-".into()),
+                r.member
+                    .map(|m| m.to_string())
+                    .unwrap_or_else(|| "-".into()),
+                r.recipient
+                    .map(|m| m.to_string())
+                    .unwrap_or_else(|| "-".into()),
                 format!("{{{}}}", tags.join(",")),
                 if r.coarse { "coarse " } else { "" },
                 r.bytes
@@ -542,7 +546,7 @@ mod tests {
     fn dump_note(note: &str) {
         use std::io::Write;
         let path = std::env::var("HYDRO_PROVENANCE_DUMP")
-            .unwrap_or_else(|_| "target/provenance_dump.txt".to_string());
+            .unwrap_or_else(|_| "target/provenance_dump.txt".to_owned());
         let _ = std::fs::create_dir_all("target");
         if let Ok(mut out) = std::fs::OpenOptions::new()
             .create(true)
