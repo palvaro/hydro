@@ -51,6 +51,9 @@ mod ec_races_targets;
 #[cfg(test)]
 mod ec_quorum_trust;
 
+#[cfg(test)]
+mod ec_teaching;
+
 // WIP: the following modules were written against an older hydro_lang API
 // (they call `broadcast_from_member`, which has since been renamed/removed,
 // and `typed_consensus` has a `T`/`usize` type mismatch at ~line 360).
