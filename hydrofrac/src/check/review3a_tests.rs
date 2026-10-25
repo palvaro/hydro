@@ -329,3 +329,33 @@ fn review3a_a_single_member_label_hides_a_fault_panic() {
     // One crash of the source at start makes the member panic in the recovery phase.
     assert!(panics.contains(&source), "{panics:?}");
 }
+
+pub fn opaque_helper(x: u32) -> u32 {
+    x
+}
+
+/// Held up: hydrofrac trusts its own taps by their text (`TAP_CLOSURE_START`, `move |
+/// __hydrofrac_x :`). A user closure written the same way is still checked, because `q!` wraps it
+/// (a type hint) before it prints, so its text never starts like a tap's.
+#[cfg(stageleft_runtime)]
+#[test]
+fn review3a_held_a_closure_named_like_a_tap_is_not_trusted() {
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (_send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let out = input
+        .broadcast_closed(&members, TCP.fail_stop().name("initial").bincode())
+        .map(q!(move |__hydrofrac_x: u32| crate::check::review3a_tests::opaque_helper(
+            __hydrofrac_x
+        )))
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(/** */));
+    let _out = out.sim_cluster_output();
+    let mut check = super::EcCheck::new().max_crashes(0);
+    let _sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 2))
+        .compiled();
+    let sites = check.fragile_sites().expect("instrumented");
+    eprintln!("sites: {sites:?}");
+    assert!(sites.iter().any(|s| s.op == "impure_closure"), "{sites:?}");
+}
