@@ -126,7 +126,7 @@ fn revealed(pairs: &Pairs<P, M>) -> Vec<Fault<M>> {
 /// The candidates over [`revealed`] faults, with every send complete (no unseen crash).
 fn universe_of(pairs: &Pairs<P, M>) -> Vec<Fault<M>> {
     let known: BTreeSet<Fault<M>> = revealed(pairs).into_iter().collect();
-    candidates(&known, &BTreeMap::new(), false)
+    candidates(&known, &BTreeMap::new(), false, &())
         .into_iter()
         .map(|c| c.fault().cloned().expect("no unseen crash"))
         .collect()
@@ -261,8 +261,21 @@ fn ask_once_crash_splits_the_members() {
     assert!(!admissible_for(&h, &one, &pairs[&one], ALIVE, &()));
 }
 
+/// A send order for the tests: each listed message precedes the ones after it.
+#[derive(Debug)]
+struct Chain(Vec<&'static str>);
+
+impl SendOrder<M> for Chain {
+    fn precedes(&self, earlier: &M, later: &M) -> bool {
+        let at = |m: &M| self.0.iter().position(|c| c == m);
+        matches!((at(earlier), at(later)), (Some(a), Some(b)) if a < b)
+    }
+}
+
+/// Omissions, then each node's crash points (weakest proved first, then the earliest sent), its
+/// unseen crash, and its start crash.
 #[test]
-fn candidates_order_omissions_then_later_crash_points_then_unseen_then_crash() {
+fn candidates_order_omissions_then_weaker_crash_points_then_unseen_then_crash() {
     let known: BTreeSet<Fault<M>> = [
         omit("drop"),
         crash("k"),
@@ -270,27 +283,46 @@ fn candidates_order_omissions_then_later_crash_points_then_unseen_then_crash() {
         crash("n"),
         crash_after("n", "early"),
         crash_after("n", "late"),
+        crash_after("n", "mid"),
     ]
     .into();
-    let latest: BTreeMap<Node, BTreeMap<M, u64>> = BTreeMap::from([(
+    let first: BTreeMap<Node, BTreeMap<M, u64>> = BTreeMap::from([(
         "n".to_owned(),
-        BTreeMap::from([("early".to_owned(), 0), ("late".to_owned(), 3)]),
+        BTreeMap::from([
+            ("early".to_owned(), 0),
+            ("mid".to_owned(), 1),
+            ("late".to_owned(), 3),
+        ]),
     )]);
     let f = Candidate::Fault;
+    let k = [
+        f(omit("drop")),
+        f(crash_after("k", "drop")),
+        Candidate::Unseen("k".to_owned()),
+        f(crash("k")),
+    ];
+    let n = |points: [&str; 3]| {
+        let mut out = k.to_vec();
+        out.extend(points.map(|m| f(crash_after("n", m))));
+        out.extend([Candidate::Unseen("n".to_owned()), f(crash("n"))]);
+        out
+    };
+    // Nothing proved: every point kills every other send; the earliest sent comes first.
     assert_eq!(
-        candidates(&known, &latest, true),
-        vec![
-            f(omit("drop")),
-            f(crash_after("k", "drop")),
-            Candidate::Unseen("k".to_owned()),
-            f(crash("k")),
-            f(crash_after("n", "late")),
-            f(crash_after("n", "early")),
-            Candidate::Unseen("n".to_owned()),
-            f(crash("n")),
-        ]
+        candidates(&known, &first, true, &()),
+        n(["early", "mid", "late"])
     );
-    assert_eq!(candidates(&known, &latest, false).len(), 6);
+    // `mid` before `late` proved: `crash(n after late)` spares `mid`, so it is the weakest.
+    assert_eq!(
+        candidates(&known, &first, true, &Chain(vec!["mid", "late"])),
+        n(["late", "early", "mid"])
+    );
+    // A chain of all three: the weakest is the crash after the last.
+    assert_eq!(
+        candidates(&known, &first, true, &Chain(vec!["early", "mid", "late"])),
+        n(["late", "mid", "early"])
+    );
+    assert_eq!(candidates(&known, &first, false, &()).len(), 7);
 }
 
 /// The image of a fault set: known faults stay, an omission of an unknown message goes, a

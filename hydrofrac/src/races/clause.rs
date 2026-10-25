@@ -7,6 +7,7 @@
 //! its deliveries occur (Lemma R, §5). Only robust clauses protect a pair; a premise is never
 //! proved, so the adversary can always make a fragile clause fail.
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::literals::{Literal, SendOrder, after};
@@ -255,15 +256,21 @@ pub fn proposal_of<M: Ord + Clone>(set: &FaultSet<M>) -> Proposal<M> {
 }
 
 /// The candidates over the faults the runs revealed (`known`: the brute-force enumerator's
-/// harvest, `check/brute_force.rs`), weakest first, since the solver's tie-break prefers earlier
-/// candidates and a hypothesis should leave as much of the protocol running as it can:
-/// omissions, then per crashable node its crash points after later messages before earlier
-/// ones, then (if `unseen`) [`Candidate::Unseen`], then `crash(n)`. "Later" is the latest
-/// position (`latest`) any run sent the message at; it is only a tie-break.
+/// harvest, `check/brute_force.rs`). The solver's tie-break prefers earlier candidates, and the
+/// order is only a tie-break: it decides which of the equally small sets is proposed first, never
+/// which candidates exist. Omissions come first; then, per crashable node, its crash points;
+/// then (if `unseen`) [`Candidate::Unseen`]; then `crash(n)`.
+///
+/// A node's crash points come weakest first, by what `order` proves: `crash(n after m)` spares
+/// the sends proved to precede `m` and kills every other, so the more it spares, the weaker it
+/// is. Among equally strong points, the one sent earliest (`first`: the earliest position any run
+/// sent it at) comes first. Its free literals are the same, but in a run it cuts more: a crash
+/// after a late send cuts nothing the run needs and is the likeliest to be a wasted set.
 pub fn candidates<M: Ord + Clone>(
     known: &BTreeSet<Fault<M>>,
-    latest: &BTreeMap<Node, BTreeMap<M, u64>>,
+    first: &BTreeMap<Node, BTreeMap<M, u64>>,
     unseen: bool,
+    order: &dyn SendOrder<M>,
 ) -> Vec<Candidate<M>> {
     let mut out: Vec<Candidate<M>> = known
         .iter()
@@ -273,7 +280,7 @@ pub fn candidates<M: Ord + Clone>(
         .collect();
     let crashable: BTreeSet<&Node> = known.iter().filter_map(Fault::crashed_node).collect();
     for node in crashable {
-        let mut points: Vec<(u64, &M)> = known
+        let sent: Vec<&M> = known
             .iter()
             .filter_map(|f| match f {
                 Fault::Crash {
@@ -282,16 +289,20 @@ pub fn candidates<M: Ord + Clone>(
                 } if n == node => Some(m),
                 _ => None,
             })
-            .map(|m| {
-                let at = latest.get(node).and_then(|l| l.get(m)).copied();
-                (at.unwrap_or(0), m)
+            .collect();
+        let mut points: Vec<(Reverse<usize>, u64, &M)> = sent
+            .iter()
+            .map(|&m| {
+                let spared = sent.iter().filter(|&&w| order.precedes(w, m)).count();
+                let at = first.get(node).and_then(|l| l.get(m)).copied();
+                (Reverse(spared), at.unwrap_or(0), m)
             })
             .collect();
-        points.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+        points.sort();
         out.extend(
-            points
-                .into_iter()
-                .map(|(_, m)| Candidate::Fault(Fault::crash_after(node.clone(), Some(m.clone())))),
+            points.into_iter().map(|(_, _, m)| {
+                Candidate::Fault(Fault::crash_after(node.clone(), Some(m.clone())))
+            }),
         );
         if unseen {
             out.push(Candidate::Unseen(node.clone()));

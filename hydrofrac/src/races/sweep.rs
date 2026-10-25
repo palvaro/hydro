@@ -76,7 +76,7 @@ pub struct Sweep<M, F> {
     in_full: BTreeSet<FaultSet<M>>,
     dead: Vec<(FaultSet<M>, F)>,
     known: BTreeSet<Fault<M>>,
-    latest: BTreeMap<Node, BTreeMap<M, u64>>,
+    first: BTreeMap<Node, BTreeMap<M, u64>>,
     sends_complete: bool,
     order: Rc<dyn SendOrder<M>>,
     runs: usize,
@@ -96,7 +96,7 @@ impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
             in_full: BTreeSet::new(),
             dead: vec![],
             known: BTreeSet::new(),
-            latest: BTreeMap::new(),
+            first: BTreeMap::new(),
             sends_complete: false,
             order: Rc::new(()),
             runs: 1,
@@ -129,12 +129,12 @@ impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
     /// Records that a run showed `node` sending `m` before the heal, as its `position`-th send.
     pub fn saw_send(&mut self, node: &Node, m: M, position: u64) {
         let at = self
-            .latest
+            .first
             .entry(node.clone())
             .or_default()
             .entry(m)
             .or_insert(position);
-        *at = (*at).max(position);
+        *at = (*at).min(position);
     }
 
     /// Records that every schedule of `set` was run, without stopping early, and every message
@@ -170,7 +170,7 @@ impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
     /// is true.
     pub fn is_exact(&self, node: &Node, m: &M) -> bool {
         self.sends_complete
-            && self.latest.get(node).is_none_or(|sent| {
+            && self.first.get(node).is_none_or(|sent| {
                 sent.keys()
                     .all(|w| w == m || after(&*self.order, w, m) != Literal::Free)
             })
@@ -229,7 +229,7 @@ impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
 
     /// The candidates of the program, as [candidates] gives them.
     pub fn universe(&self) -> Vec<Candidate<M>> {
-        candidates(&self.known, &self.latest, !self.sends_complete)
+        candidates(&self.known, &self.first, !self.sends_complete, &*self.order)
     }
 
     /// The image of `set` among the candidates ([image]).
