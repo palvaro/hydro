@@ -77,6 +77,22 @@ Status: **fixed+tested** (named test), **fixed untested**, **documented only**, 
 | R3-F6/F7/F8 | §15 shared components; the oracle's ≤2-fault limit; the missing nodes−1 bound; omission drops every content-identical copy; heal/timer wording; panics in pruned sets; ABD-KV is an exploration gap | documented (§15, §18) |
 | oracle 2 | A second brute force sharing as little as possible: plain taps, no provenance rewrite, one output per collection | **merged** in 752079ddfb (`hydrofrac/src/check/oracle2.rs`); runs in every `EcCheck::cross_check` and reports its disagreements prefixed `oracle 2:`. `SimFlow::try_fork` copies `refuse_sim_faults`, and the `CrossCheck` changes are reconciled in `brute_force.rs` |
 
+## 4a. Known open holes (round 3)
+
+Found by review round 3 and **not fixed** in the prototype (`hydrofrac-races-int` @ `56effda043`). Each is pinned by
+a test on a round-3 branch, and each can produce a wrong certificate or a missed failure.
+
+| id | hole (plain English) | pinned by |
+|---|---|---|
+| R1 | A "this delivery cannot be lost" conclusion, drawn from a run where the send happened after the heal, is reused in a run where the same send happens before the heal, where it *can* be lost | `review3b_a_post_heal_copy_protects_a_pre_heal_loss` |
+| R2 | The same hole, but the break needs 3 faults, so both oracles (capped at 2) miss it too | `review3b_a_three_fault_break_beyond_both_oracles` |
+| R3 | The purity allowlist is fooled by a counter kept outside the closure | `hydrofrac-review3-a` |
+| R4 | The purity allowlist is fooled by a user function passed by name instead of a closure literal | `hydrofrac-review3-a` |
+| R5 | A label on a single-member cluster is `Vacuous` and never run under faults, so a panic in the recovery phase is missed | `hydrofrac-review3-a` |
+| R6 | Harness inputs sent after a wait for an output are assumed to be present in every run, but a fault can stall the wait so they are never sent | `review3b_an_input_sent_after_a_wait_is_not_in_every_run` |
+
+Round-3 test branches (local, not merged): `hydrofrac-review3-a`, `hydrofrac-review3-b`.
+
 ## 5. Item D: harness discipline (merged)
 
 - **API:** `EcCheck::run` is unchanged. New: `run_then_recover(sim, inputs, recover)` and
