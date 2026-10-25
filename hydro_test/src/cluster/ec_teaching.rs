@@ -60,11 +60,20 @@ fn verdict<'c>(cross: &'c CrossCheck, name: &str) -> &'c LabelResult {
 }
 
 /// The faults of the counterexample on `label`, which must have one.
-fn faults<'l>(cross: &CrossCheck, label: &'l LabelResult) -> Vec<&'l Fault<hydrofrac::fault::MessageId>> {
+fn faults<'l>(
+    cross: &CrossCheck,
+    label: &'l LabelResult,
+) -> Vec<&'l Fault<hydrofrac::fault::MessageId>> {
     label
         .verdict
         .counterexample()
-        .unwrap_or_else(|| panic!("{}: expected a counterexample:\n{}", label.name(), cross.results))
+        .unwrap_or_else(|| {
+            panic!(
+                "{}: expected a counterexample:\n{}",
+                label.name(),
+                cross.results
+            )
+        })
         .faults
         .iter()
         .collect()
@@ -125,7 +134,11 @@ fn a_sender_crash_mid_broadcast_leaves_a_receiver_without_the_item() {
     let [Fault::Crash { node, at }] = faults(&cross, received)[..] else {
         panic!("expected one crash:\n{}", cross.results);
     };
-    assert!(node.starts_with("Sender"), "the sender crashes:\n{}", cross.results);
+    assert!(
+        node.starts_with("Sender"),
+        "the sender crashes:\n{}",
+        cross.results
+    );
     assert!(
         matches!(at, CrashAt::After(_)),
         "after its first send:\n{}",
@@ -145,7 +158,11 @@ fn one_lost_message_leaves_a_receiver_without_the_item() {
         panic!("expected one lost message:\n{}", cross.results);
     };
     let cex = received.verdict.counterexample().expect("a counterexample");
-    assert_eq!(cex.tolerates, None, "no crash is needed:\n{}", cross.results);
+    assert_eq!(
+        cex.tolerates, None,
+        "no crash is needed:\n{}",
+        cross.results
+    );
 }
 
 /// **A cluster sender's crash.** The sender is now a member of a cluster (of one), sending to a
@@ -181,7 +198,11 @@ fn a_cluster_sender_crash_mid_broadcast_leaves_a_receiver_without_the_item() {
     let [Fault::Crash { node, at }] = faults(&cross, received)[..] else {
         panic!("expected one crash:\n{}", cross.results);
     };
-    assert!(node.starts_with("Sender@"), "the sender crashes:\n{}", cross.results);
+    assert!(
+        node.starts_with("Sender@"),
+        "the sender crashes:\n{}",
+        cross.results
+    );
     assert!(matches!(at, CrashAt::After(_)), "{}", cross.results);
 }
 
@@ -228,7 +249,10 @@ fn receivers_that_echo_survive_a_sender_crash() {
     );
     let from_sender = verdict(&cross, "from_sender");
     let [Fault::Crash { node, .. }] = faults(&cross, from_sender)[..] else {
-        panic!("the plain broadcast underneath still breaks:\n{}", cross.results);
+        panic!(
+            "the plain broadcast underneath still breaks:\n{}",
+            cross.results
+        );
     };
     assert!(node.starts_with("Sender"), "{}", cross.results);
 }
@@ -295,7 +319,12 @@ fn two_senders_survive_one_crash_but_not_two() {
         .verdict
         .counterexample()
         .unwrap_or_else(|| panic!("two crashes break `items`:\n{}", cross.results));
-    assert_eq!(cex.tolerates, Some(1), "one crash is tolerated:\n{}", cross.results);
+    assert_eq!(
+        cex.tolerates,
+        Some(1),
+        "one crash is tolerated:\n{}",
+        cross.results
+    );
     assert!(cex.tolerance_certified, "{}", cross.results);
     let crashed: Vec<_> = faults(&cross, items)
         .into_iter()
