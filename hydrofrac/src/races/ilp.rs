@@ -44,6 +44,55 @@ impl Scope {
 /// One cover row: the positions of the candidates that kill some delivery of a clause.
 type Row = BTreeSet<usize>;
 
+/// Every candidate×clause hit test done so far ([`Candidate::hits`]), so that each is done once
+/// per sweep: a clause keeps one entry per candidate id. The send order is fixed for a sweep, so a
+/// test's answer never changes.
+#[derive(Clone, Debug)]
+pub struct Hits<M> {
+    ids: BTreeMap<Candidate<M>, usize>,
+    tested: BTreeMap<PairClause<M>, Vec<Option<bool>>>,
+}
+
+impl<M> Default for Hits<M> {
+    fn default() -> Self {
+        Hits {
+            ids: BTreeMap::new(),
+            tested: BTreeMap::new(),
+        }
+    }
+}
+
+impl<M: Ord + Clone> Hits<M> {
+    /// The ids of `universe`'s candidates, assigning new ones.
+    fn ids(&mut self, universe: &[Candidate<M>]) -> Vec<usize> {
+        universe
+            .iter()
+            .map(|c| {
+                let next = self.ids.len();
+                *self.ids.entry(c.clone()).or_insert(next)
+            })
+            .collect()
+    }
+
+    /// The positions in `universe` (with `ids`) of the candidates that hit `clause`.
+    fn row(
+        &mut self,
+        clause: &PairClause<M>,
+        universe: &[Candidate<M>],
+        ids: &[usize],
+        order: &dyn SendOrder<M>,
+    ) -> Row {
+        if !self.tested.contains_key(clause) {
+            self.tested.insert(clause.clone(), vec![]);
+        }
+        let tested = self.tested.get_mut(clause).unwrap();
+        tested.resize(self.ids.len(), None);
+        (0..universe.len())
+            .filter(|&i| *tested[ids[i]].get_or_insert_with(|| universe[i].hits(clause, order)))
+            .collect()
+    }
+}
+
 /// What the program needs of one pair: its cover rows (none: every set that does not excuse it is
 /// admissible for it), and its exemptions, each a set `E` of positions such that selecting all of
 /// `E` excuses the pair ([`super::excused`]).
@@ -64,9 +113,12 @@ impl PairRows {
 /// The cover rows of one pair's in-scope clauses over `universe`, without those another row
 /// implies (`A ⊆ B`: hitting `A` hits `B`). `None` if some row is empty: no set over the universe
 /// kills that clause, so the pair can never be chosen.
+#[expect(clippy::too_many_arguments, reason = "internal")]
 fn pair_rows<P: PairKey, M: Ord + Clone>(
     universe: &[Candidate<M>],
     index: &BTreeMap<&Candidate<M>, usize>,
+    hits: &mut Hits<M>,
+    ids: &[usize],
     pair: &P,
     clauses: &[PairClause<M>],
     dead: &Dead<M, P::Fact>,
@@ -76,11 +128,7 @@ fn pair_rows<P: PairKey, M: Ord + Clone>(
     let rows: BTreeSet<Row> = clauses
         .iter()
         .filter(|c| scope.includes(c))
-        .map(|c| {
-            (0..universe.len())
-                .filter(|&i| universe[i].hits(c, order))
-                .collect()
-        })
+        .map(|c| hits.row(c, universe, ids, order))
         .collect();
     if rows.iter().any(BTreeSet::is_empty) {
         return None;
@@ -139,16 +187,20 @@ pub fn propose<P: PairKey, M: Ord + Clone>(
     bounds: &CrashBounds,
     scope: Scope,
     order: &dyn SendOrder<M>,
+    hits: &mut Hits<M>,
 ) -> Option<Proposal<M>> {
     let index: BTreeMap<&Candidate<M>, usize> =
         universe.iter().enumerate().map(|(i, c)| (c, i)).collect();
+    let ids = hits.ids(universe);
     let pair_rows: Vec<PairRows> = if scope == Scope::Any {
         vec![]
     } else {
         pairs
             .iter()
             .filter_map(|(pair, clauses)| {
-                pair_rows(universe, &index, pair, clauses, dead, scope, order)
+                pair_rows(
+                    universe, &index, hits, &ids, pair, clauses, dead, scope, order,
+                )
             })
             .collect::<BTreeSet<_>>()
             .into_iter()

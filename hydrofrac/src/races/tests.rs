@@ -102,7 +102,16 @@ fn propose_faults(
 ) -> Option<FaultSet<M>> {
     let universe: Vec<Candidate<M>> = universe.iter().cloned().map(Candidate::Fault).collect();
     let tried: BTreeSet<Proposal<M>> = tried.iter().map(proposal_of).collect();
-    let proposal = propose(&universe, pairs, ALIVE, &tried, bounds, scope, &())?;
+    let proposal = propose(
+        &universe,
+        pairs,
+        ALIVE,
+        &tried,
+        bounds,
+        scope,
+        &(),
+        &mut Hits::default(),
+    )?;
     assert!(proposal.iter().all(|c| c.fault().is_some()));
     Some(faults_of(&proposal))
 }

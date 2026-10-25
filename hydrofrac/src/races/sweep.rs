@@ -39,7 +39,7 @@ use std::rc::Rc;
 use super::clause::{
     Candidate, PairKey, Pairs, Proposal, candidates, faults_of, image, proposal_of,
 };
-use super::ilp::{Scope, propose};
+use super::ilp::{Hits, Scope, propose};
 use super::literals::{Literal, SendOrder, after};
 use crate::search::{CrashAt, CrashBounds, Fault, FaultSet, HYPOTHESIS_BUDGET, Node, Tolerance};
 
@@ -79,6 +79,7 @@ pub struct Sweep<M, F> {
     latest: BTreeMap<Node, BTreeMap<M, u64>>,
     sends_complete: bool,
     order: Rc<dyn SendOrder<M>>,
+    hits: Hits<M>,
     runs: usize,
     /// The hypothesis budget: how many sets may be run, counting the probe.
     pub budget: usize,
@@ -99,6 +100,7 @@ impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
             latest: BTreeMap::new(),
             sends_complete: false,
             order: Rc::new(()),
+            hits: Hits::default(),
             runs: 1,
             budget: HYPOTHESIS_BUDGET,
         }
@@ -156,6 +158,7 @@ impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
     /// Uses `order` (what is proved of every run's send order) for the crash literals.
     pub fn with_order(mut self, order: Rc<dyn SendOrder<M>>) -> Self {
         self.order = order;
+        self.hits = Hits::default();
         self
     }
 
@@ -247,6 +250,7 @@ impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
             &self.bounds,
             Scope::Any,
             &*self.order,
+            &mut Hits::default(),
         )
         .is_none()
     }
@@ -297,6 +301,7 @@ impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
                     &bounds,
                     scope,
                     &*self.order,
+                    &mut self.hits,
                 ) else {
                     continue;
                 };

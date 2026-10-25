@@ -12,7 +12,7 @@ pub use clause::{
     Candidate, Dead, PairClause, PairKey, Pairs, Proposal, admissible_for, candidates, excused,
     faults_of, image, kills, proposal_of, pruned, within_bounds,
 };
-pub use ilp::{Scope, propose};
+pub use ilp::{Hits, Scope, propose};
 pub use literals::{FanOutOrder, Literal, SendOrder, after};
 pub use sweep::{Next, Sweep};
 
