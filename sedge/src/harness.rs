@@ -1934,7 +1934,7 @@ where
                 match outside_reading(&ex, &profile) {
                     Some((writes, cpu)) if writes <= OUTSIDE_COLLAPSE_WRITES => {
                         verdict.reason = format!(
-                            "the program went silent in band ({silent} of the tail's {} seconds without a report); read from outside, its capped nodes wrote {:.0}% of their baseline bytes per second through the tail, at {:.0}% of their CPU quota (the program's own reading was {}: {})",
+                            "the program went silent in band ({silent} of the tail's {} seconds without a report); read from outside, its capped nodes wrote {:.0}% of their baseline bytes per second through the second half of the tail, at {:.0}% of their CPU quota (the program's own reading was {}: {})",
                             tail.len(),
                             writes * 100.0,
                             cpu * 100.0,
@@ -1949,7 +1949,7 @@ where
                             tail.len(),
                             match reading {
                                 Some((w, c)) => format!(
-                                    "; from outside, its capped nodes wrote {:.0}% of their baseline bytes at {:.0}% of their CPU quota",
+                                    "; from outside, its capped nodes wrote {:.0}% of their baseline bytes at {:.0}% of their CPU quota through the second half of the tail",
                                     w * 100.0,
                                     c * 100.0
                                 ),
@@ -2164,9 +2164,11 @@ pub fn silent_seconds(window: &[crate::trace::Bucket], kinds: &StreamKinds) -> u
 /// are at most this fraction of their pre-trigger rate.
 pub const OUTSIDE_COLLAPSE_WRITES: f64 = 0.5;
 
-/// The capped nodes' outside-measured kernel writes (`wchar`) through the tail as a fraction of
-/// their rate in the second half of the pre-trigger baseline, and their CPU use through the tail
-/// as a fraction of their quota. `None` without a capacity backend's `/proc` columns.
+/// The capped nodes' outside-measured kernel writes (`wchar`) through the second half of the tail
+/// as a fraction of their rate in the second half of the pre-trigger baseline, and their CPU use
+/// through the same half of the tail as a fraction of their quota. The second half, as for the
+/// levels' trend: a run that storms on the wire for a while before it goes silent is judged by
+/// where it ends up. `None` without a capacity backend's `/proc` columns.
 pub fn outside_reading(ex: &Executed, profile: &Profile) -> Option<(f64, f64)> {
     let capped: Vec<(String, f64)> = ex
         .usage
@@ -2197,9 +2199,10 @@ pub fn outside_reading(ex: &Executed, profile: &Profile) -> Option<(f64, f64)> {
     let start = profile.trigger_start().as_secs() as usize;
     let end = profile.trigger_end().as_secs() as usize;
     let total = profile.total().as_secs() as usize;
+    let late = end + (total - end) / 2;
     let base = mean_sum("wchar_kb_", start / 2, start)?;
-    let tail = mean_sum("wchar_kb_", end, total)?;
-    let cpu = mean_sum("cpu_", end, total)?;
+    let tail = mean_sum("wchar_kb_", late, total)?;
+    let cpu = mean_sum("cpu_", late, total)?;
     let quota: f64 = capped.iter().map(|(_, q)| q).sum();
     (base > 0.0).then(|| (tail / base, cpu / quota))
 }

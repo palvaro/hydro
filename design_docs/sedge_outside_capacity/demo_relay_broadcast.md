@@ -4,20 +4,50 @@ This demo runs one program, `hydro_test/src/cluster/relay_broadcast.rs`, through
 The program contains **no capacity code**. Each tool answers a different question:
 
 - **HydroFrac** asks whether the members can end up disagreeing under crashes and lost messages.
-  The `Echo` policy can: one lost echo plus a source crash is enough. `ReliableResend` fixes
-  that, and HydroFrac finds no violation.
-- **Cress** asks whether delay makes the program do extra work. It finds that the re-sending
-  which makes `ReliableResend` correct is also a *retry amplifier*: `Echo` is BENIGN and
-  `ReliableResend` is HAZARDOUS.
+  The `Echo` policy can, because it has too little redundancy: one lost echo plus a source crash
+  is enough. The redundant fix, `ReliableResendPerEntry`, which re-sends every relay until it
+  is acknowledged, is certified by HydroFrac, but only when retries are unlimited.
+- **Cress** asks whether delay makes the program do extra work. It finds that the fix's
+  re-sends are a *retry amplifier*: late acknowledgements cause re-sends, and each re-send is
+  more wire, merge and acknowledgement work. The fix is HAZARDOUS, with a 175.60× multiplier.
 - **Sedge** deploys the program with each member's CPU capped from outside, and offers it an
-  open-loop load with a short burst. `ReliableResend` is stable without the burst. After the
-  burst it **collapses and stays collapsed** at headroom f ≤ 2, and **recovers** at f ≥ 2.5. That
-  is a metastable failure.
+  open-loop load with a short burst.
+  - **Outcome.** Without a burst, `ReliableResendPerEntry` is stable at every f tried (37
+    no-burst controls across rounds, every one clear by the outside counters). After a burst it
+    falls into a **re-send storm**, and the storm either drains or ends in a **black hole**: the
+    members' CPU stays pinned at the quota, they write almost nothing to the kernel, and
+    nothing is acknowledged again.
+    - On isolated cores at f = 4 (round 3, 5 seeds per trigger), whether it gets stuck
+      depends on the size of the burst. 2μ for 1 s and 1.5μ for 1.5 s: 5/5 stuck. 1.5μ for
+      1 s: 4/5. 2μ for 0.5 s: 5/5 stuck after 60 s, 3/5 still stuck after 180 s.
+    - After a 2μ, 5 s burst it is stuck at every f from 1.5 to 8 (round 1, and 9/9 at f = 2,
+      4 and 8 in round 2).
+  - **Evidence.** Seed 34 of the 2μ, 0.5 s trigger (the headline figure, §4) shows both
+    phases. First comes about 150 s of storm *on the wire*: kernel writes are 3.3× the
+    pre-trigger rate, sends handed to the send queues 13×, about 150 k re-sends/s in band.
+    Then comes the black hole: writes 2–3 % of baseline, attempted sends 31×, 99.9 % dropped
+    at a full queue. These are Cress's `wire` re-sends.
+  - **Caveat.** In the black hole the amplification is *not* in wire bytes. It shows in the
+    attempted sends counted by the transport, and in CPU pinned at the quota. The storm phase
+    before it is where the amplified traffic is on the wire.
+  - **The capped variant.** `max_attempts: 3` (which HydroFrac refutes) storms after the same
+    burst, but its storms end. Their length grows steeply with 3λ/μ, the re-send load if every
+    relay is sent three times: about 5 s at 0.9 and 18–39 s at 1.35. At 1.5 they outlast a
+    60 s tail, and in five 180 s tails they ended within 16–66 s, at 2.1–2.2× baseline
+    kernel writes while they lasted. With a retry cap of 3 the storm always drained; it never
+    got stuck in 180 s. Given the μ uncertainty
+    (654–778 rounds/s), the regime where the storm outlasts the trigger flips at
+    3λ/μ ≈ 1.0–1.35.
 
-The surprise is in *why* it stays collapsed. The re-sends start the collapse, but they die
-down while the backlog keeps growing. What keeps it growing is per-tick work that is proportional to
-the backlog, plus the member's outgoing messages starving behind it. Cress points at the right
-source of the hazard, but does not see this second loop.
+**What changed since the previous version of this demo.** The previous version reported a
+collapse of the per-peer `ReliableResend` policy at f ≤ 2. That collapse was **not** sustained
+by retries. It was sustained by the program rebuilding its whole table of unacknowledged
+relays on every tick, which costs work proportional to the backlog. With that table made
+persistent state, the per-peer policy recovers from the same burst at every f tried. Its
+re-sends are about 4 % of normal traffic, a bounded, additive load
+(`relay_broadcast_amplification/README.md`, Part 1). This version therefore uses
+`ReliableResendPerEntry`, whose retry load grows with the backlog, and asks whether *that*
+amplification sustains a collapse.
 
 Contents:
 
@@ -27,25 +57,58 @@ Contents:
 4. [Sedge](#4-sedge)
 5. [Discussion](#5-discussion)
 
-Everything here was produced on the branch `feat/hydrofrac-cress-sedge-e2e`. The host had 8 cores
-(Intel Xeon Platinum 8375C), cgroup v1 and Docker 25. Raw data:
+Everything here was produced on the branch `feat/hydrofrac-cress-sedge-e2e`. The Sedge runs
+used one host: 16 cores (Intel Xeon Platinum 8375C @ 2.90 GHz), cgroup v1, Docker 25.0.14.
+Round 1 ran with the harness on cpus 5–6 and the nodes on cpus 7–8. Round 3 used two isolated
+slots (§4, Methods).
 
-- [`relay_broadcast/results.tsv`](relay_broadcast/results.tsv): one Sedge row per trial.
-- [`relay_broadcast/traces/`](relay_broadcast/traces/): per-second traces, 24 of them.
-- [`relay_broadcast/mechanism/`](relay_broadcast/mechanism/): two extra runs with per-member
-  memory sampled.
-- [`demo_relay_broadcast/`](demo_relay_broadcast/): the HydroFrac and Cress output captured for
-  this demo, and the plots.
+Raw data, all under [`relay_broadcast_lossy/`](relay_broadcast_lossy/) (its
+[`README.md`](relay_broadcast_lossy/README.md) describes every file):
 
-The plots are made by [`plot_sedge.py`](demo_relay_broadcast/plot_sedge.py) and
-[`plot_cress.py`](demo_relay_broadcast/plot_cress.py), which read only committed files. The PDF is
-rendered with the `rpc_retry` demo's [`render_pdf.py`](demo_rpc_retry/render_pdf.py):
+- `runs/<group>/`: Sedge's `results.tsv` row and per-second trace for every trial, with the
+  out-of-band columns (`wchar_kb_*`, `rss_mb_*`, `cpu_*`, `nr_throttled_*`, `throttled_ms_*`,
+  `sendq_attempted[_kb]_*`, `sendq_dropped[_kb]_*`). There are 106 groups.
+  - Round 1: `p_pe_*` (`per_entry_n9_4k`), `p_pe3_*` (`per_entry3_n9_4k`) and `p_rr_*`
+    (`reliable_resend_n9_4k`), each as `burst_fF` and `ctl_fF`.
+  - Round 2: `r2_*`. Only its large-margin groups, `r2_C_rr_*` and `r2_D_pe_*`, are used here.
+  - Round 3: `r3_S1_pe3_f<F>[_t180]_s5[_ctl]` and `r3_S2_pe_f4_{m<M>,ctl}_d<D>[_t180]_s5`, where
+    the trigger is M·μ for D s.
+- [`commands.txt`](relay_broadcast_lossy/commands.txt): the exact Sedge arguments and slot of
+  every group.
+- `probes.tsv`, `calibration.tsv`, `calibration_per_slot/`, `calibration_smt_isolated/`,
+  [`calibration_index.tsv`](relay_broadcast_lossy/calibration_index.tsv) and
+  `probes_index.tsv`: the μ probes.
+- `cress/`: the three Cress reports and `console.txt` with their verdict lines.
+- `earlier/`: the unbounded and `bounded:Member` runs that ruled out those deployments.
+- [`relay_broadcast_amplification/hydrofrac.txt`](relay_broadcast_amplification/hydrofrac.txt):
+  the HydroFrac verdicts.
+- [`relay_broadcast_amplification/`](relay_broadcast_amplification/): the earlier per-peer and
+  unbounded-buffer study that §5 refers to, with the scripts `summarize.py` and `analyze2.py`.
+
+The plots are made by the scripts in [`demo_relay_broadcast/`](demo_relay_broadcast/), which
+read only committed traces. The PDF is rendered with the `rpc_retry` demo's
+[`render_pdf.py`](demo_rpc_retry/render_pdf.py):
 
 ```sh
 python3 -m pip install --target $TMPDIR/py matplotlib markdown-it-py "fpdf2<2.8"   # Python 3.7
 export PYTHONPATH=$TMPDIR/py
-python3 demo_relay_broadcast/plot_sedge.py relay_broadcast demo_relay_broadcast
-python3 demo_relay_broadcast/plot_cress.py demo_relay_broadcast/cress demo_relay_broadcast
+R=relay_broadcast_lossy/runs
+tr() { ls $R/$1/*.factor$2.trial$3.tsv; }   # group, factor, trial -> trace
+# Round 1: one call per burst run, each with the no-burst control of the same factor and length.
+for p in "pe 4" "pe3 2" "pe3 4" "rr 4"; do set -- $p
+  python3 demo_relay_broadcast/plot_amplification.py \
+    --burst $(tr p_$1_burst_f$2 $2 0) --control $(tr p_$1_ctl_f$2 $2 0) \
+    --out demo_relay_broadcast --prefix $1_f$2 --memory-mb 400 --quota 0.05 --period-us 20000
+done
+python3 demo_relay_broadcast/plot_summary.py $R demo_relay_broadcast/lossy_summary.png p_
+# The headline: seed 34 (stuck) and seed 32 (drained), each with its matched control.
+for p in "3 34" "1 32"; do set -- $p
+  python3 demo_relay_broadcast/plot_headline.py \
+    --burst $(tr r3_S2_pe_f4_m2_d0.5_t180_s5 4 $1) --control $(tr r3_S2_pe_f4_ctl_d0.5_t180_s5 4 $1) \
+    --out demo_relay_broadcast/headline_pe_f4_seed$2.png
+done
+# Round-3 outcome fractions (also prints the two tables).
+python3 demo_relay_broadcast/plot_outcomes.py $R demo_relay_broadcast/r3_outcomes.png
 python3 demo_rpc_retry/render_pdf.py demo_relay_broadcast.md demo_relay_broadcast.pdf \
   $TMPDIR/py/matplotlib/mpl-data/fonts/ttf
 ```
@@ -57,20 +120,23 @@ All commands in this document run from `design_docs/sedge_outside_capacity/`, ex
 
 - **Tick:** one step of a Hydro location's dataflow. In one tick the location takes whatever
   input has arrived and processes it as a batch.
+- **Timer tick:** a tick that saw an element of the members' 50 ms protocol timer. Re-sends
+  are judged only on timer ticks.
 - **μ** (mu): the highest request rate the deployed system keeps up with.
 - **λ** (lambda): the offered rate.
 - **f = μ/λ:** the *headroom*. f = 2 means the system is offered half of what it can handle.
-- **Open loop:** requests arrive on a fixed schedule, whether or not the system keeps up. In a
-  closed loop, a slow system would slow its own callers down.
+- **Open loop:** requests arrive on a fixed schedule, whether or not the system keeps up.
 - **Throttled:** the kernel has stopped a capped container because it used up its CPU quota for
   the current period.
+- **In band / out of band:** the members' own once-a-second reports, which travel the same
+  queues as their traffic (in band), against kernel counters that Sedge reads from outside the
+  members (out of band).
 
 ## 1. The program
 
 `relay_broadcast` has one `Source` process and a cluster of `Member`s.
 
-- The **source** broadcasts each request to every member. A request is an id, plus a body in
-  the configurations used here.
+- The **source** broadcasts each request (an id and a 4 KiB body) to every member.
 - If the source crashes part-way through a broadcast, some members have the request and others
   never will. So the **members relay** what they receive to each other. `RelayPolicy` chooses
   how:
@@ -78,13 +144,20 @@ All commands in this document run from `design_docs/sedge_outside_capacity/`, ex
   - `Echo`: a member that gets a request *from the source* sends it on (echoes it) to every
     peer, once.
   - `EchoResend`: `Echo`, and each echo is re-sent until the peer acknowledges it.
-  - `ReliableResend`: a member relays every request on its *first receipt from anyone*, source or
-    peer. It keeps each relay in an *outstanding* table (the "unacked" relays) and re-sends it
-    until the peer acknowledges it.
+  - `ReliableResend`: a member relays every request on its *first receipt from anyone*. It keeps
+    each relay in an *outstanding* table until the peer acknowledges it, and re-sends at most
+    one overdue relay per peer per timer tick.
+  - `ReliableResendPerEntry { ack_timeout_ticks, max_attempts }`: the same relaying, but
+    *every* relay whose acknowledgement is `ack_timeout_ticks` timer ticks overdue is re-sent
+    on each timer tick, with no per-peer or per-tick cap. After `max_attempts` sends (`None`:
+    never) the relay is given up.
 
 **The correctness claim.** `delivered`, the set of ids each member has received, is labelled
 *eventually consistent*: in the end, every live member has the same set. The label is an
-`assert_has_consistency_of` with a hand-written argument (`relay_broadcast.rs:482-495`):
+`assert_has_consistency_of` with a hand-written argument. HydroFrac's job is to check that
+argument.
+
+The label (`relay_broadcast.rs:571-583`):
 
 ```rust
 let delivered = initial
@@ -103,77 +176,81 @@ let delivered = initial
     ));
 ```
 
-HydroFrac's job is to check that argument.
-
 **Why `Echo` is not enough.** An echo is sent once. If it is lost, nothing repairs it. If the
-source also crashed before reaching that member, the member never learns the id. The program
-has too little redundancy for a lossy network.
+source also crashed before reaching that member, the member never learns the id.
 
-**The fix: `ReliableResend`.** Two kinds of redundancy are added:
+**The fix: `ReliableResendPerEntry`.** Two kinds of redundancy are added:
 
 - A member relays an id the first time it hears it *from anyone*. So if a relaying member
   crashes part-way through, any peer it did reach relays the id onward.
-- Each relay is kept until acknowledged and re-sent on a timer. So a lost relay is repaired.
+- Each relay has its own retry timer and is re-sent until acknowledged. So a lost relay is
+  repaired, however many times it is lost.
 
-What a member relays (`relay_broadcast.rs:515-522`). The dedup is a top-level `unique`, which
-keeps a persistent set:
-
-```rust
-let first_receipts = arrivals_in
-    .clone()
-    .filter_map(q!(move |a| if echo_enabled && (relay_any || a.relay_from.is_none()) {
-        Some((a.id, a.body))
-    } else {
-        None
-    }))
-    .unique();
-```
-
-The re-send loop. Each tick, every acknowledged entry is dropped from the outstanding table. On
-ticks where the 50 ms timer has fired (`pump`), the oldest entry per peer that has waited at
-least `ack_timeout_ticks` timer ticks is re-sent (`relay_broadcast.rs:568-608`):
+The re-send loop is the outstanding table's `Pump` event (`relay_broadcast.rs:933-961`). On a
+timer tick, every relay whose deadline has passed is re-sent, in deadline order, and its
+deadline restarts:
 
 ```rust
-let acked_keys = acks.map(q!(|a| (a.from, a.id)));
-let still_waiting = outstanding.filter_key_not_in(acked_keys);
-let due = still_waiting
-    .clone()
-    .entries()
-    .filter_if(pump.clone())
-    .cross_singleton(now_cur.clone())
-    .filter_map(q!(move |(((peer, id), (last_sent, body)), now)| {
-        if ack_timeout_ticks > 0 && now - last_sent >= ack_timeout_ticks {
-            Some((peer, (id, body)))
-        } else {
-            None
+TableEvent::Pump { now } => {
+    let mut out = Vec::new();
+    if ack_timeout_ticks > 0 && per_entry {
+        // Every relay whose deadline has passed, in deadline order.
+        while let Some(&(deadline, peer, id)) = self.due.first() {
+            if deadline > now {
+                break;
+            }
+            self.due.pop_first();
+            let e = self
+                .entries
+                .get_mut(&(peer, id))
+                .expect("every deadline has its entry");
+            e.attempts += 1;
+            out.push(TableOut::Wire {
+                peer,
+                id,
+                body: e.body.clone(),
+                resend: true,
+            });
+            if max_attempts > 0 && e.attempts >= max_attempts {
+                // The last attempt: give the relay up.
+                self.entries.remove(&(peer, id));
+                self.len -= 1;
+            } else {
+                e.deadline = now + ack_timeout_ticks;
+                self.due.insert((e.deadline, peer, id));
+            }
         }
-    }))
-    .into_keyed()
-    .sort()
-    .first()
-    .entries()
-    .sort();
-// ...
-let kept = still_waiting
-    .filter_key_not_in(due.clone().map(q!(|(peer, (id, _))| (peer, id))))
-    .into_keyed_stream();
-// ...
-outstanding = kept.chain(resent).chain(new_entries).first();
+    }
+    // ...
+}
 ```
 
-Note the last line. `outstanding` is tick-scoped state: it is rebuilt from `kept`, `resent` and
-`new_entries` on **every** tick. `filter_key_not_in(acked_keys)` also runs over the whole table
-every tick. That is a cost proportional to the number of unacked relays, paid on every tick, and
-it is what §5 finds sustaining the collapse.
+The number of re-sends on a timer tick is the number of overdue relays. When acks are late
+across the board, that is the whole backlog, so the retry load grows with the backlog. The
+per-peer policy's load, by contrast, is capped at one per peer.
 
-The Sedge configuration (`relay_broadcast.rs:420-431`):
+**The table is persistent state.** It is one top-level `scan` over a stream of table events
+(acks, first receipts, timer ticks), and each event is applied in place:
+
+- an ack is one `remove`;
+- a first receipt is one `insert` per peer;
+- a timer tick costs O(due entries).
+
+Nothing is copied or rescanned between ticks. The dedup of first receipts (a `HashSet` of ids)
+lives in the same `scan`.
+
+The `scan` is at `relay_broadcast.rs:672-673`, `TableEvent` (`Ack`, `Receipt`, `Pump`) at
+`:802`, and the members' four `use::batch` decision points (timer, arrivals, first receipts,
+acks) at `:615-618`.
+
+The Sedge configuration (`relay_broadcast.rs:487-498`):
 
 ```rust
 #[cfg_attr(feature = "sedge", sedge::overload_check(
-    name = reliable_resend_n9_4k,
+    name = per_entry_n9_4k,
     members = 9,
-    config = RelayConfig { policy: RelayPolicy::ReliableResend { ack_timeout_ticks: 3 }, channel: RelayChannel::FailStop },
-    mu = 500,
+    config = RelayConfig { policy: RelayPolicy::ReliableResendPerEntry { ack_timeout_ticks: 3, max_attempts: None }, channel: RelayChannel::FailStop },
+    mu = 150,
     cpus(Member = 0.01),
     cpu_period_us = 100_000,
     timers(timer = Duration::from_millis(50), report_tick = Duration::from_secs(1)),
@@ -183,48 +260,29 @@ The Sedge configuration (`relay_broadcast.rs:420-431`):
 ))]
 ```
 
-- `mu = 500` is only where the capacity probe starts. μ is measured.
-- `cpus(Member = 0.01)` with `cpu_period_us = 100_000` gives each member 1 ms of CPU in every
-  100 ms. The source has no cap.
-- Each request carries a 4 KiB body.
+- `mu = 150` is only where the capacity probe starts. μ is measured.
+- `cpus(Member = 0.01)` with `cpu_period_us = 100_000` is the check's default, 1 ms of CPU in
+  every 100 ms. **The runs below override it** from the command line to 0.05 cpu per 20 ms
+  (1 ms in every 20 ms, `--cpus Member=0.05 --cpu-period-us 20000`). Under the old cap a
+  throttled member froze for 80–95 ms at a time, longer than the protocol's 50 ms timer and
+  its 150 ms ack timeout, so every freeze looked like a lost ack. The new cap freezes for
+  under 20 ms at a time (§4). The source has no cap and is fed open-loop.
+- The timers run inside the program. The 50 ms `timer` is the protocol's re-send clock, and
+  `report_tick` is the members' once-a-second report.
 
-**No capacity code.** An earlier version modelled each member's capacity inside the program: a
-FIFO inbox from which at most `max_merges_per_tick` arrivals were merged per timer tick. That
-knob is gone. A member now merges whatever has arrived, and its capacity is whatever the code
-achieves on 1 % of a core. The 50 ms timer is only the protocol's re-send clock.
+**No capacity code.** A member merges whatever has arrived. Its capacity is whatever the code
+achieves on 5 % of a core. There are no per-tick budgets, filler load or harness-driven timers.
 
-**Program changes made along the way.** Each change is protocol-neutral: it does not change what
-is sent or when. HydroFrac, Cress and Sedge were re-run after each one.
+**Program changes since the previous version of this demo.** HydroFrac, Cress and Sedge were
+re-run after each one.
 
-1. **A payload body.** The request changed from a bare `u64` to `Request { id, body: Body }`,
-   and `Relay` and `Arrival` carry the body too.
-   - *Why:* with bare ids, a member's work per message was so small that, even at n = 13, the
-     re-sends were at most about 8 % of the relay load. Re-sends could never dominate, and there
-     was no metastable window (see the exploratory runs in §5).
-   - A 4 KiB body makes every relay, stored copy and re-send cost real bytes and CPU. It lowered
-     μ enough for re-sends to matter.
-   - Every earlier configuration sends an empty body, so their results are unchanged.
-2. **Dedup with `unique`.** The `relayed` set used to be a tick-scoped `KeyedSingleton`, rebuilt
-   every tick.
-   - *Why:* that cost O(ids seen so far) per tick, so members got slower and slower as a run went
-     on. A no-burst control at f = 1.25 and f = 1.5 degraded on its own: throttling climbed from
-     ~300 to ~850 ms/s over 75 s. That is a drift, not a metastable failure, and it would have
-     made every verdict meaningless.
-   - Now dedup is a top-level `.unique()`, which Hydro compiles to a persistent set with O(1)
-     cost per arrival.
-3. **Shared bodies.** `Body` wraps `bytes::Bytes`, and the `bytes` dependency now has `serde`
-   enabled.
-   - *Why:* a member keeps one copy of each relay per peer for re-sending. With `Vec<u8>` each
-     copy was a 4 KiB memcpy. With `Bytes` a copy is a reference-count increment.
-   - `Body`'s `Eq`/`Ord`/`Hash` ignore the bytes, because the id determines the body.
-4. **Re-send scan on timer ticks only.** `due` is gated with `filter_if(pump)` before the table
-   is scanned. The depth count is gated the same way and held between timer ticks.
-   - *Why:* the scan over the whole outstanding table ran on every tick, including ticks that
-     only merged arrivals.
-   - This change alone raised μ from 56.6 to 123.4 rounds/s.
-   - As a side effect, the `outstanding_depth` output emits only on timer ticks, and Cress now
-     lists it as "shed".
-   - The table *rebuild* (`outstanding = kept.chain(...)`) still runs every tick. See §5.
+1. **Persistent outstanding table.** It replaces a tick-scoped `KeyedSingleton` that was rebuilt
+   and filtered in full on every tick. This removed the per-tick cost proportional to the
+   backlog that sustained the previous version's collapse (§5).
+2. **Dedup by id only, inside the table's `scan`.** The old top-level `unique` over
+   `(id, body)` kept every received body alive, a slow RSS creep of about 0.3 MB/s even
+   without a burst.
+3. **`ReliableResendPerEntry`**, the policy described above.
 
 ## 2. HydroFrac
 
@@ -236,577 +294,723 @@ without finding one, it reports "no violation found".
 The setup comes from `hydro_test/src/cluster/relay_broadcast_ldfi.rs`:
 
 - **Size and faults:** 3 members and 2 request ids. The source and every member can crash.
-- **Channel:** the relay channel is `lossy_delayed_forever`, so any single relay may be lost.
-  `None` uses `fail_stop` instead.
-- **The run:** the test sends both requests and waits for the system to go quiet. It then
-  declares the *end of finite failures*: no new crash or loss after this point, but crashes
-  that already happened stay. Finally it fires `ack_timeout_ticks + 3` = 6 timer rounds at
-  every member, which gives the re-sends time to repair things.
-- **Schedules are sampled.** Each fault set is run with 8 randomly sampled schedules
-  (`Exploration::Fuzz { instances: 8 }`), not all of them. Exhaustive exploration does not
-  finish at this size: the simulator's estimate for the first fault set was still growing past
-  16,000 schedules.
+- **Channel:** `lossy_delayed_forever`, so any single relay may be lost.
+- **Two schedules for the timer.**
+  - *Standard:* the test sends both requests, waits for quiet, declares the end of finite
+    failures (the *cut*: no new crash or loss after it) and then fires the timers. Every retry
+    after the cut is delivered.
+  - *Stricter:* `3 · max_attempts + 1` timer rounds fire *before* the cut, so HydroFrac can omit
+    the retries as well as the first sends.
+- **Schedules are sampled:** 8 per fault set (`Exploration::Fuzz { instances: 8 }`).
 
-Fresh output, captured for this demo. Cut from it: compiler warnings, HydroFrac's per-run
-search log (`ldfi: run #…`, several hundred lines per test), and the per-label search lines
-except for the `Echo` counterexample's. Each test prints its results table twice, and it
-appears here once. The full trimmed log is
-[`demo_relay_broadcast/hydrofrac.txt`](demo_relay_broadcast/hydrofrac.txt).
+The excerpts below are from the committed log,
+[`relay_broadcast_amplification/hydrofrac.txt`](relay_broadcast_amplification/hydrofrac.txt)
+(12 tests), with `...` marking cuts. TODO(hydrofrac): commit the log of the re-run on commit
+`1b692e68ce` (16 tests, all passing, with the same verdicts), and update the fault-set counts
+below from it.
 
 ```
-$ export CMAKE=$TMPDIR/py/cmake/data/bin/cmake LIBCLANG_PATH=$TMPDIR/pyclang/clang/native
-$ cargo test -p hydro_test --lib cluster::relay_broadcast_ldfi -- --nocapture --test-threads=1
-running 6 tests
-test cluster::relay_broadcast_ldfi::tests::relay_echo_lossy_diverges_under_a_source_crash_and_an_omitted_relay ...
-LDFI: goal violated after 11 hypothesis run(s) by {omit(relay[0→1]:Relay { from: 0, id: 2, body: Body(b"") }), crash(source after bcast[→0]:Request { id: 2, body: Body(b"") })}
-  omitted: {relay[0→1]:Relay { from: 0, id: 2, body: Body(b"") }}
-  sends lost to crashes: {source#4, source#5}
-relay_broadcast Echo over LossyDelayedForever: 2.9s
-members (3 members)
-  initial    relay_broadcast.rs:473  DIVERGES under crash(source after sending bcast Request { id: 2, body: Body(b"") } to member 1)
-  delivered  :487                    DIVERGES under omit(relay Relay { from: 0, id: 2, body: Body(b"") } member 0→member 1) + crash(source after sending bcast Request { id: 2, body: Body(b"") } to member 0)
-summary: 0 hold, 2 DIVERGE (members/initial, members/delivered)
-ok
-test cluster::relay_broadcast_ldfi::tests::relay_echo_resend_lossy_diverges_under_a_source_and_a_relayer_crash ...
-relay_broadcast EchoResend { ack_timeout_ticks: 3 } over LossyDelayedForever: 4.9s
-members (3 members)
-  initial    relay_broadcast.rs:473  DIVERGES under crash(source after sending bcast Request { id: 2, body: Body(b"") } to member 1)
-  delivered  :487                    DIVERGES under crash(member@0 after sending relay Relay { from: 0, id: 2, body: Body(b"") } to member 1) + crash(source after sending bcast Request { id: 2, body: Body(b"") } to member 0)
-summary: 0 hold, 2 DIVERGE (members/initial, members/delivered)
-ok
-test cluster::relay_broadcast_ldfi::tests::relay_echo_resend_lossy_holds_under_one_crash ...
-relay_broadcast EchoResend { ack_timeout_ticks: 3 } over LossyDelayedForever: 5.0s
-members (3 members)
-  initial    relay_broadcast.rs:473  DIVERGES under crash(source after sending bcast Request { id: 2, body: Body(b"") } to member 1)
-  delivered  :487                    no violation found (18 fault sets, 8 sampled schedules each)
-summary: 1 hold, 1 DIVERGE (members/initial)
-ok
-test cluster::relay_broadcast_ldfi::tests::relay_none_diverges_under_a_source_crash ...
-relay_broadcast None over FailStop: 1.0s
-members (3 members)
-  initial    relay_broadcast.rs:473  DIVERGES under crash(source after sending bcast Request { id: 2, body: Body(b"") } to member 1)
-  delivered  :487                    DIVERGES under crash(source after sending bcast Request { id: 2, body: Body(b"") } to member 1)
-summary: 0 hold, 2 DIVERGE (members/initial, members/delivered)
-ok
-test cluster::relay_broadcast_ldfi::tests::relay_reliable_resend_lossy_holds_under_one_crash ...
-relay_broadcast ReliableResend { ack_timeout_ticks: 3 } over LossyDelayedForever: 5.6s
-members (3 members)
-  initial    relay_broadcast.rs:473  DIVERGES under crash(source after sending bcast Request { id: 2, body: Body(b"") } to member 1)
-  delivered  :487                    no violation found (18 fault sets, 8 sampled schedules each)
-summary: 1 hold, 1 DIVERGE (members/initial)
-ok
-test cluster::relay_broadcast_ldfi::tests::relay_reliable_resend_lossy_holds_under_unbounded_crashes ...
-relay_broadcast ReliableResend { ack_timeout_ticks: 3 } over LossyDelayedForever: 17.0s
-members (3 members)
-  initial    relay_broadcast.rs:473  DIVERGES under crash(source after sending bcast Request { id: 2, body: Body(b"") } to member 1)
-  delivered  :487                    no violation found (65 fault sets, 8 sampled schedules each)
-summary: 1 hold, 1 DIVERGE (members/initial)
-ok
-
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 240 filtered out; finished in 145.86s
+$ cargo test -p hydro_test --lib cluster::relay_broadcast -- --nocapture --test-threads=3
+  delivered  :576                    DIVERGES under omit(relay Relay { from: 0, id: 2, body: Body(b"") } member 0→member 1) + crash(source after sending bcast Request { id: 2, body: Body(b"") } to member 0)
+relay_broadcast Echo over LossyDelayedForever, 0 timer rounds before the cut: 2.6s
+...
+  delivered  :576                    DIVERGES under omit(relay Relay { from: 0, id: 2, body: Body(b"") } member 0→member 1) + omit(relay Relay { from: 0, id: 2, body: Body(b"") } member 0→member 2) + crash(source after sending bcast Request { id: 2, body: Body(b"") } to member 0)
+relay_broadcast ReliableResendPerEntry { ack_timeout_ticks: 3, max_attempts: Some(3) } over LossyDelayedForever, 10 timer rounds before the cut: 12.2s
+relay_broadcast ReliableResendPerEntry { ack_timeout_ticks: 3, max_attempts: Some(5) } over LossyDelayedForever, 16 timer rounds before the cut: 16.1s
+...
+  delivered  :576                    no violation found (247 fault sets, 8 sampled schedules each)
+relay_broadcast ReliableResendPerEntry { ack_timeout_ticks: 3, max_attempts: None } over LossyDelayedForever, 0 timer rounds before the cut: 154.2s
+...
+  delivered  :576                    no violation found (239 fault sets, 8 sampled schedules each)
+relay_broadcast ReliableResendPerEntry { ack_timeout_ticks: 3, max_attempts: None } over LossyDelayedForever, 10 timer rounds before the cut: 191.5s
+...
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 244 filtered out; finished in 716.55s
 ```
+
+Each verdict line is printed just before its test's header line. The trimmed log does not
+keep the verdict line for `max_attempts: Some(5)` with 16 rounds before the cut. That test's
+name (`relay_per_entry_5_diverges_when_every_attempt_is_omitted`) asserts the divergence, and
+it passed.
+
+| policy | timer rounds before the cut | result |
+|---|---|---|
+| `Echo` | 0 | counterexample: omit relay 0→1 of id 2, plus a source crash |
+| PerEntry, max_attempts 3 / 5 / none, unbounded crashes | 0 | no violation (256 / 241 / 247 fault sets) |
+| PerEntry, max_attempts 3 | 10 | counterexample |
+| PerEntry, max_attempts 5 | 16 | counterexample |
+| PerEntry, max_attempts none | 10 | no violation (239 fault sets) |
 
 **Reading.**
 
 - **`Echo`: counterexample.** The source sends id 2 to member 0 only, then crashes. Member 0
   echoes id 2 to its peers, but the echo to member 1 is lost. `Echo` never re-sends, so member 1
-  never gets id 2, while members 0 and 2 have it. HydroFrac needed two faults, one crash and
-  one loss, and found them in 11 tries.
-- **`EchoResend`** survives any *one* crash (18 fault sets). It still fails with two: the source
-  crashes after reaching only member 0, and member 0 crashes part-way through its echoes.
-  Members echo only ids they got *from the source*, so nobody passes id 2 on. This is the gap in
-  the hand-written argument that `ReliableResend` closes.
-- **`ReliableResend`: no violation found.** It held under one crash (18 fault sets) and with
-  crashes unbounded (65 fault sets: any combination of the source and the members crashing,
-  plus lost relays before the cut). Each fault set ran with 8 sampled schedules. In the test's
-  API this is a `Certificate`, but it is a certificate *for the sampled schedules*: it says no
-  violation was found, not that none exists. It also only covers 3 members and 2 ids.
-- **`initial` always diverges.** `initial` is the source's one-hop broadcast on its own, which
-  is exactly what the relays exist to repair. It is reported as its own row.
-- An earlier run of the unbounded test reported 55 fault sets. The program has changed since:
-  it now has the body field, `unique` and the pump gate, and the universe of faults HydroFrac
-  derives from the program's messages changed with it. The verdict did not change.
-
-HydroFrac's Lamport diagrams for the failing runs are in
-[`../relay_broadcast/hydrofrac/`](../relay_broadcast/hydrofrac/README.md).
+  never gets id 2, while members 0 and 2 have it. Two faults are enough: one crash and one loss.
+- **A retry limit is a hole.** In the stricter setup the source again crashes after reaching
+  only member 0, and every attempt of member 0's relays of id 2 to members 1 and 2 is omitted.
+  Once member 0 has used up its attempts it gives the relays up. Re-sends are identical bytes,
+  so one omission covers every copy.
+- **Only unlimited retries are certified.** `max_attempts: None` holds in both setups, and it
+  is the configuration deployed below. "No violation found" covers the sampled schedules, at 3
+  members and 2 ids. It does not prove that no violation exists.
+- **The redundancy is the hazard.** HydroFrac's argument for unlimited retries is exactly
+  "keep re-sending until acknowledged". §3 shows that this is what Cress flags.
 
 ## 3. Cress
 
 Cress runs the program in the simulator and asks one question: **does delay cause extra work?**
+It *holds* one decision point at a time (a `use::batch` or `use::snapshot`) for a range of
+lengths, and counts every output stream and every message against the unheld run.
 
-- A *decision point* is each place where a location takes a batch of its waiting input (a
-  `use::batch`) or reads a snapshot of some state (`use::snapshot`).
-- Cress *holds* one decision point at a time for a range of lengths. While it is held, the
-  input waits there.
-- It then counts the messages each sender sends, against a run with no hold.
-- A program where a hold only delays work is **BENIGN**. A program where a hold makes some
-  sender send *more* is **HAZARDOUS**: in a deployment, a slow node then gets more work exactly
-  when it is slow.
-
-The setup comes from the `amplification_check` attributes (`relay_broadcast.rs:214-312`):
-
-| configuration | members | policy | workload | body |
-|---|---|---|---|---|
-| `echo_only` | 5 | `Echo` | 1 request per round, rounds 0–124 | empty |
-| `reliable_resend` | 5 | `ReliableResend { ack_timeout_ticks: 3 }` | 1 request per round, rounds 0–124 | empty |
-| `reliable_resend_n9_4k` | 9 | `ReliableResend { ack_timeout_ticks: 3 }` | 1 request per round, rounds 0–39 | 4 KiB |
-
-- **Common to all three:**
-  - The relay channel is `FailStop`, with no faults.
-  - The timers are the deployed ones, converted to rounds: the 50 ms re-send timer fires
-    20 times per round, and the report tick once per round.
-  - Each run lasts 1000 rounds.
-- **Hold lengths:** 1, 2, 4, …, 512 and 999 rounds, all starting at round 1.
-- **Decision points held:**
-  - the members' timer batch (`:525`);
-  - the arrival batch (`:526`);
-  - the first-receipt batch (`:527`);
-  - the ack batch (`:528`);
-  - the metrics batches (`:657`–`:660`).
-
-  The metrics snapshot (`:661`) cannot be held.
-
-Fresh output, captured for this demo. Compiler warnings and the `Finished` lines are cut, and
-each configuration took 10–27 minutes:
+```sh
+./scripts/cress --config per_entry_n9_4k hydro_test relay_broadcast
+```
 
 ```
-$ for c in echo_only reliable_resend reliable_resend_n9_4k; do ./scripts/cress --config $c hydro_test relay_broadcast; done
-Checking relay_broadcast (echo_only)…
-✓ BENIGN  relay_broadcast (echo_only)  growth: -  multiplier: -  location: -
-    outputs: conserved: wire, merged, acks_sent, delivered; shed: outstanding_depth, metrics
-Checking relay_broadcast (reliable_resend)…
-! HAZARDOUS  relay_broadcast (reliable_resend)  growth: grows  multiplier: 8.98x  location: hydro_test/src/cluster/relay_broadcast.rs:526, batch of Arrival
-    outputs: amplified: wire, merged, acks_sent, delivered; shed: outstanding_depth, metrics
-Checking relay_broadcast (reliable_resend_n9_4k)…
-! HAZARDOUS  relay_broadcast (reliable_resend_n9_4k)  growth: grows  multiplier: 25.95x  location: hydro_test/src/cluster/relay_broadcast.rs:526, batch of Arrival
+! HAZARDOUS  relay_broadcast (per_entry_n9_4k)  growth: grows  multiplier: 175.60x  location: hydro_test/src/cluster/relay_broadcast.rs:616, batch of Arrival
     outputs: amplified: wire, merged, acks_sent, delivered; shed: outstanding_depth, metrics
 ```
 
-The full report for `reliable_resend_n9_4k`, trimmed to the two decision points that react and
-the verdict. The three reports are in
-[`demo_relay_broadcast/cress/`](demo_relay_broadcast/cress/).
+The full report is in
+[`relay_broadcast_amplification/cress/per_entry_n9_4k.txt`](relay_broadcast_amplification/cress/per_entry_n9_4k.txt).
+The two decision points that react are the members' batch of arrivals (`:616`) and their batch
+of acks (`:618`):
 
 ```
-hydro_test::cluster::relay_broadcast relay_broadcast (reliable_resend_n9_4k) workload members=9 members, round_data closure, timer=20/round, report_tick=1/round, data in rounds 0..40
-
-cress amplification check: 1000 rounds of workload, every hold begins at round 1
-horizon: 999 rounds (the longest delay imposed; a hold of that length lasts to the end of the run)
-run time: 1629.0 s including compilation
-input: data in rounds 0..40, timers only afterwards; finite holds that outlast the input: 64, 128, 256, 512
-unheld run: 201600 records admitted at decision points, 6120 network messages sent, 7 decision points had buffered input
-
-hold length (rounds)                      1      2      4      8     16     32     64    128    256    512    999
-hydro_test/src/cluster/relay_broadcast.rs:525, batch of (usize, ()): no extra work at any hold length
-hydro_test/src/cluster/relay_broadcast.rs:526, batch of Arrival
-    extra records admitted              180    540   1260   2700   5580  11340  22860  45900  91980 184140 134586
-    extra messages, busiest sender        8     24     56    120    248    504   1016   2040   4088   8184   7672
-    extra messages, all senders          72    216    504   1080   2232   4536   9144  18360  36792  73656  69048
-    first reacted at a hold of 1 rounds with 180 extra; largest extra work 184140 in admitted records
-    beyond the input (holds 64, 128, 256, 512): extra sends from Cluster(loc2v1) @8 keeps growing: rate 16.00 per round of delay, no ceiling within the run (rates 16.000, 16.000, 16.000)
-    beyond the input (holds 64, 128, 256, 512): extra admitted records keeps growing: rate 360.00 per round of delay, no ceiling within the run (rates 360.000, 360.000, 360.000)
-    multiplier: 13.79× the unheld run's 640 sends from Cluster(loc2v1) @8 (+8184 at a hold of 512 rounds)
-    under a hold that never ends: +134586 admitted records (134.7 per round of the run)
-hydro_test/src/cluster/relay_broadcast.rs:527, batch of (u64, Body): no extra work at any hold length
-hydro_test/src/cluster/relay_broadcast.rs:528, batch of Ack
-    extra records admitted                0    360   1080   2520   5400  11160  22680  45720  91800 183960 284616
-    extra messages, busiest sender        0     16     48    112    240    496   1008   2032   4080   8176  15968
-    extra messages, all senders           0    144    432   1008   2160   4464   9072  18288  36720  73584 143712
-    first reacted at a hold of 2 rounds with 360 extra; largest extra work 284616 in admitted records
-    beyond the input (holds 64, 128, 256, 512): extra sends from Cluster(loc2v1) @8 keeps growing: rate 16.00 per round of delay, no ceiling within the run (rates 16.000, 16.000, 16.000)
-    beyond the input (holds 64, 128, 256, 512): extra admitted records keeps growing: rate 360.00 per round of delay, no ceiling within the run (rates 360.000, 360.000, 360.000)
-    multiplier: 25.95× the unheld run's 640 sends from Cluster(loc2v1) @8 (+15968 at a hold of 999 rounds)
-    under a hold that never ends: +284616 admitted records (284.9 per round of the run)
-hydro_test/src/cluster/relay_broadcast.rs:657, batch of (usize, ()): no extra work at any hold length
-hydro_test/src/cluster/relay_broadcast.rs:658, batch of Arrival: no extra work at any hold length
-hydro_test/src/cluster/relay_broadcast.rs:659, batch of (u32, Relay): no extra work at any hold length
-hydro_test/src/cluster/relay_broadcast.rs:661: not holdable (snapshot of an optional; the simulator cannot script it, so it follows the prompt schedule in every run)
-...
-verdict: hazardous
-  decision point: hydro_test/src/cluster/relay_broadcast.rs:526, batch of Arrival
-  first reacted at a hold of 1 rounds, with 180 extra admitted records there
-  largest extra work over the curve: 184140 in admitted records
-  decision points that admitted more records under that hold, at its peak:
-    hydro_test/src/cluster/relay_broadcast.rs:526, batch of Arrival +36828
-    hydro_test/src/cluster/relay_broadcast.rs:528, batch of Ack +36828
-    hydro_test/src/cluster/relay_broadcast.rs:658, batch of Arrival +36828
-    hydro_test/src/cluster/relay_broadcast.rs:659, batch of (u32, Relay) +36828
-    hydro_test/src/cluster/relay_broadcast.rs:660, batch of (u32, (u64, Body)) +36828
-growth: keeps growing. Once the hold outlasts the input, every further round of delay costs the same amount of extra work.
-  worst shape, at hydro_test/src/cluster/relay_broadcast.rs:528, batch of Ack over holds 64, 128, 256, 512: extra sends from Cluster(loc2v1) @8 keeps growing: rate 16.00 per round of delay, no ceiling within the run (rates 16.000, 16.000, 16.000)
-  largest multiplier, at hydro_test/src/cluster/relay_broadcast.rs:528, batch of Ack: 25.95× the unheld run's 640 sends from Cluster(loc2v1) @8 (+15968 at a hold of 999 rounds)
-  largest stall reaction, at hydro_test/src/cluster/relay_broadcast.rs:528, batch of Ack: +284616 admitted records (284.9 per round of the run) under a hold that never ends
+hold length (rounds)                      1      2      4      8     16     32     64    128    199
+hydro_test/src/cluster/relay_broadcast.rs:618, batch of Ack
+    extra records admitted                0    432   2592  12096  42768 104976 229392 478224 627912
+    extra messages, busiest sender        0     16     96    448   1584   3888   8496  17712  27936
+    extra messages, all senders           0    144    864   4032  14256  34992  76464 159408 251424
+    first reacted at a hold of 2 rounds with 432 extra; largest extra work 627912 in admitted records
+    beyond the input (holds 16, 32, 64, 128): extra sends from Cluster(loc2v1) @8 keeps growing: rate 144.00 per round of delay, no ceiling within the run (rates 144.000, 144.000, 144.000)
+    beyond the input (holds 16, 32, 64, 128): extra admitted records keeps growing: rate 3888.00 per round of delay, no ceiling within the run (rates 3888.000, 3888.000, 3888.000)
+    multiplier: 175.60× the unheld run's 160 sends from Cluster(loc2v1) @8 (+27936 at a hold of 199 rounds)
+    under a hold that never ends: +627912 admitted records (3155.3 per round of the run)
 ```
-
-![Cress hold sweep](demo_relay_broadcast/cress_holds.png)
 
 **Reading.**
 
-- **`echo_only` is BENIGN.** No hold, at any length, makes any member send more. An echo is
-  sent once, whenever it is sent. Every output is *conserved*: its count is fixed by the input.
-- **`reliable_resend` is HAZARDOUS, at both sizes.**
-  - Holding a member's arrival batch (`:526`) or its ack batch (`:528`) means its peers'
-    relays go unacknowledged past the 3-tick timeout, and the peers re-send them.
-  - The extra sends start at a hold of 1–2 rounds and grow in proportion to the hold:
-    - with 9 members, 16 extra sends per round of delay from the busiest member (about two per
-      peer per round);
-    - with 5 members, 8.
-  - "grows" means there is **no ceiling**: as long as the delay lasts, the re-sends continue.
-    That is different from `rpc_retry`, whose three-attempt limit made the extra work stop at
-    2.98×.
-  - Delaying acks and delaying arrivals look the same to the sender. Both are "the member is
-    slow to process what has arrived", which is what a CPU cap causes in a deployment.
-- **The multiplier measures the hold, not the program.** Because the growth has no ceiling, the
-  multiplier is about (unheld sends + 16 × hold) / unheld sends, at the longest hold Cress tried:
-  (640 + 15968) / 640 = 25.95.
-  - `n9_4k` reads 25.95× because its workload is short: 40 requests, so 640 unheld sends from
-    the busiest member. It also has more peers per member.
-  - `reliable_resend` (n = 5) reads 8.98× over 125 requests and 1000 unheld sends.
-  - Neither number is a headroom threshold. Sedge's boundary is f ≈ 2–2.5 (§5).
-  - An earlier record of the n = 5 configuration (`../relay_broadcast/README.md`) reads 8.97× at
-    `relay_broadcast.rs:272`. That was the same check on an earlier layout of the file, before
-    the program changes in §1.
-- **The redundancy that earns the certificate is what Cress flags.** The re-send-until-acked
-  loop is exactly what makes `ReliableResend` survive lost relays in HydroFrac. `Echo` has no
-  such loop, which is why it is BENIGN and why HydroFrac breaks it.
-- **What Cress counts.** Cress counts messages and admitted records, not CPU. It sees that a
-  held member makes its peers re-send. It does not see that a member's per-tick cost grows with
-  its unacked table. §5 shows that this second effect is what sustains the deployed collapse.
+- **Late acks cause re-sends.** Holding a member's acks makes every relay it sent look
+  overdue, so it re-sends all of them every three timer ticks. Holding its arrivals has the same
+  effect on its peers, because the acks for those arrivals are not sent.
+- **The amplified streams** are `wire` (the re-sends themselves), `merged` and `delivered`
+  (each re-send is received and merged again) and `acks_sent` (each merged duplicate is
+  acknowledged again). §4 measures the same four streams in deployment.
+- **It grows with the backlog.** The busiest member gains 144 extra sends per round of delay,
+  with no ceiling within the run. The per-peer `ReliableResend` gains 16 at a 25.95×
+  multiplier, because it re-sends at most one relay per peer per timer tick.
+- **The workload was reduced** to 10 rounds, a horizon of 200 and *empty bodies*. With
+  40 rounds, a horizon of 1000 and 4 KiB bodies the simulator, which keeps every buffered
+  re-send, grew to 10.5 GB and was killed. Cress counts messages, not bytes, so body size does
+  not change its counts. The Sedge configuration keeps 4 KiB bodies.
+- **The other two policies deployed in §4** (verdicts only; the full report lines are in the
+  report files):
+  - `per_entry3_n9_4k`: HAZARDOUS, growth *stops*, multiplier 2.80×;
+  - `reliable_resend_n9_4k`: HAZARDOUS, growth *grows*, multiplier 25.95×.
+
+  Cress was re-run on the final tree for all three configurations; the verdict lines are in
+  [`relay_broadcast_lossy/cress/console.txt`](relay_broadcast_lossy/cress/console.txt):
+
+  ```
+  ! HAZARDOUS  relay_broadcast (per_entry_n9_4k)  growth: grows  multiplier: 175.60x  location: hydro_test/src/cluster/relay_broadcast.rs:616, batch of Arrival
+  ! HAZARDOUS  relay_broadcast (per_entry3_n9_4k)  growth: stops  multiplier: 2.80x  location: hydro_test/src/cluster/relay_broadcast.rs:616, batch of Arrival
+  ! HAZARDOUS  relay_broadcast (reliable_resend_n9_4k)  growth: grows  multiplier: 25.95x  location: hydro_test/src/cluster/relay_broadcast.rs:616, batch of Arrival
+  ```
+
+  - `per_entry3_n9_4k` (`max_attempts: Some(3)`) is HAZARDOUS, but its growth **stops**: a
+    relay is sent at most three times, so no hold can cost more than about 3× the sends.
+  - `reliable_resend_n9_4k` (per peer) is HAZARDOUS and grows at a 25.95× multiplier, but by
+    16 sends per round of delay, not 144.
+  - The full reports for all three are in [`relay_broadcast_lossy/cress/`](relay_broadcast_lossy/cress/).
+    `per_entry` and `per_entry3` use the reduced workload below. `reliable_resend` runs 40
+    rounds, a horizon of 1000 and 4 KiB bodies.
+- **Cress models delays, not loss, and that is enough here.** The Sedge runs below give the
+  members *lossy* send queues: a send that finds the queue full is dropped. Cress never drops
+  a message; it only holds one. But under a retry policy, a dropped relay followed by its
+  re-send looks to every other part of the program exactly like a relay that was delayed until
+  the re-send. The same holds for a dropped ack: the relay is re-sent until a later ack gets
+  through. So every run of the lossy deployment is also a run of Cress's delay model, and
+  Cress's verdict carries over to it. The lossy queue is a deployment option, not a program
+  change. It needs no Cress check of its own.
 
 ## 4. Sedge
 
 ### Configuration
 
-- **Capacity from outside.**
-  - Each deployed process runs in its own Docker container (`--network host`). All ten nodes
-    run on core 7 (`--node-cpus 7`), and the harness (load generator, observer) runs on core 6
-    (`--harness-cpus 6`).
-  - Each of the **9 members** gets a CFS quota of 1 ms per 100 ms (0.01 cores). The quota is
-    set at container start and stays fixed.
-  - The **source** has no quota. It stands for the callers offering the load.
-- **Release build.** The nodes are built with the workspace's `profile` profile (release with
-  debug info), which is Sedge's default (`--deploy-profile`).
-- **Open-loop workload.** Poisson arrivals at the profile's rate, each request with a 4 KiB body.
-  - The generator queues each request at its scheduled time and never waits.
-  - The nodes run with `HYDRO_DEPLOY_SEND_BUFFER=unbounded`, Sedge's default: every outgoing
-    connection is an unbounded in-memory queue, so a slow member never stalls its senders.
-  - Every trial checks this. A trial is INVALID if more than 0.1 % of requests entered the
-    source more than 50 ms after their scheduled time.
-- **μ is measured**, not assumed: μ = **123.4 rounds/s** on this host, core and build. The probe
-  found that 123.4/s keeps up and 134.5/s falls behind.
-- **Profile.**
-  - 10 s at λ = μ/f;
-  - a **burst** at 2μ (≈ 247/s) for 5 s, from 10 s to 15 s;
-  - 60 s at λ again (`--tail 60`).
+- Three configurations, each 9 members with 4 KiB bodies and `ack_timeout_ticks: 3`:
+  - `per_entry_n9_4k`: `ReliableResendPerEntry { max_attempts: None }`, the subject;
+  - `per_entry3_n9_4k`: `ReliableResendPerEntry { max_attempts: Some(3) }`, the same re-send
+    loop with a retry limit (which HydroFrac refutes, §2);
+  - `reliable_resend_n9_4k`: the per-peer policy, at most one re-send per peer per timer tick.
+- **CPU cap: 0.05 cpu per 20 ms period** for each member, in its own container (`--cpus
+  Member=0.05 --cpu-period-us 20000`). The source is uncapped and open-loop.
+  - The check's default, 0.01 per 100 ms, gave 80–95 ms freezes, longer than the 50 ms timer
+    and the 150 ms ack timeout, so a single freeze could make every outstanding relay overdue.
+  - Under the new cap a member at baseline freezes for 7–14 ms at a time, and a fully
+    throttled member for about 20 ms (`throttled_ms / nr_throttled` in the traces).
+- Release build (`--deploy-profile profile`). The harness and the nodes are on separate cpus:
+  round 1 put the nodes on cpus 7–8, and round 3 used the isolated slots described under
+  Methods.
+- Memory limit: 400 MB per member, 2000 MB for the source. A node that dies makes the trial
+  **INVALID**: Sedge reads `State.OOMKilled` and the exit code of every node before teardown.
+  An OOM kill is a crash, not a collapse.
+- Out-of-band counters, read by Sedge, never by the members:
+  - `wchar_kb_*`, `rss_mb_*`: `/proc/<pid>/io` and `VmRSS` of every member's processes, read
+    from a sampler container four times a second. `wchar / 4120 B` is the number of relays a
+    member actually wrote to its sockets.
+  - `cpu_*`, `nr_throttled_*`, `throttled_ms_*`: the containers' cgroup CPU accounting.
+  - `sendq_attempted[_kb]_*`, `sendq_dropped[_kb]_*`: counted in the transport (hydro_deploy's
+    lossy send queue), outside the program's dataflow. They are the sends the dataflow handed
+    the queue and the ones the queue dropped because it was full. Each member publishes them
+    to a file five times a second, and Sedge reads them once a second. A starved member
+    publishes late, so one second can read 0 and the next carries two seconds' worth. Window
+    means are exact; the plots smooth these two series over 3 s.
+- **Send buffers: `--send-buffer lossy:1024:Member`.** Each member's outgoing connection
+  queues at most 1024 messages, and a send that finds the queue full is dropped and counted.
+  The source's feed stays open-loop and unbounded. The other options failed:
+  - `unbounded` (the default; `relay_broadcast_lossy/earlier/n_*`, same cap): a 2μ, 5 s burst
+    fills each member's queues with first relays while its writers starve, and a member is
+    OOM-killed at 400 MB, at every f from 1.5 to 4. Those trials are INVALID: a crash, not a
+    collapse, and the memory comes from the burst itself, not from re-sends.
+  - `bounded:Member`, where a full queue pushes back on the member's own dataflow
+    (`earlier/e1_bounded_ctl_f2`, `earlier/bounded_member_calibration_old_cap.txt`). Below μ it
+    behaves like the unbounded run. Above μ the members deadlock at 0 % CPU and 0 bytes
+    written: each is blocked sending to a peer that is itself blocked sending, so no one reads.
+    The source's queue then grows until the source is OOM-killed. There is no work done, so
+    there is no amplification to see.
 
-  The verdict compares the window [45 s, 75 s) with the baseline [5 s, 10 s). The burst is the
-  only trigger: there is no CPU dip.
-- **No-burst controls** run the same profile with the burst set to λ (`--trigger-multiple 1/f`).
-  If a control degrades on its own, the program is drifting, and a "collapse" would mean
-  nothing.
-- **Timers:** the members' 50 ms re-send timer and the 1 s report tick run in-process.
-- **What Sedge watches.** Each member reports four counters once a second: arrivals merged
-  (`delivered`), relays put on the wire (`wire`), re-sends (`resent`), and its count of
-  unacked relays (`unacked`). Sedge sums them over the members. The program has no per-request
-  completion, so Sedge's "goodput" column is not meaningful here (it reads 100 % throughout).
-  The verdicts rest on the unacked level and the re-send rate.
+  A dropped send is a lost message, which is the fault model HydroFrac already checked (§2)
+  and, with retries, a delay in Cress's model (§3).
+- **Open loop held.** No request entered the program more than 50 ms late in any round-1 or
+  round-3 trial (`feed_late` = 0 in all 147 of them; the worst lag, `feed_max_lag_ms`, was
+  48.4 ms). Of the 32 round-2 trials used here, one fails the check (§4, round 2) and is
+  INVALID.
+- **μ = 565.7 rounds/s** for this cap and send-buffer mode in rounds 1 and 2, passed with
+  `--mu`. It was measured for `per_entry_n9_4k` with the nodes on cpus 3–4
+  ([`relay_broadcast_lossy/probes.tsv`](relay_broadcast_lossy/probes.tsv),
+  `calibration.tsv`): 565.7/s kept up, while 616.9/s fell behind with `unacked` rising. Other
+  core pairs gave other values (`calibration_per_slot/`, `calibration_index.tsv`). Round 3
+  measured μ on each of its slots (Methods).
+- **Trigger.** Rounds 1 and 2: a load burst at 2μ for 5 s starting at 10 s, then a 60 s tail.
+  Sedge's verdict window is the second half of the tail, [45, 75) s. Round 3 also varies the
+  burst (1.5μ or 2μ, for 0.5–1.5 s) and the tail (60 or 180 s).
+- **Controls.** Each burst run has a no-burst control of the same factor and length: the
+  trigger window runs at λ = μ/f, so the load never changes.
+
+### Methods: isolation, μ, verdicts and counters
+
+**SMT isolation (round 3).** The host has 8 physical cores with 2 hardware threads each. Logical
+cpus n and n + 8 are siblings: they share one core's execution units and caches. Round 3 runs
+in two *slots*. Each slot is a harness cpu plus two node cpus. Their siblings (9–11 and 13–15)
+are left idle, and cpu 0 and its sibling 8 are used only for builds, Cress and analysis
+(`relay_broadcast_lossy/README.md`):
+
+| slot | harness cpu | node cpus | μ (rounds/s), calibrations | μ used |
+|---|---|---|---|---|
+| S1 | 1 | 2–3 | 654.3, 654.3, 713.5 | 654.3 |
+| S2 | 5 | 6–7 | 713.5, 654.3, 778.1 | 713.5 |
+
+- **Round 2 had no such isolation.** Its slots shared physical cores (SMT siblings) with each
+  other's load, so a node's capacity depended on what its sibling was running. Its boundary
+  numbers are therefore not used here. Only its large-margin results are: a 2μ, 5 s burst,
+  and 180 s or 300 s tails.
+- **Round 1 also predates the isolation.** Its nodes ran on cpus 7–8, the siblings of 15 and 0.
+  Its outcomes have large margins, but its numbers near a boundary should be read with that in
+  mind.
+- **μ is uncertain by about 19 %.** The probe steps through rates about 9 % apart, and three
+  calibrations on the same slot gave 654.3–778.1
+  ([`calibration_smt_isolated/`](relay_broadcast_lossy/calibration_smt_isolated/)). Core pairs
+  whose siblings were busy gave 462–733 (`calibration_index.tsv`, `calibration_per_slot/`).
+  Near capacity a probe can itself start `per_entry`'s re-send storm, so its outcome there is
+  not repeatable. Every ratio to μ below is therefore given over that range, and f
+  is computed from the μ the slot used.
+
+**The silent-tail rule.** The members' in-band reports travel the same queues as their
+traffic, so in a black hole they stop reaching Sedge, and the program's own levels carry their
+last value forward. The build that ran round 3 applies one rule to every trial:
+
+- if more than 20 % of the tail's seconds have no in-band record at all, the tail is judged
+  from outside;
+- if the capped nodes' kernel writes (`wchar`) over the second half of the tail are at most
+  50 % of their pre-trigger rate, the outcome is **COLLAPSED**;
+- otherwise it is **INVALID**: the program cannot be read, and its writes are not low enough to
+  call it collapsed.
+
+Applying the rule uniformly changed 4 earlier runs from INVALID to COLLAPSED, all from round 2
+(so large-margin only). Their outside writes, whole tail → second half of the tail
+(`relay_broadcast_amplification/rescore_silent.py`):
+
+- `r2_A_pe_f4_m1.5_d1.5_s5`, trials 1, 2 and 3: 0.51 → 0.03, 0.52 → 0.03, 0.76 → 0.04;
+- `r2_A_pe_f4_m2_d0.5_t180_s5`, trial 2 (seed 13): 0.63 → 0.01.
+
+Read over the whole tail, the storm before the black hole raises the mean above the 50 %
+threshold. The second half sees only the black hole. Two round-3 trials stay INVALID under it. Both are still storming on the wire, with
+reports missing for 13 and 49 tail seconds and writes at about 60 % and 100 % of baseline.
+
+**Outcome fractions use one outside classification.** Sedge's labels mix in-band and outside
+readings, and DRAINING is often slope noise on a flat level (§4, footnote 1). The fraction
+tables therefore also classify every trial, including controls, the same way, from the outside
+counters over the second half of the tail ([`plot_outcomes.py`](demo_relay_broadcast/plot_outcomes.py)):
+
+- **black hole:** kernel writes below 0.2× the pre-trigger mean [5, 10) s, with member CPU
+  above 0.9 of the quota;
+- **storm:** sends handed to the lossy queues above 1.5× the pre-trigger mean;
+- **clear:** otherwise.
+
+"Stuck" means black hole or storm. All 50 round-3 controls are clear.
+
+**The lossy transport.** `--send-buffer lossy:1024:Member` is a hydro_deploy transport
+option. Each outgoing connection gets a queue of at most 1024 messages and a writer task, and a
+send that finds the queue full is dropped (see Configuration). The transport counts every send
+it is handed and every drop, in messages and bytes, and publishes the counts for Sedge. These
+counters are inside the member process but outside the program's dataflow. They keep counting
+when the program's reports are dropped.
+
+**The counter-recording fix.** A member's in-band counters (`resent`, `wire`, …) arrive as one
+increment per report. Sedge used to record an increment of n as n separate records. When a
+starved member's report finally arrived carrying a backlog of millions of re-sends, that loop
+stalled the harness task that also paces the open-loop feed, for hundreds of milliseconds.
+That could make the feed late, and the trial INVALID, in exactly the runs that matter. Sedge now
+keeps an increment as one entry that stands for n records (`sedge/src/trace.rs`,
+`a_large_counter_report_is_one_entry`).
 
 ### Commands
 
 ```sh
-# Cress first: Sedge reads each output stream's kind (level, work, …) from Cress's table.
+# Cress first, on every new configuration.
+./scripts/cress --config per_entry_n9_4k hydro_test relay_broadcast
+./scripts/cress --config per_entry3_n9_4k hydro_test relay_broadcast
 ./scripts/cress --config reliable_resend_n9_4k hydro_test relay_broadcast
-
-# Burst runs (seed = trial + 1 unless --seed is given):
-./scripts/sedge --config reliable_resend_n9_4k --factors 1.5,1.75 --trials 4 --tail 60 \
-  --harness-cpus 6 --node-cpus 7 hydro_test relay_broadcast                    # burst_key
-./scripts/sedge --config reliable_resend_n9_4k --factors 1.25,2,4 --trials 1 --tail 60 \
-  --harness-cpus 6 --node-cpus 7 hydro_test relay_broadcast                    # burst_other
-./scripts/sedge --config reliable_resend_n9_4k --factors 2.5,3 --trials 3 --tail 60 \
-  --harness-cpus 6 --node-cpus 7 hydro_test relay_broadcast                    # burst_bisect
-./scripts/sedge --config reliable_resend_n9_4k --factors 1.5 --trials 1 --seed 7 --tail 60 \
-  --harness-cpus 6 --node-cpus 7 hydro_test relay_broadcast                    # mech_f1.5 (and --seed 8)
-
-# No-burst control at factor F: the trigger window runs at λ = μ/F.
-./scripts/sedge --config reliable_resend_n9_4k --factors F --trials 1 \
-  --trigger-multiple $(python3 -c "print(1/F)") --tail 60 \
-  --harness-cpus 6 --node-cpus 7 hydro_test relay_broadcast                    # ctl_fF
+# Burst runs (C = per_entry_n9_4k, per_entry3_n9_4k or reliable_resend_n9_4k).
+./scripts/sedge --config C --deploy-profile profile \
+  --cpus Member=0.05 --cpu-period-us 20000 --send-buffer lossy:1024:Member \
+  --memory-mb Member=400 --memory-mb Source=2000 --mu 565.7 \
+  --harness-cpus 5-6 --node-cpus 7-8 --factors F --trials 1 --tail 60 \
+  hydro_test relay_broadcast
+# The no-burst control at factor F.
+./scripts/sedge ... --trigger-multiple $(python3 -c "print(1/F)") ...
+# One line per run: the verdict and the tail against the baseline, in band and outside.
+python3 relay_broadcast_amplification/summarize.py --quota=0.05 RUN_DIR ...
 ```
 
-During the two `mech_f1.5` runs,
-[`mechanism/sampler.py`](relay_broadcast/mechanism/sampler.py) sampled each member's RSS (the
-memory it actually holds) and CPU time from `/proc` once a second.
+Round 1 used seed 1 for every trial. Round 3 used slot S1 (`--harness-cpus 1 --node-cpus
+2-3 --mu 654.3`) and S2 (`--harness-cpus 5 --node-cpus 6-7 --mu 713.5`), 5 trials per point
+(seeds 21–25 with a 60 s tail, 31–35 with a 180 s tail), with `--trigger-multiple M --trigger
+D` for the per_entry trigger map. Every group's exact arguments and slot are in
+[`relay_broadcast_lossy/commands.txt`](relay_broadcast_lossy/commands.txt).
 
-### Results
+### Headline: one trigger, two endings
 
-The run-time console logs were not kept. Here is Sedge's own row for every trial, verbatim from
-`results.tsv`, with each reason cut at 64 characters. The seed is trial + 1, except 7 and 8
-for the two `mech_f1.5` runs:
+`per_entry_n9_4k` at f = 4 on slot S2 (μ = 713.5, λ = 178.4), a 2μ burst lasting only 0.5 s,
+then a 180 s tail. Each burst run is drawn against the no-burst control with the same seed
+and length (`r3_S2_pe_f4_m2_d0.5_t180_s5`, `r3_S2_pe_f4_ctl_d0.5_t180_s5`). Every ratio is
+against the run's own pre-trigger mean over [5, 10) s.
+[`plot_headline.py`](demo_relay_broadcast/plot_headline.py) finds the phases from the outside
+counters alone. A storm is attempted sends above 1.5× that mean; a black hole is kernel writes
+below 0.1× it.
 
-```
-$ awk -F'\t' 'BEGIN{OFS="\t"} {print $1,$5,$6,$11,$20,substr($29,1,64)}' relay_broadcast/results.tsv | column -t -s$'\t'
-run           factor  trial  outcome    max_levels      reason
-ctl_f1.5_a    1.5     0      DRAINING   unacked=686     goodput at 100% of baseline; unacked rising
-burst_key     1.5     0      COLLAPSED  unacked=152729  resent at 17.6/s against 1.8/s through the tail, goodput at 100%
-burst_key     1.5     1      COLLAPSED  unacked=152292  resent at 26.9/s against 1.6/s through the tail, goodput at 100%
-burst_key     1.5     2      INVALID    unacked=140333  not open-loop: 2 of 6888 records entered the program more than 5
-burst_key     1.5     3      COLLAPSED  unacked=172097  resent at 18.9/s against 1.6/s through the tail, goodput at 100%
-burst_key     1.75    0      COLLAPSED  unacked=168761  resent at 54.1/s against 0.0/s through the tail, goodput at 100%
-burst_key     1.75    1      INVALID    unacked=167186  not open-loop: 108 of 6225 records entered the program more than
-burst_key     1.75    2      COLLAPSED  unacked=154808  resent at 36.5/s against 2.4/s through the tail, goodput at 100%
-burst_key     1.75    3      COLLAPSED  unacked=151644  resent at 44.8/s against 1.8/s through the tail, goodput at 100%
-burst_other   1.25    0      COLLAPSED  unacked=147898  resent at 15.7/s against 0.2/s through the tail, goodput at 100%
-burst_other   2       0      COLLAPSED  unacked=140770  resent at 65.6/s against 2.2/s through the tail, goodput at 100%
-burst_other   4       0      RECOVERED  unacked=36966   tail goodput is 100% of baseline, no abandonments, wire at 2309.
-ctl_f1.75     1.75    0      RECOVERED  unacked=568     tail goodput is 100% of baseline, no abandonments, wire at 4957.
-ctl_f1.75     1.75    1      RECOVERED  unacked=616     tail goodput is 100% of baseline, no abandonments, delivered at 
-ctl_f1.25     1.25    0      RECOVERED  unacked=953     tail goodput is 100% of baseline, no abandonments, wire at 6961.
-ctl_f2        2       0      RECOVERED  unacked=504     tail goodput is 100% of baseline, no abandonments, wire at 4426.
-mech_f1.5     1.5     0      COLLAPSED  unacked=144683  resent at 17.9/s against 0.4/s through the tail, goodput at 100%
-mech_f1.5_b   1.5     0      COLLAPSED  unacked=144437  resent at 8.3/s against 0.4/s through the tail, goodput at 100% 
-burst_bisect  2.5     0      DRAINING   unacked=55626   goodput at 100% of baseline; unacked falling at 2067/s, about 4s
-burst_bisect  2.5     1      DRAINING   unacked=48367   goodput at 100% of baseline; unacked rising
-burst_bisect  2.5     2      DRAINING   unacked=58163   goodput at 100% of baseline; unacked falling at 1546/s, about 11
-burst_bisect  3       0      RECOVERED  unacked=51430   tail goodput is 100% of baseline, no abandonments, wire at 2905.
-burst_bisect  3       1      DRAINING   unacked=62869   goodput at 100% of baseline; unacked falling at 2114/s, about 1s
-burst_bisect  3       2      RECOVERED  unacked=46081   tail goodput is 100% of baseline, no abandonments, delivered at 
-ctl_f2.5      2.5     0      RECOVERED  unacked=192     tail goodput is 100% of baseline, no abandonments, wire at 3596.
-ctl_f3        3       0      RECOVERED  unacked=97      tail goodput is 100% of baseline, no abandonments, delivered at 
-```
+![seed 34: storm on the wire, then the black hole](demo_relay_broadcast/headline_pe_f4_seed34.png)
 
-`max_levels` is the highest cluster-wide unacked count Sedge saw. The two INVALID reasons
-continue: "…(the program's own reading was COLLAPSED: resent at 26.7/s against 0.0/s through the
-tail, goodput at 100% of baseline, unacked still rising)" for f = 1.5 trial 2, and the same
-reading, with re-sends at 21.9/s, for f = 1.75 trial 1.
+**Seed 34.**
 
-By headroom. The per-trial numbers are computed from the traces:
+- **Storm on the wire, 11–161 s.** Re-sends run at about 152 k/s in band, and the reports
+  keep arriving. Over [20, 150) the members write **3.3×** their baseline relays to the
+  kernel and hand their send queues 13×, of which 75 % are dropped. CPU is at the quota.
+  This is Cress's amplification, on the wire.
+- **Black hole, 161–191 s.** Over [165, 190) kernel writes are **2.4 %** of baseline,
+  attempted sends are **31×**, and **99.9 %** of them are dropped at a full queue. The
+  in-band reports stop, and CPU stays at the quota.
+- Sedge's verdict: COLLAPSED ("resent at 106 489/s … unacked still rising"). The control,
+  with the same seed, is clear throughout.
 
-| f | λ (/s) | burst trials | unacked: peak → 60–75 s | reports in [45, 75) s, of 270 | no-burst control (peak unacked) |
+![seed 32: the same trigger, a storm that drains](demo_relay_broadcast/headline_pe_f4_seed32.png)
+
+**Seed 32** has the same trigger and a storm of the same kind: writes 3.1×, attempts 10×, 70 %
+dropped, from 11 to 111 s. Then it drains. Re-sends fall to 0, attempts and writes return to
+the control's level, and CPU falls back to the control's 0.75 of the quota. Sedge's verdict:
+DRAINING, with its unacked still falling.
+
+So the black hole is not the burst's direct effect. It is a state the storm can fall into,
+after more than two minutes of storming in seed 34 (and at about 52 s in seed 31).
+
+### Round 3: outcome fractions (isolated slots, 5 seeds per point)
+
+![round 3: per_entry end states by trigger, and per_entry3 storm length against 3λ/μ](demo_relay_broadcast/r3_outcomes.png)
+
+**`per_entry_n9_4k`, f = 4, slot S2** (μ = 713.5). End states use the outside classification
+under Methods:
+
+| trigger | tail | trials | black hole | storm | clear | stuck | Sedge |
+|---|---|---|---|---|---|---|---|
+| 2μ × 0.5 s | 60 s | 5 | 2 | 3 | 0 | 5/5 | C4, I1 |
+| 2μ × 0.5 s | 180 s | 5 | 1 | 2 | 2 | 3/5 | C2, I1, D2 |
+| 1.5μ × 1 s | 60 s | 5 | 2 | 2 | 1 | 4/5 | C4, R1 |
+| 1.5μ × 1.5 s | 60 s | 5 | 5 | 0 | 0 | 5/5 | C5 |
+| 2μ × 1 s | 60 s | 5 | 5 | 0 | 0 | 5/5 | C5 |
+| no burst (4 groups) | 60 / 180 s | 20 | 0 | 0 | 20 | 0/20 | R11, D9 |
+
+Sedge's verdicts: C = COLLAPSED, I = INVALID, D = DRAINING, R = RECOVERED, with counts.
+
+- **A larger burst sticks more often.** Every trigger of at least 1.5μ for 1.5 s, or 2μ for
+  1 s, ends in a black hole in 5/5 trials within 60 s.
+- **The smallest trigger does not decide the outcome by itself.** 2μ for 0.5 s leaves every trial stuck
+  at 60 s (two already in the black hole, three still storming), but after 180 s two of five
+  seeds (32, 33) have drained, and three are stuck. One (31) fell into the black hole at
+  about 52 s. The other two (34, 35) were still storming until 140–157 s, and then fell in.
+- **Neither label is a gauge artefact.** The black holes are dark in band and are read
+  entirely from outside. The storms have their reports and their writes.
+
+**`per_entry3_n9_4k`** (`max_attempts: Some(3)`), 2μ for 5 s, slot S1 (μ = 654.3). 3λ/μ is the
+re-send load relative to capacity if every relay is sent three times, the most the policy
+allows. Storm length is the time after the trigger in which attempted sends stay above 1.5×
+baseline (3 s mean):
+
+| f | 3λ/μ at μ = 654.3 | at μ = 778.1 | tail | trials | still storming at the end | storm length (s) | Sedge |
+|---|---|---|---|---|---|---|---|
+| 2 | 1.50 | 1.26 | 60 s | 5 | 5 | ≥ 60 (all) | C2, D3 |
+| 2 | 1.50 | 1.26 | 180 s | 5 | 0 | 16, 33, 47, 49, 66 | R4, D1 |
+| 2.22 | 1.35 | 1.14 | 60 s | 5 | 0 | 22, 24, 31, 39, 39 | D5 |
+| 2.22 | 1.35 | 1.14 | 180 s | 5 | 0 | 18, 20, 22, 24, 26 | R1, D4 |
+| 2.5 | 1.20 | 1.01 | 60 s | 5 | 0 | 12, 12, 12, 14, 17 | R4, D1 |
+| 2.73 | 1.10 | 0.92 | 60 s | 5 | 0 | 7, 8, 9, 10, 10 | R3, D2 |
+| 3 | 1.00 | 0.84 | 60 s | 5 | 0 | 5, 6, 7, 7, 8 | R4, D1 |
+| 3.33 | 0.90 | 0.76 | 60 s | 5 | 0 | 5 (all) | R2, D3 |
+
+Sedge's verdicts: C = COLLAPSED, I = INVALID, D = DRAINING, R = RECOVERED, with counts.
+
+- **With a retry cap of 3 the storm always drains. It never got stuck in 180 s.** No
+  `per_entry3` trial reached a black hole. At f = 2 a 60 s tail is too short to see the end.
+  In each of the five 180 s tails (seeds 31–35) the storm ended 16–66 s after the trigger,
+  with re-sends at 36–43 k/s and kernel writes at 2.1–2.2× baseline while it lasted, and
+  writes at 0.95–1.01× after it. At f = 2.22 the five 180 s storms ended after 18–26 s
+  (writes 2.3–2.5× while they lasted), and the tails were back at baseline (0.95–1.01×).
+- **The DRAINING labels on these runs are flat tails.** The 180 s runs are labelled R4, D1
+  at f = 2 and R1, D4 at f = 2.22. Every one is clear by the outside counters, and so are
+  all 40 S1 controls.
+- **The storm's length grows steeply with 3λ/μ.** After the trigger it lasts 5 s at 0.9 (the
+  burst's own backlog), 5–8 s at 1.0, 7–10 s at 1.1, 12–17 s at 1.2, 18–39 s at 1.35, and
+  16 s to more than 60 s at 1.5 (all five 60 s tails end while still storming). Given the μ uncertainty (654–778), the regime where the storm outlasts the
+  trigger flips at 3λ/μ ≈ 1.0–1.35.
+- **f = 2.22 at the end of its 60 s tail.** Every storm at f = 2.22 had ended by 37–54 s:
+  attempted sends were back under 1.5× baseline, and in-band re-sends reached 0 by 40–57 s. Over [45, 65) the
+  five trials average 2, 45, 1 529, 11 261 and 14 667 re-sends/s and 0.92–1.59× baseline
+  writes, because that window straddles the end of the storm for three of them. Over [65, 75)
+  they average 8–21 re-sends/s and 0.91–1.04× writes.
+
+### Round 2: large-margin results only
+
+Round 2 shared physical cores between slots (see Methods), so only results far from any
+boundary are used:
+
+| configuration | f | trigger, tail | trials | end state (outside) | Sedge |
 |---|---|---|---|---|---|
-| 1.25 | 98.7 | COLLAPSED ×1 | 148 k → 148 k, rising | 3 | RECOVERED (953) |
-| 1.5 | 82.3 | COLLAPSED ×5¹, INVALID ×1² | 140–172 k → same, rising | 3–7 | DRAINING³ (686) |
-| 1.75 | 70.5 | COLLAPSED ×3, INVALID ×1² | 152–169 k → same, rising | 10–21 | RECOVERED ×2 (568, 616) |
-| 2 | 61.7 | COLLAPSED ×1 | 141 k → 141 k, rising | 39 | RECOVERED (504) |
-| 2.5 | 49.4 | DRAINING ×3⁴ | 48–58 k → 0.04–17 k; ≤ 40 at 75 s | 254–270 | RECOVERED (192) |
-| 3 | 41.1 | RECOVERED ×2, DRAINING ×1⁴ | 46–63 k → ≤ 2.3 k; ≤ 61 at 75 s | 265–270 | RECOVERED (97) |
-| 4 | 30.8 | RECOVERED ×1 | 37 k → ≤ 9 (empty from 30 s) | 270 | not run |
+| per_entry | 2, 4, 8 | 2μ × 5 s, 60 s | 3 each | black hole 9/9 | C9 |
+| per_entry, no burst | 2, 4, 8 | 60 s | 3 each | clear 9/9 | R3, D6 |
+| per_entry, no burst | 2, 4 | 300 s | 1 each | clear 2/2 | R2 |
+| reliable_resend | 1.5, 2, 4 | 2μ × 5 s, 180 s | 1, 4, 1 | clear 6/6 | R5, I1¹ |
+| reliable_resend, no burst | 1.5, 2, 4 | 180 s | 1, 4, 1 | clear 6/6 | R3, D3 |
 
-"Reports" counts the members' once-a-second metric reports that reached Sedge in the verdict
-window. 270 means all 9 members reported every second. Fewer means the reports were stuck in
-the members' send queues (see the caveat under the time series).
+Sedge's verdicts: C = COLLAPSED, I = INVALID, D = DRAINING, R = RECOVERED, with counts.
 
-1. Including the two `mech_f1.5` runs (seeds 7 and 8).
-2. INVALID means the open-loop check fired: some requests entered the source more than 50 ms
-   late. At f = 1.5 it was 2 of 6888 requests, the worst 77 ms late. At f = 1.75 trial 1 the
-   whole run went wrong: every node, the source included, averaged 0.003 cores, and requests
-   were up to 228 s late. In both cases the program's own reading was COLLAPSED.
-3. Sedge labels the f = 1.5 control DRAINING ("unacked rising") because of slope noise at the end
-   of the run. The trace is flat between 200 and 700 for the whole 75 s (plot below).
-4. At f = 2.5 and f = 3 every trial empties its backlog within the run. DRAINING only means the
-   backlog had not finished draining inside the verdict window, or (f = 2.5 trial 1) that a
-   near-empty level of 84–89 read as "rising".
+1. Not open loop: 2 of 59 534 requests entered more than 50 ms late (worst 53 ms). The
+   program's own reading was RECOVERED.
 
-![Outcome vs headroom](demo_relay_broadcast/summary_outcomes.png)
+The black holes have the same signature as round 1: writes 0.9–4.6 % of baseline, attempted
+sends 18× (f = 2), 37–39× (f = 4) and 72–77× (f = 8), 99.9 % dropped. With a 180 s tail, the
+per-peer `reliable_resend` that round 1 left DRAINING after 60 s recovers, at every f tried.
 
-The top panel shows every trial's verdict, and the bottom panel shows where each run ends. The
-burst runs fall into two groups with nothing in between:
+### Round 1: three policies across f
 
-- At f ≤ 2 every run ends with over 10⁵ unacked relays, still rising.
-- At f ≥ 2.5 every run ends at or near the control's level. The two f = 2.5 runs above 10³
-  are still draining fast, and both are down to a few dozen by 75 s.
+Round 1: one trial per point, one host, cores not isolated. Tail rates are means over [45, 75) s, summed over the
+9 members; "×" is against the same run's pre-trigger baseline [5, 10) s. "Attempted" is the
+relay-sized sends the members handed to their send queues; "written" is the relays they wrote
+to the kernel. Both are read from outside.
 
-The controls stay below 10³ at every f.
+**`per_entry_n9_4k`** (`max_attempts: None`):
+
+| f | λ | burst run | control | tail attempted/s | tail written/s | dropped |
+|---|---|---|---|---|---|---|
+| 1.5 | 377.1 | COLLAPSED | DRAINING¹ | 348 k (12.7×) | 173 (0.006×) | 100.0 % |
+| 2 | 282.9 | COLLAPSED | DRAINING¹ | 371 k (16.7×) | 185 (0.008×) | 99.9 % |
+| 3 | 188.6 | COLLAPSED | RECOVERED | 373 k (27.1×) | 188 (0.014×) | 100.0 % |
+| 4 | 141.4 | COLLAPSED | RECOVERED | 386 k (40.0×) | 225 (0.022×) | 99.9 % |
+| 6 | 94.3 | COLLAPSED | RECOVERED | 384 k (58.0×) | 255 (0.038×) | 99.9 % |
+| 8 | 70.7 | COLLAPSED | RECOVERED | 395 k (79.3×) | 247 (0.050×) | 99.9 % |
+
+In every collapsed run, member CPU is 0.99–1.00 of the quota with 99 % of periods throttled,
+and member RSS at 75 s is 95–98 MB. The uncapped source's RSS at 75 s is 722, 529, 323, 221,
+120 and 98 MB at f = 1.5 … 8 (see the caveats in §5).
+
+**`per_entry3_n9_4k`** (`max_attempts: Some(3)`):
+
+| f | λ | burst run | control | tail attempted/s | tail written/s | dropped |
+|---|---|---|---|---|---|---|
+| 2 | 282.9 | DRAINING² | RECOVERED | 58.8 k (2.80×) | 47.8 k (2.25×) | 19.5 % |
+| 3 | 188.6 | RECOVERED | RECOVERED | 13.5 k (0.99×) | 13.6 k (0.98×) | 0 |
+| 4 | 141.4 | RECOVERED | RECOVERED | 10.3 k (1.14×) | 10.3 k (1.04×) | 0 |
+
+Member CPU against quota, throttled fraction, RSS at 75 s: 1.00, 0.99, 47 MB at f = 2; 0.87,
+0.32, 45 MB at f = 3; 0.72, 0.17, 46 MB at f = 4.
+
+**`reliable_resend_n9_4k`** (per peer):
+
+| f | λ | burst run | control | tail attempted/s | tail written/s | dropped |
+|---|---|---|---|---|---|---|
+| 2 | 282.9 | DRAINING³ | DRAINING¹ | 21.7 k (1.05×) | 21.8 k (1.03×) | 0 |
+| 4 | 141.4 | DRAINING³ | DRAINING¹ | 11.6 k (1.26×) | 11.7 k (1.17×) | 0 |
+
+Member CPU against quota, throttled fraction, RSS at 75 s: 0.98, 0.77, 55 MB at f = 2; 0.84,
+0.26, 56 MB at f = 4.
+
+1. **Not a real drain.** Sedge's "unacked rising" is slope noise on a flat level. Through the
+   whole run, the control's unacked stays at 50–400 relays, outside writes are 0.95–1.02× of
+   the 72 first relays per request, and nothing is dropped. These controls are stable.
+2. **A stable, degraded state.** Unacked falls slowly, from about 6.4 k at 20–30 s to 5.2 k at
+   75 s (Sedge: falling at 23/s). Re-sends hold at 38.5 k/s against 20.2 k first
+   relays/s, so nearly every relay is sent three times, the most `max_attempts: 3` allows.
+   Members stay at the quota, but in-band reports keep arriving (9 per second) and goodput is
+   100 %. Round 3 shows that this storm ends within 16–66 s at f = 2, given a 180 s tail.
+3. **Draining at the per-peer cap.** Re-sends run at 1384–1415/s, which is the policy's cap:
+   one per peer per 50 ms timer tick, or 9 × 8 × 20 = 1440/s. Unacked is 34 k (f = 2) and
+   30 k (f = 4) at 75 s and falling at about 1.4 k/s.
+   The 60 s tail is too short to see it finish. Round 2's 180 s tails show it recover.
+
+- **Controls.** Every control is stable at every f tried (footnote 1). The load alone is never
+  too much.
+- **Burst runs.** `per_entry` collapses at every f from 1.5 to 8. No recovery boundary was found
+  in round 1. The two capped policies do not collapse anywhere: `per_entry3` recovers at
+  f ≥ 3 and settles into the bounded 3× state at f = 2, and `reliable_resend` drains at the
+  per-peer cap. Rounds 2 and 3 repeat these with more seeds and look for `per_entry`'s
+  boundary in the size of the burst.
+- **INVALID trials.** None in round 1. No node was OOM-killed or exited.
+
+![Outcome against f, and the tail read from outside](demo_relay_broadcast/lossy_summary.png)
+
+### Is the collapse sustained by the amplification?
+
+The question this demo has to answer is whether the collapsed tail runs on the streams Cress
+reports, not just whether something collapsed. For each run, the tail is compared with the same
+run's pre-trigger baseline and with its no-burst control (`plot_amplification.py`'s table).
+
+**`per_entry_n9_4k`, f = 4, collapsed.** No member report reached Sedge in the tail (0 of 9
+per second), so the in-band rows are dark:
+
+| stream | burst: pre-trigger /s | burst: tail /s | burst: ratio | control: pre-trigger /s | control: tail /s | control: ratio |
+|---|---|---|---|---|---|---|
+| re-sends | 5.2 | – | dark | – | – | – |
+| wire (in band) | 9659.6 | – | dark | 9660.8 | 10094.1 | 1.04× |
+| merged = delivered (in band) | 10861.6 | – | dark | 10865.2 | 11355.3 | 1.05× |
+| acks_sent (derived) | 9635.8 | – | dark | 9639.4 | 10101.9 | 1.05× |
+| wire, outside (wchar) | 10029.9 | 225.2 | 0.02× | 10023.1 | 10175.0 | 1.02× |
+| sends attempted, outside (lossy queue) | 9651.2 | 385724.5 | 39.97× | 9767.8 | 10074.3 | 1.03× |
+| sends dropped, outside (lossy queue) | 0.0 | 385478.9 | – | 0.0 | 0.0 | – |
+
+**`per_entry3_n9_4k`, f = 2, bounded.** All 9 reports arrive, so the in-band rows are live:
+
+| stream | burst: pre-trigger /s | burst: tail /s | burst: ratio | control: pre-trigger /s | control: tail /s | control: ratio |
+|---|---|---|---|---|---|---|
+| re-sends | 33.8 | 38489.9 | 1139× | – | – | – |
+| wire (in band) | 21313.8 | 58819.5 | 2.76× | 20809.6 | 20135.5 | 0.97× |
+| merged = delivered (in band) | 23965.0 | 50156.2 | 2.09× | 23414.6 | 22650.8 | 0.97× |
+| acks_sent (derived) | 21355.0 | 47611.9 | 2.23× | 20804.6 | 20134.1 | 0.97× |
+| wire, outside (wchar) | 21245.4 | 47813.4 | 2.25× | 21360.7 | 20095.3 | 0.94× |
+| sends attempted, outside (lossy queue) | 20964.1 | 58782.1 | 2.80× | 20660.9 | 20226.7 | 0.98× |
+| sends dropped, outside (lossy queue) | 0.0 | 11489.9 | – | 0.0 | 0.0 | – |
+
+**`reliable_resend_n9_4k`, f = 4, draining**, for contrast:
+
+| stream | burst: pre-trigger /s | burst: tail /s | burst: ratio | control: pre-trigger /s | control: tail /s | control: ratio |
+|---|---|---|---|---|---|---|
+| re-sends | 0.4 | 1414.9 | 3537× | – | – | – |
+| wire (in band) | 9674.0 | 11603.1 | 1.20× | 9659.2 | 10057.1 | 1.04× |
+| merged = delivered (in band) | 10898.8 | 12877.6 | 1.18× | 10864.6 | 11313.9 | 1.04× |
+| acks_sent (derived) | 9673.0 | 11602.3 | 1.20× | 9638.8 | 10060.5 | 1.04× |
+| wire, outside (wchar) | 9949.4 | 11681.3 | 1.17× | 9941.5 | 10115.0 | 1.02× |
+| sends attempted, outside (lossy queue) | 9184.2 | 11607.6 | 1.26× | 9825.5 | 10068.4 | 1.02× |
+| sends dropped, outside (lossy queue) | 0.0 | 0.0 | – | 0.0 | 0.0 | – |
+
+The controls report no re-sends in band at all (their `resent_n` column is empty), shown as
+"–".
+
+**The criteria set before the runs, one by one**, for the collapsed `per_entry` runs:
+
+- *Re-sends stay far above baseline.* **Yes, read from outside.** The in-band count is dark,
+  but the members hand their send queues 350–395 k relay-sized sends per second, 13–79× the
+  baseline (which is the 72 first relays per offered request). In bytes, almost every
+  attempted send is relay-sized (`sendq_attempted_kb / 4120 B` ≈ `sendq_attempted`), so these
+  are relays, not acks or reports. The only relays a member sends after the burst, apart from
+  first relays, are re-sends.
+- *Wire traffic measured outside stays far above the 72 first relays per request.* **No.**
+  Kernel writes fall to 0.6–5 % of baseline. The re-sends are produced, but 99.9 % of them
+  are dropped at a full queue before they reach the kernel. The queues are full because the
+  peers they write to are themselves at the quota, and so read slowly.
+- *Merged and acks_sent rise with it.* **Not observable.** Both are in-band only, and the
+  in-band reports are dark. `rchar` does not count the members' socket reads.
+- *Member CPU stays at the quota and RSS below the limit.* **Yes.** CPU is 0.99–1.00 of the
+  quota and 99 % of periods are throttled, at every f, including f = 8, where the same members
+  use 39 % of the quota without the burst. RSS settles near 95 MB, a quarter of the limit, and
+  creeps by about 0.5 MB/s. No member was OOM-killed.
+- *The controls at the same f are stable.* **Yes** (footnote 1).
+- *The in-band reports stop, and only Sedge's reading of a gauge says "collapsed".* **The
+  reports do stop.** For f ≤ 6 the program's own stale reading was RECOVERED, and Sedge's
+  COLLAPSED comes from its outside reading ("went silent in band; … its capped nodes wrote
+  1–7 % of their baseline bytes per second through the tail, at 99–100 % of their CPU
+  quota"). The verdict does not rest on a gauge, though. The outside send-queue counters show
+  what the CPU is spent on.
+
+**The policy comparison is the strongest evidence.** The three configurations share the
+deployment, the cap, the queues and the burst. Only the retry policy differs, and only the
+policy whose re-sends grow with the backlog collapses:
+
+- `per_entry` re-sends every overdue relay on every timer tick. Once the burst fills the
+  queues, acks are dropped with everything else, so no relay is ever acknowledged. The whole
+  backlog stays overdue and is re-sent every three timer ticks, using the whole quota. The
+  loop sustains itself. Cress's verdict for it is *grows*, 175.60×.
+- `per_entry3` gives a relay up after three sends, so its re-sends are capped at 2× the first
+  relays. It settles at 2.80× attempted sends and 2.25× kernel writes, inside the 2.80× ceiling
+  Cress reports for it (*growth stops*), with 19.5 % of sends dropped. This is the one run in
+  which the amplification shows on the wire. It is degraded but not collapsed: the reports
+  keep arriving and goodput is 100 %. The cost is correctness: under loss it gives relays up,
+  which is the hole HydroFrac found.
+- `reliable_resend` re-sends at most one relay per peer per timer tick, 1440/s across the
+  cluster. That is about 7 % of the baseline at f = 2, and the backlog drains.
 
 ### Time series
 
-All four plots share the layout. Orange is the 2μ burst ([10 s, 15 s)), and grey is the verdict
-window. The panels, top to bottom:
+`per_entry_n9_4k`, f = 4, collapsed:
 
-1. Offered load: requests per second entering the source.
-2. `delivered`: arrivals merged per second, summed over the 9 members, duplicates included.
-   Each request reaches each member 9 times (once from the source, once from each of the 8
-   peers), so the cluster merges ~81 arrivals per request: 82/s × 81 ≈ 6.6 k/s at f = 1.5.
-3. `wire`: relays put on the wire per second, first sends and re-sends. Each member relays
-   each request to its 8 peers, so that is ~72 per request.
-4. Re-sends per second.
-5. Unacked relays, the cluster total. Grey, on the right axis: how many member reports arrived
-   that second. 9 means every member reported.
-6. The fraction of each member's 100 ms CFS periods in which the kernel throttled it: the mean
-   over the 9 members, with the min–max range shaded.
-7. Member RSS, sampled from `/proc` once a second. This was sampled only in the `mech_f1.5`
-   runs. The sampler's clock is aligned to the trace's by the members' first CPU use, to within
-   about a second.
+![re-sends and unacked relays, per_entry f = 4](demo_relay_broadcast/pe_f4_resends.png)
 
-**A caveat that applies to every plot.** The counters reach Sedge as messages from the members,
-on the same outgoing queues that starve during a collapse. When a member's report does not
-arrive, that second's counts are missing, so the rates read 0, and the unacked gauge holds its
-last reported value. The grey line in panel 5 shows when this happens. In a collapse, "0
-delivered/s" after ~45 s means *no reports*, not *no work*. Memory keeps growing through the
-same seconds.
+The in-band series stop about 2 s into the burst: after that no member report reaches Sedge.
 
-**COLLAPSED: burst, f = 1.5** (λ = 82/s against μ = 123/s; `mech_f1.5`, seed 7).
+![wire, attempted and dropped sends measured outside, RSS and CPU, per_entry f = 4](demo_relay_broadcast/pe_f4_wire.png)
 
-- Before the burst, the cluster merges ~7 k arrivals/s, about 500 relays are unacked, and there
-  are no re-sends. The members are already throttled in almost every period: at f = 1.5,
-  1 ms per 100 ms is nearly all used.
-- The burst starts re-sends (150–290/s) and the unacked count climbs.
-- After the burst the offered load is back at λ, yet unacked keeps climbing, at 3–4 k/s
-  between 20 s and 45 s.
-  The re-sends fall back to 50–180/s by 35–45 s, so they are *not* what keeps it climbing.
-- Member reports thin out from ~20 s and stop by ~45 s.
-- Member RSS grows steadily from 8 MB to ~180 MB by the end of the run (190–233 MB by teardown at
-  ~95 s), about 2.5 MB/s per member.
+The top panel is the core of the argument. Attempted sends (red) jump to about 380 k/s in the
+burst and stay there. Nearly all of them are dropped (orange), and kernel writes (blue) fall
+two orders of magnitude below the first relays the load needs (dotted). CPU stays at the quota,
+and RSS stays at a quarter of the limit.
 
-![burst f=1.5 collapsed](demo_relay_broadcast/burst_f1.5_collapsed.png)
+![tail against baseline, per_entry f = 4](demo_relay_broadcast/pe_f4_tail.png)
 
-**Slow recovery: burst, f = 2.5** (λ = 49/s; `burst_bisect` trial 2, Sedge: DRAINING).
+`per_entry3_n9_4k`, f = 2, the bounded 3× state:
 
-- The same burst builds up 58 k unacked relays and the same re-send rate (~200–350/s).
-- With more headroom the members keep reporting, and the backlog shrinks by ~1.5 k/s, slowly at
-  first and faster as it empties: the smaller the table, the cheaper each tick.
-- It is empty at ~73 s, just after the verdict window's slope was taken.
+![wire, attempted and dropped sends, per_entry3 f = 2](demo_relay_broadcast/pe3_f2_wire.png)
 
-![burst f=2.5 slow recovery](demo_relay_broadcast/burst_f2.5_slow_recovery.png)
+![Cress's amplified streams normalized to the control, per_entry3 f = 2](demo_relay_broadcast/pe3_f2_streams.png)
 
-**RECOVERED: burst, f = 4** (λ = 31/s).
+`per_entry3_n9_4k`, f = 4, and `reliable_resend_n9_4k`, f = 4, for contrast:
 
-- The backlog peaks at 37 k and is gone by 30 s.
-- The re-sends stop when the backlog does. Throttling drops from 100 % to 0–30 %.
+![wire, attempted and dropped sends, per_entry3 f = 4](demo_relay_broadcast/pe3_f4_wire.png)
 
-![burst f=4 recovered](demo_relay_broadcast/burst_f4_recovered.png)
+![re-sends and unacked relays, reliable_resend f = 4](demo_relay_broadcast/rr_f4_resends.png)
 
-**Control: no burst, f = 1.5** (λ = 82/s). The hatched window marks where the burst would be.
+The remaining figures (`*_streams.png`, `*_tail.png` and `*_resends.png` for every pair) are in
+[`demo_relay_broadcast/`](demo_relay_broadcast/).
 
-- With the same load and no trigger, the system is flat for 75 s: unacked stays at 200–700, there
-  are ≤ 6 re-sends/s, and every member reports every second.
-- It runs at 80–100 % throttled, which is close to capacity but stable.
+### CPU headroom at baseline
 
-![control f=1.5 flat](demo_relay_broadcast/control_f1.5_flat.png)
+A member's cost per round falls as load rises, because each tick handles a larger batch. So
+under a fixed quota it uses nearly all of the quota at low f. Under the old cap (0.01 per
+100 ms, unbounded buffers) the mean throttled fraction at baseline was 0.98–1.0 at f = 1.5–2,
+0.80–0.94 at f = 3 and 0.60–0.85 at f = 4.
+
+The new cap (0.05 per 20 ms) gives real headroom from f = 3 on. From the `per_entry` controls,
+over 30–75 s (`summarize.py`'s tail):
+
+| f | λ | member CPU / quota | throttled fraction | mean freeze |
+|---|---|---|---|---|
+| 1.5 | 377.1 | 1.00 | 0.86 | 13.5 ms |
+| 2 | 282.9 | 0.97 | 0.60 | 10.0 ms |
+| 3 | 188.6 | 0.82 | 0.25 | 7.8 ms |
+| 4 | 141.4 | 0.66 | 0.12 | 7.2 ms |
+| 6 | 94.3 | 0.51 | 0.07 | 7.2 ms |
+| 8 | 70.7 | 0.39 | 0.03 | 7.5 ms |
+
+At f ≤ 2 the members are still near the quota at baseline. Real headroom there was not
+achieved under this cap. The collapse does not need it to be absent, though: at f = 8 a member
+uses 39 % of its quota without the burst, and after the burst it is pinned at 100 %.
 
 ## 5. Discussion
 
-**This is a metastable failure.** All four parts of the definition were observed:
+**The previous collapse was not caused by retries.** The previous version of this demo found
+`ReliableResend` collapsing at f ≤ 2 after a burst, and its own analysis already saw the
+re-sends die down while the backlog kept growing. The cause was the program's state, not its
+retry policy. The outstanding table was tick-scoped state, rebuilt and filtered in full on
+every tick, so every tick cost work proportional to the backlog, and the members' outgoing
+messages starved behind it. With the table made persistent (old cap, unbounded buffers):
 
-1. **Stable without a trigger.** Every no-burst control from f = 1.25 to f = 3 is flat for 75 s:
-   unacked stays bounded, there are almost no re-sends, and throttling does not trend upward.
-2. **A transient trigger.** Five seconds at 2μ.
-3. **Sustained collapse below capacity.** At f ≤ 2 the load returns to λ < μ (as low as half
-   of μ), and the system does not come back. The backlog keeps growing by thousands of relays
-   per second through the 60 s tail, as far as the starved reports show it, and the members stay pinned at their quota.
-4. **Recovery with enough headroom.** At f ≥ 2.5 the same burst's backlog (40–60 k) drains: in
-   15–50 s at f = 3 and 4, and in 30–60 s at f = 2.5.
+- the same configuration and burst recover at every f tried (1.25, 1.5, 2 and 4);
+- they also recover from a burst four times as long, which builds a 250 k-entry backlog;
+- re-sends, capped at one per peer per timer tick, add about 270/s across the cluster, about
+  4 % of normal traffic, far below the headroom.
 
-**The boundary is between f = 2 and f = 2.5, and nothing was mixed.**
+Cress does not model per-tick cost, since it counts messages, so it could not have seen this.
+Data: `relay_broadcast_amplification/README.md`, Part 1. Under this demo's deployment the
+per-peer policy still does not collapse: it drains at its cap (§4).
 
-- All 10 valid burst runs at f ≤ 2 collapsed, and so did the program's own reading in both
-  INVALID runs.
-- All 7 burst runs at f ≥ 2.5 drained to empty within the run.
-- No factor produced both outcomes, so this is a fairly sharp threshold, not a probability that
-  shifts gradually. It was not bisected further: f = 2.25 was not run.
+**Retries that grow with the backlog, with unbounded buffers: a crash.**
+`ReliableResendPerEntry` re-sends every overdue relay. After a burst, with unbounded send
+buffers, it fell into a re-send storm of 6–10 k/s at every f from 1.5 to 4. But the storm piled
+up in user-space send buffers instead of on the wire, and members were OOM-killed at 400 MB
+30–45 s after the burst. Those runs are crashes, not collapses, and are reported as INVALID.
+Bounded, back-pressuring buffers deadlocked the members instead.
 
-**What sustains it: not (mainly) the retry storm.** The design premise was a retry storm: delay
-causes re-sends, and re-sends cause more delay. The traces say that loop *triggers* the collapse
-but does not *sustain* it:
+**With lossy buffers: a collapse that holds without a crash.** With `lossy:1024:Member`, the
+storm is no longer stored. It is produced and thrown away. Member RSS settles near 95 MB, no
+node dies, and the collapsed state holds through the whole 60 s tail at every f. The storm is
+still not on the wire in bytes: the kernel writes fall to 0.6–5 % of baseline. What is
+amplified is the work of producing re-sends: 350–395 k relay-sized sends per second across the
+cluster, about 40× baseline at f = 4, which uses the whole CPU quota. The queues drop them
+because every peer is busy doing the same thing.
 
-- **Re-sends decay while the backlog grows.** Re-sends peak at 150–290/s during and just after
-  the burst, then fall (to 8–66/s in Sedge's tail window) while unacked keeps rising. They are
-  bounded by design: one per peer per timer tick, and when a member is starved its timer
-  elements bunch into fewer ticks, so it re-sends *less*.
-- **Per-tick work grows with the backlog.**
-  - Every tick rebuilds the whole `outstanding` table and filters it against the acks (§1). That
-    costs O(unacked) per tick, on every tick, timer or not.
-  - At ~17 k entries per member, the estimate is 2–4 ms per tick, against a quota of 1 ms per
-    100 ms. Once the table passes a few thousand entries per member, a single tick costs more
-    than a whole period's quota.
-- **Outgoing messages starve.**
-  - Each member is one thread. Its dataflow and its socket writers share that thread and its 1 ms
-    per 100 ms.
-  - When ticks eat the quota, queued sends (acks, relays, metric reports) are not written, and the
-    queues are unbounded, so they grow in memory. That is the RSS growth: 2.5–3 MB/s per member,
-    of which the unacked table itself accounts for only ~10–20 MB (~17 k entries per member, with
-    the bodies shared through `Bytes`).
-  - It is also why member reports stop arriving.
-- **The loop closes.** Acks are not sent, so peers' tables stop shrinking. Their ticks get more
-  expensive, so they send fewer acks too.
-  - At f ≥ 2.5 the burst's backlog does not stay above the line for long enough, and the loop
-    unwinds.
-  - At f ≤ 2 it does not unwind.
+**The boundary is in the trigger, not in f.** Round 1 found no f at which a 2μ, 5 s burst
+leaves `per_entry` unstuck, from f = 1.5 to 8, and round 2 repeats that at f = 2, 4 and 8
+(9/9). On isolated cores at f = 4, the trigger has to be made small before any trial escapes:
+4/5 stuck at 1.5μ for 1 s, and 3/5 still stuck after 180 s at 2μ for 0.5 s. The same small
+trigger produces both endings: seed 32 storms on the wire for 100 s and drains, and seed 34
+storms for 150 s and falls into the black hole (§4, headline).
 
-This attribution is **inferred, not profiled**:
+**The capped variant storms but does not stick.** `per_entry3` caps each relay at three
+sends. With a retry cap of 3 the storm always drained: it never got stuck in 180 s, and no
+trial reached a black hole. How long the storm lasts depends on 3λ/μ, the re-send load at the
+cap relative to capacity. It lasts a few seconds below 1, 18–39 s at 1.35, and 16 s to more
+than 60 s at 1.5. Given the μ
+uncertainty, the regime where the storm outlasts the trigger flips at 3λ/μ ≈ 1.0–1.35.
 
-- There is no `perf` on the host.
-- The members' socket queues are inside their containers and could not be read from outside.
+**Conclusion.** The amplification Cress identifies is what the members spend their capacity
+on after the burst, and it sustains the collapse:
 
-The evidence is the RSS growth, the decaying re-send rate, the missing reports, and the per-tick
-cost estimate. The cleanest test would be to change the table's representation and see whether
-the collapse goes away (see next steps).
+- In the storm, the amplified re-sends are on the wire: about 3× the kernel writes for as long
+  as 150 s.
+- In the black hole, the same loop runs, but almost all of its output is dropped at full
+  queues. The acks that would end it are lost with everything else, so it never ends within
+  the run.
+- Changing only the retry policy changes the outcome. Capped growth (`per_entry3`, Cress
+  *growth stops*) storms and ends, and the per-peer cap recovers (round 2, 180 s tails).
 
-**What this means for Cress.**
+What this evidence does **not** show is amplified bytes on the wire *in the black hole*. There
+the kernel writes fall to a few percent, and the amplification is visible only in the
+transport's attempted-send counters and in CPU pinned at the quota.
 
-- Cress's flag is correct about the *source* of the hazard. Holding the members' arrival batch
-  makes `ReliableResend` re-send, and re-sending is exactly what turns the 5 s burst into a
-  backlog that outlasts it. `Echo`, which has no re-send, is BENIGN, and has no table to grow.
-- Cress does not see the *sustaining* loop. It counts messages, not the CPU a tick costs. A
-  tick that rebuilds a 17 k-entry table sends no more messages than one that rebuilds a 17-entry
-  table, so the O(unacked) cost, and the starvation of the send queues, are invisible to it.
-- The multiplier does not predict the threshold here either: 25.95× is far from the measured
-  boundary of 2–2.5. The "recovers iff f > A" reading from the `rpc_retry` demo applies to a
-  growth that *stops* at a plateau, and this one *grows*.
+**Caveats.**
 
-**The redundancy trade-off.** The re-sending that HydroFrac needs to find no violation is the
-same code that Cress flags and Sedge collapses. Removing it brings back the `Echo`
-counterexample. The repair for the collapse should keep the redundancy and change its cost. A
-production implementation would keep the table per peer or in a timer wheel, and would not pay
-O(table) on every tick. It would also cap or back off re-sends under load.
-
-**Issues found along the way.** Each one, uncaught, would have produced a wrong verdict.
-
-- **Debug builds.**
-  - The first runs deployed debug builds, where every per-tick cost is several times larger and μ
-    is not the program's real capacity.
-  - The exploratory runs below are debug builds. The final runs use the release `profile` build.
-- **The `relayed` drift** (change 2 in §1). The no-burst controls degraded on their own, because
-  the dedup set was rebuilt every tick and grew with the run. A control is what caught it.
-- **Payload copying** (change 3). Every per-peer copy of a 4 KiB body was a memcpy.
-- **Per-tick scans** (change 4). The re-send scan ran on every tick, not just timer ticks.
-  Gating it more than doubled μ, from 56.6 to 123.4/s. The table rebuild is the same kind of
-  cost, and it is still there.
-- **No metastability with bare ids.** With n = 13 and empty bodies, μ = 493.5 rounds/s, about
-  the same as n = 5.
-  - The re-send cap (20/s per peer) is at most ~8 % of the per-peer relay load, so cluster size
-    alone could not make re-sends matter.
-  - The 4 KiB body, by lowering μ, did. These runs are in
-    [`relay_broadcast/exploratory/`](relay_broadcast/exploratory/).
-
-**Limitations.**
-
-- **One host, one core.** All nine members and the source shared core 7 of a single 8-core host.
-  μ was measured there and is specific to that host, core and build.
-- **Few trials at some factors.** f = 1.25, 2 and 4 have one burst trial each. Most controls
-  have one trial, and f = 4 has no control. The f = 1.5 and 1.75 results (4–6 trials each) are
-  the solid ones. Seeds are fixed (trial + 1, plus 7 and 8).
-- **The boundary is coarse.** It lies somewhere in (2, 2.5).
-- **The metrics travel through the starved path.** In a collapse the rate panels read 0 because
-  the reports stop, and the unacked gauge holds a stale value. The final unacked counts are
-  therefore lower bounds on the collapsed runs' backlogs.
-- **The mechanism is not directly measured.** RSS was sampled in only two runs, there is no CPU
-  profile, and the socket queues were not read. The 2–4 ms per-tick figure is an estimate.
-- **Sedge's labels need reading.**
-  - DRAINING at f = 2.5 and 3 means "not finished inside the window", not "stuck".
-  - The f = 1.5 control's DRAINING is slope noise on a flat trace.
-  - Goodput is not defined for this program.
-- **HydroFrac's result is sampled and small.** 8 schedules per fault set, with 3 members and
-  2 ids.
-
-**Next steps.**
-
-1. **Test the inferred mechanism directly.** Keep the outstanding table as persistent per-peer
-   state, so a tick costs O(arrivals + acks) and not O(table), and rerun the same sweep. If the
-   collapse at f ≤ 2 goes away, or the boundary moves well below 2, the attribution is confirmed.
-2. **Observe out of band.** Have members write their per-second counters, and the time each tick
-   took, to a local file or a channel that does not share the starved send queue. Then the
-   collapsed runs' rates are measured, not missing.
-3. **Bisect and repeat.** Run f = 2.25, more trials at f = 1.25, 2 and 4, and a control at
-   f = 4.
-4. **Teach Cress about state cost.** Alongside extra messages, count the records each tick
-   touches under a hold. A program whose per-tick work grows with a held backlog would then
-   be flagged as well as one whose sends do.
+- **One host.** Round 1 ran each point once, round 2 3 times at most, and round 3 5 times.
+  Rounds 1 and 2 did not isolate SMT siblings. Each round-3 boundary rests on 5 seeds of one
+  slot.
+- **μ is uncertain by about 19 %** (654–778 on one slot), so every boundary in units of μ is a
+  range.
+- **Kernel writes fall.** In the `per_entry` collapse the members write 0.6–5 % of their
+  baseline bytes. The amplified sends are counted by the transport's lossy queue, inside the
+  member process but outside the program's dataflow. They are not counted by the kernel.
+- **The in-band reports go dark** in every `per_entry` collapse, so Cress's `merged` and
+  `acks_sent` streams cannot be measured there.
+- **The source's backlog grows.** The collapsed members read slowly, so the source's sends to
+  them queue in the uncapped source. In round 1 its RSS reaches 722 MB at f = 1.5 by 75 s
+  (limit 2000 MB), and it hands the members only 18–49 % of the offered requests at f ≤ 4
+  (`summarize.py`'s `intake`). It keeps growing while a black hole lasts: in the longest one
+  (seed 31, 180 s tail) it reached 552 MB. No node died in any of the final runs.
+- **`per_entry3` at f = 2 storms for longer than a 60 s tail.** In five 180 s tails it ended
+  within 16–66 s.
+- Cress's verdict was computed on a reduced workload with empty bodies, and it models delay,
+  not loss (§3).
+- HydroFrac's "no violation found" covers sampled schedules at 3 members and 2 ids.

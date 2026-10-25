@@ -1,0 +1,13 @@
+probe     150.0/s: offered 156.8/s (0 late, 0 entered late, worst 2 ms), goodput 100.0%, levels flat, throttled 95% → keeps up
+probe     300.0/s: offered 301.2/s (0 late, 0 entered late, worst 2 ms), goodput 100.0%, levels flat, throttled 75% → keeps up
+probe     600.0/s: offered 603.0/s (0 late, 0 entered late, worst 2 ms), goodput 100.0%, levels flat, throttled 67% → keeps up
+node failure: Source was OOM-killed at its memory limit
+probe    1200.0/s: offered 661.1/s (0 late, 0 entered late, worst 10 ms), goodput 100.0%, levels flat, throttled 71% → falls behind
+node failure: Source was OOM-killed at its memory limit
+probe     848.5/s: offered 803.1/s (0 late, 0 entered late, worst 19 ms), goodput 100.0%, levels flat, throttled 60% → keeps up
+node failure: Source was OOM-killed at its memory limit
+probe    1009.1/s: offered 758.3/s (0 late, 0 entered late, worst 22 ms), goodput 100.0%, levels flat, throttled 67% → falls behind
+node failure: Source was OOM-killed at its memory limit
+probe     925.3/s: offered 779.3/s (0 late, 0 entered late, worst 19 ms), goodput 100.0%, levels flat, throttled 71% → keeps up
+μ = 925.3 rounds/s (falls behind at 1009.1)
+relay_broadcast (per_entry_n9_4k): μ = 925.3 rounds/s (measured) under docker;Member=1000/100000,Source=-;cpuset=4-5;mem=419430400
