@@ -52,7 +52,7 @@ fn cut(legend: &mut Vec<String>, text: &str) -> String {
 /// Each send, receive, output, crash and the heal gets its own rank, in program order (a lost
 /// send gets a second one, for the `✗` on the receiver's lane). Lanes are as far apart as the
 /// longest message label needs; a message's label sits on its edge, in the first lane gap it
-/// crosses, and an output's note just right of its lane.
+/// crosses where it covers no other label, and an output's note just right of its lane.
 pub fn dot(trace: &Trace, title: &str) -> String {
     let mut rank = 0usize;
     let mut event_rank: Vec<Option<usize>> = vec![None; trace.events.len()];
@@ -175,6 +175,7 @@ pub fn dot(trace: &Trace, title: &str) -> String {
     }
 
     // Messages: a straight edge (a self-send bends out of its lane through `via`), labelled.
+    let mut placed: Vec<(f64, f64)> = vec![];
     for (index, m) in trace.messages.iter().enumerate() {
         let Some(send_rank) = event_rank[m.send_event] else {
             continue;
@@ -231,8 +232,22 @@ pub fn dot(trace: &Trace, title: &str) -> String {
             (vx + width / 2.0 + 2.0, vy)
         } else {
             let _ = writeln!(out, "    {from} -> {to} [{attrs}];");
-            let lx = a.0 + (b.0 - a.0).signum() * gap / 2.0;
-            (lx, a.1 + (lx - a.0) / (b.0 - a.0) * (b.1 - a.1))
+            // In the first lane gap it crosses where no other label sits.
+            let at = |k: usize| {
+                let lx = a.0 + (b.0 - a.0).signum() * gap * (k as f64 + 0.5);
+                (lx, a.1 + (lx - a.0) / (b.0 - a.0) * (b.1 - a.1))
+            };
+            let free = |&(lx, ly): &(f64, f64)| {
+                !placed
+                    .iter()
+                    .any(|&(px, py): &(f64, f64)| px == lx && (py - ly).abs() < 12.0)
+            };
+            let spot = (0..m.from.abs_diff(m.to))
+                .map(at)
+                .find(free)
+                .unwrap_or_else(|| at(0));
+            placed.push(spot);
+            spot
         };
         let color = match m.fate {
             Fate::Omitted => LOST,
