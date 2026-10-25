@@ -108,11 +108,16 @@ Status: **fixed+tested** (named test), **fixed untested**, **documented only**, 
 1. Merge oracle 2; run it over every cross-checked program.
 2. Close R3-F3 (require `Serialize` for labelled types) and R1-F4/F5 wording.
 3. **Second review round:** fresh adversarial reviewers on the fixed code.
-4. **C:**
-   - the tie-break fix;
-   - an IR-level proof of order between successive `TotalOrder` broadcasts, which must hold under every fault set
-     (S2) or be restricted;
-   - a test that exercises `choices.rs`'s one-schedule path and fails if that optimisation is removed.
+4. **C:** done on branch `hydrofrac-races-itemc` (ITEM-C2).
+   - **Order between successive broadcasts:** restricted to *sequenced* closed broadcasts, whose data is directly a
+     `TotalOrder`, `ExactlyOnce` harness input of a process. It is ARGUED in `hydrofrac-soundness.md` §6.4, and
+     every executed run is checked against it. It is DEMONSTRATED against brute force under every schedule of every
+     fault set of at most two faults, next to a relay of S2's shape (`sequenced_broadcasts_keep_the_harness_order_under_every_fault_set`).
+     A mutation that marks the relay sequenced fails that test. Network-fed broadcasts keep their payload literals
+     free.
+   - **The tie-break:** crash points are ordered by proved strength, with the earliest sent first among equals. Only
+     the order changes. Costs are in `races-vs-lite-comparison.md`, "Update: item C".
+   - The choice-free one-schedule test was already in place (`664c60e2f1`).
 5. Redo the lite-vs-races cost table on the final code. Rows above 2× today: ABD phase 2 8.4×, `new_messages` 5–6×,
    gossip ~4×, CTP-3 3.2×, Paxos prepares 8×.
 6. Future: a completion/liveness spec; rebase onto upstream.
