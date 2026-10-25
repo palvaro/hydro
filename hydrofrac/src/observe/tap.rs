@@ -194,6 +194,10 @@ fn max_port(ir: &mut [HydroRoot]) -> Option<usize> {
     max
 }
 
+/// How a tap's closure ([`tap_closure`]) starts when printed: the purity check
+/// (`crate::provenance::purity`) trusts it.
+pub(crate) const TAP_CLOSURE_START: &str = "move | __hydrofrac_x :";
+
 /// The closure a tap maps each element through: `(bincode of x, Debug of x if T: Debug)`. A
 /// fact's identity is its bincode, so a labelled element type must be `Serialize` (A4): `Debug`
 /// text or a hash digest could make two different facts one, and hide a member's missing fact.
@@ -201,6 +205,7 @@ fn max_port(ir: &mut [HydroRoot]) -> Option<usize> {
 /// `Serialize` panics when its first element is tapped, with the [`NO_IDENTITY`] message, which
 /// the check re-raises as the harness's error (`check::engine::program_panic`).
 fn tap_closure(element_type: &syn::Type) -> syn::Expr {
+    // `TAP_CLOSURE_START` is how this closure prints.
     // The generated dylib depends on `hydro_lang` under its own name, as every IR expression
     // `hydro_lang` itself builds assumes.
     let debug = debug_of(quote::quote!(&__hydrofrac_x));

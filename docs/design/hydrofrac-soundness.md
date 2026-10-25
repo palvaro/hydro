@@ -284,11 +284,20 @@ or is an opaque island.
 - the default arm (`_ => false`, `hf/provenance/fragile.rs:268`) makes everything else fragile, including node kinds
   added to the IR later;
 - a closure that reads Hydro state by reference is fragile before any arm (`closure_over_state`);
-- so is a closure, or a source expression, that names outside or shared state (`impure_closure`, A3): `static`,
-  `thread_local`, `Cell`/`RefCell`/`OnceCell`/`Lazy*`, `Mutex`/`RwLock`, `Atomic*`, `unsafe`, randomness, `Instant`,
-  `SystemTime`, `tokio`, and `std::`/`core::` `env`, `fs`, `io`, `net`, `process`, `ptr`, `thread`, `time`
-  (`hf/provenance/fragile.rs`, `names_impure`). The guard is textual: it cannot see into functions the closure calls,
-  and it flags some pure closures, which only costs schedules. Such a closure is also a schedule choice (§3.1).
+- so is a closure, or a source expression, that is not *known pure* (`impure_closure`, A3;
+  `hf/provenance/purity.rs`, an allowlist). A closure is known pure only if, after stageleft's wrappers, it is a
+  closure literal (so no block creates state before it: `{ let (tx, rx) = channel(); move |x| ... }` is not) whose
+  every name is allowed: a keyword other than `static`, `unsafe`, `fn`, `impl`, `struct`, `async`, ...; a name that
+  is only read (a variable, field, type, constant or capture); a method of `METHODS` (`std` methods that compute from
+  their receiver and arguments, or change only a value the closure owns or was passed); a macro of `MACROS`; a
+  constructor (a capitalised name: `Some(x)`, `Msg::Ack(x)`); or a function of a primitive type or of `STD_PATHS`
+  (`Vec::new`, `cmp::max`). A call of any other function (`helper(x)`, which may hide a `static`), or through a value
+  (`(f)(x)`), is not known pure. Reading is not a call: to change a `static` or a captured value a closure needs
+  `unsafe` or a method, and every method it may call is listed. Captured values (stageleft's `name__free`) are held
+  to the same rules: a captured closure as a closure, any other captured value may hold no closure. A source
+  expression runs once per run, so it may bind state (`let`), but is held to the same names. `hydro_lang`'s own
+  quoted code is trusted (its captures are checked), and so are hydrofrac's taps. Not known pure costs only
+  schedules. Such a closure is also a schedule choice (§3.1).
 
 **The table** (every `HydroNode` kind at `dd5c4d05a5`):
 
@@ -877,7 +886,7 @@ counterexample of `n <= max_faults` faults and `c` crashes must be matched by an
 |---|---|---|
 | A1 | The simulator branches only at hooks, and `exhaustive` enumerates every hook decision sequence | ASSUMED (`hydro_lang/src/sim/compiled.rs`; the simulator's design) |
 | A2 | DFIR is deterministic between hook decisions | ASSUMED |
-| A3 | User closures are pure (no hidden state, no I/O): each output is a function of the inputs | ASSUMED for functions closures call. Partly CHECKED IN CODE: a closure that reads Hydro state by reference is fragile (`reads_state`); a closure or source expression that names outside or shared state is fragile and a choice (`names_impure`, a textual guard, §3) |
+| A3 | User closures are pure (no hidden state, no I/O): each output is a function of the inputs | CHECKED IN CODE by an allowlist (§3, `hf/provenance/purity.rs`): a closure or source expression that is not known pure is fragile and a choice, and a closure that reads Hydro state by reference is fragile (`reads_state`). ASSUMED: a listed method, macro or `std` function is the `std` one or as pure (a user's inherent method named `len` that bumps a counter is not seen); the `std` traits a closure uses through operators and methods (`Clone`, `PartialEq`, `Ord`, `Hash`, `Add`, `Index`, `Display`, `Iterator`) are implemented purely by its types; a hash collection's iteration order (random per instance) does not change a closure's result; `hydro_lang`'s quoted code is pure |
 | A4 | Records are compared by content; a message is its content and copy number (§0); facts are identified by `bincode` (§11) | CHECKED IN CODE: labelled types must be `Serialize`, or the check stops (`hf/observe/tap.rs`, `tap_closure`; `hf/fault/mod.rs:154`, `MessageId`). ASSUMED that `Serialize` is injective on the labelled values: derived impls are; a custom impl or `#[serde(skip)]` may not be |
 | A5 | The provenance rewrite over-approximates every record's dependencies and tags every fragile step's outputs; opaque operators fall back to the execution rule | TESTED (`hf/lineage/*tests*.rs`, provenance tests, every brute-force cross-check); not proved |
 | A6 | Quiescence means no tick can run (`SimTick::can_run`, `hydro_lang/src/sim/compiled.rs:2022`): a tick runs only when every one of its hooks is ready and some hook can release. A hook that is not ready blocks its tick even with input pending: a snapshot of a singleton that never got a value (`SingletonHook::is_ready`, `hydro_lang/src/sim/runtime.rs:591`; every other hook is always ready, `:78`). So a batch's pending input is released at quiescence only if its tick snapshots no singleton (§3, `batch_beside_snapshot`). Nothing else makes a tick run (§17, fix 2). Under the `hydrofrac` feature such a stuck tick no longer aborts the process: the run quiesces with that member never running the tick (`compiled.rs`, the "never became ready" check) | CHECKED IN CODE (`compiled.rs:2022`, `quiesce` at `:292`) |
@@ -933,8 +942,15 @@ and fixed structurally:
    snapshot is fragile); no program showed that one break, since the simulator cannot yet yield a keyed singleton out
    of an atomic region.
 6. **Impure closures** (A3). A closure with a hidden counter was robust, and in a choice-free program its one
-   schedule stood for all. Now a closure (or source expression) that names outside state is fragile and a choice.
-   Regression: `impure_closures_are_fragile_choices`.
+   schedule stood for all. Then a closure (or source expression) that named outside state was fragile and a choice
+   (a deny-list of names). Regression: `impure_closures_are_fragile_choices`. Review 2 (reviewer A) got past the
+   deny-list with a closure that owns its state: `{ let (tx, rx) = std::sync::mpsc::channel(); move |_| ... }`
+   names nothing on the list, yet numbers its calls. A false certificate
+   (`review2a_a_closure_owning_its_state_escapes_the_impurity_guard`) and a false `Vacuous`
+   (`review2a_an_owned_counter_makes_a_false_vacuous_verdict`), both broken by both oracles. Now purity is an
+   allowlist (§3, `hf/provenance/purity.rs`): such a block is not a closure literal, and a call of a function the
+   list does not know (a helper hiding a `static`) is not known pure. Both tests now find the counterexample, and both
+   oracles agree.
 7. **Label merging** (reviewer #3, fatal; brute force agreed). Every IR node with one `(label, op, kind, cluster)` key
    was tapped into one label, so a helper labelling two collections on one line unioned them: a member missing a fact
    in one was masked by the other. Now each labelled node is its own label, and the tap pass checks it tapped each
@@ -997,8 +1013,9 @@ and fixed structurally:
   Outside the three certified cases, Claim B is checked only in explored runs, and the report says so.
 - **Trusted code.** `quorum.rs:121-185` (§7), the fragile table's DFIR semantics (§3), the fan-out lowering (§6.1) and
   the simulator's FIFO external-input path (§6.4) are trusted by reading, and checked only by the tests cited.
-- **Impurity beyond the textual guard** (A3). A closure that calls a function with hidden state, or a type whose
-  `Clone` or `Hash` is impure, is not detected.
+- **Impurity behind a listed name** (A3). The purity allowlist trusts names, not their resolution: a user's method
+  named like a listed `std` method, or a type whose `Clone`, `PartialEq`, `Hash` or arithmetic is impure, is not
+  detected. A closure that calls any unlisted function is treated as impure, so this needs a listed name.
 - **Fact identity** (A4, §11). A custom `Serialize` that drops data (`#[serde(skip)]`) can make two facts one.
 - **Unchecked labels.** Scalars (§11) and collections inside a tick are reported, not checked.
 - **Empty domains cost a full enumeration** (§11). Outside fragile-free and choice-free programs, a label with an

@@ -130,7 +130,7 @@ pub fn choice(node: &HydroNode) -> Option<String> {
         }
         _ if observed => "observe_for_mut",
         // A closure that may give different results for one input: the one schedule of a
-        // choice-free program would not stand for the others (`super::fragile::names_impure`).
+        // choice-free program would not stand for the others (`super::purity`).
         _ if super::fragile::impure(node) => "impure_closure",
         _ if ALLOWED.contains(&name) => return None,
         _ => name,

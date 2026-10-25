@@ -33,6 +33,9 @@ pub mod choices;
 /// exist or not depending on the schedule.
 #[cfg(stageleft_runtime)]
 pub mod fragile;
+/// Which closures are known pure (A3): an allowlist of names.
+#[cfg(stageleft_runtime)]
+pub(crate) mod purity;
 /// Closed-broadcast channels, whose sends to each member follow a fixed order
 /// (docs/design/hydrofrac-races.md §4.2).
 #[cfg(stageleft_runtime)]
