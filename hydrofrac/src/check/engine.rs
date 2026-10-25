@@ -214,7 +214,11 @@ struct Failure {
 }
 
 impl Failure {
-    /// A program that panics under injected faults breaks every label.
+    /// A program that panics under injected faults breaks every label. A pruned set never hides
+    /// such a panic within the bounds (docs/design/hydrofrac-soundness.md §18, "Panics"): outside
+    /// fragile-free and choice-free programs the Claim B sweep runs every set, and inside them
+    /// every record under faults is a failure-free record, so a pure closure that panics on it
+    /// panics in the probe.
     fn panic(message: &str, record: Rc<InstanceRecord>) -> Self {
         Failure {
             missing: vec![],

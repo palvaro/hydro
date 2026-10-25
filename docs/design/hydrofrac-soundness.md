@@ -939,8 +939,22 @@ and fixed structurally:
   deliver the retry" is never explored.
 - **Stuck ticks are the simulator's semantics.** A tick blocked on a snapshot that never got a value never runs in
   the simulator (A6); a deployment might run it with an empty snapshot. hydrofrac reports what the simulator does.
-- **Panics in pruned sets.** Claim A covers the runs of completed schedules: a set the search prunes is not run, so a
-  program panic only that set would cause is not reported.
+- **Panics.** A run that panics breaks every label, in the search and in both oracles. The search runs a set only if
+  it may break the label, so a certificate claims no panic only by the argument of §13:
+  - **in a program that is neither fragile-free nor choice-free** a certificate needs the Claim B sweep (§13), which
+    runs every set within the bounds in every schedule: every panic within the bounds is found. **Proved**;
+  - **in a fragile-free or choice-free program** every record under a fault set `H` is a record of the failure-free
+    runs (the argument of §13 is about every record, not only the label's facts). Program code panics only in a
+    closure applied to records, and a pure closure (A3; one that is not known pure is a choice, §3) panics on a
+    record wherever it panics on it. So a panic under `H` is a panic without faults, which the probe runs first and
+    reports as a counterexample with no faults. The harness does not branch on what it observes (A8), so it panics
+    under `H` only if it panics without faults. **Argued**, given A3, A8 and A13.
+
+  So a pruned set never hides a panic within the bounds. Not covered: a program whose every label is decided without
+  a run (`Vacuous(SingleMember)`, `NotChecked`) is never run under faults. Regression:
+  `review2b_fault_created_panic_beside_a_robust_fact` (review 2, reviewer B): the label's fact survives a crash that
+  makes the run panic, so the crash was pruned and the label certified, while both oracles break it; the program
+  batches, so the Claim B sweep now runs that crash and reports the panic.
 - **Other order-observed rules.** None remain. The kill rule never reads an observed order (§5), and dead facts use
   only proved literals (§8). The weights' tie-break uses observed positions, but only to order proposals, never to
   decide soundness.
