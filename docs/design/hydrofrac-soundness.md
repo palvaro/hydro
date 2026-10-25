@@ -32,11 +32,14 @@ have regression tests. They are recorded in §17.
   *hooks*: batch releases, snapshot versions, order choices and the tick to run next. `exhaustive` enumerates every
   sequence of hook decisions.
 - **Fault model.**
-  - `omit(m)`: every copy of message `m` on a lossy channel is dropped, until the heal.
+  - `omit(m)`: the send `m` on a lossy channel is dropped, if it happens before the heal.
   - `crash(n)`: node `n` is dead from instance start.
-  - `crash(n after m)`: `n` dies right after it first sends `m`, if it sends `m` before the heal.
-  - Messages are *content-addressed*: a `MessageId` is `(channel, from, to, payload bytes)` (`hf/fault/mod.rs:154`).
-    So `omit(m)` drops every copy with that content, a retry included (§18).
+  - `crash(n after m)`: `n` dies right after it sends `m`, if it sends `m` before the heal.
+  - A message names one send: a `MessageId` is its *content* `(channel, from, to, payload bytes)` and its *copy*
+    `k`, the number of earlier sends of that content in the run, dropped or not (`hf/fault/mod.rs`, `MessageId`). So
+    "lose one of two identical sends" and "crash between them" are faults. Copies are numbered per run: the same
+    `k` may name a different send under another fault set or schedule, so nothing below trusts a copy number across
+    runs except where it says why.
   - A *fault set* has at most one crash per node.
   - **The heal**: from the heal on, no omission applies and no new crash fires; crashes that fired persist
     (`hf/fault/mod.rs:389`).
@@ -237,8 +240,20 @@ of the run, `c`'s tap has emitted `f`, or `c` has crashed.
 - **The end.** `c` computes `f` and its tap emits it, unless `c` is dead. A dead node's outputs are dropped
   (`hf/fault/mod.rs:504`), and that is the "or crashed" case. The member view only grows (`hf/spec.rs:45`).
 
-**Duplicates.** Messages are content-addressed, so `omit(m)` drops every copy and `crash(n after m)` fires after the
-first copy. A dependency on a later copy of `m` is served by the first copy, whose content is the same (A4).
+**Duplicates.** The kill rule reads contents, not copies (`hf/races/clause.rs`, `kills`): `omit(m)` kills a
+dependency `d` iff `m` is the *first* copy of `d`'s content, and `crash(n after m)` spares every copy of `m`'s
+content. A robust step is set-preserving (§3), so a dependency on content `c` needs only *some* copy of `c`
+delivered, whichever copy it was in the run `D` was read from (A4). The first copy of `c` is sent in every schedule
+of `H`: `d`'s own send happens (the bullets above, with "`d = m`" read as "`d` has `m`'s content": every copy of
+`m`'s content up to `m` is sent before the crash fires, and a proved `after(d, m) = false` puts some copy of `d`'s
+content before `m`, §6.1), and the first copy comes no later. It is dropped only by `omit` of the first copy, which
+kills `D`. So `D`'s receiver gets `c`.
+
+This needs a *set-preserving* step. A step that counts copies (a fold, a scan, `enumerate`) may need the second copy
+too, and the first copy does not serve it. Such steps are fragile (§3), so their derivations have a premise and
+protect nothing, except under the choice-free shortcut, which keeps their premises when they use a later copy
+(§3.1). Before copies were named, the rule also spared `crash(n after m)` for a later copy of `m`, and §3.1 dropped
+the premises of derivations that counted copies: the five `review2a_*`/`review_c_*` regressions of §17 (fix 14).
 **Proved**, given A1–A8.
 
 **Corollary (pruning).** If `H` is pruned, POST holds in every schedule of `H` (§1, case 1). **Proved.**
@@ -338,8 +353,9 @@ or is an opaque island.
 
 ### 3.1 The choice-free shortcut
 
-**Claim.** In a program with no schedule choice, every derivation may be treated as robust. `read_schedule` drops
-premises when `choice_free` (`hf/check/races_engine.rs:198`).
+**Claim.** In a program with no schedule choice, every derivation that uses only first copies may be treated as
+robust. `read_schedule` drops premises when `choice_free`, unless a dependency is a later copy
+(`hf/check/races_engine.rs`, `read_schedule`).
 
 **What "choice-free" means.** The choice scan (`hf/provenance/choices.rs:73`, `choice`) finds nothing. The scan is an
 allowlist too: an operator is choice-free only if its kind is in `ALLOWED` (`hf/provenance/choices.rs:22`) and no
@@ -356,6 +372,11 @@ closure that names outside state (`impure_closure`, §3), and every unlisted kin
   and the fold's or scan's record carries every earlier input in its lineage (`hf/provenance/rewrite.rs:608`,
   `wrap_acc`; `:628`, `wrap_scan`).
 - So a derivation whose dependencies all survive `H` is recomputed under `H`, which is Lemma R's conclusion.
+- "Survive" means each *copy*, for a fold, scan or `enumerate` that counts them. The kill rule reads contents (§2):
+  it spares a crash after the first copy of `m` for a derivation that also used the second copy, which that crash
+  cuts. So a derivation that used a later copy keeps its premises. One that used only first copies has, for each
+  content, the one copy the kill rule protects (the first is sent and not omitted, §2). A counting step's record
+  carries every earlier input in its lineage, so a derivation of only first copies saw no second copy before it.
 
 **Proved**, given A1, A2 and A13.
 
@@ -383,7 +404,8 @@ every set over `U`.
 every schedule in which its sending record exists.
 
 **Proof.**
-- **`d = m`:** the crash fires right after `m`'s first send, so `m` is sent.
+- **`d` has `m`'s content:** the crash fires right after the copy `m`, so every copy of that content up to `m` is
+  sent, the first among them (§2: some copy serves a set-preserving step).
 - **`after(d, m)` proved false:** `d` is sent before `m` in every run (§6.1), and the crash fires only once `m` is sent.
 - **Otherwise the rule says the crash kills `d`**, so there is nothing to prove.
 - **Never sent:** if `m` is never sent, the crash never fires (`hf/fault/mod.rs:475-477`).
@@ -423,6 +445,8 @@ JoinHalf(probe: Map(|v| ((), v)) ← data, build: Map(|v| ((), v)) ← [AssertIs
   for_each(send)`).
 - So each `v` is sent as `(v → 0), …, (v → n−1)`, in that order.
 - A crash between two of these sends cuts a suffix, never a prefix.
+- A payload sent twice is two fan-outs, one after the other. The literal is about contents: every copy of
+  `(v → k)` follows the copy of `(v → j)` of its own fan-out (`hf/races/literals.rs`, `SendOrder`).
 
 **Proved**, given (A2) and the cited DFIR semantics. Also **checked in code** (the strict match) and **tested**
 (`hf/check/fanout_tests.rs`: under every schedule, 1,332 for one test, every payload goes to members in increasing id
@@ -447,11 +471,22 @@ order).
    This is what lets a fragile-free program use no `Unseen` candidate (`hf/races/sweep.rs:150`,
    `hf/check/races_engine.rs`: `sends_complete` when `fragile_free`).
 
+   With copies named, it also needs every *copy* a faulty run sends to appear in the probe: no fault set makes a
+   node send a content more times than the failure-free run does. **Argued**: every robust step's output
+   multiplicity is a monotone function of its inputs' (map, filter, union, join and network count each input once;
+   `unique` and the dedup idiom emit once), sources are fixed, and faults only remove sends.
+
 ### 6.3 Exact crash points
 
-`crash(n after m)` is *exact* if sends are complete and every message `n` can send has a proved literal `after(·, m)`
-(`hf/races/sweep.rs:169`). Then in every run the crash cuts exactly the sends whose literal is true. **Proved**, from
-6.1 and 6.2.
+`crash(n after m)` is *exact* if sends are complete and every message `n` can send of another content has a proved
+literal `after(·, m)`, and, if `m` is a later copy, no literal is true (`hf/races/sweep.rs`, `is_exact`). Then in
+every run the crash cuts exactly the sends whose literal is true. The literals are about contents, so after a later
+copy `m#j` a "true" `(v → k)` of an earlier fan-out escapes the crash, hence the extra condition.
+
+`omit(m)` is *exact* if `m` is a later copy (the kill rule says it kills nothing), or if sends are complete and no
+run showed a second copy of `m`'s content (by 6.2 it is then the only copy in every run, so it drops every
+delivery of that content, as the rule says; `hf/races/sweep.rs`, `omission_is_exact`). **Proved**, from 6.1 and
+6.2.
 
 ## 7. Trusted `quorum`
 
@@ -494,7 +529,8 @@ attestations, which is sound.
 
 **Claim.** Suppose all of:
 - the program is fragile-free;
-- every crash of `S` is a start crash, or an exact crash point (§6.3) of a node outside the label's cluster;
+- every omission of `S` is exact, and every crash a start crash, or an exact crash point (§6.3) of a node outside
+  the label's cluster;
 - the one run of `S` shows no correct member holding `f`.
 
 Then under every `H ⊇ S`, in every schedule, no correct member holds `f`.
@@ -502,7 +538,8 @@ Then under every `H ⊇ S`, in every schedule, no correct member holds `f`.
 **Proof** (`hf/races/sweep.rs:177-226`). Suppose some correct member `c` of `H` holds `f` in a schedule of `H`, by a
 derivation `D`, which is robust because the program is fragile-free.
 - **No fault of `S` kills `D`:**
-  - an omission in `S ⊆ H` did not drop `D`'s deliveries;
+  - an omission in `S ⊆ H` did not drop `D`'s deliveries: it is exact, so it kills a dependency only if it drops the
+    only copy of its content;
   - a start crash's node sent nothing, so `D` has no dependency from it;
   - for an exact `crash(n after m)` in `S`, a dependency of `D` from `n` with a true literal would be sent after `m`,
     which the crash in `H` cuts. So all its literals are false, and the rule spares it.
@@ -705,9 +742,9 @@ above.
   so far. The remaining schedules are covered by the pruning corollary (§2). Disabled for `in_full` runs.
 - **One schedule** (`Policy::One`, `hf/check/races_engine.rs:254`), in two cases:
   - **choice-free program with only start crashes:** one schedule is the only schedule;
-  - **fragile-free program, and every crash of the set a start crash or exact (§6.3).** Every fact of one schedule is
+  - **fragile-free program, and every fault of the set exact (§6.3).** Every fact of one schedule is
     a fact of every schedule, and conversely. Proof: take a fact's robust derivation from one schedule. Its
-    dependencies were delivered under the set, so no omission kills them, no start-crashed node sent them, and, with
+    dependencies were delivered under the set, so no exact omission kills them, no start-crashed node sent them, and, with
     every literal fixed, a dependency from an exact crash point's node must have a false literal (a true one would
     have been cut). So it survives the set, and by Lemma R the fact exists in every schedule. The correct members are
     the same in every schedule: start crashes always fire, and exact crash points fire iff their message is sent,
@@ -731,8 +768,7 @@ above.
 - the instrumented, compiled program, including the provenance rewrite (A5 and A9 below);
 - the label planning and the taps (`hf/observe/`), so which collections are checked and how facts are identified
   (A4);
-- the fault hook (`hf/fault/mod.rs`), with whole-message omission (`omit(m)` drops every copy of a content-identical
-  message, §18);
+- the fault hook (`hf/fault/mod.rs`), which names each copy of a content (§0);
 - the universe harvest, which mirrors the search's `Revealed`;
 - the specification evaluation (`hf/spec.rs`);
 - the bounds, except one: brute force does not apply the `nodes − 1` bound (it is implied for the configurations it
@@ -762,8 +798,8 @@ simulator, the user's IR, the harness and the definition of the bounds with the 
   oracle 2 compiles the fork with hook points but without the provenance rewrite or hydrofrac's tap pass;
 - **its own taps**: one external output per labelled cluster node where the label is minted or exits, by node
   identity (never merged by source line), carrying `bincode(element)`;
-- **its own faults and hook**: omission of a message by content on a lossy channel, crash before the first send or
-  right after the node's `k`-th send, all only before the heal;
+- **its own faults and hook**: omission of the `k`-th send of a content on a lossy channel, crash before the first
+  send or right after the node's `k`-th send, all only before the heal;
 - **its own comparison**: per schedule and collection, the correct members' element sets must be equal.
 
 Its program is a copy, so node addresses do not carry over: its collections map to the search's labels by the
@@ -775,9 +811,8 @@ time-bounded exhaustive runs, like the search. Agreement:
 a claim of holding with up to `k` crashes (a `Vacuous` verdict claims every `k`) is refuted by any oracle-2 breaking
 set with at most `k` crashes; a
 counterexample of `n <= max_faults` faults and `c` crashes must be matched by an oracle-2 breaking set with at most
-`n` faults and `c` crashes; and both failure-free runs agree on vacuity. It is stricter than the search where a node
-resends a payload (it can crash after the second copy), and weaker within a same-key group (another assignment may
-explain a wrong verdict).
+`n` faults and `c` crashes; and both failure-free runs agree on vacuity. It is weaker within a same-key group
+(another assignment may explain a wrong verdict).
 
 ## 16. Assumptions
 
@@ -786,14 +821,14 @@ explain a wrong verdict).
 | A1 | The simulator branches only at hooks, and `exhaustive` enumerates every hook decision sequence | ASSUMED (`hydro_lang/src/sim/compiled.rs`; the simulator's design) |
 | A2 | DFIR is deterministic between hook decisions | ASSUMED |
 | A3 | User closures are pure (no hidden state, no I/O): each output is a function of the inputs | ASSUMED for functions closures call. Partly CHECKED IN CODE: a closure that reads Hydro state by reference is fragile (`reads_state`); a closure or source expression that names outside or shared state is fragile and a choice (`names_impure`, a textual guard, §3) |
-| A4 | Records are compared by content; messages are content-addressed; facts are identified by `bincode` (§11) | CHECKED IN CODE: labelled types must be `Serialize`, or the check stops (`hf/observe/tap.rs`, `tap_closure`; `hf/fault/mod.rs:154`, `MessageId`). ASSUMED that `Serialize` is injective on the labelled values: derived impls are; a custom impl or `#[serde(skip)]` may not be |
+| A4 | Records are compared by content; a message is its content and copy number (§0); facts are identified by `bincode` (§11) | CHECKED IN CODE: labelled types must be `Serialize`, or the check stops (`hf/observe/tap.rs`, `tap_closure`; `hf/fault/mod.rs:154`, `MessageId`). ASSUMED that `Serialize` is injective on the labelled values: derived impls are; a custom impl or `#[serde(skip)]` may not be |
 | A5 | The provenance rewrite over-approximates every record's dependencies and tags every fragile step's outputs; opaque operators fall back to the execution rule | TESTED (`hf/lineage/*tests*.rs`, provenance tests, every brute-force cross-check); not proved |
 | A6 | Quiescence means no tick can run (`SimTick::can_run`, `hydro_lang/src/sim/compiled.rs:2022`): a tick runs only when every one of its hooks is ready and some hook can release. A hook that is not ready blocks its tick even with input pending: a snapshot of a singleton that never got a value (`SingletonHook::is_ready`, `hydro_lang/src/sim/runtime.rs:591`; every other hook is always ready, `:78`). So a batch's pending input is released at quiescence only if its tick snapshots no singleton (§3, `batch_beside_snapshot`). Nothing else makes a tick run (§17, fix 2). Under the `hydrofrac` feature such a stuck tick no longer aborts the process: the run quiesces with that member never running the tick (`compiled.rs`, the "never became ready" check) | CHECKED IN CODE (`compiled.rs:2022`, `quiesce` at `:292`) |
 | A7 | The simulated network delivers every send that no injected omission drops; lossy channels are intercepted by the fault hook | CHECKED IN CODE (`hf/fault/mod.rs:348-353` asserts interception) |
 | A8 | The harness, in both phases, is deterministic: the same inputs, in the same order, in every schedule; it may wait for outputs but does not branch on them | ASSUMED |
 | A9 | The rewrite preserves the program's behaviour (records carry tags but compute the same values) | TESTED (`hf/check/tests.rs`, `hydrofrac_provenance_tests` in `hydro_test` and `hydro_std`) |
 | A10 | Messages are sent one at a time, in production order, per channel | ASSUMED (simulator `for_each(send)`); used by §6.1 |
-| A11 | A crash fires right after the first send of its message and halts the node (no further sends or outputs) | CHECKED IN CODE (`hf/fault/mod.rs:468-489`, `:516-534`) |
+| A11 | A crash fires right after the send it names (that copy) and halts the node (no further sends or outputs) | CHECKED IN CODE (`hf/fault/mod.rs:468-489`, `:516-534`) |
 | A12 | Cluster ids are listed `0..n` by one `source_iter` | ASSUMED from `hydro_lang/src/sim/graph.rs`; TESTED by `fanout_tests` |
 | A13 | A Hydro program with no schedule choice is monotone: non-monotone operators need a bounded input, which only a tick provides, and outside data enters a tick only through a batch (a choice) | ASSUMED (Hydro's type system); used only for Claim B in choice-free programs (§13) |
 | A14 | Membership is static, and only hydrofrac injects crashes: no `with_dynamic_membership` (its `MembershipHook` makes joins a schedule choice), no `with_crashable_process`/`with_crashable_cluster` (the simulator's own `CrashHook`, whose crashes are not in the fault hook's record, so its crashed members would count as correct) | CHECKED IN CODE: `EcCheck::instrument` sets `SimFlow::refuse_sim_faults`, and `compiled()` panics if either was used, before or after (`hydro_lang/src/sim/flow.rs`) |
@@ -867,6 +902,18 @@ and fixed structurally:
     network, as `Rc<dyn Any>`, whose `Debug` is `Any { .. }` for every value. A single crash of the source, right
     after it sends `2` to one member, leaves the other two without `2`, yet the check certified the label (with
     Claim B). Now a labelled type must be `Serialize` (§11).
+14. **Copies of one content** (reviewers 2-A and C; all five pinned as false certificates). Messages were named by
+    content alone, so `omit(m)` dropped every copy and `crash(n after m)` fired after the first. Three faults could not
+    be expressed: losing one of two identical sends, which fooled the search and both oracles
+    (`review_c_omitting_one_of_two_identical_messages_is_not_modelled`); a crash between two of them
+    (`review_c_crash_between_two_identical_messages_is_not_modelled`); and a crash inside a resend
+    (`review2a_a_crash_inside_a_resend_is_outside_the_fault_model`). Oracle 2 caught the last two. Within the
+    model, the kill rule and §2 treated a later copy as covered by the first, which a scan or `enumerate` under the
+    choice-free shortcut does not satisfy (`review_c_choice_free_scan_over_a_repeated_message_is_pruned_wrongly`,
+    `review2a_a_crash_cuts_a_later_copy_the_kill_rule_spares`). Now every fault names one copy (§0), the kill rule
+    reads contents and spares only what the first copy serves (§2), §3.1 keeps the premises of a derivation that
+    used a later copy, and exactness (§6.3) covers omissions too. All five find their counterexample, and both
+    oracles agree.
 
 ## 18. Known gaps: what certificates do not cover
 
@@ -900,8 +947,11 @@ and fixed structurally:
 - **Empty domains cost a full enumeration** (§11). Outside fragile-free and choice-free programs, a label with an
   empty domain runs every set within the bounds, in full; the hypothesis budget may stop it (`Budget`, not a
   certificate).
-- **Whole-message omission.** `omit(m)` drops every copy of a content-identical message, so "lose the first copy,
-  deliver the retry" is never explored.
+- **Copies cost faults.** Faults name single copies (§0), so losing every copy of a message sent `k` times is `k`
+  omissions, and the brute force's `max_faults` covers fewer such losses than before. Omissions are not bounded in
+  the search, so certificates are unaffected.
+- **Copy multiplicity** (§6.2). That a fragile-free program sends no content more often under faults than without
+  is argued from the allowlist, not checked.
 - **Stuck ticks are the simulator's semantics.** A tick blocked on a snapshot that never got a value never runs in
   the simulator (A6); a deployment might run it with an empty snapshot. hydrofrac reports what the simulator does.
 - **Panics in pruned sets.** Claim A covers the runs of completed schedules: a set the search prunes is not run, so a

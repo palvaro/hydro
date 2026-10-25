@@ -106,9 +106,14 @@ fn review_c_omitting_one_of_two_identical_messages_is_not_modelled() {
     let members = flow.cluster::<()>();
     let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
     let parity = input
-        .broadcast_closed(&members, TCP.lossy_delayed_forever().name("votes").bincode())
+        .broadcast_closed(
+            &members,
+            TCP.lossy_delayed_forever().name("votes").bincode(),
+        )
         .weaken_consistency()
-        .assume_ordering::<TotalOrder>(nondet!(/** the 7s are identical and the trigger comes after a quiesce */))
+        .assume_ordering::<TotalOrder>(
+            nondet!(/** the 7s are identical and the trigger comes after a quiesce */),
+        )
         .scan(
             q!(|| 0u32),
             q!(|count, x| {
@@ -328,7 +333,10 @@ fn review_c_crash_between_two_identical_messages_is_not_modelled() {
     let (send_s, in_s) = s.sim_input::<(u32, u32), TotalOrder, ExactlyOnce>();
     let (send_r, in_r) = r.sim_input::<u32, TotalOrder, ExactlyOnce>();
     let from_s = in_s
-        .map(q!(|(d, v)| (hydro_lang::location::MemberId::<()>::from_raw_id(d), v)))
+        .map(q!(|(d, v)| (
+            hydro_lang::location::MemberId::<()>::from_raw_id(d),
+            v
+        )))
         .demux(&members, TCP.fail_stop().name("updates").bincode());
     let trigger = in_r
         .broadcast_closed(&members, TCP.fail_stop().name("trigger").bincode())
@@ -476,7 +484,10 @@ fn review_c_choice_free_scan_over_a_repeated_message_is_pruned_wrongly() {
     let (send_s, in_s) = s.sim_input::<(u32, u32), TotalOrder, ExactlyOnce>();
     let (send_t, in_t) = t.sim_input::<(u32, u32), TotalOrder, ExactlyOnce>();
     let counts = in_s
-        .map(q!(|(d, v)| (hydro_lang::location::MemberId::<()>::from_raw_id(d), v)))
+        .map(q!(|(d, v)| (
+            hydro_lang::location::MemberId::<()>::from_raw_id(d),
+            v
+        )))
         .demux(&members, TCP.fail_stop().name("updates").bincode())
         .scan(
             q!(|| 0u32),
@@ -490,7 +501,10 @@ fn review_c_choice_free_scan_over_a_repeated_message_is_pruned_wrongly() {
         .values()
         .weaken_consistency();
     let direct = in_t
-        .map(q!(|(d, v)| (hydro_lang::location::MemberId::<()>::from_raw_id(d), v)))
+        .map(q!(|(d, v)| (
+            hydro_lang::location::MemberId::<()>::from_raw_id(d),
+            v
+        )))
         .demux(&members, TCP.fail_stop().name("direct").bincode())
         .weaken_ordering::<NoOrder>()
         .cross_product(heard.clone().filter(q!(|c| *c == 1)))

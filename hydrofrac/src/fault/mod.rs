@@ -466,7 +466,6 @@ impl FaultHook {
         }
         finished
     }
-
 }
 
 /// Whether a channel with this networking may lose messages (so omissions apply to it):
@@ -575,7 +574,10 @@ impl SimNetworkHook for FaultHook {
             .exec
             .clone()
             .unwrap_or_else(|| panic!("output on port {port} outside an execution"));
-        assert_eq!(node.member, member, "output on port {port} from another member");
+        assert_eq!(
+            node.member, member,
+            "output on port {port} from another member"
+        );
         // A crashed node emits nothing, like it sends nothing (between its crash firing and the
         // scheduler halting it, its current execution may still run).
         if cur.dead.contains(&node) {

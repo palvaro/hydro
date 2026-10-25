@@ -100,7 +100,10 @@ fn review2a_a_closure_owning_its_state_escapes_the_impurity_guard() {
     eprintln!("=== owned counter\n{cross}");
     eprintln!("disagreements: {:#?}", cross.disagreements);
     let label = cross.results.label("numbered");
-    eprintln!("numbered: certified = {}", matches!(label.verdict, Verdict::Certified { .. }));
+    eprintln!(
+        "numbered: certified = {}",
+        matches!(label.verdict, Verdict::Certified { .. })
+    );
     assert!(
         matches!(label.verdict, Verdict::Certified { .. }),
         "the search certifies `numbered`: {cross}"
@@ -177,7 +180,10 @@ fn review2a_an_owned_counter_makes_a_false_vacuous_verdict() {
         "the search calls `alarm` vacuous without a search: {cross}"
     );
     assert!(
-        cross.disagreements.iter().any(|d| d.contains("owned_counter_alarm")),
+        cross
+            .disagreements
+            .iter()
+            .any(|d| d.contains("owned_counter_alarm")),
         "and the oracles break it: {cross}"
     );
 }

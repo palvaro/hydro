@@ -71,7 +71,8 @@ impl<'a> ReportNames<'a> {
             if let Event::Sent { msg, meta, .. } = event
                 && let Some((_, Some(debug))) = meta.as_deref().and_then(split_meta)
             {
-                self.payloads.insert(msg.bytes.to_vec(), short_debug(&debug));
+                self.payloads
+                    .insert(msg.bytes.to_vec(), short_debug(&debug));
             }
         }
         self
@@ -120,10 +121,15 @@ impl<'a> ReportNames<'a> {
         format!("‹{k}›")
     }
 
-    /// A message: `channel[from→to]: payload`.
+    /// A message: `channel[from→to]: payload`, then ` (copy k)` for the `k`-th repeat of it.
     pub fn message(&self, m: &MessageId) -> String {
+        let copy = if m.copy > 0 {
+            format!(" (copy {})", m.copy)
+        } else {
+            String::new()
+        };
         format!(
-            "{}[{}→{}]: {}",
+            "{}[{}→{}]: {}{copy}",
             self.channel(m.channel),
             self.node(&m.from),
             self.node(&m.to),

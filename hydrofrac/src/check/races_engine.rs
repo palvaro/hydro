@@ -18,7 +18,6 @@ use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
 use std::time::Instant;
 
-
 use super::*;
 use crate::check::RaceNotes;
 use crate::fault::{Fate, NodeNames};
@@ -263,9 +262,13 @@ impl Shape {
     /// (`races::Sweep::is_exact_set`: an omission of a content's only copy or of a later copy,
     /// a start crash, or a crash point whose every literal is proved). Then the kill rule is
     /// exact for `set`, so a derivation one run shows survives the rule, and holds in every run.
-    fn policy(self, set: &FaultSet<MessageId>, exact: impl Fn(&FaultSet<MessageId>) -> bool) -> Policy {
-        let one = self.choice_free && crashes_all(set, |_, _| false)
-            || self.fragile_free && exact(set);
+    fn policy(
+        self,
+        set: &FaultSet<MessageId>,
+        exact: impl Fn(&FaultSet<MessageId>) -> bool,
+    ) -> Policy {
+        let one =
+            self.choice_free && crashes_all(set, |_, _| false) || self.fragile_free && exact(set);
         if one { Policy::One } else { Policy::All }
     }
 }

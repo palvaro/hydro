@@ -10,9 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::literals::{Literal, SendOrder, after};
-use crate::search::{
-    Copies, CrashAt, CrashBounds, Dependency, Derivation, Fault, FaultSet, Node,
-};
+use crate::search::{Copies, CrashAt, CrashBounds, Dependency, Derivation, Fault, FaultSet, Node};
 
 /// One derivation of one pair, with the premises it needs.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -227,7 +225,6 @@ impl<M: Ord + Copies> Candidate<M> {
                 .any(|d| d.sender.as_ref().is_some_and(|(sender, _)| sender == node)),
         }
     }
-
 }
 
 impl<M> Candidate<M> {

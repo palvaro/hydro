@@ -1001,7 +1001,11 @@ impl Names {
                         self.node(from),
                         self.node(to),
                         if bytes.len() > 8 { "…" } else { "" },
-                        if *copy > 0 { format!("#{copy}") } else { String::new() }
+                        if *copy > 0 {
+                            format!("#{copy}")
+                        } else {
+                            String::new()
+                        }
                     )
                 }
             })
