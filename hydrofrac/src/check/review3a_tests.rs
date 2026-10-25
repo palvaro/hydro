@@ -230,3 +230,102 @@ fn review3a_the_purity_allowlist_accepts_hidden_state() {
     assert!(pure("|(x, c): (u32, Rc<Cell<u32>>)| c.replace(c.get() + x)"));
     assert!(pure("|(x, v): (u32, Rc<RefCell<Vec<u32>>>)| { v.take().len() as u32 + x }"));
 }
+
+/// **Finding 3: a single-member label is never run under faults (the known gap, exploited).**
+/// One member hears `x` from `source` during the fault phase, and in the recovery phase a probe
+/// for `x` arrives from `prober`; a member that never heard `x` panics ("never heard x"). The
+/// label is the member's view of `x` (the alarm stream before the panic). Without faults the
+/// member always hears `x` before the heal, so no failure-free schedule panics. A single crash
+/// of `source` at start makes the member panic in the recovery phase.
+///
+/// The label's cluster has one member, so the label is `Vacuous(SingleMember)` up front, no
+/// set is ever run under faults, and `assert_holds` passes, though the program panics under one
+/// crash. The program batches (it is neither fragile-free nor choice-free), so the doc's
+/// argument that a fault-free probe sees every panic (§18, "Panics") does not apply.
+#[cfg(stageleft_runtime)]
+fn single_member_panic() -> (CrossCheck, String, Vec<String>) {
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let prober = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let (send_probe, probe) = prober.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let tick = members.tick();
+    let arrived = input
+        .broadcast_closed(&members, TCP.fail_stop().name("data").bincode())
+        .batch(&tick, nondet!(/** which tick a delivery lands in */))
+        .weaken_ordering::<NoOrder>();
+    let (handle, prev) = tick.cycle::<Stream<u32, _, Bounded, NoOrder>, _>();
+    let heard = prev.chain(arrived);
+    handle.complete_next_tick(heard.clone());
+    let probes = probe.broadcast_closed(&members, TCP.fail_stop().name("probe").bincode());
+    let checked = probes
+        .batch(&tick, nondet!(/** which tick a probe lands in */))
+        .weaken_ordering::<NoOrder>()
+        .filter_not_in(heard)
+        .all_ticks()
+        .map(q!(|x: u32| -> u32 { panic!("never heard {x}") }))
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** one member agrees with itself */
+        ));
+    let _out = checked.sim_cluster_output();
+    let mut check = super::EcCheck::new().max_crashes(1);
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 1))
+        .compiled();
+    let cross = check.cross_check_then_recover(
+        &sim,
+        async || send.send(1),
+        async || send_probe.send(1),
+        MAX_FAULTS,
+    );
+    // The hand enumeration: every schedule of the one-crash set {crash(source) at start}, with
+    // the check's own fault hook and the check's harness shape (fault phase, quiesce, heal,
+    // quiesce, recovery, quiesce).
+    use hydro_lang::sim::compiled::quiesce;
+    let names = crate::fault::NodeNames::new(sim.locations());
+    let source_name = names
+        .crashable()
+        .iter()
+        .map(|n| names.name(n))
+        .find(|n| n.starts_with("process") && !n.contains('@'))
+        .expect("a process");
+    let mut panics = vec![];
+    for name in names.crashable().iter().map(|n| names.name(n)) {
+        let plan = crate::fault::FaultPlan {
+            faults: [crate::search::Fault::crash_after(name.clone(), None)].into(),
+        };
+        let hook = std::rc::Rc::new(crate::fault::FaultHook::new(&plan, &sim));
+        sim.set_network_hook(hook.clone());
+        let healer = std::panic::AssertUnwindSafe(hook.clone());
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sim.exhaustive(async || {
+                send.send(1);
+                quiesce().await;
+                healer.heal();
+                quiesce().await;
+                send_probe.send(1);
+                quiesce().await;
+            });
+        }));
+        sim.clear_network_hook();
+        if outcome.is_err() {
+            panics.push(name);
+        }
+    }
+    (cross, source_name, panics)
+}
+
+#[cfg(stageleft_runtime)]
+#[test]
+fn review3a_a_single_member_label_hides_a_fault_panic() {
+    let (cross, source, panics) = single_member_panic();
+    eprintln!("=== single member panic\n{cross}");
+    eprintln!("hand enumeration: one start crash of each node; the runs panic under {panics:?}");
+    // The check certifies (every label `Vacuous(SingleMember)`), and so do both oracles: they
+    // skip single-member collections too, and run no set under faults.
+    cross.results.assert_holds();
+    assert!(cross.disagreements.is_empty(), "{cross}");
+    // One crash of the source at start makes the member panic in the recovery phase.
+    assert!(panics.contains(&source), "{panics:?}");
+}
