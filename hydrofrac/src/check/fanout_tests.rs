@@ -21,14 +21,14 @@ use hydro_lang::sim::network_hook::IrPassStage;
 #[cfg(stageleft_runtime)]
 use crate::fault::{FaultHook, FaultPlan, MessageId, NodeId};
 #[cfg(stageleft_runtime)]
-use crate::provenance::fanout::{self, FANOUT_MARK};
+use crate::provenance::fanout::{self, is_fan_out};
 
 /// The channels `sim` marked as closed broadcasts, by id.
 #[cfg(stageleft_runtime)]
 fn marked(sim: &CompiledSim) -> Vec<usize> {
     sim.channels()
         .iter()
-        .filter(|c| c.op.id == Some(FANOUT_MARK))
+        .filter(|c| is_fan_out(c.op.id))
         .map(|c| c.id)
         .collect()
 }
