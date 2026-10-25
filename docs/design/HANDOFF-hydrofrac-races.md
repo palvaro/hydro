@@ -64,7 +64,7 @@ Status: **fixed+tested** (named test), **fixed untested**, **documented only**, 
 | R2-F2 + R1 | A tick with a never-ready snapshot never runs, so its batch is never released; the simulator aborted the process | fixed+tested `review_batch_beside_an_unready_snapshot` (`batch_beside_snapshot` is fragile; under the `hydrofrac` feature a stuck tick quiesces instead of aborting) |
 | R2-F3 | Dedup state read by other operators leaked absence-dependence: a break with zero faults | fixed+tested `a_dedup_state_read_elsewhere_is_fragile` |
 | R2-F4 | `BeginAtomic` lacked Batch's kind check | fixed; no repro possible (the sim cannot yield that shape) |
-| R2-F5 | Impure closures (counters, `Cell`, statics) make outputs schedule-dependent | fixed+tested `impure_closures_are_fragile_choices` (a textual guard, `names_impure`; ARGUED, not complete) |
+| R2-F5 | Impure closures (counters, `Cell`, statics) make outputs schedule-dependent | fixed+tested `impure_closures_are_fragile_choices` (an allowlist since review 2, `provenance/purity.rs`; ARGUED, names are trusted, not resolved) |
 | R2-F6 / R1-F3 | The simulator's own crash hooks and dynamic membership bypass the fault model | fixed+tested `the_simulators_own_crashes_are_refused` (`SimFlow::refuse_sim_faults`); A14 |
 | R2-F7 | A6 wording | done (§16) |
 | R1-F2 | No omission or crash may happen after the heal | fixed (`EventLog::check_heal`, checked on every run); no dedicated failing test |

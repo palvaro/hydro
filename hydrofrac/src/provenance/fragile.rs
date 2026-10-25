@@ -35,8 +35,8 @@
 //! - the steps inside a trusted `quorum` (`super::quorum`), which [`classify`] skips.
 //!
 //! Everything else is fragile. That includes: any operator whose closure (or a source's
-//! expression) names shared or outside state (`static`, `Cell`, `Mutex`, atomics, `std::time`,
-//! `std::fs`, randomness, ..., [`names_impure`]): such a closure may give different results for
+//! expression) is not known pure ([`super::purity`], an allowlist: a closure literal naming only
+//! listed methods, macros and `std` functions): such a closure may give different results for
 //! the same input, so lineage's assumption that each output is a function of its inputs (A3) is
 //! not checked for it; a constant inside a tick (`tick.singleton`, `optional_first_tick`, a
 //! tick's `source_iter`): it is emitted in every tick that runs, and only if one runs; a `batch`
@@ -63,7 +63,7 @@ use std::fmt::{self, Display};
 use hydro_lang::compile::builder::CycleId;
 use hydro_lang::compile::ir::{CollectionKind, HydroNode, HydroRoot, HydroSource};
 use hydro_lang::location::dynamic::LocationId;
-use proc_macro2::{TokenStream, TokenTree};
+use proc_macro2::TokenStream;
 
 use super::choices::{cell, closures};
 use super::rewrite::node_key;
@@ -165,71 +165,28 @@ fn reads_state(node: &HydroNode) -> bool {
         .any(|f| !f.singleton_refs().is_empty())
 }
 
-/// Names whose use in a closure can make its result depend on more than its input: shared or
-/// interior-mutable state, `unsafe`, randomness and clocks.
-const IMPURE_NAMES: &[&str] = &[
-    "static", "thread_local", "unsafe", "Cell", "RefCell", "UnsafeCell", "OnceCell", "OnceLock",
-    "LazyCell", "LazyLock", "Mutex", "RwLock", "rand", "random", "thread_rng", "Instant",
-    "SystemTime", "tokio",
-];
-
-/// Modules of `std` (or `core`) whose functions read or change state outside the closure.
-const IMPURE_MODULES: &[&str] = &["env", "fs", "io", "net", "process", "ptr", "thread", "time"];
-
-/// Whether `tokens` (a closure or a source expression) names any of [`IMPURE_NAMES`], an
-/// `Atomic*` type, or one of [`IMPURE_MODULES`] (as `std::fs`, `core::ptr`, ...). A textual,
-/// conservative guard for A3: it cannot see into functions the closure calls, and it flags some
-/// pure closures (a variable named `random`, say), which only costs schedules.
-pub(crate) fn names_impure(tokens: TokenStream) -> bool {
-    fn flatten(tokens: TokenStream, out: &mut Vec<TokenTree>) {
-        for t in tokens {
-            match t {
-                TokenTree::Group(g) => flatten(g.stream(), out),
-                t => out.push(t),
-            }
-        }
-    }
-    let mut flat = vec![];
-    flatten(tokens, &mut flat);
-    let ident = |i: usize| match flat.get(i) {
-        Some(TokenTree::Ident(id)) => Some(id.to_string()),
-        _ => None,
-    };
-    let punct = |i: usize, c: char| matches!(flat.get(i), Some(TokenTree::Punct(p)) if p.as_char() == c);
-    (0..flat.len()).any(|i| {
-        let Some(name) = ident(i) else {
-            return false;
-        };
-        // `'static` is a lifetime, not a static item.
-        if i > 0 && punct(i - 1, '\'') {
-            return false;
-        }
-        let module = || {
-            punct(i + 1, ':')
-                && punct(i + 2, ':')
-                && ident(i + 3).is_some_and(|m| IMPURE_MODULES.contains(&m.as_str()))
-        };
-        IMPURE_NAMES.contains(&name.as_str())
-            || name.starts_with("Atomic")
-            || (name == "std" || name == "core") && module()
-    })
-}
-
-/// Whether one of `node`'s closures, or its source expression, [`names_impure`]. An expression
-/// that does not print as tokens counts as impure.
+/// Whether one of `node`'s closures, or its source expression, is not known pure
+/// ([`super::purity`], an allowlist: A3 is checked only for closures it accepts). An expression
+/// that does not print as tokens is not known pure. hydrofrac's own taps are trusted.
 pub(crate) fn impure(node: &HydroNode) -> bool {
-    let mut texts: Vec<String> = closures(node).iter().map(|f| format!("{f:?}")).collect();
-    match node {
-        HydroNode::SingletonSource { value, .. } => texts.push(format!("{value:?}")),
+    let closures = closures(node)
+        .into_iter()
+        .map(|f| (format!("{f:?}"), true))
+        .filter(|(text, _)| !text.starts_with(crate::observe::TAP_CLOSURE_START));
+    let source = match node {
+        HydroNode::SingletonSource { value, .. } => Some(format!("{value:?}")),
         HydroNode::Source {
             source: HydroSource::Iter(expr),
             ..
-        } => texts.push(format!("{expr:?}")),
-        _ => {}
-    }
-    texts
-        .iter()
-        .any(|t| t.parse::<TokenStream>().map_or(true, names_impure))
+        } => Some(format!("{expr:?}")),
+        _ => None,
+    };
+    closures
+        .chain(source.map(|s| (s, false)))
+        .any(|(text, closure)| {
+            text.parse::<TokenStream>()
+                .map_or(true, |t| !super::purity::known_pure(t, closure))
+        })
 }
 
 /// Whether `node`'s records are a stream (or keyed stream), not a snapshot of a scalar.

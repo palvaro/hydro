@@ -1163,13 +1163,24 @@ fn impure_closures_are_fragile_choices() {
         .compiled();
     let sites = check.fragile_sites().expect("instrumented");
     assert!(sites.iter().any(|s| s.op == "impure_closure"), "{sites:?}");
-    let impure = |text: &str| crate::provenance::fragile::names_impure(text.parse().unwrap());
+    let impure =
+        |text: &str| !crate::provenance::purity::known_pure(text.parse().unwrap(), true);
     assert!(impure("|x| { static N: u32 = 0; x + N }"));
     assert!(impure("|x| x + COUNT.fetch_add(1, Ordering::Relaxed) as AtomicU32"));
     assert!(impure("|x| (x, std::time::SystemTime::now())"));
     assert!(impure("|x| x.borrow_mut().replace(RefCell::new(0))"));
+    // Not on a deny-list, but not known pure: state the expression creates before the closure,
+    // a helper that may hide a `static`, a call through a value.
+    assert!(impure("{ let (tx, rx) = std::sync::mpsc::channel(); move |x| { tx.send(x); x } }"));
+    assert!(impure("|x| helper(x)"));
+    assert!(impure("|x| (HELPERS[0])(x)"));
+    assert!(impure("|x| x.next_id()"));
+    assert!(impure("|x| unsafe { x }"));
     assert!(!impure("|x: &'static str| x.len()"));
     assert!(!impure("|(k, v)| (k, v + 1)"));
+    assert!(!impure("move |(k, v): (u32, Vec<u32>)| Some((k, v.iter().map(|x| x * 2).collect::<Vec<_>>()))"));
+    assert!(!impure("|acc: &mut u32, x| *acc += x"));
+    assert!(!impure("Some"));
 }
 
 /// The simulator's own crash injection and dynamic membership are refused: hydrofrac would

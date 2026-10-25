@@ -79,19 +79,18 @@ fn owned_counter() -> CrossCheck {
 #[cfg(stageleft_runtime)]
 #[test]
 fn review2a_a_closure_owning_its_state_escapes_the_impurity_guard() {
+    // Fixed: a closure is pure only if the allowlist (`provenance::purity`) knows it is, and a
+    // block that creates state before returning the closure is not a closure literal. The
+    // `map` is an `impure_closure` site, so `numbered`'s derivations through it are fragile, the
+    // program has a schedule choice, and the search finds the crash.
     let cross = owned_counter();
     eprintln!("=== owned counter\n{cross}");
-    eprintln!("disagreements: {:#?}", cross.disagreements);
     let label = cross.results.label("numbered");
-    eprintln!("numbered: certified = {}", matches!(label.verdict, Verdict::Certified { .. }));
     assert!(
-        matches!(label.verdict, Verdict::Certified { .. }),
-        "the search certifies `numbered`: {cross}"
+        label.verdict.counterexample().is_some(),
+        "the search breaks `numbered`: {cross}"
     );
-    assert!(
-        cross.disagreements.iter().any(|d| d.contains("numbered")),
-        "and the oracles break it: {cross}"
-    );
+    cross.assert_agrees();
 }
 
 /// The same owned counter, aimed at §13 (Claim B and `Vacuous`). Each member numbers its
@@ -147,22 +146,16 @@ fn owned_counter_alarm() -> CrossCheck {
 #[cfg(stageleft_runtime)]
 #[test]
 fn review2a_an_owned_counter_makes_a_false_vacuous_verdict() {
+    // Fixed: the counting closure is not known pure, so the program is neither fragile-free nor
+    // choice-free, §13 does not apply, and the empty-domain label is searched for Claim B.
     let cross = owned_counter_alarm();
     eprintln!("=== owned counter alarm\n{cross}");
-    eprintln!("disagreements: {:#?}", cross.disagreements);
     let label = cross.results.label("owned_counter_alarm");
-    eprintln!(
-        "alarm: vacuous = {}",
-        matches!(label.verdict, Verdict::Vacuous(_))
-    );
     assert!(
-        matches!(label.verdict, Verdict::Vacuous(_)),
-        "the search calls `alarm` vacuous without a search: {cross}"
+        label.verdict.counterexample().is_some(),
+        "the search breaks `alarm`: {cross}"
     );
-    assert!(
-        cross.disagreements.iter().any(|d| d.contains("owned_counter_alarm")),
-        "and the oracles break it: {cross}"
-    );
+    cross.assert_agrees();
 }
 
 /// A source broadcasts the same value `10` twice (the harness sends it twice) to three members
