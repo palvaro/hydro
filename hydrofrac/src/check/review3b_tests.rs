@@ -322,3 +322,79 @@ fn review3b_a_three_fault_break_without_the_recovery_copy_is_found() {
         std::collections::BTreeSet::from(["[[7], []]".to_string()])
     );
 }
+
+/// Finding 3: an input the harness sends only after an output arrives.
+///
+/// Process `q` gets input 7 and broadcasts it to two members over a lossy channel (`first`).
+/// Process `p` gets input 7 too and broadcasts it over `fail_stop` (`second`). The label is
+/// what the members got from either. The harness sends 7 to `q`, **waits until member 1 shows
+/// 7**, and only then sends 7 to `p` (a wait, not a branch: the sequence it sends is a prefix of
+/// one fixed sequence, as A8 allows: "a wait that never returns ends the sequence early").
+/// Written with `out.next(1).await` instead of `try_next`, the search still certifies and both
+/// oracles break the label by the harness's panic ("Stream ended"); `try_next` shows the
+/// members' disagreement itself.
+///
+/// Every derivation through `p` is robust, and only a crash of `p` kills it, so with no crash
+/// every set is pruned. But losing `7 → member 1` on `first` makes the wait never return, so
+/// `p` never gets its input: member 0 holds 7 and member 1 never does.
+#[cfg(stageleft_runtime)]
+#[test]
+fn review3b_an_input_sent_after_a_wait_is_not_in_every_run() {
+    let mut check = EcCheck::new().max_crashes(0);
+    let mut flow = FlowBuilder::new();
+    let q = flow.process::<()>();
+    let p = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send_q, in_q) = q.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let (send_p, in_p) = p.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let first = in_q
+        .broadcast_closed(&members, TCP.lossy_delayed_forever().name("first").bincode());
+    let second = in_p.broadcast_closed(&members, TCP.fail_stop().name("second").bincode());
+    let delivered = first
+        .weaken_ordering::<NoOrder>()
+        .merge_unordered(second.weaken_ordering::<NoOrder>())
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed (wrongly): `p`'s reliable copy covers every loss on `first` */
+        ));
+    let out = delivered
+        .clone()
+        .assume_ordering::<TotalOrder>(nondet!(/** the harness waits for one value */))
+        .sim_cluster_output();
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 2))
+        .compiled();
+    let cross = check.cross_check(
+        &sim,
+        async || {
+            send_q.send(7);
+            // A wait: if 7 never reaches member 1, the harness sends nothing more.
+            if out.try_next(1).await.is_some() {
+                send_p.send(7);
+            }
+        },
+        MAX_FAULTS,
+    );
+    eprintln!("=== input after a wait\n{}\n{cross}", cross.results);
+    let label = cross.results.label("delivered");
+    assert!(
+        matches!(label.verdict, Verdict::Certified { .. }),
+        "{:?}",
+        label.verdict
+    );
+    let brute = cross
+        .brute
+        .labels
+        .iter()
+        .find(|l| l.name.starts_with("delivered"))
+        .expect("delivered was enumerated");
+    // `{omit(7 → member 1 on first)}` breaks it: member 0 holds 7, member 1 never does.
+    assert_eq!(brute.min_crashes(), Some(0), "{cross}");
+    assert_eq!(brute.breaking_within(0).map(|s| s.len()), Some(1), "{cross}");
+    let about: Vec<&String> = cross
+        .disagreements
+        .iter()
+        .filter(|d| d.contains("delivered (review3b_tests.rs)"))
+        .collect();
+    assert_eq!(about.len(), 2, "{cross}");
+    assert!(about[1].starts_with("oracle 2:"), "{cross}");
+}
