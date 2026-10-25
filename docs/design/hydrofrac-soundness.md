@@ -51,9 +51,9 @@ have regression tests. They are recorded in §17.
 
   A *member view* is the union of what the member's tap emitted. It never shrinks.
 
-  Every run the search explores is checked for both. A certificate claims POST in every run within the bounds
-  (Claim A, §1). It claims no divergence in every such run only where §13 says (Claim B), and the report says which.
-  A label with an empty domain has no POST to check, so its only claim is Claim B (§11).
+  Every run the search explores is checked for both. A certificate claims both in every run within the bounds: POST
+  (Claim A, §1) and no divergence (Claim B, §13). A label with an empty domain has no POST to check, so its only claim
+  is Claim B (§11).
 - **Bounds** (§10). A fault set is *within the bounds* if:
   - it holds at most one crash per node;
   - it crashes at most `max_crashes` nodes, if the check sets that cap;
@@ -635,7 +635,8 @@ bounds for the oracle).
     The label is `Vacuous`, with no search (`hf/check/races_engine.rs`, `check`).
   - **Otherwise** the label is searched for Claim B alone. With no pair, the sweep proposes every set within the
     bounds over the revealed faults, and runs each one in every schedule, without stopping early (`hf/races/sweep.rs`,
-    `next`; `Scope::Any`). The result is a counterexample, a certificate with Claim B certified, or `Budget`.
+    `next`; `Scope::Any`). The result is a counterexample, a certificate (which covers Claim B), or `Budget`. A label
+    with a domain gets the same sweep once Claim A is certified, unless §13 proves Claim B.
   - Brute force checks such labels like any other. A `Vacuous` verdict that some set breaks is a disagreement.
   - **Tested:** `a_fact_only_faults_create_is_checked` (§17, fix 12).
 
@@ -692,19 +693,35 @@ above.
 
 ## 13. Claims A and B
 
-- **Claim A** (§1): POST for every fault set within the bounds and every schedule. Certified by `Certified`.
-- **Claim B**: no divergence on facts outside the domain, for every such fault set and schedule. Certified (`claim_b`,
-  `hf/check/races_engine.rs:519`) when the label is certified, and one of:
-  - **the program is fragile-free.** Every fact under `H` has a robust derivation, which survives no-faults, so by
-    Lemma R it is in the domain. No fact is outside the domain. **Proved**;
-  - **the program is choice-free.** Then it is monotone (A13): a non-monotone operator needs a bounded input, only a
-    tick provides one, and a tick's outside input arrives through a batch, which is a choice. In a monotone program
-    faults only remove facts. Every fact under `H` is also a failure-free fact (its derivation's dependencies exist
-    without faults, and every step is monotone), so it is in the domain. No fact is outside the domain. **Proved**,
-    given A13;
-  - **no early stop, and every set over `U` within the bounds was tried** (`Sweep::covers_everything`, a program with
-    no admissibility rows). Then every `H` maps to a tried set explored in full, and its divergence was checked.
-    **Proved.**
+- **Claim A** (§1): POST for every fault set within the bounds and every schedule.
+- **Claim B**: no divergence on facts outside the domain, for every such fault set and schedule.
+
+`Certified` claims both (`claim_b` in the report is true of every certificate). The sweep first certifies Claim A
+(§1). Then Claim B holds without more runs in two cases:
+- **the program is fragile-free.** Every fact under `H` has a robust derivation, which survives no-faults, so by
+  Lemma R it is in the domain. No fact is outside the domain. **Proved**;
+- **the program is choice-free.** Then it is monotone (A13): a non-monotone operator needs a bounded input, only a
+  tick provides one, and a tick's outside input arrives through a batch, which is a choice. In a monotone program
+  faults only remove facts. Every fact under `H` is also a failure-free fact (its derivation's dependencies exist
+  without faults, and every step is monotone), so it is in the domain. No fact is outside the domain. **Proved**,
+  given A13 and A3 (an impure closure is a choice, §3, so it cannot make a choice-free program compute a new fact).
+
+Otherwise the search checks Claim B (`hf/check/races_engine.rs`, `search_races`; `Sweep::check_claim_b`): the sweep
+starts over from zero crashes and proposes every set within the bounds over the candidates (`Scope::Any`, no pair
+prunes anything), running each in every schedule without stopping early, except sets already run so. A set that was
+only explored until it was pruned is run again: pruning (Lemma R) says the domain's pairs survive it, nothing about
+facts outside the domain. When this sweep concludes, the theorem of §1 applies with no pair pruning anything: every
+`H` within the bounds maps to a set that was run in full (or whose unseen crashes never fire), so every schedule of
+`H` is a schedule of a set whose every run was checked for both POST and divergence. **Proved.** The result is a
+counterexample, a certificate, or `Budget` (the hypothesis budget, not a certificate).
+
+The same holds of panics (§18, "Panics"): a run that panics breaks every label, and the full sweep runs every set.
+
+**Regression:** `review2b_fault_created_divergence_beside_a_robust_fact` (review 2, reviewer B). One label holds a
+constant every member has (robust, the whole domain) and an alarm that only a crash raises at some members. A crash
+of the source kills no derivation of the constant, so Claim A pruned it, and the label was `Certified` with Claim B
+"not certified", which `assert_holds` accepted, while both oracles break it. Now the Claim B sweep runs that crash and
+finds the divergence; both oracles agree.
 
 ## 14. Exploration policies
 
@@ -905,8 +922,9 @@ and fixed structurally:
   program's one-schedule sets are exact (§14).
 - **Covering values / aggregates.** `covering_quorum` (ABD, synod) is not trusted, so its labels pay brute-force cost
   and are argued only by exploration.
-- **Claim B for choice-free programs** (§13) rests on A13 (monotonicity from Hydro's types), not on the search.
-  Outside the three certified cases, Claim B is checked only in explored runs, and the report says so.
+- **Claim B for fragile-free and choice-free programs** (§13) rests on Lemma R and A13 (monotonicity from Hydro's
+  types), not on runs. In every other program a certificate's Claim B costs a full sweep: every set within the bounds,
+  in every schedule (§13), which the hypothesis budget may stop (`Budget`, not a certificate).
 - **Trusted code.** `quorum.rs:121-185` (§7), the fragile table's DFIR semantics (§3), and the fan-out lowering (§6.1)
   are trusted by reading, and checked only by the tests cited.
 - **Impurity behind a listed name** (A3). The purity allowlist trusts names, not their resolution: a user's method

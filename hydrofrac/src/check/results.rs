@@ -157,9 +157,10 @@ pub struct RaceNotes {
     pub early_stops: usize,
     /// Fault sets run over one schedule only (every run of them has the same facts).
     pub single_schedule_sets: usize,
-    /// Whether the certificate covers Claim B (no new disagreement outside the domain) too:
-    /// the label is certified, and the program is fragile-free or choice-free, or every fault
-    /// set over the revealed faults was run in every schedule. Always `false` for other
+    /// Whether the verdict certifies Claim B (no new disagreement outside the domain): true of
+    /// every certificate, since the search checks Claim B before it certifies (by §13 of
+    /// docs/design/hydrofrac-soundness.md in a fragile-free or choice-free program, else by
+    /// running every fault set within the bounds in every schedule). Always `false` for other
     /// verdicts.
     pub claim_b: bool,
 }

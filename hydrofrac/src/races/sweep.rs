@@ -49,16 +49,17 @@ pub enum Next<M> {
     /// Run this set. With `in_full`, run every schedule, without stopping early, and report it
     /// with [`Sweep::explored_in_full`]: the proposal held a [`Candidate::Unseen`] crash, which
     /// stands for every crash after a message the set's runs do not send, and those are all the
-    /// set itself once its runs have shown every message they send; or the label has no pair, so
-    /// every set is run in full for Claim B.
+    /// set itself once its runs have shown every message they send; or the sweep checks Claim B
+    /// ([`Sweep::check_claim_b`], or the label has no pair), so every set is run in full.
     Try {
         /// The fault set.
         set: FaultSet<M>,
         /// Whether to run every schedule.
         in_full: bool,
     },
-    /// No fault set within the bounds is admissible: the label holds (Claim A). With no pair,
-    /// every set within the bounds was tried, in full (Claim B).
+    /// No fault set within the bounds is admissible: the label holds (Claim A). When the sweep
+    /// checks Claim B ([`Sweep::checks_claim_b`]), every set within the bounds was tried, in
+    /// full (Claim B).
     Certified(Tolerance),
     /// The hypothesis budget is spent: not a certificate.
     Budget,
@@ -78,6 +79,8 @@ pub struct Sweep<M, F> {
     known: BTreeSet<Fault<M>>,
     latest: BTreeMap<Node, BTreeMap<M, u64>>,
     sends_complete: bool,
+    /// Every set within the bounds is to be run in full, for Claim B ([`Self::check_claim_b`]).
+    claim_b: bool,
     order: Rc<dyn SendOrder<M>>,
     runs: usize,
     /// The hypothesis budget: how many sets may be run, counting the probe.
@@ -98,6 +101,7 @@ impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
             known: BTreeSet::new(),
             latest: BTreeMap::new(),
             sends_complete: false,
+            claim_b: false,
             order: Rc::new(()),
             runs: 1,
             budget: HYPOTHESIS_BUDGET,
@@ -237,18 +241,24 @@ impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
         image(set, &self.known, !self.sends_complete)
     }
 
-    /// Whether every set over the candidates within the full bounds was tried (for Claim B, §2).
-    pub fn covers_everything<P: PairKey<Fact = F>>(&self, pairs: &Pairs<P, M>) -> bool {
-        propose(
-            &self.universe(),
-            pairs,
-            &self.dead,
-            &self.tried,
-            &self.bounds,
-            Scope::Any,
-            &*self.order,
-        )
-        .is_none()
+    /// Starts the sweep over again for Claim B (no divergence outside the domain): from zero
+    /// crashes, every set within the bounds over the candidates is proposed and run in full,
+    /// unless it already was ([`Self::explored_in_full`]). A set that was only explored until it
+    /// was pruned is run again: pruning says the domain's pairs survive it, nothing about the
+    /// facts outside the domain. Once this concludes, every fault set within the bounds maps to
+    /// a set run in full (the theorem in the module docs, with no pair pruning anything), so
+    /// both claims hold of every run.
+    pub fn check_claim_b(&mut self) {
+        self.claim_b = true;
+        self.bound = 0;
+        self.tolerated = None;
+        self.tried = self.in_full.iter().map(proposal_of).collect();
+    }
+
+    /// Whether the sweep is checking Claim B ([`Self::check_claim_b`]), or the label has no
+    /// pair: then every set it proposes is run in full.
+    pub fn checks_claim_b<P: PairKey<Fact = F>>(&self, pairs: &Pairs<P, M>) -> bool {
+        self.claim_b || pairs.is_empty()
     }
 
     /// The next step given every clause learned so far. A proposed set counts as tried.
@@ -281,8 +291,9 @@ impl<M: Ord + Clone + 'static, F: Ord + Clone> Sweep<M, F> {
             }
             let bounds = self.bounds.capped_at(self.bound);
             // No pair (an empty domain): Claim A holds of every set, so the only claim left is
-            // Claim B, which needs every set within the bounds run in full.
-            let everything = pairs.is_empty();
+            // Claim B, which needs every set within the bounds run in full; and so does Claim B
+            // once Claim A is certified (`check_claim_b`).
+            let everything = self.checks_claim_b(pairs);
             let scopes: &[Scope] = if everything {
                 &[Scope::Any]
             } else {
