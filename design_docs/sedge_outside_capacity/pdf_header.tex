@@ -1,0 +1,11 @@
+% Header includes for render_pdf_pandoc.sh
+\usepackage{fvextra}
+\fvset{breaklines=true,breakanywhere=true,fontsize=\footnotesize}
+\DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,breakanywhere,commandchars=\\\{\},fontsize=\footnotesize}
+\RecustomVerbatimEnvironment{verbatim}{Verbatim}{breaklines,breakanywhere,fontsize=\footnotesize}
+\usepackage{etoolbox}
+\AtBeginEnvironment{longtable}{\footnotesize}
+\setkeys{Gin}{width=\linewidth,height=0.62\textheight,keepaspectratio}
+\usepackage{xurl}
+\setlength{\emergencystretch}{3em}
+\sloppy
