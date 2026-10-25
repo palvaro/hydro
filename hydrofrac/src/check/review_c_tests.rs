@@ -187,3 +187,48 @@ fn review_c_omitting_one_of_two_identical_messages_is_not_modelled() {
         "dropping one copy did not break the label"
     );
 }
+
+/// **A label computed from local inputs passes `assert_holds` while members disagree with no
+/// fault at all.** Each member labels `[its own id]` `EventualConsistency`. The plan classifies
+/// the label `NotChecked(LocalInputsOnly)` ("no fault can withhold its inputs"), and
+/// [`super::Results::holds`] counts `NotChecked` as holding, so `assert_holds` passes. Yet the
+/// three members end with `{0}`, `{1}` and `{2}` in the failure-free run.
+#[cfg(stageleft_runtime)]
+#[test]
+fn review_c_local_only_label_that_disagrees_passes_assert_holds() {
+    use hydro_lang::location::cluster::CLUSTER_SELF_ID;
+
+    let mut check = EcCheck::new();
+    let mut flow = FlowBuilder::new();
+    let members = flow.cluster::<()>();
+    let mine = members
+        .source_iter(q!(vec![CLUSTER_SELF_ID.get_raw_id()]))
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed (wrongly): every member has the same ids */
+        ));
+    let out = mine.sim_cluster_output();
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 3))
+        .compiled();
+    let results = check.run(&sim, async || {});
+    eprintln!("=== hydrofrac\n{results}");
+
+    let views = AssertUnwindSafe(RefCell::new(BTreeSet::new()));
+    sim.exhaustive(async || {
+        quiesce().await;
+        let mut held = vec![];
+        for m in 0..3u32 {
+            let got: Vec<u32> = out.collect(m).await;
+            held.push(got);
+        }
+        views.borrow_mut().insert(format!("{held:?}"));
+    });
+    eprintln!("hand run, no faults: member views {:?}", views.borrow());
+    assert!(results.holds(), "hydrofrac flagged it: {results}");
+    results.assert_holds();
+    assert!(
+        views.borrow().iter().all(|v| v == "[[0], [1], [2]]"),
+        "{:?}",
+        views.borrow()
+    );
+}
