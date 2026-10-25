@@ -212,6 +212,7 @@ fn pair_rows<P: PairKey, M: Ord + Clone + Copies>(
 ///
 /// The no-good of a tried set that no pair admits is left out, exactly: the other rows already
 /// exclude it.
+#[expect(clippy::too_many_arguments, reason = "internal")]
 pub fn propose<P: PairKey, M: Ord + Clone + Copies>(
     universe: &[Candidate<M>],
     pairs: &Pairs<P, M>,

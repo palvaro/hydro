@@ -409,7 +409,7 @@ fn review_c_crash_between_two_identical_messages_is_not_modelled() {
         .clone();
     let hook = Rc::new(CrashAfterNth {
         channel: updates.id,
-        sender: updates.from.clone(),
+        sender: updates.from,
         to: 1,
         payload: bincode::serialize(&7u32).unwrap(),
         nth: 2,
