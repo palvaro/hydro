@@ -32,6 +32,16 @@ use hydro_lang::location::dynamic::LocationId;
 /// copies it, so `CompiledSim::channels` tells marked channels apart. Nothing else sets `op.id`.
 pub const FANOUT_MARK: usize = usize::MAX - 0xFA0;
 
+/// The `op.id` of a marked `Network` whose payloads are, moreover, *sequenced*: the probe side
+/// of its join is exactly a harness input of the sending process (see [`is_sequenced`]). Such
+/// a channel is a closed broadcast too, so [`FANOUT_MARK`]'s order holds on it as well.
+pub const SEQUENCED_MARK: usize = usize::MAX - 0xFA1;
+
+/// Whether `op_id` (a channel's `op.id`) marks a closed broadcast, sequenced or not.
+pub fn is_fan_out(op_id: Option<usize>) -> bool {
+    matches!(op_id, Some(FANOUT_MARK | SEQUENCED_MARK))
+}
+
 /// The text of a closure or expression, without whitespace.
 fn squash(s: &str) -> String {
     s.chars().filter(|c| !c.is_whitespace()).collect()
