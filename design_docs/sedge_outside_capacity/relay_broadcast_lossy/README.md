@@ -194,7 +194,7 @@ Seed 35 is INVALID because the second half of its tail still holds about 40 s of
 | f | 3λ/μ (μ = 654) | 60 s tail | 180 s tail |
 |---|---|---|---|
 | 2 | 1.50 | 2 COLLAPSED, 3 DRAINING; all still storming at 60 s (37–43 k re-sends/s, writes 2.0–2.2×) | 5 of 5 drain to baseline by 60–120 s (4 RECOVERED, 1 DRAINING) |
-| 2.22 | 1.35 | 5 DRAINING; still storming at 60 s (4–20 k re-sends/s, writes 1.2–1.7×) | 5 of 5 drain by about 60 s (4 labelled DRAINING on flat tails, 1 RECOVERED) |
+| 2.22 | 1.35 | 5 DRAINING; every storm ends by 37–54 s. Over [45, 65) the five average 2–14.7 k re-sends/s and 0.92–1.59× writes, because that window straddles the end; over [65, 75) 8–21 re-sends/s and 0.91–1.04× | 5 of 5 drain by about 60 s (4 labelled DRAINING on flat tails, 1 RECOVERED) |
 | 2.5 | 1.20 | 4 RECOVERED, 1 DRAINING on a flat trace | — |
 | 2.73 | 1.10 | recovered (2 labelled DRAINING on flat traces) | — |
 | 3 | 1.00 | recovered (1 labelled DRAINING on a flat trace) | — |
@@ -203,5 +203,5 @@ Seed 35 is INVALID because the second half of its tail still holds about 40 s of
 All 40 controls are flat.
 
 - **With a retry limit of 3, the storm is a transient that ends.** It never got stuck in a 180 s tail on this slot.
-- In a 60 s tail, storms are still present at 3λ/μ ≥ 1.35 and gone at ≤ 1.20. With μ uncertain by up to 19 %
+- At the end of a 60 s tail, storms are still present at 3λ/μ = 1.5 and gone at ≤ 1.35; they last 18–39 s at 1.35 and 12–17 s at 1.20 (`../demo_relay_broadcast/plot_outcomes.py`). With μ uncertain by up to 19 %
   (654–778), that flip lies at **3λ/μ ≈ 1.0–1.35**.

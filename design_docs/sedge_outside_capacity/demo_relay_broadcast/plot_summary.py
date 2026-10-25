@@ -1,10 +1,10 @@
 """Outcome against f for the relay_broadcast lossy-buffer runs, one row per policy.
 
-usage: python3 plot_summary.py RESULTS_TSV TRACES_DIR OUT_PNG [GROUP_PREFIX ...]
+usage: python3 plot_summary.py RUNS_DIR OUT_PNG [GROUP_PREFIX ...]
 
-RESULTS_TSV is `relay_broadcast_amplification/results.tsv` (its first column, `run`, names the
-run group, which is also the trace directory under TRACES_DIR). Only groups whose name starts
-with one of GROUP_PREFIX (default `p_`) are drawn. A group name is `<prefix><policy>_<burst|ctl>
+RUNS_DIR is `relay_broadcast_lossy/runs` (one directory per run group, with Sedge's results.tsv
+and one trace per trial, `*.factor<F>.trial<N>.tsv`). Only groups whose name starts with one of
+GROUP_PREFIX (default `p_`) are drawn. A group name is `<prefix><policy>_<burst|ctl>
 _f<F>`, with policy `pe`, `pe3` or `rr`.
 
 Top: Sedge's outcome per (policy, f), burst run and no-burst control, one marker per trial.
@@ -65,16 +65,19 @@ def window(path, cols, a, b):
 
 
 def main():
-    results, traces, out = sys.argv[1:4]
-    prefixes = sys.argv[4:] or ["p_"]
+    runs, out = sys.argv[1:3]
+    prefixes = sys.argv[3:] or ["p_"]
     pts = []  # (pol, kind, f, trial, outcome, att_ratio, wire_ratio)
-    with open(results) as fh:
-        for r in csv.DictReader(fh, delimiter="\t"):
-            m = NAME.match(r["run"])
-            if not m or not any(r["run"].startswith(p) for p in prefixes):
-                continue
+    for g in sorted(os.listdir(runs)):
+        res = os.path.join(runs, g, "results.tsv")
+        m = NAME.match(g)
+        if not m or not os.path.isfile(res) or not any(g.startswith(p) for p in prefixes):
+            continue
+        for r in csv.DictReader(open(res), delimiter="\t"):
             f = float(r["factor"])
-            tr = os.path.join(traces, r["run"], f"factor{r['factor']}.trial{r['trial']}.tsv")
+            suffix = f".factor{r['factor']}.trial{r['trial']}.tsv"
+            cand = [x for x in os.listdir(os.path.join(runs, g)) if x.endswith(suffix)]
+            tr = os.path.join(runs, g, cand[0]) if cand else ""
             att = wire = math.nan
             if m["kind"] == "burst" and os.path.exists(tr):
                 fams = ["sendq_attempted_kb_", "wchar_kb_"]

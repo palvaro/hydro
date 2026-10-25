@@ -1,9 +1,9 @@
 """Outcome fractions for the relay_broadcast round-3 runs (isolated slots), from the traces.
 
-usage: python3 plot_outcomes.py RESULTS_TSV TRACES_DIR OUT_PNG
+usage: python3 plot_outcomes.py RUNS_DIR OUT_PNG
 
-Reads the `r3_S*` rows of RESULTS_TSV (relay_broadcast_amplification/results.tsv; the first
-column, `run`, is the run group and the trace directory under TRACES_DIR). Group names:
+Reads every `r3_S*` run group under RUNS_DIR (relay_broadcast_lossy/runs: one directory per
+group, with Sedge's results.tsv and one trace per trial, `*.factor<F>.trial<N>.tsv`). Groups:
   r3_S2_pe_f4_m<M>_d<D>[_t180]_s5      per_entry, f = 4, trigger M·μ for D s (60 s tail, or 180)
   r3_S2_pe_f4_ctl_d<D>[_t180]_s5       its no-burst control
   r3_S1_pe3_f<F>[_t180]_s5             per_entry3, trigger 2μ for 5 s, at f = F
@@ -82,17 +82,29 @@ def trial(path, trig, tail, before=10.0):
                 stuck=bool(hot) and storm_end >= t[-1] + 1)
 
 
+def rows(runs):
+    """(group, results row, trace path) for every trial under RUNS_DIR."""
+    for g in sorted(os.listdir(runs)):
+        d = os.path.join(runs, g)
+        res = os.path.join(d, "results.tsv")
+        if not os.path.isfile(res):
+            continue
+        for r in csv.DictReader(open(res), delimiter="\t"):
+            suffix = f".factor{r['factor']}.trial{r['trial']}.tsv"
+            tr = [x for x in os.listdir(d) if x.endswith(suffix)]
+            if tr:
+                yield g, r, os.path.join(d, tr[0])
+
+
 def main():
-    results, traces, out = sys.argv[1:4]
+    runs, out = sys.argv[1:3]
     pe, pe3 = [], []
-    for r in csv.DictReader(open(results), delimiter="\t"):
-        g = r["run"]
+    for g, r, path in rows(runs):
         m, m3 = PE.match(g), PE3.match(g)
         if not (m or m3):
             continue
         tail = 180 if (m or m3)["t180"] else 60
         trig = float(m["d"]) if m else 5.0
-        path = os.path.join(traces, g, f"factor{r['factor']}.trial{r['trial']}.tsv")
         o = trial(path, trig, tail)
         o.update(seed=r["seed"], sedge=r["outcome"], tail=tail, mu=float(r["mu"]))
         if m:
