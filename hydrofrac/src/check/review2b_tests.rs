@@ -224,3 +224,95 @@ fn review2b_a_sampled_miss_is_not_accepted_by_assert_holds() {
     }
     eprintln!("sampled misses (Exhausted) in 20 runs: {misses}");
 }
+
+/// A fragile-free program with schedule choices (batches that snapshot nothing) and duplicate
+/// messages. `source` broadcasts 1 over a lossy channel. Each member batches what it got and
+/// forwards it to `relay` over `fail_stop`. `relay` re-broadcasts every copy it gets (up to
+/// three identical fan-outs, so identical `MessageId`s). Label `facts`: direct ∪ relayed.
+/// This exercises the fragile-free shortcuts: one schedule for exact crash points, dead facts,
+/// and `sends_complete`.
+#[cfg(stageleft_runtime)]
+fn relay_with_batches(crashes: usize) -> CrossCheck {
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let relay = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let direct = input
+        .broadcast_closed(&members, TCP.lossy_delayed_forever().name("direct").bincode())
+        .weaken_consistency();
+    let tick = members.tick();
+    let up = direct
+        .clone()
+        .batch(&tick, nondet!(/** which tick a delivery lands in */))
+        .all_ticks()
+        .send(&relay, TCP.fail_stop().name("up").bincode())
+        .values();
+    let relayed = up
+        .broadcast_closed(&members, TCP.fail_stop().name("down").bincode())
+        .weaken_consistency();
+    let facts = direct
+        .merge_unordered(relayed)
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed: the relay repairs lost direct deliveries */
+        ));
+    let _out = facts.sim_cluster_output();
+    let mut check = EcCheck::new().max_crashes(crashes);
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 3))
+        .compiled();
+    check.cross_check(&sim, async || send.send(1), MAX_FAULTS)
+}
+
+#[cfg(stageleft_runtime)]
+#[test]
+fn review2b_relay_with_batches_and_duplicates() {
+    agree("relay with batches, one crash", &relay_with_batches(1));
+    agree("relay with batches, two crashes", &relay_with_batches(2));
+}
+
+/// Two sources broadcast the same 1 over `fail_stop`, and every member echoes every copy it
+/// hears to every member: each member sends one payload, twice, so its crash points are exact
+/// (one fan-out chain). Label `known`: heard ∪ echoed.
+#[cfg(stageleft_runtime)]
+#[test]
+fn review2b_double_echo_of_one_payload() {
+    let mut flow = FlowBuilder::new();
+    let first = flow.process::<()>();
+    let second = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send_a, in_a) = first.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let (send_b, in_b) = second.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let heard = in_a
+        .broadcast_closed(&members, TCP.fail_stop().name("a").bincode())
+        .weaken_consistency()
+        .weaken_ordering::<NoOrder>()
+        .merge_unordered(
+            in_b.broadcast_closed(&members, TCP.fail_stop().name("b").bincode())
+                .weaken_consistency(),
+        );
+    let echoed = heard
+        .clone()
+        .broadcast_closed(&members, TCP.fail_stop().name("echo").bincode())
+        .values()
+        .weaken_consistency();
+    let known = heard
+        .merge_unordered(echoed)
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed: an echo spreads what anyone heard */
+        ));
+    let _out = known.sim_cluster_output();
+    let mut check = EcCheck::new().max_crashes(2);
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, 3))
+        .compiled();
+    let cross = check.cross_check(
+        &sim,
+        async || {
+            send_a.send(1);
+            send_b.send(1);
+        },
+        MAX_FAULTS,
+    );
+    agree("double echo, two crashes", &cross);
+}
