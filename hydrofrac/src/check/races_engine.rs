@@ -18,7 +18,6 @@ use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
 use std::time::Instant;
 
-
 use super::*;
 use crate::check::RaceNotes;
 use crate::fault::{Fate, NodeNames};
@@ -284,8 +283,6 @@ struct Search<'t> {
     notes: RaceNotes,
     /// A multi-schedule exploration ran on a sample to its end: no certificate.
     sampled: bool,
-    /// The proved send order; every run is checked against it.
-    order: Rc<races::FanOutOrder>,
 }
 
 impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
@@ -445,7 +442,7 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
             }
         }
 
-        let order = Rc::new(order);
+        self.order = Rc::new(order);
         for mut target in targets {
             target.domain = domains.remove(&target.label).unwrap_or_default();
             let probe_stats = Stats {
@@ -471,7 +468,6 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
                     (probe_sampled, probe_in_full),
                     shape,
                     &mut world,
-                    order.clone(),
                 )
             };
             verdicts[target.label] = Some(result);
@@ -490,7 +486,6 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
         (probe_sampled, probe_in_full): (bool, bool),
         shape: Shape,
         world: &mut Vec<Revealed>,
-        order: Rc<races::FanOutOrder>,
     ) -> (Verdict, Stats) {
         let start = Instant::now();
         let mut search = Search {
@@ -499,11 +494,10 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
             stats: probe_stats,
             notes: probe_stats.races.unwrap_or_default(),
             sampled: probe_sampled,
-            order: order.clone(),
         };
         search.pairs.learn(probe_clauses);
         let mut sweep: races::Sweep<MessageId, Fact> =
-            races::Sweep::new(self.bounds(target)).with_order(order);
+            races::Sweep::new(self.bounds(target)).with_order(self.order.clone());
         for revealed in world.iter() {
             revealed.tell(&mut sweep);
         }
@@ -579,7 +573,7 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
             .iter()
             .map(|m| names.name(&NodeId::new(&target.cluster, Some(*m))))
             .collect();
-        let order = search.order.clone();
+        let order = self.order.clone();
         let pairs = &mut search.pairs;
         let mut failure = None;
         let mut pruned = false;

@@ -76,7 +76,7 @@ cross-check`, `hydro_std --lib hydrofrac`, `hydro_test --lib cluster::ec_`), fro
 
 - **Group 1 is resolved.** `reliable_broadcast_closed` `new_messages`: 2 payloads 134 → 24 sets, 3 payloads 281 → 49
   (lite: 25, 46). The payloads come from one harness input, so the order between their broadcasts is now proved.
-  Also: plain broadcast with 3 payloads 9,920 → 2 schedules, uniform broadcast `deliveries`-style labels 282 → 78 and 80 sets.
+  Also: plain broadcast with 3 payloads 9,920 → 2 schedules, the uniform broadcast demo's two sampled labels 282 → 78 and 80 sets.
 - **Group 6 is mixed.** Proposing the earliest-sent of equally strong crash points first helps where the break is an
   early crash, and costs where it is a late one.
   - Cheaper: ABD `queries` 5 → 3 (both ABD tests), the G-Set gossip demo's first label 50 → 12 (its two runs
