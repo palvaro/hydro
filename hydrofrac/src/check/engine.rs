@@ -421,19 +421,48 @@ impl<'c, B: AsyncFnMut(), R: AsyncFnMut()> Engine<'c, B, R> {
                     Some(_) => decode_output(bytes).to_string(),
                     None => crate::lamport::short_hex(bytes),
                 });
-            let trace = crate::lamport::trace_with(
-                &cex.record.log,
-                self.tables.names(),
-                &cex.faults,
-                &lamport_labels,
-            );
             let name = label_name(&labels.plans[index]);
             let line = verdict_line(&Verdict::Counterexample(cex.clone()), &names);
             let title = format!("{name}: {line}");
             let dir = crate::lamport::claim(crate::lamport::default_dir(&test, &name));
-            cex.diagram = crate::lamport::write(&dir, "counterexample", &trace, &title)
+            let log = &cex.record.log;
+            let draw = |log: &crate::fault::EventLog, file: &str, title: &str| {
+                let trace = crate::lamport::trace_with(
+                    log,
+                    self.tables.names(),
+                    &cex.faults,
+                    &lamport_labels,
+                );
+                crate::lamport::write(&dir, file, &trace, title)
+            };
+            // The broken facts: what the focused diagram shows the lineage of. A panic names
+            // none, and is drawn whole.
+            let broken: BTreeSet<&[u8]> = cex
+                .missing
+                .iter()
+                .map(|(_, f)| f)
+                .chain(&cex.divergent)
+                .map(|f| &f.bytes[..])
+                .collect();
+            let lineage = Lineage::new(log, &self.tables);
+            let (focused, caption) =
+                crate::lamport::focus(log, &lineage, &cex.faults, |e| match e {
+                    Event::Sent { msg, .. } => broken.contains(&msg.bytes[..]),
+                    Event::Output { port, bytes, .. } => {
+                        labels.label_of_port(*port) == Some(index)
+                            && broken.contains(&decode_output(bytes).bytes[..])
+                    }
+                    _ => false,
+                });
+            let _ = draw(log, "counterexample-full", &title);
+            let title = match caption {
+                Some(caption) => format!("{title}\n{caption}"),
+                None => title,
+            };
+            let diagram = draw(&focused, "counterexample", &title)
                 .ok()
                 .map(|w| w.path().to_path_buf());
+            cex.diagram = diagram;
         }
     }
 }

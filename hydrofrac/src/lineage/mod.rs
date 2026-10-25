@@ -102,6 +102,7 @@ pub struct Observation<'a> {
 
 /// A send of the log, with what the closure needs.
 struct SendRecord {
+    id: DeliveryId,
     from: NodeId,
     fate: Fate,
     prov: RecordProv,
@@ -146,6 +147,8 @@ pub struct Lineage<'a> {
 struct Closure {
     derivation: Rc<Derivation<MessageId>>,
     sites: Rc<BTreeSet<usize>>,
+    /// Every delivery reached, killable or not (indices into [`Lineage::sends`]).
+    reached: Rc<BTreeSet<usize>>,
 }
 
 /// The site [`Lineage::fragile_sites`] reports for a derivation that reached an opaque record:
@@ -217,6 +220,7 @@ impl<'a> Lineage<'a> {
                     });
                     by_id.insert(*id, sends.len());
                     sends.push(SendRecord {
+                        id: *id,
                         from: msg.from.clone(),
                         fate: *fate,
                         prov: decode_meta(meta.as_deref()),
@@ -314,6 +318,19 @@ impl<'a> Lineage<'a> {
         Some(self.closure(Record::Send(s)).derivation)
     }
 
+    /// Every delivery the record at event index `event` (an output or a send) was computed
+    /// from, through the closure, including those no fault can kill: what a diagram of it has
+    /// to show. Empty for any other event.
+    pub fn support(&self, event: usize) -> BTreeSet<DeliveryId> {
+        let record = match self.log.events().get(event) {
+            Some(Event::Output { .. }) => Record::Output(event),
+            Some(Event::Sent { id, .. }) => Record::Send(self.by_id[id]),
+            _ => return BTreeSet::new(),
+        };
+        let reached = self.closure(record).reached;
+        reached.iter().map(|&s| self.sends[s].id).collect()
+    }
+
     /// How many distinct records (sends and outputs) the derivations computed so far reached
     /// that fell back to the execution rule.
     pub fn opaque_fallbacks(&self) -> usize {
@@ -384,6 +401,7 @@ impl<'a> Lineage<'a> {
         let closure = Closure {
             derivation: Rc::new(derivation),
             sites: Rc::new(sites),
+            reached: Rc::new(reached),
         };
         self.memo.borrow_mut().insert(root, closure.clone());
         closure

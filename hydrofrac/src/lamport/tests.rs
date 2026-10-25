@@ -412,3 +412,48 @@ fn directories() {
 fn escaping() {
     assert_eq!(escape("a\"b\\c\nd"), "a\\\"b\\\\c\\nd");
 }
+
+#[test]
+fn the_focus_keeps_the_lineage_and_the_faults_and_drops_the_rest() {
+    let mut log = Log::default();
+    log.exec("B");
+    let (dep, _) = log.send(0, "B", "A", "dep", Fate::Delivered);
+    log.exec("A").recv(dep, 0, "A");
+    // Opaque, so it depends on everything A received before it: `dep`.
+    log.round_trip(0, "A", "B", "fact");
+    let (_, lost) = log.send(0, "A", "B", "lost", Fate::Omitted);
+    log.output("B", "fact");
+    // Received after the output: in nothing's lineage.
+    log.exec("C").round_trip(0, "C", "B", "noise");
+    let (full, faults) = (log.log(), [Fault::Omit(lost)].into_iter().collect());
+    let lineage = crate::lineage::derive(&full, &crate::lineage::Tables::from_parts(names(), [0]));
+    let is_fact = |e: &Event| match e {
+        Event::Sent { msg, .. } => &*msg.bytes == b"fact",
+        Event::Output { bytes, .. } => bytes == b"fact",
+        _ => false,
+    };
+
+    let (focused, caption) = focus(&full, &lineage, &faults, is_fact);
+    assert_eq!(caption.as_deref(), Some("1 unrelated message not shown"));
+    let trace = trace_with(&focused, &names(), &faults, &labels());
+    let shown: Vec<&str> = trace.messages.iter().map(|m| m.display.as_str()).collect();
+    assert_eq!(shown, ["dep", "fact", "lost"]);
+    assert!(
+        trace
+            .messages
+            .iter()
+            .all(|m| m.fate != Fate::Delivered || m.recv_event.is_some())
+    );
+    // C sent only the noise: its lane is gone.
+    assert_eq!(trace.node("C"), None);
+    assert!(
+        trace
+            .events
+            .iter()
+            .any(|e| matches!(e.kind, TraceEventKind::Output { .. }))
+    );
+
+    // Nothing to focus on: the whole run.
+    let (same, caption) = focus(&full, &lineage, &faults, |_| false);
+    assert_eq!((same, caption), (full, None));
+}

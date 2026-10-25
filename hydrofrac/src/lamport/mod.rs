@@ -8,8 +8,13 @@
 //! to a crash in a gray one, crashes are `☠ crashed` marks and the heal a dashed rule across the
 //! lanes. Labels longer than 40 characters are cut, with their full text in a legend.
 //! [`write()`] writes `<name>.dot`, plus `<name>.svg` when Graphviz is installed.
+//!
+//! A counterexample's diagram shows only what the broken fact depended on ([`focus`]): its
+//! sends and their lineage, the faults and the heal, with a caption counting what it left
+//! out. The whole run is drawn beside it, as `counterexample-full`.
 
 mod dot;
+mod focus;
 mod out;
 // Two attributes, not `cfg(all(..))`: stageleft keeps the module out of the staged copy only on an
 // exact `#[cfg(stageleft_runtime)]`, and the copy cannot call `Log`'s methods.
@@ -23,6 +28,7 @@ use std::fmt::Write as _;
 use hydro_lang::sim::network_hook::ChannelInfo;
 
 pub use self::dot::dot;
+pub use self::focus::focus;
 pub use self::out::{Written, claim, default_dir, sanitize, test_name, write};
 use crate::fault::{DeliveryId, Event, EventLog, Fate, MessageId, NodeId, NodeNames};
 use crate::search::{CrashAt, Fault, FaultSet, Node};
