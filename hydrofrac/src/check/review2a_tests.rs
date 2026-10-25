@@ -1,6 +1,8 @@
 //! REVIEWER-A (review 2): adversarial counterexamples to the soundness argument
 //! (docs/design/hydrofrac-soundness.md). Each test prints the cross-check and asserts what was
-//! observed, so a test that passes documents the finding as it stands at `664c60e2f1`.
+//! observed, so a test that passes documents the finding as it stands at `664c60e2f1`. The two
+//! owned-counter tests are fixed (the purity allowlist, §3) and now assert the counterexample;
+//! the program descriptions below say what the textual guard missed.
 //!
 //! Every item is `cfg(stageleft_runtime)`, as in `brute_tests.rs`.
 

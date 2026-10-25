@@ -1143,8 +1143,8 @@ fn one_labelling_line_twice_is_two_labels() {
     );
 }
 
-/// A closure that names outside state is fragile, and a choice (its one schedule would not
-/// stand for the others).
+/// A closure that is not known pure (the allowlist of `provenance::purity`) is fragile, and a
+/// choice (its one schedule would not stand for the others).
 #[cfg(stageleft_runtime)]
 #[test]
 fn impure_closures_are_fragile_choices() {
