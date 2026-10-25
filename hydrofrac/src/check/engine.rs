@@ -182,10 +182,10 @@ async fn drive(inputs: &mut impl AsyncFnMut(), recover: &mut impl AsyncFnMut(), 
 }
 
 /// The message of a run's panic, re-raised if it is the harness's mistake rather than the
-/// program's failure: a barrier in the fault phase.
+/// program's failure: a barrier in the fault phase, or a labelled type with no fact identity.
 fn program_panic(payload: &(dyn std::any::Any + Send)) -> String {
     let message = panic_message(payload);
-    if message == BARRIER_IN_FAULT_PHASE {
+    if message == BARRIER_IN_FAULT_PHASE || message.starts_with(crate::observe::NO_IDENTITY) {
         panic!("{message}");
     }
     message

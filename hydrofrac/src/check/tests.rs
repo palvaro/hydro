@@ -611,3 +611,39 @@ fn awaiting_an_output_in_the_fault_phase_is_allowed() {
     let cex = results.label("delivered").verdict.counterexample();
     assert!(cex.is_some_and(|c| c.crashes() == 1), "{results}");
 }
+
+/// Review R3-F3: a fact's identity fell back to its `Debug` text (else a 64-bit hash) for a type
+/// that is not `Serialize`. Here the label holds `Rc<dyn Any>`, whose `Debug` is `Any { .. }`
+/// for every value. Each member holds `1` from a local source, and `2` from the network, so a
+/// member that missed `2` looked complete: a single crash of the source, right after it sends
+/// `2` to one member, leaves the other two without it, and the check certified the label. A labelled type must now be `Serialize`; otherwise the check stops
+/// with the harness's error, not a verdict.
+#[cfg(stageleft_runtime)]
+#[test]
+#[should_panic(expected = "is not `Serialize`")]
+fn a_labelled_type_without_serialize_is_refused() {
+    let mut flow = FlowBuilder::new();
+    let source = flow.process::<()>();
+    let members = flow.cluster::<()>();
+    let (send, input) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
+    let delivered = input.broadcast_closed(&members, TCP.fail_stop().bincode());
+    let local = members
+        .source_iter(q!([1u32]))
+        .weaken_consistency()
+        .weaken_ordering::<NoOrder>();
+    let opaque = delivered
+        .weaken_consistency()
+        .weaken_ordering::<NoOrder>()
+        .merge_unordered(local.into())
+        .map(q!(|value| std::rc::Rc::new(value) as std::rc::Rc<dyn std::any::Any>))
+        .assert_has_consistency_of::<Cluster<'_, (), EventualConsistency>>(manual_proof!(
+            /** claimed: every member holds `1`, and `2` once the source sends it */
+        ));
+    opaque.for_each(q!(|_| {}, commutative = manual_proof!(/** a no-op */)));
+    let mut check = EcCheck::new();
+    let sim = check
+        .instrument(flow.sim().with_cluster_size(&members, MEMBERS))
+        .compiled();
+    let results = check.run(&sim, async || send.send(2));
+    eprintln!("{results}");
+}

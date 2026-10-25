@@ -52,10 +52,13 @@
 //!   yet; it is `#[doc(hidden)]` and screamingly named instead. Real sealing
 //!   requires promoting the mint into `hydro_lang`'s trusted base (the same
 //!   promotion path as `fan_out`'s completeness premise).
-//! - **Certificates are local.** `Durable` is deliberately not `Serialize`:
+//! - **Certificates are local.** `Durable` is deliberately not `Deserialize`:
 //!   shipping a certificate to another location would let the receiver
-//!   "deserialize a forgery." A transportable certificate needs its own design
-//!   (attestor set + re-verification, or a trusted channel type).
+//!   "deserialize a forgery," and Hydro's networking needs `Deserialize` to
+//!   send a type. A transportable certificate needs its own design (attestor
+//!   set + re-verification, or a trusted channel type). It is `Serialize`, which
+//!   forges nothing, so that hydrofrac can identify a labelled certificate by
+//!   its bytes.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
@@ -81,8 +84,8 @@ pub struct Ts {
 /// fewer than `threshold` members.
 ///
 /// Only [`quorum`] mints these (see the module docs for the enforcement
-/// caveat). Deliberately not `Serialize` — see the module docs.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// caveat). `Serialize` but deliberately not `Deserialize` — see the module docs.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct Durable<F> {
     fact: F,
 }

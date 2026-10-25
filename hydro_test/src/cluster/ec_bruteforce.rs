@@ -86,9 +86,14 @@ fn brute_force_agrees_on_a_plain_broadcast() {
     let cross = plain_reliable_broadcast(EcCheck::new());
     costs("reliable_broadcast::broadcast (plain)", &cross);
     agree("reliable_broadcast::broadcast (plain)", &cross);
-    // Without the echo, a broadcaster crash mid fan-out breaks every searched label.
+    // Without the echo, a broadcaster crash mid fan-out breaks every searched label. The echo
+    // labels hold nothing in any run (`Vacuous`), and the enumeration agrees.
     assert!(!cross.brute.labels.is_empty(), "{cross}");
     for b in &cross.brute.labels {
+        if let hydrofrac::check::Verdict::Vacuous(_) = cross.results.results()[b.index].verdict {
+            assert_eq!(b.min_crashes(), None, "{}: {cross}", b.name);
+            continue;
+        }
         assert_eq!(b.min_crashes(), Some(1), "{}: {cross}", b.name);
         let cex = cross.results.results()[b.index]
             .verdict

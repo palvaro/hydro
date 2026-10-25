@@ -591,10 +591,13 @@ bounds for the oracle).
   checked stream: the specification compares sets of facts, and members agreeing on a stream's set can disagree on a
   fold of it (a count or a sum over duplicates, any fold that is not idempotent). The IR does not say whether a fold
   is idempotent (§17, fix 8).
-- **Fact identity** (A4): a fact is its element's `bincode` encoding if the type is `Serialize`; else its `Debug`
-  text; else a 64-bit `Hash` digest (`hf/observe/tap.rs`, `tap_closure`; `hydro_std`'s `Durable` is not
-  `Serialize`). The fallbacks are sound only if `Debug` is injective on the labelled values and the digest has no
-  collision among them (§18).
+- **Fact identity** (A4): a fact is its element's `bincode` encoding, so a labelled element type must be `Serialize`
+  (`hf/observe/tap.rs`, `tap_closure`). A type that is not stops the check with the harness's error, not a verdict
+  (`NO_IDENTITY`, re-raised by `program_panic`). `Debug` text or a hash digest, the fallbacks before, could make two
+  different facts one and hide a member's missing fact (§17, fix 13). `hydro_std`'s `Durable` is `Serialize` but not
+  `Deserialize`, so it still cannot be sent. Two identities can only err one way: equal values with different bytes
+  (a `HashSet`'s iteration order, `0.0` and `-0.0`) make two facts of one, which can report a false counterexample
+  but never hide a missing fact.
 
 **Claims and proofs.**
 - **Monotone view.** A member's view is the union of its tap's emissions (`hf/spec.rs:45`). A tap emits each record
@@ -778,7 +781,7 @@ explain a wrong verdict).
 | A1 | The simulator branches only at hooks, and `exhaustive` enumerates every hook decision sequence | ASSUMED (`hydro_lang/src/sim/compiled.rs`; the simulator's design) |
 | A2 | DFIR is deterministic between hook decisions | ASSUMED |
 | A3 | User closures are pure (no hidden state, no I/O): each output is a function of the inputs | ASSUMED for functions closures call. Partly CHECKED IN CODE: a closure that reads Hydro state by reference is fragile (`reads_state`); a closure or source expression that names outside or shared state is fragile and a choice (`names_impure`, a textual guard, §3) |
-| A4 | Records are compared by content; messages are content-addressed; facts are identified by `bincode`, else `Debug`, else a 64-bit hash (§11) | CHECKED IN CODE for `Serialize` types (`hf/fault/mod.rs:154`, `MessageId`; `hf/observe/tap.rs`, `tap_closure`); ASSUMED that `Debug` is injective, and the hash collision-free, on the labelled values of other types |
+| A4 | Records are compared by content; messages are content-addressed; facts are identified by `bincode` (§11) | CHECKED IN CODE: labelled types must be `Serialize`, or the check stops (`hf/observe/tap.rs`, `tap_closure`; `hf/fault/mod.rs:154`, `MessageId`). ASSUMED that `Serialize` is injective on the labelled values: derived impls are; a custom impl or `#[serde(skip)]` may not be |
 | A5 | The provenance rewrite over-approximates every record's dependencies and tags every fragile step's outputs; opaque operators fall back to the execution rule | TESTED (`hf/lineage/*tests*.rs`, provenance tests, every brute-force cross-check); not proved |
 | A6 | Quiescence means no tick can run (`SimTick::can_run`, `hydro_lang/src/sim/compiled.rs:2022`): a tick runs only when every one of its hooks is ready and some hook can release. A hook that is not ready blocks its tick even with input pending: a snapshot of a singleton that never got a value (`SingletonHook::is_ready`, `hydro_lang/src/sim/runtime.rs:591`; every other hook is always ready, `:78`). So a batch's pending input is released at quiescence only if its tick snapshots no singleton (§3, `batch_beside_snapshot`). Nothing else makes a tick run (§17, fix 2). Under the `hydrofrac` feature such a stuck tick no longer aborts the process: the run quiesces with that member never running the tick (`compiled.rs`, the "never became ready" check) | CHECKED IN CODE (`compiled.rs:2022`, `quiesce` at `:292`) |
 | A7 | The simulated network delivers every send that no injected omission drops; lossy channels are intercepted by the fault hook | CHECKED IN CODE (`hf/fault/mod.rs:348-353` asserts interception) |
@@ -853,6 +856,12 @@ and fixed structurally:
     sends `x` to one member, makes the other two members report `x` missing and the first not. Now such a label is
     `Vacuous` only when §13 proves faults create no fact; otherwise it is searched for Claim B over every set within
     the bounds (§11).
+13. **Fact identity** (reviewer #3, R3-F3). A labelled type that was not `Serialize` was identified by its `Debug`
+    text, else a 64-bit hash, and both can merge different facts; brute force shares the identity, so it agreed. In
+    `a_labelled_type_without_serialize_is_refused`, every member holds `1` from a local source and `2` from the
+    network, as `Rc<dyn Any>`, whose `Debug` is `Any { .. }` for every value. A single crash of the source, right
+    after it sends `2` to one member, leaves the other two without `2`, yet the check certified the label (with
+    Claim B). Now a labelled type must be `Serialize` (§11).
 
 ## 18. Known gaps: what certificates do not cover
 
@@ -881,7 +890,7 @@ and fixed structurally:
   are trusted by reading, and checked only by the tests cited.
 - **Impurity beyond the textual guard** (A3). A closure that calls a function with hidden state, or a type whose
   `Clone` or `Hash` is impure, is not detected.
-- **Fact identity without `Serialize`** (A4, §11). `Debug` text or a 64-bit hash identifies facts of other types.
+- **Fact identity** (A4, §11). A custom `Serialize` that drops data (`#[serde(skip)]`) can make two facts one.
 - **Unchecked labels.** Scalars (§11) and collections inside a tick are reported, not checked.
 - **Empty domains cost a full enumeration** (§11). Outside fragile-free and choice-free programs, a label with an
   empty domain runs every set within the bounds, in full; the hypothesis budget may stop it (`Budget`, not a

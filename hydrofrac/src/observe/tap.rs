@@ -194,43 +194,28 @@ fn max_port(ir: &mut [HydroRoot]) -> Option<usize> {
     max
 }
 
-/// The closure a tap maps each element through: `(identity of x, Debug of x if T: Debug)`. The
-/// identity is `bincode(x)` if `T: Serialize`, else its `Debug`, else a `Hash` digest
-/// (`hydro_std`'s `Durable` is deliberately not `Serialize`). Autoref specialization picks
-/// both, so any element type compiles.
+/// The closure a tap maps each element through: `(bincode of x, Debug of x if T: Debug)`. A
+/// fact's identity is its bincode, so a labelled element type must be `Serialize` (A4): `Debug`
+/// text or a hash digest could make two different facts one, and hide a member's missing fact.
+/// Autoref specialization picks the identity, so any element type compiles; a type that is not
+/// `Serialize` panics when its first element is tapped, with the [`NO_IDENTITY`] message, which
+/// the check re-raises as the harness's error (`check::engine::program_panic`).
 fn tap_closure(element_type: &syn::Type) -> syn::Expr {
     // The generated dylib depends on `hydro_lang` under its own name, as every IR expression
     // `hydro_lang` itself builds assumes.
     let debug = debug_of(quote::quote!(&__hydrofrac_x));
+    let no_identity = NO_IDENTITY;
     parse_quote!(
         move |__hydrofrac_x: #element_type| -> (::std::vec::Vec<u8>, ::core::option::Option<::std::string::String>) {
             struct __HydrofracWrap<'__a, __T>(&'__a __T);
             let __debug = #debug;
-            // The receiver `&&&&_` matches the most specific applicable impl first.
+            // The receiver `&&_` matches the most specific applicable impl first.
             trait __HydrofracViaSerialize {
                 fn __hydrofrac_id(&self) -> ::std::vec::Vec<u8>;
             }
-            impl<__T: hydro_lang::__staged::__deps::serde::Serialize> __HydrofracViaSerialize for &&&__HydrofracWrap<'_, __T> {
+            impl<__T: hydro_lang::__staged::__deps::serde::Serialize> __HydrofracViaSerialize for &__HydrofracWrap<'_, __T> {
                 fn __hydrofrac_id(&self) -> ::std::vec::Vec<u8> {
                     hydro_lang::runtime_support::bincode::serialize(self.0).unwrap()
-                }
-            }
-            trait __HydrofracIdViaDebug {
-                fn __hydrofrac_id(&self) -> ::std::vec::Vec<u8>;
-            }
-            impl<__T: ::core::fmt::Debug> __HydrofracIdViaDebug for &&__HydrofracWrap<'_, __T> {
-                fn __hydrofrac_id(&self) -> ::std::vec::Vec<u8> {
-                    ::std::format!("{:?}", self.0).into_bytes()
-                }
-            }
-            trait __HydrofracIdViaHash {
-                fn __hydrofrac_id(&self) -> ::std::vec::Vec<u8>;
-            }
-            impl<__T: ::core::hash::Hash> __HydrofracIdViaHash for &__HydrofracWrap<'_, __T> {
-                fn __hydrofrac_id(&self) -> ::std::vec::Vec<u8> {
-                    let mut __h = ::std::hash::DefaultHasher::new();
-                    ::core::hash::Hash::hash(self.0, &mut __h);
-                    ::core::hash::Hasher::finish(&__h).to_le_bytes().to_vec()
                 }
             }
             trait __HydrofracNoId {
@@ -238,17 +223,19 @@ fn tap_closure(element_type: &syn::Type) -> syn::Expr {
             }
             impl<__T> __HydrofracNoId for __HydrofracWrap<'_, __T> {
                 fn __hydrofrac_id(&self) -> ::std::vec::Vec<u8> {
-                    ::core::panic!(
-                        "hydrofrac: a labelled collection's element type ({}) is neither `Serialize`, `Debug` nor `Hash`, so its facts have no identity to compare",
-                        ::core::any::type_name::<__T>()
-                    )
+                    ::core::panic!("{} ({})", #no_identity, ::core::any::type_name::<__T>())
                 }
             }
-            let __id = (&&&&__HydrofracWrap(&__hydrofrac_x)).__hydrofrac_id();
+            let __id = (&&__HydrofracWrap(&__hydrofrac_x)).__hydrofrac_id();
             (__id, __debug)
         }
     )
 }
+
+/// The start of the panic a tap raises on a labelled element type that is not `Serialize`.
+pub const NO_IDENTITY: &str = "hydrofrac: a labelled collection's element type is not `Serialize`, \
+    so its facts have no byte identity to compare (implement `Serialize` for it; `Debug` text \
+    or a hash could merge two different facts)";
 
 /// Enumerates the labels of `ir`, plans them, and taps every searched one.
 pub fn tap(ir: &mut Vec<HydroRoot>) -> Labels {
