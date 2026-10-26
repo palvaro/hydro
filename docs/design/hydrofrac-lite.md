@@ -1,0 +1,626 @@
+# hydrofrac-lite: design plan
+
+Status: implemented as the lean `hydrofrac-lite` commit series. This document is the plan, revised only where the
+implementation changed it. A fresh branch that shares no files with the research line
+(`hydrofrac-input-coverage` @ `0d801bbafc`, "the research branch" below), which stays as the
+record of every optimization that was explored.
+
+**Base:** `origin/main` @ `90d9d26736`, as is, with no rebase onto upstream. That is where the EC corpus lives:
+ABD, multi-Paxos and the broadcast demos are among its 75 commits ahead of `upstream/main`, which is only 53
+commits ahead the other way and has none of the sim-hook work. Two consequences:
+- core changes are written against `90d9`'s single-file `sim/runtime.rs`, not the research branch's
+  `sim/runtime/` split;
+- `90d9` already has its own crash injection and provenance, which the extension points absorb (§6.2).
+
+The research line's delta proper is `4de7c45e41..0d801bbafc`. Some removals in that range only revert unrelated work,
+so it is read hunk by hunk, never cherry-picked whole.
+
+## 1. Goal
+
+One job, done with no configuration: **for every collection a Hydro program labels
+`EventualConsistency`, show that under the fault model its transports declare, every correct
+member ends with the same facts, or produce a counterexample and its Lamport diagram.**
+
+Non-goals:
+- hand-written specifications (PRE/POST) and the old goal API;
+- experiment machinery: lineage-level ablations, disjunctive provenance, aggregate witnesses,
+  blind and random baselines, `LDFI_*` knobs;
+- deploy-mode fault injection;
+- delay, reordering and Byzantine faults (unchanged from the research branch).
+
+Design rules:
+- **Convention over configuration.** Every choice the research branch exposed as a knob is either fixed by convention,
+  with the evidence that fixed it cited, or left to the research branch.
+- **Nothing exotic.** Lite and its ported corpus use only what `main` has, plus the extension points in §6.2. Nothing
+  that exists only on the research branch: no `BatchHook`, no `flow.sim_hook()`, no standing hook policies, no
+  `NonDet::hooked`. A program that needs such machinery is rewritten on plain `main` features or left out.
+
+## 2. What a user writes
+
+```rust
+let mut flow = FlowBuilder::new();
+// ... program, with its `EventualConsistency` labels ...
+let mut check = hydrofrac::EcCheck::new();
+let sim = check                                          // taps every label; the host checks them
+    .instrument(flow.sim().with_cluster_size(&members, 3))
+    .compiled();
+check.run(&sim, async || {                               // faults may strike while this drives inputs
+    send.send(Item(1));                                  // and while the run settles; then the network
+    send.send(Item(2));                                  // heals and the run quiesces again
+})
+.assert_holds();                                         // panics with the report; writes diagrams
+```
+
+The check instruments the `SimFlow`, not the `FlowBuilder`: everything it adds is simulator-only.
+`assert_no_counterexample()` is the weaker form: it also accepts `Exhausted` (§4.9).
+
+That is the whole API surface for the common case. Compare a typical research harness
+(`hydro_test/src/cluster/ec_ldfi.rs:263-294`):
+- `Ldfi::new().level(Precise)` (already the default), `.crashable(..)`, `.crashable_cluster(..)`
+  (always every node), `.spec(&spec)`;
+- `Spec::all_labels`;
+- on the sim builder, `.skip_consistency_assertions()` and `.with_provenance()`;
+- an explicit `quiesce().await`;
+- in some harnesses, an explicit `run.end_of_finite_failures()` (§4.6).
+
+Across the EC harnesses, the per-test variation beyond inputs and cluster sizes is:
+- `exploration(Fuzz { 8 })` (6 uses: ABD, gossip, uniform broadcast);
+- `crash_budget(1)` (2 uses, multi-Paxos);
+- `end_of_finite_failures()` (`gossip_all_labels`, `ec_demos_ldfi.rs:404`; also ISR's harness, now out of scope);
+- restricted crashable sets (2PC `…with_the_coordinator_correct`, ISR `…with_the_harness_fault_model`).
+
+The second becomes the only knob. The others become conventions: the schedule budget (exhaustive within a fixed
+budget, a fixed seeded sample past it; hydrofrac-soundness.md §14; this replaced an earlier `.sample_schedules(n)`
+knob), heal (§4.6) and the crash sweep (§4.5).
+
+| knob | default | why it can't be a convention |
+|---|---|---|
+| `.max_crashes(n)` | no cap: the sweep stops only at a counterexample or at the vacuity bounds (§4.5) | caps the crash sweep. Multi-Paxos is impractical unbounded, and nothing in the program says how many crashes matter |
+
+Conventions that replace the research branch's per-harness calls:
+- **every process and every cluster member is crashable**; there are no restricted crashable sets. What a
+  restriction used to express ("holds if the coordinator stays up"), the crash sweep now reports (§4.5);
+- **the fault model is the transport type** (lossy channels admit omission, `fail_stop` channels only
+  their sender's crash);
+- **heal at the end of the run** (§4.6): faults are admitted while the closure drives inputs and while the work it
+  caused settles; then the network heals (no more omissions or new crashes; crashes that happened persist) and the
+  run quiesces again;
+- **the crash sweep is the output**: for each label, the largest number of crashes it tolerates and a
+  counterexample one crash beyond that (§4.5);
+- the program's own consistency assertions are skipped automatically under the check;
+- a hypothesis budget of 1024, after which the verdict is `Budget`, not a certificate (the retrospective
+  recommends raising 256 to 1024);
+- counterexample diagrams are always written, to `target/hydrofrac/<test>/<label>/`.
+
+There is no `rows()` or TSV output in the crate. Tests that compare with the records write the 13 record columns
+themselves (§7). `EcCheck::cross_check` (§7) exists only behind the crate feature `cross-check`, which is
+test-only and enabled by `hydro_test`'s dev-dependency.
+
+## 3. What is in, what is out
+
+Every row cites the evidence. "Measured" refers to the records in `docs/design/hydrofrac-lite-data/`, all
+on the research branch at `0d801bbafc`:
+- A = positional, Precise (`rec-positional.tsv`, 125 searches);
+- B = Auto with open sent sets and schedule reduction on, Precise (`rec-auto-open.tsv`, 125 searches);
+- run C = the EC searches at Precise vs Execution, positional (`level/`, 54 searches);
+- the earlier reduction-off comparison, positional vs `sent-set-open` (123/123 verdicts agree, hypotheses
+  1,947 → 2,866). Its raw records were lost to temp-dir cleanup; only these totals survive.
+
+| mechanism | lite | evidence |
+|---|---|---|
+| Sender-side filter on every `Network` send, transport type as fault model | **in** | the redesign that made every channel a fault point by construction; the consumer-side seam was closed (retrospective, "Fault point and fault model") |
+| Omission identity `(channel, sender, destination, wire bytes)` | **in** | settled (retrospective) |
+| Crash model: **positional only**, `crash(node after m)` | **in** | one fault names one message (O(1)), against a whole sent set (O(n)). Sent sets only pay where they enable schedule reduction, and in this corpus that saved ~1% of search time: B, 22 reduced searches, 977 schedules, ~5 s, almost all from one test (948 → 5). Where reduction doesn't apply, sent sets only add hypotheses (+47% overall with reduction off) |
+| Static order check (`order.rs`): its cone walk | **out** | replaced by a whole-program scan for schedule choices: no cone, no sender reasoning (§4.9). Its per-node classification survives as the scan's allowlist |
+| One schedule per hypothesis, with open sent sets (schedule reduction) | **phase 2, out of v1** | All 125 B verdicts agree with A, and no reduced search saw a never-seen send; but A's certificates in programs with schedule choices are not ground truth (§4.9). It's the remedy if a program's schedule space explodes (uniform broadcast's probe: >359k schedules), so it's documented and measured but not built until a real program needs it |
+| Generated EC spec: fixed fact domain from the failure-free probe, POST as "every correct member holds every domain fact some correct member holds" | **in**, evaluated **on the host** from per-member tap outputs: no observer process, no staged views, no eager location (E3 dropped) | the view is monotone by construction; this is what makes the inference sound (retrospective, wall 2; `spec_views.rs:63-95`). Why the host's view is as sound as the observer's: §4.7 |
+| Scalar labels checked at their input stream (`covered_by`) | **in** | already implemented in the research branch (`observe.rs:144-170`) |
+| Vacuity: empty fact domain is `Vacuous`; empty derivation is a vacuous run; crash-all and crash-all-but-one-of-the-checked-cluster are excluded | **in** | settled (`1538508755`; ablation doc on crash bounds) |
+| Heal at the end of the run (Molly's EFF, renamed) | **in**, as a convention | without it every retrying protocol has a meaningless omit-every-retry counterexample (§4.6) |
+| Crash sweep: bound 0, 1, 2, …, keeping learned clauses, over a completed crash universe | **in**, as the default output | derivations don't depend on the bound, so raising it is cheap. It replaces restricted crashable sets and `crash_budget` (§4.5) |
+| Restricted crashable sets (`.crashable(..)` on a subset) | **out** | every node is crashable; the sweep reports what a restriction used to assume (§4.5) |
+| PRE, preserve points, `required` | **out** | the generated EC spec has no PRE; `required` is always empty on the EC path |
+| Certificates only in programs with no schedule choice; elsewhere the search is a heuristic ending `Exhausted` | **in** | Molly's pruning assumes one execution per fault set, which a schedule choice breaks: the 2PC-with-CTP false certificate (§4.9) |
+| Lineage: record provenance only, no `Level` | **in** | run C: Execution alone is 2.4× the wall time on EC, up to 14.6× on multi-Paxos, with less minimal counterexamples (§5) |
+| Counterfactual replay, standing hook policies, `BatchHook`, `flow.sim_hook()` | **out** | replay only served opaque records and programs compiled without provenance; lite always compiles with provenance and falls back to the sound execution rule (§5). The hooks exist only on the research branch ("nothing exotic", §1) |
+| Disjunctive provenance, aggregate witnesses, witness caps | **out** | no reduction on any protocol, and +10–40% hypotheses on broadcast; aggregate witnesses are draw-dominated (retrospective, "Disjunction", "Aggregate-local witnesses") |
+| Old goal API (`goal*`, `Run::witness*`, `require*`) | **out** | decided "to be deleted"; 2 remaining callers, both expressible as specs (retrospective) |
+| `Strategy::Blind`, `fuzz_faults`, `LDFI_RECORD`, `LDFI_*` env vars | **out of the API**; see §7 for the honesty check | experiment and diagnostic knobs ("Every knob not needed for the automatic path is an experiment or a diagnostic", retrospective) |
+| HiGHS backend | **out** by default: same `good_lp` ILP on the pure-Rust `microlp` backend; HiGHS behind the opt-in `highs` feature | §4.4 |
+| Lamport diagram of each counterexample | **in** | requested; `build_trace` + trace data + one backend |
+| Provenance-graph viz, witness pictures, payload parser in the report | **out** | output-only; about 1.4k lines |
+| Per-label report with source-derived names (`source_names`) | **in** | the cost of output people can read |
+
+## 4. Design
+
+### 4.1 Crate layout
+
+A new crate, `hydrofrac`, depending on `hydro_lang` with its `hydrofrac` feature (which implies `sim`; §6), set up
+for staged code (`q!`) like `hydro_std`. The research `spec_views.rs` is not carried over (§4.7). All hydrofrac
+logic lives in this crate; `hydro_lang` only gains the extension points in §6.
+
+Modules, with rough sizes ported or rewritten from the research branch (the planned budget):
+
+| module | content | ~lines |
+|---|---|---|
+| `observe` | label enumeration (`ec_collections`), `LabelPlan` / `NotChecked` / `covered_by`, the tap pass | 600 |
+| `spec` | the generated POST, evaluated on the host over the taps' observations (§4.7) | 350 |
+| `fault` | `FaultState`: the per-send filter, positional crash points | 250 |
+| `lineage` | derivations from the event log: record provenance, with the execution rule as the fallback for opaque records | 700 |
+| `provenance` | the record-provenance IR rewrite (via E2) and its runtime tags | 1600 |
+| `search` | the Molly loop, crash bounds, vacuity, the hitting-set ILP | 650 |
+| `report` | per-label report, names | 600 |
+| `lamport` | trace extraction + one diagram backend | 450 |
+| **total** | | **≈5.1k**, against ≈12.7k of logic in the research branch |
+
+The built crate is larger; the per-module table is in the crate commit bodies. The unbudgeted parts are the
+schedule-choice scan (§4.9) and the `EcCheck` loop (`check`).
+
+### 4.2 Lineage
+
+The event log records executions, sends with their fate and a delivery id, receives, and which
+execution produced each observation. Every record carries the delivery ids it was computed from: the
+provenance rewrite tags records as they flow through operators, and sends carry the tags across the
+network. The support of an observation is the deliveries its record's tags name, closed backwards
+through the sends that carried them.
+
+Where the rewrite can't see into a record (an operator it leaves as an island, such as `ResolveFutures*` or
+a multi-version network, or a receive with no tag), the record is opaque and its support falls back to the
+**execution rule**: an execution depends on the receives at its node before it. A record produced in execution X at
+node n depends on every delivery n received before X ended, in program order.
+
+The execution rule is sound for every program; it only costs precision. The research branch's
+`record_closure` and `closure` (`ldfi.rs:3370`, `:3966`) are its two halves.
+- **No release attribution.** On the research branch, a tick's arrivals came from the hook policies' `Released`
+  events, which lite drops. The plan was an `on_release` callback in E1; it was dropped as too invasive (it would
+  thread item identity through every hook buffer). Instead E1's callbacks arrive in program order, and the
+  scheduler brackets each execution with `on_exec_begin(location, member)` / `on_exec_end()`. So "every receive at
+  the node before the execution" is directly computable. It is coarser than "what the tick consumed", and still
+  sound.
+- **State read by reference** (`by_ref` / `by_mut` closures) is a sound over-approximation: the record names
+  every delivery the state was built from, so it stays precise, not opaque.
+- **`leader_merge` is precise, not opaque.** The research rewrite mishandled `entries_partially_ordered` on a keyed
+  stream, so `leader_merge` was compiled without provenance there (`ec_demos_ldfi.rs:216-225`). The cause was a
+  keyed→flat `ObserveNonDet` whose metadata had the wrong shape. Lite keeps the node's metadata honest
+  (`(K, Tagged<V>)`) and converts after it; a test checks that every replica record names the right writer's
+  delivery. Every corpus program runs instrumented with 0 opaque records and no islands.
+
+### 4.3 The loop
+
+1. Run the failure-free probe; it learns the fact domain. An empty domain gives `Vacuous`. The probe
+   is reused as hypothesis 0, so the failure-free run executes once, not twice as in the research branch.
+   - The probe's POST is evaluated against the domain it has just learned, so members that disagree with no fault
+     are a counterexample at hypothesis 0. Its clauses come from the tap observations, like every run's (§4.7).
+2. For each label, starting at crash bound 0: propose the minimal admissible fault set that kills every
+   derivation seen so far. Run it over all schedules, or, past the schedule budget, over a fixed seeded sample of them
+   (hydrofrac-soundness.md §14).
+3. If a correct member lacks a fact, report a counterexample. Otherwise the run's derivations become new
+   clauses.
+4. When no admissible set exists at bound k, ask once more over the completed universe (§4.5). If that admits
+   nothing either, the label tolerates k crashes. Raise the bound to k+1, keep every clause, and continue at step 2.
+5. Stop at a counterexample, at the top of the sweep (a certificate for the largest bound reached), or when the
+   hypothesis budget runs out (`Budget`).
+6. In a program with schedule choices (§4.9), steps 2 and 4 use the heuristic instead (a hypothesis need only kill one
+   schedule's derivations per earlier run), and the top of the sweep is `Exhausted`, not a certificate.
+
+### 4.4 Hitting sets: the research branch's ILP, on a pure-Rust solver
+
+The EC path has no PRE, so the model is the research branch's `solve_hypothesis` without its PRE terms:
+- one binary per candidate fault, minimising count;
+- cover constraints, each conditional on its crash premises;
+- at most one crash per node and the crash bounds;
+- no superset of a vacuous set, and an exact no-good for each tried set;
+- in a program with schedule choices (§4.9), disjunctive groups: one group per earlier run, satisfied when *some*
+  clause of it is (a binary `y_c ≤ hits(c) + missing premises(c)` per clause, and `Σ y_c ≥ 1`). A group of one
+  clause is the ordinary cover row (`hitting_set_any` / `Sweep::next_any`).
+
+Writing it as an ILP keeps it short; the model is about 150 lines.
+- **Solver:** `good_lp` with the `microlp` backend (pure Rust, branch-and-bound) instead of HiGHS:
+  `good_lp = { version = "1.15", default-features = false, features = ["microlp"] }` and
+  `.using(good_lp::microlp)`. The research code uses no HiGHS-specific API.
+- **Optimality:** with a zero MIP gap and no time limit, a solution is returned only when proven optimal, so
+  certificates stay certificates.
+- **Why not HiGHS:** HiGHS is the reason `cargo test` on `hydro_std`/`hydro_test` currently needs cmake ≥ 3.15,
+  libclang and a C++ toolchain, and it is used nowhere else.
+- **Speed:** `microlp` has no presolve or cuts, and dense no-good rows are its worst case, so the model writes only
+  rows that can cut something off: a tried set gets an explicit no-good only when no cover or vacuous row already
+  excludes it. HiGHS is behind the opt-in `highs` feature, for the solver cross-check (§7). `opt-level = 3` is set for `microlp` in dev builds. Measured on the full hydrofrac-lite line
+  (`d9944a51dd`), on a synthetic learning search (6 nodes × 20 sends, cap 2): 6 / 16 / 25 ms per hypothesis at
+  100 / 200 / 300 hypotheses, against 15 / 29 / 84 ms with every row. Those benchmarks, and the ignored
+  HiGHS/`microlp` ones, are not part of the lean series.
+- **Fix to carry over:** the research branch's tie-break weight `0.5/n` can add up to more than one fault,
+  so for sets of size ≥ 3 a k-set can cost more than a (k+1)-set. Use `0.5/(n·n)`.
+
+### 4.5 Crash sweep
+
+Every node is crashable, and the output for each label is a **crash sweep**, not a single verdict at one bound.
+- **The sweep:** search at crash bound 0 (omissions only), then 1, 2, …. When no admissible set exists at bound k,
+  the label tolerates k crashes, and the search raises the bound to k+1.
+- **Clauses carry over.** A derivation is a set of sends and executions seen in a run, and whether a fault set
+  kills it doesn't depend on the bound. The no-goods for tried sets and the no-superset rule for vacuous sets
+  stay valid too. Raising the bound only admits more sets, so each step resumes from everything already learned
+  instead of starting a new search.
+- **The top of the sweep** is the smallest of:
+  - never crash every node (Σ ≤ N−1);
+  - never crash all, or all but one, of the checked cluster (Σ ≤ |C|−2), since a single survivor agrees with
+    itself (both from `1538508755`);
+  - the `.max_crashes(n)` cap, when given (the only override).
+- **The verdict** per label is "tolerates k crashes; breaks at k+1 with ⟨counterexample⟩", or "tolerates every
+  admissible number of crashes" (a certificate at the top), or `Budget`. In a program with schedule choices (§4.9)
+  the same sweep only searches: "no counterexample with up to k crashes found, breaks at k+1", or `Exhausted` at the
+  top. A counterexample found at bound k+1 has exactly k+1 crashes, because bound k was exhausted first.
+
+**Crash-universe completion.** The solver's universe holds each delivery's *weakest* killers: its omission, and its
+sender's crash right after the send before it. That is enough to find minimal sets, but not to conclude that none
+exists. A later run can name an earlier crash point of a node that kills deliveries of several older clauses
+together (two runs in which `n` sends `a, b` and `b, a`, each deriving the fact from its second send: the crash
+after the first send spares the other run's delivery, `crash(n)` kills both). With one crash per node, the only
+hitting set may go through that point. So before concluding at a bound, the sweep asks once more
+(`Sweep::next_any`) over a completed universe (`search::completion`):
+- `crash(n)` for every sender `n` of a delivery;
+- where `crash(n)` is a clause's premise or in a vacuous set, every crash point of `n` that kills some delivery;
+- every fault in a premise or a vacuous set.
+
+*Why it suffices.* Take any fault set `H` that hits every clause. Drop the faults that kill nothing (an omission
+that kills a delivery names it, and is already a candidate), and replace each remaining crash of `n` outside the
+universe by `crash(n)`. The result `H*` is in the completed universe and:
+- hits a superset of what `H` hits (premises only go missing, never appear, since `crash(n)` is no premise there);
+- crashes a subset of `H`'s nodes;
+- is a superset of a vacuous set only if `H` is.
+
+So "no admissible set at bound k" holds of every positional fault set. That makes the certificate sound and
+"exactly k+1" true. The completion costs a hypothesis only where it finds one.
+`certificates_hold_over_every_positional_fault_set` checks this on random runs with reordered sends.
+
+**What replaces restricted crashable sets.** "Does 2PC commit if the coordinator stays up?" was answered by making
+only some nodes crashable (2PC `…with_the_coordinator_correct`). Under the sweep it is answered by the bound at which
+the labels break and the counterexample. Measured (§7): plain 2PC's `committed`, `prepares` and `commits` break at 1
+with the coordinator's crash; with cooperative termination, `prepares` and `commits` do the same, and `committed`
+finds no counterexample with 2 participants and breaks at 2 crashes with 3 (§4.9). The sweep gives one witness per
+label, not a characterisation of which nodes must stay up.
+
+### 4.6 Heal (Molly's "end of finite failures", renamed)
+
+**What it is for.** A lossy channel admits the omission of any message. A protocol that recovers by retrying or
+re-gossiping sends m, then its retry m′, then m″, and the adversary can omit each one. A finite run has finitely
+many retries, so "omit every retry" is a finite fault set, and the hitting-set search finds it. That counterexample
+is real, but it says nothing: no retrying protocol survives a network that drops everything forever. Molly's
+answer was to bound the adversary to a window of faults, after which the network behaves and the protocol's own
+recovery has to deliver. The research branch called the end of that window `end_of_finite_failures` (EFF).
+
+**Convention.**
+- Faults are admitted while the `run` closure executes, including any `quiesce().await` inside it, and while
+  the work it caused settles: when the closure returns, the check first quiesces under faults. (The simulator
+  runs the program only while the closure is blocked, so a closure that sends its inputs and returns has
+  caused no sends yet; healing at that point would admit no fault at all.)
+- Then the network **heals**: omissions stop applying, and no crash point fires after heal
+  (the research `FaultState::end_finite_failures` semantics). Crashes that already happened persist.
+- The check then quiesces again. For a body that already ends in `quiesce().await` this does nothing, since
+  healing creates no new work.
+- There is no public knob. Internally the boundary is called `heal`.
+- **Consequence for harness authors:** recovery that the harness drives (gossip rounds, 2PC's timeout inputs) runs
+  inside the closure, so it runs under faults. A protocol whose recovery only works on a healed network has no
+  way to express that in v1. No program in the corpus needs it (below). If one does, the remedy is a second,
+  fault-free closure (`run(inputs).then_heal(recovery)`), and it stays out until such a program appears.
+
+**Evidence.**
+- **An earlier claim was false:** `gossip_all_labels` did call `end_of_finite_failures`, before its gossip rounds
+  (`ec_demos_ldfi.rs:404`), and so did ISR's harness.
+- **Gossip.** Its sibling harness `ec_demo_g_set_gossip_certifies` drives the same rounds without EFF and
+  certifies with the same counts (13 hypotheses, 104 schedules, `rec-positional.tsv`), because gossip's channels are
+  `fail_stop` and admit no omission. Heal at the end keeps gossip's results for `all_elements` and the G-Set
+  (`crdt_gossip.rs` `:54`, `:84`, `:138`); the `echo` hop now breaks at 1 crash, since a member may crash
+  mid-round (§7).
+- **Every other harness** already ran with EFF at the end (the default) and ends with `quiesce().await`, so heal
+  at the end reproduces what they measured.
+
+### 4.7 The specification is checked on the host
+
+The research branch evaluated the generated specification inside the program: taps sent every labelled element
+over a `fail_stop` channel to an **observer** process, and a staged view there computed `POST`. Lite computes the
+same `POST` on the host, from the taps' outputs:
+- **Taps:** a `PreNetwork` pass tees each checked collection, at every member, into an external output of its own.
+  Each element arrives through `SimNetworkHook::on_output` as `(identity, Debug)`, with the provenance rewrite's
+  meta. The identity is the element's bincode if its type is `Serialize`, else its `Debug` string, else a `Hash`
+  digest (chosen by autoref specialization).
+- **The view:** for each member, the union of the facts its taps emitted (`spec::MemberView`).
+- **`POST`:** every correct member holds every domain fact that some correct member holds. The domain is what
+  correct members held in the failure-free probe. This is the research formula, unchanged.
+- **Who is correct** is decided at the end of the run: the members not halted, so a crash point that never fires
+  leaves its member obliged.
+
+**Why this is as sound as the observer.** The inference needs a fixed domain and a view that only grows. Both carry
+over: a union of tap outputs is never retracted, and taps are synchronous outputs of the execution that derived
+the element, so nothing is ever in flight between a member and the host. No observer process, no staged views, no
+eager location: an external output adds no schedule choice, so **E3 is dropped** (§6.2).
+
+**Which labels are checked.** A fact is an element of a labelled `Stream`, or an entry of a labelled `KeyedStream`;
+both only grow. A `Singleton`, `Optional` or `KeyedSingleton` changes value, and a union of its versions is not its
+value, so a scalar label is not checked unless it is covered (a `fold` / `reduce` of a checked labelled stream);
+then the stream is checked instead. The specification is set-based, as the research observer's was: it checks
+contents, not order.
+
+### 4.8 Output
+
+- **The report:** one block per cluster, one row per label, with the verdict (§4.5), hypotheses and the
+  counterexample in source names.
+- **The diagram:** a Lamport diagram for each counterexample, from the failing schedule's trace (always kept).
+- **Backend: DOT only**, the research branch's Lamport layout with every position pinned, rendered with
+  `neato -n2`. Always write the `.dot`; also write an `.svg` when Graphviz is on `PATH`, so no new build
+  dependency.
+  - **Why not Mermaid:** a `sequenceDiagram` draws every message as one horizontal arrow, so a message sent
+    before a crash and delivered after it is drawn as if the dead node sent it (see the broadcast render in
+    `docs/design/hydrofrac-lite-img/broadcast_live_sender_crash.png`). In-flight messages across a fault are exactly what counterexamples are about,
+    so Mermaid misleads where it matters. A second "preview" backend is also against the one-convention rule.
+  - Real samples of the research emitter's Mermaid output are in `docs/design/hydrofrac-lite-data/level/mermaid/`.
+- **One fixed layout, no options.** What the diagram shows:
+  - crash marks, with the lane dotted after the crash;
+  - the heal as a dashed rule across all lanes;
+  - omitted messages as red dashed edges ending in `✗`, sends lost to a crash in gray, in-flight messages dotted;
+  - external outputs as notes beside their lane;
+  - a title with the hypothesis' faults and the crashes that never fired;
+  - a numbered legend for labels over 40 characters.
+- **Not in lean:** options, witness highlighting, and the plan's `×k` collapse of repeated rounds (dropped to keep
+  `lamport` small). Label placement is fixed, so labels of close sends can overlap.
+- **Legibility fixes**, from the research branch's output:
+  - **Facts and message payloads render as raw bincode** (`⇒ 01000000`, `peer[..]: 0100000001000000`). Both now
+    render with `Debug`, through one shared `debug_of` generator. The tap uses it for facts. The provenance rewrite
+    uses it at the send, where the channel's element type is known, and appends the payload rendering to the send
+    metadata. Reports and diagrams print `Decided(Txn(1))`; types without `Debug` stay hex.
+  - **Wide protocols:** payloads set the lane width. Long labels go to the legend.
+
+### 4.9 Schedule choices: which labels can be certified
+
+**The rule.** A label is certified only if its program has no schedule choice anywhere.
+`hydrofrac::provenance::choices::program_choices` scans the program's whole IR as built, before the taps. A node is
+choice-free only if its kind is on an **allowlist** (`ALLOWED`: maps, filters, joins, chains, casts, networks, ordered
+folds, …). Everything else is a choice: `batch`, atomic entries, `merge_ordered`, timers and other non-iterator
+sources, futures, async streams, watermarks, multi-version networks, and any IR kind added later. Some instances of
+allowlisted kinds are choices too:
+- an untrusted `observe_nondet` that is not a bare retry cast;
+- a fold, reduce or scan over an unordered input;
+- a closure with a mutable reference over a non-strict input (`observe_for_mut`);
+- an external input without an order;
+- an unresolved captured reference;
+- an ordered lossy channel (`TCP.lossy`, which keeps `TotalOrder`). A fault there can create a record downstream
+  of a positional operator. The simulator rejects it today, and a test pins that.
+
+`EcCheck` adds the provenance rewrite's opaque islands to the list. In a program with a choice, every label's search
+becomes a counterexample heuristic: one disjunctive group per earlier run (§4.4). It ends in `Exhausted`, e.g. "no
+counterexample found; not a certificate (program has schedule choices: batch at two_pc_ctp.rs:105, batch at
+two_pc_ctp.rs:172, fold_unordered at two_pc_ctp.rs:188)". `assert_holds` rejects that verdict;
+`assert_no_counterexample` accepts it.
+
+**Why.** Molly's strong rule says a hypothesis that some earlier derivation survives cannot break the label. That is
+sound when each fault set has exactly one execution. The simulator runs top-level dataflow deterministically and
+branches only at the nodes above, so one run per fault set ⇔ no schedule choice in the program. Lineage is
+positive-only, so the rule also needs faults to only remove records. In the simulator they do: lossy channels are
+`NoOrder`, `fail_stop` cuts suffixes, and negation needs a `Bounded` side, which only a choice produces.
+
+Where a choice exists, the strong rule fails in two ways:
+- **U1:** a derivation can hold only under the schedule that produced it. CTP-3's `committed`, `ask_once` and
+  CTP-2 with racing timers were all certified wrongly this way.
+- **U2:** a choice at a node can reorder that node's sends, which moves its positional crash points.
+
+The per-label walk this scan replaces had to follow each label's cone through networks, cycles and captured state
+(for U1), then the cone of every location sending into it (for U2), to argue that a choice elsewhere could not
+matter. The whole-program scan visits a superset of every such cone, so it is sound without any of that reasoning.
+The only cost is certificates for labels whose own cone happens to be choice-free in a program with choices
+elsewhere. In this corpus no verdict changes (below).
+
+**The corpus** (`hydro_test/tests/ec_schedule_choices.rs`; certified counts from the corpus tests):
+
+| program | choice-free | first choices | labels certified |
+|---|---|---|---|
+| closed broadcast (`broadcast_closed`, `fail_stop`) | yes | — | 0 of 1 (breaks at 1 crash; tolerance certified) |
+| `broadcast_live_from_process` | yes | — | 0 of 1 (breaks at 1 crash; tolerance certified) |
+| `reliable_broadcast_closed` | yes | — | 1 of 3 (`new_messages`; the other 2 break at 1, tolerance certified) |
+| `reliable_broadcast_live` | yes | — | 1 of 3 (`new_messages`; the other 2 break at 1, tolerance certified) |
+| `uniform_reliable_broadcast_closed` | no | `fold_unordered` at quorum.rs:144, `batch` at quorum.rs:135 | 0 of 5 |
+| `g_set_gossip`, `g_set_gossip_live` | no | `batch` at crdt_gossip.rs:70 / :154, `fold_unordered` at :57 / :141 | 0 of 4, 0 of 3 |
+| `leader_merge_broadcast` | no | `observe_nondet` at leader_merge.rs:97 | 0 of 1 |
+| `multi_paxos` | no | `fold_unordered` at multi_paxos.rs:325, `batch` at :299, … (11) | 0 of 10 |
+| `abd_register`, `abd_register_reliable_phase2` | no | `batch` at abd.rs:207, `fold_unordered` at abd.rs:147, … (6) | 0 of 5, 0 of 6 |
+| `hydro_test` broadcast (plain, echo) | no | `batch` at reliable_broadcast.rs:67 | 0 of 4 each |
+| `two_pc`, `two_pc` with CTP | no | `batch` at two_pc_ctp.rs:105, :172, `fold_unordered` at :188 | 0 of 5 each |
+
+So 4 of 15 programs are choice-free, and 2 of their 8 labels hold (`new_messages` in both reliable broadcasts).
+Their other 6 labels break at one crash, and that they tolerate none is certified. The per-label walk also counted
+three labels as choice-free in programs that have choices elsewhere: the single `initial` hops of uniform broadcast
+and of `hydro_test`'s two broadcasts. They still break at one crash. Only their "tolerates 0 crashes" changes, to
+"no counterexample with up to 0 crashes found". `ask_once`, CTP-3 and CTP-2 with racing timers stay uncertified.
+
+## 5. Lineage level: record provenance stays (measured)
+
+`Precise` (record provenance, plus replay for opaque records) had earned its place on **hand-written specs
+under load** (2PC at `n=4 load=8`: 101 → 23 hypotheses), but had never been measured on the EC corpus.
+
+**Run C** (`docs/design/hydrofrac-lite-data/level/`) covered 20 EC tests and 54 searches, positional, with a
+scratch-only patch so `LDFI_LEVEL` overrides the harnesses' hard-coded `.level(Precise)`. Its two halves
+are run P (Precise, `rec-ec-precise.tsv`) and run E (Execution, `rec-ec-exec.tsv`).
+- **Verdicts:** 54/54 agree.
+- **Totals, Execution vs Precise:** 1.8× the hypotheses (768 → 1393), 1.6× the schedules, **2.4× the wall
+  time** (82.6 s → 201.5 s).
+- **Worst cases:** multi-Paxos `:281` at 8.8× hypotheses and 14.6× wall; ISR `:343`/`:360` at 7–8× hypotheses and
+  7–8× wall; reliable broadcast `:130` at 4.6× hypotheses. (ISR is out of scope for lite. Its rows stay here as
+  measurements, not as targets.)
+- **Fine at Execution:** simple broadcast, G-Set, 2PC labels, uniform broadcast and `leader_merge` cost the same at both levels.
+- **Counterexample quality:** Execution's are less minimal. ISR `:360` gives `{crash(client), crash(zk)}` against
+  Precise's `{crash(zk)}`, because the coarse rule blames the client too.
+
+**Decision: lite keeps record provenance as its only lineage**, so `Level` disappears as a concept.
+- **Every compile instruments:** `EcCheck` always applies the provenance rewrite (as a post-network E2 pass), so
+  enabling provenance stops being a user call. (`90d9` has its own, unrelated `SimFlow::with_provenance`; §6.2.)
+- **Opaque records fall back to the execution rule.** Counterfactual replay stays out. Replay only ever served
+  records the rewrite can't see into (on the research branch, closures taking `&`/`&mut` state,
+  `provenance.rs:520`) and programs compiled without provenance, which lite rules out by construction. Lite's
+  rewrite tracks state read by reference as a sound over-approximation instead (§4.2).
+- **Measured: "provenance without replay" costs nothing on this corpus.** Every corpus program runs instrumented
+  with 0 opaque records and no islands, so the execution-rule fallback never fires there.
+- **What this costs lite:**
+  - the provenance rewrite lives in `hydrofrac` (`provenance/`), entering through E2. A simulation dylib cannot link
+    `hydrofrac`, so its generated code reuses `90d9`'s `hydro_lang::sim::provenance::{Tagged, Tag, TagSet, apply1}`;
+  - core gains E5 (§6.2): sends carry an opaque tag on the simulator's wire.
+  - What stays out: replay, the hook policies and `erase_guarded`. `map_tick_closure` comes back, but for F6
+    (§6.1), not for replay.
+
+## 6. Changes to core Hydro
+
+Two principles:
+- **Nothing changes for anyone who does not enable `hydrofrac`.** Today the research branch's send filter,
+  event log and provenance modules are gated only by `sim`, so every simulator user pays for an unbounded
+  log and cloned send bytes. Lite gates all of it behind a `hydrofrac` feature of `hydro_lang`, and even with
+  the feature on, codegen changes only for a flow that opts in (`with_network_hook_points()`). The one ungated
+  change is F6, which every simulator user wants.
+- **Extension points, not hydrofrac logic.** Each one is generic, small and testable without hydrofrac.
+
+### 6.1 Independent fixes (land first, separate PRs, valuable on their own)
+
+| PR | change | why it stands alone |
+|---|---|---|
+| F1 | `hydro_std::quorum::collect_quorum_with_response`: result no longer depends on batching | correctness bug; changes Paxos snapshots |
+| F2 | Maelstrom many-to-many: `"port"` in the body, demux by port | wire-format bug for any cluster with several intra-cluster channels |
+| F3 | sim gaps: top-level `Reduce` (replaces `todo!`), the top-level unbounded `Optional` snapshot (`OptionalHook`), `AtLeastOnce → ExactlyOnce` retry cast, clearer `todo!` messages | simulator coverage for ordinary programs. The `Optional` snapshot was planned as dropped, but on `90d9` nothing could consume a top-level unbounded `Optional`, so top-level `Reduce` was unusable without it. `collapse_ticks_around_atomic` is dropped: it depends on upstream #3155, which `90d9` lacks, and on `90d9` every tick has a `ClockId`, so the bug may not exist |
+| F4 | `CompiledSim::first_schedule`, and `exhaustive_then` / `fuzz_bounded_then` with a callback between executions, all public | a deterministic single run for debugging; bounded memory for long explorations (the research branch measured 10 GB → 241 MB from folding results between executions). `first_schedule` is hand-ported, since the research version sits on `deterministic()`, which `90d9` lacks |
+| F5 | `ClusterIds: Copy`, `Counter::next_count` | trivial, additive |
+| F6 | **carry panics across the simulation dylib boundary**: generated code catches a program panic inside the dylib (each tick, through a doc-hidden `Dfir::map_tick_closure`) and the host re-raises it. A host-side stash holds panics from host callbacks (println handlers), re-raised after each poll | ungated, for every simulator user: a program panic used to abort the process with "Rust cannot catch foreign exceptions". Lite needs it so a program panicking under injected faults is a counterexample, not a crash of the test run |
+
+**R**, a refactor with no behaviour change, lands before E: one emitter for the four `create_network` arms, with
+byte-identical generated code. It keeps E's diff small.
+
+### 6.2 Extension points lite needs (one PR, all behind `hydrofrac`)
+
+| id | extension point | lines (plan) | justification |
+|---|---|---|---|
+| E1 | **Network hook:** a flow opts in with `SimFlow::with_network_hook_points()`; without it, codegen is unchanged. An installed `SimNetworkHook` is called on every `Network` send (`on_send` drops it, or delivers it with a `u64` tag), every receive (`on_recv`), external outputs (`on_output`, may drop; `external_output_metadata` names the output ports), execution begin and end (`on_exec_begin` / `on_exec_end`) and instance start (`on_instance_begin`); `take_halts` lets it halt a node. Callbacks arrive in program order; there is no `on_release` (§4.2) | ≈322 (300) | the single seam for any fault injection or network tracing in the simulator; replaces the research branch's hard-wired `record_sent`/`LineageOutputSender` and its `Released` events from hook policies |
+| — | `GuardedNetworkHook`: wraps the hook, so a hook panic inside a dylib callback is stashed and re-raised by F6 | ≈42 (—) | a panicking hook is otherwise a foreign exception |
+| E2 | **IR pass hook** on `SimFlow`: `with_ir_pass(PreNetwork \| PostNetwork, f)`, run in a declared order. `PreNetwork` runs before network compilation (the taps); `PostNetwork` runs after it (the provenance rewrite has to see the compiled sends). The original plan's single pre-network stage was wrong for the rewrite (research `flow.rs:200` vs `:230`) | ≈38 (60) | lets external crates add sim-only instrumentation without core knowing about it; also useful for test oracles. Precedent on `90d9`'s line: `extension.rs::ir_mut` @ `4de7c45e41` |
+| E3 | **Eager locations** | dropped (40) | there is no observer process (§4.7), and nothing else needs one |
+| E4 | **Read access to simulation metadata:** `CompiledSim::channels()` (`ChannelInfo { id, name, from, to, networking: NetworkingInfo, intercepted, op }`) and `locations()` (`LocationInfo { id, name, members }`), both plain data, fed by a provided `DfirBuilder::network_metadata`. No output table: the crate attributes outputs to the current execution. The crate asserts that every lossy channel is intercepted. `serialize_bincode_with_type`, `handoff_ref_ident` and `ClosureExpr::{singleton_refs, into_parts}` become `#[doc(hidden)] pub` | ≈115 (40) | the channel table and the tap serialization live in the hydrofrac crate rather than in core. Recording at `create_network` replaces the research `slice::compute`, which mirrors the emitter's statement counter; the provided method keeps `DfirBuilder` non-breaking |
+| — | accessors | ≈18 (—) | |
+| E5 | **Send metadata on the simulator's wire:** with hook points on, the wire carries the `u64` tag `on_send` returned. A `PostNetwork` pass's wrapped serialize calls `rt::set_send_meta(Vec<u8>)`, and the send that follows hands those bytes to `on_send` (or `on_output`); a wrapped deserialize reads its receive's tag with `rt::recv_tag()`. An opaque meta slot, not the plan's core peeling of `(T, Meta)` | ≈43 (100) | record provenance has to cross the network; an opaque tag and an opaque side value keep provenance itself out of core, and core never sees the pass's types |
+| — | test probe | 8 (—) | |
+
+E is 591 inserted non-test lines (440 code, 96 doc, 55 blank) against 540 here (410 in the original estimate without
+E3), plus 586 test lines; the E commit body itemizes the overrun. Phase 2 (schedule reduction) would add doc-hidden
+read access to the nondeterministic-operator markers for the order check.
+
+**Folding `90d9`'s own sim work.** `90d9` already has two mechanisms that overlap E1, E2 and E5:
+- **Crash injection** (`with_crashable_process` / `with_crashable_cluster`, `CrashHook`, `crash_channels_ident`).
+  `CrashHook` stays a nondeterminism `SimHook`: crash timing is a search choice drawn from the driver, and
+  re-expressing it as a deterministic interceptor would cost more than it saves. It shares the send emitter (R)
+  and `halt_location` with E1, and its users' tests pass unchanged.
+- **Forward provenance** (`SimFlow::with_provenance`, `sim/provenance.rs` + `provenance_ir.rs`): stays hard-wired,
+  and is not folded into an E2 pass. Lite's rewrite is separate and internal to `EcCheck`, but its generated code
+  reuses this module's `Tagged`, `Tag`, `TagSet` and `apply1` (§5).
+
+### 6.3 Research-branch core changes lite deliberately avoids
+
+| change | why it isn't needed |
+|---|---|
+| `create_network(.., input_element_type)` | breaks the public `DfirBuilder` trait only to print payloads; lite renders payloads with `Debug` at the send, from the provenance rewrite (§4.8) |
+| `broadcast_closed` rewrite (`flat_map_ordered` over `ClusterIds`) | changes codegen for every cluster→cluster broadcast only to hide the member-id list from the observation pass. Lite's observation pass drops instead every labelled collection whose only sources are cluster membership (a `ClusterMembers` source, or `source_iter` over `ClusterIds`), with no core change |
+| `pub mod spec_views` (ungated) | not carried over: the specification is checked on the host (§4.7) |
+| `erase_guarded`, and `map_tick_closure` for replay | guards counterfactual replays that panic; lite doesn't replay. `map_tick_closure` is reintroduced for F6, not for replay |
+| standing hook policies (`scripted.rs`, `tick_input.rs`, `observation.rs`), `BatchHook::{deliver_all, replay, omit, ..}`, `flow.sim_hook()`, `NonDet::hooked` | replay and traced pass-through only. The `BatchHook` method additions have no callers; `BatchHook` itself and `flow.sim_hook()` are research-only and are used by 2PC, ISR and the research `Spec::accumulate`. The execution rule is sound without them, using E1's program-order callbacks (§4.2). Those users are rewritten on plain `main` features or dropped (§7) |
+| the research branch's `with_provenance` as a core `SimFlow` API, and its provenance branches in `builder.rs` | the rewrite enters through E2 and its tags through E5's opaque `u64`, so core knows nothing about lite's provenance. (`90d9`'s own `with_provenance` is a different, existing feature, §6.2) |
+| fine-grained sink slices in `slice.rs` | leftovers of the removed `Level::Slice` (about 300 lines unused) |
+| `location_names`, `keyed_singleton.rs` formatting | cosmetic |
+
+## 7. Validation
+
+- **The EC corpus.** Ported to the lite API:
+  - `hydro_test`: `ec_hydrofrac.rs`, `ec_hydrofrac_classes.rs`, `ec_demos_hydrofrac.rs` (from `ec_ldfi.rs`,
+    `ec_all_labels_classes.rs` and `ec_demos_ldfi.rs` minus its two phase-2 tests), and `ec_two_pc_hydrofrac.rs`;
+  - `hydro_std`: `ec_abd_hydrofrac.rs` (ABD; needs the research demo deltas `abd_register_reliable_phase2` and
+    `reliable_broadcast_closed_from_cluster` on `main`).
+- **2PC.** `two_pc_ldfi.rs` is rewritten on plain `main` features (no `BatchHook`, no `flow.sim_hook()`), every node
+  crashable. Its hand-written-spec and strategy-comparison tests are not ported.
+- **ISR is out of scope.** Its unclean-election bug was only ever found through hand-written PRE/POST specs.
+- **Acceptance: the same verdict per label as the research branch's positional records**
+  (`docs/design/hydrofrac-lite-data/rec-positional.tsv`).
+  - **A record row** is one line of that file: one search the research branch ran. It has 13 tab-separated columns:
+    test, label, crash model, exploration, verdict, normalized counterexample (`{omit(..) | crash(<node>)}`), raw
+    counterexample, hypotheses, schedules, wall time, peak RSS, exploration note, novel sends.
+  - **Which rows count:** the rows of the ported files, plus 2PC's `…with_the_harness_fault_model`. Excluded: ISR, and
+    every row from a restricted crashable set (2PC `…with_the_coordinator_correct`, ISR
+    `…with_the_harness_fault_model`), along with strategy comparisons and other non-EC rows.
+  - **Keying:** by (file, collection name, occurrence), falling back to the operator when a collection has no name.
+    The records' `file:line` labels don't match `main` (`abd.rs` alone has about 1.1k lines of diff). Single-spec rows (label `-`) map to the label of the stream they observed.
+  - **Matching the sweep (§4.5) to a record:**
+    - a research certificate (crashes bounded only by vacuity) must be "tolerates every admissible number of
+      crashes", or `Exhausted` in a program with schedule choices (§4.9);
+    - a research counterexample must be "breaks at k+1", with k+1 no greater than the record's crash count;
+    - the counterexample sets are expected to match, and any difference is explained (the sweep finds the fewest
+      crashes first, the research search the fewest faults);
+    - multi-Paxos compares at `.max_crashes(1)`, its research `crash_budget(1)`.
+  - **Not wired up:** the record comparison through `compare.py`. The crate has no rows output, so the 13 columns
+    would be written test-side; the comparison was done per ported file, by hand, against the records.
+- **Heal check:** gossip's three labels (`crdt_gossip.rs` `:54`, `:84`, `:138`) under heal at the end of the run
+  (§4.6). `all_elements` and the G-Set it covers find no counterexample under any crash set (`Exhausted`, since
+  gossip has schedule choices); the `echo` hop breaks at 1 crash, because a member may now crash mid-round, which
+  the research harness's early EFF ruled out.
+- **Provenance check:** `leader_merge`'s keyed `entries_partially_ordered` is tracked precisely, not miscompiled
+  (§4.2), and its verdict matches its record. Every corpus program runs instrumented with 0 opaque records.
+- **Honesty check, test-only:** `EcCheck::cross_check` (feature `cross-check`), a brute-force enumerator over every
+  admissible fault set up to size 2, with no lineage pruning. It runs in `hydro_test`'s `ec_bruteforce.rs` on a plain
+  broadcast, `reliable_broadcast_closed`, `ask_once` and CTP-3, and in the crate's own `check/brute_tests.rs`.
+  Agreement with lite's verdicts tests the lineage pruning without a `Strategy::Blind` in the API. In programs
+  with schedule choices it tests the heuristic: before §4.9, `ask_once` and CTP-3 disagreed (false certificates).
+- **Solver check:** on every ported search, the `microlp` and HiGHS backends return sets of the same size,
+  behind the opt-in `highs` feature. Not run.
+- **Performance budget:** total EC-corpus search time no worse than the positional records' EC rows. The sweep tries
+  the low-bound hypotheses first, and those are admissible at higher bounds too. So it should cost about the same
+  as one search at the top bound, but this is measured, not assumed.
+
+## 8. Plan of work
+
+Done, as the lean series:
+1. **F1–F6** (§6.1), each an independent commit on `90d9` with its own test.
+2. **R**: one emitter for the four `create_network` arms, byte-identical generated code.
+3. **E**: E1, E2, E4, E5, `GuardedNetworkHook` and the test probe, behind `hydrofrac` (§6.2). E3 dropped.
+4. **The `hydrofrac` crate**, in dependency order: `search` (the ILP with the `0.5/(n·n)` tie-break, the sweep,
+   the completion), `fault`, `provenance` (with the schedule-choice scan), `lineage`, `observe`, `spec` (host-side),
+   the `EcCheck` loop (`check`) with heal and `Exhausted`, then `report` and `lamport`.
+5. **The ported corpus** (§7): the `hydro_test` and `hydro_std` harnesses, the static schedule-choice table, and the
+   brute-force cross-checks.
+6. **This document.**
+
+Not done: phase 2 (open sent sets, the order check, one schedule per hypothesis), until a program needs it.
+
+## 9. Decisions
+
+Settled:
+1. **Crash model:** positional only; sent sets and schedule reduction are phase 2 (§3).
+2. **Lamport backend:** DOT only; Mermaid rejected because it can't draw messages in flight across a fault (§4.8).
+3. **`trust_order_insensitive(site)`:** not in v1. It would win back certificates in programs with schedule choices,
+   but it is a per-site knob, against convention over configuration.
+4. **Crate placement:** a separate `hydrofrac` crate; core only gets §6.2.
+5. **`broadcast_closed`:** not changed; membership-only labels are dropped in lite's observation pass (§6.3).
+6. **Solver:** the `good_lp` ILP on `microlp`, HiGHS behind the opt-in `highs` feature (§4.4).
+7. **Lineage:** record provenance only, with the execution rule as the opaque-record fallback and no replay
+   (§5, run C). Keyed `entries_partially_ordered` is rewritten precisely (§4.2).
+8. **Base:** `origin/main` @ `90d9d26736` as is, with no rebase onto upstream. `90d9`'s crash injection stays a
+   `SimHook` that shares the send emitter and `halt_location`; its forward provenance stays hard-wired (§6.2).
+9. **Scope:** ISR is out. 2PC stays, rewritten on plain `main` features. Nothing exotic: no research-only hooks (§1).
+10. **Heal:** EFF is renamed and becomes a convention. Faults are admitted while the run closure executes and
+    while the work it caused settles; then the network heals; crashes persist; no public knob (§4.6).
+11. **Crash sweep:** the default output. Every node is crashable, with no restricted crashable sets, and
+    `.max_crashes(n)` caps the sweep (§4.5).
+12. **Verdict comparison:** keyed by (file, collection name, occurrence), with an operator fallback. ISR and
+    restricted-crash rows are excluded (§7).
+13. **No label of a program with a schedule choice is certified:** the search is a heuristic that ends
+    `Exhausted` (§4.9).
+14. **The crash universe is completed** before concluding at a bound, so a certificate covers every positional
+    fault set (§4.5).
+15. **The spec is checked on the host**, from per-member taps (§4.7).
+16. **E3 is dropped:** with no observer there is no eager location (§6.2).
+17. **The Lamport diagram has one fixed layout**, with no options and no `×k` collapse (§4.8).
+
+Open:
+- **Certificates in programs with schedule choices**, for example an order-insensitivity analysis or per-record
+  taint. Deliberately not in lean (§4.9).
+- **A fault-free recovery phase** (`then_heal(recovery)`): only if a program's recovery works only on a healed
+  network (§4.6).
+- **All minimal counterexamples at the breaking bound:** an extension of the sweep, if one witness per label
+  proves too little (§4.5).
