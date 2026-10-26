@@ -13,7 +13,13 @@ pub mod paxos_bench;
 pub mod paxos_log_bench;
 #[cfg(feature = "tokio")]
 pub mod paxos_with_client;
+#[cfg(feature = "cress")]
+pub mod cress_inputs_check;
+pub mod pure_heartbeat;
 pub mod raft;
+pub mod rpc_retry;
+#[cfg(feature = "cress")]
+pub mod rpc_retry_check;
 pub mod simple_cluster;
 #[cfg(feature = "tokio")]
 pub mod two_pc;
@@ -54,3 +60,4 @@ mod ec_teaching;
 
 #[cfg(test)]
 mod ec_teaching_checks;
+pub mod witnesses;
