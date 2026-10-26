@@ -97,10 +97,15 @@ pub struct DecisionFuture {
 
 impl DecisionFuture {
     fn new(hook_id: usize, member: Option<u32>, decision: &impl ScriptDecision) -> Self {
+        Self::from_blob(hook_id, member, rmp_serde::to_vec_named(decision).unwrap())
+    }
+
+    /// A decision already serialized by the caller (see [`super::extension::install_decision`]).
+    pub(crate) fn from_blob(hook_id: usize, member: Option<u32>, blob: Vec<u8>) -> Self {
         DecisionFuture {
             hook_id,
             member,
-            blob: Some(rmp_serde::to_vec_named(decision).unwrap()),
+            blob: Some(blob),
         }
     }
 }
