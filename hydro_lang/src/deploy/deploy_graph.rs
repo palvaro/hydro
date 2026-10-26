@@ -64,8 +64,14 @@ impl<'a> Deploy<'a> for HydroDeploy {
         _external_types: Option<(&syn::Type, &syn::Type)>,
     ) -> (syn::Expr, syn::Expr) {
         match networking_info {
+            // A `lossy_delayed_forever` channel may delay any message forever and reorder
+            // freely; a TCP connection delivers in order while it stands and nothing after it
+            // fails, which that contract allows. (`Lossy` is not deployed this way: its
+            // fairness is not met by a connection that stops.)
             crate::networking::NetworkingInfo::Tcp {
-                fault: crate::networking::TcpFault::FailStop,
+                fault:
+                    crate::networking::TcpFault::FailStop
+                    | crate::networking::TcpFault::LossyDelayedForever,
             } => {}
             _ => panic!("Unsupported networking info: {:?}", networking_info),
         }
@@ -113,8 +119,14 @@ impl<'a> Deploy<'a> for HydroDeploy {
         _external_types: Option<(&syn::Type, &syn::Type)>,
     ) -> (syn::Expr, syn::Expr) {
         match networking_info {
+            // A `lossy_delayed_forever` channel may delay any message forever and reorder
+            // freely; a TCP connection delivers in order while it stands and nothing after it
+            // fails, which that contract allows. (`Lossy` is not deployed this way: its
+            // fairness is not met by a connection that stops.)
             crate::networking::NetworkingInfo::Tcp {
-                fault: crate::networking::TcpFault::FailStop,
+                fault:
+                    crate::networking::TcpFault::FailStop
+                    | crate::networking::TcpFault::LossyDelayedForever,
             } => {}
             _ => panic!("Unsupported networking info: {:?}", networking_info),
         }
@@ -174,8 +186,14 @@ impl<'a> Deploy<'a> for HydroDeploy {
         _external_types: Option<(&syn::Type, &syn::Type)>,
     ) -> (syn::Expr, syn::Expr) {
         match networking_info {
+            // A `lossy_delayed_forever` channel may delay any message forever and reorder
+            // freely; a TCP connection delivers in order while it stands and nothing after it
+            // fails, which that contract allows. (`Lossy` is not deployed this way: its
+            // fairness is not met by a connection that stops.)
             crate::networking::NetworkingInfo::Tcp {
-                fault: crate::networking::TcpFault::FailStop,
+                fault:
+                    crate::networking::TcpFault::FailStop
+                    | crate::networking::TcpFault::LossyDelayedForever,
             } => {}
             _ => panic!("Unsupported networking info: {:?}", networking_info),
         }
@@ -227,8 +245,14 @@ impl<'a> Deploy<'a> for HydroDeploy {
         _external_types: Option<(&syn::Type, &syn::Type)>,
     ) -> (syn::Expr, syn::Expr) {
         match networking_info {
+            // A `lossy_delayed_forever` channel may delay any message forever and reorder
+            // freely; a TCP connection delivers in order while it stands and nothing after it
+            // fails, which that contract allows. (`Lossy` is not deployed this way: its
+            // fairness is not met by a connection that stops.)
             crate::networking::NetworkingInfo::Tcp {
-                fault: crate::networking::TcpFault::FailStop,
+                fault:
+                    crate::networking::TcpFault::FailStop
+                    | crate::networking::TcpFault::LossyDelayedForever,
             } => {}
             _ => panic!("Unsupported networking info: {:?}", networking_info),
         }
