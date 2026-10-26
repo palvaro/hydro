@@ -5,9 +5,16 @@ No third-party dependencies. Columns understood:
   second, rounds, offered, completed, abandoned, p50_ms, p99_ms
   <stream>_n   records per second on an output stream
   <stream>_v   latest value of a level (gauge) stream
+  wchar_kb_<node>  the node's kernel writes per second, measured from outside it (KiB/s)
+  cpu_<node>, nr_throttled_<node>  the node's CPU use (cores) and CFS periods throttled
 Any other numeric column is ignored.
 
     sedge_plot.py TRACE.tsv OUT.svg "title" [--trigger 10,15] [--tail-window 37,60] [--rates a,b] [--dip]
+                  [--msg-bytes B] [--cpu-period-us P]
+
+--msg-bytes: draw the outside-measured writes as messages per second (KiB/s * 1024 / B) instead
+of KiB/s. --cpu-period-us: the CFS period the quotas were enforced over (default 100000), to
+draw throttled periods as a fraction.
 
 --tail-window: the tail verdict window to shade (default [37,60); with `--tail 60` it is [45,75)).
 --rates: streams that carry `_v` columns but are not levels (for example a stream of `u64` ids
@@ -142,6 +149,25 @@ def main(argv):
         panels.append((rates, "output stream record rates" + (" (log; zero not drawn)" if wide else ""), "records/s", wide))
     for k in level_cols:
         panels.append(([(k[:-2], d[k])], f"level: {k[:-2]}", "value", False))
+    # Measured from outside the program (the containers' /proc accounting and cgroup stats).
+    wchar = sorted(k for k in d if k.startswith("wchar_kb_"))
+    if wchar:
+        msg_bytes = float(argv[argv.index("--msg-bytes") + 1]) if "--msg-bytes" in argv else None
+        scale = (1024.0 / msg_bytes) if msg_bytes else 1.0
+        series = [(k[len("wchar_kb_"):] + " writes", [None if v is None else v * scale for v in d[k]]) for k in wchar]
+        unit = "msgs/s" if msg_bytes else "KiB/s"
+        what = f"~{msg_bytes:g} B messages" if msg_bytes else "KiB"
+        panels.append((series, f"wire writes per node, measured outside the program ({what})", unit, False))
+    cpu = sorted(k for k in d if k.startswith("cpu_"))
+    if cpu:
+        period_us = float(argv[argv.index("--cpu-period-us") + 1]) if "--cpu-period-us" in argv else 100000.0
+        per_s = 1e6 / period_us
+        series = [(k[4:] + " cores", d[k]) for k in cpu]
+        for k in cpu:
+            t = d.get("nr_throttled_" + k[4:])
+            if t and any(v for v in t if v):
+                series.append((k[4:] + " throttled (frac.)", [None if v is None else min(v / per_s, 1.0) for v in t]))
+        panels.append((series, "CPU use (cores) and fraction of CFS periods throttled", "cores / fraction", False))
 
     height = PAD_T + len(panels) * (H_PANEL + GAP) + PAD_B
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{height}" font-family="Helvetica, Arial, sans-serif">',
