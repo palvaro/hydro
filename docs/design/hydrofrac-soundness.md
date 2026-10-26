@@ -1119,3 +1119,18 @@ and fixed structurally:
   only proved literals (§8). The ranks of sequenced broadcasts (§6.4) are read from the probe, but only where the
   proof says every run sends a prefix of the probe's sequence, and every executed run is checked against them. The
   weights' tie-break uses observed positions, but only to order proposals, never to decide soundness.
+- **Resend-until-acked programs cost a full enumeration.** A cost gap, not a soundness one. In
+  `hydro_std::reliable_send` every resend passes `filter_not_in(acked)` and `filter_if` on the timer, both fragile
+  (§3). A value whose first copy is lost then has only fragile derivations, so Claim A prunes no set that drops one,
+  and the Claim B sweep (§13) runs the rest. A check costs about `2^k` sets for the `k` lossy messages sent before the
+  heal, times the crash options (measured in `hydro_test/src/cluster/ec_reliable_send.rs`: three values with
+  resends only after the heal certify at 576 sets; two values with a resend before the heal pass the budget).
+  - **Open research item, beside review 3's R1** (the same send before and after the heal, which is this
+    program's shape). Values here are independent: an acknowledgement of one value never removes another from the
+    outstanding set, so the search explores the product over values where their sum would do. Two directions,
+    neither argued nor implemented:
+    - *Keyed negation*: treat `x.filter_not_in(y)` as robust per key when the negated record is its own key and the
+      derivation shows `y` held no record of that key. This needs an argument that the negative side's
+      schedule-dependent contents cannot remove a record of another key, and has to be reconciled with R1.
+    - *Per-key Claim B*: decompose the sweep by key. Claim B is about facts outside the domain, which per-pair
+      clauses say nothing about, so this needs its own argument.
