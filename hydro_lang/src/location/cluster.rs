@@ -228,20 +228,15 @@ impl<'a, C> Cluster<'a, C> {
 ///
 /// When spliced into a quoted snippet, this provides access to the set of
 /// [`TaglessMemberId`]s that belong to the cluster.
+///
+/// It is `Copy`, so that a quoted closure that runs more than once (`map`, `flat_map`) can
+/// splice it.
+#[derive(Clone, Copy)]
 pub struct ClusterIds<'a> {
     /// The location key identifying which cluster this refers to.
     pub key: LocationKey,
     /// Phantom data binding the lifetime.
     pub _phantom: PhantomData<&'a ()>,
-}
-
-impl<'a> Clone for ClusterIds<'a> {
-    fn clone(&self) -> Self {
-        Self {
-            key: self.key,
-            _phantom: Default::default(),
-        }
-    }
 }
 
 impl<'a, Ctx> FreeVariableWithContextWithProps<Ctx, ()> for ClusterIds<'a> {

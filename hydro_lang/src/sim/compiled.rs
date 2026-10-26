@@ -60,9 +60,9 @@
 //! swallows panics. Internal invariant checks should use `abort_assert!`
 //! rather than `panic!`/`assert!`.
 //!
-//! TODO(mingwei): Panics inside the tick DFIR (generated code in the dylib) are
-//! also caught by bolero's `catch_unwind`. Consider a mechanism to detect and
-//! propagate those as well.
+//! Panics inside the tick DFIR (generated code in the dylib) are caught in the dylib and raised
+//! again on the host as ordinary panics (see `sim::panic_guard`), so they reach bolero's
+//! `catch_unwind` like panics in the test body.
 
 /// Like `assert!`, but calls `std::process::abort()` instead of `panic!()`.
 /// Use for internal invariants that must not be silently caught by bolero.
@@ -97,6 +97,7 @@ use super::runtime::{
     Hooks, InlineHooks, ObservationHooks, ScriptTarget, ScriptedHookControl, ScriptedHookRegistry,
     ScriptedInlineHooks, ScriptedObservationHooks, ScriptedTickHooks, SimLocation,
 };
+use super::network_hook::{ChannelInfo, LocationInfo, SimNetworkHook};
 use super::{SimClusterReceiver, SimClusterSender, SimReceiver, SimSender};
 use crate::compile::builder::ExternalPortId;
 use crate::live_collections::stream::{ExactlyOnce, NoOrder, Ordering, Retries, TotalOrder};
@@ -134,12 +135,17 @@ struct QuiescenceState {
     tainted: Cell<bool>,
     /// Set when new input is sent after `tainted`; all further receives panic.
     poisoned: Cell<bool>,
+    /// While set (see [`forbid_barriers`]), a phase barrier — [`quiesce`], or input after an
+    /// observation forced quiescence — panics with this message.
+    barriers_forbidden: Cell<Option<&'static str>>,
 }
 
 impl QuiescenceState {
     /// Signal that new input has been sent, waking the scheduler if it was quiescent.
     fn resume(&self) {
         if self.tainted.get() {
+            // Input after a forced quiescence: the observation was a phase barrier.
+            guard_barrier_allowed(self);
             self.poisoned.set(true);
         }
         self.quiescent.set(false);
@@ -546,6 +552,29 @@ impl Drop for SettlePauseGuard {
     }
 }
 
+/// Panics if phase barriers are forbidden (see [`forbid_barriers`]).
+fn guard_barrier_allowed(quiescence: &QuiescenceState) {
+    if let Some(reason) = quiescence.barriers_forbidden.get() {
+        panic!("{reason}");
+    }
+}
+
+/// Runs `phase` with phase barriers forbidden: a [`quiesce`] inside it, or new input after an
+/// observation forced the simulation to quiesce (such as [`SimReceiver::try_next`] with
+/// nondeterministic work pending), panics with `reason`. Waiting for a message stays allowed.
+///
+/// For checkers that explore every interleaving of a phase: a barrier inside it would hide
+/// the interleavings it cuts.
+#[cfg(feature = "hydrofrac")]
+pub async fn forbid_barriers<T>(reason: &'static str, phase: impl Future<Output = T>) -> T {
+    let quiescence =
+        CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().quiescence.clone());
+    let outer = quiescence.barriers_forbidden.replace(Some(reason));
+    let out = phase.await;
+    quiescence.barriers_forbidden.set(outer);
+    out
+}
+
 /// Panics if the simulation has been poisoned: an earlier observation forced the simulation
 /// to quiesce (running pending nondeterministic work), and new input has been sent since, so
 /// further observations could misattribute failures caused by the forced overrun.
@@ -575,6 +604,7 @@ pub async fn quiesce() {
     let quiescence =
         CURRENT_SIM_CONNECTIONS.with(|connections| connections.borrow().quiescence.clone());
     guard_not_poisoned(&quiescence);
+    guard_barrier_allowed(&quiescence);
 
     let mut notified_fut = pin!(None);
     std::future::poll_fn(|cx| {
@@ -773,7 +803,47 @@ pub struct CompiledSim {
     pub(super) lib: Library,
     pub(super) externals_port_registry: SimExternalPortRegistry,
     pub(super) unit_test_fuzz_iterations: usize,
+    /// Whether the dylib was generated with network hook points.
+    pub(super) network_hooks: bool,
+    /// The hook installed with [`Self::set_network_hook`], handed to every instance.
+    pub(super) network_hook: RefCell<Option<Rc<dyn SimNetworkHook>>>,
+    #[cfg_attr(not(feature = "hydrofrac"), expect(dead_code, reason = "hydrofrac API"))]
+    pub(super) channels: Vec<ChannelInfo>,
+    #[cfg_attr(not(feature = "hydrofrac"), expect(dead_code, reason = "hydrofrac API"))]
+    pub(super) locations: Vec<LocationInfo>,
 }
+
+/// Signature of the dylib's exported network-hook installer.
+type SetNetworkHookFn = unsafe extern "Rust" fn(Option<Rc<dyn SimNetworkHook>>);
+
+#[cfg(feature = "hydrofrac")]
+impl CompiledSim {
+    /// Installs `hook` for every subsequent instance. Requires a flow compiled with
+    /// [`SimFlow::with_network_hook_points`](super::flow::SimFlow::with_network_hook_points).
+    pub fn set_network_hook(&self, hook: Rc<dyn SimNetworkHook>) {
+        assert!(
+            self.network_hooks,
+            "set_network_hook requires a flow compiled with `with_network_hook_points()`"
+        );
+        *self.network_hook.borrow_mut() = Some(hook);
+    }
+
+    /// Removes the hook installed with [`Self::set_network_hook`].
+    pub fn clear_network_hook(&self) {
+        *self.network_hook.borrow_mut() = None;
+    }
+
+    /// The program's network channels, one per `Network` node, in emission order.
+    pub fn channels(&self) -> &[ChannelInfo] {
+        &self.channels
+    }
+
+    /// The program's processes and clusters, in location order.
+    pub fn locations(&self) -> &[LocationInfo] {
+        &self.locations
+    }
+}
+
 
 #[sealed::sealed]
 /// A trait implemented by closures that can instantiate a compiled simulation.
@@ -785,12 +855,13 @@ impl<'a, T: RefUnwindSafe + Fn() -> CompiledSimInstance<'a>> Instantiator<'a> fo
 
 fn null_handler(_args: fmt::Arguments<'_>) {}
 
+// The dylib calls these mid-tick, so a panic in them (e.g. a closed stdout) stays host-side.
 fn println_handler(args: fmt::Arguments<'_>) {
-    println!("{}", args);
+    super::panic_guard::catch_host((), || println!("{}", args));
 }
 
 fn eprintln_handler(args: fmt::Arguments<'_>) {
-    eprintln!("{}", args);
+    super::panic_guard::catch_host((), || eprintln!("{}", args));
 }
 
 /// Creates a simulation instance, returning:
@@ -808,6 +879,7 @@ type SimLoaded<'a> = libloading::Symbol<
         cluster_external_in: &mut HashMap<usize, HashMap<u32, UnsyncSender<Bytes>>>,
         println_handler: fn(fmt::Arguments<'_>),
         eprintln_handler: fn(fmt::Arguments<'_>),
+        panic_handler: super::panic_guard::PanicHandler,
     ) -> (
         Vec<(LocationId, Option<u32>, DfirErased)>,
         Vec<(LocationId, Option<u32>, DfirErased)>,
@@ -841,14 +913,27 @@ impl CompiledSim {
     ) -> T {
         let func: SimLoaded<'_> = unsafe { self.lib.get(b"__hydro_runtime").unwrap() };
         let log = always_log || std::env::var("HYDRO_SIM_LOG").is_ok_and(|v| v == "1");
+        // Only dylibs generated with hook points export the installer.
+        let set_network_hook: Option<SetNetworkHookFn> = self.network_hooks.then(|| unsafe {
+            *self
+                .lib
+                .get::<SetNetworkHookFn>(b"__hydro_set_network_hook")
+                .unwrap()
+        });
+        // A panic inside an instance aborts that instance, and the hook sees
+        // `on_instance_begin` before the next one.
+        let network_hook = std::panic::AssertUnwindSafe(self.network_hook.borrow().clone());
+        let externals_port_registry = &self.externals_port_registry;
         thunk(
             &(|| CompiledSimInstance {
                 func: func.clone(),
-                externals_port_registry: self.externals_port_registry.clone(),
+                externals_port_registry: externals_port_registry.clone(),
                 dylib_result: None,
                 log,
                 exhaustive: false,
                 deterministic: false,
+                set_network_hook,
+                network_hook: Option::clone(&network_hook),
             }),
         )
     }
@@ -1045,7 +1130,24 @@ impl CompiledSim {
     /// Because no fuzzer is involved, you can run exhaustive tests with `cargo test`.
     ///
     /// Returns the number of distinct executions explored.
-    pub fn exhaustive(&self, mut thunk: impl AsyncFnMut() + RefUnwindSafe) -> usize {
+    pub fn exhaustive(&self, thunk: impl AsyncFnMut() + RefUnwindSafe) -> usize {
+        self.exhaustive_then(thunk, || {})
+    }
+
+    /// [`Self::exhaustive`], calling `after` once each execution has finished, outside the
+    /// instance.
+    ///
+    /// This lets a caller fold each execution's results into a summary between executions
+    /// (rather than accumulating them across the whole exploration), and run instances of its
+    /// own from `after`. A panic in `after` ends the exploration like a panic in `thunk` does.
+    ///
+    /// Returns the number of distinct executions explored.
+    pub fn exhaustive_then(
+        &self,
+        mut thunk: impl AsyncFnMut() + RefUnwindSafe,
+        after: impl FnMut(),
+    ) -> usize {
+        let mut after = std::panic::AssertUnwindSafe(after);
         if std::env::var("BOLERO_FUZZER").is_ok() {
             eprintln!(
                 "Cannot run exhaustive tests with a fuzzer. Please use `cargo test` instead of `cargo sim`."
@@ -1091,13 +1193,143 @@ impl CompiledSim {
                     tokio::runtime::Builder::new_current_thread()
                         .build()
                         .unwrap()
-                        .block_on(async { instance.run(&mut thunk).await })
+                        .block_on(async { instance.run(&mut thunk).await });
+                    (*after)();
                 })
             },
             false,
         );
 
         count
+    }
+    /// Explores exactly `iterations` randomly scheduled executions of the simulation, with no
+    /// fuzzer, no reproducer lookup and no failure output.
+    ///
+    /// This is a bounded random sample of the schedule space, for callers that run many such
+    /// samples under their own control and need each one to terminate. Prefer [`Self::fuzz`]
+    /// for tests.
+    pub fn fuzz_bounded(&self, iterations: usize, thunk: impl AsyncFnMut() + RefUnwindSafe) {
+        self.fuzz_bounded_then(iterations, thunk, || {});
+    }
+
+    /// [`Self::fuzz_bounded`], calling `after` once each execution has finished, outside the
+    /// instance (see [`Self::exhaustive_then`]).
+    pub fn fuzz_bounded_then(
+        &self,
+        iterations: usize,
+        mut thunk: impl AsyncFnMut() + RefUnwindSafe,
+        after: impl FnMut(),
+    ) {
+        let mut after = std::panic::AssertUnwindSafe(after);
+        self.with_instantiator(
+            |instantiator| {
+                bolero::test(bolero::TargetLocation {
+                    package_name: "",
+                    manifest_dir: "",
+                    module_path: "",
+                    file: ".",
+                    line: 0,
+                    item_path: "<unknown>::__bolero_item_path__",
+                    test_name: None,
+                })
+                .with_iterations(iterations)
+                .run_with_replay(move |is_replay| {
+                    let mut instance = instantiator();
+                    if is_replay {
+                        instance.log = true;
+                    }
+                    tokio::runtime::Builder::new_current_thread()
+                        .build()
+                        .unwrap()
+                        .block_on(async { instance.run(&mut thunk).await });
+                    (*after)();
+                })
+            },
+            false,
+        );
+    }
+
+    /// [`Self::fuzz_bounded_then`], but reproducible: execution `i` (for `i` in `1..=iterations`)
+    /// reads its scheduling and batching choices from a fixed pseudo-random byte stream seeded by
+    /// `i`, so every call explores the same executions. An execution that fails a
+    /// [`continue_if!`](crate::continue_if) assumption is discarded (it does not reach `after`).
+    pub fn sample_then(
+        &self,
+        iterations: usize,
+        mut thunk: impl AsyncFnMut() + RefUnwindSafe,
+        mut after: impl FnMut(),
+    ) {
+        self.with_instantiator(
+            |instantiator| {
+                for seed in 1..=iterations as u64 {
+                    // An xorshift64 stream, which the bytes driver maps to choices. 256 KiB is far
+                    // more than an execution reads; a driver that ran out would fail the
+                    // execution like a `continue_if!`.
+                    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+                    let mut bytes = vec![0u8; 1 << 18];
+                    for chunk in bytes.chunks_exact_mut(8) {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        chunk.copy_from_slice(&state.to_le_bytes());
+                    }
+                    let instance = instantiator();
+                    let driver = Box::new(bolero::bolero_engine::driver::object::Object(
+                        bolero::bolero_engine::driver::bytes::Driver::new(
+                            bytes,
+                            &Default::default(),
+                        ),
+                    ));
+                    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        bolero::bolero_engine::any::scope::with(driver, || {
+                            tokio::runtime::Builder::new_current_thread()
+                                .build()
+                                .unwrap()
+                                .block_on(instance.run(&mut thunk));
+                        })
+                    }));
+                    match run {
+                        Ok(_) => after(),
+                        Err(payload)
+                            if payload
+                                .downcast_ref::<bolero::generator::bolero_generator::any::Error>()
+                                .is_some() => {}
+                        Err(payload) => std::panic::resume_unwind(payload),
+                    }
+                }
+            },
+            false,
+        );
+    }
+
+    /// Runs exactly one execution: the first schedule [`Self::exhaustive`] explores, with every
+    /// scheduling and batching choice resolved to its first alternative by an all-zero entropy
+    /// source.
+    ///
+    /// Deterministic: the same program and body always run the same schedule, which makes
+    /// this useful for debugging a single run.
+    pub fn first_schedule(&self, mut thunk: impl AsyncFnMut() + RefUnwindSafe) {
+        self.with_instantiator(
+            |instantiator| {
+                let mut instance = instantiator();
+                instance.exhaustive = true;
+                bolero::bolero_engine::any::scope::with(
+                    Box::new(bolero::bolero_engine::driver::object::Object(
+                        bolero::bolero_engine::driver::bytes::Driver::new(
+                            vec![0u8; 1 << 20],
+                            &Default::default(),
+                        ),
+                    )),
+                    || {
+                        tokio::runtime::Builder::new_current_thread()
+                            .build()
+                            .unwrap()
+                            .block_on(instance.run(&mut thunk));
+                    },
+                );
+            },
+            false,
+        );
     }
 
     /// Runs the test body against exactly **one** execution of the program, with no fuzzer
@@ -1146,6 +1378,8 @@ pub struct CompiledSimInstance<'a> {
     log: bool,
     exhaustive: bool,
     deterministic: bool,
+    set_network_hook: Option<SetNetworkHookFn>,
+    network_hook: Option<Rc<dyn SimNetworkHook>>,
 }
 
 impl<'a> CompiledSimInstance<'a> {
@@ -1167,6 +1401,21 @@ impl<'a> CompiledSimInstance<'a> {
         let mut cluster_external_in: HashMap<usize, HashMap<u32, UnsyncSender<Bytes>>> =
             HashMap::new();
 
+        // A host panic stashed by a previous instance (which then panicked itself) is stale.
+        super::panic_guard::clear_pending();
+
+        // Hand this instance's hook to the dylib, guarded so a panic in its callbacks stays on the
+        // host side of the dylib boundary (see `sim::panic_guard`).
+        if let Some(set_network_hook) = self.set_network_hook {
+            if let Some(hook) = &self.network_hook {
+                hook.on_instance_begin();
+            }
+            let guarded = self.network_hook.clone().map(|hook| {
+                Rc::new(super::panic_guard::GuardedNetworkHook(hook)) as Rc<dyn SimNetworkHook>
+            });
+            unsafe { set_network_hook(guarded) };
+        }
+
         let mut dylib_result = unsafe {
             (self.func)(
                 colored::control::SHOULD_COLORIZE.should_colorize(),
@@ -1184,6 +1433,7 @@ impl<'a> CompiledSimInstance<'a> {
                 } else {
                     null_handler
                 },
+                super::panic_guard::host_handler,
             )
         };
 
@@ -1198,6 +1448,7 @@ impl<'a> CompiledSimInstance<'a> {
             settle_wakers: RefCell::new(vec![]),
             tainted: Cell::new(false),
             poisoned: Cell::new(false),
+            barriers_forbidden: Cell::new(None),
         });
 
         let mut input_senders = HashMap::new();
@@ -1455,6 +1706,8 @@ impl<'a> CompiledSimInstance<'a> {
             },
             quiescence,
             deterministic: self.deterministic,
+            halted: vec![],
+            network_hook: self.network_hook.take(),
         }
     }
 }
@@ -2409,9 +2662,33 @@ struct LaunchedSim<W: std::io::Write> {
     /// drawn, every unsafe operator with meaningful input must be scripted, and at most
     /// one tick is ever runnable (see `SimFlow::deterministic`).
     deterministic: bool,
+    /// Locations halted by the network hook ([`SimNetworkHook::take_halts`]). Their async DFIRs
+    /// are skipped (but kept alive so inbound channels stay open), and their ticks and
+    /// observations have been removed.
+    halted: Vec<(LocationId, Option<u32>)>,
+    /// The instance's network hook, told about executions and polled for halts.
+    network_hook: Option<Rc<dyn SimNetworkHook>>,
 }
 
 impl<W: std::io::Write> LaunchedSim<W> {
+    /// Permanently halts a location: its async DFIR is skipped from now on (but kept alive, so
+    /// channels *into* it stay open and senders to it are unaffected), and its tick DFIRs and
+    /// observations are removed from scheduling.
+    fn halt_location(&mut self, loc: &LocationId, c_id: Option<u32>) {
+        if self.halted.iter().any(|(l, c)| l == loc && *c == c_id) {
+            return;
+        }
+        self.halted.push((loc.clone(), c_id));
+        self.possibly_ready_ticks
+            .retain(|tick| !(tick.parent_location == *loc && tick.cluster_id == c_id));
+        self.not_ready_ticks
+            .retain(|tick| !(tick.parent_location == *loc && tick.cluster_id == c_id));
+        self.possibly_ready_observations
+            .retain(|obs| !(obs.location == *loc && obs.cluster_id == c_id));
+        self.not_ready_observations
+            .retain(|obs| !(obs.location == *loc && obs.cluster_id == c_id));
+    }
+
     /// Runs a single step of the simulation scheduler.
     ///
     /// A step first advances all async DFIRs; if none of them made progress, it instead runs
@@ -2423,6 +2700,14 @@ impl<W: std::io::Write> LaunchedSim<W> {
     /// This future is always awaited to completion by the driver, so a step is atomic: user
     /// code never runs (and never observes intermediate state) while a step is in flight.
     async fn step(&mut self) {
+        self.step_inner().await;
+        let halts = self.network_hook.as_ref().map(|h| h.take_halts());
+        for (loc, c_id) in halts.into_iter().flatten() {
+            self.halt_location(&loc, c_id);
+        }
+    }
+
+    async fn step_inner(&mut self) {
         // A group remains joinable only while the test body is in the same synchronous poll
         // that created it. Starting any scheduler step seals it and moves its tick out of
         // the ordinary lists exactly once; `Some(current)` then means that tick exclusively
@@ -2511,7 +2796,19 @@ impl<W: std::io::Write> LaunchedSim<W> {
 
         let mut any_made_progress = false;
         for (loc, c_id, dfir) in &mut self.async_dfirs {
-            if dfir.run_tick().await {
+            if self.halted.iter().any(|(l, c)| l == loc && c == c_id) {
+                // A halted location runs no further dataflow (but its DFIR is kept
+                // alive so channels into it stay open).
+                continue;
+            }
+            if let Some(hook) = &self.network_hook {
+                hook.on_exec_begin(loc, *c_id);
+            }
+            let progressed = dfir.run_tick().await;
+            if let Some(hook) = &self.network_hook {
+                hook.on_exec_end();
+            }
+            if progressed {
                 any_made_progress = true;
 
                 // This async DFIR may have produced new data, so the ticks and observations
@@ -2700,6 +2997,9 @@ impl<W: std::io::Write> LaunchedSim<W> {
                 } else {
                     self.possibly_ready_ticks.remove(next_tick_or_obs)
                 };
+                if let Some(hook) = &self.network_hook {
+                    hook.on_exec_begin(&tick.parent_location, tick.cluster_id);
+                }
 
                 match &mut self.log {
                     LogKind::Null => {}
@@ -2805,6 +3105,10 @@ impl<W: std::io::Write> LaunchedSim<W> {
                         made_progress,
                         "runnable tick's DFIR run_tick() returned false"
                     );
+                }
+
+                if let Some(hook) = &self.network_hook {
+                    hook.on_exec_end();
                 }
 
                 if is_scripted_tick {

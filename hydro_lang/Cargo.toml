@@ -60,6 +60,9 @@ sim = [
     "dfir_rs/meta",
 ]
 
+# Simulator extension points for external tooling (see `sim::network_hook`).
+hydrofrac = ["sim"]
+
 docker_deploy = [
     "deploy",
     "docker_runtime",

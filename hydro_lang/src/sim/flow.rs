@@ -12,6 +12,7 @@ use slotmap::{SecondaryMap, SparseSecondaryMap};
 use super::builder::SimBuilder;
 use super::compiled::{CompiledSim, CompiledSimInstance};
 use super::graph::{SimDeploy, SimExternal, SimNode, compile_sim, create_sim_graph_trybuild};
+use super::network_hook::{IrPassStage, LocationInfo};
 use crate::compile::builder::StmtId;
 use crate::compile::ir::HydroRoot;
 use crate::location::LocationKey;
@@ -56,10 +57,117 @@ pub struct SimFlow<'a> {
     /// Number of iterations to use for fuzzing, defaults to 8192
     pub(crate) unit_test_fuzz_iterations: usize,
 
+    /// Who refuses the simulator's own fault injection ([`Self::refuse_sim_faults`]), if anyone.
+    pub(crate) refuse_sim_faults: Option<&'static str>,
+
+    /// IR passes registered with [`Self::with_ir_pass`], in registration order.
+    pub(crate) ir_passes: Vec<(IrPassStage, IrPass<'a>)>,
+
+    /// Emit network hook points (see [`Self::with_network_hook_points`]).
+    pub(crate) network_hooks: bool,
+
+    /// Each location's Rust type name, for [`CompiledSim::locations`].
+    pub(crate) location_names: SecondaryMap<LocationKey, String>,
+
     pub(crate) _phantom: Invariant<'a>,
 }
 
+/// An IR pass registered with [`SimFlow::with_ir_pass`].
+pub(crate) type IrPass<'a> = Box<dyn FnOnce(&mut Vec<HydroRoot>) + 'a>;
+
 impl<'a> SimFlow<'a> {
+    /// Registers an IR pass to run when the simulation is compiled, after the passes registered
+    /// before it at the same [`IrPassStage`]. A pass may edit roots in place and append new ones.
+    #[cfg(feature = "hydrofrac")]
+    pub fn with_ir_pass(
+        mut self,
+        stage: IrPassStage,
+        pass: impl FnOnce(&mut Vec<HydroRoot>) + 'a,
+    ) -> Self {
+        self.ir_passes.push((stage, Box::new(pass)));
+        self
+    }
+
+    /// An independent copy of this flow, to compile a second program from the same user IR (a
+    /// test oracle compiling its own variant of the program, say). The IR is deep-cloned (shared
+    /// nodes stay shared within the copy); the port counters and the external port registry are
+    /// copied into fresh cells, so compiling one flow does not touch the other; every other field
+    /// is cloned.
+    ///
+    /// Returns `None` if IR passes are registered: they are `FnOnce` closures, which cannot be
+    /// copied. Without them, nothing in a flow borrows for `'a` (the lifetime only ties the flow to
+    /// its builder's locations), so the copy is `'static`.
+    #[cfg(feature = "hydrofrac")]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "order-free: every node shares one counter, and the maps are rebuilt by key"
+    )]
+    pub fn try_fork(&self) -> Option<SimFlow<'static>> {
+        if !self.ir_passes.is_empty() {
+            return None;
+        }
+        // The process and cluster nodes share one port counter, and the externals one registry:
+        // the copy gets its own of each, starting where this flow's are.
+        let counter = self
+            .processes
+            .values()
+            .chain(self.clusters.values())
+            .next()
+            .map(|node| *node.shared_port_counter.borrow())
+            .unwrap_or_default();
+        let counter = Rc::new(RefCell::new(counter));
+        let node = || SimNode {
+            shared_port_counter: counter.clone(),
+        };
+        let registry = Rc::new(RefCell::new(self.externals_port_registry.borrow().clone()));
+        Some(SimFlow {
+            ir: crate::compile::ir::deep_clone(&self.ir),
+            processes: self.processes.iter().map(|(k, _)| (k, node())).collect(),
+            clusters: self.clusters.iter().map(|(k, _)| (k, node())).collect(),
+            externals: self
+                .externals
+                .iter()
+                .map(|(k, _)| {
+                    (
+                        k,
+                        SimExternal {
+                            shared_inner: registry.clone(),
+                        },
+                    )
+                })
+                .collect(),
+            cluster_max_sizes: self.cluster_max_sizes.clone(),
+            externals_port_registry: registry,
+            location_version: self.location_version.clone(),
+            location_version_group_root: self.location_version_group_root.clone(),
+            test_safety_only: self.test_safety_only,
+            skip_consistency_assertions: self.skip_consistency_assertions,
+            unit_test_fuzz_iterations: self.unit_test_fuzz_iterations,
+            ir_passes: Vec::new(),
+            network_hooks: self.network_hooks,
+            location_names: self.location_names.clone(),
+            refuse_sim_faults: self.refuse_sim_faults,
+            _phantom: std::marker::PhantomData,
+        })
+    }
+
+    /// Emits network hook points, which call the hook installed with
+    /// [`CompiledSim::set_network_hook`] (see [`super::network_hook`]). Without this call, the
+    /// generated code has none.
+    #[cfg(feature = "hydrofrac")]
+    pub fn with_network_hook_points(mut self) -> Self {
+        self.network_hooks = true;
+        self
+    }
+
+    /// Records that a checker (`by`) injects its own faults. This upstream simulator has no
+    /// built-in crash injection or dynamic membership, so there is nothing to refuse; the
+    /// marker is kept so checkers can call it unconditionally.
+    pub fn refuse_sim_faults(mut self, by: &'static str) -> Self {
+        self.refuse_sim_faults = Some(by);
+        self
+    }
+
     /// Sets the maximum size of the given cluster in the simulation.
     #[must_use]
     pub fn with_cluster_size<C>(mut self, cluster: &Cluster<'a, C>, max_size: usize) -> Self {
@@ -160,6 +268,10 @@ impl<'a> SimFlow<'a> {
             skip_consistency_assertions: self.skip_consistency_assertions,
             channel_tables: BTreeMap::new(),
             bound_sim_hooks: HashMap::new(),
+            network_hooks: self.network_hooks,
+            channels: vec![],
+            pending_network_meta: None,
+            pending_output_port: None,
         };
 
         // Ensure the default (0) external is always present.
@@ -169,6 +281,13 @@ impl<'a> SimFlow<'a> {
                 shared_inner: self.externals_port_registry.clone(),
             },
         );
+
+        let (pre_network, post_network): (Vec<_>, Vec<_>) = std::mem::take(&mut self.ir_passes)
+            .into_iter()
+            .partition(|(stage, _)| *stage == IrPassStage::PreNetwork);
+        for (_, pass) in pre_network {
+            pass(&mut self.ir);
+        }
 
         let mut seen_tees_instantiate: HashMap<_, _> = HashMap::new();
         let mut seen_cluster_members = HashSet::new();
@@ -190,6 +309,10 @@ impl<'a> SimFlow<'a> {
                 &self.location_version_group_root,
                 &self.location_version,
             );
+        }
+
+        for (_, pass) in post_network {
+            pass(&mut self.ir);
         }
 
         let mut seen_tees = HashMap::new();
@@ -246,6 +369,22 @@ impl<'a> SimFlow<'a> {
         let (cluster_max_sizes, cluster_member_ids) = self.cluster_sizing();
         drop(flow_build_span);
 
+        let name = |key: LocationKey| self.location_names.get(key).cloned().unwrap_or_default();
+        #[expect(clippy::disallowed_methods, reason = "sorted below")]
+        let mut locations: Vec<LocationInfo> = (self.processes.keys())
+            .map(|key| LocationInfo {
+                id: LocationId::Process(key),
+                name: name(key),
+                members: None,
+            })
+            .chain(self.clusters.keys().map(|key| LocationInfo {
+                id: LocationId::Cluster(key),
+                name: name(key),
+                members: cluster_member_ids.get(&LocationId::Cluster(key)).cloned(),
+            }))
+            .collect();
+        locations.sort_by(|a, b| a.id.cmp(&b.id));
+
         let (bin, trybuild) = create_sim_graph_trybuild(
             process_graphs,
             cluster_graphs,
@@ -255,6 +394,7 @@ impl<'a> SimFlow<'a> {
             cluster_tick_graphs,
             sim_emit.extra_stmts_global,
             sim_emit.extra_stmts_cluster,
+            self.network_hooks,
         );
 
         let out = compile_sim(bin, trybuild).unwrap();
@@ -268,6 +408,10 @@ impl<'a> SimFlow<'a> {
             lib,
             externals_port_registry: self.externals_port_registry.take(),
             unit_test_fuzz_iterations: self.unit_test_fuzz_iterations,
+            network_hooks: self.network_hooks,
+            network_hook: RefCell::new(None),
+            channels: sim_emit.channels,
+            locations,
         }
     }
 

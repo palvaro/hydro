@@ -290,6 +290,11 @@ impl<T: Countable> Counter<T> {
         T::from_count(id)
     }
 
+    /// The value the next [`Self::get_and_increment`] will return (as a raw count).
+    pub fn next_count(&self) -> usize {
+        self.0
+    }
+
     /// Returns an iterator from zero up to (but excluding) the current counter value.
     ///
     /// This is useful for iterating already-allocated values.
