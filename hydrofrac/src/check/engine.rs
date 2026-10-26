@@ -1,0 +1,716 @@
+//! The loop behind [`EcCheck::run`] (see the [module docs](super)): the races search
+//! (`races_engine.rs`, docs/design/hydrofrac-races.md), and what it shares with the test-only
+//! brute-force oracle (`brute_force.rs`).
+
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
+use std::panic::AssertUnwindSafe;
+use std::rc::Rc;
+
+use hydro_lang::location::dynamic::LocationId;
+use hydro_lang::sim::compiled::{CompiledSim, forbid_barriers, quiesce};
+use hydro_lang::sim::flow::SimFlow;
+use hydro_lang::sim::network_hook::IrPassStage;
+
+use super::results::{
+    ChoiceSite, Counterexample, LabelResult, ReportContext, Results, Stats, VacuousReason, Verdict,
+    counterexample_facts, label_name, missing_notes, verdict_line,
+};
+use crate::fault::{Event, FaultHook, FaultPlan, InstanceRecord, MessageId, NodeId};
+use crate::lineage::{Lineage, Tables};
+use crate::observe::Rule;
+use crate::observe::{Fact, Labels, TapPass, decode_output, tap_pass};
+use crate::report::ReportNames;
+use crate::search::{CheckedCluster, CrashBounds, Fault, FaultSet};
+use crate::spec::{ASide, BSide, Evaluation, MemberView, Members, evaluate, obligations};
+
+// The test-only honesty check (docs/design/hydrofrac-lite.md §7): a child of this module, as it
+// drives the engine. It has its own execution path, independent of the search.
+#[cfg(any(test, feature = "cross-check"))]
+#[path = "brute_force.rs"]
+mod brute;
+#[cfg(any(test, feature = "cross-check"))]
+pub use brute::{BruteForce, BruteLabel, CrossCheck};
+
+// The second, independent oracle (`oracle2.rs`): its own program, taps, faults and comparison.
+#[cfg(any(test, feature = "cross-check"))]
+#[path = "oracle2.rs"]
+mod oracle2;
+#[cfg(any(test, feature = "cross-check"))]
+pub use oracle2::{Oracle2, Oracle2Breaking, Oracle2Collection};
+
+// The search (docs/design/hydrofrac-races.md §4.4, §12): a child of this module, as it drives
+// the engine.
+#[path = "races_engine.rs"]
+mod races_engine;
+
+/// Checks every `EventualConsistency` label of a program (see the [module docs](super)).
+///
+/// One knob, [`Self::max_crashes`], which caps the crash sweep; everything else is a convention
+/// (docs/design/hydrofrac-lite.md §2). In particular each hypothesis is explored over every
+/// schedule if they fit the check's schedule budget, and over a fixed sample of them otherwise;
+/// a label whose search sampled is never certified ([`Verdict::Exhausted`]).
+#[derive(Default)]
+pub struct EcCheck {
+    max_crashes: Option<usize>,
+    taps: Option<TapPass>,
+    /// The operators the provenance rewrite left as opaque islands (filled at compile time).
+    islands: Rc<RefCell<Vec<String>>>,
+    /// The program's fragile steps (filled at compile time).
+    fragile: Option<Rc<RefCell<Vec<crate::provenance::FragileSite>>>>,
+    /// Oracle 2's program: the user's flow, forked before it is instrumented.
+    #[cfg(any(test, feature = "cross-check"))]
+    oracle2: Option<oracle2::Program>,
+}
+
+impl EcCheck {
+    /// A check with no cap on crashes.
+    pub fn new() -> Self {
+        EcCheck::default()
+    }
+
+    /// Caps the crash sweep at `n` crashes: a label that holds at `n` is reported as holding
+    /// with up to `n` crashes ([`crate::search::Tolerance::UpTo`]).
+    pub fn max_crashes(mut self, n: usize) -> Self {
+        self.max_crashes = Some(n);
+        self
+    }
+
+    /// Instruments a simulation for the check, and returns it to compile and pass to
+    /// [`Self::run`]:
+    /// - taps every checked label and emits network hook points;
+    /// - marks the closed-broadcast channels, whose fan-out order is proved
+    ///   (`crate::provenance::fanout`; the mark runs before the rewrite, on the program's own IR);
+    /// - attaches record provenance in fragile mode (docs/design/hydrofrac-races.md §4.1): each
+    ///   record names the deliveries it came from and the fragile steps it passed through.
+    ///   Operators the rewrite cannot see into are opaque islands; their records fall back to
+    ///   the execution rule, which is sound, and count as fragile;
+    /// - skips the program's own consistency assertions (the check is what checks them) and
+    ///   acknowledges lossy channels (the check injects their omissions itself).
+    ///
+    /// Once compiled, [`Self::fragile_sites`] lists the program's fragile steps.
+    pub fn instrument<'a>(&mut self, flow: SimFlow<'a>) -> SimFlow<'a> {
+        #[cfg(any(test, feature = "cross-check"))]
+        {
+            self.oracle2 = Some(oracle2::Program::fork(&flow));
+        }
+        let (taps, pass) = tap_pass();
+        self.taps = Some(taps);
+        // The tap pass runs before networks are compiled, so the provenance rewrite (a
+        // `PostNetwork` pass) traces the taps like any other operator.
+        let flow = flow
+            .refuse_sim_faults("hydrofrac")
+            .skip_consistency_assertions()
+            .test_safety_only()
+            .with_network_hook_points()
+            .with_ir_pass(IrPassStage::PreNetwork, pass)
+            .with_ir_pass(IrPassStage::PostNetwork, |ir| {
+                crate::provenance::fanout::mark(ir);
+            });
+        let sites = Rc::new(RefCell::new(vec![]));
+        self.fragile = Some(sites.clone());
+        crate::provenance::install_fragile(flow, Some(self.islands.clone()), sites)
+    }
+
+    /// The program's fragile steps, indexed by site: `Some` once a flow passed through
+    /// [`Self::instrument`] was compiled, else `None`.
+    pub fn fragile_sites(&self) -> Option<Vec<crate::provenance::FragileSite>> {
+        self.fragile.as_ref().map(|sites| sites.borrow().clone())
+    }
+
+    /// Runs the check on `sim` (compiled from a flow passed through [`Self::instrument`]).
+    /// `inputs` drives the program's inputs while faults strike; then the run quiesces, the
+    /// network heals and the run quiesces again. The same as [`Self::run_then_recover`] with
+    /// nothing to recover.
+    ///
+    /// # Panics
+    /// If `sim` was not instrumented by this check, or if `inputs` places a phase barrier
+    /// (see [`Self::run_then_recover`]).
+    pub fn run(&self, sim: &CompiledSim, inputs: impl AsyncFnMut()) -> Results {
+        self.run_then_recover(sim, inputs, async || {})
+    }
+
+    /// Runs the check on `sim` (compiled from a flow passed through [`Self::instrument`]), in
+    /// two phases:
+    /// 1. the **fault phase**: `inputs` drives the program's inputs while omissions and crashes
+    ///    strike. Every interleaving of the inputs with the program's work is explored, so the
+    ///    phase must not place a barrier: [`quiesce`] here (or an observation forcing
+    ///    quiescence, such as `try_next` with work pending) panics. Awaiting the program's
+    ///    outputs is allowed;
+    /// 2. the run quiesces and the network **heals**: no more omissions, no new crashes, and
+    ///    crashed nodes stay crashed. Then `recover` runs, with no faults: the place for timeout
+    ///    ticks and retry rounds, with [`quiesce`] between them if they model time passing.
+    ///
+    /// The run quiesces again and the specification is checked on what the members hold.
+    ///
+    /// # Panics
+    /// If `sim` was not instrumented by this check, or if `inputs` places a phase barrier.
+    pub fn run_then_recover(
+        &self,
+        sim: &CompiledSim,
+        mut inputs: impl AsyncFnMut(),
+        mut recover: impl AsyncFnMut(),
+    ) -> Results {
+        let labels = self
+            .taps
+            .as_ref()
+            .expect("`EcCheck::run` needs a simulation compiled from `EcCheck::instrument`")
+            .labels();
+        Engine::new(self, sim, &labels, &mut inputs, &mut recover).check()
+    }
+}
+
+/// The panic of a phase barrier in the fault phase.
+const BARRIER_IN_FAULT_PHASE: &str = "hydrofrac: a phase barrier (`quiesce()`, or input after an observation that forced quiescence) inside the inputs of `EcCheck::run`. The fault phase explores every interleaving of the inputs with the program's work; a barrier there hides the interleavings it cuts. Move the rounds that come after the faults (timeouts, retries) into the recovery closure of `EcCheck::run_then_recover`, or drop the barrier.";
+
+/// The work, in messages sent summed over its schedules, up to which the search explores a
+/// hypothesis exhaustively: past it, [`explore_schedules`] samples instead. It counts messages
+/// rather than schedules so that it bounds time: a G-Set gossip schedule sends about 45
+/// messages and costs 35-85 ms, a CTP-2 one about 12 and 4-7 ms. 40,000 covers the largest
+/// hypothesis the exhaustive tests certify (CTP-2 with its timers after the faults: 2,112
+/// schedules, 24,704 messages) with 60% to spare, and costs a gossip probe about 900 schedules
+/// (some 30 s) before it samples (docs/design/hydrofrac-soundness.md §14).
+const SEND_BUDGET: usize = 40_000;
+
+/// The schedules [`explore_schedules`] samples from a hypothesis past [`SEND_BUDGET`]: the
+/// sample size most callers chose when it was a knob, and few enough for G-Set gossip's 82
+/// hypotheses.
+const SAMPLED_SCHEDULES: usize = 8;
+
+/// The panic payload that ends an exhaustive exploration past [`SEND_BUDGET`].
+struct OverBudget;
+
+/// The search's exploration of one hypothesis (docs/design/hydrofrac-soundness.md §14). Runs
+/// `thunk` over every schedule of `sim`, calling `after` once each finishes (see
+/// [`CompiledSim::exhaustive_then`]); `after` returns how many messages the schedule sent.
+/// Once the schedules so far sent more than `SEND_BUDGET` messages, the enumeration stops and
+/// `SAMPLED_SCHEDULES` seeded schedules run instead ([`CompiledSim::sample_then`]: the same ones
+/// on every run of the check). `discard` drops what the schedule past the budget (and the
+/// simulator's replay of it) left behind, before the sample starts. Returns whether the
+/// schedules were sampled: a sampled search certifies nothing ([`Verdict::Exhausted`]).
+///
+/// `over_budget` is the label's memory: set once a hypothesis ran past the budget, after which
+/// every hypothesis is sampled at once. The label can no longer be certified, so enumerating up
+/// to the budget again would only cost time.
+///
+/// A panic of `thunk` or `after` ends the exploration, as in [`CompiledSim::exhaustive_then`].
+pub(super) fn explore_schedules(
+    sim: &CompiledSim,
+    over_budget: &Cell<bool>,
+    mut thunk: impl AsyncFnMut() + std::panic::RefUnwindSafe,
+    mut after: impl FnMut() -> usize,
+    discard: impl FnOnce(),
+) -> bool {
+    if !over_budget.get() {
+        races_engine::refuse_truncated_exhaustive();
+        let mut sends = 0;
+        let exhaustive = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            sim.exhaustive_then(&mut thunk, || {
+                if sends > SEND_BUDGET {
+                    std::panic::resume_unwind(Box::new(OverBudget));
+                }
+                sends += after();
+            });
+        }));
+        match exhaustive {
+            Ok(()) => return false,
+            Err(payload) if payload.is::<OverBudget>() => {
+                over_budget.set(true);
+                discard();
+            }
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+    sim.sample_then(SAMPLED_SCHEDULES, thunk, || {
+        after();
+    });
+    true
+}
+
+/// One instance of a harness: the fault phase (`inputs`, with barriers forbidden), quiesce,
+/// heal, the recovery phase (`recover`, with no faults), quiesce.
+async fn drive(inputs: &mut impl AsyncFnMut(), recover: &mut impl AsyncFnMut(), hook: &FaultHook) {
+    forbid_barriers(BARRIER_IN_FAULT_PHASE, inputs()).await;
+    quiesce().await;
+    hook.heal();
+    quiesce().await;
+    recover().await;
+    quiesce().await;
+}
+
+/// The message of a run's panic, re-raised if it is the harness's mistake rather than the
+/// program's failure: a barrier in the fault phase, or a labelled type with no fact identity.
+fn program_panic(payload: &(dyn std::any::Any + Send)) -> String {
+    let message = panic_message(payload);
+    if message == BARRIER_IN_FAULT_PHASE || message.starts_with(crate::observe::NO_IDENTITY) {
+        panic!("{message}");
+    }
+    message
+}
+
+/// One side of a rule: a tapped collection and the members of its location.
+struct Side {
+    /// The collection's index ([`Labels::plans`]).
+    label: usize,
+    /// Its location.
+    location: LocationId,
+    /// The members of its location (`{0}` for a process).
+    members: BTreeSet<u32>,
+    /// Whether the location is a process.
+    process: bool,
+}
+
+impl Side {
+    /// The node of member `m`.
+    fn node(&self, m: u32) -> NodeId {
+        NodeId::new(&self.location, (!self.process).then_some(m))
+    }
+
+    /// The members in `record`: all, and those whose crash did not fire.
+    fn members_in(&self, record: &InstanceRecord) -> Members {
+        Members {
+            all: self.members.clone(),
+            correct: self
+                .members
+                .iter()
+                .copied()
+                .filter(|m| !record.crashed.contains(&self.node(*m)))
+                .collect(),
+        }
+    }
+
+    /// What this side's members emitted in `outputs` (`(port, member, fact, support)`).
+    fn view<S: Clone>(
+        &self,
+        labels: &Labels,
+        outputs: impl IntoIterator<Item = (usize, u32, Fact, S)>,
+    ) -> MemberView<S> {
+        let mut view = MemberView::default();
+        for (port, member, fact, support) in outputs {
+            if labels.label_of_port(port) == Some(self.label) {
+                view.add(member, fact, support);
+            }
+        }
+        view
+    }
+}
+
+/// One rule's search inputs.
+struct Target {
+    /// The rule's index ([`Labels::rules`]).
+    label: usize,
+    rule: Rule,
+    a: Side,
+    b: Side,
+    /// Its obligations in the failure-free probe (the facts of `A` the A-side owes there).
+    domain: BTreeSet<Fact>,
+    /// The program's schedule choices (empty if it has none), reported with a sampled verdict.
+    sites: Vec<ChoiceSite>,
+}
+
+impl Target {
+    fn sides(&self) -> (ASide, BSide) {
+        (self.rule.a_side, self.rule.b_side)
+    }
+
+    /// The rule evaluated on one run's `outputs` (`(port, member, fact, support)`).
+    fn evaluate<S: Clone>(
+        &self,
+        labels: &Labels,
+        record: &InstanceRecord,
+        outputs: &[(usize, u32, Fact, S)],
+    ) -> Evaluation<S> {
+        let a = self.a.view(labels, outputs.iter().cloned());
+        let b = self.b.view(labels, outputs.iter().cloned());
+        let (in_a, in_b) = (self.a.members_in(record), self.b.members_in(record));
+        evaluate(&a, &b, self.sides(), &in_a, &in_b)
+    }
+
+    /// The failure of an evaluation that does not hold: a missing obligation of `domain` (the
+    /// probe's obligations) is *missing*, any other *divergent* (a fault created it).
+    fn failure<S>(
+        &self,
+        evaluation: Evaluation<S>,
+        domain: &BTreeSet<Fact>,
+        record: &Rc<InstanceRecord>,
+    ) -> Option<Failure> {
+        if evaluation.holds() {
+            return None;
+        }
+        let (missing, outside): (Vec<_>, Vec<_>) = evaluation
+            .missing
+            .into_iter()
+            .partition(|(_, f)| domain.contains(f));
+        let divergent: BTreeSet<Fact> = outside.into_iter().map(|(_, f)| f).collect();
+        Some(Failure {
+            missing,
+            divergent: divergent.into_iter().collect(),
+            panic: None,
+            record: record.clone(),
+        })
+    }
+}
+
+/// The tap outputs of a record's log, as [`Target::evaluate`] reads them (with no support).
+fn log_outputs(labels: &Labels, record: &InstanceRecord) -> Vec<(usize, u32, Fact, ())> {
+    record
+        .log
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            Event::Output {
+                port, node, bytes, ..
+            } if labels.label_of_port(*port).is_some() => {
+                Some((*port, node.member.unwrap_or(0), decode_output(bytes), ()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// What a schedule's failure looks like for a counterexample.
+struct Failure {
+    missing: Vec<(u32, Fact)>,
+    divergent: Vec<Fact>,
+    panic: Option<String>,
+    record: Rc<InstanceRecord>,
+}
+
+impl Failure {
+    /// A program that panics under injected faults breaks every label. A pruned set never hides
+    /// such a panic within the bounds (docs/design/hydrofrac-soundness.md §18, "Panics"): outside
+    /// fragile-free and choice-free programs the Claim B sweep runs every set, and inside them
+    /// every record under faults is a failure-free record, so a pure closure that panics on it
+    /// panics in the probe.
+    fn panic(message: &str, record: Rc<InstanceRecord>) -> Self {
+        Failure {
+            missing: vec![],
+            divergent: vec![],
+            panic: Some(message.to_owned()),
+            record,
+        }
+    }
+}
+
+/// The obligations of `target` in `record`: what the probe learns as its domain.
+fn record_domain(labels: &Labels, target: &Target, record: &InstanceRecord) -> BTreeSet<Fact> {
+    let a = target.a.view(labels, log_outputs(labels, record));
+    obligations(&a, target.rule.a_side, &target.a.members_in(record))
+}
+
+struct Engine<'c, B, R> {
+    sim: &'c CompiledSim,
+    /// The provenance rewrite's opaque islands.
+    islands: Rc<RefCell<Vec<String>>>,
+    labels: &'c Labels,
+    /// The harness's fault phase and recovery phase.
+    inputs: &'c mut B,
+    recover: &'c mut R,
+    tables: Tables,
+    max_crashes: Option<usize>,
+    /// The current label's search ran a hypothesis past `SEND_BUDGET` ([`explore_schedules`]).
+    over_budget: Cell<bool>,
+    /// The oracles' schedules per fault set, if they sample (`cross_check_sampling_oracles`).
+    #[cfg(any(test, feature = "cross-check"))]
+    oracle_samples: Option<usize>,
+    /// The program's fragile steps.
+    fragile: Option<Vec<crate::provenance::FragileSite>>,
+    /// The proved send order, its ranks learned from the races search's probe; every later run of
+    /// the search is checked against it.
+    order: Rc<crate::races::FanOutOrder>,
+}
+
+/// The message of a panic payload.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_owned()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "(non-string panic payload)".to_owned()
+    }
+}
+
+impl<'c, B: AsyncFnMut(), R: AsyncFnMut()> Engine<'c, B, R> {
+    fn new(
+        check: &EcCheck,
+        sim: &'c CompiledSim,
+        labels: &'c Labels,
+        inputs: &'c mut B,
+        recover: &'c mut R,
+    ) -> Self {
+        Engine {
+            sim,
+            islands: check.islands.clone(),
+            labels,
+            inputs,
+            recover,
+            tables: Tables::new(sim.channels(), sim.locations()),
+            max_crashes: check.max_crashes,
+            over_budget: Cell::new(false),
+            #[cfg(any(test, feature = "cross-check"))]
+            oracle_samples: None,
+            fragile: check.fragile_sites(),
+            order: Rc::default(),
+        }
+    }
+
+    /// The program's schedule choices: the scan's, and, to be conservative, every operator the
+    /// provenance rewrite could not see into (an opaque island's records fall back to the
+    /// execution rule, and the scan cannot tell what flows through it).
+    fn choices(&self) -> Vec<ChoiceSite> {
+        let mut choices = self.labels.choices.clone();
+        for island in self.islands.borrow().iter() {
+            let choice = ChoiceSite {
+                op: "provenance_island".to_owned(),
+                site: island.clone(),
+            };
+            if !choices.contains(&choice) {
+                choices.push(choice);
+            }
+        }
+        choices
+    }
+
+    /// The members of `cluster` (`None` for a process).
+    fn members_of(&self, cluster: &LocationId) -> Option<BTreeSet<u32>> {
+        self.sim
+            .locations()
+            .iter()
+            .find(|l| l.id.root() == cluster.root())
+            .and_then(|l| l.members.as_ref())
+            .map(|m| m.iter().copied().collect())
+    }
+
+    /// The crash bounds of `target`'s search.
+    fn bounds(&self, target: &Target) -> CrashBounds {
+        let names = self.tables.names();
+        CrashBounds {
+            cap: self.max_crashes,
+            nodes: names.crashable().len(),
+            // Agreement keeps two members correct: a single survivor agrees with itself. Any
+            // other rule has no cap: one survivor may still owe what a crashed member held.
+            checked: target.rule.is_agreement().then(|| {
+                CheckedCluster::new(
+                    target
+                        .b
+                        .members
+                        .iter()
+                        .map(|m| names.name(&target.b.node(*m))),
+                )
+            }),
+        }
+    }
+
+    /// The results, from every rule's verdict (by rule index).
+    fn results(&self, mut verdicts: Vec<Option<(Verdict, Stats)>>) -> Results {
+        let plans = &self.labels.plans;
+        let context = Rc::new(ReportContext {
+            names: self.tables.names().clone(),
+            channels: self.sim.channels().to_vec(),
+            taps: self.labels.clone(),
+        });
+        Results {
+            labels: self
+                .labels
+                .rules
+                .iter()
+                .enumerate()
+                .map(|(index, rule)| {
+                    let (verdict, stats) = verdicts[index].take().expect("every rule decided");
+                    LabelResult {
+                        index,
+                        plan: plans[rule.a].clone(),
+                        verdict,
+                        stats,
+                        context: context.clone(),
+                    }
+                })
+                .collect(),
+            names: self.tables.names().clone(),
+            islands: self.islands.borrow().clone(),
+            choices: self.choices(),
+            channels: self.sim.channels().to_vec(),
+            taps: self.labels.clone(),
+        }
+    }
+
+    /// One side of `rule`: `a` or `b`. `None` if the location has no members.
+    fn side(&self, label: usize) -> Option<Side> {
+        let location = self.labels.plans[label].cluster().clone();
+        let process = matches!(location, LocationId::Process(_));
+        let members = if process {
+            BTreeSet::from([0])
+        } else {
+            self.members_of(&location)?
+        };
+        Some(Side {
+            label,
+            location,
+            members,
+            process,
+        })
+    }
+
+    /// The rules that need no search, decided (by rule index), and the rules left to search
+    /// (with empty fact domains).
+    fn label_targets(&self) -> (Vec<Option<(Verdict, Stats)>>, Vec<Target>) {
+        let plans = &self.labels.plans;
+        let rules = &self.labels.rules;
+        let mut verdicts: Vec<Option<(Verdict, Stats)>> = vec![None; rules.len()];
+        let mut targets = vec![];
+        let choices = self.choices();
+        for (i, rule) in rules.iter().enumerate() {
+            let not_checked = [rule.a, rule.b]
+                .iter()
+                .find_map(|&l| plans[l].not_checked.clone());
+            let sides = self.side(rule.a).zip(self.side(rule.b));
+            verdicts[i] = match (not_checked, sides) {
+                (Some(reason), _) => Some((Verdict::NotChecked(reason), Stats::default())),
+                // A single member agrees with itself.
+                (None, Some((a, b))) if !(rule.is_agreement() && a.members.len() <= 1) => {
+                    targets.push(Target {
+                        label: i,
+                        rule: *rule,
+                        a,
+                        b,
+                        domain: BTreeSet::new(),
+                        sites: choices.clone(),
+                    });
+                    None
+                }
+                _ => Some((
+                    Verdict::Vacuous(VacuousReason::SingleMember),
+                    Stats::default(),
+                )),
+            };
+        }
+        (verdicts, targets)
+    }
+
+    /// Writes each counterexample's Lamport diagram to `target/hydrofrac/<test>/<label>/`
+    /// (docs/design/hydrofrac-lite.md §4.7) and records where it went.
+    fn write_diagrams(&self, verdicts: &mut [Option<(Verdict, Stats)>]) {
+        let labels = self.labels;
+        let test = crate::lamport::test_name();
+        for (index, slot) in verdicts.iter_mut().enumerate() {
+            let Some((Verdict::Counterexample(cex), _)) = slot else {
+                continue;
+            };
+            let facts = counterexample_facts(cex, labels);
+            let names = ReportNames::new(self.tables.names(), self.sim.channels())
+                .with_facts(facts.iter())
+                .with_log(&cex.record.log);
+            let lamport_labels = crate::lamport::Labels::default()
+                .with_channels(self.sim.channels())
+                .payloads(|m| names.payload_full(&m.bytes))
+                .outputs(|port, bytes| match labels.label_of_port(port) {
+                    Some(_) => decode_output(bytes).to_string(),
+                    None => crate::lamport::short_hex(bytes),
+                });
+            let rule = labels.rules[index];
+            let ours = |port: usize| {
+                labels
+                    .label_of_port(port)
+                    .is_some_and(|l| l == rule.a || l == rule.b)
+            };
+            let name = label_name(&labels.plans[rule.a]);
+            let cluster = self
+                .tables
+                .names()
+                .label(labels.plans[rule.b].cluster())
+                .unwrap_or("member");
+            let line = verdict_line(&Verdict::Counterexample(cex.clone()), cluster, &names);
+            let title = format!("{name}: {line}");
+            let dir = crate::lamport::claim(crate::lamport::default_dir(&test, &name));
+            let log = &cex.record.log;
+            // The members owed a record that end without it, as the sentence names them.
+            let notes: Vec<(NodeId, String)> = match self.side(rule.b) {
+                Some(b) => missing_notes(&cex.missing)
+                    .into_iter()
+                    .map(|(m, note)| (b.node(m), note))
+                    .collect(),
+                None => vec![],
+            };
+            // Both mark what each member ends without; the full diagram also spells out the
+            // faults, which the focused one leaves to the sentence of its title.
+            let draw = |log: &crate::fault::EventLog, file: &str, title: &str, focused: bool| {
+                let mut trace = crate::lamport::trace_with_notes(
+                    log,
+                    self.tables.names(),
+                    &cex.faults,
+                    &lamport_labels,
+                    &notes,
+                );
+                if focused {
+                    trace.faults.clear();
+                }
+                crate::lamport::write(&dir, file, &trace, title)
+            };
+            // The broken facts: what the focused diagram shows the lineage of. A panic names
+            // none, and is drawn whole.
+            let broken: BTreeSet<&[u8]> = cex
+                .missing
+                .iter()
+                .map(|(_, f)| f)
+                .chain(&cex.divergent)
+                .map(|f| &f.bytes[..])
+                .collect();
+            let lineage = Lineage::new(log, &self.tables);
+            let (focused, caption) =
+                crate::lamport::focus(log, &lineage, &cex.faults, |e| match e {
+                    Event::Sent { msg, .. } => broken.contains(&msg.bytes[..]),
+                    Event::Output { port, bytes, .. } => {
+                        ours(*port) && broken.contains(&decode_output(bytes).bytes[..])
+                    }
+                    _ => false,
+                });
+            // Only this label's decoded outputs: the focus already keeps no others, unless it
+            // fell back to the whole run (a panic).
+            let other = |e: &Event| match e {
+                Event::Output { port, .. } => !ours(*port),
+                _ => false,
+            };
+            let dropped = focused.events().iter().filter(|e| other(e)).count();
+            let focused =
+                crate::fault::EventLog(focused.0.into_iter().filter(|e| !other(e)).collect());
+            let caption = match dropped {
+                0 => caption,
+                n => Some(format!(
+                    "{}{n} unrelated output{} not shown",
+                    caption.map_or(String::new(), |c| c + "; "),
+                    if n == 1 { "" } else { "s" }
+                )),
+            };
+            let _ = draw(log, "counterexample-full", &title, false);
+            let title = match caption {
+                Some(caption) => format!("{title}\n{caption}"),
+                None => title,
+            };
+            let diagram = draw(&focused, "counterexample", &title, true)
+                .ok()
+                .map(|w| w.path().to_path_buf());
+            cex.diagram = diagram;
+        }
+    }
+}
+
+fn counterexample(
+    faults: FaultSet<MessageId>,
+    tolerates: Option<usize>,
+    tolerance_certified: bool,
+    hypothesis: usize,
+    failure: &Failure,
+) -> Verdict {
+    Verdict::Counterexample(Box::new(Counterexample {
+        faults,
+        tolerates,
+        tolerance_certified,
+        hypothesis,
+        missing: failure.missing.clone(),
+        divergent: failure.divergent.clone(),
+        panic: failure.panic.clone(),
+        record: failure.record.clone(),
+        diagram: None,
+    }))
+}
