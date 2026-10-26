@@ -17,6 +17,7 @@ pub mod paxos_with_client;
 pub mod cress_inputs_check;
 pub mod pure_heartbeat;
 pub mod raft;
+pub mod reliable_send_check;
 pub mod rpc_retry;
 #[cfg(feature = "cress")]
 pub mod rpc_retry_check;
