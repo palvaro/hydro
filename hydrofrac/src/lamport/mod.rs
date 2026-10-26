@@ -95,6 +95,9 @@ pub struct Trace {
     pub faults: Vec<String>,
     /// The crashes of the plan that never fired.
     pub unfired: Vec<String>,
+    /// Notes at the bottom of lanes (index into [`Self::nodes`], text): what a member that the
+    /// broken fact owed a record ends without.
+    pub notes: Vec<(usize, String)>,
 }
 
 impl Trace {
@@ -127,12 +130,13 @@ impl Default for Labels<'_> {
 }
 
 impl<'a> Labels<'a> {
-    /// Names channels as the program named them (`ChannelInfo::name`).
+    /// Names channels as the report does ([`crate::report::channel_name`]): the name the
+    /// program gave them, else the variable the sending statement binds, else its `file:line`.
     #[must_use]
     pub fn with_channels(mut self, channels: &[ChannelInfo]) -> Self {
         let names: HashMap<usize, String> = channels
             .iter()
-            .filter_map(|c| Some((c.id, c.name.clone()?)))
+            .map(|c| (c.id, crate::report::channel_name(c)))
             .collect();
         self.channel = Box::new(move |id| names.get(&id).cloned());
         self
@@ -184,9 +188,22 @@ pub fn trace_with(
     faults: &FaultSet<MessageId>,
     labels: &Labels<'_>,
 ) -> Trace {
+    trace_with_notes(log, names, faults, labels, &[])
+}
+
+/// [`trace_with`], with `notes` (node, text) at the bottom of their nodes' lanes. A noted node
+/// gets a lane even if nothing happened at it.
+pub fn trace_with_notes(
+    log: &EventLog,
+    names: &NodeNames,
+    faults: &FaultSet<MessageId>,
+    labels: &Labels<'_>,
+    notes: &[(NodeId, String)],
+) -> Trace {
     let mut ids: BTreeSet<NodeId> = faults
         .iter()
         .filter_map(|f| f.crashed_node().and_then(|n| names.id(n)).cloned())
+        .chain(notes.iter().map(|(id, _)| id.clone()))
         .collect();
     for event in log.events() {
         match event {
@@ -303,6 +320,10 @@ pub fn trace_with(
     Trace {
         faults: faults.iter().map(describe).collect(),
         unfired,
+        notes: notes
+            .iter()
+            .map(|(id, text)| (lane[id], text.clone()))
+            .collect(),
         nodes,
         events,
         messages,

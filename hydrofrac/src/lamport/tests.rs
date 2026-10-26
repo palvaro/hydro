@@ -457,3 +457,94 @@ fn the_focus_keeps_the_lineage_and_the_faults_and_drops_the_rest() {
     let (same, caption) = focus(&full, &lineage, &faults, |_| false);
     assert_eq!((same, caption), (full, None));
 }
+
+#[test]
+fn a_lane_note_says_what_a_node_never_holds() {
+    let mut log = Log::default();
+    log.exec("A").round_trip(0, "A", "B", "x");
+    let notes = [(node("C"), "✗ never holds x".to_owned())];
+    let trace = trace_with_notes(&log.log(), &names(), &FaultSet::new(), &labels(), &notes);
+    // Nothing happened at C, and it still gets a lane, for its note.
+    let c = trace.node("C").expect("a noted node has a lane");
+    assert_eq!(trace.notes, [(c, "✗ never holds x".to_owned())]);
+    let out = dot(&trace, "");
+    let line = out
+        .lines()
+        .find(|l| l.trim_start().starts_with(&format!("note{c} [")))
+        .unwrap_or_else(|| panic!("no note on C's lane in\n{out}"));
+    assert!(line.contains("label=\"✗ never holds x\""), "{line}");
+    assert!(line.contains("#c0392b"), "red: {line}");
+    // Below the end of C's lane.
+    let (note_x, note_y) = pos_of(&out, &format!("note{c}"));
+    let (end_x, end_y) = pos_of(&out, &format!("end{c}"));
+    assert_eq!(note_x, end_x);
+    assert!(note_y < end_y, "{out}");
+}
+
+/// Every message label's box (centre, size), from its DOT line.
+fn label_boxes(out: &str) -> Vec<(String, f64, f64, f64)> {
+    out.lines()
+        .map(str::trim_start)
+        .filter(|l| {
+            let name = l.split(' ').next().unwrap_or("");
+            name.len() > 1 && name.starts_with('l') && name[1..].parse::<usize>().is_ok()
+        })
+        .map(|l| {
+            let name = l.split(' ').next().unwrap();
+            let start = l.find("label=\"").unwrap() + 7;
+            let text = &l[start..start + l[start..].find('"').unwrap()];
+            let (x, y) = pos_of(out, name);
+            (
+                text.to_owned(),
+                x,
+                y,
+                5.3 * text.chars().count() as f64 + 6.0,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn message_labels_cover_no_other_label_and_no_event_point() {
+    // A member delivers, then crashes with its forwards in flight and lost: the self-send's
+    // label and the lost forward's start at the same point.
+    let mut log = Log::default();
+    log.exec("A");
+    let (first, _) = log.send(0, "A", "B", "1", Fate::Delivered);
+    let (_, lost) = log.send(0, "A", "C", "1", Fate::SenderDead);
+    log.halt("A");
+    log.exec("B").recv(first, 0, "B").output("B", "1");
+    log.send(1, "B", "B", "1", Fate::Delivered);
+    let (_, forward) = log.send(1, "B", "C", "1", Fate::SenderDead);
+    log.halt("B");
+    let faults = [
+        Fault::crash_after("A", Some(lost)),
+        Fault::crash_after("B", Some(forward)),
+    ]
+    .into_iter()
+    .collect();
+    let (trace, out) = render(&log, &faults);
+    let labels = label_boxes(&out);
+    assert_eq!(labels.len(), trace.messages.len(), "{out}");
+    for (i, (a, ax, ay, aw)) in labels.iter().enumerate() {
+        for (b, bx, by, bw) in &labels[i + 1..] {
+            let apart = (ax - bx).abs() >= (aw + bw) / 2.0 || (ay - by).abs() >= 11.0;
+            assert!(
+                apart,
+                "`{a}` at ({ax}, {ay}) covers `{b}` at ({bx}, {by})\n{out}"
+            );
+        }
+        for e in 0..trace.events.len() {
+            let Some(line) = out
+                .lines()
+                .find(|l| l.trim_start().starts_with(&format!("e{e} [")))
+            else {
+                continue;
+            };
+            assert!(line.contains("pos="), "{line}");
+            let (ex, ey) = pos_of(&out, &format!("e{e}"));
+            let clear = (ax - ex).abs() >= aw / 2.0 + 3.0 || (ay - ey).abs() >= 5.5 + 3.0;
+            assert!(clear, "`{a}` at ({ax}, {ay}) covers the point e{e}\n{out}");
+        }
+    }
+}

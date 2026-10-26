@@ -278,8 +278,11 @@ pub fn tap(ir: &mut Vec<HydroRoot>) -> Labels {
         .collect();
     let mut sides: BTreeMap<String, (Option<(usize, ASide)>, Option<(usize, BSide)>)> =
         BTreeMap::new();
+    // Where each rule was stated (`file.rs:12`), for its label.
+    let mut sites: BTreeMap<String, String> = BTreeMap::new();
     for (collection, marker) in rule_collections(ir) {
         let index = collections.len();
+        sites.insert(marker.name.clone(), marker.short_site());
         let (a, b) = sides.entry(marker.name.clone()).or_default();
         let twice = match marker.side {
             Ok(side) => a.replace((index, side)).is_some(),
@@ -296,7 +299,7 @@ pub fn tap(ir: &mut Vec<HydroRoot>) -> Labels {
         let (Some((a, a_side)), Some((b, b_side))) = sides else {
             panic!("hydrofrac: the `implies` rule `{name}` lost one of its sides");
         };
-        collections[a].label = format!("implies, {a_side:?} → {b_side:?}");
+        collections[a].label = format!("implies at {}, {a_side:?} → {b_side:?}", sites[&name]);
         rules.push(Rule {
             a,
             b,

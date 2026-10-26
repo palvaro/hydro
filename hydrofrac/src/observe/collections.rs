@@ -260,7 +260,7 @@ pub fn rule_collections(ir: &[HydroRoot]) -> Vec<(EcCollection, crate::implies::
                 in_tick: tick_of(location).is_some(),
                 covered_by: None,
                 name: Some(marker.name.clone()),
-                file: ec_file(node),
+                file: Some(marker.file()),
                 occurrence: 0,
                 node: std::ptr::from_ref(node) as usize,
             };
@@ -458,7 +458,8 @@ pub(crate) fn tick_of(location: &LocationId) -> Option<&LocationId> {
 /// (and so whether its constants and cycles emit anything) depends on what feeds them.
 pub(crate) fn tick_entries(ir: &[HydroRoot]) -> HashMap<LocationId, Vec<*const HydroNode>> {
     let (mut seen, mut out) = (HashSet::new(), HashMap::<LocationId, Vec<_>>::new());
-    let mut stack: Vec<*const HydroNode> = ir.iter().map(|r| std::ptr::from_ref(r.input())).collect();
+    let mut stack: Vec<*const HydroNode> =
+        ir.iter().map(|r| std::ptr::from_ref(r.input())).collect();
     while let Some(ptr) = stack.pop() {
         if !seen.insert(ptr) {
             continue;

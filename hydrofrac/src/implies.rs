@@ -21,7 +21,8 @@ use stageleft::IntoQuotedMut;
 #[cfg(stageleft_runtime)]
 use crate::spec::{ASide, BSide};
 
-/// The start of the tag of a rule's key node: `PREFIX|side|a or b|name`.
+/// The start of the tag of a rule's key node: `PREFIX|side|file:line|name`, where `file:line`
+/// is the user's `implies` call.
 #[cfg(stageleft_runtime)]
 pub(crate) const MARKER: &str = "hydrofrac::implies";
 
@@ -30,12 +31,36 @@ pub(crate) const MARKER: &str = "hydrofrac::implies";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Marker {
     pub(crate) name: String,
+    /// The `file:line` of the user's `implies` call (the key node itself is built in this
+    /// file, so its backtrace names this file).
+    pub(crate) site: String,
     /// The A-side's setting, or the B-side's.
     pub(crate) side: Result<ASide, BSide>,
 }
 
 #[cfg(stageleft_runtime)]
-fn tag(name: &str, side: Result<ASide, BSide>) -> String {
+impl Marker {
+    /// The file of the user's call, by its name, and the line: `file.rs:12`.
+    pub(crate) fn short_site(&self) -> String {
+        self.site
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(&self.site)
+            .to_owned()
+    }
+
+    /// The file of the user's call, by its name.
+    pub(crate) fn file(&self) -> String {
+        let site = self.short_site();
+        match site.rsplit_once(':') {
+            Some((file, _)) => file.to_owned(),
+            None => site,
+        }
+    }
+}
+
+#[cfg(stageleft_runtime)]
+fn tag(name: &str, side: Result<ASide, BSide>, site: &str) -> String {
     let side = match side {
         Ok(ASide::Correct) => "a:correct".to_owned(),
         Ok(ASide::Any) => "a:any".to_owned(),
@@ -43,14 +68,15 @@ fn tag(name: &str, side: Result<ASide, BSide>) -> String {
         Err(BSide::Some) => "b:some".to_owned(),
         Err(BSide::AtLeast(k)) => format!("b:{k}"),
     };
-    format!("{MARKER}|{side}|{name}")
+    format!("{MARKER}|{side}|{site}|{name}")
 }
 
 /// The rule side a node's tag names, if it is a rule's key node.
 #[cfg(stageleft_runtime)]
 pub(crate) fn marker(tag: Option<&str>) -> Option<Marker> {
     let rest = tag?.strip_prefix(MARKER)?.strip_prefix('|')?;
-    let (side, name) = rest.split_once('|')?;
+    let (side, rest) = rest.split_once('|')?;
+    let (site, name) = rest.split_once('|')?;
     let side = match side {
         "a:correct" => Ok(ASide::Correct),
         "a:any" => Ok(ASide::Any),
@@ -60,6 +86,7 @@ pub(crate) fn marker(tag: Option<&str>) -> Option<Marker> {
     };
     Some(Marker {
         name: name.to_owned(),
+        site: site.to_owned(),
         side,
     })
 }
@@ -83,6 +110,7 @@ pub(crate) fn marker(tag: Option<&str>) -> Option<Marker> {
 #[cfg(stageleft_runtime)]
 pub trait Implies<'a, T, L: Location<'a>, B: Boundedness, O: Ordering, R: Retries> {
     /// See the [trait docs](Implies).
+    #[track_caller]
     fn implies<U, LB, BB, OB, RB, K, FA, CA, IA, FB, CB, IB>(
         &self,
         name: &str,
@@ -109,6 +137,7 @@ pub trait Implies<'a, T, L: Location<'a>, B: Boundedness, O: Ordering, R: Retrie
 impl<'a, T: Clone, L: Location<'a>, B: Boundedness, O: Ordering, R: Retries>
     Implies<'a, T, L, B, O, R> for Stream<T, L, B, O, R>
 {
+    #[track_caller]
     fn implies<U, LB, BB, OB, RB, K, FA, CA, IA, FB, CB, IB>(
         &self,
         name: &str,
@@ -130,8 +159,19 @@ impl<'a, T: Clone, L: Location<'a>, B: Boundedness, O: Ordering, R: Retries>
         CB: ValidMutCommutativityFor<FB, U, K, OB, false>,
         IB: ValidMutIdempotenceFor<FB, U, K, RB, false>,
     {
+        // The report and the diagrams name the rule by where the user stated it.
+        let caller = std::panic::Location::caller();
+        let site = format!("{}:{}", caller.file(), caller.line());
         // Dropped unconsumed, each key stream becomes a root of the program that nothing reads.
-        drop(self.clone().map(ka).ir_node_named(&tag(name, Ok(a_side))));
-        drop(b.clone().map(kb).ir_node_named(&tag(name, Err(b_side))));
+        drop(
+            self.clone()
+                .map(ka)
+                .ir_node_named(&tag(name, Ok(a_side), &site)),
+        );
+        drop(
+            b.clone()
+                .map(kb)
+                .ir_node_named(&tag(name, Err(b_side), &site)),
+        );
     }
 }

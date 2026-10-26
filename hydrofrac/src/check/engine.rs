@@ -14,7 +14,7 @@ use hydro_lang::sim::network_hook::IrPassStage;
 
 use super::results::{
     ChoiceSite, Counterexample, LabelResult, ReportContext, Results, Stats, VacuousReason, Verdict,
-    counterexample_facts, label_name, verdict_line,
+    counterexample_facts, label_name, missing_notes, verdict_line,
 };
 use crate::fault::{Event, FaultHook, FaultPlan, InstanceRecord, MessageId, NodeId};
 use crate::lineage::{Lineage, Tables};
@@ -624,13 +624,27 @@ impl<'c, B: AsyncFnMut(), R: AsyncFnMut()> Engine<'c, B, R> {
             let title = format!("{name}: {line}");
             let dir = crate::lamport::claim(crate::lamport::default_dir(&test, &name));
             let log = &cex.record.log;
-            let draw = |log: &crate::fault::EventLog, file: &str, title: &str| {
-                let trace = crate::lamport::trace_with(
+            // The members owed a record that end without it, as the sentence names them.
+            let notes: Vec<(NodeId, String)> = match self.side(rule.b) {
+                Some(b) => missing_notes(&cex.missing)
+                    .into_iter()
+                    .map(|(m, note)| (b.node(m), note))
+                    .collect(),
+                None => vec![],
+            };
+            // Both mark what each member ends without; the full diagram also spells out the
+            // faults, which the focused one leaves to the sentence of its title.
+            let draw = |log: &crate::fault::EventLog, file: &str, title: &str, focused: bool| {
+                let mut trace = crate::lamport::trace_with_notes(
                     log,
                     self.tables.names(),
                     &cex.faults,
                     &lamport_labels,
+                    &notes,
                 );
+                if focused {
+                    trace.faults.clear();
+                }
                 crate::lamport::write(&dir, file, &trace, title)
             };
             // The broken facts: what the focused diagram shows the lineage of. A panic names
@@ -668,12 +682,12 @@ impl<'c, B: AsyncFnMut(), R: AsyncFnMut()> Engine<'c, B, R> {
                     if n == 1 { "" } else { "s" }
                 )),
             };
-            let _ = draw(log, "counterexample-full", &title);
+            let _ = draw(log, "counterexample-full", &title, false);
             let title = match caption {
                 Some(caption) => format!("{title}\n{caption}"),
                 None => title,
             };
-            let diagram = draw(&focused, "counterexample", &title)
+            let diagram = draw(&focused, "counterexample", &title, true)
                 .ok()
                 .map(|w| w.path().to_path_buf());
             cex.diagram = diagram;

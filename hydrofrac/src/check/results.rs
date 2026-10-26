@@ -532,6 +532,27 @@ fn missing_in_words(missing: &[(u32, Fact)], cluster: &str, names: &ReportNames<
     }
 }
 
+/// What each member `missing` names ends without, as its lane's note in a diagram: `(1, "✗
+/// never holds 1 and 2")`, in member order. The facts are in full (the diagram cuts long notes
+/// into its own legend), at most [`FACTS_SHOWN`] of them, then a count.
+pub(crate) fn missing_notes(missing: &[(u32, Fact)]) -> Vec<(u32, String)> {
+    let mut by_member: std::collections::BTreeMap<u32, Vec<String>> = Default::default();
+    for (member, fact) in missing {
+        by_member.entry(*member).or_default().push(fact.to_string());
+    }
+    by_member
+        .into_iter()
+        .map(|(member, facts)| {
+            let mut shown: Vec<String> = facts.iter().take(FACTS_SHOWN).cloned().collect();
+            let more = facts.len().saturating_sub(FACTS_SHOWN);
+            if more > 0 {
+                shown.push(format!("{more} more"));
+            }
+            (member, format!("✗ never holds {}", and_list(&shown)))
+        })
+        .collect()
+}
+
 /// What a certified crash bound rules out, in words: `no single crash`, `no combination of up
 /// to 3 crashes`.
 fn no_crashes_up_to(k: usize) -> String {
