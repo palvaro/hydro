@@ -57,6 +57,8 @@ mod ec_teaching;
 mod ec_implies_checks;
 #[cfg(test)]
 mod ec_implies_teaching;
+#[cfg(test)]
+mod ec_reliable_send;
 
 #[cfg(test)]
 mod ec_teaching_checks;
