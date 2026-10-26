@@ -44,6 +44,22 @@ pub struct ReliableSendOutputs<'a, T> {
     pub delivered: Stream<Numbered<T>, Process<'a, Receiver>, Unbounded, NoOrder, ExactlyOnce>,
 }
 
+/// What the Sedge overload harness watches: deliveries by sequence number. The sender numbers its
+/// input in arrival order, which is the order the harness's generator offers it, so a delivery's
+/// `id` is the generator's sequence number for the value. `reliable_send` never gives up on a
+/// value, so nothing is abandoned, and it exports no counters: what each node puts on the wire,
+/// resends included, is measured from outside it (Sedge's `/proc` sampling of the containers'
+/// kernel writes, `wchar_kb_*` in the traces).
+#[cfg(feature = "sedge")]
+impl<'a, T> sedge::Observed<'a> for ReliableSendOutputs<'a, T>
+where
+    T: Serialize + DeserializeOwned + 'a,
+{
+    fn observe(self, obs: &mut sedge::Observer<'a>) {
+        obs.completions(self.delivered.map(q!(|n| n.id)));
+    }
+}
+
 /// `values` sent from `sender` to `receiver` with [`reliable_send`], numbered in the order the
 /// sender receives them. The sender resends everything unacknowledged on each element of
 /// `resend_ticks`, its timer interrupt: a deployment wires `source_interval(period)` into it and a
@@ -57,6 +73,30 @@ pub struct ReliableSendOutputs<'a, T> {
 /// a 1000-round run, with the timer firing every round throughout, so that holds longer than the
 /// input show whether extra work stops when the input does or keeps rising with the delay. Run it
 /// with `./scripts/cress hydro_test reliable_send_pair`.
+///
+/// The `overload_check` attribute deploys the same configuration (same name, so that Sedge reads
+/// Cress's classification of `delivered`) under the Sedge overload harness:
+/// `./scripts/sedge hydro_test reliable_send_pair --factors 2,4,8,16`, after the Cress run.
+///
+/// - **Capacity from outside.** Only the receiver, the resource under test, gets a CPU quota: 1 %
+///   of a core (1 ms of CPU every 100 ms). The sender stands for the callers and gets none. The
+///   program has no capacity code; the receiver's per-arrival work is real (decode, the `unique`
+///   check, and the acknowledgement, which is the value itself).
+/// - **Load on the sender.** The generator feeds `values` open loop with 4 KiB bodies
+///   ([`super::rpc_retry::Payload`], distinct per sequence number, since the value is its own
+///   identity).
+/// - **The resend timer** fires every second, TCP's initial retransmission timeout (RFC 6298), and
+///   well above the receiver's round trip at baseline, so that few values are resent before
+///   their acknowledgement can return. Each tick resends everything outstanding.
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = two_per_round,
+    T = super::rpc_retry::Payload<4096>,
+    load = values,
+    mu = 500,
+    cpus(Sender = none, Receiver = 0.01),
+    cpu_period_us = 100_000,
+    timers(resend_ticks = std::time::Duration::from_secs(1)),
+))]
 #[cfg_attr(feature = "cress", cress::amplification_check(
     name = two_per_round,
     T = u64,
