@@ -8,6 +8,11 @@ assumptions, the proof, where it lives in code, and what tests check it.
 since). Paths are relative to the repository root; `hydrofrac/src/` is
 abbreviated `hf/`. Line numbers are at that commit.
 
+**Since `implies`** (docs/design/hydrofrac-implies.md): the specification is one rule, `A ⇒ B`, of which a label's
+POST plus no-divergence (§0) is the agreement instance; Claims A and B are one claim, the rule, and §13's second sweep
+is the *completeness sweep*. That note's §5 lists, claim by claim, what changed below (§1, §8, §10, §13, §14); the
+rest of this document is unchanged.
+
 **Status words.** Every step is marked:
 - **proved**: argued here, step by step;
 - **checked in code**: an assertion or a structural check in the code enforces it;

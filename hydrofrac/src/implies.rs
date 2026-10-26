@@ -83,7 +83,6 @@ pub(crate) fn marker(tag: Option<&str>) -> Option<Marker> {
 #[cfg(stageleft_runtime)]
 pub trait Implies<'a, T, L: Location<'a>, B: Boundedness, O: Ordering, R: Retries> {
     /// See the [trait docs](Implies).
-    #[expect(clippy::too_many_arguments, reason = "the rule's parts")]
     fn implies<U, LB, BB, OB, RB, K, FA, CA, IA, FB, CB, IB>(
         &self,
         name: &str,

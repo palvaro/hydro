@@ -224,25 +224,34 @@ pub fn evaluate<S: Clone>(
         }
     }
     if let Some(k) = b_side.at_least() {
-        // An obligation fewer than `k` counted members hold breaks the rule, even when every
-        // member that lacks it crashed: it is missing at every member that is not a counted
-        // holder (at every member, if all of them are).
-        missing = vec![];
+        // An obligation fewer than `k` counted members hold breaks the rule. It is missing at
+        // the counted members without it; if there are none (they all crashed, or all hold
+        // it), at every other member, else at every member, so that it is never missing nowhere.
+        let mut short = vec![];
         for fact in &obligations {
             let holders: BTreeSet<u32> = held
                 .iter()
                 .filter(|p| &p.fact == fact)
                 .map(|p| p.member)
                 .collect();
-            if holders.len() < k {
-                let mut lacking: Vec<u32> = in_b.all.difference(&holders).copied().collect();
-                if lacking.is_empty() {
-                    lacking = holders.into_iter().collect();
-                }
-                missing.extend(lacking.into_iter().map(|m| (m, fact.clone())));
+            if holders.len() >= k {
+                continue;
             }
+            let mut lacking: Vec<u32> = missing
+                .iter()
+                .filter(|(_, f)| f == fact)
+                .map(|(m, _)| *m)
+                .collect();
+            if lacking.is_empty() {
+                lacking = in_b.all.difference(&holders).copied().collect();
+            }
+            if lacking.is_empty() {
+                lacking = holders.into_iter().collect();
+            }
+            short.extend(lacking.into_iter().map(|m| (m, fact.clone())));
         }
-        missing.sort();
+        short.sort();
+        missing = short;
     }
     Evaluation {
         obligations,
@@ -359,8 +368,8 @@ mod tests {
         let e = evaluate(&a, &b, (ASide::Correct, BSide::Some), &client, &one_correct);
         assert!(e.holds());
         let e = evaluate(&a, &b, (ASide::Correct, BSide::AtLeast(1)), &client, &one_correct);
-        assert_eq!(e.missing, vec![(0, fact(1)), (1, fact(1)), (2, fact(1))]);
-        // Short of `k` with every counted member holding it: still broken.
+        assert_eq!(e.missing, vec![(2, fact(1))]);
+        // Short of `k` with every counted member crashed, or holding it: still broken.
         let none_correct = members(&[0, 1, 2], &[]);
         let e = evaluate(&a, &b, (ASide::Any, BSide::AtLeast(1)), &client, &none_correct);
         assert!(!e.holds());

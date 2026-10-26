@@ -1,8 +1,8 @@
 # hydrofrac: one rule, `implies`
 
-Status: design for review (phase 1), against `hydrofrac-races` at `57bd3b20f0`. Section numbers `§n` refer to
+Status: implemented (phase 2; §7 has what was measured), from `hydrofrac-races` at `57bd3b20f0`. Section numbers `§n` refer to
 `docs/design/hydrofrac-soundness.md`. Claims are marked **proved** (argued here), **checked** (code enforces it),
-**to test**, or **guessed**.
+**demonstrated** (a test shows it), or **guessed**.
 
 ## 1. The rule, its settings, the API
 
@@ -34,7 +34,7 @@ results.label("uniform").assert_holds();
 ```
 
 It adds, beside the user's dataflow, `a.clone().map(ka)` and `b.clone().map(kb)`, each tagged with the rule's name,
-side and setting, into an empty `for_each`. The keys must be `Serialize` (a fact is its key's `bincode`, A4). The
+side and setting, and dropped unconsumed (a `Null` root). The keys must be `Serialize` (a fact is its key's `bincode`, A4). The
 planner finds the two tagged nodes and taps them like labels; the program itself is unchanged. This is not
 `assert_has_consistency_of` (a type change on one collection), because a rule relates two collections that may live
 on different locations; a name is needed because a rule has no binding of its own to name it by. Two rules with one
@@ -150,3 +150,15 @@ does today.
   search by rule name.
 - **Teaching examples** (`hydro_test/src/cluster/ec_implies_teaching.rs`): (a) a broadcast that passes regular RB and
   fails uniform RB; (b) the repo's URB passing both; (c) acked ⇒ durable, broken and fixed.
+
+## 7. Measured
+
+- **Existing verdicts unchanged (demonstrated).** Every printed verdict and stats line (hypotheses, schedules, early
+  stops, one-schedule sets, Claim B) of the `hydrofrac` suite (136 report lines, 313 cross-check lines) and of the
+  `hydro_test` `cluster::ec_` corpus (800 lines) is identical to the base after removing timings; the new tests only
+  add lines.
+- **Time** (paired runs, `--test-threads=4`): `hydrofrac` 103 s against 117 s; `hydro_test cluster::ec_` 525 s
+  (63 tests) against 561 s (53 tests); `hydro_std hydrofrac` 70 s against 38 s, but that run overlapped another
+  suite, so it does not compare.
+- **Oracle 2 caught two bugs in the first cut (demonstrated):** `AtLeast(k)` reported no violation when every member
+  without the key had crashed, and `Some` was encoded in the tag as `AtLeast(1)`. Both are fixed, with spec tests.
