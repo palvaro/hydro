@@ -13,8 +13,8 @@ use hydro_lang::sim::flow::SimFlow;
 use hydro_lang::sim::network_hook::IrPassStage;
 
 use super::results::{
-    ChoiceSite, Counterexample, LabelResult, Results, Stats, VacuousReason, Verdict,
-    ReportContext, counterexample_facts, label_name, verdict_line,
+    ChoiceSite, Counterexample, LabelResult, ReportContext, Results, Stats, VacuousReason, Verdict,
+    counterexample_facts, label_name, verdict_line,
 };
 use crate::fault::{Event, FaultHook, FaultPlan, InstanceRecord, MessageId, NodeId};
 use crate::lineage::{Lineage, Tables};

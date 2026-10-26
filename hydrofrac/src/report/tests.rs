@@ -147,7 +147,7 @@ fn faults_in_words() {
             false
         ))
     );
-    let mut again = m.clone();
+    let mut again = m;
     again.copy = 1;
     assert_eq!(
         words(vec![
@@ -163,6 +163,8 @@ fn faults_in_words() {
     );
     assert_eq!(
         [1, 2, 3, 4, 11, 12, 13, 21, 22, 101].map(ordinal),
-        ["1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd", "101st"]
+        [
+            "1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd", "101st"
+        ]
     );
 }

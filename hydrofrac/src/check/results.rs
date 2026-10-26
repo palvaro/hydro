@@ -281,10 +281,7 @@ impl<'l> Failure<'l> {
                  certificate (`assert_no_counterexample` accepts it)\n{report}",
                 l.name()
             ),
-            Failure::Fails(l) => panic!(
-                "hydrofrac: label `{}` does not hold\n{report}",
-                l.name()
-            ),
+            Failure::Fails(l) => panic!("hydrofrac: label `{}` does not hold\n{report}", l.name()),
         }
     }
 }
@@ -422,8 +419,11 @@ impl Results {
     /// How this report names nodes, channels and payloads: by the `Debug` renderings the
     /// counterexamples' sends carried, else by the facts their runs observed.
     pub fn report_names(&self) -> ReportNames<'_> {
-        let cexes: Vec<&Counterexample> =
-            self.labels.iter().filter_map(|l| l.verdict.counterexample()).collect();
+        let cexes: Vec<&Counterexample> = self
+            .labels
+            .iter()
+            .filter_map(|l| l.verdict.counterexample())
+            .collect();
         let facts: Vec<Fact> = cexes
             .iter()
             .flat_map(|c| counterexample_facts(c, &self.taps))
@@ -523,11 +523,7 @@ fn missing_in_words(missing: &[(u32, Fact)], cluster: &str, names: &ReportNames<
         .into_iter()
         .map(|(members, facts)| {
             let members: Vec<String> = members.iter().map(|m| format!("{cluster}@{m}")).collect();
-            format!(
-                "{} without {}",
-                and_list(&members),
-                fact_list(facts, names)
-            )
+            format!("{} without {}", and_list(&members), fact_list(facts, names))
         })
         .collect();
     match groups.as_slice() {
@@ -552,7 +548,13 @@ fn counterexample_in_words(c: &Counterexample, cluster: &str, names: &ReportName
     let (subject, plural) = names
         .fault_set_in_words(&c.faults)
         .unwrap_or_else(|| ("even the failure-free run".to_owned(), false));
-    let verb = |one: &str, many: &str| if plural { many.to_owned() } else { one.to_owned() };
+    let verb = |one: &str, many: &str| {
+        if plural {
+            many.to_owned()
+        } else {
+            one.to_owned()
+        }
+    };
     let mut effects = vec![];
     if !c.missing.is_empty() {
         effects.push(format!(
@@ -569,7 +571,9 @@ fn counterexample_in_words(c: &Counterexample, cluster: &str, names: &ReportName
         ));
     }
     let mut sentence = match (&c.panic, effects.is_empty()) {
-        (Some(panic), true) => format!("{subject} {} the run panic: {panic}", verb("makes", "make")),
+        (Some(panic), true) => {
+            format!("{subject} {} the run panic: {panic}", verb("makes", "make"))
+        }
         (_, true) => format!("{subject} {} it", verb("breaks", "break")),
         (panic, false) => {
             let mut s = format!("{subject} {}", effects.join(" and "));
@@ -699,7 +703,11 @@ fn write_label(
 }
 
 /// Writes the header of `cluster`'s block of the report.
-fn write_cluster(f: &mut fmt::Formatter<'_>, cluster: &LocationId, nodes: &NodeNames) -> fmt::Result {
+fn write_cluster(
+    f: &mut fmt::Formatter<'_>,
+    cluster: &LocationId,
+    nodes: &NodeNames,
+) -> fmt::Result {
     match nodes.label(cluster) {
         Some(label) => writeln!(f, "{label}:"),
         None => writeln!(f, "{cluster:?}:"),
