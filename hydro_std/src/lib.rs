@@ -6,4 +6,5 @@ pub mod compartmentalize;
 pub mod ec_inference_demos;
 pub mod membership;
 pub mod quorum;
+pub mod reliable_send;
 pub mod request_response;
