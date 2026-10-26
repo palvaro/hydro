@@ -95,9 +95,9 @@ where
     // The leader manufactures THE interleaving. `nondet!` (run-contingent
     // choice); no consistency downgrade on a Process (DropConsistency = Self).
     let merged = at_leader.entries_partially_ordered(nondet!(
-            /// The caller's `nondet_interleaving`.
-            nondet_interleaving
-        ));
+        /// The caller's `nondet_interleaving`.
+        nondet_interleaving
+    ));
 
     // Leader → replicas: FIFO broadcast of the chosen sequence. TO,EC — but
     // F = {leader}, untracked (see module docs).
@@ -164,9 +164,9 @@ where
     // nondet!). TotalOrder at the cluster location, NoConsistency — honestly,
     // since the types cannot see that only member 0 has data.
     let merged = at_member.entries_partially_ordered(nondet!(
-            /// The caller's `nondet_interleaving`.
-            nondet_interleaving
-        ));
+        /// The caller's `nondet_interleaving`.
+        nondet_interleaving
+    ));
 
     // Step 3: Broadcast, and stop. The keyed output is the honest type:
     // per-sender TO,EC (the single-writer row, per key). At runtime every
@@ -394,7 +394,8 @@ mod tests {
             });
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// **Crash demo, part 1 — the dissemination hole (fixable without
     /// consensus).** The module docs state the caveat in prose: the stamped
     /// TO,EC silently assumes the leader survives (`F = {leader}`), and "a
@@ -489,7 +490,8 @@ mod tests {
         );
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// **Crash demo, part 2 — the succession hole (this is what consensus is).**
     /// Patch part 1's dissemination hole: the leader ships its chosen order *as
     /// data* (slot indices, since the echo destroys FIFO) and disseminates via
@@ -608,7 +610,8 @@ mod tests {
         );
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// **Crash demo, part 2b — the member-leader variant fails the same test
     /// Raft passes, under the identical fault model.** The distinguished-member
     /// route ([`leader_merge_slots_from_member`]: all writers' values funnel to

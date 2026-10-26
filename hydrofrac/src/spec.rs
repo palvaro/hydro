@@ -355,23 +355,53 @@ mod tests {
         let (a, b) = (MemberView::of(0, &acks), MemberView::of(0, &stored));
         let client = members(&[0], &[0]);
         let replicas = members(&[0, 1, 2], &[1, 2]);
-        let e = evaluate(&a, &b, (ASide::Correct, BSide::AtLeast(1)), &client, &replicas);
+        let e = evaluate(
+            &a,
+            &b,
+            (ASide::Correct, BSide::AtLeast(1)),
+            &client,
+            &replicas,
+        );
         assert!(e.holds());
-        let e = evaluate(&a, &b, (ASide::Correct, BSide::AtLeast(2)), &client, &replicas);
+        let e = evaluate(
+            &a,
+            &b,
+            (ASide::Correct, BSide::AtLeast(2)),
+            &client,
+            &replicas,
+        );
         // Two replicas are correct: key 1 at one of them, key 2 at the other.
         assert_eq!(e.missing, vec![(1, fact(2)), (2, fact(1))]);
         assert_eq!(e.held.len(), 2);
-        let e = evaluate(&a, &b, (ASide::Correct, BSide::AllCorrect), &client, &replicas);
+        let e = evaluate(
+            &a,
+            &b,
+            (ASide::Correct, BSide::AllCorrect),
+            &client,
+            &replicas,
+        );
         assert_eq!(e.missing, vec![(1, fact(2)), (2, fact(1))]);
         // `Some` counts the crashed replica 0's key 1; `AtLeast(1)` does not.
         let one_correct = members(&[0, 1, 2], &[2]);
         let e = evaluate(&a, &b, (ASide::Correct, BSide::Some), &client, &one_correct);
         assert!(e.holds());
-        let e = evaluate(&a, &b, (ASide::Correct, BSide::AtLeast(1)), &client, &one_correct);
+        let e = evaluate(
+            &a,
+            &b,
+            (ASide::Correct, BSide::AtLeast(1)),
+            &client,
+            &one_correct,
+        );
         assert_eq!(e.missing, vec![(2, fact(1))]);
         // Short of `k` with every counted member crashed, or holding it: still broken.
         let none_correct = members(&[0, 1, 2], &[]);
-        let e = evaluate(&a, &b, (ASide::Any, BSide::AtLeast(1)), &client, &none_correct);
+        let e = evaluate(
+            &a,
+            &b,
+            (ASide::Any, BSide::AtLeast(1)),
+            &client,
+            &none_correct,
+        );
         assert!(!e.holds());
         let e = evaluate(&a, &b, (ASide::Any, BSide::AtLeast(4)), &client, &replicas);
         assert!(!e.holds());

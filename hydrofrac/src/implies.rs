@@ -115,8 +115,18 @@ pub trait Implies<'a, T, L: Location<'a>, B: Boundedness, O: Ordering, R: Retrie
         &self,
         name: &str,
         b: &Stream<U, LB, BB, OB, RB>,
-        ka: impl IntoQuotedMut<'a, FA, OperatorContext<L, B>, StreamMapFuncAlgebra<T, B, CA, IA, L::SimHookScope>>,
-        kb: impl IntoQuotedMut<'a, FB, OperatorContext<LB, BB>, StreamMapFuncAlgebra<U, BB, CB, IB, LB::SimHookScope>>,
+        ka: impl IntoQuotedMut<
+            'a,
+            FA,
+            OperatorContext<L, B>,
+            StreamMapFuncAlgebra<T, B, CA, IA, L::SimHookScope>,
+        >,
+        kb: impl IntoQuotedMut<
+            'a,
+            FB,
+            OperatorContext<LB, BB>,
+            StreamMapFuncAlgebra<U, BB, CB, IB, LB::SimHookScope>,
+        >,
         a_side: ASide,
         b_side: BSide,
     ) where
@@ -142,8 +152,18 @@ impl<'a, T: Clone, L: Location<'a>, B: Boundedness, O: Ordering, R: Retries>
         &self,
         name: &str,
         b: &Stream<U, LB, BB, OB, RB>,
-        ka: impl IntoQuotedMut<'a, FA, OperatorContext<L, B>, StreamMapFuncAlgebra<T, B, CA, IA, L::SimHookScope>>,
-        kb: impl IntoQuotedMut<'a, FB, OperatorContext<LB, BB>, StreamMapFuncAlgebra<U, BB, CB, IB, LB::SimHookScope>>,
+        ka: impl IntoQuotedMut<
+            'a,
+            FA,
+            OperatorContext<L, B>,
+            StreamMapFuncAlgebra<T, B, CA, IA, L::SimHookScope>,
+        >,
+        kb: impl IntoQuotedMut<
+            'a,
+            FB,
+            OperatorContext<LB, BB>,
+            StreamMapFuncAlgebra<U, BB, CB, IB, LB::SimHookScope>,
+        >,
         a_side: ASide,
         b_side: BSide,
     ) where

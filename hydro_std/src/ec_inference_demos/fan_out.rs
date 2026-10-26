@@ -343,7 +343,8 @@ mod tests {
         let _ = flow.finalize();
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// **Premise 2, refuted under crash faults.** The epistemic doc's
     /// correction predicted this: [`fan_out`]'s single trusted mint tacitly
     /// assumes the data holder does not crash ("premise 2 hardens to *some
@@ -430,7 +431,8 @@ mod tests {
         );
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// Self-delivery edge case: `fan_out` over a live view must deliver a
     /// member's element to ITSELF under dynamic membership. The RB-live tests
     /// can't catch a broken self-send (any peer's echo masks it); gossip's
@@ -467,7 +469,8 @@ mod tests {
             });
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// Sim test of the axiom behind `EventuallyComplete` (premise 1 of the
     /// minting rule): every observer's live view eventually contains every
     /// member of the target cluster, across all explored join timings.

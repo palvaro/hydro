@@ -54,7 +54,11 @@ fn ports_of(labels: &Labels, label: usize) -> impl Iterator<Item = usize> + '_ {
 
 #[cfg(stageleft_runtime)]
 fn searched(labels: &Labels) -> impl Iterator<Item = (usize, &LabelPlan)> {
-    labels.plans.iter().enumerate().filter(|(_, p)| p.is_searched())
+    labels
+        .plans
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.is_searched())
 }
 
 #[cfg(stageleft_runtime)]
@@ -222,7 +226,10 @@ fn gossip_state_is_not_covered_by_the_stream_it_folds() {
     assert!(all_elements.is_searched());
     let (_, state) = find(&plans, "gset_state");
     assert_eq!(state.collection.covered_by, Some(all));
-    assert!(matches!(state.not_checked, Some(NotCheckedReason::NotAStream(_))), "{state:?}");
+    assert!(
+        matches!(state.not_checked, Some(NotCheckedReason::NotAStream(_))),
+        "{state:?}"
+    );
     assert!(!state.is_searched());
     for hop in ["initial", "echo"] {
         assert!(find(&plans, hop).1.is_searched());

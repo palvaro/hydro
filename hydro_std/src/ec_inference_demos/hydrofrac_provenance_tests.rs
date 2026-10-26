@@ -51,7 +51,9 @@ fn broadcast(which: Broadcast, name: &str) {
             broadcast_live_from_process(items, &members, TCP.fail_stop().name("bcast").bincode())
                 .weaken_consistency()
         }
-        Broadcast::ReliableClosed => reliable_broadcast_closed(items, &members).weaken_consistency(),
+        Broadcast::ReliableClosed => {
+            reliable_broadcast_closed(items, &members).weaken_consistency()
+        }
         Broadcast::ReliableLive => reliable_broadcast_live(items, &members).weaken_consistency(),
         Broadcast::Uniform => {
             uniform_reliable_broadcast_closed(items, &members, 2).weaken_consistency()
@@ -113,7 +115,10 @@ fn gossip(live: bool, name: &str) {
     let member_tick = members.tick();
     let out = set
         .weaken_consistency()
-        .snapshot(&member_tick, nondet!(/** every change of the set is observed */))
+        .snapshot(
+            &member_tick,
+            nondet!(/** every change of the set is observed */),
+        )
         .into_stream()
         .flat_map_unordered(q!(|set: BTreeSet<u32>| set))
         .all_ticks()

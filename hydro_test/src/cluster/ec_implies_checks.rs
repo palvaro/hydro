@@ -243,7 +243,14 @@ fn durable(replicas: usize, acks: usize, b_side: BSide, max_crashes: Option<usiz
         .entries()
         .map(q!(|(replica, write)| (write, replica)));
     let acked = quorum(acks, replies).map(q!(|durable| durable.into_fact()));
-    acked.implies("durable", &stored, q!(|w| w), q!(|w| w), ASide::Correct, b_side);
+    acked.implies(
+        "durable",
+        &stored,
+        q!(|w| w),
+        q!(|w| w),
+        ASide::Correct,
+        b_side,
+    );
     drop((acked, stored));
     let mut check = EcCheck::new();
     if let Some(k) = max_crashes {

@@ -93,11 +93,11 @@ use futures::StreamExt;
 use libloading::Library;
 use tokio::sync::{Mutex, Notify};
 
+use super::network_hook::{ChannelInfo, LocationInfo, SimNetworkHook};
 use super::runtime::{
     Hooks, InlineHooks, ObservationHooks, ScriptTarget, ScriptedHookControl, ScriptedHookRegistry,
     ScriptedInlineHooks, ScriptedObservationHooks, ScriptedTickHooks, SimLocation,
 };
-use super::network_hook::{ChannelInfo, LocationInfo, SimNetworkHook};
 use super::{SimClusterReceiver, SimClusterSender, SimReceiver, SimSender};
 use crate::compile::builder::ExternalPortId;
 use crate::live_collections::stream::{ExactlyOnce, NoOrder, Ordering, Retries, TotalOrder};
@@ -807,9 +807,15 @@ pub struct CompiledSim {
     pub(super) network_hooks: bool,
     /// The hook installed with [`Self::set_network_hook`], handed to every instance.
     pub(super) network_hook: RefCell<Option<Rc<dyn SimNetworkHook>>>,
-    #[cfg_attr(not(feature = "hydrofrac"), expect(dead_code, reason = "hydrofrac API"))]
+    #[cfg_attr(
+        not(feature = "hydrofrac"),
+        expect(dead_code, reason = "hydrofrac API")
+    )]
     pub(super) channels: Vec<ChannelInfo>,
-    #[cfg_attr(not(feature = "hydrofrac"), expect(dead_code, reason = "hydrofrac API"))]
+    #[cfg_attr(
+        not(feature = "hydrofrac"),
+        expect(dead_code, reason = "hydrofrac API")
+    )]
     pub(super) locations: Vec<LocationInfo>,
 }
 
@@ -843,7 +849,6 @@ impl CompiledSim {
         &self.locations
     }
 }
-
 
 #[sealed::sealed]
 /// A trait implemented by closures that can instantiate a compiled simulation.

@@ -474,8 +474,7 @@ impl<'a> View<'a> {
         // Same records in every schedule if every input is (every node here has an input). The
         // constants inside a tick are tagged at their source, so their tags still reach the
         // output. Not for `defer_tick`, whose records exist only if a later tick runs.
-        if !matches!(node, DeferTick { .. }) && inputs(node).into_iter().all(|i| self.constant(i))
-        {
+        if !matches!(node, DeferTick { .. }) && inputs(node).into_iter().all(|i| self.constant(i)) {
             return None;
         }
         Some(match node {

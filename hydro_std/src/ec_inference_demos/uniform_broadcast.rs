@@ -119,7 +119,8 @@ mod tests {
             });
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// **The separation, red half: regular RB is not uniform.** Sender and one
     /// cluster member may crash. The search must find an execution where SOME
     /// member delivered 42 but fewer than N − F members ever do — i.e. a
@@ -177,7 +178,8 @@ mod tests {
         );
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// **The separation, green half: URB is uniform.** The identical fault
     /// model — crashable sender AND one crashable cluster member — but
     /// delivery is certificate-gated at threshold F + 1. In every explored

@@ -149,7 +149,10 @@ fn review2b_fault_created_panic_beside_a_robust_fact() {
     let diagram = cex.diagram.as_ref().expect("the diagram was written");
     let dot = std::fs::read_to_string(diagram.with_extension("dot")).unwrap();
     assert!(dot.contains("⇒ 1\""), "{dot}");
-    assert!(!dot.contains("⇒ 10") && !dot.contains("⇒ 0a000000"), "{dot}");
+    assert!(
+        !dot.contains("⇒ 10") && !dot.contains("⇒ 0a000000"),
+        "{dot}"
+    );
     assert!(dot.contains("unrelated outputs not shown"), "{dot}");
 }
 
@@ -163,10 +166,7 @@ fn racy_alarm(
     check: &mut EcCheck,
     items: u32,
     probed: u32,
-) -> (
-    hydro_lang::sim::compiled::CompiledSim,
-    impl FnMut() + use<>,
-) {
+) -> (hydro_lang::sim::compiled::CompiledSim, impl FnMut() + use<>) {
     let mut flow = FlowBuilder::new();
     let source = flow.process::<()>();
     let prober = flow.process::<()>();
@@ -221,7 +221,10 @@ fn review2b_a_sampled_miss_is_not_accepted_by_assert_holds() {
         assert!(!results.holds(), "{results}");
         let refused =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| results.assert_holds()));
-        assert!(refused.is_err(), "assert_holds accepted a sampled search: {results}");
+        assert!(
+            refused.is_err(),
+            "assert_holds accepted a sampled search: {results}"
+        );
     };
     let run = |items, probed| {
         let mut check = EcCheck::new().max_crashes(0);
@@ -241,7 +244,10 @@ fn review2b_a_sampled_miss_is_not_accepted_by_assert_holds() {
         match &label.verdict {
             Verdict::Counterexample(cex) => assert!(!cex.tolerance_certified, "{racing}"),
             Verdict::Exhausted { .. } => {}
-            _ => panic!("a sampled search must not certify `{}`: {racing}", label.name()),
+            _ => panic!(
+                "a sampled search must not certify `{}`: {racing}",
+                label.name()
+            ),
         }
     }
     refuses(&racing);
@@ -258,7 +264,9 @@ fn review2b_a_sampled_miss_is_not_accepted_by_assert_holds() {
     refuses(&holding);
     let message = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| holding.assert_holds()))
         .expect_err("refused above");
-    let message = message.downcast_ref::<String>().expect("a formatted message");
+    let message = message
+        .downcast_ref::<String>()
+        .expect("a formatted message");
     assert!(message.contains("schedules were sampled"), "{message}");
 }
 

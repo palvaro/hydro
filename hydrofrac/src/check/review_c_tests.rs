@@ -242,7 +242,10 @@ fn review_c_local_only_label_that_disagrees_passes_assert_holds() {
     );
     let label = cross.results.label("mine");
     assert!(
-        label.verdict.counterexample().is_some_and(|c| c.faults.is_empty()),
+        label
+            .verdict
+            .counterexample()
+            .is_some_and(|c| c.faults.is_empty()),
         "the probe breaks it: {cross}"
     );
     assert!(!cross.results.holds(), "{cross}");

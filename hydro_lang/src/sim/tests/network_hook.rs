@@ -172,7 +172,13 @@ fn hook_drops_one_channel_and_tags_round_trip() {
         fault: TcpFault::FailStop,
     };
     assert_eq!(
-        (a.name.as_deref(), &a.from, &a.to, &a.networking, a.intercepted),
+        (
+            a.name.as_deref(),
+            &a.from,
+            &a.to,
+            &a.networking,
+            a.intercepted
+        ),
         (Some("a"), &p1.id(), &p2.id(), &fail_stop, true)
     );
     assert_eq!(b.name.as_deref(), Some("b"));

@@ -78,7 +78,9 @@ fn observe(sim: &CompiledSim, mut body: impl AsyncFnMut()) -> Vec<Vec<Seen>> {
                 .map(|o| Seen {
                     member: o.node.member,
                     // Sim outputs cross the dylib boundary in the default sim codec (MessagePack).
-                    fact: <hydro_lang::sim::codec::RmpCodec as hydro_lang::sim::codec::SimCodec<u32>>::decode(o.bytes),
+                    fact: <hydro_lang::sim::codec::RmpCodec as hydro_lang::sim::codec::SimCodec<
+                        u32,
+                    >>::decode(o.bytes),
                     sites: (*lineage.fragile_sites(o.event)).clone(),
                     deps: lineage
                         .derivation(o.event)

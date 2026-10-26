@@ -927,7 +927,10 @@ fn deferred_records_are_fragile() {
 
 /// Whether some label of `cross` breaks under a fault set satisfying `faults`.
 #[cfg(stageleft_runtime)]
-fn breaks_under(cross: &CrossCheck, faults: impl Fn(&FaultSet<crate::fault::MessageId>) -> bool) -> bool {
+fn breaks_under(
+    cross: &CrossCheck,
+    faults: impl Fn(&FaultSet<crate::fault::MessageId>) -> bool,
+) -> bool {
     cross
         .results
         .results()
@@ -1002,7 +1005,11 @@ fn a_dedup_state_read_elsewhere_is_fragile() {
         .batch(&tick, nondet!(/** which tick a delivery lands in */))
         .weaken_ordering::<NoOrder>();
     let (handle, prev) = tick.cycle::<Stream<u32, _, Bounded, NoOrder>, _>();
-    let seen = prev.chain(tick.singleton(q!(0u32)).into_stream().weaken_ordering::<NoOrder>());
+    let seen = prev.chain(
+        tick.singleton(q!(0u32))
+            .into_stream()
+            .weaken_ordering::<NoOrder>(),
+    );
     let fresh = arrived.filter_not_in(seen.clone());
     handle.complete_next_tick(seen.clone().chain(fresh.clone()));
     fresh
@@ -1071,7 +1078,10 @@ fn review_batch_beside_an_unready_snapshot() {
         .instrument(flow.sim().with_cluster_size(&members, 2))
         .compiled();
     let sites = check.fragile_sites().expect("instrumented");
-    assert!(sites.iter().any(|s| s.op == "batch_beside_snapshot"), "{sites:?}");
+    assert!(
+        sites.iter().any(|s| s.op == "batch_beside_snapshot"),
+        "{sites:?}"
+    );
     let cross = check.cross_check(
         &sim,
         async || {
@@ -1131,7 +1141,12 @@ fn one_labelling_line_twice_is_two_labels() {
     );
     agree("one labelling line twice", &cross);
     // The two broadcasts, and the two collections `claim` labels.
-    let searched: Vec<_> = cross.results.results().iter().filter(|l| l.plan.is_searched()).collect();
+    let searched: Vec<_> = cross
+        .results
+        .results()
+        .iter()
+        .filter(|l| l.plan.is_searched())
+        .collect();
     assert_eq!(searched.len(), 4, "{cross}");
     let claimed: Vec<_> = searched
         .iter()
@@ -1139,7 +1154,10 @@ fn one_labelling_line_twice_is_two_labels() {
         .collect();
     assert_eq!(claimed.len(), 2, "{cross}");
     // `b`'s broadcast and `claim(b)` break under omissions; `a`'s and `claim(a)` hold.
-    let breaking = searched.iter().filter(|l| l.verdict.counterexample().is_some()).count();
+    let breaking = searched
+        .iter()
+        .filter(|l| l.verdict.counterexample().is_some())
+        .count();
     assert_eq!(breaking, 2, "{cross}");
     assert!(
         claimed.iter().any(|l| l.verdict.counterexample().is_some()),
@@ -1167,22 +1185,27 @@ fn impure_closures_are_fragile_choices() {
         .compiled();
     let sites = check.fragile_sites().expect("instrumented");
     assert!(sites.iter().any(|s| s.op == "impure_closure"), "{sites:?}");
-    let impure =
-        |text: &str| !crate::provenance::purity::known_pure(text.parse().unwrap(), true);
+    let impure = |text: &str| !crate::provenance::purity::known_pure(text.parse().unwrap(), true);
     assert!(impure("|x| { static N: u32 = 0; x + N }"));
-    assert!(impure("|x| x + COUNT.fetch_add(1, Ordering::Relaxed) as AtomicU32"));
+    assert!(impure(
+        "|x| x + COUNT.fetch_add(1, Ordering::Relaxed) as AtomicU32"
+    ));
     assert!(impure("|x| (x, std::time::SystemTime::now())"));
     assert!(impure("|x| x.borrow_mut().replace(RefCell::new(0))"));
     // Not on a deny-list, but not known pure: state the expression creates before the closure,
     // a helper that may hide a `static`, a call through a value.
-    assert!(impure("{ let (tx, rx) = std::sync::mpsc::channel(); move |x| { tx.send(x); x } }"));
+    assert!(impure(
+        "{ let (tx, rx) = std::sync::mpsc::channel(); move |x| { tx.send(x); x } }"
+    ));
     assert!(impure("|x| helper(x)"));
     assert!(impure("|x| (HELPERS[0])(x)"));
     assert!(impure("|x| x.next_id()"));
     assert!(impure("|x| unsafe { x }"));
     assert!(!impure("|x: &'static str| x.len()"));
     assert!(!impure("|(k, v)| (k, v + 1)"));
-    assert!(!impure("move |(k, v): (u32, Vec<u32>)| Some((k, v.iter().map(|x| x * 2).collect::<Vec<_>>()))"));
+    assert!(!impure(
+        "move |(k, v): (u32, Vec<u32>)| Some((k, v.iter().map(|x| x * 2).collect::<Vec<_>>()))"
+    ));
     assert!(!impure("|acc: &mut u32, x| *acc += x"));
     assert!(!impure("Some"));
 }
@@ -1297,13 +1320,21 @@ fn a_fact_only_faults_create_is_checked() {
     let cex = cross.results.label("missing").verdict.counterexample();
     let cex = cex.unwrap_or_else(|| panic!("a single crash of the source breaks it: {cross}"));
     assert_eq!(cex.crashes(), 1, "{cross}");
-    assert!(cex.missing.is_empty() && !cex.divergent.is_empty(), "{cross}");
+    assert!(
+        cex.missing.is_empty() && !cex.divergent.is_empty(),
+        "{cross}"
+    );
 
     let cross = missing_alarm(EcCheck::new().max_crashes(0));
     agree("a fact only faults create, no crash", &cross);
     let label = cross.results.label("missing");
     assert!(
-        matches!(label.verdict, Verdict::Certified { tolerates: Tolerance::UpTo(0) }),
+        matches!(
+            label.verdict,
+            Verdict::Certified {
+                tolerates: Tolerance::UpTo(0)
+            }
+        ),
         "{cross}"
     );
     assert!(label.stats.races.is_some_and(|r| r.claim_b), "{cross}");
@@ -1322,18 +1353,24 @@ fn redundant_scans() -> CrossCheck {
     let (send_second, input_second) = second.sim_input::<u32, TotalOrder, ExactlyOnce>();
     let from_first = input_first
         .broadcast_closed(&members, TCP.fail_stop().name("first").bincode())
-        .scan(q!(|| 0u32), q!(|count, x| {
-            *count += 1;
-            Some(x)
-        }))
+        .scan(
+            q!(|| 0u32),
+            q!(|count, x| {
+                *count += 1;
+                Some(x)
+            }),
+        )
         .weaken_consistency()
         .weaken_ordering::<NoOrder>();
     let from_second = input_second
         .broadcast_closed(&members, TCP.fail_stop().name("second").bincode())
-        .scan(q!(|| 0u32), q!(|count, x| {
-            *count += 1;
-            Some(x)
-        }))
+        .scan(
+            q!(|| 0u32),
+            q!(|count, x| {
+                *count += 1;
+                Some(x)
+            }),
+        )
         .weaken_consistency()
         .weaken_ordering::<NoOrder>();
     let either = from_first
@@ -1346,7 +1383,10 @@ fn redundant_scans() -> CrossCheck {
     let sim = check
         .instrument(flow.sim().with_cluster_size(&members, 3))
         .compiled();
-    assert!(check.fragile_sites().is_some_and(|s| !s.is_empty()), "the scans are fragile");
+    assert!(
+        check.fragile_sites().is_some_and(|s| !s.is_empty()),
+        "the scans are fragile"
+    );
     check.cross_check(
         &sim,
         async || {
@@ -1369,14 +1409,23 @@ fn the_choice_free_shortcut_runs_one_schedule_and_aims_the_search() {
     agree("redundant scans", &cross);
     let label = cross.results.label("either");
     assert!(
-        matches!(label.verdict, Verdict::Certified { tolerates: Tolerance::UpTo(1) }),
+        matches!(
+            label.verdict,
+            Verdict::Certified {
+                tolerates: Tolerance::UpTo(1)
+            }
+        ),
         "{cross}"
     );
     // Only the probe runs: its robust clauses leave no admissible one-crash set. With the
     // shortcut forced off, this search ran 12 sets, none on one schedule (measured).
     let notes = label.stats.races.expect("a races search");
     assert_eq!(
-        (label.stats.hypotheses, notes.single_schedule_sets, notes.claim_b),
+        (
+            label.stats.hypotheses,
+            notes.single_schedule_sets,
+            notes.claim_b
+        ),
         (1, 1, true),
         "{cross}"
     );
@@ -1439,5 +1488,8 @@ fn a_sequenced_broadcast_runs_each_crash_point_of_its_sender_once() {
     // Without the sequence proof: 6 sets, 24 schedules, 2 of the sets on one schedule. With it:
     // 4 sets, every one on one schedule.
     assert_eq!(label.stats.schedules, label.stats.hypotheses, "{cross}");
-    assert_eq!(notes.single_schedule_sets, label.stats.hypotheses, "{cross}");
+    assert_eq!(
+        notes.single_schedule_sets, label.stats.hypotheses,
+        "{cross}"
+    );
 }

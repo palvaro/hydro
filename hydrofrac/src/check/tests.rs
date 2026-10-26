@@ -214,10 +214,14 @@ fn a_label_assert_holds_panics_with_its_report() {
         .downcast::<String>()
         .unwrap();
     assert!(
-        message.starts_with("hydrofrac: label `delivered (") && message.contains("` does not hold\n"),
+        message.starts_with("hydrofrac: label `delivered (")
+            && message.contains("` does not hold\n"),
         "{message}"
     );
-    assert!(message.contains("broken: a single crash of process"), "{message}");
+    assert!(
+        message.contains("broken: a single crash of process"),
+        "{message}"
+    );
     assert!(message.contains("diagram: "), "{message}");
 }
 
@@ -345,10 +349,7 @@ fn the_report_is_in_source_names() {
         .lines()
         .find(|l| l.contains(&format!("[{}] delivered", delivered.index)))
         .unwrap_or_else(|| panic!("a row for `delivered`:\n{report}"));
-    assert!(
-        line.contains("broken: a crash of "),
-        "{report}"
-    );
+    assert!(line.contains("broken: a crash of "), "{report}");
     // The broadcast value 7 is decoded through the tapped fact with the same bytes.
     assert!(line.contains("sends 7 to "), "{report}");
     assert!(
@@ -516,7 +517,10 @@ fn message_payloads_render_by_their_debug() {
     });
     assert!(carried, "{:?}", cex.record.log);
     let report = results.to_string();
-    assert!(report.contains("the message Order { id: 1 } from "), "{report}");
+    assert!(
+        report.contains("the message Order { id: 1 } from "),
+        "{report}"
+    );
     let diagram = cex.diagram.as_ref().expect("the diagram was written");
     let dot = std::fs::read_to_string(diagram.with_extension("dot")).unwrap();
     assert!(dot.contains("Order { id: 1 }"), "{dot}");

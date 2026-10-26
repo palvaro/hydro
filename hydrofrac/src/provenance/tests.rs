@@ -241,8 +241,9 @@ fn fold_accumulates_the_deliveries_it_folded() {
         let mut covered = BTreeSet::new();
         for o in outputs.iter() {
             // Sim outputs use the default sim codec (MessagePack); network payloads are bincode.
-            let sum: u32 =
-                <hydro_lang::sim::codec::RmpCodec as hydro_lang::sim::codec::SimCodec<u32>>::decode(&o.payload);
+            let sum: u32 = <hydro_lang::sim::codec::RmpCodec as hydro_lang::sim::codec::SimCodec<
+                u32,
+            >>::decode(&o.payload);
             let ids = Recorder::ids(&o.prov);
             let from: u32 = ids
                 .iter()

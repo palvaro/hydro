@@ -1120,7 +1120,8 @@ mod tests {
                         },
                     ),
                 )]);
-                let ack: Vec<(MemberId<()>, ToClient<u32>)> = replies.collect_n_sorted_only(0, 1).await;
+                let ack: Vec<(MemberId<()>, ToClient<u32>)> =
+                    replies.collect_n_sorted_only(0, 1).await;
                 assert!(matches!(ack[0].1, ToClient::WriteAck { rid: 1 }));
 
                 q_send.send_many_unordered([(0, (requester, ToReplica::Query { rid: 2 }))]);
@@ -1178,7 +1179,8 @@ mod tests {
                 assert_eq!(done[0].0, 1, "write rid 1 must complete");
 
                 r_send.send(0, 2);
-                let got: Vec<(u64, Option<(Ts, u32)>)> = read_recv.collect_n_sorted_only(0, 1).await;
+                let got: Vec<(u64, Option<(Ts, u32)>)> =
+                    read_recv.collect_n_sorted_only(0, 1).await;
                 assert_eq!(got[0].0, 2);
                 assert_eq!(
                     got[0].1.as_ref().map(|(_, v)| *v),
@@ -1235,7 +1237,8 @@ mod tests {
             });
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// **The portfolio row.** One untargeted REPLICA crash (budget F = 1):
     /// in EVERY explored execution both writes and the read COMPLETE
     /// (progress at F = 1 — no leader, no dead state; contrast
@@ -1269,7 +1272,8 @@ mod tests {
                 let _: Vec<(u64, Ts)> = done_recv.collect_n_sorted_only(0, 1).await;
 
                 r_send.send(0, 3);
-                let got: Vec<(u64, Option<(Ts, u32)>)> = read_recv.collect_n_sorted_only(0, 1).await;
+                let got: Vec<(u64, Option<(Ts, u32)>)> =
+                    read_recv.collect_n_sorted_only(0, 1).await;
                 assert_eq!(
                     got[0].1.as_ref().map(|(_, v)| *v),
                     Some(20),
@@ -1324,7 +1328,8 @@ mod tests {
         );
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// **The test the client-cluster design unlocks: an untargeted CLIENT
     /// crash.** A client may die mid-phase-2 — the classic incomplete write,
     /// stored on some replicas but never certified. Survivor-agnostic

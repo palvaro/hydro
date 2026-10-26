@@ -245,7 +245,8 @@ mod tests {
             });
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// Minimal regression net for the sim's empty-fold-batch bug: a top-level
     /// fold whose hook was serviced (empty, trivial release) before real input
     /// arrived used to have its `scan` state permanently terminated, silently
@@ -284,7 +285,8 @@ mod tests {
             });
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// First-ever behavior test for the dynamic gossip demo: across every
     /// explored join timing (a member's `Joined` fact may reach observers
     /// after updates have already flowed), every member converges to the full
@@ -330,7 +332,8 @@ mod tests {
             });
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// The fault column: gossip's pump is its retry loop (premise (d) of the
     /// dissemination theorem). One untargeted crash (`with_crashable_cluster`)
     /// may cut a member's initial broadcast mid-fan-out, leaving peers with

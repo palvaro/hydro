@@ -25,7 +25,6 @@ use hydro_lang::prelude::*;
 use hydrofrac::EcCheck;
 use hydrofrac::check::{CrossCheck, Verdict};
 
-
 pub struct Source;
 pub struct Member;
 pub struct Proposer;
@@ -324,7 +323,10 @@ fn ctp(
 #[test]
 #[ignore = "measurement"]
 fn races_targets_probe_ctp_timers_after_the_faults() {
-    probe("ctp (2 participants, timers after the faults)", ctp(2, false, 1, None));
+    probe(
+        "ctp (2 participants, timers after the faults)",
+        ctp(2, false, 1, None),
+    );
 }
 
 /// Measured (with the barrier harness's racing variant, the same failure-free runs): passed

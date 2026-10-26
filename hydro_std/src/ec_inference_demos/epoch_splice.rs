@@ -388,7 +388,8 @@ mod tests {
                 });
 
                 for member in 0..2u32 {
-                    let facts: Vec<SpliceFact<u32>> = out_recv.collect_n_sorted_only(member, 5).await;
+                    let facts: Vec<SpliceFact<u32>> =
+                        out_recv.collect_n_sorted_only(member, 5).await;
                     let mut state = SpliceState::new();
                     for f in facts {
                         state.absorb(f);

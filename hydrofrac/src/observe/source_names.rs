@@ -590,7 +590,8 @@ fn g() -> u32 {
             Some("abd_register_state")
         );
         assert_eq!(
-            function_name("<hydro_lang::Stream<T> as hydro_std::Ext>::relay::{closure#0}").as_deref(),
+            function_name("<hydro_lang::Stream<T> as hydro_std::Ext>::relay::{closure#0}")
+                .as_deref(),
             Some("relay")
         );
         assert_eq!(short_type_name("a::b::Learner"), "Learner");

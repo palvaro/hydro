@@ -896,7 +896,8 @@ mod tests {
             });
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// Dueling leaders AND one untargeted acceptor crash: per-slot agreement
     /// and learner convergence still hold in every explored execution.
     #[test]
@@ -1046,7 +1047,8 @@ mod tests {
         );
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// **Progress under the Ω discipline.** A single designated leader (no
     /// duel — that is the oracle's job) with one untargeted acceptor crash:
     /// in EVERY explored execution both decrees are chosen, uniformly

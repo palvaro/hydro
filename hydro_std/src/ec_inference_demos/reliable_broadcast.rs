@@ -364,7 +364,8 @@ mod tests {
         assert_eq!(count, 1, "static RB should explore a single execution");
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// Full-protocol late-join catch-up (M2 payoff). Both the initial broadcast
     /// and the echo fan out over *live* membership (`broadcast_live_from_process`
     /// and `broadcast_live`), so a member that joins after the initial send genuinely
@@ -405,7 +406,8 @@ mod tests {
             });
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// **The distinguishing fault, part 1: plain broadcast is not reliable
     /// broadcast.** In every crash-free execution, `broadcast_closed` and
     /// `reliable_broadcast_closed` are observationally identical — the echo cycle
@@ -468,7 +470,8 @@ mod tests {
         );
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// **The distinguishing fault, part 2: the echo cycle is load-bearing.** The
     /// identical harness and fault as
     /// [`broadcast_closed_violates_agreement_under_sender_crash`] — sender

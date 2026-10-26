@@ -2507,7 +2507,10 @@ impl DfirBuilder for SimBuilder {
         let Some((meta_id, name, op)) = self.pending_network_meta.take() else {
             panic!("SimBuilder: network_metadata was not called before create_network")
         };
-        assert_eq!(meta_id, tag_id, "SimBuilder: network_metadata for another network");
+        assert_eq!(
+            meta_id, tag_id,
+            "SimBuilder: network_metadata for another network"
+        );
         // Hook points intercept bincode channels only: embedded channels carry typed values.
         let intercepted = self.network_hooks && external_element_type.is_none();
         let channel_id = tag_id.into_inner();
@@ -2736,9 +2739,14 @@ impl DfirBuilder for SimBuilder {
         );
 
         let Some((port_id, port)) = self.pending_output_port.take() else {
-            panic!("SimBuilder: external_output_metadata was not called before create_external_output")
+            panic!(
+                "SimBuilder: external_output_metadata was not called before create_external_output"
+            )
         };
-        assert_eq!(port_id, tag_id, "SimBuilder: external_output_metadata for another output");
+        assert_eq!(
+            port_id, tag_id,
+            "SimBuilder: external_output_metadata for another output"
+        );
         let send_closure: syn::Expr = if self.network_hooks {
             let root = get_this_crate();
             let member: syn::Expr = if matches!(on.root(), LocationId::Cluster(_)) {

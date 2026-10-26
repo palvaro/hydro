@@ -56,8 +56,22 @@ fn a_member_that_delivers_then_crashes_breaks_uniformity() {
     let (send, item) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
     let delivered = reliable_broadcast_closed(item, &members);
     let id = || q!(|m| m);
-    delivered.implies("regular", &delivered, id(), id(), ASide::Correct, BSide::AllCorrect);
-    delivered.implies("uniform", &delivered, id(), id(), ASide::Any, BSide::AllCorrect);
+    delivered.implies(
+        "regular",
+        &delivered,
+        id(),
+        id(),
+        ASide::Correct,
+        BSide::AllCorrect,
+    );
+    delivered.implies(
+        "uniform",
+        &delivered,
+        id(),
+        id(),
+        ASide::Any,
+        BSide::AllCorrect,
+    );
     let _out = delivered.sim_cluster_output();
 
     let mut check = EcCheck::new();
@@ -89,8 +103,22 @@ fn uniform_reliable_broadcast_is_uniform() {
     let (send, item) = source.sim_input::<u32, TotalOrder, ExactlyOnce>();
     let delivered = uniform_reliable_broadcast_closed(item, &members, 1);
     let id = || q!(|m| m);
-    delivered.implies("regular", &delivered, id(), id(), ASide::Correct, BSide::AllCorrect);
-    delivered.implies("uniform", &delivered, id(), id(), ASide::Any, BSide::AllCorrect);
+    delivered.implies(
+        "regular",
+        &delivered,
+        id(),
+        id(),
+        ASide::Correct,
+        BSide::AllCorrect,
+    );
+    delivered.implies(
+        "uniform",
+        &delivered,
+        id(),
+        id(),
+        ASide::Any,
+        BSide::AllCorrect,
+    );
     let _out = delivered.sim_cluster_output();
 
     let mut check = EcCheck::new();
@@ -132,7 +160,14 @@ fn replicated_store<'a>(
         .entries()
         .map(q!(|(replica, write)| (write, replica)));
     let acked = quorum(acks, replies).map(q!(|durable| durable.into_fact()));
-    acked.implies("durable", &stored, q!(|w| w), q!(|w| w), ASide::Correct, b_side);
+    acked.implies(
+        "durable",
+        &stored,
+        q!(|w| w),
+        q!(|w| w),
+        ASide::Correct,
+        b_side,
+    );
     (client, replicas, send)
 }
 

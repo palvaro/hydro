@@ -29,6 +29,10 @@ pub mod check;
 #[cfg(stageleft_runtime)]
 #[doc(hidden)]
 pub mod choices;
+/// Closed-broadcast channels, whose sends to each member follow a fixed order
+/// (docs/design/hydrofrac-races.md §4.2).
+#[cfg(stageleft_runtime)]
+pub mod fanout;
 /// The program's fragile steps (docs/design/hydrofrac-races.md §3.1): steps whose output can
 /// exist or not depending on the schedule.
 #[cfg(stageleft_runtime)]
@@ -36,14 +40,10 @@ pub mod fragile;
 /// Which closures are known pure (A3): an allowlist of names.
 #[cfg(stageleft_runtime)]
 pub(crate) mod purity;
-/// Closed-broadcast channels, whose sends to each member follow a fixed order
-/// (docs/design/hydrofrac-races.md §4.2).
-#[cfg(stageleft_runtime)]
-pub mod fanout;
-pub mod rewrite;
 /// Trusted `quorum` (docs/design/hydrofrac-races.md §8.2): its mint gives each certificate the
 /// lineage of its fact's attestations, and none of its steps is fragile.
 mod quorum;
+pub mod rewrite;
 
 #[cfg(stageleft_runtime)]
 pub use fragile::FragileSite;

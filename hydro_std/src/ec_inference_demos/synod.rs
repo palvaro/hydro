@@ -368,7 +368,8 @@ mod tests {
             });
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// Dueling proposers AND one untargeted acceptor crash: agreement still
     /// holds in every explored execution.
     #[test]
@@ -533,7 +534,8 @@ mod tests {
         );
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// **Progress under the Ω discipline.** A single designated proposer
     /// (no duel — that is the oracle's job) with one untargeted acceptor
     /// crash: the value is chosen in EVERY explored execution, asserted by

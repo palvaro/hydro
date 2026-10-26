@@ -170,7 +170,10 @@ impl FanOutOrder {
                 self.ranks.insert(key, None);
                 continue;
             }
-            let entry = self.ranks.entry(key.clone()).or_insert(Some(BTreeMap::new()));
+            let entry = self
+                .ranks
+                .entry(key.clone())
+                .or_insert(Some(BTreeMap::new()));
             if let Some(rank) = entry {
                 assert_prefix(&key, rank, &seq);
                 for (i, bytes) in seq.into_iter().enumerate() {

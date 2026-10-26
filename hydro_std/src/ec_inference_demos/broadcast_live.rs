@@ -206,7 +206,8 @@ mod tests {
             });
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// Dynamic-membership path (M0): same broadcast, but the destination cluster
     /// opts into `with_dynamic_membership`, so members' `Joined` events are
     /// released by the `MembershipHook` at nondeterministic times rather than all
@@ -260,7 +261,8 @@ mod tests {
         );
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// The real late-join catch-up test. Source member 0 sends *three* messages,
     /// and the destination cluster joins dynamically. Across **every** explored
     /// join timing — including ones where a dest member joins only after all
@@ -321,7 +323,8 @@ mod tests {
         );
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// Process-source late-join catch-up (via `broadcast_live_from_process`).
     /// A process broadcasts three messages to a dynamically-joining cluster.
     /// Across every explored join timing — including a member joining only after

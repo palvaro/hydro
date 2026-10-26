@@ -400,7 +400,8 @@ mod tests {
             });
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// **The test this layer exists for: an untargeted PROPOSER crash cannot
     /// block progress.** The driver is crash-agnostic (the Raft progress
     /// test's discipline): each round it resubmits the command to the next
@@ -464,7 +465,8 @@ mod tests {
             });
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// **Elections cannot break safety.** Both members submit and both get
     /// timer interrupts with no barriers — campaigns, fencing, recovery
     /// re-proposals, and an untargeted acceptor crash all race. Per-slot
@@ -558,7 +560,8 @@ mod tests {
             });
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// **Raft test parity, the headline: `any_single_crash_cannot_block_
     /// progress`, identical topology.** One cluster of 3, every node all
     /// three roles, untargeted crash budget F = 1 over the WHOLE node (its
@@ -616,7 +619,8 @@ mod tests {
             });
     }
 
-    #[cfg(any())] // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
+    #[cfg(any())]
+    // fork-only sim: needs crash/membership injection (`with_crashable_*`, `with_dynamic_membership`), not in upstream
     /// **Safety beyond the crash budget** (raft-parity for
     /// `leader_without_quorum_commits_nothing`, strengthened): with up to
     /// TWO of three acceptors crashed — beyond the design budget — progress

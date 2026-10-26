@@ -361,7 +361,10 @@ fn brute_force_finds_the_two_pc_cooperative_termination_violation() {
 #[test]
 fn brute_force_agrees_on_two_pc_cooperative_termination() {
     let cross = two_pc_cross_check();
-    costs("two_pc ctp (3 participants, one-shot timer, sampled)", &cross);
+    costs(
+        "two_pc ctp (3 participants, one-shot timer, sampled)",
+        &cross,
+    );
     cross.assert_agrees();
     let cex = claim(&cross, "committed")
         .verdict
