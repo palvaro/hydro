@@ -19,3 +19,36 @@ pub mod simple_cluster;
 pub mod two_pc;
 #[cfg(feature = "tokio")]
 pub mod two_pc_bench;
+
+// hydrofrac (`EcCheck`) targets and checks.
+pub mod reliable_broadcast;
+pub mod two_pc_ctp;
+
+pub mod ec_hydrofrac;
+pub mod ec_hydrofrac_classes;
+#[cfg(test)]
+mod ec_two_pc_hydrofrac;
+#[cfg(test)]
+mod hydrofrac_provenance_tests;
+
+#[cfg(test)]
+mod ec_demos_hydrofrac;
+
+#[cfg(test)]
+mod ec_bruteforce;
+
+#[cfg(test)]
+mod ec_races_targets;
+
+#[cfg(test)]
+mod ec_quorum_trust;
+
+#[cfg(test)]
+mod ec_teaching;
+#[cfg(test)]
+mod ec_implies_checks;
+#[cfg(test)]
+mod ec_implies_teaching;
+
+#[cfg(test)]
+mod ec_teaching_checks;

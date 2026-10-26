@@ -52,6 +52,9 @@ stageleft_tool.workspace = true
 hydro_build_utils = { path = "../hydro_build_utils", version = "^0.1.1-alpha.1" }
 
 [dev-dependencies]
+# `EcCheck` on the EC corpus (`cluster::ec_*`, `cluster::hydrofrac_provenance_tests`);
+# `cross-check` for the brute-force honesty check (`cluster::ec_bruteforce`).
+hydrofrac = { path = "../hydrofrac", features = ["cross-check"] }
 clap = { version = "4.4", features = ["derive"] }
 dfir_lang = { path = "../dfir_lang", version = "^0.17.0-alpha.4" }
 example_test = { path = "../example_test", version = "^0.0.2-alpha.0" }
