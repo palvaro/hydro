@@ -178,12 +178,114 @@ pub struct LabelResult {
     pub verdict: Verdict,
     /// What the search cost (zero for labels that were not searched).
     pub stats: Stats,
+    /// What the label's report names nodes, channels and payloads by (shared with the other
+    /// labels of the same [`Results`]).
+    pub(crate) context: Rc<ReportContext>,
+}
+
+/// What a label's report needs from the program it was checked in: [`Results::names`],
+/// [`Results::channels`] and [`Results::taps`].
+pub(crate) struct ReportContext {
+    pub(crate) names: NodeNames,
+    pub(crate) channels: Vec<ChannelInfo>,
+    pub(crate) taps: Labels,
+}
+
+impl fmt::Debug for ReportContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReportContext").finish_non_exhaustive()
+    }
 }
 
 impl LabelResult {
     /// The label's display name: its binding (or operator), file and occurrence.
     pub fn name(&self) -> String {
         label_name(&self.plan)
+    }
+
+    /// The counterexample that breaks the label, if one does.
+    pub fn counterexample(&self) -> Option<&Counterexample> {
+        self.verdict.counterexample()
+    }
+
+    /// Whether the label is certified (or vacuous), by the rule of [`Results::holds`]: not a
+    /// counterexample, an exhausted budget, a sampled search ([`Verdict::Exhausted`]) or a
+    /// label the specification does not check ([`Verdict::NotChecked`]).
+    pub fn holds(&self) -> bool {
+        !self.verdict.fails()
+    }
+
+    /// Panics with the label's report unless it holds (see [`Self::holds`]), saying why: the
+    /// counterexample in words and the path of its diagram, a sampled search, a spent budget,
+    /// or a label the specification does not check. The label-by-label form of
+    /// [`Results::assert_holds`].
+    #[track_caller]
+    pub fn assert_holds(&self) {
+        if let Some(failure) = Failure::first([self]) {
+            failure.panic(self);
+        }
+    }
+}
+
+/// Why a set of labels does not hold: what [`Results::assert_holds`] and
+/// [`LabelResult::assert_holds`] panic with.
+enum Failure<'l> {
+    /// Every label that fails is one the specification does not check.
+    NotChecked(&'l LabelResult, &'l NotCheckedReason),
+    /// No counterexample, but a search sampled schedules.
+    Sampled(&'l LabelResult),
+    /// A counterexample (the first in `labels`), or else a spent budget.
+    Fails(&'l LabelResult),
+}
+
+impl<'l> Failure<'l> {
+    /// The reason the first of `labels` that fails (in their order) does, preferring the most
+    /// actionable: a counterexample over a sampled search, over a spent budget, over a label
+    /// that is not checked. `None` if every label holds.
+    fn first<I>(labels: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = &'l LabelResult>,
+    {
+        let failing: Vec<&LabelResult> = labels.into_iter().filter(|l| !l.holds()).collect();
+        if let Some(l) = failing.iter().find(|l| l.verdict.is_counterexample()) {
+            return Some(Failure::Fails(l));
+        }
+        if let Some(l) = failing
+            .iter()
+            .find(|l| matches!(l.verdict, Verdict::Exhausted { .. }))
+        {
+            return Some(Failure::Sampled(l));
+        }
+        if let Some(l) = failing
+            .iter()
+            .find(|l| matches!(l.verdict, Verdict::Budget { .. }))
+        {
+            return Some(Failure::Fails(l));
+        }
+        failing.first().map(|l| match &l.verdict {
+            Verdict::NotChecked(reason) => Failure::NotChecked(l, reason),
+            _ => Failure::Fails(l),
+        })
+    }
+
+    /// Panics, naming the failing label and why, followed by `report`.
+    #[track_caller]
+    fn panic(&self, report: &dyn Display) -> ! {
+        match self {
+            Failure::NotChecked(l, reason) => panic!(
+                "hydrofrac: label `{}` is not checked ({reason}), so it is not certified\n{report}",
+                l.name()
+            ),
+            Failure::Sampled(l) => panic!(
+                "hydrofrac: schedules were sampled, so the search of label `{}` is not a \
+                 certificate (`assert_no_counterexample` accepts it)\n{report}",
+                l.name()
+            ),
+            Failure::Fails(l) => panic!(
+                "hydrofrac: label `{}` does not hold\n{report}",
+                l.name()
+            ),
+        }
     }
 }
 
@@ -257,42 +359,47 @@ impl Results {
     /// the specification does not check ([`Verdict::NotChecked`]: a scalar, or a collection
     /// inside a tick, on which members may disagree).
     pub fn holds(&self) -> bool {
-        !self.labels.iter().any(|l| l.verdict.fails())
+        self.labels.iter().all(LabelResult::holds)
     }
 
-    /// Panics with the report unless every label holds (see [`Self::holds`]). A sampled search
-    /// certifies nothing, so for a program past the check's schedule budget use
-    /// [`Self::assert_no_counterexample`]. A label that is not checked is not certified: assert
-    /// the labels that are, one by one ([`Self::label`]).
+    /// Panics with the report unless every label holds (see [`Self::holds`]), naming the first
+    /// label that does not (in report order) and why. A sampled search certifies nothing, so
+    /// for a program past the check's schedule budget use [`Self::assert_no_counterexample`].
+    /// A label that is not checked is not certified: assert the labels that are, one by one
+    /// ([`LabelResult::assert_holds`]).
     #[track_caller]
     pub fn assert_holds(&self) {
-        let unchecked = self.labels.iter().find_map(|l| match &l.verdict {
-            Verdict::NotChecked(reason) => Some((l, reason)),
-            _ => None,
-        });
-        if let Some((l, reason)) = unchecked
-            && self.labels.iter().all(|l| {
-                !l.verdict.fails() || matches!(l.verdict, Verdict::NotChecked(_))
+        if let Some(failure) = Failure::first(self.in_report_order()) {
+            failure.panic(self);
+        }
+    }
+
+    /// The first counterexample in report order (clusters in the order their first label
+    /// appears, then labels in order), if any label has one.
+    pub fn counterexample(&self) -> Option<&Counterexample> {
+        self.in_report_order()
+            .into_iter()
+            .find_map(LabelResult::counterexample)
+    }
+
+    /// The labels in the order the report lists them: by cluster, in the order of each
+    /// cluster's first label, then in label order.
+    pub fn in_report_order(&self) -> Vec<&LabelResult> {
+        let mut clusters: Vec<&LocationId> = vec![];
+        for l in &self.labels {
+            let cluster = l.plan.cluster().root();
+            if !clusters.contains(&cluster) {
+                clusters.push(cluster);
+            }
+        }
+        clusters
+            .into_iter()
+            .flat_map(|c| {
+                self.labels
+                    .iter()
+                    .filter(move |l| l.plan.cluster().root() == c)
             })
-        {
-            panic!(
-                "hydrofrac: label `{}` is not checked ({reason}), so it is not certified\n{self}",
-                l.name()
-            );
-        }
-        if let Some(l) = self
-            .labels
-            .iter()
-            .find(|l| matches!(l.verdict, Verdict::Exhausted { .. }))
-            && !self.labels.iter().any(|l| l.verdict.is_counterexample())
-        {
-            panic!(
-                "hydrofrac: schedules were sampled, so the search of label `{}` is not a \
-                 certificate (`assert_no_counterexample` accepts it)\n{self}",
-                l.name()
-            );
-        }
-        assert!(self.holds(), "hydrofrac: a label does not hold\n{self}");
+            .collect()
     }
 
     /// Whether no label has a counterexample (searches that found nothing count, certificates
@@ -367,160 +474,264 @@ fn crashes(n: usize) -> String {
     plural(n, "crash", "crashes")
 }
 
-/// The verdict line of a label, naming faults with `names`.
-pub(crate) fn verdict_line(verdict: &Verdict, names: &ReportNames<'_>) -> String {
+/// `items` joined as an English list: `a`, `a and b`, `a, b and c`.
+fn and_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    }
+}
+
+/// At most this many facts are listed in a sentence; the rest are counted.
+const FACTS_SHOWN: usize = 4;
+
+/// `facts` in words, abbreviated with `names`: `1`, `1 and 2`, `1, 2, 3, 4 and 5 more`.
+fn fact_list<'f>(facts: impl IntoIterator<Item = &'f Fact>, names: &ReportNames<'_>) -> String {
+    let facts: Vec<&Fact> = facts.into_iter().collect();
+    let mut shown: Vec<String> = facts
+        .iter()
+        .take(FACTS_SHOWN)
+        .map(|f| names.abbreviate(f.to_string()))
+        .collect();
+    let more = facts.len().saturating_sub(FACTS_SHOWN);
+    if more > 0 {
+        shown.push(format!("{more} more"));
+    }
+    and_list(&shown)
+}
+
+/// What the correct members lack, in words: `Receiver@1 without 1`, `Receiver@0 and
+/// Receiver@1 without 1 and 2`, `Receiver@0 without 1, and Receiver@1 without 2`. Members
+/// that lack the same facts are named together.
+fn missing_in_words(missing: &[(u32, Fact)], cluster: &str, names: &ReportNames<'_>) -> String {
+    let mut by_member: Vec<(u32, Vec<&Fact>)> = vec![];
+    for (member, fact) in missing {
+        match by_member.iter_mut().find(|(m, _)| m == member) {
+            Some((_, facts)) => facts.push(fact),
+            None => by_member.push((*member, vec![fact])),
+        }
+    }
+    let mut groups: Vec<(Vec<u32>, Vec<&Fact>)> = vec![];
+    for (member, facts) in by_member {
+        match groups.iter_mut().find(|(_, f)| *f == facts) {
+            Some((members, _)) => members.push(member),
+            None => groups.push((vec![member], facts)),
+        }
+    }
+    let groups: Vec<String> = groups
+        .into_iter()
+        .map(|(members, facts)| {
+            let members: Vec<String> = members.iter().map(|m| format!("{cluster}@{m}")).collect();
+            format!(
+                "{} without {}",
+                and_list(&members),
+                fact_list(facts, names)
+            )
+        })
+        .collect();
+    match groups.as_slice() {
+        [init @ .., last] if !init.is_empty() => format!("{}, and {last}", init.join(", ")),
+        _ => groups.join(""),
+    }
+}
+
+/// What a certified crash bound rules out, in words: `no single crash`, `no combination of up
+/// to 3 crashes`.
+fn no_crashes_up_to(k: usize) -> String {
+    if k == 1 {
+        "no single crash".to_owned()
+    } else {
+        format!("no combination of up to {k} crashes")
+    }
+}
+
+/// A counterexample in words: what breaks the label, what it leaves the correct members
+/// without, and how many crashes the search ruled out first.
+fn counterexample_in_words(c: &Counterexample, cluster: &str, names: &ReportNames<'_>) -> String {
+    let (subject, plural) = names
+        .fault_set_in_words(&c.faults)
+        .unwrap_or_else(|| ("even the failure-free run".to_owned(), false));
+    let verb = |one: &str, many: &str| if plural { many.to_owned() } else { one.to_owned() };
+    let mut effects = vec![];
+    if !c.missing.is_empty() {
+        effects.push(format!(
+            "{} {}",
+            verb("leaves", "leave"),
+            missing_in_words(&c.missing, cluster, names)
+        ));
+    }
+    if !c.divergent.is_empty() {
+        effects.push(format!(
+            "{} correct members disagree on {}, which the failure-free run never derived",
+            verb("makes", "make"),
+            fact_list(&c.divergent, names)
+        ));
+    }
+    let mut sentence = match (&c.panic, effects.is_empty()) {
+        (Some(panic), true) => format!("{subject} {} the run panic: {panic}", verb("makes", "make")),
+        (_, true) => format!("{subject} {} it", verb("breaks", "break")),
+        (panic, false) => {
+            let mut s = format!("{subject} {}", effects.join(" and "));
+            if let Some(panic) = panic {
+                s.push_str(&format!(" (the run panicked: {panic})"));
+            }
+            s
+        }
+    };
+    sentence.push('.');
+    if !c.faults.is_empty() {
+        match c.tolerates {
+            Some(k) if c.tolerance_certified && k > 0 => {
+                let mut cleared = no_crashes_up_to(k);
+                cleared[..1].make_ascii_uppercase();
+                sentence.push_str(&format!(" {cleared} breaks it."));
+            }
+            Some(_) if !c.tolerance_certified => sentence.push_str(
+                " No counterexample with fewer crashes was found, but schedules were sampled, so \
+                 that is not a certificate.",
+            ),
+            _ => {}
+        }
+    }
+    sentence
+}
+
+/// The verdict on a label in words, naming the members of `cluster` (the label's cluster) by
+/// it, and faults, payloads and facts with `names`.
+pub(crate) fn verdict_line(verdict: &Verdict, cluster: &str, names: &ReportNames<'_>) -> String {
     match verdict {
         Verdict::Certified {
             tolerates: Tolerance::All,
-        } => "holds under any crashes".to_owned(),
+        } => "holds: no number of crashes or lost messages breaks it.".to_owned(),
+        Verdict::Certified {
+            tolerates: Tolerance::UpTo(0),
+        } => "holds when nothing crashes (`max_crashes` is 0, so crashes were not checked)."
+            .to_owned(),
         Verdict::Certified {
             tolerates: Tolerance::UpTo(k),
-        } => format!("holds with up to {} (the `max_crashes` cap)", crashes(*k)),
+        } => format!(
+            "holds: {} breaks it (`max_crashes` is {k}, so more were not checked).",
+            no_crashes_up_to(*k)
+        ),
         Verdict::Counterexample(c) => {
-            let n = c.crashes();
-            let mut line = match c.tolerates {
-                _ if c.faults.is_empty() => "breaks without faults".to_owned(),
-                Some(k) if c.tolerance_certified => {
-                    format!("tolerates {}, breaks at {n}", crashes(k))
-                }
-                // Schedule choices: fewer crashes were searched, not ruled out.
-                Some(k) => format!(
-                    "no counterexample with up to {} found, breaks at {n}",
-                    crashes(k)
-                ),
-                None if n == 0 => "breaks under omissions alone".to_owned(),
-                None => format!("breaks at {}", crashes(n)),
-            };
-            if !c.faults.is_empty() {
-                line.push_str(": ");
-                line.push_str(&names.fault_set(&c.faults));
-            }
-            if let Some(panic) = &c.panic {
-                line.push_str(&format!(" (the run panicked: {panic})"));
-            }
-            line
+            format!("broken: {}", counterexample_in_words(c, cluster, names))
         }
-        Verdict::Vacuous(reason) => format!("vacuous: {reason}"),
+        Verdict::Vacuous(reason) => format!("nothing to check ({reason})."),
         Verdict::Budget { tolerates } => {
-            let mut line = "hypothesis budget spent, not a certificate".to_owned();
-            if let Some(k) = tolerates {
-                line.push_str(&format!(" (holds with up to {})", crashes(*k)));
+            let mut line = "not a certificate: the hypothesis budget ran out".to_owned();
+            match tolerates {
+                Some(0) => line.push_str(" (before then, nothing broke it without crashes)"),
+                Some(k) => line.push_str(&format!(
+                    " (before then, {} broke it)",
+                    no_crashes_up_to(*k)
+                )),
+                None => {}
             }
+            line.push('.');
             line
         }
         Verdict::Exhausted { tolerates, sites } => {
             let searched = match tolerates {
-                Tolerance::All => "no counterexample found".to_owned(),
-                Tolerance::UpTo(k) => {
-                    format!("no counterexample with up to {} found", crashes(*k))
-                }
+                Tolerance::All => String::new(),
+                Tolerance::UpTo(k) => format!("searched up to {}; ", crashes(*k)),
             };
             format!(
-                "{searched} on sampled schedules; not a certificate (schedule choices: {})",
+                "no counterexample found, but schedules were sampled, so this is not a \
+                 certificate ({searched}schedule choices: {}).",
                 site_list(sites)
             )
         }
-        Verdict::NotChecked(reason) => format!("not checked: {reason}; not a certificate"),
+        Verdict::NotChecked(reason) => {
+            format!("not checked ({reason}), so this is not a certificate.")
+        }
     }
 }
 
-impl Results {
-    fn write_label(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        l: &LabelResult,
-        names: &ReportNames<'_>,
-    ) -> fmt::Result {
-        let (indent, detail) = ("  ", "      ");
-        let c = &l.plan.collection;
-        write!(
+/// Writes one label's rows of the report: its verdict in words, the diagram of its
+/// counterexample, and what its search cost.
+fn write_label(
+    f: &mut fmt::Formatter<'_>,
+    l: &LabelResult,
+    nodes: &NodeNames,
+    names: &ReportNames<'_>,
+) -> fmt::Result {
+    let (indent, detail) = ("  ", "      ");
+    let c = &l.plan.collection;
+    let cluster = nodes.label(l.plan.cluster()).unwrap_or("member");
+    writeln!(
+        f,
+        "{indent}[{}] {} ({}, {}): {}",
+        l.index,
+        c.display_name(),
+        kind_name(&c.collection_kind),
+        c.label,
+        verdict_line(&l.verdict, cluster, names)
+    )?;
+    if let Verdict::Counterexample(cx) = &l.verdict
+        && let Some(diagram) = &cx.diagram
+    {
+        writeln!(f, "{detail}diagram: {}", diagram.display())?;
+    }
+    if l.stats.hypotheses > 0 {
+        writeln!(
             f,
-            "{indent}[{}] {} ({}, {})",
-            l.index,
-            c.display_name(),
-            kind_name(&c.collection_kind),
-            c.label
+            "{detail}{}, {}, {:.2?}",
+            plural(l.stats.hypotheses, "hypothesis", "hypotheses"),
+            plural(l.stats.schedules, "schedule", "schedules"),
+            l.stats.wall
         )?;
-        let line = verdict_line(&l.verdict, names);
-        writeln!(f, ": {line}")?;
-        if let Verdict::Counterexample(cx) = &l.verdict {
-            let cluster = self.names.label(l.plan.cluster()).unwrap_or("member");
-            for (member, fact) in &cx.missing {
-                writeln!(
-                    f,
-                    "{detail}{cluster}@{member} lacks {}",
-                    names.abbreviate(fact.to_string())
-                )?;
-            }
-            for fact in &cx.divergent {
-                writeln!(
-                    f,
-                    "{detail}correct members disagree on {} (outside the fact domain)",
-                    names.abbreviate(fact.to_string())
-                )?;
-            }
-            if let Some(diagram) = &cx.diagram {
-                writeln!(f, "{detail}diagram: {}", diagram.display())?;
-            }
-        }
-        if l.stats.hypotheses > 0 {
+        if let Some(r) = &l.stats.races {
             writeln!(
                 f,
-                "{detail}{}, {}, {:.2?}",
-                plural(l.stats.hypotheses, "hypothesis", "hypotheses"),
-                plural(l.stats.schedules, "schedule", "schedules"),
-                l.stats.wall
+                "{detail}races: {} stopped early, {} on one schedule; claim B {}",
+                plural(r.early_stops, "set", "sets"),
+                plural(r.single_schedule_sets, "set", "sets"),
+                if r.claim_b {
+                    "certified"
+                } else {
+                    "not certified"
+                }
             )?;
-            if let Some(r) = &l.stats.races {
-                writeln!(
-                    f,
-                    "{detail}races: {} stopped early, {} on one schedule; claim B {}",
-                    plural(r.early_stops, "set", "sets"),
-                    plural(r.single_schedule_sets, "set", "sets"),
-                    if r.claim_b {
-                        "certified"
-                    } else {
-                        "not certified"
-                    }
-                )?;
-            }
         }
-        Ok(())
     }
+    Ok(())
+}
+
+/// Writes the header of `cluster`'s block of the report.
+fn write_cluster(f: &mut fmt::Formatter<'_>, cluster: &LocationId, nodes: &NodeNames) -> fmt::Result {
+    match nodes.label(cluster) {
+        Some(label) => writeln!(f, "{label}:"),
+        None => writeln!(f, "{cluster:?}:"),
+    }
+}
+
+/// Writes the legend of the payloads `names` abbreviated.
+fn write_legend(f: &mut fmt::Formatter<'_>, names: &ReportNames<'_>) -> fmt::Result {
+    let legend = names.legend();
+    if !legend.is_empty() {
+        writeln!(f, "legend:")?;
+        for (k, text) in legend {
+            writeln!(f, "  ‹{k}› = {text}")?;
+        }
+    }
+    Ok(())
 }
 
 /// The report: one block per cluster, one row per label in source names.
 impl Display for Results {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let names = self.report_names();
-        let mut clusters: Vec<&LocationId> = vec![];
-        for l in &self.labels {
-            let cluster = l.plan.cluster().root();
-            if !clusters.contains(&cluster) {
-                clusters.push(cluster);
+        let mut cluster = None;
+        for l in self.in_report_order() {
+            let root = l.plan.cluster().root();
+            if cluster != Some(root) {
+                write_cluster(f, root, &self.names)?;
+                cluster = Some(root);
             }
+            write_label(f, l, &self.names, &names)?;
         }
-        for cluster in clusters {
-            let in_cluster: Vec<&LabelResult> = self
-                .labels
-                .iter()
-                .filter(|l| l.plan.cluster().root() == cluster)
-                .collect();
-            match self.names.label(cluster) {
-                Some(label) => writeln!(f, "{label}:")?,
-                None => writeln!(f, "{cluster:?}:")?,
-            }
-            for l in &in_cluster {
-                self.write_label(f, l, &names)?;
-            }
-        }
-        let legend = names.legend();
-        if !legend.is_empty() {
-            writeln!(f, "legend:")?;
-            for (k, text) in legend {
-                writeln!(f, "  ‹{k}› = {text}")?;
-            }
-        }
+        write_legend(f, &names)?;
         if !self.islands.is_empty() {
             writeln!(
                 f,
@@ -529,5 +740,21 @@ impl Display for Results {
             )?;
         }
         Ok(())
+    }
+}
+
+/// The label's part of the report: its cluster, its row, and the legend of the payloads the
+/// row abbreviated.
+impl Display for LabelResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let ctx = &self.context;
+        let mut names = ReportNames::new(&ctx.names, &ctx.channels);
+        if let Some(c) = self.verdict.counterexample() {
+            let facts = counterexample_facts(c, &ctx.taps);
+            names = names.with_facts(facts.iter()).with_log(&c.record.log);
+        }
+        write_cluster(f, self.plan.cluster().root(), &ctx.names)?;
+        write_label(f, self, &ctx.names, &names)?;
+        write_legend(f, &names)
     }
 }

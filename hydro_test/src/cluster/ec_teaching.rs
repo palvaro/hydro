@@ -14,7 +14,10 @@
 //! `EventualConsistency`: **at the end of the run, every correct member holds every item some
 //! correct member holds.** `broadcast_closed` types what it delivers that way, so every
 //! broadcast is a claim to check, and so is everything computed from it (here, `delivered` and
-//! `items`). `results.label(name)` is the verdict on the collection bound to `name`.
+//! `items`). `results.counterexample()` is the first counterexample found, if any, and
+//! `results.label(name)` the verdict on the collection bound to `name`:
+//! `results.label("delivered").assert_holds()` fails the test, with the label's report, unless
+//! no admissible fault breaks it.
 //!
 //! Printing the results shows the verdict on each collection. A counterexample is also drawn
 //! as a Lamport diagram under `target/hydrofrac/<test>/<label>/counterexample.svg`, and the
@@ -62,7 +65,10 @@ fn a_sender_crash_mid_broadcast_leaves_a_receiver_without_the_item() {
     });
 
     println!("{results}");
-    assert!(results.label("received").verdict.is_counterexample());
+    let cex = results
+        .counterexample()
+        .expect("a crash mid-broadcast leaves a receiver without the item");
+    assert_eq!(cex.crashes(), 1);
 }
 
 /// **One message is lost.** The same broadcast, over a link that may lose messages. Nothing
@@ -89,7 +95,10 @@ fn one_lost_message_leaves_a_receiver_without_the_item() {
     });
 
     println!("{results}");
-    assert!(results.label("received").verdict.is_counterexample());
+    let cex = results
+        .counterexample()
+        .expect("a lost message leaves a receiver without the item");
+    assert_eq!(cex.crashes(), 0);
 }
 
 /// **A cluster sender crashes in the middle of its broadcast.** The same story as
@@ -117,7 +126,10 @@ fn a_cluster_sender_crash_mid_broadcast_leaves_a_receiver_without_the_item() {
     });
 
     println!("{results}");
-    assert!(results.label("received").verdict.is_counterexample());
+    let cex = results
+        .counterexample()
+        .expect("a crash mid-broadcast leaves a receiver without the item");
+    assert_eq!(cex.crashes(), 1);
 }
 
 /// **The fix: receivers echo.** Each receiver, the first time it sees the item, sends it on to
@@ -157,8 +169,8 @@ fn receivers_that_echo_survive_a_sender_crash() {
     });
 
     println!("{results}");
-    assert!(!results.label("delivered").verdict.fails());
-    assert!(results.label("from_sender").verdict.is_counterexample());
+    results.label("delivered").assert_holds();
+    assert!(results.label("from_sender").counterexample().is_some());
 }
 
 /// **Plain redundancy masks one crash, but not two.** Two senders both hold the item and both
@@ -192,8 +204,8 @@ fn two_redundant_senders_survive_one_crash_but_not_two() {
         send.send(1, 1);
     });
     println!("{results}");
-    assert!(!results.label("items").verdict.fails());
-    assert!(results.label("received").verdict.is_counterexample());
+    results.label("items").assert_holds();
+    assert!(results.label("received").counterexample().is_some());
 
     let check = check.max_crashes(2);
     let results = check.run(&sim, async || {
@@ -201,5 +213,9 @@ fn two_redundant_senders_survive_one_crash_but_not_two() {
         send.send(1, 1);
     });
     println!("{results}");
-    assert!(results.label("items").verdict.is_counterexample());
+    let cex = results
+        .label("items")
+        .counterexample()
+        .expect("two crashes leave a receiver without the item");
+    assert_eq!(cex.crashes(), 2);
 }

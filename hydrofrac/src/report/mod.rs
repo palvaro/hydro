@@ -165,6 +165,87 @@ impl<'a> ReportNames<'a> {
         format!("{{{}}}", faults.join(", "))
     }
 
+    /// A sent message in words, as the object of "sends": `1 to Receiver@0 (on bcast)`, with
+    /// `for the 2nd time` for a repeat of the same send.
+    fn sent(&self, m: &MessageId) -> String {
+        let repeat = if m.copy > 0 {
+            format!(" for the {} time", ordinal(m.copy as usize + 1))
+        } else {
+            String::new()
+        };
+        format!(
+            "{} to {}{repeat} (on {})",
+            self.payload(&m.bytes),
+            self.node(&m.to),
+            self.channel(m.channel)
+        )
+    }
+
+    /// A lost message in words: `the message 1 from Sender to Receiver@0 (on bcast)`, or `the
+    /// 2nd copy of the message ...` for a repeat of the same send.
+    fn lost(&self, m: &MessageId) -> String {
+        let copy = if m.copy > 0 {
+            format!("the {} copy of ", ordinal(m.copy as usize + 1))
+        } else {
+            String::new()
+        };
+        format!(
+            "{copy}the message {} from {} to {} (on {})",
+            self.payload(&m.bytes),
+            self.node(&m.from),
+            self.node(&m.to),
+            self.channel(m.channel)
+        )
+    }
+
+    /// One fault in words, as an item of a list of faults: `a crash of Sender, right after it
+    /// sends 1 to Receiver@0 (on bcast),`, `a crash of Sender before it sends anything`, or
+    /// `the loss of the message 1 from Sender to Receiver@0 (on bcast)`.
+    pub fn fault_in_words(&self, fault: &Fault<MessageId>) -> String {
+        match fault {
+            Fault::Omit(m) => format!("the loss of {}", self.lost(m)),
+            Fault::Crash {
+                node,
+                at: CrashAt::BeforeAnySend,
+            } => format!("a crash of {node} before it sends anything"),
+            Fault::Crash {
+                node,
+                at: CrashAt::After(m),
+            } => format!("a crash of {node}, right after it sends {},", self.sent(m)),
+        }
+    }
+
+    /// A fault set in words, as the subject of a sentence, and whether it is plural:
+    ///
+    /// - one crash: `a single crash of Sender, right after it sends 1 to Receiver@0 (on
+    ///   bcast),`;
+    /// - one lost message: `losing the message 1 from Sender to Receiver@0 (on bcast)`;
+    /// - several faults: each in [`Self::fault_in_words`], crashes first, joined by `and`.
+    ///
+    /// `None` for the empty set. [`Self::fault_set`] is the compact notation.
+    pub fn fault_set_in_words(&self, set: &FaultSet<MessageId>) -> Option<(String, bool)> {
+        let (crashes, omissions): (Vec<_>, Vec<_>) =
+            set.iter().partition(|f| f.crashed_node().is_some());
+        let faults: Vec<&Fault<MessageId>> = crashes.into_iter().chain(omissions).collect();
+        match faults.as_slice() {
+            [] => None,
+            [Fault::Omit(m)] => Some((format!("losing {}", self.lost(m)), false)),
+            [crash] => Some((
+                self.fault_in_words(crash)
+                    .replacen("a crash", "a single crash", 1),
+                false,
+            )),
+            several => Some((
+                several
+                    .iter()
+                    .map(|f| self.fault_in_words(f))
+                    .collect::<Vec<_>>()
+                    .join(" and "),
+                true,
+            )),
+        }
+    }
+
     /// The legend of abbreviated payloads so far: `(k, full text)`.
     pub fn legend(&self) -> Vec<(usize, String)> {
         self.legend
@@ -189,4 +270,16 @@ pub fn channel_name(channel: &ChannelInfo) -> String {
         }),
         None => format!("c{}", channel.id),
     }
+}
+
+/// `n` as an English ordinal: `1st`, `2nd`, `3rd`, `4th`, ..., `11th`, `21st`.
+pub fn ordinal(n: usize) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
 }

@@ -207,8 +207,43 @@ On `hydrofrac-races`, i.e. the merge of B's review fixes and N's item D, plus th
 
 `hydro_test/src/cluster/ec_teaching.rs` holds five minimal programs, written the way a user would write them: a
 Hydro sim test, plus `EcCheck::new()`, `check.instrument(..)`, `check.run(..)`, `println!("{results}")` and one
-user-level assertion on a collection by its binding name (`results.label("received").verdict.is_counterexample()`).
-Each one shows a way a broadcast loses agreement, or keeps it. To run all five, one at a time, with the checker's
+user-level assertion: `results.counterexample().expect(..)` for a broken program, or
+`results.label("delivered").assert_holds()` for the collection that should hold, by its binding name. Each one
+shows a way a broadcast loses agreement, or keeps it. For example:
+
+```rust
+let mut check = EcCheck::new();
+let sim = check
+    .instrument(flow.sim().with_cluster_size(&receivers, 2))
+    .compiled();
+let results = check.run(&sim, async || {
+    send.send(1);
+});
+
+println!("{results}");
+let cex = results
+    .counterexample()
+    .expect("a crash mid-broadcast leaves a receiver without the item");
+assert_eq!(cex.crashes(), 1);
+```
+
+prints
+
+```text
+Receiver:
+  [0] received (Stream, ec_teaching.rs:56): broken: a single crash of Sender, right after it sends 1 to Receiver@0 (on bcast), leaves Receiver@1 without 1.
+      diagram: target/hydrofrac/a_sender_crash_mid_broadcast_leaves_a_receiver_without_the_item/received_ec_teaching.rs/counterexample.svg
+      2 hypotheses, 2 schedules, 3.04ms
+      races: 0 sets stopped early, 2 sets on one schedule; claim B not certified
+```
+
+The report states each verdict as a sentence: what breaks the label and what it leaves which correct member
+without (`losing the message 1 from Sender to Receiver@0 (on bcast) leaves Receiver@0 without 1.`), then how many
+crashes were ruled out first (`No single crash breaks it.`); or, for a certificate, what does not break it (`holds:
+no number of crashes or lost messages breaks it.`, `holds: no single crash breaks it (`max_crashes` is 1, ...)`).
+A sampled search says `no counterexample found, but schedules were sampled, so this is not a certificate`. The
+compact fault notation (`{crash(Sender after bcast[Sender→Receiver@0]: 1)}`) is still
+`Results::report_names().fault_set(..)`, which the brute-force cross-check reports use. To run all five, one at a time, with the checker's
 report printed:
 
 ```sh
@@ -236,7 +271,7 @@ that is set. The label directory is the binding name and the file (`received_ec_
 run of the same label in one test gets a `-2` suffix.
 - `counterexample.svg` (and `.dot`): the focused diagram. It shows the broken fact's lineage, the faults and the
   heal, and only the reported label's decoded outputs. Its caption counts what it left out
-  (`2 unrelated messages and 8 unrelated outputs not shown`). This is the one the report's `diagram:` line names.
+  (`2 unrelated messages and 8 unrelated outputs not shown`). This is the one the report's `diagram:` line names, and its title is the verdict sentence.
 - `counterexample-full.svg` (and `.dot`): the whole run, with every output, including other labels' and the raw
   bytes of `sim_cluster_output` ports.
 
@@ -251,8 +286,10 @@ The `.svg` is written only when Graphviz's `neato` is on the `PATH`. Otherwise r
 | `two_redundant_senders_survive_one_crash_but_not_two` | `received_ec_teaching.rs` (and `-2`), `items_ec_teaching.rs` | `items`: 4 lanes, 4 arrows, both crashes |
 
 API notes from writing the teaching file:
-- `Results` has no `counterexample()` and `LabelResult` has no `holds()`, so a user asserts through
-  `results.label(name).verdict` (`is_counterexample()`, `!fails()`).
+- `Results::counterexample()` is the first counterexample in report order; `Results::label(name)` is one label's
+  result, with `counterexample()`, `holds()` and `assert_holds()`. `LabelResult::assert_holds` uses the same rule as
+  `Results::assert_holds` (it rejects a counterexample, a spent budget, a sampled search and a label that is not
+  checked) and panics with that label's report (its sentence, diagram path and stats).
 - `.weaken_consistency()` does not retract a claim: the `broadcast_closed` it is applied to is still a minted
   `EventualConsistency` collection, and hydrofrac still checks it (it exits at the cast). So a program built on a
   closed broadcast (the echo, the redundant senders) always reports the raw hop's counterexample, and

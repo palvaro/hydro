@@ -194,9 +194,31 @@ fn a_label_that_sees_nothing_without_faults_is_vacuous() {
 
 #[cfg(stageleft_runtime)]
 #[test]
-#[should_panic(expected = "hydrofrac: a label does not hold")]
+#[should_panic(expected = "hydrofrac: label `delivered (")]
 fn assert_holds_panics_with_the_report() {
     plain_broadcast(EcCheck::new(), false).assert_holds();
+}
+
+/// `LabelResult::assert_holds` rejects a broken label with its own report: the counterexample
+/// in words and its diagram.
+#[cfg(stageleft_runtime)]
+#[test]
+fn a_label_assert_holds_panics_with_its_report() {
+    let results = plain_broadcast(EcCheck::new(), false);
+    let label = results.label("delivered");
+    assert!(!label.holds(), "{results}");
+    let cex = results.counterexample().expect("the broadcast breaks");
+    assert!(std::ptr::eq(cex, label.counterexample().unwrap()));
+    let message = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| label.assert_holds()))
+        .expect_err("a broken label does not hold")
+        .downcast::<String>()
+        .unwrap();
+    assert!(
+        message.starts_with("hydrofrac: label `delivered (") && message.contains("` does not hold\n"),
+        "{message}"
+    );
+    assert!(message.contains("broken: a single crash of process"), "{message}");
+    assert!(message.contains("diagram: "), "{message}");
 }
 
 #[cfg(stageleft_runtime)]
@@ -324,19 +346,21 @@ fn the_report_is_in_source_names() {
         .find(|l| l.contains(&format!("[{}] delivered", delivered.index)))
         .unwrap_or_else(|| panic!("a row for `delivered`:\n{report}"));
     assert!(
-        line.contains("tolerates 1 crash, breaks at 2: {crash("),
+        line.contains("broken: a crash of "),
         "{report}"
     );
     // The broadcast value 7 is decoded through the tapped fact with the same bytes.
-    assert!(line.contains("]: 7"), "{report}");
+    assert!(line.contains("sends 7 to "), "{report}");
     assert!(
         !report.contains("07000000"),
         "raw bincode in the report:\n{report}"
     );
-    assert!(report.contains("lacks 7"), "{report}");
+    assert!(line.contains(" without 7."), "{report}");
+    assert!(line.contains("No single crash breaks it."), "{report}");
+    assert!(!report.contains("breaks at"), "{report}");
     // Channels are named by the program's names.
     assert!(
-        line.contains("initial[") || line.contains("echo["),
+        line.contains("(on initial)") || line.contains("(on echo)"),
         "{report}"
     );
 }
@@ -347,10 +371,10 @@ fn the_report_states_omission_only_counterexamples() {
     let results = plain_broadcast(EcCheck::new(), true);
     let report = results.to_string();
     assert!(
-        report.contains("breaks under omissions alone: {omit("),
+        report.contains("broken: losing the message 1 from process to cluster@"),
         "{report}"
     );
-    assert!(report.contains("[process→cluster@"), "{report}");
+    assert!(report.contains(" leaves cluster@"), "{report}");
 }
 
 /// Two members on fail-stop channels, each sending its own fact to the other and keeping it
@@ -442,7 +466,8 @@ fn assert_holds_rejects_a_sampled_search() {
     };
     assert!(
         results.to_string().contains(
-            "on sampled schedules; not a certificate (schedule choices: batch at tests.rs:"
+            "no counterexample found, but schedules were sampled, so this is not a certificate \
+             (searched up to 0 crashes; schedule choices: batch at tests.rs:"
         ),
         "{results}"
     );
@@ -491,7 +516,7 @@ fn message_payloads_render_by_their_debug() {
     });
     assert!(carried, "{:?}", cex.record.log);
     let report = results.to_string();
-    assert!(report.contains("]: Order { id: 1 })}"), "{report}");
+    assert!(report.contains("the message Order { id: 1 } from "), "{report}");
     let diagram = cex.diagram.as_ref().expect("the diagram was written");
     let dot = std::fs::read_to_string(diagram.with_extension("dot")).unwrap();
     assert!(dot.contains("Order { id: 1 }"), "{dot}");

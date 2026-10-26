@@ -117,3 +117,52 @@ fn long_payloads_go_to_a_legend_once() {
     assert_eq!(names.abbreviate("short".to_owned()), "short");
     assert_eq!(names.legend(), vec![(1, long.to_owned())]);
 }
+
+#[test]
+fn faults_in_words() {
+    let nodes = NodeNames::new(&locations());
+    let names =
+        ReportNames::new(&nodes, &[channel(3, Some("bcast"))]).with_facts([&fact(&[7], "Item(7)")]);
+    let m = message(&nodes, 3, "Source", "Replica@2", &[7]);
+    let words = |faults: Vec<Fault<MessageId>>| {
+        let mut set = FaultSet::new();
+        for f in faults {
+            set.insert(f);
+        }
+        names.fault_set_in_words(&set)
+    };
+    assert_eq!(words(vec![]), None);
+    assert_eq!(
+        words(vec![Fault::crash_after("Source", Some(m.clone()))]),
+        Some((
+            "a single crash of Source, right after it sends Item(7) to Replica@2 (on bcast),"
+                .to_owned(),
+            false
+        ))
+    );
+    assert_eq!(
+        words(vec![Fault::Omit(m.clone())]),
+        Some((
+            "losing the message Item(7) from Source to Replica@2 (on bcast)".to_owned(),
+            false
+        ))
+    );
+    let mut again = m.clone();
+    again.copy = 1;
+    assert_eq!(
+        words(vec![
+            Fault::Omit(again),
+            Fault::crash_after("Replica@0", None)
+        ]),
+        Some((
+            "a crash of Replica@0 before it sends anything and the loss of the 2nd copy of the \
+             message Item(7) from Source to Replica@2 (on bcast)"
+                .to_owned(),
+            true
+        ))
+    );
+    assert_eq!(
+        [1, 2, 3, 4, 11, 12, 13, 21, 22, 101].map(ordinal),
+        ["1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd", "101st"]
+    );
+}
