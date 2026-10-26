@@ -5314,6 +5314,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "sedge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "hydro_deploy",
+ "hydro_deploy_integration",
+ "hydro_lang",
+ "rand 0.10.2",
+ "sedge_macro",
+ "serde",
+ "serde_json",
+ "stageleft",
+ "stageleft_tool",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+]
+
+[[package]]
+name = "sedge_macro"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.111",
+]
+
+[[package]]
 name = "seize"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -24,6 +24,8 @@ members = [
     "lattices_macro",
     "lattices",
     "multiplatform_test",
+    "sedge",
+    "sedge_macro",
     "sinktools",
     "variadics_macro",
     "variadics",
