@@ -18,10 +18,11 @@ use super::results::{
 };
 use crate::fault::{Event, FaultHook, FaultPlan, InstanceRecord, MessageId, NodeId};
 use crate::lineage::{Lineage, Tables};
+use crate::observe::Rule;
 use crate::observe::{Fact, Labels, TapPass, decode_output, tap_pass};
 use crate::report::ReportNames;
 use crate::search::{CheckedCluster, CrashBounds, Fault, FaultSet};
-use crate::spec::{MemberView, Observation, evaluate, learn_domain};
+use crate::spec::{ASide, BSide, Evaluation, MemberView, Members, evaluate, obligations};
 
 // The test-only honesty check (docs/design/hydrofrac-lite.md §7): a child of this module, as it
 // drives the engine. It has its own execution path, independent of the search.
@@ -247,18 +248,124 @@ fn program_panic(payload: &(dyn std::any::Any + Send)) -> String {
     message
 }
 
-/// One label's search inputs.
-struct Target {
-    /// The label's index.
+/// One side of a rule: a tapped collection and the members of its location.
+struct Side {
+    /// The collection's index ([`Labels::plans`]).
     label: usize,
-    /// The members of its cluster.
-    members: BTreeSet<u32>,
     /// Its location.
-    cluster: LocationId,
-    /// Its fact domain (from the probe).
+    location: LocationId,
+    /// The members of its location (`{0}` for a process).
+    members: BTreeSet<u32>,
+    /// Whether the location is a process.
+    process: bool,
+}
+
+impl Side {
+    /// The node of member `m`.
+    fn node(&self, m: u32) -> NodeId {
+        NodeId::new(&self.location, (!self.process).then_some(m))
+    }
+
+    /// The members in `record`: all, and those whose crash did not fire.
+    fn members_in(&self, record: &InstanceRecord) -> Members {
+        Members {
+            all: self.members.clone(),
+            correct: self
+                .members
+                .iter()
+                .copied()
+                .filter(|m| !record.crashed.contains(&self.node(*m)))
+                .collect(),
+        }
+    }
+
+    /// What this side's members emitted in `outputs` (`(port, member, fact, support)`).
+    fn view<S: Clone>(
+        &self,
+        labels: &Labels,
+        outputs: impl IntoIterator<Item = (usize, u32, Fact, S)>,
+    ) -> MemberView<S> {
+        let mut view = MemberView::default();
+        for (port, member, fact, support) in outputs {
+            if labels.label_of_port(port) == Some(self.label) {
+                view.add(member, fact, support);
+            }
+        }
+        view
+    }
+}
+
+/// One rule's search inputs.
+struct Target {
+    /// The rule's index ([`Labels::rules`]).
+    label: usize,
+    rule: Rule,
+    a: Side,
+    b: Side,
+    /// Its obligations in the failure-free probe (the facts of `A` the A-side owes there).
     domain: BTreeSet<Fact>,
     /// The program's schedule choices (empty if it has none), reported with a sampled verdict.
     sites: Vec<ChoiceSite>,
+}
+
+impl Target {
+    fn sides(&self) -> (ASide, BSide) {
+        (self.rule.a_side, self.rule.b_side)
+    }
+
+    /// The rule evaluated on one run's `outputs` (`(port, member, fact, support)`).
+    fn evaluate<S: Clone>(
+        &self,
+        labels: &Labels,
+        record: &InstanceRecord,
+        outputs: &[(usize, u32, Fact, S)],
+    ) -> Evaluation<S> {
+        let a = self.a.view(labels, outputs.iter().cloned());
+        let b = self.b.view(labels, outputs.iter().cloned());
+        let (in_a, in_b) = (self.a.members_in(record), self.b.members_in(record));
+        evaluate(&a, &b, self.sides(), &in_a, &in_b)
+    }
+
+    /// The failure of an evaluation that does not hold: a missing obligation of `domain` (the
+    /// probe's obligations) is *missing*, any other *divergent* (a fault created it).
+    fn failure<S>(
+        &self,
+        evaluation: Evaluation<S>,
+        domain: &BTreeSet<Fact>,
+        record: &Rc<InstanceRecord>,
+    ) -> Option<Failure> {
+        if evaluation.holds() {
+            return None;
+        }
+        let (missing, outside): (Vec<_>, Vec<_>) = evaluation
+            .missing
+            .into_iter()
+            .partition(|(_, f)| domain.contains(f));
+        let divergent: BTreeSet<Fact> = outside.into_iter().map(|(_, f)| f).collect();
+        Some(Failure {
+            missing,
+            divergent: divergent.into_iter().collect(),
+            panic: None,
+            record: record.clone(),
+        })
+    }
+}
+
+/// The tap outputs of a record's log, as [`Target::evaluate`] reads them (with no support).
+fn log_outputs(labels: &Labels, record: &InstanceRecord) -> Vec<(usize, u32, Fact, ())> {
+    record
+        .log
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            Event::Output {
+                port, node, bytes, ..
+            } if labels.label_of_port(*port).is_some() => {
+                Some((*port, node.member.unwrap_or(0), decode_output(bytes), ()))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// What a schedule's failure looks like for a counterexample.
@@ -285,26 +392,10 @@ impl Failure {
     }
 }
 
-/// The facts `target`'s correct members hold in `record`: what the probe learns as its domain.
+/// The obligations of `target` in `record`: what the probe learns as its domain.
 fn record_domain(labels: &Labels, target: &Target, record: &InstanceRecord) -> BTreeSet<Fact> {
-    let observations: Vec<Observation<()>> = record
-        .log
-        .events()
-        .iter()
-        .filter_map(|e| match e {
-            Event::Output {
-                port, node, bytes, ..
-            } if labels.label_of_port(*port) == Some(target.label) => Some(Observation {
-                label: target.label,
-                member: node.member.unwrap_or(0),
-                fact: decode_output(bytes),
-                support: (),
-            }),
-            _ => None,
-        })
-        .collect();
-    let view = MemberView::of(target.label, &observations);
-    learn_domain(&view, &correct_members(target, record))
+    let a = target.a.view(labels, log_outputs(labels, record));
+    obligations(&a, target.rule.a_side, &target.a.members_in(record))
 }
 
 struct Engine<'c, B, R> {
@@ -397,16 +488,21 @@ impl<'c, B: AsyncFnMut(), R: AsyncFnMut()> Engine<'c, B, R> {
         CrashBounds {
             cap: self.max_crashes,
             nodes: names.crashable().len(),
-            checked: Some(CheckedCluster::new(
-                target
-                    .members
-                    .iter()
-                    .map(|m| names.name(&NodeId::new(&target.cluster, Some(*m)))),
-            )),
+            // Agreement keeps two members correct: a single survivor agrees with itself. Any
+            // other rule has no cap: one survivor may still owe what a crashed member held.
+            checked: target.rule.is_agreement().then(|| {
+                CheckedCluster::new(
+                    target
+                        .b
+                        .members
+                        .iter()
+                        .map(|m| names.name(&target.b.node(*m))),
+                )
+            }),
         }
     }
 
-    /// The results, from every label's verdict (by label index).
+    /// The results, from every rule's verdict (by rule index).
     fn results(&self, mut verdicts: Vec<Option<(Verdict, Stats)>>) -> Results {
         let plans = &self.labels.plans;
         let context = Rc::new(ReportContext {
@@ -415,14 +511,16 @@ impl<'c, B: AsyncFnMut(), R: AsyncFnMut()> Engine<'c, B, R> {
             taps: self.labels.clone(),
         });
         Results {
-            labels: plans
+            labels: self
+                .labels
+                .rules
                 .iter()
                 .enumerate()
-                .map(|(index, plan)| {
-                    let (verdict, stats) = verdicts[index].take().expect("every label decided");
+                .map(|(index, rule)| {
+                    let (verdict, stats) = verdicts[index].take().expect("every rule decided");
                     LabelResult {
                         index,
-                        plan: plan.clone(),
+                        plan: plans[rule.a].clone(),
                         verdict,
                         stats,
                         context: context.clone(),
@@ -437,34 +535,55 @@ impl<'c, B: AsyncFnMut(), R: AsyncFnMut()> Engine<'c, B, R> {
         }
     }
 
-    /// The labels that need no search, decided (by label index), and the labels left to search
+    /// One side of `rule`: `a` or `b`. `None` if the location has no members.
+    fn side(&self, label: usize) -> Option<Side> {
+        let location = self.labels.plans[label].cluster().clone();
+        let process = matches!(location, LocationId::Process(_));
+        let members = if process {
+            BTreeSet::from([0])
+        } else {
+            self.members_of(&location)?
+        };
+        Some(Side {
+            label,
+            location,
+            members,
+            process,
+        })
+    }
+
+    /// The rules that need no search, decided (by rule index), and the rules left to search
     /// (with empty fact domains).
     fn label_targets(&self) -> (Vec<Option<(Verdict, Stats)>>, Vec<Target>) {
         let plans = &self.labels.plans;
-        let mut verdicts: Vec<Option<(Verdict, Stats)>> = vec![None; plans.len()];
-        // The searched labels with more than one member; the others are decided up front.
+        let rules = &self.labels.rules;
+        let mut verdicts: Vec<Option<(Verdict, Stats)>> = vec![None; rules.len()];
         let mut targets = vec![];
         let choices = self.choices();
-        for (i, plan) in plans.iter().enumerate() {
-            if let Some(reason) = &plan.not_checked {
-                verdicts[i] = Some((Verdict::NotChecked(reason.clone()), Stats::default()));
-            } else {
-                match self.members_of(plan.cluster()) {
-                    Some(members) if members.len() > 1 => targets.push(Target {
+        for (i, rule) in rules.iter().enumerate() {
+            let not_checked = [rule.a, rule.b]
+                .iter()
+                .find_map(|&l| plans[l].not_checked.clone());
+            let sides = self.side(rule.a).zip(self.side(rule.b));
+            verdicts[i] = match (not_checked, sides) {
+                (Some(reason), _) => Some((Verdict::NotChecked(reason), Stats::default())),
+                // A single member agrees with itself.
+                (None, Some((a, b))) if !(rule.is_agreement() && a.members.len() <= 1) => {
+                    targets.push(Target {
                         label: i,
-                        members,
-                        cluster: plan.cluster().clone(),
+                        rule: *rule,
+                        a,
+                        b,
                         domain: BTreeSet::new(),
                         sites: choices.clone(),
-                    }),
-                    _ => {
-                        verdicts[i] = Some((
-                            Verdict::Vacuous(VacuousReason::SingleMember),
-                            Stats::default(),
-                        ));
-                    }
+                    });
+                    None
                 }
-            }
+                _ => Some((
+                    Verdict::Vacuous(VacuousReason::SingleMember),
+                    Stats::default(),
+                )),
+            };
         }
         (verdicts, targets)
     }
@@ -489,11 +608,17 @@ impl<'c, B: AsyncFnMut(), R: AsyncFnMut()> Engine<'c, B, R> {
                     Some(_) => decode_output(bytes).to_string(),
                     None => crate::lamport::short_hex(bytes),
                 });
-            let name = label_name(&labels.plans[index]);
+            let rule = labels.rules[index];
+            let ours = |port: usize| {
+                labels
+                    .label_of_port(port)
+                    .is_some_and(|l| l == rule.a || l == rule.b)
+            };
+            let name = label_name(&labels.plans[rule.a]);
             let cluster = self
                 .tables
                 .names()
-                .label(labels.plans[index].cluster())
+                .label(labels.plans[rule.b].cluster())
                 .unwrap_or("member");
             let line = verdict_line(&Verdict::Counterexample(cex.clone()), cluster, &names);
             let title = format!("{name}: {line}");
@@ -522,15 +647,14 @@ impl<'c, B: AsyncFnMut(), R: AsyncFnMut()> Engine<'c, B, R> {
                 crate::lamport::focus(log, &lineage, &cex.faults, |e| match e {
                     Event::Sent { msg, .. } => broken.contains(&msg.bytes[..]),
                     Event::Output { port, bytes, .. } => {
-                        labels.label_of_port(*port) == Some(index)
-                            && broken.contains(&decode_output(bytes).bytes[..])
+                        ours(*port) && broken.contains(&decode_output(bytes).bytes[..])
                     }
                     _ => false,
                 });
             // Only this label's decoded outputs: the focus already keeps no others, unless it
             // fell back to the whole run (a panic).
             let other = |e: &Event| match e {
-                Event::Output { port, .. } => labels.label_of_port(*port) != Some(index),
+                Event::Output { port, .. } => !ours(*port),
                 _ => false,
             };
             let dropped = focused.events().iter().filter(|e| other(e)).count();
@@ -555,20 +679,6 @@ impl<'c, B: AsyncFnMut(), R: AsyncFnMut()> Engine<'c, B, R> {
             cex.diagram = diagram;
         }
     }
-}
-
-/// The members of `target`'s cluster whose crash did not fire in `record`.
-fn correct_members(target: &Target, record: &InstanceRecord) -> BTreeSet<u32> {
-    target
-        .members
-        .iter()
-        .copied()
-        .filter(|m| {
-            !record
-                .crashed
-                .contains(&NodeId::new(&target.cluster, Some(*m)))
-        })
-        .collect()
 }
 
 fn counterexample(

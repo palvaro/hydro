@@ -27,15 +27,15 @@ pub mod source_names;
 mod tap;
 
 #[cfg(stageleft_runtime)]
-pub(crate) use collections::{ec_label, tick_of};
-#[cfg(stageleft_runtime)]
 pub use collections::{EcCollection, ec_collections, kind_name};
+#[cfg(stageleft_runtime)]
+pub(crate) use collections::{ec_label, tick_of};
 #[cfg(stageleft_runtime)]
 pub use plan::{LabelPlan, NotCheckedReason, plan};
 #[cfg(stageleft_runtime)]
 pub(crate) use tap::TAP_CLOSURE_START;
 #[cfg(stageleft_runtime)]
-pub use tap::{Fact, Labels, NO_IDENTITY, TapPass, decode_output, tap, tap_pass};
+pub use tap::{Fact, Labels, NO_IDENTITY, Rule, TapPass, decode_output, tap, tap_pass};
 
 #[cfg(test)]
 mod tests;

@@ -149,35 +149,68 @@ pub fn excused<P: PairKey, M: Ord + Clone + Copies>(
             .any(|(lost, fact)| fact == pair.fact() && lost.is_subset(set))
 }
 
-/// Whether `set` is admissible for `pair`: it does not [excuse](excused) the pair, and it kills
-/// every robust clause of it. A pair with no robust clause makes every set that does not excuse
-/// it admissible.
-pub fn admissible_for<P: PairKey, M: Ord + Clone + Copies>(
+/// How many pairs of one fact a set must break, and what breaks one (the rule's B-side):
+/// - `None` (`AllCorrect`): one pair; a set breaks a pair if it kills every robust clause of it
+///   and does not [excuse](excused) it;
+/// - `Some(k)` (`AtLeast(k)`, and `Some` as `k = 1`): all but `k − 1` of the fact's pairs, as
+///   fewer than `k` members then hold it. Lemma R says only "held or crashed", and a member that
+///   crashed is not counted (`AtLeast`) or may have crashed before holding it (`Some`), so any
+///   crash of the member breaks the pair too, besides killing its robust clauses.
+pub type AtLeast = Option<usize>;
+
+/// How many of a fact's `pairs` pairs a set must break ([`AtLeast`]). At least one: with `k`
+/// above the number of members every obligation breaks the rule, and the failure-free run
+/// already shows it (a fact has pairs only once some run owes it).
+pub fn need(pairs: usize, at_least: AtLeast) -> usize {
+    at_least.map_or(1, |k| (pairs + 1).saturating_sub(k).max(1))
+}
+
+/// Whether `set` breaks `pair` ([`AtLeast`]). A pair with no robust clause is broken by every set
+/// that does not excuse it.
+pub fn breaks<P: PairKey, M: Ord + Clone + Copies>(
     set: &FaultSet<M>,
     pair: &P,
     clauses: &[PairClause<M>],
     dead: &Dead<M, P::Fact>,
     order: &dyn SendOrder<M>,
+    at_least: AtLeast,
 ) -> bool {
-    !excused(set, pair, dead)
-        && clauses
+    let killed = || {
+        clauses
             .iter()
             .filter(|c| c.is_robust())
             .all(|c| c.hit_by_set(set, order))
+    };
+    match at_least {
+        None => !excused(set, pair, dead) && killed(),
+        Some(_) => set.iter().any(|f| f.crashed_node() == Some(pair.member())) || killed(),
+    }
 }
 
-/// Whether `set` can be skipped (§4.3, the corollary of Lemma R): it is admissible for no pair.
-/// For each pair, either some robust clause survives it, so in every schedule of `set` the pair
-/// is held or its member crashed, or `set` [excuses](excused) the pair.
+/// Whether `set` can be skipped (§4.3, the corollary of Lemma R): for every fact, `set` holds a
+/// set under which it is dead (nobody owes it), or breaks fewer of its pairs than [`need`]. For
+/// `AllCorrect`, each pair then has a robust clause that survives `set` (so in every schedule its
+/// member holds the fact or crashed), or is excused. For `AtLeast(k)`, at least `k` members are not
+/// crashed and keep a robust clause, so they hold the fact.
 pub fn pruned<P: PairKey, M: Ord + Clone + Copies>(
     set: &FaultSet<M>,
     pairs: &Pairs<P, M>,
     dead: &Dead<M, P::Fact>,
     order: &dyn SendOrder<M>,
+    at_least: AtLeast,
 ) -> bool {
-    pairs
-        .iter()
-        .all(|(pair, clauses)| !admissible_for(set, pair, clauses, dead, order))
+    let mut groups: BTreeMap<&P::Fact, (usize, usize)> = BTreeMap::new();
+    for (pair, clauses) in pairs {
+        let (broken, total) = groups.entry(pair.fact()).or_default();
+        *total += 1;
+        *broken += usize::from(breaks(set, pair, clauses, dead, order, at_least));
+    }
+    groups.into_iter().all(|(fact, (broken, total))| {
+        broken < need(total, at_least)
+            || dead
+                .iter()
+                .any(|(lost, f)| f == fact && lost.is_subset(set))
+    })
 }
 
 /// Whether `set` is within `bounds`: at most one crash per node, the crash cap, the every-node

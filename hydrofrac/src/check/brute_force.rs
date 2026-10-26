@@ -42,16 +42,14 @@ use std::time::{Duration, Instant};
 use hydro_lang::sim::compiled::CompiledSim;
 
 use super::oracle2::{self, Oracle2};
-use super::{
-    EcCheck, Engine, Failure, Target, correct_members, drive, program_panic, record_domain,
-};
+use super::{EcCheck, Engine, Failure, Side, Target, drive, program_panic};
 use crate::check::results::{LabelResult, Results, Verdict, label_name};
 use crate::fault::{Event, Fate, FaultHook, FaultPlan, InstanceRecord, MessageId, NodeId};
 use crate::lineage::Tables;
 use crate::observe::{Fact, Labels, decode_output};
 use crate::report::ReportNames;
 use crate::search::{CrashBounds, Fault, FaultSet, Tolerance, crash_count};
-use crate::spec::{MemberView, Observation, evaluate};
+use crate::spec::{ASide, BSide};
 
 /// The outcome of [`EcCheck::cross_check`]: the search's results, the enumeration's, and every
 /// way they disagree.
@@ -375,46 +373,67 @@ struct Run {
     /// By label index.
     labels: BTreeMap<usize, LabelRun>,
     schedules: usize,
-    /// The probe only: each target's fact domain, by label index.
-    domains: BTreeMap<usize, BTreeSet<Fact>>,
 }
 
-/// Whether one schedule's record breaks `target`, against `domain`: the specification's
-/// evaluation, over the outputs the log shows (no lineage).
-fn failure_of(
-    labels: &Labels,
-    target: &Target,
-    domain: &BTreeSet<Fact>,
-    record: &Rc<InstanceRecord>,
-) -> Option<Failure> {
-    let observations: Vec<Observation<()>> = record
-        .log
-        .events()
-        .iter()
-        .filter_map(|e| match e {
-            Event::Output {
-                port, node, bytes, ..
-            } if labels.label_of_port(*port) == Some(target.label) => Some(Observation {
-                label: target.label,
-                member: node.member.unwrap_or(0),
-                fact: decode_output(bytes),
-                support: (),
-            }),
-            _ => None,
-        })
-        .collect();
-    let view = MemberView::of(target.label, &observations);
-    let correct = correct_members(target, record);
-    let evaluation = evaluate(&view, domain, &correct);
-    let divergent: Vec<Fact> = evaluation
-        .outside_domain
-        .iter()
-        .filter(|fact| !correct.iter().all(|m| view.holds(*m, fact)))
-        .cloned()
-        .collect();
-    (!evaluation.holds() || !divergent.is_empty()).then(|| Failure {
-        missing: evaluation.missing,
-        divergent,
+/// Whether one schedule's record breaks `target`'s rule: the oracle's own reading of the rule
+/// (not `crate::spec`'s), over the outputs the log shows, against the record's own
+/// obligations (no lineage, no domain).
+fn failure_of(labels: &Labels, target: &Target, record: &Rc<InstanceRecord>) -> Option<Failure> {
+    // What each `(collection, member)` emitted, by bytes.
+    let mut emitted: BTreeMap<(usize, u32), BTreeMap<Vec<u8>, Fact>> = BTreeMap::new();
+    for e in record.log.events() {
+        if let Event::Output {
+            port, node, bytes, ..
+        } = e
+            && let Some(label) = labels.label_of_port(*port)
+        {
+            let fact = decode_output(bytes);
+            emitted
+                .entry((label, node.member.unwrap_or(0)))
+                .or_default()
+                .insert(fact.bytes.clone(), fact);
+        }
+    }
+    let correct = |side: &Side, m: u32| !record.crashed.contains(&side.node(m));
+    let empty = BTreeMap::new();
+    let held = |side: &Side, m: u32| emitted.get(&(side.label, m)).unwrap_or(&empty);
+    let mut owed: BTreeMap<Vec<u8>, Fact> = BTreeMap::new();
+    for &m in &target.a.members {
+        if target.rule.a_side == ASide::Any || correct(&target.a, m) {
+            owed.extend(held(&target.a, m).clone());
+        }
+    }
+    let mut missing = vec![];
+    for (key, fact) in &owed {
+        let lacking: Vec<u32> = match target.rule.b_side.at_least() {
+            None => target
+                .b
+                .members
+                .iter()
+                .copied()
+                .filter(|&m| correct(&target.b, m) && !held(&target.b, m).contains_key(key))
+                .collect(),
+            Some(k) => {
+                let some = target.rule.b_side == BSide::Some;
+                let (have, lack): (Vec<u32>, Vec<u32>) = target
+                    .b
+                    .members
+                    .iter()
+                    .filter(|&&m| some || correct(&target.b, m))
+                    .partition(|&&m| held(&target.b, m).contains_key(key));
+                // Short of `k`, even if every member lacking it crashed.
+                match (have.len() >= k, lack.is_empty()) {
+                    (true, _) => vec![],
+                    (false, false) => lack,
+                    (false, true) => target.b.members.iter().copied().collect(),
+                }
+            }
+        };
+        missing.extend(lacking.into_iter().map(|m| (m, fact.clone())));
+    }
+    (!missing.is_empty()).then(|| Failure {
+        missing,
+        divergent: vec![],
         panic: None,
         record: record.clone(),
     })
@@ -423,10 +442,7 @@ fn failure_of(
 /// A run being read one schedule at a time.
 struct RunFold<'t> {
     targets: &'t [Target],
-    /// Whether this is the failure-free probe, which learns each target's domain as it reads.
-    probe: bool,
     labels: BTreeMap<usize, LabelRun>,
-    domains: BTreeMap<usize, BTreeSet<Fact>>,
     schedules: usize,
     /// The latest record, read when the next one arrives or at [`Self::finish`]: when a
     /// schedule panics, the run's last record is the panicking one.
@@ -434,15 +450,13 @@ struct RunFold<'t> {
 }
 
 impl<'t> RunFold<'t> {
-    fn new(targets: &'t [Target], probe: bool) -> Self {
+    fn new(targets: &'t [Target]) -> Self {
         RunFold {
             targets,
-            probe,
             labels: targets
                 .iter()
                 .map(|t| (t.label, LabelRun::default()))
                 .collect(),
-            domains: BTreeMap::new(),
             schedules: 0,
             pending: None,
         }
@@ -470,7 +484,6 @@ impl<'t> RunFold<'t> {
         Run {
             labels: self.labels,
             schedules: self.schedules,
-            domains: self.domains,
         }
     }
 
@@ -486,22 +499,8 @@ impl<'t> RunFold<'t> {
                     .get_or_insert_with(|| Rc::new(Failure::panic(panic, record.clone())));
                 continue;
             }
-            // The probe reads each schedule against the facts its own correct members hold: a
-            // schedule's facts are a subset of the domain (the union of every schedule's), so
-            // that is the same reading as against the whole domain.
-            let own;
-            let domain = if self.probe {
-                own = record_domain(labels, t, &record);
-                self.domains
-                    .entry(t.label)
-                    .or_default()
-                    .extend(own.iter().cloned());
-                &own
-            } else {
-                &t.domain
-            };
             if lr.failure.is_none() {
-                lr.failure = failure_of(labels, t, domain, &record).map(Rc::new);
+                lr.failure = failure_of(labels, t, &record).map(Rc::new);
             }
         }
     }
@@ -514,7 +513,6 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
         &mut self,
         faults: &FaultSet<MessageId>,
         targets: &[Target],
-        probe: bool,
         seen: impl FnMut(&Tables, &InstanceRecord),
     ) -> Run {
         let hook = Rc::new(FaultHook::new(
@@ -524,7 +522,7 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
             self.sim,
         ));
         self.sim.set_network_hook(hook.clone());
-        let fold = RefCell::new(RunFold::new(targets, probe));
+        let fold = RefCell::new(RunFold::new(targets));
         let seen = RefCell::new(seen);
         let labels = self.labels;
         let tables = &self.tables;
@@ -559,14 +557,11 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
         fold.into_inner().finish(labels, panic)
     }
 
-    /// The labels to check, with their domains from the failure-free probe, and the probe's run.
-    /// `seen` gets each of the probe's records first.
+    /// The rules to check, and the failure-free probe's run. `seen` gets each of the probe's
+    /// records first.
     fn prepare(&mut self, seen: impl FnMut(&Tables, &InstanceRecord)) -> (Vec<Target>, Rc<Run>) {
-        let (_, mut targets) = self.label_targets();
-        let mut probe = self.execute(&FaultSet::new(), &targets, true, seen);
-        for t in &mut targets {
-            t.domain = probe.domains.remove(&t.label).unwrap_or_default();
-        }
+        let (_, targets) = self.label_targets();
+        let probe = self.execute(&FaultSet::new(), &targets, seen);
         (targets, Rc::new(probe))
     }
 
@@ -599,7 +594,7 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
             }
             for set in fresh {
                 done.insert(set.clone());
-                let run = Rc::new(self.execute(&set, &targets, false, |tables, record| {
+                let run = Rc::new(self.execute(&set, &targets, |tables, record| {
                     harvest(record, tables, &mut universe)
                 }));
                 schedules += run.schedules;
@@ -625,7 +620,7 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
                 breaking.sort_by_key(|s| (crash_count(s), s.len()));
                 BruteLabel {
                     index: t.label,
-                    name: label_name(&self.labels.plans[t.label]),
+                    name: label_name(&self.labels.plans[t.rule.a]),
                     admissible: admissible_sets,
                     breaking,
                 }
@@ -647,7 +642,7 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
                 {
                     run.labels[&label.index].failure.is_some()
                 } else {
-                    let run = self.execute(&cex.faults, &targets, false, |_, _| {});
+                    let run = self.execute(&cex.faults, &targets, |_, _| {});
                     run.labels[&label.index].failure.is_some()
                 };
                 confirmed.insert(label.index, failed);

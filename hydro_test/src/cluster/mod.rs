@@ -53,6 +53,10 @@ mod ec_quorum_trust;
 
 #[cfg(test)]
 mod ec_teaching;
+#[cfg(test)]
+mod ec_implies_checks;
+#[cfg(test)]
+mod ec_implies_teaching;
 
 #[cfg(test)]
 mod ec_teaching_checks;

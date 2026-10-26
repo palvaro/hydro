@@ -662,7 +662,9 @@ fn write_label(
 ) -> fmt::Result {
     let (indent, detail) = ("  ", "      ");
     let c = &l.plan.collection;
-    let cluster = nodes.label(l.plan.cluster()).unwrap_or("member");
+    // Missing facts are at members of the rule's B-side (the label's own cluster, for agreement).
+    let b = &l.context.taps.plans[l.context.taps.rules[l.index].b];
+    let cluster = nodes.label(b.cluster()).unwrap_or("member");
     writeln!(
         f,
         "{indent}[{}] {} ({}, {}): {}",

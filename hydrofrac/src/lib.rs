@@ -13,6 +13,7 @@ hydro_lang::setup!();
 
 pub mod check;
 pub mod fault;
+pub mod implies;
 pub mod lamport;
 pub mod lineage;
 pub mod observe;
@@ -30,3 +31,7 @@ pub mod spec;
 
 #[cfg(stageleft_runtime)]
 pub use check::{EcCheck, Results, Verdict};
+#[cfg(stageleft_runtime)]
+pub use implies::Implies;
+#[cfg(stageleft_runtime)]
+pub use spec::{ASide, BSide};

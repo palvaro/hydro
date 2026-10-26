@@ -111,6 +111,7 @@ fn propose_faults(
         scope,
         &(),
         &mut Hits::default(),
+        None,
     )?;
     assert!(proposal.iter().all(|c| c.fault().is_some()));
     Some(faults_of(&proposal))
@@ -264,10 +265,10 @@ fn ask_once_crash_splits_the_members() {
     assert!(to2.hit_by_set(&h, &()));
     let pairs: Pairs<P, M> =
         BTreeMap::from([(pair("m1", "7"), vec![to1]), (pair("m2", "7"), vec![to2])]);
-    assert!(!pruned(&h, &pairs, ALIVE, &()));
+    assert!(!pruned(&h, &pairs, ALIVE, &(), None));
     let (two, one) = (pair("m2", "7"), pair("m1", "7"));
-    assert!(admissible_for(&h, &two, &pairs[&two], ALIVE, &()));
-    assert!(!admissible_for(&h, &one, &pairs[&one], ALIVE, &()));
+    assert!(breaks(&h, &two, &pairs[&two], ALIVE, &(), None));
+    assert!(!breaks(&h, &one, &pairs[&one], ALIVE, &(), None));
 }
 
 /// A send order for the tests: each listed message precedes the ones after it.
@@ -386,14 +387,14 @@ fn proposals_are_the_sets_admissible_for_some_pair() {
     let expected: BTreeSet<FaultSet<M>> = subsets(&universe, universe.len())
         .into_iter()
         .filter(|s| within_bounds(s, &bounds))
-        .filter(|s| {
-            pairs
-                .iter()
-                .any(|(p, c)| admissible_for(s, p, c, ALIVE, &()))
-        })
+        .filter(|s| pairs.iter().any(|(p, c)| breaks(s, p, c, ALIVE, &(), None)))
         .collect();
     assert_eq!(proposed, expected);
-    assert!(expected.iter().all(|s| !pruned(s, &pairs, ALIVE, &())));
+    assert!(
+        expected
+            .iter()
+            .all(|s| !pruned(s, &pairs, ALIVE, &(), None))
+    );
 }
 
 /// S1 (§4.3): a run under which `f` vanished at every member contributes no clause for `f`.
@@ -443,15 +444,21 @@ fn fragile_clauses_never_prune_but_steer_all_known() {
         ),
     ]);
     // Killing the fragile clause does not make a set admissible, nor does it stop one being so.
-    assert!(pruned(&set([omit("b")]), &pairs, ALIVE, &()));
-    assert!(!pruned(&set([omit("a")]), &pairs, ALIVE, &()));
-    assert!(!pruned(&set([omit("a"), omit("b")]), &pairs, ALIVE, &()));
+    assert!(pruned(&set([omit("b")]), &pairs, ALIVE, &(), None));
+    assert!(!pruned(&set([omit("a")]), &pairs, ALIVE, &(), None));
+    assert!(!pruned(
+        &set([omit("a"), omit("b")]),
+        &pairs,
+        ALIVE,
+        &(),
+        None
+    ));
     // A pair with only fragile clauses keeps every set unpruned, even the empty one.
     let only_fragile: Pairs<P, M> = BTreeMap::from([(
         pair("mr", "r"),
         vec![PairClause::fragile([lossy("a", "n")])],
     )]);
-    assert!(!pruned(&FaultSet::new(), &only_fragile, ALIVE, &()));
+    assert!(!pruned(&FaultSet::new(), &only_fragile, ALIVE, &(), None));
 
     let universe = universe_of(&pairs);
     let tried = BTreeSet::from([FaultSet::new()]);
@@ -741,13 +748,13 @@ fn a_fan_out_order_narrows_admissible_crash_points() {
         ),
     ]);
     let last = set([crash_after("s", "d2")]);
-    assert!(pruned(&last, &pairs, ALIVE, &order));
-    assert!(!pruned(&last, &pairs, ALIVE, &()));
+    assert!(pruned(&last, &pairs, ALIVE, &order, None));
+    assert!(!pruned(&last, &pairs, ALIVE, &(), None));
     let middle = set([crash_after("s", "d1")]);
     let admitting = |order: &dyn SendOrder<M>| -> Vec<P> {
         pairs
             .iter()
-            .filter(|(p, c)| admissible_for(&middle, *p, c, ALIVE, order))
+            .filter(|(p, c)| breaks(&middle, *p, c, ALIVE, order, None))
             .map(|(p, _)| p.clone())
             .collect()
     };
@@ -873,7 +880,7 @@ fn completion_covers_every_fault_set() {
                     // The runs answer every pair the set is admissible for.
                     let admitting: Vec<P> = pairs
                         .iter()
-                        .filter(|(p, c)| admissible_for(&set, *p, c, ALIVE, &()))
+                        .filter(|(p, c)| breaks(&set, *p, c, ALIVE, &(), None))
                         .map(|(p, _)| p.clone())
                         .collect();
                     for p in admitting {
@@ -944,7 +951,7 @@ fn completion_covers_every_fault_set() {
                 );
             } else {
                 assert!(
-                    pruned(&h, &pairs, ALIVE, &()),
+                    pruned(&h, &pairs, ALIVE, &(), None),
                     "seed {seed}: {h:?} not pruned"
                 );
             }

@@ -190,7 +190,8 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
         aggregations: vec![],
         entries: tick_entries(ir),
     };
-    for root in ir {
+    // A rule's key nodes are not the program's: what they add is not a collection of it.
+    for root in ir.iter().filter(|root| !is_rule_root(root)) {
         let input = root.input();
         visit(input, &mut found, &cycle_sinks);
         // An output of the program (not a cycle, which continues inside it).
@@ -235,6 +236,37 @@ pub fn ec_collections(ir: &[HydroRoot]) -> Vec<EcCollection> {
         *count += 1;
     }
     collections
+}
+
+/// The key nodes of every `implies` rule of `ir` (`crate::implies`), as collections named by
+/// their rule, with the side each one is, in the order of their roots.
+pub fn rule_collections(ir: &[HydroRoot]) -> Vec<(EcCollection, crate::implies::Marker)> {
+    ir.iter()
+        .filter(|root| is_rule_root(root))
+        .map(|root| {
+            let node = root.input();
+            let marker = rule_side(node).expect("a rule root");
+            let location = &node.metadata().location_id;
+            let label = match marker.side {
+                Ok(side) => format!("implies, A-side {side:?}"),
+                Err(side) => format!("implies, B-side {side:?}"),
+            };
+            let collection = EcCollection {
+                label,
+                op: ec_op(node),
+                location: location.root().clone(),
+                fed_by_network: false,
+                collection_kind: node.metadata().collection_kind.clone(),
+                in_tick: tick_of(location).is_some(),
+                covered_by: None,
+                name: Some(marker.name.clone()),
+                file: ec_file(node),
+                occurrence: 0,
+                node: std::ptr::from_ref(node) as usize,
+            };
+            (collection, marker)
+        })
+        .collect()
 }
 
 /// The input stream a labelled scalar aggregates: `node`, through pass-throughs
@@ -304,6 +336,17 @@ fn with_shared_resolved<R>(node: &HydroNode, f: impl FnOnce(&HydroNode) -> R) ->
         // A partition side is the operator: its `PartitionShared` cannot be tapped whole.
         _ => f(node),
     }
+}
+
+/// Whether `root` consumes one side of an `implies` rule (`crate::implies`): its input is the
+/// key node, tagged with the rule.
+pub(crate) fn is_rule_root(root: &HydroRoot) -> bool {
+    matches!(root, HydroRoot::Null { .. }) && rule_side(root.input()).is_some()
+}
+
+/// The rule side `node` is the key node of, if any.
+pub(crate) fn rule_side(node: &HydroNode) -> Option<crate::implies::Marker> {
+    crate::implies::marker(node.metadata().tag.as_deref())
 }
 
 /// Whether `node` carries the `EventualConsistency` label on a cluster.

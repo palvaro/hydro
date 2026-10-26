@@ -93,8 +93,10 @@ use syn::parse_quote;
 use super::races_engine::refuse_truncated_exhaustive;
 use super::{BARRIER_IN_FAULT_PHASE, EcCheck, program_panic};
 use crate::check::results::{LabelResult, Results, VacuousReason, Verdict, label_name};
+use crate::implies::{Marker, marker};
 use crate::observe::{ec_label, kind_name};
 use crate::search::Tolerance;
+use crate::spec::{ASide, BSide};
 
 // ---------------------------------------------------------------------------------------------
 // The program
@@ -164,8 +166,10 @@ struct Tap {
     /// Its cluster.
     cluster: LocationId,
     key: Key,
-    /// Why it is tapped: `minted`, `exits` or `output`.
+    /// Why it is tapped: `minted`, `exits`, `output`, or `rule` (one side of an `implies` rule).
     why: &'static str,
+    /// The rule side, for a `rule` tap.
+    rule: Option<Marker>,
 }
 
 /// What the tap pass found.
@@ -331,8 +335,20 @@ fn tap_closure(element_type: &syn::Type) -> syn::Expr {
 /// external output of its own.
 fn tap(ir: &mut Vec<HydroRoot>) -> Taps {
     let mut choice = Choice::default();
+    // A rule's key node (`crate::implies`): a `Null` root over a node tagged with the rule.
+    let rule_of = |root: &HydroRoot| {
+        matches!(root, HydroRoot::Null { .. })
+            .then(|| marker(root.input().metadata().tag.as_deref()))
+            .flatten()
+    };
+    let mut rules: HashMap<*const HydroNode, Marker> = HashMap::new();
     for root in ir.iter() {
         let input = root.input();
+        if let Some(rule) = rule_of(root) {
+            choice.choose(input, "rule");
+            rules.insert(std::ptr::from_ref(input), rule);
+            continue;
+        }
         choice.visit(input);
         if resolve(input, labelled)
             && matches!(
@@ -396,10 +412,16 @@ fn tap(ir: &mut Vec<HydroRoot>) -> Taps {
             return;
         }
         let metadata = node.metadata().clone();
-        let LocationId::Cluster(_) = &metadata.location_id else {
+        let rule = rules.get(&ptr).cloned();
+        let top = match &metadata.location_id {
+            LocationId::Cluster(_) => true,
+            LocationId::Process(_) => rule.is_some(),
+            _ => false,
+        };
+        if !top {
             skipped.push((position, format!("{}: inside a tick", describe(&key))));
             return;
-        };
+        }
         let (element_type, bound, order, retry): (syn::Type, _, _, _) =
             match &metadata.collection_kind {
                 CollectionKind::Stream {
@@ -474,6 +496,7 @@ fn tap(ir: &mut Vec<HydroRoot>) -> Taps {
                 cluster: metadata.location_id.root().clone(),
                 key,
                 why,
+                rule,
             },
         ));
     });
@@ -561,12 +584,16 @@ struct Instance {
     copies: HashMap<Content, u32>,
     halts: Vec<Node>,
     record: Record,
+    /// The node whose crash fired in the execution in progress: what that execution computes
+    /// still counts as what the node held (not what it sent).
+    crashing: Option<Node>,
 }
 
 impl Instance {
     fn crash(&mut self, node: &Node) {
         if self.record.crashed.insert(node.clone()) {
             self.halts.push(node.clone());
+            self.crashing = Some(node.clone());
         }
     }
 }
@@ -723,14 +750,17 @@ impl SimNetworkHook for Hook {
         };
         let element: Option<Vec<u8>> =
             bincode::deserialize(payload).expect("an oracle-2 tap output is `Option<Vec<u8>>`");
-        let member = member.expect("oracle 2 taps only cluster collections");
         let mut current = self.current.borrow_mut();
-        let record = &mut current.record;
-        // A crashed member emits nothing (its current execution may still run until the
-        // scheduler halts it).
-        if record.crashed.contains(&(cluster.clone(), Some(member))) {
+        // A crashed member emits nothing, but what the execution it crashed in computes (it
+        // still runs until the scheduler halts the member) is what it held.
+        let node = (cluster.clone(), member);
+        let dead = current.record.crashed.contains(&node);
+        if dead && current.crashing.as_ref() != Some(&node) {
             return false;
         }
+        let record = &mut current.record;
+        // A process's outputs are its member 0's.
+        let member = member.unwrap_or(0);
         match element {
             Some(bytes) => {
                 record
@@ -745,7 +775,15 @@ impl SimNetworkHook for Hook {
                 record.unserializable.insert(port);
             }
         }
-        true
+        !dead
+    }
+
+    fn on_exec_begin(&self, _location: &LocationId, _member: Option<u32>) {
+        self.current.borrow_mut().crashing = None;
+    }
+
+    fn on_exec_end(&self) {
+        self.current.borrow_mut().crashing = None;
     }
 
     fn take_halts(&self) -> Vec<(LocationId, Option<u32>)> {
@@ -891,6 +929,8 @@ impl Display for Oracle2 {
 struct Bound {
     cluster: LocationId,
     members: BTreeSet<u32>,
+    /// Whether at most `|members| − 2` members may crash (agreement), or any number.
+    agreement: bool,
     cap: Option<usize>,
     nodes: usize,
 }
@@ -902,11 +942,14 @@ impl Bound {
         distinct.len() == crashed.len()
             && crashed.len() < self.nodes
             && self.cap.is_none_or(|cap| crashed.len() <= cap)
-            && crashed
-                .iter()
-                .filter(|(l, m)| *l == self.cluster && m.is_some_and(|m| self.members.contains(&m)))
-                .count()
-                <= self.members.len().saturating_sub(2)
+            && (!self.agreement
+                || crashed
+                    .iter()
+                    .filter(|(l, m)| {
+                        *l == self.cluster && m.is_some_and(|m| self.members.contains(&m))
+                    })
+                    .count()
+                    <= self.members.len().saturating_sub(2))
     }
 }
 
@@ -1070,11 +1113,42 @@ impl EcCheck {
             .map(|(cluster, m)| Bound {
                 cluster: cluster.clone(),
                 members: m.clone(),
+                agreement: true,
                 cap: self.max_crashes,
                 nodes: nodes.len(),
             })
             .collect();
         let bound_of = |cluster: &LocationId| bounds.iter().find(|b| b.cluster == *cluster);
+        // The `implies` rules: by name, the tap of each side and its setting. A rule's bound
+        // has no cluster cap (a single survivor may still owe what a crashed member held).
+        let mut sides: BTreeMap<&str, (Option<(usize, ASide)>, Option<(usize, BSide)>)> =
+            BTreeMap::new();
+        for (i, tap) in taps.taps.iter().enumerate() {
+            if let Some(m) = &tap.rule {
+                let (a, b) = sides.entry(&m.name).or_default();
+                match m.side {
+                    Ok(side) => *a = Some((i, side)),
+                    Err(side) => *b = Some((i, side)),
+                }
+            }
+        }
+        let rules: Vec<(&str, usize, ASide, usize, BSide)> = sides
+            .into_iter()
+            .filter_map(|(name, (a, b))| Some((name, a?.0, a?.1, b?.0, b?.1)))
+            .collect();
+        let members_of = |tap: &Tap| -> BTreeSet<u32> {
+            match tap.cluster {
+                LocationId::Process(_) => BTreeSet::from([0]),
+                _ => members.get(&tap.cluster).cloned().unwrap_or_default(),
+            }
+        };
+        let rule_bound = Bound {
+            cluster: LocationId::Process(LocationKey::FIRST),
+            members: BTreeSet::new(),
+            agreement: false,
+            cap: self.max_crashes,
+            nodes: nodes.len(),
+        };
         let ports: BTreeMap<usize, LocationId> = taps
             .taps
             .iter()
@@ -1123,6 +1197,60 @@ impl EcCheck {
                             run.broken.insert(i);
                         }
                     }
+                    // Each rule, as its own index after the taps': the obligations are what the
+                    // chosen members of A's tap emitted; each needs its key at B's.
+                    for (r, &(_, a, a_side, b, b_side)) in rules.iter().enumerate() {
+                        let (a, b) = (&taps.taps[a], &taps.taps[b]);
+                        let node = |tap: &Tap, m: u32| {
+                            let process = matches!(tap.cluster, LocationId::Process(_));
+                            (tap.cluster.clone(), (!process).then_some(m))
+                        };
+                        let empty = BTreeSet::new();
+                        let emitted = |tap: &Tap, m: u32| {
+                            record
+                                .facts
+                                .get(&tap.port)
+                                .and_then(|by| by.get(&m))
+                                .unwrap_or(&empty)
+                        };
+                        let owed: BTreeSet<&Vec<u8>> = members_of(a)
+                            .into_iter()
+                            .filter(|m| {
+                                a_side == ASide::Any || !record.crashed.contains(&node(a, *m))
+                            })
+                            .flat_map(|m| emitted(a, m))
+                            .collect();
+                        let in_b = members_of(b);
+                        let breaks = owed.iter().any(|key| match b_side.at_least() {
+                            None => in_b.iter().any(|m| {
+                                !record.crashed.contains(&node(b, *m))
+                                    && !emitted(b, *m).contains(*key)
+                            }),
+                            Some(k) => {
+                                in_b.iter()
+                                    .filter(|m| {
+                                        (b_side == BSide::Some
+                                            || !record.crashed.contains(&node(b, **m)))
+                                            && emitted(b, **m).contains(*key)
+                                    })
+                                    .count()
+                                    < k
+                            }
+                        });
+                        let i = taps.taps.len() + r;
+                        if !owed.is_empty() {
+                            run.with_facts.insert(i);
+                        }
+                        if breaks {
+                            run.broken.insert(i);
+                        }
+                        if [a, b]
+                            .iter()
+                            .any(|t| record.unserializable.contains(&t.port))
+                        {
+                            run.unserializable.insert(i);
+                        }
+                    }
                 }
             };
             let outcome = {
@@ -1153,7 +1281,7 @@ impl EcCheck {
             if let Err(payload) = outcome {
                 // A program that panics under injected faults breaks every collection.
                 run.panic = Some(program_panic(&*payload));
-                run.broken.extend(0..taps.taps.len());
+                run.broken.extend(0..taps.taps.len() + rules.len());
             }
             universe.extend(revealed.into_inner());
             run
@@ -1178,7 +1306,10 @@ impl EcCheck {
             let fresh: Vec<FaultSet> = (1..=max_faults)
                 .flat_map(|size| subsets(&candidates, size))
                 .filter(|set| !done.contains(set))
-                .filter(|set| bounds.iter().any(|b| b.admits(set)))
+                .filter(|set| {
+                    bounds.iter().any(|b| b.admits(set))
+                        || !rules.is_empty() && rule_bound.admits(set)
+                })
                 .collect();
             if fresh.is_empty() {
                 break;
@@ -1191,18 +1322,35 @@ impl EcCheck {
             }
         }
 
-        let collections = taps
-            .taps
-            .iter()
-            .enumerate()
-            .map(|(i, tap)| {
+        // One collection per tap but a rule's, then one per rule: `(name, key, bound, members,
+        // index in the runs)`.
+        let mut compared: Vec<(String, Key, Option<&Bound>, usize, usize)> = vec![];
+        for (i, tap) in taps.taps.iter().enumerate() {
+            if tap.rule.is_none() {
+                let name = format!("{} ({}, {}) [{}]", tap.key.0, tap.key.1, tap.key.2, tap.why);
+                let n = members.get(&tap.cluster).map_or(0, BTreeSet::len);
+                compared.push((name, tap.key.clone(), bound_of(&tap.cluster), n, i));
+            }
+        }
+        for (r, (name, ..)) in rules.iter().enumerate() {
+            let key = rule_key(name);
+            compared.push((
+                format!("{name} [rule]"),
+                key,
+                Some(&rule_bound),
+                usize::MAX,
+                taps.taps.len() + r,
+            ));
+        }
+        let collections = compared
+            .into_iter()
+            .map(|(name, key, bound, members, i)| {
                 let labels: Vec<usize> = results
                     .results()
                     .iter()
-                    .filter(|l| label_key(l) == tap.key)
+                    .filter(|l| label_key(results, l) == key)
                     .map(|l| l.index)
                     .collect();
-                let bound = bound_of(&tap.cluster);
                 let mut admissible = 0;
                 let mut breaking = vec![];
                 for (set, run) in &runs {
@@ -1216,10 +1364,10 @@ impl EcCheck {
                 }
                 breaking.sort_by_key(|(c, n, _)| (*c, *n));
                 Oracle2Collection {
-                    name: format!("{} ({}, {}) [{}]", tap.key.0, tap.key.1, tap.key.2, tap.why),
+                    name,
                     labels,
-                    key: tap.key.clone(),
-                    members: members.get(&tap.cluster).map_or(0, BTreeSet::len),
+                    key,
+                    members,
                     failure_free_facts: runs[0].1.with_facts.contains(&i),
                     unserializable: runs.iter().any(|(_, r)| r.unserializable.contains(&i)),
                     admissible,
@@ -1257,9 +1405,22 @@ impl EcCheck {
 // Agreement
 // ---------------------------------------------------------------------------------------------
 
+/// The key of the `implies` rule `name`: rules are matched by name.
+fn rule_key(name: &str) -> Key {
+    (
+        name.to_owned(),
+        "implies".to_owned(),
+        "rule",
+        LocationId::Process(LocationKey::FIRST),
+    )
+}
+
 /// A search label's `(label, operator, kind, cluster)` key, as [`key`] computes it for oracle
-/// 2's nodes.
-fn label_key(label: &LabelResult) -> Key {
+/// 2's nodes; a rule's [`rule_key`].
+fn label_key(results: &Results, label: &LabelResult) -> Key {
+    if !results.taps.rules[label.index].is_agreement() {
+        return rule_key(label.plan.collection.display_name());
+    }
     let c = &label.plan.collection;
     (
         c.label.clone(),
@@ -1293,7 +1454,7 @@ pub(super) fn disagreements(results: &Results, oracle: &Oracle2) -> Vec<String> 
     let group_of = |key: &Key| format!("{key:?}");
     for label in results.results() {
         groups
-            .entry(group_of(&label_key(label)))
+            .entry(group_of(&label_key(results, label)))
             .or_default()
             .0
             .push(label);

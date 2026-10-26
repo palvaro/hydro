@@ -37,7 +37,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use super::clause::{
-    Candidate, PairKey, Pairs, Proposal, candidates, faults_of, image, proposal_of,
+    AtLeast, Candidate, PairKey, Pairs, Proposal, candidates, faults_of, image, proposal_of,
 };
 use super::ilp::{Hits, Scope, propose};
 use super::literals::{Literal, SendOrder, after};
@@ -83,6 +83,8 @@ pub struct Sweep<M, F> {
     sends_complete: bool,
     /// Every set within the bounds is to be run in full, for Claim B ([`Self::check_claim_b`]).
     claim_b: bool,
+    /// What breaks a fact's pairs ([`AtLeast`]).
+    at_least: AtLeast,
     order: Rc<dyn SendOrder<M>>,
     hits: Hits<M, F>,
     runs: usize,
@@ -105,6 +107,7 @@ impl<M: Ord + Clone + Copies + 'static, F: Ord + Clone> Sweep<M, F> {
             first: BTreeMap::new(),
             sends_complete: false,
             claim_b: false,
+            at_least: None,
             order: Rc::new(()),
             hits: Hits::default(),
             runs: 1,
@@ -159,6 +162,17 @@ impl<M: Ord + Clone + Copies + 'static, F: Ord + Clone> Sweep<M, F> {
     /// [`super::literals`]), and no [`Candidate::Unseen`] is needed.
     pub fn sends_complete(&mut self) {
         self.sends_complete = true;
+    }
+
+    /// Reads the pairs under the B-side `AtLeast(k)` ([`AtLeast`]); the default is `AllCorrect`.
+    pub fn with_at_least(mut self, at_least: AtLeast) -> Self {
+        self.at_least = at_least;
+        self
+    }
+
+    /// What breaks a fact's pairs ([`AtLeast`]).
+    pub fn at_least(&self) -> AtLeast {
+        self.at_least
     }
 
     /// Uses `order` (what is proved of every run's send order) for the crash literals.
@@ -349,6 +363,7 @@ impl<M: Ord + Clone + Copies + 'static, F: Ord + Clone> Sweep<M, F> {
                     scope,
                     &*self.order,
                     &mut self.hits,
+                    self.at_least,
                 ) else {
                     continue;
                 };

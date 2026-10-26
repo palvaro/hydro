@@ -15,16 +15,20 @@ B-side)*. It is read on the end state of each run (after the heal and the recove
   - `Any`: those held by any member, a crashed one counting what its tap emitted before the crash fired.
 - **B-side** chooses which `B`-members must hold a match, for each obligation key `κ = ka(r)`:
   - `AllCorrect`: every member of `B`'s location that never crashes;
-  - `AtLeast(k)`: at least `k` members of `B`'s location held a match at some point (a crashed member counts what it
-    held before crashing, as durability on crash-stop replicas is usually stated);
-  - `Some`: `AtLeast(1)`.
+  - `AtLeast(k)`: at least `k` members of `B`'s location that never crash (a write that survives on `k` replicas);
+  - `Some`: at least one member, crashed or not, a crashed one counting what it emitted before its crash fired (a
+    delivery some sender sent, even one that crashed later).
+
+  (First drafted as "`AtLeast(k)` counts crashed members too, `Some = AtLeast(1)`". Counting survivors is the usual
+  durability statement: "stored at `k` replicas that may later crash" is no guarantee in a crash-stop model. `Some`
+  keeps the "it existed somewhere" reading that no-creation needs, where the sender may crash right after sending.)
 
 **API** (`hydrofrac::Implies`, an extension trait on top-level `Stream`s, any location, not in a tick):
 
 ```rust
 use hydrofrac::{ASide, BSide, Implies};
 deliveries.implies("uniform", &deliveries, q!(|m| m), q!(|m| m), ASide::Any, BSide::AllCorrect);
-acks.implies("durable", &stored, q!(|(id, _)| id), q!(|(id, _)| id), ASide::Correct, BSide::AtLeast(2));
+acked.implies("durable", &stored, q!(|w| w), q!(|w| w), ASide::Correct, BSide::AtLeast(1));
 ...
 results.label("uniform").assert_holds();
 ```
@@ -54,11 +58,12 @@ after the labels.
 - **Pairs.** For each obligation key `κ` the probe showed, and each member `b` of `B`'s location, a pair `(b, κ)`;
   its clauses are the derivations of the `B`-records with key `κ` at `b` (one per tap emission, as today).
 - **Groups with a threshold.** The pairs of `κ` form a group with a *need*: `AllCorrect` needs 1 broken pair, `AtLeast(k)`
-  needs `|B| − k + 1`. A set is admissible for a group if it breaks at least *need* of its pairs and the group is not
+  needs `|B| − k + 1` (`Some` as `k = 1`). A set is admissible for a group if it breaks at least *need* of its pairs and the group is not
   exempt. The program becomes `Σ_{p∈G} z_p ≥ need_G · y_G`, `Σ_G y_G ≥ 1`. With need 1 it is today's program.
 - **Breaking a pair.** For `AllCorrect`, as today: kill every robust clause, and do not excuse (a start crash of `b`
-  excuses). For `AtLeast`, a crashed member's later holdings do not count, and Lemma R only says "holds or crashed",
-  so *any* crash of `b` (start, crash point, `Unseen`) breaks `(b, κ)`, besides killing its robust clauses.
+  excuses). For `AtLeast` and `Some`, a crashed member does not count (`AtLeast`) or may have crashed before holding
+  `κ` (`Some`), and Lemma R only says "holds or crashed", so *any* crash of `b` (start, crash point, `Unseen`) breaks
+  `(b, κ)`, besides killing its robust clauses.
 - **Exemptions** (a group with no obligation needs nothing): a dead set for `κ` (§8, re-proved in §5 below), or a
   set that start-crashes every member of `A`'s location (it emits nothing). The second is added only when it is
   within the bounds, so the EC program is unchanged.
@@ -66,7 +71,7 @@ after the labels.
   holds *every* derivation of the failure-free run, and in a monotone program faults only remove derivations.
   hydrofrac's lineage holds one derivation per tap emission: a record reached by two paths and deduplicated (`unique`,
   the dedup idiom) shows one. Killing that path does not remove the record, so skipping the set would be a false
-  certificate (**to test**: a two-path relay with `unique`, where the skipped set breaks the rule). Only proved absence
+  certificate (**argued**, not built as a test). Only proved absence
   exempts: start crashes and dead sets. Preserve terms could still order proposals (Molly's heuristic scope), but no
   instance needs it yet, so they are left out.
 - **Pruning needs obligation completeness.** A set may be skipped (or an exploration stopped early) only if every
@@ -76,11 +81,21 @@ after the labels.
 
 ## 4. Observation
 
-The fault hook drops only what a node emits *after* its crash fires (`hf/fault/mod.rs`, `on_output`; oracle 2's hook
-the same); what it emitted before is in the log. So `Any` and `AtLeast` need no new taps: the evaluation reads every
-member's outputs instead of only the correct members'. A crash fires right after its send (A11), and the node emits
-nothing more in that execution: that is the crash-stop semantics both oracles share. **Checked** by reading; **to
-test** with a rule on a member that delivers and then crashes.
+The fault hook drops what a node emits *after* its crash fires; what it emitted before is in the log. So `Any` and
+`Some` need no new taps: the evaluation reads every member's outputs instead of only the correct members'.
+
+**One change** (**argued**): a crash fires right after a send (A11), in the middle of an execution. Whether a tap's
+output in that execution falls before or after the send is the compiler's operator order, not the program's, and the
+two programs (the instrumented one, and oracle 2's fork) need not agree on it. It happens: in the replicated store of
+the teaching file, a replica's ack leaves before its store reaches the tap, so under the old rule a crash right after
+the ack hid the store (observed while drafting `AtLeast`).
+So the view of a crashed member is now *every output of its executions up to and including the one it crashed in*
+(`hf/fault/mod.rs` `on_output`, and oracle 2's hook, the same rule): that execution still runs until the scheduler
+halts the node, its local outputs are logged (not delivered to the harness), and its later sends are dropped as
+before. This is the usual model: a step computes locally, then sends, and the crash falls among the sends. It
+changes nothing for `Correct` and `AllCorrect`, which ignore crashed members.
+**Demonstrated**: the uniform-broadcast counterexample is a member that delivers and crashes right after its first
+echo, in one execution.
 
 ## 5. The soundness argument, claim by claim
 
@@ -89,8 +104,8 @@ test** with a rule on a member that delivers and then crashes.
   obligation `κ` of the run. By completeness (below) `κ` is a probe obligation, so it has a group. Either the group is
   exempt, so `κ` is no obligation (contradiction), or fewer than *need* of its pairs are broken. Unbroken under
   `AllCorrect`: some robust clause survives, so by Lemma R `b` holds `κ` or crashed: every correct `b` holds it.
-  Unbroken under `AtLeast`: `b` is not crashed in `H` and a robust clause survives, so `b` holds `κ`: at least `k`
-  members hold it. **Proved.** Case 2 (tried sets) is unchanged.
+  Unbroken under `AtLeast` or `Some`: `b` is not crashed in `H` and a robust clause survives, so `b` is correct and
+  holds `κ`: at least `k` members hold it. **Proved.** Case 2 (tried sets) is unchanged.
 - **§1.1 (free literals).** The new terms (the crash of `b` breaking a pair, thresholds over `z`) are over faults
   only, so every free literal still helps every row it is in. **Proved.**
 - **§2 (Lemma R), §3–§7, §9 (completion).** Unchanged: they are about derivations, which now serve `B`. Exemptions use
@@ -111,16 +126,16 @@ test** with a rule on a member that delivers and then crashes.
   there. **Proved** (§13's argument with groups for pairs). An empty probe with completeness proved is
   `Vacuous(no obligations)`; otherwise the completeness sweep runs, as today (§11).
 - **§14 (one-schedule policy).** "Every schedule of `S` shows the same facts" was about end states. `Any` and
-  `AtLeast` also read what a member emitted *before* its crash point fired, which may depend on the schedule (two
+  `Some` also read what a member emitted *before* its crash point fired, which may depend on the schedule (two
   arrivals in either order around the crashing send). So a set with a crash point on a member of `A`'s location (for
-  `Any`) or `B`'s (for `AtLeast`) is explored over every schedule. **Proved** need; the restriction is **checked**.
+  `Any`) or `B`'s (for `Some`) is explored over every schedule. **Argued** need; the restriction is **checked**.
 - **§18 (panics).** Unchanged: a pruned set never hides a panic, by the same two cases.
 
 ## 6. Cost and tests
 
 **Cost (guessed).** EC: the same program (need 1, no new rows), the same sets and schedules; the evaluation reads one
 view where it read two. Within 1.1x. `implies` rules: `|B| × |obligations|` pairs, as a label of `B` with that many
-facts; `AtLeast` adds a threshold row per group. A rule in a program with timers pays the completeness sweep, as EC
+facts; `AtLeast` and `Some` add a threshold row per group. A rule in a program with timers pays the completeness sweep, as EC
 does today.
 
 **Tests.**
@@ -128,8 +143,8 @@ does today.
 - Every existing test unchanged (verdicts, and the brute-force agreement of every cross-check).
 - **Brute-force cross-checks** (`ec_implies_checks.rs`), for each instance: regular RB (`Correct → AllCorrect`) holds
   and uniform RB (`Any → AllCorrect`) breaks on a deliver-then-forward broadcast; URB holds both; validity; no
-  creation (`Some`); acked ⇒ durable, broken by acking after one store, holding by acking after all (`AllCorrect`) or a
-  majority (`AtLeast(2)` of 3); the two-path `unique` relay of §3.
+  creation (`Some`); acked ⇒ durable, broken by acking after one store, holding by acking after all (`AllCorrect`), and
+  two acks of three replicas keeping one correct copy (`AtLeast(1)`) under one crash but not two.
 - **Two independent oracles.** Brute force gets its own evaluation of the rule (no longer `hf/spec.rs`); oracle 2 finds
   the tagged nodes on its own fork, taps them, and evaluates the rule with its own code. Both are compared with the
   search by rule name.

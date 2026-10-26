@@ -351,6 +351,8 @@ struct Instance {
     healed: bool,
     /// The node of the execution in progress (outputs are attributed to it).
     exec: Option<NodeId>,
+    /// The node whose crash fired during the execution in progress.
+    crashing: Option<NodeId>,
 }
 
 impl Instance {
@@ -545,6 +547,7 @@ impl SimNetworkHook for FaultHook {
         });
         if fires {
             cur.crash(&from);
+            cur.crashing = Some(from);
         }
         (fate == Fate::Delivered).then_some(id)
     }
@@ -578,9 +581,14 @@ impl SimNetworkHook for FaultHook {
             node.member, member,
             "output on port {port} from another member"
         );
-        // A crashed node emits nothing, like it sends nothing (between its crash firing and the
-        // scheduler halting it, its current execution may still run).
-        if cur.dead.contains(&node) {
+        // A crashed node emits nothing, like it sends nothing. Between its crash firing and the
+        // scheduler halting it, the execution it crashed in still runs: what that execution
+        // computes locally is logged (a crashed member's view, `ASide::Any` and `BSide::Some`, is
+        // every output of its executions up to the one it crashed in), though not delivered.
+        // Where in an execution a tap's output falls against a send is the compiler's choice,
+        // not the program's (docs/design/hydrofrac-implies.md §4).
+        let dead = cur.dead.contains(&node);
+        if dead && cur.crashing.as_ref() != Some(&node) {
             return false;
         }
         cur.log.push(Event::Output {
@@ -589,19 +597,21 @@ impl SimNetworkHook for FaultHook {
             bytes: payload.to_vec(),
             meta,
         });
-        true
+        !dead
     }
 
     fn on_exec_begin(&self, location: &LocationId, member: Option<u32>) {
         let node = NodeId::new(location, member);
         let mut cur = self.current.borrow_mut();
         cur.exec = Some(node.clone());
+        cur.crashing = None;
         cur.log.push(Event::Exec { node });
     }
 
     fn on_exec_end(&self) {
         let mut cur = self.current.borrow_mut();
         cur.exec = None;
+        cur.crashing = None;
         cur.log.push(Event::ExecEnd);
     }
 

@@ -18,10 +18,11 @@ use hydro_lang::live_collections::stream::networking::serialize_bincode_with_typ
 use hydro_lang::location::LocationKey;
 use syn::parse_quote;
 
-use super::collections::is_ec;
+use super::collections::{is_ec, rule_collections, rule_side};
 use super::{LabelPlan, ec_collections, plan};
 use crate::provenance::choices::{ChoiceSite, program_choices};
 use crate::provenance::rewrite::debug_of;
+use crate::spec::{ASide, BSide};
 
 /// One observed element of a labelled collection: its identity (normally its bincode) and its
 /// `Debug` rendering, if any, for reports. Equality, order and hashing use the bytes only.
@@ -93,11 +94,33 @@ pub fn decode_output(payload: &[u8]) -> Fact {
     }
 }
 
+/// One rule to check (docs/design/hydrofrac-implies.md): `A ⇒ B`, between two tapped
+/// collections (indices into [`Labels::plans`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rule {
+    pub a: usize,
+    pub b: usize,
+    pub a_side: ASide,
+    pub b_side: BSide,
+}
+
+impl Rule {
+    /// Whether this is a label's `EventualConsistency`: `A = B`, `Correct → AllCorrect`
+    /// (an `implies` rule has two key nodes, even over one collection).
+    pub fn is_agreement(&self) -> bool {
+        self.a == self.b
+    }
+}
+
 /// The labelled collections of a compiled program and their taps' output ports.
 #[derive(Clone, Debug, Default)]
 pub struct Labels {
-    /// One plan per labelled collection; the index is the label's identity in hydrofrac.
+    /// One plan per tapped collection: every labelled collection, then every `implies` rule's
+    /// key nodes. The index is the collection's identity in hydrofrac.
     pub plans: Vec<LabelPlan>,
+    /// The rules to check: one per labelled collection (its agreement), in plan order, then one
+    /// per `implies` rule. A result is a rule's ([`crate::check::Results::labels`]).
+    pub rules: Vec<Rule>,
     /// The program's schedule choices ([`crate::provenance::choices`]), on the IR as the
     /// program built it.
     pub choices: Vec<ChoiceSite>,
@@ -244,7 +267,43 @@ pub const NO_IDENTITY: &str = "hydrofrac: a labelled collection's element type i
 
 /// Enumerates the labels of `ir`, plans them, and taps every searched one.
 pub fn tap(ir: &mut Vec<HydroRoot>) -> Labels {
-    let collections = ec_collections(ir);
+    let mut collections = ec_collections(ir);
+    let mut rules: Vec<Rule> = (0..collections.len())
+        .map(|i| Rule {
+            a: i,
+            b: i,
+            a_side: ASide::Correct,
+            b_side: BSide::AllCorrect,
+        })
+        .collect();
+    let mut sides: BTreeMap<String, (Option<(usize, ASide)>, Option<(usize, BSide)>)> =
+        BTreeMap::new();
+    for (collection, marker) in rule_collections(ir) {
+        let index = collections.len();
+        let (a, b) = sides.entry(marker.name.clone()).or_default();
+        let twice = match marker.side {
+            Ok(side) => a.replace((index, side)).is_some(),
+            Err(side) => b.replace((index, side)).is_some(),
+        };
+        assert!(
+            !twice,
+            "hydrofrac: two `implies` rules are named `{}`",
+            marker.name
+        );
+        collections.push(collection);
+    }
+    for (name, sides) in sides {
+        let (Some((a, a_side)), Some((b, b_side))) = sides else {
+            panic!("hydrofrac: the `implies` rule `{name}` lost one of its sides");
+        };
+        collections[a].label = format!("implies, {a_side:?} → {b_side:?}");
+        rules.push(Rule {
+            a,
+            b,
+            a_side,
+            b_side,
+        });
+    }
     // The program's schedule choices, on the IR as the program built it (before the taps).
     let choices = program_choices(ir);
     let plans = plan(collections);
@@ -274,7 +333,7 @@ pub fn tap(ir: &mut Vec<HydroRoot>) -> Labels {
     let mut taps: Vec<HydroRoot> = vec![];
     let mut tap_ports: BTreeMap<usize, usize> = BTreeMap::new();
     walk_in_place(ir, &mut |node: &mut HydroNode| {
-        if !is_ec(node)
+        if !(is_ec(node) || rule_side(node).is_some())
             || matches!(
                 node,
                 HydroNode::PartitionShared { .. }
@@ -373,6 +432,7 @@ pub fn tap(ir: &mut Vec<HydroRoot>) -> Labels {
 
     Labels {
         plans,
+        rules,
         choices,
         ports: tap_ports,
     }

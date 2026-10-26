@@ -13,7 +13,7 @@ use good_lp::{
     Expression, ProblemVariables, ResolutionError, Solution, SolverModel, Variable, variable,
 };
 
-use super::clause::{Candidate, Dead, PairClause, PairKey, Pairs, Proposal};
+use super::clause::{AtLeast, Candidate, Dead, PairClause, PairKey, Pairs, Proposal, need};
 use super::literals::SendOrder;
 use crate::search::{Copies, CrashBounds, Fault, FaultSet, Node, weights};
 
@@ -141,6 +141,7 @@ fn pair_rows<P: PairKey, M: Ord + Clone + Copies>(
     dead: &Dead<M, P::Fact>,
     scope: Scope,
     order: &dyn SendOrder<M>,
+    at_least: AtLeast,
 ) -> Option<PairRows> {
     let key = (pair.member().clone(), pair.fact().clone(), scope);
     let mut read = hits.pairs.remove(&key).unwrap_or(Read {
@@ -172,8 +173,18 @@ fn pair_rows<P: PairKey, M: Ord + Clone + Copies>(
         read.count = clauses.len();
         read.last = clauses.last().cloned();
     }
-    let rows: Vec<Row> = read.minimal.iter().map(|(_, row)| row.clone()).collect();
+    let mut rows: Vec<Row> = read.minimal.iter().map(|(_, row)| row.clone()).collect();
     hits.pairs.insert(key, read);
+    if at_least.is_some() {
+        // Any crash of the member breaks the pair ([`AtLeast`]), as if it killed every clause.
+        let crashes: Row = (0..universe.len())
+            .filter(|&i| universe[i].crashed_node() == Some(pair.member()))
+            .collect();
+        for row in &mut rows {
+            row.extend(&crashes);
+        }
+        rows.sort_by_key(BTreeSet::len);
+    }
     if rows.first().is_some_and(BTreeSet::is_empty) {
         return None;
     }
@@ -184,7 +195,10 @@ fn pair_rows<P: PairKey, M: Ord + Clone + Copies>(
             .collect()
     };
     let crashed = FaultSet::from([Fault::crash_after(pair.member().clone(), None)]);
-    let exemptions = std::iter::once(&crashed)
+    let exemptions = at_least
+        .is_none()
+        .then_some(&crashed)
+        .into_iter()
         .chain(
             dead.iter()
                 .filter(|(_, fact)| fact == pair.fact())
@@ -195,16 +209,33 @@ fn pair_rows<P: PairKey, M: Ord + Clone + Copies>(
     Some(PairRows { rows, exemptions })
 }
 
+/// The pairs of one fact, and how many of them a set must break ([`need`]). Under
+/// `AllCorrect` every pair is its own group, with need 1, as pairs were before groups.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Group {
+    need: usize,
+    pairs: Vec<PairRows>,
+}
+
+impl Group {
+    /// Whether the set at these positions is admissible for the group.
+    fn admits(&self, inside: &BTreeSet<usize>) -> bool {
+        self.pairs.iter().filter(|p| p.admits(inside)).count() >= self.need
+    }
+}
+
 /// The next hypothesis: a minimum-weight subset of `universe` (weakest first, see
 /// [`super::candidates`]) that satisfies `scope` for some pair, keeps crashes within `bounds` and
 /// at most one per node, and is not in `tried`. `None` when no such set exists (proven: the solver
 /// closes the gap).
 ///
-/// The program, with a binary `x_c` per candidate and `z_p` per pair, minimizing `Σ w_c x_c`
-/// ([`weights`]):
-/// - `Σ_p z_p ≥ 1` (not for [`Scope::Any`]);
-/// - per pair `p` and in-scope clause `D` of `p`: `Σ { x_c : c kills a delivery of D } ≥ z_p`;
-/// - per pair `p` of member `m`: `z_p + x_{crash(m)} ≤ 1`;
+/// The program, with a binary `x_c` per candidate, `z_p` per pair and `y_G` per group (the pairs
+/// of one fact, [`need`]), minimizing `Σ w_c x_c` ([`weights`]):
+/// - `Σ_G y_G ≥ 1` (not for [`Scope::Any`]), and `Σ_{p ∈ G} z_p ≥ need_G · y_G`. Under
+///   `AllCorrect` ([`AtLeast`] `None`) each pair is a group of need 1, and `y_G` is `z_p`;
+/// - per pair `p` and in-scope clause `D` of `p`: `Σ { x_c : c kills a delivery of D } ≥ z_p`,
+///   counting, under `AtLeast(k)`, every crash of `p`'s member as a kill;
+/// - per pair `p` of member `m`, under `AllCorrect`: `z_p + x_{crash(m)} ≤ 1`;
 /// - per pair `p` of fact `f` and dead set `D` of `f`: `z_p + Σ_{g ∈ D} x_g ≤ |D|`;
 /// - at most one crash per node; `Σ_{crash} x_c ≤ min(cap, N − 1)`; at most the checked
 ///   cluster's cap among its members;
@@ -222,25 +253,43 @@ pub fn propose<P: PairKey, M: Ord + Clone + Copies>(
     scope: Scope,
     order: &dyn SendOrder<M>,
     hits: &mut Hits<M, P::Fact>,
+    at_least: AtLeast,
 ) -> Option<Proposal<M>> {
     let index: BTreeMap<&Candidate<M>, usize> =
         universe.iter().enumerate().map(|(i, c)| (c, i)).collect();
     let ids = hits.ids(universe);
-    let pair_rows: Vec<PairRows> = if scope == Scope::Any {
-        vec![]
-    } else {
-        pairs
-            .iter()
-            .filter_map(|(pair, clauses)| {
-                pair_rows(
-                    universe, &index, hits, &ids, pair, clauses, dead, scope, order,
-                )
-            })
+    let mut facts: BTreeMap<&P::Fact, (usize, Vec<PairRows>)> = BTreeMap::new();
+    if scope != Scope::Any {
+        for (pair, clauses) in pairs {
+            let rows = pair_rows(
+                universe, &index, hits, &ids, pair, clauses, dead, scope, order, at_least,
+            );
+            let (total, rows_of) = facts.entry(pair.fact()).or_default();
+            *total += 1;
+            rows_of.extend(rows);
+        }
+    }
+    let groups: Vec<Group> = match at_least {
+        None => facts
+            .into_values()
+            .flat_map(|(_, rows)| rows)
             .collect::<BTreeSet<_>>()
             .into_iter()
-            .collect()
+            .map(|pair| Group {
+                need: 1,
+                pairs: vec![pair],
+            })
+            .collect(),
+        Some(_) => facts
+            .into_values()
+            .map(|(total, pairs)| Group {
+                need: need(total, at_least),
+                pairs,
+            })
+            .filter(|g| g.pairs.len() >= g.need)
+            .collect(),
     };
-    if scope != Scope::Any && pair_rows.is_empty() {
+    if scope != Scope::Any && groups.is_empty() {
         return None;
     }
 
@@ -260,15 +309,28 @@ pub fn propose<P: PairKey, M: Ord + Clone + Copies>(
         |positions: &Row| -> Expression { positions.iter().map(|&i| Expression::from(x[i])).sum() };
     if scope != Scope::Any {
         let mut any = Expression::from(0.0);
-        for pair in &pair_rows {
-            let z = vars.add(variable().binary());
-            for row in &pair.rows {
-                constraints.push(sum(row).geq(z));
+        for group in &groups {
+            let y = vars.add(variable().binary());
+            let mut broken = Expression::from(0.0);
+            for pair in &group.pairs {
+                // A group of one pair needing it: its indicator is the pair's.
+                let z = if group.pairs.len() == 1 && group.need == 1 {
+                    y
+                } else {
+                    vars.add(variable().binary())
+                };
+                for row in &pair.rows {
+                    constraints.push(sum(row).geq(z));
+                }
+                for exemption in &pair.exemptions {
+                    constraints.push((sum(exemption) + z).leq(exemption.len() as f64));
+                }
+                broken += z;
             }
-            for exemption in &pair.exemptions {
-                constraints.push((sum(exemption) + z).leq(exemption.len() as f64));
+            if !(group.pairs.len() == 1 && group.need == 1) {
+                constraints.push(broken.geq(group.need as f64 * y));
             }
-            any += z;
+            any += y;
         }
         constraints.push(any.geq(1.0));
     }
@@ -304,7 +366,7 @@ pub fn propose<P: PairKey, M: Ord + Clone + Copies>(
             // A set with a candidate outside the universe can never be selected.
             continue;
         };
-        if scope != Scope::Any && !pair_rows.iter().any(|pair| pair.admits(&inside)) {
+        if scope != Scope::Any && !groups.iter().any(|g| g.admits(&inside)) {
             continue;
         }
         let mut no_good = Expression::from(0.0);

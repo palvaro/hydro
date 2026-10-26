@@ -57,8 +57,8 @@ struct Explored {
 enum Reading {
     /// `POST` failed.
     Fails(Failure),
-    /// `POST` held: a clause for every derivation of every held pair, and the domain facts some
-    /// correct member holds.
+    /// `POST` held: a clause for every derivation of every held pair, and the run's
+    /// obligations.
     Holds {
         clauses: Vec<(Pair, PairClause<MessageId>)>,
         held: BTreeSet<Fact>,
@@ -138,11 +138,12 @@ struct LabelPairs {
 }
 
 impl LabelPairs {
-    /// A pair, with no clause yet, for every member of `target` and every fact of `domain`.
+    /// A pair, with no clause yet, for every member of `target`'s B-side and every fact of
+    /// `domain`.
     fn new(target: &Target, domain: &BTreeSet<Fact>, names: &NodeNames) -> Self {
         let mut pairs = Pairs::new();
-        for &m in &target.members {
-            let node = names.name(&NodeId::new(&target.cluster, Some(m)));
+        for &m in &target.b.members {
+            let node = names.name(&target.b.node(m));
             for fact in domain {
                 pairs.insert((node.clone(), fact.clone()), vec![]);
             }
@@ -174,40 +175,30 @@ fn read_schedule(
     lineage: &Lineage<'_>,
     all_robust: bool,
 ) -> Reading {
-    let observations: Vec<Observation<usize>> = lineage
+    let outputs: Vec<(usize, u32, Fact, usize)> = lineage
         .observations()
-        .filter(|o| labels.label_of_port(o.port) == Some(target.label))
-        .map(|o| Observation {
-            label: target.label,
-            member: o.node.member.unwrap_or(0),
-            fact: decode_output(o.bytes),
-            support: o.event,
+        .filter(|o| labels.label_of_port(o.port).is_some())
+        .map(|o| {
+            (
+                o.port,
+                o.node.member.unwrap_or(0),
+                decode_output(o.bytes),
+                o.event,
+            )
         })
         .collect();
-    let view = MemberView::of(target.label, &observations);
-    let correct = correct_members(target, record);
-    let evaluation = evaluate(&view, domain, &correct);
-    let divergent: Vec<Fact> = evaluation
-        .outside_domain
-        .iter()
-        .filter(|fact| !correct.iter().all(|m| view.holds(*m, fact)))
-        .cloned()
-        .collect();
-    if !evaluation.holds() || !divergent.is_empty() {
-        return Reading::Fails(Failure {
-            missing: evaluation.missing,
-            divergent,
-            panic: None,
-            record: record.clone(),
-        });
+    let evaluation = target.evaluate(labels, record, &outputs);
+    let held = evaluation.held.clone();
+    let obligations = evaluation.obligations.clone();
+    if let Some(failure) = target.failure(evaluation, domain, record) {
+        return Reading::Fails(failure);
     }
     let names = tables.names();
     let mut clauses = vec![];
-    for pair in &evaluation.held {
-        let key = (
-            names.name(&NodeId::new(&target.cluster, Some(pair.member))),
-            pair.fact.clone(),
-        );
+    // Pairs are the probe's obligations' (`LabelPairs::new`): an obligation only faults create
+    // is checked in every run, by the completeness sweep where no proof covers it.
+    for pair in held.iter().filter(|p| domain.contains(&p.fact)) {
+        let key = (names.name(&target.b.node(pair.member)), pair.fact.clone());
         for &event in &pair.supports {
             // In a choice-free program each fault set has one schedule, so a derivation holds
             // in it and needs no premise, unless it counts copies: the kill rule reads contents,
@@ -225,7 +216,7 @@ fn read_schedule(
     }
     Reading::Holds {
         clauses,
-        held: evaluation.required,
+        held: obligations,
     }
 }
 
@@ -508,10 +499,26 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
             sampled: probe_sampled,
         };
         search.pairs.learn(probe_clauses);
-        let mut sweep: races::Sweep<MessageId, Fact> =
-            races::Sweep::new(self.bounds(target)).with_order(self.order.clone());
+        let bounds = self.bounds(target);
+        let mut sweep: races::Sweep<MessageId, Fact> = races::Sweep::new(bounds.clone())
+            .with_order(self.order.clone())
+            .with_at_least(target.rule.b_side.at_least());
         for revealed in world.iter() {
             revealed.tell(&mut sweep);
+        }
+        // A set that crashes every member of A's location at start owes nothing: they emit
+        // nothing. Only for a rule other than agreement (whose bounds never allow it).
+        let names = self.tables.names();
+        let silent: FaultSet<MessageId> = target
+            .a
+            .members
+            .iter()
+            .map(|m| Fault::crash_after(names.name(&target.a.node(*m)), None))
+            .collect();
+        if !target.rule.is_agreement() && races::within_bounds(&silent, &bounds) {
+            for fact in &target.domain {
+                sweep.mark_dead(silent.clone(), fact.clone());
+            }
         }
         if shape.fragile_free {
             // The probe showed every send (`races::Sweep::sends_complete`).
@@ -579,19 +586,31 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
         shape: Shape,
         in_full: bool,
     ) -> Option<Failure> {
-        let policy = if in_full {
+        let labels = self.labels;
+        let target = search.target;
+        let names = self.tables.names();
+        let nodes = |side: &Side| -> BTreeSet<Node> {
+            side.members
+                .iter()
+                .map(|m| names.name(&side.node(*m)))
+                .collect()
+        };
+        let in_a = nodes(&target.a);
+        // `Any` and `Some` read what a member emitted before its crash point fired, which
+        // the schedule may change (docs/design/hydrofrac-implies.md §5, §14 of the soundness
+        // argument): such a set is explored over every schedule.
+        let mut prefixes = BTreeSet::new();
+        if target.rule.a_side == ASide::Any {
+            prefixes.extend(in_a.iter().cloned());
+        }
+        if target.rule.b_side.counts_crashed() {
+            prefixes.extend(nodes(&target.b));
+        }
+        let policy = if in_full || !crashes_all(set, |n, _| !prefixes.contains(n)) {
             Policy::All
         } else {
             shape.policy(set, |set| sweep.is_exact_set(set, |_, _| true))
         };
-        let labels = self.labels;
-        let target = search.target;
-        let names = self.tables.names();
-        let members: BTreeSet<Node> = target
-            .members
-            .iter()
-            .map(|m| names.name(&NodeId::new(&target.cluster, Some(*m))))
-            .collect();
         let order = self.order.clone();
         let pairs = &mut search.pairs;
         let mut failure = None;
@@ -621,7 +640,13 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
                     held_somewhere.extend(held);
                     if policy == Policy::All
                         && !in_full
-                        && races::pruned(set, &pairs.pairs, sweep.dead(), sweep.order())
+                        && races::pruned(
+                            set,
+                            &pairs.pairs,
+                            sweep.dead(),
+                            sweep.order(),
+                            sweep.at_least(),
+                        )
                     {
                         pruned = true;
                     }
@@ -649,9 +674,9 @@ impl<B: AsyncFnMut(), R: AsyncFnMut()> Engine<'_, B, R> {
             sweep.explored_in_full(set.clone());
         }
         // A fragile-free program, a set of omissions, start crashes and exact crash points of
-        // nodes outside the cluster, its one schedule read in full: a domain fact no correct
-        // member holds is held by none under any superset either (`races::Sweep::mark_dead`).
-        let deadly = sweep.is_exact_set(set, |n, _| !members.contains(n));
+        // nodes outside A's location, its one schedule read in full: a probe obligation this
+        // run does not owe is owed by no run under any superset either (`races::Sweep::mark_dead`).
+        let deadly = sweep.is_exact_set(set, |n, _| !in_a.contains(n));
         if failure.is_none() && policy == Policy::One && shape.fragile_free && deadly {
             for fact in &target.domain {
                 if !held_somewhere.contains(fact) {
