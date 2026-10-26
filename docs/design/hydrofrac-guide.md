@@ -492,11 +492,11 @@ Member:
   [2] new_messages (Stream, reliable_broadcast.rs:152): holds: no number of crashes or lost messages breaks it.
       3 hypotheses, 3 schedules, 6.30ms
       races: 0 sets stopped early, 3 sets on one schedule; claim B certified
-  [3] regular (Stream, implies, Correct → AllCorrect): holds: no number of crashes or lost messages breaks it.
+  [3] regular (Stream, implies at ec_implies_teaching.rs:59, Correct → AllCorrect): holds: no number of crashes or lost messages breaks it.
       5 hypotheses, 5 schedules, 8.75ms
       races: 0 sets stopped early, 5 sets on one schedule; claim B certified
-  [4] uniform (Stream, implies, Any → AllCorrect): broken: a crash of Member@0, right after it sends 1 to Member@0 (on echo), and a crash of Source, right after it sends 1 to Member@0 (on initial), leave Member@1 without 1. No single crash breaks it.
-      diagram: target/hydrofrac/a_member_that_delivers_then_crashes_breaks_uniformity/uniform_implies.rs/counterexample.svg
+  [4] uniform (Stream, implies at ec_implies_teaching.rs:60, Any → AllCorrect): broken: a crash of Member@0, right after it sends 1 to Member@0 (on echo), and a crash of Source, right after it sends 1 to Member@0 (on initial), leave Member@1 without 1. No single crash breaks it.
+      diagram: target/hydrofrac/a_member_that_delivers_then_crashes_breaks_uniformity/uniform_ec_implies_teaching.rs/counterexample.svg
       4 hypotheses, 4 schedules, 8.05ms
       races: 0 sets stopped early, 3 sets on one schedule; claim B not certified
 ```
@@ -510,20 +510,20 @@ only the rule matters here:
 
 ```text
 Source:
-  [1] durable (Stream, implies, Correct → AtLeast(1)): holds: no single crash breaks it (`max_crashes` is 1, so more were not checked).
+  [1] durable (Stream, implies at ec_implies_teaching.rs:135, Correct → AtLeast(1)): holds: no single crash breaks it (`max_crashes` is 1, so more were not checked).
       12 hypotheses, 12 schedules, 19.24ms
       races: 0 sets stopped early, 12 sets on one schedule; claim B certified
 ...
 Source:
-  [1] durable (Stream, implies, Correct → AtLeast(1)): broken: a crash of Member@0, right after it sends 1 to Source (on ack), and a crash of Member@1, right after it sends 1 to Source (on ack), and the loss of the message 1 from Source to Member@2 (on write) leave Member@2 without 1. No single crash breaks it.
-      diagram: target/hydrofrac/two_copies_survive_one_crash_but_not_two/durable_implies.rs/counterexample.svg
+  [1] durable (Stream, implies at ec_implies_teaching.rs:135, Correct → AtLeast(1)): broken: a crash of Member@0, right after it sends 1 to Source (on ack), and a crash of Member@1, right after it sends 1 to Source (on ack), and the loss of the message 1 from Source to Member@2 (on write) leave Member@2 without 1. No single crash breaks it.
+      diagram: target/hydrofrac/two_copies_survive_one_crash_but_not_two/durable_ec_implies_teaching.rs/counterexample.svg
       15 hypotheses, 15 schedules, 22.68ms
       races: 0 sets stopped early, 15 sets on one schedule; claim B not certified
 ```
 
 (The `...` replaces the second run's `Member:` block, identical in kind to the first.) The rule is grouped under
-`Source:`, the location of its `A` side; the missing member is named in `B`'s location. The diagram directory says
-`implies.rs` because the rule's key nodes are built inside `hydrofrac/src/implies.rs`.
+`Source:`, the location of its `A` side; the missing member is named in `B`'s location. Rules are named after the file and line of their `.implies(..)` call, so the diagram directory ends in the
+test's own file name.
 
 **`Vacuous`** (from `hydro_test`'s `brute_force_agrees_on_a_plain_broadcast`, in `cluster::ec_bruteforce`):
 
@@ -595,33 +595,33 @@ The **focused** diagram (`hydrofrac/src/lamport/focus.rs`) keeps:
 - the crashes and the heal;
 
 and then only the outputs of this rule's own collections. It drops every other message and output; a node left
-with nothing loses its lane. Its title is the report's sentence, then a caption counting what was left out, then a
-`faults:` line in compact notation, then the legend. If the run panicked, no fact is broken, and the whole run is
+with nothing loses its lane. Its title is the report's sentence, then a caption counting what was left out, then
+the legend. Each member left without an owed record gets a red `✗ never holds …` note under its lane. (The full
+diagram also lists the faults in compact notation.) If the run panicked, no fact is broken, and the whole run is
 drawn.
 
 ## 6.3 Reading one
 
-![Focused diagram of `uniform` in `a_member_that_delivers_then_crashes_breaks_uniformity`, rendered with `neato -n2 -Tpng` from `counterexample.dot`. The only change: its one-line title is wrapped to fit the page.](hydrofrac-guide-img/uniform-counterexample.png){width=72%}
+![Focused diagram of `uniform` in `a_member_that_delivers_then_crashes_breaks_uniformity`, rendered with `neato -n2 -Tpng` from `counterexample.dot`. Shown exactly as hydrofrac writes it.](hydrofrac-guide-img/uniform-counterexample.png){width=72%}
 
 This is the focused diagram of the `uniform` rule from §5.2, at
-`target/hydrofrac/a_member_that_delivers_then_crashes_breaks_uniformity/uniform_implies.rs/counterexample.dot`.
+`target/hydrofrac/a_member_that_delivers_then_crashes_breaks_uniformity/uniform_ec_implies_teaching.rs/counterexample.dot`.
 
 - **Lanes.** One vertical line per node (`Source`, `Member@0`, `Member@1`), time flowing down. Each event has its
   own row, in the order of the run's event log (`dot.rs`: "each send, receive, output, crash and the heal gets
   its own rank, in program order"). Distances mean nothing.
-- **Title.** The verdict sentence; `5 unrelated outputs not shown`; then `faults: crash(Member@0 after c39:
-  →Member@0 1), crash(Source after c18: →Member@0 1)`. In the diagram a message is labelled by its channel's
-  `.name(..)` if it has one, else `c<id>`: `reliable_broadcast_closed` names neither channel, so `c18` is the
-  initial broadcast and `c39` the echo (the text report calls them `initial` and `echo`; the two use different
-  naming code, `lamport/mod.rs` and `report/mod.rs`).
+- **Title.** The verdict sentence (the same one the text report prints), then `5 unrelated outputs not shown`
+  (the focused diagram leaves out what the broken fact does not depend on; `counterexample-full.svg` beside it
+  draws everything, and also lists the faults in hydrofrac's compact notation). Messages are labelled by the same
+  channel names the report uses: here `initial` (the first broadcast) and `echo`.
 - **Source.** It sends `1` to `Member@0` (a solid black arrow, delivered), then `☠ crashed`. The send it would
   have made next, to `Member@1`, is drawn grey and dashed, ending in a grey `✗` on `Member@1`'s lane: lost to the
   crash. Below the crash its lane is dotted.
 - **Member@0.** It receives `1`, and two yellow notes `⇒ 1` show its outputs: the rule's `A` and `B` key taps both
   read the same `delivered` stream. Then it sends the echo `1` to itself, which is dotted (`in flight`: sent but
-  never received, because `Member@0` crashed right after sending it; its label `c39: 1` is partly covered by the
-  next one), and crashes. Its echo to `Member@1` is lost to the crash (grey, `✗`).
-- **Member@1.** Nothing arrives; it never outputs `1`.
+  never received, because `Member@0` crashed right after sending it), and crashes. Its echo to `Member@1` is lost to the crash (grey, `✗`).
+- **Member@1.** Nothing arrives; it never outputs `1`. The red `✗ never holds 1` under its lane marks the
+  member the counterexample leaves without the record.
 - **The heal** is the green dashed line near the bottom. Nothing happens after it here.
 
 Read as a sentence: `Member@0` delivered `1` (so under `ASide::Any` it is an obligation), and `Member@1`, which
