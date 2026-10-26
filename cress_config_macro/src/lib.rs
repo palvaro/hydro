@@ -74,6 +74,11 @@
 //!   with the doubling sequence means about a quarter of the horizon or less (125 of 1000).
 //! * `ignore = "reason"`: omits this check from the checker command unless its
 //!   `--include-ignored` option is given.
+//! * `test_safety_only`: calls `SimFlow::test_safety_only` on the simulation, which the
+//!   simulator requires of programs with `lossy_delayed_forever` channels. The simulator never
+//!   drops a message on such a channel (it would hold a dropped one to the end of the run), so
+//!   under the checker's schedules every message is delivered and every count it reads is the
+//!   program's reaction to delay alone.
 //! * `skip_consistency_assertions`: calls `SimFlow::skip_consistency_assertions` on the
 //!   simulation, for programs that use `assert_has_consistency`.
 //! * `cress = path`: the path to the `cress` crate, `::cress` by default. The generated code
@@ -349,6 +354,7 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
     let mut cress: syn::Path = syn::parse_quote!(::cress);
     let mut hydro: syn::Path = syn::parse_quote!(::cress::__private::hydro_lang);
     let mut skip_consistency = false;
+    let mut safety_only = false;
     let mut round_closure: Option<Expr> = None;
     let mut round_data: Option<Expr> = None;
     let mut timers: Vec<(Ident, Expr)> = Vec::new();
@@ -375,6 +381,7 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
                 hydro = syn::parse_quote!(#cress::__private::hydro_lang);
             }
             ("skip_consistency_assertions", None, None) => skip_consistency = true,
+            ("test_safety_only", None, None) => safety_only = true,
             ("round", Some(v), _) => round_closure = Some(syn::parse2(v.clone())?),
             ("round_data", Some(v), _) => round_data = Some(syn::parse2(v.clone())?),
             ("timers", None, Some(g)) => {
@@ -670,6 +677,11 @@ fn expand(f: &ItemFn, args: Args) -> syn::Result<TokenStream2> {
         quote!(.skip_consistency_assertions())
     } else {
         quote!()
+    };
+    let skip = if safety_only {
+        quote!(#skip.test_safety_only())
+    } else {
+        skip
     };
     let cfg = if let Some(h) = &horizon {
         quote!(#amp::CheckConfig::new(#h))
