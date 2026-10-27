@@ -158,6 +158,19 @@ def main(argv):
         unit = "msgs/s" if msg_bytes else "KiB/s"
         what = f"~{msg_bytes:g} B messages" if msg_bytes else "KiB"
         panels.append((series, f"wire writes per node, measured outside the program ({what})", unit, False))
+    # Lossy send queues (`--send-buffer lossy:N:ROLE,...`): what each node's transport dropped
+    # at a full queue, and the values offered so far that no completion has answered yet. The
+    # verdict reads only the values offered in its windows; this backlog is the burst's lost work.
+    dropped = sorted(k for k in d if k.startswith("sendq_dropped_") and not k.startswith("sendq_dropped_kb_"))
+    if dropped and any(v for k in dropped for v in d[k] if v):
+        series = [(k[len("sendq_dropped_"):] + " dropped/s", d[k]) for k in dropped]
+        panels.append((series, "messages dropped at full send queues (in the transport, outside the program)", "msgs/s", False))
+    if dropped and "offered" in d and "completed" in d:
+        backlog, acc = [], 0.0
+        for o, c in zip(d["offered"], d["completed"]):
+            acc += (o or 0) - (c or 0)
+            backlog.append(acc)
+        panels.append(([("undelivered values", backlog)], "values offered so far and not yet delivered", "values", False))
     cpu = sorted(k for k in d if k.startswith("cpu_"))
     if cpu:
         period_us = float(argv[argv.index("--cpu-period-us") + 1]) if "--cpu-period-us" in argv else 100000.0

@@ -2,7 +2,7 @@
 # Sedge: deploys every `#[sedge::overload_check(...)]` in a crate on localhost and runs overload
 # trials against it.
 #
-#   ./scripts/sedge [options] <crate> [function-substring]
+#   ./scripts/sedge [options] <crate> [function-substring | =exact-function-name]
 #
 # Options (all optional; see `sedge::harness::USAGE`, or run the runner with a bad option):
 #   --config NAME  --include-ignored  --factors F1,F2,...  --trials N  --trigger-multiple M

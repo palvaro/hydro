@@ -868,7 +868,11 @@ pub fn run_registered_checks(run: &RunConfig) -> Result<Vec<TrialResult>, String
         .lock()
         .map_err(|_| "overload check registry lock poisoned".to_owned())?
         .clone();
-    checks.retain(|c| c.function.contains(&run.function_filter));
+    // `=name` selects exactly one function; a plain filter is a substring.
+    match run.function_filter.strip_prefix('=') {
+        Some(exact) => checks.retain(|c| c.function == exact),
+        None => checks.retain(|c| c.function.contains(&run.function_filter)),
+    }
     checks.retain(|c| {
         run.configuration_filter.is_empty() || c.configuration == run.configuration_filter
     });
