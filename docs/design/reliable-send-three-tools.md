@@ -296,7 +296,24 @@ V2 is ruled out, because it can lose a value forever, and only hydrofrac shows i
 
 Sedge's deployment layer can make a sender's outgoing buffer lossy (`HYDRO_DEPLOY_SEND_BUFFER=lossy:N`), so the same receiver quota can be combined with real message loss. Our hypothesis is that V3 recovers from loss faster than V1 at the same protection against storms, because acknowledgements that do arrive buy extra resends. If V3 shows no advantage, V1 is the better choice because it is simpler.
 
-<!-- PENDING: Act 3, the lossy-link Sedge experiment comparing V1 and V3 (and V0 as a reference), with verdicts, recovery times and figures. -->
+### The loss model
+
+Docker's host networking rules out `tc netem`, so the loss is imposed in the deployment's transport instead, which is still outside the program. The Sedge option `--send-buffer lossy:64:Sender,Receiver` puts a queue of 64 messages in front of every outgoing connection of both nodes, for data and for acknowledgements alike. A send that finds its queue full is dropped, and the transport counts the drop (`SEND_STATS`, in the `sendq_dropped_*` counters). This is congestion tail-drop: messages are dropped only while the burst backs up the queues, and none are dropped at the baseline load.
+
+### A first pair of runs
+
+The first pair of runs used f = 4, seed 1 and μ = 500, with V1 and V3 run back to back. These numbers are DEMONSTRATED by those two runs on the local branch `demo/act3-lossy`, and everything else in this subsection is preliminary.
+
+| variant | data messages dropped | acknowledgements dropped | values still undelivered 45 s after the burst | lost values recovered per second in the tail | Sedge verdict |
+|---|---|---|---|---|---|
+| V1 time | 1,346 | 415 | 1,335 | 0.0 | RECOVERED |
+| V3 hybrid | 1,783 | 234 | 1,503 | 8.0 | RECOVERED |
+
+Our reading of the pair, which is GUESSED until the full run confirms it, is that V3's acknowledgement refill lets it recover lost values at about eight per second while acknowledgements flow, whereas V1's single token per tick makes no measurable progress. A plausible reason for V1's lack of progress is that the head of its FIFO is occupied by values whose acknowledgements were lost, so its one resend per tick goes to values that the receiver already holds. Neither variant drains its lost values within 45 s.
+
+Both runs are labelled RECOVERED, with full goodput in the tail and a median latency of 7 ms, although more than a thousand values were still undelivered in each. Sedge judges only the values that are offered during the tail, so values that were lost during the burst stay undelivered in the background without affecting the verdict. They show up only in the 99th percentile of completion time (50 s for V3) and in the count of values outstanding at the end of the run. Under loss, a RECOVERED verdict therefore means that new work is healthy, and it says nothing about whether the lost work came back. We read Act 3 through the undelivered count and the recovery rate for that reason.
+
+<!-- PENDING: Act 3, the full interleaved run (36 trials, V1 and V3 alternating, with V0 as a reference), followed by a long-tail pair to see whether either variant eventually drains its lost values. Replace the preliminary reading above with its results. -->
 
 ## 8. Limits of what we showed
 
@@ -306,7 +323,8 @@ Sedge's deployment layer can make a sender's outgoing buffer lossy (`HYDRO_DEPLO
 - When a search runs past its schedule budget it falls back to sampled schedules, and it can then miss a counterexample. With crashes disabled, success budgets of three and four tokens gave the same counterexamples at the same cost as before, but at five to seven tokens the search reported `Exhausted` without finding the starvation. `Exhausted` is correctly not a certificate, so the search lost power there but did not give an unsound verdict.
 - Hydrofrac's verdicts on the rate-limited variants depend on the number of recovery ticks in the harness, as the single-token sweep in §6 shows.
 - Cress labels every variant HAZARDOUS, because by design it labels any extra work at all as hazardous (`cress/src/lib.rs`). The severity is in the growth shape and the multiplier.
-- Cress and Sedge never lose a message: the simulator does not drop on lossy channels, and the deployment runs over plain TCP. Loss is exercised only by hydrofrac, and in deployment only by the pending Act 3.
+- Cress never loses a message, because the simulator does not drop on lossy channels, and Sedge's deployments lose messages only when they are given a lossy send buffer, as in Act 3. Loss is otherwise exercised only by hydrofrac.
+- Under loss, Sedge's RECOVERED verdict covers only the values offered during the tail. Values that were lost during the burst and never recovered do not change the verdict, and they appear only in the tail of the completion-time distribution and in the count of values outstanding at the end of the run.
 - Deploying `reliable_send` required a change to `hydro_lang` (commit `2ad28e7c5f`), because the deployment backend refused every TCP channel other than `fail_stop`. The change deploys `LossyDelayedForever` as plain TCP, which is sound because in-order delivery that stops at a failure is one of the behaviors that a delayed-forever, unordered channel allows. It still refuses plain `Lossy`.
 
 ## 9. How to reproduce
@@ -330,4 +348,4 @@ cargo test -p hydro_test --lib cluster::ec_reliable_send -- --test-threads=4 --n
     hydro_test reliable_send_pair_time_budget
 ```
 
-The Sedge filter is also a substring match, so the plain name `reliable_send_pair` deploys all four functions. The per-variant traces, calibration tables and plots of the runs in this document are under `target/sedge-demo-reliable-send/` and `target/sedge-demo-budget/` on the host where they were produced, and they are not committed. The trace analysis and its scripts are in `target/sedge-demo-budget/ANALYSIS.md` and `target/sedge-demo-budget/tools/analysis/`. The directory `target/sedge-demo-reliable-send/traces/traces_sweep3_P20/` also contains stale copies of one-second traces, and only `factor2.trial0` and `factor8.trial0` there are real 20-second runs.
+The Sedge filter is also a substring match, so the plain name `reliable_send_pair` deploys all four functions. On the local branch `demo/act3-lossy` the filter also accepts `=exact_name`, which selects one function exactly. The Act 3 runs add `--send-buffer lossy:64:Sender,Receiver` to the Sedge command. The per-variant traces, calibration tables and plots of the runs in this document are under `target/sedge-demo-reliable-send/` and `target/sedge-demo-budget/` on the host where they were produced, and they are not committed. The trace analysis and its scripts are in `target/sedge-demo-budget/ANALYSIS.md` and `target/sedge-demo-budget/tools/analysis/`. The directory `target/sedge-demo-reliable-send/traces/traces_sweep3_P20/` also contains stale copies of one-second traces, and only `factor2.trial0` and `factor8.trial0` there are real 20-second runs.
