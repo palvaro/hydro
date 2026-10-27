@@ -75,9 +75,11 @@ local function figure_block(fig)
     -- Small figures (sequence diagrams, Cress plots) float; full-page Sedge plots stay in place,
     -- because typst 0.12 overflows a page when a tall block follows a float.
     local small = name:match("^hydrofrac") or name:match("^cress")
+    -- An explicit {width=...} on the image overrides the default of the full text width.
+    local width = img.attributes.width or "100%"
     return pandoc.RawBlock("typst", string.format(
-      "#figure(image(%s, width: 100%%), placement: %s,\n  caption: [%s])",
-      typst_str(src), small and "auto" or "none", caption))
+      "#figure(image(%s, width: %s), placement: %s,\n  caption: [%s])",
+      typst_str(src), width, small and "auto" or "none", caption))
   end
   for _, p in ipairs(positions) do caption = caption:gsub(p[1], p[2]) end
   local cells = {}
