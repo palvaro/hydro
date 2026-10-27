@@ -19,7 +19,10 @@
 use cress::SimOutputs;
 use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
 use hydro_lang::prelude::*;
-use hydro_std::reliable_send::reliable_send;
+use hydro_std::reliable_send::{
+    reliable_send, reliable_send_hybrid_budget, reliable_send_success_budget,
+    reliable_send_time_budget,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -119,6 +122,154 @@ where
     }));
     ReliableSendOutputs {
         delivered: reliable_send(numbered, receiver, resend_ticks),
+    }
+}
+
+/// The resend budget of the budgeted variants below, the same for all three so that they differ
+/// only in where tokens come from: a bucket of ten, starting full; the timer variant grants one
+/// token per timer element, the success variant one per four acknowledgements that clear a
+/// value, and the hybrid both. These are the retry-governance corpus's constants
+/// (`witnesses/blind_budget/`: bucket 10, one per clock element, one per four useful replies;
+/// its `success_budget` attribute uses five, its module docs and `hybrid_budget` four).
+///
+/// Against the cress workload (two new values and one timer element per round) the timer's
+/// grant is half the input rate. On a deployment the timer fires once a second, so a time
+/// budget allows one resend per second after the first ten.
+pub const BUDGET_CAPACITY: u64 = 10;
+/// Tokens per timer element (time and hybrid budgets).
+pub const BUDGET_TOKENS_PER_TICK: u64 = 1;
+/// Useful acknowledgements per token (success and hybrid budgets).
+pub const BUDGET_ACKS_PER_TOKEN: u64 = 4;
+
+/// The sender's input, numbered in the order the sender receives it (see [`Numbered`]).
+fn numbered<'a, T>(
+    values: Stream<T, Process<'a, Sender>, Unbounded, TotalOrder, ExactlyOnce>,
+) -> Stream<Numbered<T>, Process<'a, Sender>, Unbounded, TotalOrder, ExactlyOnce>
+where
+    T: 'a,
+{
+    values.enumerate().map(q!(|(id, body)| Numbered {
+        id: id as u64,
+        body
+    }))
+}
+
+/// [`reliable_send_pair`] over [`reliable_send_time_budget`]: each resend spends a token, and
+/// the timer grants [`BUDGET_TOKENS_PER_TICK`] per element, up to [`BUDGET_CAPACITY`]. The same
+/// Cress and Sedge configurations as [`reliable_send_pair`].
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = two_per_round,
+    T = super::rpc_retry::Payload<4096>,
+    load = values,
+    mu = 500,
+    cpus(Sender = none, Receiver = 0.01),
+    cpu_period_us = 100_000,
+    timers(resend_ticks = std::time::Duration::from_secs(1)),
+))]
+#[cfg_attr(feature = "cress", cress::amplification_check(
+    name = two_per_round,
+    T = u64,
+    workload(values = 2),
+    workload_rounds = 125,
+    test_safety_only,
+))]
+pub fn reliable_send_pair_time_budget<'a, T>(
+    _sender: &Process<'a, Sender>,
+    receiver: &Process<'a, Receiver>,
+    values: Stream<T, Process<'a, Sender>, Unbounded, TotalOrder, ExactlyOnce>,
+    resend_ticks: Stream<(), Process<'a, Sender>, Unbounded, TotalOrder, ExactlyOnce>,
+) -> ReliableSendOutputs<'a, T>
+where
+    T: Clone + Eq + std::hash::Hash + Serialize + DeserializeOwned + 'a,
+{
+    ReliableSendOutputs {
+        delivered: reliable_send_time_budget(
+            numbered(values),
+            receiver,
+            resend_ticks,
+            BUDGET_CAPACITY,
+            BUDGET_TOKENS_PER_TICK,
+        ),
+    }
+}
+
+/// [`reliable_send_pair`] over [`reliable_send_success_budget`]: each resend spends a token, and
+/// every [`BUDGET_ACKS_PER_TOKEN`] acknowledgements that clear a value grant one, up to
+/// [`BUDGET_CAPACITY`]. The same Cress and Sedge configurations as [`reliable_send_pair`].
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = two_per_round,
+    T = super::rpc_retry::Payload<4096>,
+    load = values,
+    mu = 500,
+    cpus(Sender = none, Receiver = 0.01),
+    cpu_period_us = 100_000,
+    timers(resend_ticks = std::time::Duration::from_secs(1)),
+))]
+#[cfg_attr(feature = "cress", cress::amplification_check(
+    name = two_per_round,
+    T = u64,
+    workload(values = 2),
+    workload_rounds = 125,
+    test_safety_only,
+))]
+pub fn reliable_send_pair_success_budget<'a, T>(
+    _sender: &Process<'a, Sender>,
+    receiver: &Process<'a, Receiver>,
+    values: Stream<T, Process<'a, Sender>, Unbounded, TotalOrder, ExactlyOnce>,
+    resend_ticks: Stream<(), Process<'a, Sender>, Unbounded, TotalOrder, ExactlyOnce>,
+) -> ReliableSendOutputs<'a, T>
+where
+    T: Clone + Eq + std::hash::Hash + Serialize + DeserializeOwned + 'a,
+{
+    ReliableSendOutputs {
+        delivered: reliable_send_success_budget(
+            numbered(values),
+            receiver,
+            resend_ticks,
+            BUDGET_CAPACITY,
+            BUDGET_ACKS_PER_TOKEN,
+        ),
+    }
+}
+
+/// [`reliable_send_pair`] over [`reliable_send_hybrid_budget`]: each resend spends a token; the
+/// timer grants [`BUDGET_TOKENS_PER_TICK`] per element and every [`BUDGET_ACKS_PER_TOKEN`]
+/// acknowledgements that clear a value grant one, up to [`BUDGET_CAPACITY`]. The same Cress and
+/// Sedge configurations as [`reliable_send_pair`].
+#[cfg_attr(feature = "sedge", sedge::overload_check(
+    name = two_per_round,
+    T = super::rpc_retry::Payload<4096>,
+    load = values,
+    mu = 500,
+    cpus(Sender = none, Receiver = 0.01),
+    cpu_period_us = 100_000,
+    timers(resend_ticks = std::time::Duration::from_secs(1)),
+))]
+#[cfg_attr(feature = "cress", cress::amplification_check(
+    name = two_per_round,
+    T = u64,
+    workload(values = 2),
+    workload_rounds = 125,
+    test_safety_only,
+))]
+pub fn reliable_send_pair_hybrid_budget<'a, T>(
+    _sender: &Process<'a, Sender>,
+    receiver: &Process<'a, Receiver>,
+    values: Stream<T, Process<'a, Sender>, Unbounded, TotalOrder, ExactlyOnce>,
+    resend_ticks: Stream<(), Process<'a, Sender>, Unbounded, TotalOrder, ExactlyOnce>,
+) -> ReliableSendOutputs<'a, T>
+where
+    T: Clone + Eq + std::hash::Hash + Serialize + DeserializeOwned + 'a,
+{
+    ReliableSendOutputs {
+        delivered: reliable_send_hybrid_budget(
+            numbered(values),
+            receiver,
+            resend_ticks,
+            BUDGET_CAPACITY,
+            BUDGET_TOKENS_PER_TICK,
+            BUDGET_ACKS_PER_TOKEN,
+        ),
     }
 }
 

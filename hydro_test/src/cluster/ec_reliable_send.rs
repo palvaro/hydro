@@ -8,6 +8,22 @@
 //! | [`reliable_send_delivers_three_values_despite_losses`] | `reliable_send`, three values, resends after the heal | omissions, crashes | `delivery` holds |
 //! | [`plain_send_loses_a_message`] | `send` | omissions, crashes | `delivery` broken by one lost message |
 //!
+//! The budgeted variants ([`reliable_send_budgeted`], bucket of 10 starting full unless noted):
+//!
+//! | test | budget | harness | outcome | cost |
+//! |---|---|---|---|---|
+//! | `*_budget_delivers_each_value_once_without_faults` | time, success, hybrid | as T1 | each value delivered once | 14580 schedules each |
+//! | [`time_budget_delivers_despite_losses`], [`hybrid_budget_delivers_despite_losses`] | time; hybrid | as T2 | `delivery` holds | 112 sets, 1 s |
+//! | [`success_budget_one_value`] | success | as T2 | holds: one value cannot drain ten tokens | 112 sets, 1 s |
+//! | [`time_budget_delivers_three_values_despite_losses`], [`hybrid_budget_delivers_three_values_despite_losses`] | time; hybrid | as T2b | `delivery` holds | 576 sets, 80 s |
+//! | [`success_budget_starves_when_losses_drain_the_bucket`] | success, **bucket of 1**, a token per ack | as T2 | broken by 2 lost messages, no crash: nothing refills the bucket | 3 sets |
+//! | [`hybrid_bucket_of_one_delivers`] | the same, plus a token per tick | as T2 | holds | 112 sets, 1 s |
+//!
+//! The budgets cost hydrofrac nothing over [`reliable_send`]: the same fault sets, since the
+//! fragile steps are the same and the bucket adds no lossy message. A success budget of ten
+//! would starve only after more than ten lost resends, out of hydrofrac's reach here (about
+//! `2^k` sets for `k` lossy messages), so starvation is shown with a bucket of one.
+//!
 //! The rule `delivery` is validity, as in `ec_implies_checks.rs`: **every value a correct
 //! sender sends, a correct receiver delivers** (`ASide::Correct`, `BSide::AllCorrect`). A
 //! crashed sender owes nothing and a crashed receiver is owed nothing, so the rule asks only
@@ -43,7 +59,7 @@ use hydro_lang::live_collections::stream::{ExactlyOnce, TotalOrder};
 use hydro_lang::prelude::*;
 use hydro_lang::sim::SimSender;
 use hydro_lang::sim::compiled::CompiledSim;
-use hydro_std::reliable_send::reliable_send;
+use hydro_std::reliable_send::{ResendBudget, reliable_send, reliable_send_budgeted};
 use hydrofrac::{ASide, BSide, EcCheck, Implies, Results};
 
 /// The process that sends.
@@ -71,13 +87,62 @@ const RECOVERY_TICKS: usize = 2;
 /// five minutes of exhaustive exploration without finishing.)
 #[test]
 fn delivers_each_value_once_without_faults() {
+    delivers_once(Variant::Unbudgeted);
+}
+
+/// The protocol under test: plain `send`, [`reliable_send`], or one of its budgeted variants.
+#[derive(Clone, Copy, Debug)]
+enum Variant {
+    /// Plain `send` over a lossy link, the negative control.
+    Plain,
+    /// [`reliable_send`]: every outstanding value on every tick.
+    Unbudgeted,
+    /// [`reliable_send_budgeted`] with this budget.
+    Budgeted(ResendBudget),
+}
+
+/// The corpus budget (see `reliable_send_check::BUDGET_*`): a bucket of ten, starting full.
+const fn budget(tokens_per_tick: u64, acks_per_token: u64) -> ResendBudget {
+    ResendBudget {
+        capacity: 10,
+        tokens_per_tick,
+        acks_per_token,
+    }
+}
+const TIME_BUDGET: Variant = Variant::Budgeted(budget(1, 0));
+const SUCCESS_BUDGET: Variant = Variant::Budgeted(budget(0, 4));
+const HYBRID_BUDGET: Variant = Variant::Budgeted(budget(1, 4));
+
+/// `variant`'s delivered stream, from `vals` at the sender to `receiver`.
+fn deliver<'a>(
+    variant: Variant,
+    vals: Stream<u32, Process<'a, Sender>, Unbounded, TotalOrder, ExactlyOnce>,
+    receiver: &Process<'a, Receiver>,
+    ticks: Stream<(), Process<'a, Sender>, Unbounded, TotalOrder, ExactlyOnce>,
+) -> Stream<u32, Process<'a, Receiver>, Unbounded, hydro_lang::live_collections::stream::NoOrder, ExactlyOnce>
+{
+    match variant {
+        Variant::Plain => {
+            drop(ticks);
+            vals.send(receiver, TCP.lossy_delayed_forever().name("data").bincode())
+                .weaken_ordering()
+        }
+        Variant::Unbudgeted => reliable_send(vals, receiver, ticks),
+        Variant::Budgeted(budget) => reliable_send_budgeted(vals, receiver, ticks, budget),
+    }
+}
+
+/// [`delivers_each_value_once_without_faults`] for `variant`: [`VALUES`], a tick after each,
+/// every schedule.
+fn delivers_once(variant: Variant) {
     let mut flow = FlowBuilder::new();
     let sender = flow.process::<Sender>();
     let receiver = flow.process::<Receiver>();
     let (vals_send, vals) = sender.sim_input::<u32, TotalOrder, ExactlyOnce>();
     let (ticks_send, ticks) = sender.sim_input::<(), TotalOrder, ExactlyOnce>();
-    let delivered = reliable_send(vals, &receiver, ticks).sim_output();
+    let delivered = deliver(variant, vals, &receiver, ticks).sim_output();
 
+    let start = std::time::Instant::now();
     let schedules = flow.sim().test_safety_only().exhaustive(async || {
         for v in VALUES {
             vals_send.send(v);
@@ -85,14 +150,17 @@ fn delivers_each_value_once_without_faults() {
         }
         delivered.assert_yields_only_unordered(VALUES).await;
     });
-    eprintln!("{schedules} schedules");
+    eprintln!(
+        "{variant:?}: {schedules} schedules, {:.1}s",
+        start.elapsed().as_secs_f64()
+    );
 }
 
 /// The program, with the rule `delivery` from what the sender sends to what the receiver
-/// receives: over [`reliable_send`], or over plain `send` (`reliable == false`).
+/// receives, over `variant`.
 fn program(
     check: &mut EcCheck,
-    reliable: bool,
+    variant: Variant,
 ) -> (
     CompiledSim,
     SimSender<u32, TotalOrder, ExactlyOnce>,
@@ -103,47 +171,41 @@ fn program(
     let receiver = flow.process::<Receiver>();
     let (vals_send, vals) = sender.sim_input::<u32, TotalOrder, ExactlyOnce>();
     let (ticks_send, ticks) = sender.sim_input::<(), TotalOrder, ExactlyOnce>();
-    if reliable {
-        let delivered = reliable_send(vals.clone(), &receiver, ticks);
-        vals.implies(
-            "delivery",
-            &delivered,
-            q!(|v| v),
-            q!(|v| v),
-            ASide::Correct,
-            BSide::AllCorrect,
-        );
-    } else {
-        drop(ticks);
-        let delivered = vals.clone().send(
-            &receiver,
-            TCP.lossy_delayed_forever().name("data").bincode(),
-        );
-        vals.implies(
-            "delivery",
-            &delivered,
-            q!(|v| v),
-            q!(|v| v),
-            ASide::Correct,
-            BSide::AllCorrect,
-        );
-    }
+    let delivered = deliver(variant, vals.clone(), &receiver, ticks);
+    vals.implies(
+        "delivery",
+        &delivered,
+        q!(|v| v),
+        q!(|v| v),
+        ASide::Correct,
+        BSide::AllCorrect,
+    );
     drop(vals);
     let sim = check.instrument(flow.sim()).compiled();
     (sim, vals_send, ticks_send)
 }
 
-/// The harness (see the [module docs](self)) on the program over [`reliable_send`] or plain
-/// `send`: [`CHECKED_VALUES`] with a tick after each.
-fn check(reliable: bool) -> Results {
-    check_values(reliable, &CHECKED_VALUES, true)
+/// The harness (see the [module docs](self)) on `variant`: [`CHECKED_VALUES`] with a tick
+/// after each.
+fn check(variant: Variant) -> Results {
+    check_values(variant, &CHECKED_VALUES, true)
 }
 
 /// The harness on `values`, with a tick after each if `ticks_before_heal`, then
 /// [`RECOVERY_TICKS`] rounds of one tick each.
-fn check_values(reliable: bool, values: &[u32], ticks_before_heal: bool) -> Results {
+fn check_values(variant: Variant, values: &[u32], ticks_before_heal: bool) -> Results {
+    check_values_recovering(variant, values, ticks_before_heal, RECOVERY_TICKS)
+}
+
+/// [`check_values`] with `recovery_ticks` rounds after the heal.
+fn check_values_recovering(
+    variant: Variant,
+    values: &[u32],
+    ticks_before_heal: bool,
+    recovery_ticks: usize,
+) -> Results {
     let mut check = EcCheck::new();
-    let (sim, vals, ticks) = program(&mut check, reliable);
+    let (sim, vals, ticks) = program(&mut check, variant);
     let start = std::time::Instant::now();
     let results = check.run_then_recover(
         &sim,
@@ -156,15 +218,15 @@ fn check_values(reliable: bool, values: &[u32], ticks_before_heal: bool) -> Resu
             }
         },
         async || {
-            for _ in 0..RECOVERY_TICKS {
+            for _ in 0..recovery_ticks {
                 ticks.send(());
                 hydro_lang::sim::compiled::quiesce().await;
             }
         },
     );
     eprintln!(
-        "reliable: {reliable}, values: {values:?}, ticks before the heal: {ticks_before_heal}, \
-         {:.1}s\n{results}",
+        "{variant:?}, values: {values:?}, ticks before the heal: {ticks_before_heal}, \
+         recovery ticks: {recovery_ticks}, {:.1}s\n{results}",
         start.elapsed().as_secs_f64()
     );
     results
@@ -174,7 +236,7 @@ fn check_values(reliable: bool, values: &[u32], ticks_before_heal: bool) -> Resu
 /// the sender sends, the resends after it heals get through.
 #[test]
 fn reliable_send_delivers_despite_losses() {
-    check(true).label("delivery").assert_holds();
+    check(Variant::Unbudgeted).label("delivery").assert_holds();
 }
 
 /// **Three values get through despite losses.** The sender sends three values with no tick
@@ -183,7 +245,7 @@ fn reliable_send_delivers_despite_losses() {
 /// resend is lost: see the [module docs](self) for the cost of losing those.)
 #[test]
 fn reliable_send_delivers_three_values_despite_losses() {
-    check_values(true, &CHECKED_VALUES_NO_TICK, false)
+    check_values(Variant::Unbudgeted, &CHECKED_VALUES_NO_TICK, false)
         .label("delivery")
         .assert_holds();
 }
@@ -192,10 +254,102 @@ fn reliable_send_delivers_three_values_despite_losses() {
 /// and harness without resends. One lost message breaks `delivery`, with no crash.
 #[test]
 fn plain_send_loses_a_message() {
-    let results = check(false);
+    let results = check(Variant::Plain);
     let cex = results
         .label("delivery")
         .counterexample()
         .unwrap_or_else(|| panic!("expected a counterexample:\n{results}"));
     assert_eq!((cex.crashes(), cex.faults.len()), (0, 1), "{results}");
+}
+
+// The budgeted variants (`reliable_send_budgeted`), with the corpus budget unless noted.
+
+/// **A time budget delivers each value once without faults.**
+#[test]
+fn time_budget_delivers_each_value_once_without_faults() {
+    delivers_once(TIME_BUDGET);
+}
+
+/// **A success budget delivers each value once without faults.**
+#[test]
+fn success_budget_delivers_each_value_once_without_faults() {
+    delivers_once(SUCCESS_BUDGET);
+}
+
+/// **A hybrid budget delivers each value once without faults.**
+#[test]
+fn hybrid_budget_delivers_each_value_once_without_faults() {
+    delivers_once(HYBRID_BUDGET);
+}
+
+/// **A time budget delivers despite losses** (one value, a resend before the heal): the timer
+/// refills the bucket, so the resends after the heal get through.
+#[test]
+fn time_budget_delivers_despite_losses() {
+    check(TIME_BUDGET).label("delivery").assert_holds();
+}
+
+/// **A success budget, one value, a resend before the heal.** With a bucket of ten, one value
+/// cannot drain it, so the verdict says nothing about starvation; see
+/// [`success_budget_starves_when_losses_drain_the_bucket`].
+#[test]
+fn success_budget_one_value() {
+    let results = check(SUCCESS_BUDGET);
+    eprintln!("success budget, one value: {:?}", results.label("delivery").counterexample().map(|c| (c.crashes(), c.faults.len())));
+}
+
+/// **A hybrid budget delivers despite losses** (one value, a resend before the heal).
+#[test]
+fn hybrid_budget_delivers_despite_losses() {
+    check(HYBRID_BUDGET).label("delivery").assert_holds();
+}
+
+/// **A success budget starves once losses drain the bucket.** A test-only bucket of one token
+/// that only acknowledgements refill: the first tick before the heal resends the one value
+/// (spending the token), the network drops the first copy and the resend, and nothing is left
+/// to pay for a resend after the heal, since only an acknowledgement of a value that got
+/// through can earn a token. Delivery breaks with no crash.
+#[test]
+fn success_budget_starves_when_losses_drain_the_bucket() {
+    let starved = Variant::Budgeted(ResendBudget {
+        capacity: 1,
+        tokens_per_tick: 0,
+        acks_per_token: 1,
+    });
+    let results = check(starved);
+    let cex = results
+        .label("delivery")
+        .counterexample()
+        .unwrap_or_else(|| panic!("expected a counterexample:\n{results}"));
+    eprintln!("starvation: {} crashes, {} faults", cex.crashes(), cex.faults.len());
+    assert_eq!(cex.crashes(), 0, "{results}");
+}
+
+/// **The same bucket of one, refilled by the timer as well, delivers.** The control for
+/// [`success_budget_starves_when_losses_drain_the_bucket`]: the only change is one token per
+/// timer element.
+#[test]
+fn hybrid_bucket_of_one_delivers() {
+    let hybrid = Variant::Budgeted(ResendBudget {
+        capacity: 1,
+        tokens_per_tick: 1,
+        acks_per_token: 1,
+    });
+    check(hybrid).label("delivery").assert_holds();
+}
+
+/// **A time budget, three values, resends after the heal.**
+#[test]
+fn time_budget_delivers_three_values_despite_losses() {
+    check_values(TIME_BUDGET, &CHECKED_VALUES_NO_TICK, false)
+        .label("delivery")
+        .assert_holds();
+}
+
+/// **A hybrid budget, three values, resends after the heal.**
+#[test]
+fn hybrid_budget_delivers_three_values_despite_losses() {
+    check_values(HYBRID_BUDGET, &CHECKED_VALUES_NO_TICK, false)
+        .label("delivery")
+        .assert_holds();
 }
