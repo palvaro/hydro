@@ -263,11 +263,34 @@ These p-values are bounded by the design. The two trials in each cell are two fi
 
 Between the budgeted variants the data supports no ranking. V1 and V3 tie in 8 of 12 paired settle times at the metric's one-second resolution, and neither the sign test (p = 0.63) nor the Wilcoxon test (p = 0.25) finds a difference. V2's slower settling is borderline (p between 0.03 and 0.07 without correction for three comparisons) and sits in the confounded cells described above. The calibrated capacities (841 for V1 against 771 for V2 and V3) come from one calibration each and differ by one probe step, so they cannot be tested.
 
-<!-- PENDING: Cress rate sweeps (several workload rates and bucket parameters), to show how the measured rate tracks the refill rate. -->
+### How Cress's numbers depend on load and on the bucket
+
+We repeated the Cress check over a range of input rates and bucket parameters, always holding the acknowledgement batch and reading the sender's extra messages at a hold of 999 rounds. These results are DEMONSTRATED by the runs on the local branch `demo/cress-sweeps` (`da7f1e8c39`), whose full table is in `target/cress-sweeps/SUMMARY.md`.
+
+| variant and parameters | input rate (values per round) | growth | extra sender messages at a hold of 999 | multiplier |
+|---|---|---|---|---|
+| V0 | 1, 2, 4 | 124, 248 and 496 per round | 116,126, 232,252 and 464,504 | 930× at every rate |
+| V1, B = 10, one token per tick | 1, 2, 4 | 1.00 per round | 1,007 at every rate | 9.06×, 5.03× and 3.01× |
+| V1, B = 5 and 20, one token per tick | 2 | 1.00 per round | 1,002 and 1,017 | |
+| V1, B = 5, 10 and 20, two tokens per tick | 2 | 2.00 per round | 1,999, 2,004 and 2,014 | |
+| V2, B = 10, four acknowledgements per token | 1, 2, 4 | ceiling | 10 at every rate | |
+| V2, B = 5 and 20 | 2 | ceiling | 5 and 20 | |
+| V2, B = 10, one acknowledgement per token | 2 | ceiling | 10 | |
+| V3, in every configuration above | | the same as V1 | the same as V1 | |
+
+Three laws fit every row, and each is DEMONSTRATED for the parameters in the table. V0's rate is the input rate times the 124 rounds of input that arrive after the hold begins, which is the size of the outstanding set. A time budget's extra work is B + (tokens per tick) × 997, which means that the hold spends the full bucket once at its start and then resends at exactly the refill rate, whatever the load. A success budget's extra work is a ceiling of exactly B, whatever the input rate and whatever the number of acknowledgements per token. Holding the timer batch or the new-values batch added no work in any configuration.
+
+Two consequences matter for reading Cress's output. First, V1's extra work does not depend on the load, and its multiplier falls from 9.06× to 3.01× as the load rises only because Cress divides by the number of messages in the unheld run, which grows with the load. Second, Cress cannot tell V3 from V1 in any configuration, because the hybrid's acknowledgement refill changes the outcome only when values are lost while acknowledgements still flow, and Cress's simulator never drops a message (ARGUED). Separating them needs loss, which only hydrofrac and the Act 3 experiment provide.
+
+![Cress's acknowledgement hold at input rates of one, two and four values per round (log-log). V0's extra work grows in proportion to the input rate, V1's three curves coincide on a single line at one message per round of delay, and V2's curves stop at a ceiling of ten.](reliable-send-three-tools-img/cress-rates.png)
+
+![Cress's acknowledgement hold for different buckets. V1 with buckets of 5 and 20 tokens and one or two tokens per tick grows at its refill rate after an initial step of B, and V2 with buckets of 5, 10 and 20 tokens stops at a ceiling equal to B.](reliable-send-three-tools-img/cress-buckets.png)
+
+One side finding concerns the timer. With four timer elements per round, V0 still grows at 248 messages per round, because all of a round's ticks reach the sender in one batch and V0 resends once per batch in which any tick appears (`count() > 0`). V1 and V3 rise to 4.00 messages per round (3,996 extra messages each at a hold of 999 rounds), because the bucket grants a token for every tick element. A faster timer therefore raises a time budget's resend rate but leaves V0's unchanged in this simulator setting.
 
 ### What the comparison settles
 
-V2 is ruled out, because it can lose a value forever, and only hydrofrac shows it. V1 and V3 both remove the storm while keeping the delivery guarantee. Our experiments cannot yet tell V1 from V3. Cress holds acknowledgements, so the hybrid's acknowledgement refill has nothing to count, and Sedge's deployments lose nothing, so the hybrid has no losses to recover from. The difference between them can only show up when acknowledgements flow while values are being lost, which is the subject of Act 3.
+V2 is ruled out, because it can lose a value forever, and only hydrofrac shows it. V1 and V3 both remove the storm while keeping the delivery guarantee. Our experiments cannot yet tell V1 from V3. Cress holds acknowledgements and never loses a message, so it gives them identical numbers in every configuration that we tried, and Sedge's deployments lose nothing, so the hybrid has no losses to recover from. The difference between them can only show up when acknowledgements flow while values are being lost, which is the subject of Act 3.
 
 ## 7. Act 3: real loss in deployment
 
