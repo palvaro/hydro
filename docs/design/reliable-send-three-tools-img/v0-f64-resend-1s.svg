@@ -1,0 +1,206 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1060" height="1010" font-family="Liberation Sans">
+<rect width="1060" height="1010" fill="white"/>
+<text x="70" y="24" font-size="16" font-weight="bold">reliable_send_pair, resend every 1 s, f = 64 (λ = 8/s), trial 1: DRAINING (escapes at ~50 s)</text>
+<text x="830" y="46" font-size="11" text-anchor="end" fill="#555">pink = trigger window; green = baseline [5,10) and tail [37,60) verdict windows</text>
+<text x="70" y="48" font-size="14" font-weight="bold">offered load and completions</text>
+<rect x="198.8" y="56" width="64.4" height="190" fill="#f4c7c3" opacity="0.5"/>
+<rect x="134.4" y="56" width="64.4" height="190" fill="#cfe8cf" opacity="0.35"/>
+<rect x="546.6" y="56" width="283.4" height="190" fill="#cfe8cf" opacity="0.35"/>
+<rect x="70" y="56" width="760" height="190" fill="none" stroke="#888"/>
+<line x1="70" x2="830" y1="246.0" y2="246.0" stroke="#ddd"/>
+<text x="64" y="250.0" font-size="11" text-anchor="end">0</text>
+<line x1="70" x2="830" y1="160.6" y2="160.6" stroke="#ddd"/>
+<text x="64" y="164.6" font-size="11" text-anchor="end">500</text>
+<line x1="70" x2="830" y1="75.2" y2="75.2" stroke="#ddd"/>
+<text x="64" y="79.2" font-size="11" text-anchor="end">1000</text>
+<text x="18" y="151.0" font-size="11" text-anchor="middle" transform="rotate(-90 18 151.0)">per second</text>
+<line x1="70.0" x2="70.0" y1="246" y2="250" stroke="#888"/>
+<text x="70.0" y="262" font-size="11" text-anchor="middle">0</text>
+<line x1="134.4" x2="134.4" y1="246" y2="250" stroke="#888"/>
+<text x="134.4" y="262" font-size="11" text-anchor="middle">5</text>
+<line x1="198.8" x2="198.8" y1="246" y2="250" stroke="#888"/>
+<text x="198.8" y="262" font-size="11" text-anchor="middle">10</text>
+<line x1="263.2" x2="263.2" y1="246" y2="250" stroke="#888"/>
+<text x="263.2" y="262" font-size="11" text-anchor="middle">15</text>
+<line x1="327.6" x2="327.6" y1="246" y2="250" stroke="#888"/>
+<text x="327.6" y="262" font-size="11" text-anchor="middle">20</text>
+<line x1="392.0" x2="392.0" y1="246" y2="250" stroke="#888"/>
+<text x="392.0" y="262" font-size="11" text-anchor="middle">25</text>
+<line x1="456.4" x2="456.4" y1="246" y2="250" stroke="#888"/>
+<text x="456.4" y="262" font-size="11" text-anchor="middle">30</text>
+<line x1="520.8" x2="520.8" y1="246" y2="250" stroke="#888"/>
+<text x="520.8" y="262" font-size="11" text-anchor="middle">35</text>
+<line x1="585.3" x2="585.3" y1="246" y2="250" stroke="#888"/>
+<text x="585.3" y="262" font-size="11" text-anchor="middle">40</text>
+<line x1="649.7" x2="649.7" y1="246" y2="250" stroke="#888"/>
+<text x="649.7" y="262" font-size="11" text-anchor="middle">45</text>
+<line x1="714.1" x2="714.1" y1="246" y2="250" stroke="#888"/>
+<text x="714.1" y="262" font-size="11" text-anchor="middle">50</text>
+<line x1="778.5" x2="778.5" y1="246" y2="250" stroke="#888"/>
+<text x="778.5" y="262" font-size="11" text-anchor="middle">55</text>
+<polyline points="70.0,244.8 82.9,244.3 95.8,245.1 108.6,245.7 121.5,244.3 134.4,244.5 147.3,245.0 160.2,245.1 173.1,244.8 185.9,245.0 198.8,75.4 211.7,70.9 224.6,70.1 237.5,73.3 250.3,74.5 263.2,244.6 276.1,245.3 289.0,245.1 301.9,244.6 314.7,244.5 327.6,244.0 340.5,244.8 353.4,244.1 366.3,244.5 379.2,244.5 392.0,245.3 404.9,243.4 417.8,245.1 430.7,244.6 443.6,244.0 456.4,243.4 469.3,244.6 482.2,244.6 495.1,244.3 508.0,245.0 520.8,244.8 533.7,244.5 546.6,244.5 559.5,244.5 572.4,244.5 585.3,244.0 598.1,245.3 611.0,244.5 623.9,245.0 636.8,244.6 649.7,244.8 662.5,245.1 675.4,244.6 688.3,244.3 701.2,244.6 714.1,244.8 726.9,244.8 739.8,244.8 752.7,245.3 765.6,244.5 778.5,245.1 791.4,245.0 804.2,244.8 817.1,244.5 830.0,244.3" fill="none" stroke="#1f77b4" stroke-width="2"/>
+<line x1="842" x2="864" y1="70" y2="70" stroke="#1f77b4" stroke-width="2"/>
+<text x="870" y="74" font-size="12">rounds offered/s</text>
+<polyline points="70.0,244.8 82.9,244.3 95.8,245.1 108.6,245.7 121.5,244.3 134.4,244.5 147.3,245.0 160.2,245.1 173.1,244.8 185.9,245.0 198.8,121.3 211.7,178.9 224.6,134.0 237.5,204.2 250.3,151.7 263.2,164.4 276.1,246.0 289.0,151.0 301.9,168.3 314.7,246.0 327.6,213.7 340.5,133.3 353.4,219.5 366.3,246.0 379.2,244.6 392.0,246.0 404.9,246.0 417.8,245.3 430.7,246.0 443.6,245.1 456.4,246.0 469.3,244.6 482.2,246.0 495.1,244.5 508.0,246.0 520.8,244.0 533.7,246.0 546.6,244.8 559.5,244.1 572.4,244.5 585.3,244.5 598.1,245.3 611.0,246.0 623.9,243.4 636.8,243.8 649.7,236.9 662.5,239.2 675.4,240.2 688.3,242.4 701.2,240.7 714.1,244.8 726.9,244.8 739.8,244.8 752.7,245.3 765.6,244.5 778.5,245.1 791.4,245.0 804.2,244.8 817.1,244.5 830.0,244.3" fill="none" stroke="#d62728" stroke-width="2"/>
+<line x1="842" x2="864" y1="88" y2="88" stroke="#d62728" stroke-width="2"/>
+<text x="870" y="92" font-size="12">completions/s (by id)</text>
+<text x="70" y="282" font-size="14" font-weight="bold">latency of completions (log)</text>
+<rect x="198.8" y="290" width="64.4" height="190" fill="#f4c7c3" opacity="0.5"/>
+<rect x="134.4" y="290" width="64.4" height="190" fill="#cfe8cf" opacity="0.35"/>
+<rect x="546.6" y="290" width="283.4" height="190" fill="#cfe8cf" opacity="0.35"/>
+<rect x="70" y="290" width="760" height="190" fill="none" stroke="#888"/>
+<line x1="70" x2="830" y1="480.0" y2="480.0" stroke="#ddd"/>
+<text x="64" y="484.0" font-size="11" text-anchor="end">1</text>
+<line x1="70" x2="830" y1="442.0" y2="442.0" stroke="#ddd"/>
+<text x="64" y="446.0" font-size="11" text-anchor="end">10</text>
+<line x1="70" x2="830" y1="404.0" y2="404.0" stroke="#ddd"/>
+<text x="64" y="408.0" font-size="11" text-anchor="end">100</text>
+<line x1="70" x2="830" y1="366.0" y2="366.0" stroke="#ddd"/>
+<text x="64" y="370.0" font-size="11" text-anchor="end">1000</text>
+<line x1="70" x2="830" y1="328.0" y2="328.0" stroke="#ddd"/>
+<text x="64" y="332.0" font-size="11" text-anchor="end">10000</text>
+<line x1="70" x2="830" y1="290.0" y2="290.0" stroke="#ddd"/>
+<text x="64" y="294.0" font-size="11" text-anchor="end">100000</text>
+<text x="18" y="385.0" font-size="11" text-anchor="middle" transform="rotate(-90 18 385.0)">ms</text>
+<line x1="70.0" x2="70.0" y1="480" y2="484" stroke="#888"/>
+<text x="70.0" y="496" font-size="11" text-anchor="middle">0</text>
+<line x1="134.4" x2="134.4" y1="480" y2="484" stroke="#888"/>
+<text x="134.4" y="496" font-size="11" text-anchor="middle">5</text>
+<line x1="198.8" x2="198.8" y1="480" y2="484" stroke="#888"/>
+<text x="198.8" y="496" font-size="11" text-anchor="middle">10</text>
+<line x1="263.2" x2="263.2" y1="480" y2="484" stroke="#888"/>
+<text x="263.2" y="496" font-size="11" text-anchor="middle">15</text>
+<line x1="327.6" x2="327.6" y1="480" y2="484" stroke="#888"/>
+<text x="327.6" y="496" font-size="11" text-anchor="middle">20</text>
+<line x1="392.0" x2="392.0" y1="480" y2="484" stroke="#888"/>
+<text x="392.0" y="496" font-size="11" text-anchor="middle">25</text>
+<line x1="456.4" x2="456.4" y1="480" y2="484" stroke="#888"/>
+<text x="456.4" y="496" font-size="11" text-anchor="middle">30</text>
+<line x1="520.8" x2="520.8" y1="480" y2="484" stroke="#888"/>
+<text x="520.8" y="496" font-size="11" text-anchor="middle">35</text>
+<line x1="585.3" x2="585.3" y1="480" y2="484" stroke="#888"/>
+<text x="585.3" y="496" font-size="11" text-anchor="middle">40</text>
+<line x1="649.7" x2="649.7" y1="480" y2="484" stroke="#888"/>
+<text x="649.7" y="496" font-size="11" text-anchor="middle">45</text>
+<line x1="714.1" x2="714.1" y1="480" y2="484" stroke="#888"/>
+<text x="714.1" y="496" font-size="11" text-anchor="middle">50</text>
+<line x1="778.5" x2="778.5" y1="480" y2="484" stroke="#888"/>
+<text x="778.5" y="496" font-size="11" text-anchor="middle">55</text>
+<polyline points="70.0,477.0 82.9,472.2 95.8,478.4 108.6,475.7 121.5,475.7 134.4,474.4 147.3,478.4 160.2,477.0 173.1,477.0 185.9,473.3 198.8,406.3 211.7,381.2 224.6,366.4 237.5,362.1 250.3,351.4 263.2,350.9" fill="none" stroke="#1f77b4" stroke-width="2"/>
+<polyline points="289.0,342.5 301.9,340.7" fill="none" stroke="#1f77b4" stroke-width="2"/>
+<polyline points="327.6,334.4 340.5,333.7 353.4,333.4" fill="none" stroke="#1f77b4" stroke-width="2"/>
+<circle cx="379.2" cy="329.2" r="2.5" fill="#1f77b4"/>
+<circle cx="417.8" cy="326.1" r="2.5" fill="#1f77b4"/>
+<circle cx="443.6" cy="324.6" r="2.5" fill="#1f77b4"/>
+<circle cx="469.3" cy="323.2" r="2.5" fill="#1f77b4"/>
+<circle cx="495.1" cy="321.8" r="2.5" fill="#1f77b4"/>
+<circle cx="520.8" cy="320.8" r="2.5" fill="#1f77b4"/>
+<polyline points="546.6,320.4 559.5,320.2 572.4,320.0 585.3,320.0 598.1,319.6" fill="none" stroke="#1f77b4" stroke-width="2"/>
+<polyline points="623.9,319.6 636.8,319.7 649.7,321.9 662.5,328.4 675.4,335.1 688.3,343.8 701.2,360.9 714.1,437.2 726.9,405.1 739.8,411.5 752.7,409.0 765.6,415.7 778.5,475.7 791.4,475.7 804.2,477.0 817.1,473.3 830.0,475.7" fill="none" stroke="#1f77b4" stroke-width="2"/>
+<line x1="842" x2="864" y1="304" y2="304" stroke="#1f77b4" stroke-width="2"/>
+<text x="870" y="308" font-size="12">p50 ms</text>
+<polyline points="70.0,472.2 82.9,470.3 95.8,468.6 108.6,475.7 121.5,469.4 134.4,472.2 147.3,471.2 160.2,471.2 173.1,472.2 185.9,469.4 198.8,384.8 211.7,367.4 224.6,361.8 237.5,361.3 250.3,350.8 263.2,350.0" fill="none" stroke="#d62728" stroke-width="2"/>
+<polyline points="289.0,342.1 301.9,340.5" fill="none" stroke="#d62728" stroke-width="2"/>
+<polyline points="327.6,334.2 340.5,333.3 353.4,333.2" fill="none" stroke="#d62728" stroke-width="2"/>
+<circle cx="379.2" cy="328.6" r="2.5" fill="#d62728"/>
+<circle cx="417.8" cy="326.1" r="2.5" fill="#d62728"/>
+<circle cx="443.6" cy="324.2" r="2.5" fill="#d62728"/>
+<circle cx="469.3" cy="322.7" r="2.5" fill="#d62728"/>
+<circle cx="495.1" cy="321.3" r="2.5" fill="#d62728"/>
+<circle cx="520.8" cy="320.3" r="2.5" fill="#d62728"/>
+<polyline points="546.6,320.1 559.5,320.0 572.4,319.7 585.3,319.7 598.1,319.5" fill="none" stroke="#d62728" stroke-width="2"/>
+<polyline points="623.9,319.1 636.8,319.2 649.7,320.6 662.5,324.9 675.4,332.3 688.3,338.9 701.2,347.9 714.1,397.4 726.9,392.7 739.8,404.9 752.7,407.2 765.6,407.7 778.5,471.2 791.4,472.2 804.2,468.6 817.1,470.3 830.0,468.6" fill="none" stroke="#d62728" stroke-width="2"/>
+<line x1="842" x2="864" y1="322" y2="322" stroke="#d62728" stroke-width="2"/>
+<text x="870" y="326" font-size="12">p99 ms</text>
+<text x="70" y="516" font-size="14" font-weight="bold">wire writes per node, measured outside the program (~4140 B messages)</text>
+<rect x="198.8" y="524" width="64.4" height="190" fill="#f4c7c3" opacity="0.5"/>
+<rect x="134.4" y="524" width="64.4" height="190" fill="#cfe8cf" opacity="0.35"/>
+<rect x="546.6" y="524" width="283.4" height="190" fill="#cfe8cf" opacity="0.35"/>
+<rect x="70" y="524" width="760" height="190" fill="none" stroke="#888"/>
+<line x1="70" x2="830" y1="714.0" y2="714.0" stroke="#ddd"/>
+<text x="64" y="718.0" font-size="11" text-anchor="end">0</text>
+<line x1="70" x2="830" y1="671.2" y2="671.2" stroke="#ddd"/>
+<text x="64" y="675.2" font-size="11" text-anchor="end">1000</text>
+<line x1="70" x2="830" y1="628.4" y2="628.4" stroke="#ddd"/>
+<text x="64" y="632.4" font-size="11" text-anchor="end">2000</text>
+<line x1="70" x2="830" y1="585.6" y2="585.6" stroke="#ddd"/>
+<text x="64" y="589.6" font-size="11" text-anchor="end">3000</text>
+<line x1="70" x2="830" y1="542.8" y2="542.8" stroke="#ddd"/>
+<text x="64" y="546.8" font-size="11" text-anchor="end">4000</text>
+<text x="18" y="619.0" font-size="11" text-anchor="middle" transform="rotate(-90 18 619.0)">msgs/s</text>
+<line x1="70.0" x2="70.0" y1="714" y2="718" stroke="#888"/>
+<text x="70.0" y="730" font-size="11" text-anchor="middle">0</text>
+<line x1="134.4" x2="134.4" y1="714" y2="718" stroke="#888"/>
+<text x="134.4" y="730" font-size="11" text-anchor="middle">5</text>
+<line x1="198.8" x2="198.8" y1="714" y2="718" stroke="#888"/>
+<text x="198.8" y="730" font-size="11" text-anchor="middle">10</text>
+<line x1="263.2" x2="263.2" y1="714" y2="718" stroke="#888"/>
+<text x="263.2" y="730" font-size="11" text-anchor="middle">15</text>
+<line x1="327.6" x2="327.6" y1="714" y2="718" stroke="#888"/>
+<text x="327.6" y="730" font-size="11" text-anchor="middle">20</text>
+<line x1="392.0" x2="392.0" y1="714" y2="718" stroke="#888"/>
+<text x="392.0" y="730" font-size="11" text-anchor="middle">25</text>
+<line x1="456.4" x2="456.4" y1="714" y2="718" stroke="#888"/>
+<text x="456.4" y="730" font-size="11" text-anchor="middle">30</text>
+<line x1="520.8" x2="520.8" y1="714" y2="718" stroke="#888"/>
+<text x="520.8" y="730" font-size="11" text-anchor="middle">35</text>
+<line x1="585.3" x2="585.3" y1="714" y2="718" stroke="#888"/>
+<text x="585.3" y="730" font-size="11" text-anchor="middle">40</text>
+<line x1="649.7" x2="649.7" y1="714" y2="718" stroke="#888"/>
+<text x="649.7" y="730" font-size="11" text-anchor="middle">45</text>
+<line x1="714.1" x2="714.1" y1="714" y2="718" stroke="#888"/>
+<text x="714.1" y="730" font-size="11" text-anchor="middle">50</text>
+<line x1="778.5" x2="778.5" y1="714" y2="718" stroke="#888"/>
+<text x="778.5" y="730" font-size="11" text-anchor="middle">55</text>
+<polyline points="82.9,713.7 95.8,713.7 108.6,713.9 121.5,713.6 134.4,713.8 147.3,713.6 160.2,713.7 173.1,713.7 185.9,713.8 198.8,690.5 211.7,672.9 224.6,685.9 237.5,683.2 250.3,679.3 263.2,696.1 276.1,691.2 289.0,698.2 301.9,698.4 314.7,693.7 327.6,691.6 340.5,698.0 353.4,698.1 366.3,699.4 379.2,695.4 392.0,698.1 404.9,695.6 417.8,695.8 430.7,697.7 443.6,695.3 456.4,697.1 469.3,693.5 482.2,695.5 495.1,697.6 508.0,697.7 520.8,697.7 533.7,696.0 546.6,698.2 559.5,697.5 572.4,695.7 585.3,697.5 598.1,696.3 611.0,698.3 623.9,695.3 636.8,695.6 649.7,698.4 662.5,698.6 675.4,695.9 688.3,702.3 701.2,693.6 714.1,600.0 726.9,554.3 739.8,558.2 752.7,545.1 765.6,538.1 778.5,713.7 791.4,713.7 804.2,713.8 817.1,713.5 830.0,713.6" fill="none" stroke="#1f77b4" stroke-width="2"/>
+<line x1="842" x2="864" y1="538" y2="538" stroke="#1f77b4" stroke-width="2"/>
+<text x="870" y="542" font-size="12">Receiver writes</text>
+<polyline points="82.9,713.7 95.8,713.7 108.6,713.9 121.5,713.6 134.4,713.8 147.3,713.6 160.2,713.7 173.1,713.7 185.9,713.8 198.8,682.8 211.7,678.1 224.6,686.1 237.5,683.1 250.3,679.5 263.2,681.5 276.1,673.9 289.0,680.0 301.9,685.3 314.7,677.8 327.6,667.1 340.5,685.9 353.4,676.2 366.3,678.4 379.2,673.7 392.0,679.7 404.9,678.1 417.8,673.6 430.7,676.0 443.6,670.3 456.4,676.4 469.3,669.3 482.2,670.6 495.1,676.0 508.0,675.8 520.8,676.0 533.7,673.7 546.6,683.9 559.5,672.2 572.4,670.1 585.3,676.1 598.1,678.1 611.0,675.7 623.9,670.3 636.8,673.3 649.7,675.6 662.5,675.4 675.4,674.5 688.3,684.0 701.2,673.2 714.1,700.9 726.9,702.4 739.8,703.3 752.7,704.8 765.6,710.0 778.5,713.7 791.4,713.7 804.2,713.8 817.1,713.5 830.0,713.6" fill="none" stroke="#d62728" stroke-width="2"/>
+<line x1="842" x2="864" y1="556" y2="556" stroke="#d62728" stroke-width="2"/>
+<text x="870" y="560" font-size="12">Sender writes</text>
+<text x="70" y="750" font-size="14" font-weight="bold">CPU use (cores) and fraction of CFS periods throttled</text>
+<rect x="198.8" y="758" width="64.4" height="190" fill="#f4c7c3" opacity="0.5"/>
+<rect x="134.4" y="758" width="64.4" height="190" fill="#cfe8cf" opacity="0.35"/>
+<rect x="546.6" y="758" width="283.4" height="190" fill="#cfe8cf" opacity="0.35"/>
+<rect x="70" y="758" width="760" height="190" fill="none" stroke="#888"/>
+<line x1="70" x2="830" y1="948.0" y2="948.0" stroke="#ddd"/>
+<text x="64" y="952.0" font-size="11" text-anchor="end">0</text>
+<line x1="70" x2="830" y1="860.0" y2="860.0" stroke="#ddd"/>
+<text x="64" y="864.0" font-size="11" text-anchor="end">0.5</text>
+<line x1="70" x2="830" y1="772.1" y2="772.1" stroke="#ddd"/>
+<text x="64" y="776.1" font-size="11" text-anchor="end">1</text>
+<text x="18" y="853.0" font-size="11" text-anchor="middle" transform="rotate(-90 18 853.0)">cores / fraction</text>
+<line x1="70.0" x2="70.0" y1="948" y2="952" stroke="#888"/>
+<text x="70.0" y="964" font-size="11" text-anchor="middle">0</text>
+<line x1="134.4" x2="134.4" y1="948" y2="952" stroke="#888"/>
+<text x="134.4" y="964" font-size="11" text-anchor="middle">5</text>
+<line x1="198.8" x2="198.8" y1="948" y2="952" stroke="#888"/>
+<text x="198.8" y="964" font-size="11" text-anchor="middle">10</text>
+<line x1="263.2" x2="263.2" y1="948" y2="952" stroke="#888"/>
+<text x="263.2" y="964" font-size="11" text-anchor="middle">15</text>
+<line x1="327.6" x2="327.6" y1="948" y2="952" stroke="#888"/>
+<text x="327.6" y="964" font-size="11" text-anchor="middle">20</text>
+<line x1="392.0" x2="392.0" y1="948" y2="952" stroke="#888"/>
+<text x="392.0" y="964" font-size="11" text-anchor="middle">25</text>
+<line x1="456.4" x2="456.4" y1="948" y2="952" stroke="#888"/>
+<text x="456.4" y="964" font-size="11" text-anchor="middle">30</text>
+<line x1="520.8" x2="520.8" y1="948" y2="952" stroke="#888"/>
+<text x="520.8" y="964" font-size="11" text-anchor="middle">35</text>
+<line x1="585.3" x2="585.3" y1="948" y2="952" stroke="#888"/>
+<text x="585.3" y="964" font-size="11" text-anchor="middle">40</text>
+<line x1="649.7" x2="649.7" y1="948" y2="952" stroke="#888"/>
+<text x="649.7" y="964" font-size="11" text-anchor="middle">45</text>
+<line x1="714.1" x2="714.1" y1="948" y2="952" stroke="#888"/>
+<text x="714.1" y="964" font-size="11" text-anchor="middle">50</text>
+<line x1="778.5" x2="778.5" y1="948" y2="952" stroke="#888"/>
+<text x="778.5" y="964" font-size="11" text-anchor="middle">55</text>
+<polyline points="70.0,947.8 82.9,947.8 95.8,948.0 108.6,948.0 121.5,947.8 134.4,947.8 147.3,947.8 160.2,948.0 173.1,947.8 185.9,948.0 198.8,946.1 211.7,945.9 224.6,946.2 237.5,946.2 250.3,946.2 263.2,946.2 276.1,946.2 289.0,945.9 301.9,946.6 314.7,946.1 327.6,946.1 340.5,946.4 353.4,946.4 366.3,946.4 379.2,946.2 392.0,946.2 404.9,946.2 417.8,946.2 430.7,946.2 443.6,946.2 456.4,946.2 469.3,946.2 482.2,946.2 495.1,946.2 508.0,946.2 520.8,946.2 533.7,946.2 546.6,946.2 559.5,946.2 572.4,946.2 585.3,946.2 598.1,946.2 611.0,946.2 623.9,946.4 636.8,946.1 649.7,946.2 662.5,946.2 675.4,946.2 688.3,946.2 701.2,946.2 714.1,946.2 726.9,946.2 739.8,946.2 752.7,946.2 765.6,946.6 778.5,948.0 791.4,947.8 804.2,947.8 817.1,947.8 830.0,947.8" fill="none" stroke="#1f77b4" stroke-width="2"/>
+<line x1="842" x2="864" y1="772" y2="772" stroke="#1f77b4" stroke-width="2"/>
+<text x="870" y="776" font-size="12">Receiver cores</text>
+<polyline points="70.0,947.8 82.9,947.8 95.8,948.0 108.6,948.0 121.5,947.8 134.4,947.8 147.3,947.8 160.2,947.8 173.1,947.8 185.9,947.8 198.8,899.6 211.7,818.7 224.6,783.7 237.5,772.6 250.3,772.1 263.2,923.5 276.1,927.9 289.0,928.3 301.9,924.2 314.7,922.8 327.6,925.3 340.5,939.6 353.4,935.7 366.3,937.3 379.2,935.3 392.0,937.6 404.9,930.6 417.8,940.1 430.7,943.2 443.6,945.4 456.4,945.5 469.3,945.2 482.2,945.5 495.1,945.7 508.0,945.5 520.8,945.5 533.7,945.0 546.6,944.7 559.5,945.5 572.4,945.2 585.3,944.7 598.1,945.2 611.0,944.8 623.9,945.2 636.8,944.7 649.7,944.8 662.5,945.0 675.4,944.3 688.3,944.5 701.2,944.1 714.1,937.8 726.9,938.5 739.8,938.0 752.7,938.9 765.6,942.0 778.5,947.8 791.4,947.8 804.2,947.8 817.1,947.8 830.0,947.8" fill="none" stroke="#d62728" stroke-width="2"/>
+<line x1="842" x2="864" y1="790" y2="790" stroke="#d62728" stroke-width="2"/>
+<text x="870" y="794" font-size="12">Sender cores</text>
+<polyline points="70.0,948.0 82.9,948.0 95.8,948.0 108.6,948.0 121.5,948.0 134.4,948.0 147.3,948.0 160.2,948.0 173.1,948.0 185.9,948.0 198.8,772.1 211.7,772.1 224.6,772.1 237.5,772.1 250.3,772.1 263.2,772.1 276.1,772.1 289.0,772.1 301.9,772.1 314.7,772.1 327.6,772.1 340.5,772.1 353.4,772.1 366.3,772.1 379.2,772.1 392.0,772.1 404.9,772.1 417.8,772.1 430.7,772.1 443.6,772.1 456.4,772.1 469.3,772.1 482.2,772.1 495.1,772.1 508.0,772.1 520.8,772.1 533.7,772.1 546.6,772.1 559.5,772.1 572.4,772.1 585.3,772.1 598.1,772.1 611.0,772.1 623.9,772.1 636.8,772.1 649.7,772.1 662.5,772.1 675.4,772.1 688.3,772.1 701.2,772.1 714.1,772.1 726.9,772.1 739.8,772.1 752.7,772.1 765.6,807.3 778.5,948.0 791.4,948.0 804.2,948.0 817.1,948.0 830.0,948.0" fill="none" stroke="#2ca02c" stroke-width="2"/>
+<line x1="842" x2="864" y1="808" y2="808" stroke="#2ca02c" stroke-width="2"/>
+<text x="870" y="812" font-size="12">Receiver throttled (frac.)</text>
+</svg>

@@ -1,0 +1,131 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="560" font-family="Liberation Sans">
+<rect width="980" height="560" fill="white"/>
+<text x="90" y="30" font-size="17" font-weight="bold">Cress: holding acks, bucket B and tokens per tick (2 values/round)</text>
+<rect x="90" y="60" width="580" height="430" fill="none" stroke="#888"/>
+<line x1="90" y1="490.0" x2="670" y2="490.0" stroke="#e5e5e5"/>
+<text x="82" y="494.0" font-size="12" text-anchor="end">1</text>
+<line x1="90" y1="382.5" x2="670" y2="382.5" stroke="#e5e5e5"/>
+<text x="82" y="386.5" font-size="12" text-anchor="end">10</text>
+<line x1="90" y1="275.0" x2="670" y2="275.0" stroke="#e5e5e5"/>
+<text x="82" y="279.0" font-size="12" text-anchor="end">100</text>
+<line x1="90" y1="167.5" x2="670" y2="167.5" stroke="#e5e5e5"/>
+<text x="82" y="171.5" font-size="12" text-anchor="end">1,000</text>
+<line x1="90" y1="60.0" x2="670" y2="60.0" stroke="#e5e5e5"/>
+<text x="82" y="64.0" font-size="12" text-anchor="end">10,000</text>
+<line x1="90.0" y1="60" x2="90.0" y2="490" stroke="#f0f0f0"/>
+<text x="90.0" y="508" font-size="12" text-anchor="middle">1</text>
+<line x1="148.2" y1="60" x2="148.2" y2="490" stroke="#f0f0f0"/>
+<text x="148.2" y="508" font-size="12" text-anchor="middle">2</text>
+<line x1="206.4" y1="60" x2="206.4" y2="490" stroke="#f0f0f0"/>
+<text x="206.4" y="508" font-size="12" text-anchor="middle">4</text>
+<line x1="264.6" y1="60" x2="264.6" y2="490" stroke="#f0f0f0"/>
+<text x="264.6" y="508" font-size="12" text-anchor="middle">8</text>
+<line x1="322.8" y1="60" x2="322.8" y2="490" stroke="#f0f0f0"/>
+<text x="322.8" y="508" font-size="12" text-anchor="middle">16</text>
+<line x1="381.0" y1="60" x2="381.0" y2="490" stroke="#f0f0f0"/>
+<text x="381.0" y="508" font-size="12" text-anchor="middle">32</text>
+<line x1="439.2" y1="60" x2="439.2" y2="490" stroke="#f0f0f0"/>
+<text x="439.2" y="508" font-size="12" text-anchor="middle">64</text>
+<line x1="497.5" y1="60" x2="497.5" y2="490" stroke="#f0f0f0"/>
+<text x="497.5" y="508" font-size="12" text-anchor="middle">128</text>
+<line x1="555.7" y1="60" x2="555.7" y2="490" stroke="#f0f0f0"/>
+<text x="555.7" y="508" font-size="12" text-anchor="middle">256</text>
+<line x1="613.9" y1="60" x2="613.9" y2="490" stroke="#f0f0f0"/>
+<text x="613.9" y="508" font-size="12" text-anchor="middle">512</text>
+<line x1="670.0" y1="60" x2="670.0" y2="490" stroke="#f0f0f0"/>
+<text x="670.0" y="508" font-size="12" text-anchor="middle">999</text>
+<text x="380.0" y="538" font-size="13" text-anchor="middle">hold length of the acknowledgement batch (rounds)</text>
+<text x="22" y="275.0" font-size="13" text-anchor="middle" transform="rotate(-90 22 275.0)">extra sender messages over the unheld run</text>
+<polyline points="148.2,457.6 206.4,399.2 264.6,378.1 322.8,352.5 381.0,324.0 439.2,293.7 497.5,262.4 555.7,230.6 613.9,198.5 670.0,167.4" fill="none" stroke="#d62728" stroke-width="2.2"/>
+<circle cx="148.2" cy="457.6" r="3" fill="#d62728"/>
+<circle cx="206.4" cy="399.2" r="3" fill="#d62728"/>
+<circle cx="264.6" cy="378.1" r="3" fill="#d62728"/>
+<circle cx="322.8" cy="352.5" r="3" fill="#d62728"/>
+<circle cx="381.0" cy="324.0" r="3" fill="#d62728"/>
+<circle cx="439.2" cy="293.7" r="3" fill="#d62728"/>
+<circle cx="497.5" cy="262.4" r="3" fill="#d62728"/>
+<circle cx="555.7" cy="230.6" r="3" fill="#d62728"/>
+<circle cx="613.9" cy="198.5" r="3" fill="#d62728"/>
+<circle cx="670.0" cy="167.4" r="3" fill="#d62728"/>
+<line x1="685" y1="74" x2="710" y2="74" stroke="#d62728" stroke-width="2.2"/>
+<text x="716" y="78" font-size="13">V1 B=5, 1/tick</text>
+<polyline points="148.2,457.6 206.4,374.0 264.6,337.9 322.8,325.4 381.0,307.4 439.2,284.3 497.5,257.3 555.7,227.9 613.9,197.1 670.0,166.7" fill="none" stroke="#1f77b4" stroke-width="2.2"/>
+<circle cx="148.2" cy="457.6" r="3" fill="#1f77b4"/>
+<circle cx="206.4" cy="374.0" r="3" fill="#1f77b4"/>
+<circle cx="264.6" cy="337.9" r="3" fill="#1f77b4"/>
+<circle cx="322.8" cy="325.4" r="3" fill="#1f77b4"/>
+<circle cx="381.0" cy="307.4" r="3" fill="#1f77b4"/>
+<circle cx="439.2" cy="284.3" r="3" fill="#1f77b4"/>
+<circle cx="497.5" cy="257.3" r="3" fill="#1f77b4"/>
+<circle cx="555.7" cy="227.9" r="3" fill="#1f77b4"/>
+<circle cx="613.9" cy="197.1" r="3" fill="#1f77b4"/>
+<circle cx="670.0" cy="166.7" r="3" fill="#1f77b4"/>
+<line x1="685" y1="96" x2="710" y2="96" stroke="#1f77b4" stroke-width="2.2"/>
+<text x="716" y="100" font-size="13">V1 B=20, 1/tick</text>
+<polyline points="148.2,457.6 206.4,387.4 264.6,357.7 322.8,326.8 381.0,295.1 439.2,263.1 497.5,230.9 555.7,198.7 613.9,166.3 670.0,135.2" fill="none" stroke="#2ca02c" stroke-width="2.2"/>
+<circle cx="148.2" cy="457.6" r="3" fill="#2ca02c"/>
+<circle cx="206.4" cy="387.4" r="3" fill="#2ca02c"/>
+<circle cx="264.6" cy="357.7" r="3" fill="#2ca02c"/>
+<circle cx="322.8" cy="326.8" r="3" fill="#2ca02c"/>
+<circle cx="381.0" cy="295.1" r="3" fill="#2ca02c"/>
+<circle cx="439.2" cy="263.1" r="3" fill="#2ca02c"/>
+<circle cx="497.5" cy="230.9" r="3" fill="#2ca02c"/>
+<circle cx="555.7" cy="198.7" r="3" fill="#2ca02c"/>
+<circle cx="613.9" cy="166.3" r="3" fill="#2ca02c"/>
+<circle cx="670.0" cy="135.2" r="3" fill="#2ca02c"/>
+<line x1="685" y1="118" x2="710" y2="118" stroke="#2ca02c" stroke-width="2.2"/>
+<text x="716" y="122" font-size="13">V1 B=5, 2/tick</text>
+<polyline points="148.2,457.6 206.4,374.0 264.6,328.2 322.8,309.3 381.0,285.4 439.2,258.0 497.5,228.3 555.7,197.3 613.9,165.7 670.0,134.8" fill="none" stroke="#9467bd" stroke-width="2.2"/>
+<circle cx="148.2" cy="457.6" r="3" fill="#9467bd"/>
+<circle cx="206.4" cy="374.0" r="3" fill="#9467bd"/>
+<circle cx="264.6" cy="328.2" r="3" fill="#9467bd"/>
+<circle cx="322.8" cy="309.3" r="3" fill="#9467bd"/>
+<circle cx="381.0" cy="285.4" r="3" fill="#9467bd"/>
+<circle cx="439.2" cy="258.0" r="3" fill="#9467bd"/>
+<circle cx="497.5" cy="228.3" r="3" fill="#9467bd"/>
+<circle cx="555.7" cy="197.3" r="3" fill="#9467bd"/>
+<circle cx="613.9" cy="165.7" r="3" fill="#9467bd"/>
+<circle cx="670.0" cy="134.8" r="3" fill="#9467bd"/>
+<line x1="685" y1="140" x2="710" y2="140" stroke="#9467bd" stroke-width="2.2"/>
+<text x="716" y="144" font-size="13">V1 B=20, 2/tick</text>
+<polyline points="148.2,457.6 206.4,414.9 264.6,414.9 322.8,414.9 381.0,414.9 439.2,414.9 497.5,414.9 555.7,414.9 613.9,414.9 670.0,414.9" fill="none" stroke="#ff7f0e" stroke-width="2.2"/>
+<circle cx="148.2" cy="457.6" r="3" fill="#ff7f0e"/>
+<circle cx="206.4" cy="414.9" r="3" fill="#ff7f0e"/>
+<circle cx="264.6" cy="414.9" r="3" fill="#ff7f0e"/>
+<circle cx="322.8" cy="414.9" r="3" fill="#ff7f0e"/>
+<circle cx="381.0" cy="414.9" r="3" fill="#ff7f0e"/>
+<circle cx="439.2" cy="414.9" r="3" fill="#ff7f0e"/>
+<circle cx="497.5" cy="414.9" r="3" fill="#ff7f0e"/>
+<circle cx="555.7" cy="414.9" r="3" fill="#ff7f0e"/>
+<circle cx="613.9" cy="414.9" r="3" fill="#ff7f0e"/>
+<circle cx="670.0" cy="414.9" r="3" fill="#ff7f0e"/>
+<line x1="685" y1="162" x2="710" y2="162" stroke="#ff7f0e" stroke-width="2.2"/>
+<text x="716" y="166" font-size="13">V2 B=5</text>
+<polyline points="148.2,457.6 206.4,382.5 264.6,382.5 322.8,382.5 381.0,382.5 439.2,382.5 497.5,382.5 555.7,382.5 613.9,382.5 670.0,382.5" fill="none" stroke="#8c564b" stroke-width="2.2"/>
+<circle cx="148.2" cy="457.6" r="3" fill="#8c564b"/>
+<circle cx="206.4" cy="382.5" r="3" fill="#8c564b"/>
+<circle cx="264.6" cy="382.5" r="3" fill="#8c564b"/>
+<circle cx="322.8" cy="382.5" r="3" fill="#8c564b"/>
+<circle cx="381.0" cy="382.5" r="3" fill="#8c564b"/>
+<circle cx="439.2" cy="382.5" r="3" fill="#8c564b"/>
+<circle cx="497.5" cy="382.5" r="3" fill="#8c564b"/>
+<circle cx="555.7" cy="382.5" r="3" fill="#8c564b"/>
+<circle cx="613.9" cy="382.5" r="3" fill="#8c564b"/>
+<circle cx="670.0" cy="382.5" r="3" fill="#8c564b"/>
+<line x1="685" y1="184" x2="710" y2="184" stroke="#8c564b" stroke-width="2.2"/>
+<text x="716" y="188" font-size="13">V2 B=10</text>
+<polyline points="148.2,457.6 206.4,374.0 264.6,350.1 322.8,350.1 381.0,350.1 439.2,350.1 497.5,350.1 555.7,350.1 613.9,350.1 670.0,350.1" fill="none" stroke="#e377c2" stroke-width="2.2"/>
+<circle cx="148.2" cy="457.6" r="3" fill="#e377c2"/>
+<circle cx="206.4" cy="374.0" r="3" fill="#e377c2"/>
+<circle cx="264.6" cy="350.1" r="3" fill="#e377c2"/>
+<circle cx="322.8" cy="350.1" r="3" fill="#e377c2"/>
+<circle cx="381.0" cy="350.1" r="3" fill="#e377c2"/>
+<circle cx="439.2" cy="350.1" r="3" fill="#e377c2"/>
+<circle cx="497.5" cy="350.1" r="3" fill="#e377c2"/>
+<circle cx="555.7" cy="350.1" r="3" fill="#e377c2"/>
+<circle cx="613.9" cy="350.1" r="3" fill="#e377c2"/>
+<circle cx="670.0" cy="350.1" r="3" fill="#e377c2"/>
+<line x1="685" y1="206" x2="710" y2="206" stroke="#e377c2" stroke-width="2.2"/>
+<text x="716" y="210" font-size="13">V2 B=20</text>
+<text x="90" y="556" font-size="11" fill="#666">Every hold begins at round 1; input in rounds 0..125. Zero extra work is not drawn (log axis).</text>
+</svg>
