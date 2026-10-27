@@ -18,6 +18,31 @@
 //! | [`time_budget_delivers_three_values_despite_losses`], [`hybrid_budget_delivers_three_values_despite_losses`] | time; hybrid | as T2b | `delivery` holds | 576 sets, 80 s |
 //! | [`success_budget_starves_when_losses_drain_the_bucket`] | success, **bucket of 1**, a token per ack | as T2 | broken by 2 lost messages, no crash: nothing refills the bucket | 3 sets |
 //! | [`hybrid_bucket_of_one_delivers`] | the same, plus a token per tick | as T2 | holds | 112 sets, 1 s |
+//! | [`success_budget_starvation_needs_one_more_loss_than_tokens`] | success, bucket of `B` = 1..4 | one value, `B` ticks before the heal | broken by exactly `B + 1` lost messages, no crash | 3, 8, 31, 132 sets |
+//! | [`tiny_time_budget_runs_out_of_recovery_ticks`] | time, bucket of 1 | as T2b, 2 recovery ticks | broken by 3 lost first copies: one resend per tick needs 3 ticks | 17 sets |
+//! | [`tiny_time_budget_delivers_with_enough_recovery_ticks`] (ignored, 75 s) | time, bucket of 1 | as T2b, 3 recovery ticks | holds | 576 sets |
+//!
+//! # Sweeps
+//!
+//! [`sweep`] (ignored) runs one configuration given by environment variables. What it measured
+//! (one value, `B` ticks before the heal, success budget refilled per 1 or per 4 acks, the same
+//! counts for both):
+//!
+//! | `B` | verdict | lost messages | fault sets | time |
+//! |---|---|---|---|---|
+//! | 1 | broken | 2 | 3 | 0.0 s |
+//! | 2 | broken | 3 | 8 | 0.2 s |
+//! | 3 | broken | 4 | 31 | 1.7 s |
+//! | 4 | broken | 5 | 132 | 25 s |
+//! | 5 | hypothesis budget (1,024) | | | 232 s |
+//!
+//! Each token adds a resend and its acknowledgement, two lossy messages, so the cost grows about
+//! fourfold per token; the corpus bucket of ten would need eleven losses and about half a million
+//! fault sets. With `max_crashes(0)` the same counterexamples are found for `B` = 3 and 4, but
+//! for `B` = 5 to 7 the search samples schedules past its schedule budget and misses them
+//! (`Exhausted`, not a certificate). Two values with a tick before the heal exhaust the
+//! hypothesis budget for [`reliable_send`] and for a time budget of one or ten alike: the bucket
+//! caps resends after the heal, not the lossy messages before it.
 //!
 //! The budgets cost hydrofrac nothing over [`reliable_send`]: the same fault sets, since the
 //! fragile steps are the same and the bucket adds no lossy message. A success budget of ten
@@ -119,8 +144,13 @@ fn deliver<'a>(
     vals: Stream<u32, Process<'a, Sender>, Unbounded, TotalOrder, ExactlyOnce>,
     receiver: &Process<'a, Receiver>,
     ticks: Stream<(), Process<'a, Sender>, Unbounded, TotalOrder, ExactlyOnce>,
-) -> Stream<u32, Process<'a, Receiver>, Unbounded, hydro_lang::live_collections::stream::NoOrder, ExactlyOnce>
-{
+) -> Stream<
+    u32,
+    Process<'a, Receiver>,
+    Unbounded,
+    hydro_lang::live_collections::stream::NoOrder,
+    ExactlyOnce,
+> {
     match variant {
         Variant::Plain => {
             drop(ticks);
@@ -295,7 +325,13 @@ fn time_budget_delivers_despite_losses() {
 #[test]
 fn success_budget_one_value() {
     let results = check(SUCCESS_BUDGET);
-    eprintln!("success budget, one value: {:?}", results.label("delivery").counterexample().map(|c| (c.crashes(), c.faults.len())));
+    eprintln!(
+        "success budget, one value: {:?}",
+        results
+            .label("delivery")
+            .counterexample()
+            .map(|c| (c.crashes(), c.faults.len()))
+    );
 }
 
 /// **A hybrid budget delivers despite losses** (one value, a resend before the heal).
@@ -321,7 +357,11 @@ fn success_budget_starves_when_losses_drain_the_bucket() {
         .label("delivery")
         .counterexample()
         .unwrap_or_else(|| panic!("expected a counterexample:\n{results}"));
-    eprintln!("starvation: {} crashes, {} faults", cex.crashes(), cex.faults.len());
+    eprintln!(
+        "starvation: {} crashes, {} faults",
+        cex.crashes(),
+        cex.faults.len()
+    );
     assert_eq!(cex.crashes(), 0, "{results}");
 }
 
@@ -352,4 +392,191 @@ fn hybrid_budget_delivers_three_values_despite_losses() {
     check_values(HYBRID_BUDGET, &CHECKED_VALUES_NO_TICK, false)
         .label("delivery")
         .assert_holds();
+}
+
+// Parameter sweeps, driven by environment variables (see `sweep`). Not part of the default
+// suite: `cargo test -p hydro_test --lib cluster::ec_reliable_send::sweep -- --ignored`.
+
+/// When the sender's timer fires before the network heals.
+#[derive(Clone, Copy, Debug)]
+enum FaultPhaseTicks {
+    /// After each value.
+    AfterEach,
+    /// This many, after every value has been sent.
+    AfterAll(usize),
+}
+
+/// One hydrofrac run of `variant` on `values`, with `ticks` before the heal and
+/// `recovery_ticks` rounds after it, crashes bounded by `max_crashes` if given. Prints one
+/// `SWEEP` line with the verdict and the search's cost.
+fn sweep_run(
+    variant: Variant,
+    values: &[u32],
+    ticks: FaultPhaseTicks,
+    max_crashes: Option<usize>,
+    recovery_ticks: usize,
+) -> Results {
+    let mut check = EcCheck::new();
+    if let Some(k) = max_crashes {
+        check = check.max_crashes(k);
+    }
+    let (sim, vals, timer) = program(&mut check, variant);
+    let start = std::time::Instant::now();
+    let results = check.run_then_recover(
+        &sim,
+        async || match ticks {
+            FaultPhaseTicks::AfterEach => {
+                for &v in values {
+                    vals.send(v);
+                    timer.send(());
+                }
+            }
+            FaultPhaseTicks::AfterAll(n) => {
+                for &v in values {
+                    vals.send(v);
+                }
+                for _ in 0..n {
+                    timer.send(());
+                }
+            }
+        },
+        async || {
+            for _ in 0..recovery_ticks {
+                timer.send(());
+                hydro_lang::sim::compiled::quiesce().await;
+            }
+        },
+    );
+    let wall = start.elapsed().as_secs_f64();
+    let label = results.label("delivery");
+    let (verdict, cex) = match &label.verdict {
+        hydrofrac::Verdict::Certified { .. } => ("holds", String::new()),
+        hydrofrac::Verdict::Counterexample(c) => (
+            "broken",
+            format!(" cex_crashes={} cex_faults={}", c.crashes(), c.faults.len()),
+        ),
+        hydrofrac::Verdict::Budget { .. } => ("budget", String::new()),
+        hydrofrac::Verdict::Exhausted { .. } => ("exhausted", String::new()),
+        other => {
+            eprintln!("{other:?}");
+            ("other", String::new())
+        }
+    };
+    eprintln!(
+        "SWEEP variant={variant:?} values={} ticks={ticks:?} max_crashes={max_crashes:?} \
+         recovery_ticks={recovery_ticks} verdict={verdict}{cex} hypotheses={} schedules={} wall={wall:.1}s",
+        values.len(),
+        label.stats.hypotheses,
+        label.stats.schedules,
+    );
+    eprintln!("{results}");
+    results
+}
+
+/// The parameterized run behind the sweeps in the [module docs](self). Reads
+/// `HF_VARIANT` (`plain`, `v0`, or `budget`), `HF_CAP`, `HF_TPT` (tokens per tick), `HF_APT`
+/// (acks per token), `HF_VALUES` (how many values), `HF_TICKS` (`each`, or a number of ticks
+/// after every value), and `HF_MAX_CRASHES` (unset for unbounded).
+#[test]
+#[ignore = "parameterized by environment variables; run by hand"]
+fn sweep() {
+    let var = |k: &str| std::env::var(k).ok();
+    let num = |k: &str, d: u64| var(k).map_or(d, |v| v.parse().unwrap());
+    let variant = match var("HF_VARIANT").as_deref().unwrap_or("budget") {
+        "plain" => Variant::Plain,
+        "v0" => Variant::Unbudgeted,
+        "budget" => Variant::Budgeted(ResendBudget {
+            capacity: num("HF_CAP", 10),
+            tokens_per_tick: num("HF_TPT", 0),
+            acks_per_token: num("HF_APT", 1),
+        }),
+        other => panic!("unknown HF_VARIANT {other}"),
+    };
+    let values: Vec<u32> = (1..=num("HF_VALUES", 1) as u32).collect();
+    let ticks = match var("HF_TICKS").as_deref().unwrap_or("each") {
+        "each" => FaultPhaseTicks::AfterEach,
+        n => FaultPhaseTicks::AfterAll(n.parse().unwrap()),
+    };
+    let max_crashes = var("HF_MAX_CRASHES").map(|v| v.parse().unwrap());
+    let recovery_ticks = num("HF_RECOVERY", RECOVERY_TICKS as u64) as usize;
+    sweep_run(variant, &values, ticks, max_crashes, recovery_ticks);
+}
+
+/// **Starving a success budget of `B` takes `B + 1` lost messages, and no crash.** One value and
+/// `B` ticks before the heal: each tick resends the value and spends a token, and losing its
+/// first copy and all `B` resends leaves no token and no acknowledgement to earn one. hydrofrac
+/// finds exactly that, for `B` from 1 to 4. (Measured: 3, 8, 31 and 132 fault sets, 0.0 to 25 s;
+/// `B = 5` exhausts the hypothesis budget, see the [module docs](self).)
+#[test]
+fn success_budget_starvation_needs_one_more_loss_than_tokens() {
+    for capacity in 1..=4 {
+        let budget = Variant::Budgeted(ResendBudget {
+            capacity,
+            tokens_per_tick: 0,
+            acks_per_token: 1,
+        });
+        let results = sweep_run(
+            budget,
+            &[1],
+            FaultPhaseTicks::AfterAll(capacity as usize),
+            None,
+            RECOVERY_TICKS,
+        );
+        let cex = results
+            .label("delivery")
+            .counterexample()
+            .unwrap_or_else(|| panic!("B = {capacity}: expected a counterexample:\n{results}"));
+        assert_eq!(
+            (cex.crashes(), cex.faults.len()),
+            (0, capacity as usize + 1),
+            "B = {capacity}:\n{results}"
+        );
+    }
+}
+
+/// **A tiny time budget is live, but slow: the rule must give it time.** A bucket of one,
+/// refilled by the timer, resends one value per tick. Three values whose first copies are all
+/// lost need three ticks after the heal; with two, `delivery` is broken by those three losses
+/// (no crash), not because the protocol lost a value but because the run ended first. With
+/// three recovery ticks it holds ([`tiny_time_budget_delivers_with_enough_recovery_ticks`]).
+#[test]
+fn tiny_time_budget_runs_out_of_recovery_ticks() {
+    let tiny = Variant::Budgeted(ResendBudget {
+        capacity: 1,
+        tokens_per_tick: 1,
+        acks_per_token: 0,
+    });
+    let results = sweep_run(
+        tiny,
+        &CHECKED_VALUES_NO_TICK,
+        FaultPhaseTicks::AfterAll(0),
+        None,
+        2,
+    );
+    let cex = results
+        .label("delivery")
+        .counterexample()
+        .unwrap_or_else(|| panic!("expected a counterexample:\n{results}"));
+    assert_eq!((cex.crashes(), cex.faults.len()), (0, 3), "{results}");
+}
+
+/// **The same tiny time budget delivers three values given three ticks after the heal** (576
+/// fault sets, about 73 s; the hybrid budget with a bucket of one is the same).
+#[test]
+#[ignore = "about 75 s"]
+fn tiny_time_budget_delivers_with_enough_recovery_ticks() {
+    let tiny = Variant::Budgeted(ResendBudget {
+        capacity: 1,
+        tokens_per_tick: 1,
+        acks_per_token: 0,
+    });
+    sweep_run(
+        tiny,
+        &CHECKED_VALUES_NO_TICK,
+        FaultPhaseTicks::AfterAll(0),
+        None,
+        3,
+    )
+    .label("delivery")
+    .assert_holds();
 }
