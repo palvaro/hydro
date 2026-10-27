@@ -1,6 +1,6 @@
 # Reliable delivery under hydrofrac, Cress and Sedge
 
-This document follows one small protocol, a sender that resends until its messages are acknowledged, through three tools that each ask a different question about it. Hydrofrac asks whether the protocol is correct when messages are lost and nodes crash. Cress asks whether delay makes the protocol do work that its input did not require. Sedge asks whether the deployed protocol recovers from a burst of load when its receiver has a fixed, externally imposed CPU budget. The naive protocol passes the first question and fails the other two. We then add a token bucket to its resends in three different ways and let the tools judge the candidates. Each tool rejects or ranks something that the other two cannot see.
+This document follows one small protocol, a sender that resends until its messages are acknowledged, through three tools that each ask a different question about it. Hydrofrac asks whether the protocol is correct when messages are lost and nodes crash. Cress asks whether delay makes the protocol do work that its input did not require. Sedge asks whether the deployed protocol recovers from a burst of load when its receiver has a fixed, externally imposed CPU budget. The naive protocol passes the first question and fails the other two. We then add a token bucket to its resends in three different ways and let the tools judge the candidates. Each tool rejects or ranks something that the other two cannot see: hydrofrac rejects the bucket that only acknowledgements refill, Cress measures how much extra work each bucket allows, and Sedge shows which buckets let a capped receiver recover. A final experiment with real loss in deployment overturns part of the story. When the transport drops messages from full queues, the unbudgeted protocol recovers best and the time-refilled bucket did not recover its lost values within four minutes, so the right bucket depends on the transport. Only the hybrid bucket, which refills from both the timer and acknowledgements, did well on every axis that we tested.
 
 Every number below comes from a named test or run. Claims are marked in the style of the hydrofrac guide:
 
@@ -17,8 +17,9 @@ Contents:
 5. [The diagnosis](#5-the-diagnosis)
 6. [Act 2: three token buckets](#6-act-2-three-token-buckets)
 7. [Act 3: real loss in deployment](#7-act-3-real-loss-in-deployment)
-8. [Limits of what we showed](#8-limits-of-what-we-showed)
-9. [How to reproduce](#9-how-to-reproduce)
+8. [What the three tools found together](#8-what-the-three-tools-found-together)
+9. [Limits of what we showed](#9-limits-of-what-we-showed)
+10. [How to reproduce](#10-how-to-reproduce)
 
 The code is on the local branch `demo/budget-runs` (commit `4f8b9ebbc5`), which sits on `integ/frac-cress-sedge` (`ebd4272032`), which in turn sits on upstream `hydro-project/hydro` `main` at `858ba1a6b2`. The Sedge runs used a 16-core host with Docker. The containers ran on cores 8–15, the harness ran on cores 0–7, and each node had a 6000 MB memory limit. A background Java process (`TPSGeneratorWorker`) was running on the host throughout.
 
@@ -32,7 +33,7 @@ A reliable sender over a lossy link must keep resending until it hears an acknow
 
 **Cress** checks schedule amplification in the simulator. It holds each batch of a program for longer and longer and counts the messages that the program sends compared with the run in which nothing is held. When the extra work grows with the length of the hold, the program turns delay into load. Cress reports the shape of that growth (a ceiling, or a rate per round of delay) and a multiplier. It never loses a message, so it knows nothing about faults.
 
-**Sedge** deploys the program, imposes capacity from outside with Docker CPU quotas, and drives it with an open-loop Poisson load that has a baseline, a burst, and a tail. It reads the tail against the baseline and says whether the program recovered, is still draining, or collapsed. It measures wire traffic from outside the program, from each container's `/proc` write counters. Its deployments run over plain TCP, so it knows nothing about loss. Sedge reads Cress's classification of each output stream from Cress's result table, so Cress runs first on the same function and configuration.
+**Sedge** deploys the program, imposes capacity from outside with Docker CPU quotas, and drives it with an open-loop Poisson load that has a baseline, a burst, and a tail. It reads the tail against the baseline and says whether the program recovered, is still draining, or collapsed. It measures wire traffic from outside the program, from each container's `/proc` write counters. Its deployments run over plain TCP and lose nothing, unless the transport is given lossy send queues, as in Act 3. Sedge reads Cress's classification of each output stream from Cress's result table, so Cress runs first on the same function and configuration.
 
 ## 3. The protocol
 
@@ -137,7 +138,7 @@ The one trial that escaped, at f = 64, did so about 50 s into the run, when a ca
 
 ![V0 with a one-second resend timer, at f = 8 (left, collapsed) and f = 64 (right, which escapes about 50 s into the run). The sender writes about the same number of messages per second in both runs although the steady load differs by a factor of eight.](reliable-send-three-tools-img/v0-f8-vs-f64.png)
 
-<!-- PENDING: extra Sedge trials for V0 (more than 2 per factor), to turn "11 of 12" into a collapse probability per factor. -->
+We did not run more lossless trials of V0, so we report the eleven collapses in twelve trials as counts and do not estimate a collapse probability per factor. V0 did collapse again with unbounded send buffers in the later, separate session of Act 3 (§7), so the result reproduces across sessions.
 
 ## 5. The diagnosis
 
@@ -253,7 +254,7 @@ The second sweep asks whether a budget makes hydrofrac's search cheaper, and it 
 
 Three more observations come from the Sedge runs. First, under the same one-percent quota the budgeted variants sustain 1.5–1.7 times V0's rate, because V0's resends consume receiver capacity even at steady load (DEMONSTRATED by one calibration per variant). The difference between V1's 841 and V2's and V3's 771 is a single probe step from a single calibration each, so we do not claim it. Second, in the tail the budgeted senders write about the offered load and end the run with about 20 MB of memory, while V0's sender writes 760–880 messages per second at every load and ends with 0.1–0.9 GB. Third, V2 settled more slowly than V1 and V3 at f = 1.25–4 (6–9 s against 3–5 s), but that difference is confounded and we do not attribute it to V2's protocol. The same cells show a throttling anomaly that is already present before the burst, when no protocol difference should matter. At f = 2 the V2 receiver was throttled in 95–99% of CPU periods before the burst and in 97% in the tail, against 39–62% for V1 and V3, at the same offered load and the same wire rate of 246–270 messages per second. Every variant's receiver used its whole quota, but V2's spent about 2.5 times as long throttled, wrote fewer and larger batches, and had a higher latency, and V2's uncapped sender spent 25–50% more CPU for the same message rate. Three facts argue against a protocol cause. The receiver code is identical in V1, V2 and V3. V3 shares V2's acknowledgement refill and still matches V1. The steady-state resends are at most 7% above the offered rate in every variant, which is far too few to double the receiver's throttling. Three facts point instead to the host during part of the V2 sweep. The anomaly appears at f = 1.25, 2 and 4 in that sweep and does not appear in V2's separate session at f = 1.1. The harness's feed lag in V2's runs was the largest of all 46 runs (11.4 ms and 6.0 ms, against 2.1–3.9 ms everywhere else). The host also ran a background Java process, and the runs thread interrupted one V2 sweep and removed a leftover sampler container. The data cannot name the cause, so we conclude only that the anomaly is real, that it predates the burst, and that V2's protocol does not explain it (DEMONSTRATED by the trace analysis in `target/sedge-demo-budget/ANALYSIS.md`, with the host explanation GUESSED).
 
-<!-- PENDING: a rerun with the variants interleaved per trial (V1, V2, V3, V1, ...) and the node cores checked for co-tenants, to settle whether V2 drains more slowly near capacity. -->
+We did not repeat this lossless comparison with the variants interleaved, so the question of whether V2 drains more slowly near capacity without loss remains open. The Act 3 session in §7 did interleave the variants trial by trial and logged the host, and under loss V2 drained as fast as V3.
 
 ### How sure we are
 
@@ -290,32 +291,74 @@ One side finding concerns the timer. With four timer elements per round, V0 stil
 
 ### What the comparison settles
 
-V2 is ruled out, because it can lose a value forever, and only hydrofrac shows it. V1 and V3 both remove the storm while keeping the delivery guarantee. Our experiments cannot yet tell V1 from V3. Cress holds acknowledgements and never loses a message, so it gives them identical numbers in every configuration that we tried, and Sedge's deployments lose nothing, so the hybrid has no losses to recover from. The difference between them can only show up when acknowledgements flow while values are being lost, which is the subject of Act 3.
+V2 is ruled out, because it can lose a value forever, and only hydrofrac shows it. V1 and V3 both remove the storm while keeping the delivery guarantee. Our experiments cannot yet tell V1 from V3. Cress holds acknowledgements and never loses a message, so it gives them identical numbers in every configuration that we tried, and Sedge's deployments lose nothing, so the hybrid has no losses to recover from. The difference between them can only show up when acknowledgements flow while values are being lost, which is the subject of Act 3, and there the difference turns out to be large.
 
 ## 7. Act 3: real loss in deployment
 
-Sedge's deployment layer can make a sender's outgoing buffer lossy (`HYDRO_DEPLOY_SEND_BUFFER=lossy:N`), so the same receiver quota can be combined with real message loss. Our hypothesis is that V3 recovers from loss faster than V1 at the same protection against storms, because acknowledgements that do arrive buy extra resends. If V3 shows no advantage, V1 is the better choice because it is simpler.
+Act 2 left one question open: does the hybrid's acknowledgement refill help a sender recover from real loss, at the same protection against storms as the time budget? Cress cannot answer it, because it never loses a message, and hydrofrac cannot answer it, because it knows nothing about rates. Sedge can answer it once the deployment is made lossy.
 
-### The loss model
+### The loss model and the design
 
-Docker's host networking rules out `tc netem`, so the loss is imposed in the deployment's transport instead, which is still outside the program. The Sedge option `--send-buffer lossy:64:Sender,Receiver` puts a queue of 64 messages in front of every outgoing connection of both nodes, for data and for acknowledgements alike. A send that finds its queue full is dropped, and the transport counts the drop (`SEND_STATS`, in the `sendq_dropped_*` counters). This is congestion tail-drop: messages are dropped only while the burst backs up the queues, and none are dropped at the baseline load.
+Docker's host networking rules out `tc netem`, so the loss is imposed in the deployment's transport instead, which is still outside the program. The Sedge option `--send-buffer lossy:64:Sender,Receiver` puts a queue of 64 messages in front of every outgoing connection of both nodes, for data and for acknowledgements alike. A send that finds its queue full is dropped, and the transport counts the drop (`sendq_dropped_*`, from `HYDRO_DEPLOY_SEND_STATS`). This is congestion tail-drop: messages are dropped only while the burst backs up the queues, and no message was dropped before any burst.
 
-### A first pair of runs
+Everything else matches Act 2: the receiver is capped at one percent of a core, the sender is uncapped, μ is pinned at 500, the resend timer fires every second, and the load profile is a 10 s baseline, a 5 s burst at twice μ and a 45 s tail. For each factor f ∈ {2, 4, 8} and each of three seeds, the four variants ran back to back in the order V1, V3, V0, V2, which gives 36 interleaved trials. Each trial logged its start and end time, the load average, `top` and `docker ps`, no leftover containers were found, and the load stayed open loop in all 42 trials of the session (no late records, and a worst feed lag of 12.8 ms). Cress ran first, and Sedge read `delivered` as conserved from its table. The results in this section are DEMONSTRATED by that session on the local branch `demo/act3-lossy` (`37d55d13c1`), whose summary is `target/sedge-demo-act3/SUMMARY.md`.
 
-The first pair of runs used f = 4, seed 1 and μ = 500, with V1 and V3 run back to back. These numbers are DEMONSTRATED by those two runs on the local branch `demo/act3-lossy`, and everything else in this subsection is preliminary.
+### What Sedge's verdict sees, and what it misses
 
-| variant | data messages dropped | acknowledgements dropped | values still undelivered 45 s after the burst | lost values recovered per second in the tail | Sedge verdict |
-|---|---|---|---|---|---|
-| V1 time | 1,346 | 415 | 1,335 | 0.0 | RECOVERED |
-| V3 hybrid | 1,783 | 234 | 1,503 | 8.0 | RECOVERED |
+Sedge labelled all 36 lossy trials RECOVERED, for every variant, with tail goodput between 96% and 100%. The verdict cannot tell the variants apart, because it judges only the values that are offered during its baseline and tail windows. Values that were lost during the burst and never delivered do not affect it. We therefore added a panel to the Sedge plots that shows the number of values offered so far and not yet delivered, and we read Act 3 through that backlog.
 
-Our reading of the pair, which is GUESSED until the full run confirms it, is that V3's acknowledgement refill lets it recover lost values at about eight per second while acknowledgements flow, whereas V1's single token per tick makes no measurable progress. A plausible reason for V1's lack of progress is that the head of its FIFO is occupied by values whose acknowledgements were lost, so its one resend per tick goes to values that the receiver already holds. Neither variant drains its lost values within 45 s.
+| variant | f | sender drops | undelivered at the end of the burst | undelivered at the end of the run |
+|---|---|---|---|---|
+| V0 none | 2, 4, 8 | 24–43 k, 46–58 k, 32–35 k | 1,342–2,348 | 0 in all nine trials |
+| V1 time | 2, 4, 8 | 1.5–2.1 k | 1,382–2,175 | 1,353–2,110, barely changing |
+| V2 success | 2, 4, 8 | 1.3–2.3 k | 1,223–2,292 | 1,189–1,875 |
+| V3 hybrid | 2, 4, 8 | 1.3–2.3 k | 1,333–2,343 | 1,059–1,900 |
 
-Both runs are labelled RECOVERED, with full goodput in the tail and a median latency of 7 ms, although more than a thousand values were still undelivered in each. Sedge judges only the values that are offered during the tail, so values that were lost during the burst stay undelivered in the background without affecting the verdict. They show up only in the 99th percentile of completion time (50 s for V3) and in the count of values outstanding at the end of the run. Under loss, a RECOVERED verdict therefore means that new work is healthy, and it says nothing about whether the lost work came back. We read Act 3 through the undelivered count and the recovery rate for that reason.
+A 45-second tail is too short to see whether the budgeted variants ever deliver their lost values, so we repeated f = 4 with seed 1 and a 240-second tail.
 
-<!-- PENDING: Act 3, the full interleaved run (36 trials, V1 and V3 alternating, with V0 as a reference), followed by a long-tail pair to see whether either variant eventually drains its lost values. Replace the preliminary reading above with its results. -->
+| undelivered at t = | 15 s | 30 s | 60 s | 120 s | 180 s | 240 s | fully drained |
+|---|---|---|---|---|---|---|---|
+| V0 none | 1,338 | 801 | 0 | 0 | 0 | 0 | at t = 43 s, 28 s after the burst |
+| V2 success | 1,402 | 1,401 | 1,124 | 592 | 44 | 0 | at t = 193 s, 178 s after the burst |
+| V3 hybrid | 2,073 | 1,936 | 1,705 | 1,146 | 560 | 199 | not by the end of the run at t = 254 s, with 68 values left |
+| V1 time | 1,377 | 1,376 | 1,378 | 1,414 | 1,384 | 1,530 | never; the backlog was flat and ended higher |
 
-## 8. Limits of what we showed
+![The 240-second runs at f = 4 with lossy send queues: V0 (top left), V2 (top right), V1 (bottom left) and V3 (bottom right). The fifth panel of each run is the number of values offered and not yet delivered. V0 drains its backlog within 28 s of the burst, V2 and V3 drain theirs linearly at about eight or nine values per second, and V1's stays flat for four minutes.](reliable-send-three-tools-img/act3-longtail-f4.png)
+
+V1 resent about 0.9 messages per second between t = 30 s and t = 250 s, which is its budget of one token per tick, but two later episodes of drops (at t = 93 s and t = 207–209 s, about 280 messages) lost more than it resent, so its net recovery over the run was −140 values. V2 and V3 resent about 8.5 messages per second, close to their cap of ten tokens per tick, so their backlogs fell linearly. Resend rates are inferred as the sender's attempted sends minus the offered load, since the tokens themselves are not observable from outside.
+
+### The control: Act 1 still collapses with unbounded buffers
+
+In the same session we reran the setting of Act 1, in which the send buffers are unbounded, at f = 4 and seed 1. V0 collapsed again, with 0% goodput in the tail, and V1 recovered with an empty backlog one second after the burst. The collapse of Act 1 therefore reproduces in this session.
+
+![V0 at f = 4 in the Act 3 session with unbounded send buffers, the setting of Act 1. The run collapses as it did in Act 1.](reliable-send-three-tools-img/act3-control-v0-unbounded-f4.png)
+
+### What Act 3 shows
+
+Under real loss the acknowledgement refill matters. V3 recovered lost values at about nine per second and V1 at less than one per second, which in our runs was not enough to make any net progress in four minutes (DEMONSTRATED for this loss model). The time budget that looked as good as the hybrid in Act 2 is too stingy once messages are actually lost.
+
+V2 drained as fast as V3 here, and it did not starve. New load kept arriving, so acknowledgements kept flowing and kept refilling its bucket. Hydrofrac's starvation needs a pause in new values while every outstanding value is lost (ARGUED from the counterexample in §6), which a steady open-loop load never produces. That is exactly the case that only hydrofrac covers.
+
+The largest surprise is that under tail-drop loss V0, the variant without any budget, recovered best, draining its whole backlog in 28 s. The lossy queues shed V0's resend storm inside the sender: V0 attempted about 2,000 resends per second, but only about 65 extra messages per second reached the wire, and the transport dropped the rest locally, so the receiver was never overloaded (DEMONSTRATED by the drop and wire counters). Act 1's collapse therefore depends on unbounded send buffers, which are Sedge's default and which model RPC stacks that queue every send. With a bounded, lossy transport, the network itself limits the resend rate (ARGUED from the counters and the control).
+
+The cost of the buckets moves to the sender's CPU. While a backlog persists, the budgeted senders run at about 0.9 cores, because they rebuild an outstanding set of one to two thousand values on every tick, and V3's sender CPU falls as its backlog drains. V0's sender returns to its baseline as soon as its backlog is gone.
+
+## 8. What the three tools found together
+
+The table below collects the verdicts of every experiment in this document. Each entry is DEMONSTRATED by the section it cites, except where the section marks it otherwise.
+
+| variant | hydrofrac, delivery under loss and crashes (§4, §6) | Cress, extra work when acknowledgements are delayed (§4, §6) | Sedge, capped receiver with unbounded send buffers (§4, §6) | Sedge, capped receiver with lossy send queues (§7) |
+|---|---|---|---|---|
+| V0 none | Holds. | Grows with the backlog, 930×. | Collapses in 11 of 12 trials. | Recovers best, draining its lost values in 28 s. |
+| V1 time | Holds, given enough recovery ticks. | Grows at the refill rate, independent of the load. | Recovers in all 12 trials. | Never recovers its lost values in four minutes. |
+| V2 success | Starves after B + 1 losses. | Stops at a ceiling of B. | Recovers in all 12 trials. | Drains its lost values in about three minutes. |
+| V3 hybrid | Holds, given enough recovery ticks. | Grows at the refill rate, the same as V1. | Recovers in all 12 trials. | Drains its lost values at about nine per second. |
+
+Each tool caught something that the other two could not. Hydrofrac alone found that V2 can lose a value forever, because only hydrofrac loses messages while nothing new arrives. Cress alone measured how each design turns delay into work, and it showed that a time budget bounds that work independently of the load. Sedge alone showed the collapse of V0 under an externally imposed capacity, the recovery of the budgeted variants, and, once the transport was made lossy, that V1's single token per tick is too few to recover lost work.
+
+The answer to the question of which bucket to use depends on the transport. With unbounded send buffers, which queue every send the way an RPC stack does, the unbudgeted protocol turns a burst into a self-sustaining storm, and any of the three buckets prevents it. With bounded queues that drop when full, the transport itself sheds the storm, the unbudgeted protocol recovers fastest, and a bucket slows recovery; only the acknowledgement refill of V2 and V3 keeps that slowdown tolerable. Of the four designs, only V3 did well on every axis that we tested: hydrofrac certifies it, Cress bounds its extra work, it recovers with unbounded buffers, and it recovers its lost values under tail-drop loss. This conclusion is limited to the parameters, loss model and host described below (ARGUED from the table above).
+
+## 9. Limits of what we showed
 
 - Sedge ran two trials per factor with two fixed seeds that were reused in every cell, and one calibration per variant, on a host that also ran a background Java process. V0 ran in an earlier session than V1–V3, so the comparison between them is also a comparison between sessions.
 - V2's starvation is demonstrated for buckets of one to four tokens, where it always takes B + 1 lost messages. For the corpus bucket of ten tokens it is argued from that law, because the search for 11 lost messages is out of reach.
@@ -324,10 +367,13 @@ Both runs are labelled RECOVERED, with full goodput in the tail and a median lat
 - Hydrofrac's verdicts on the rate-limited variants depend on the number of recovery ticks in the harness, as the single-token sweep in §6 shows.
 - Cress labels every variant HAZARDOUS, because by design it labels any extra work at all as hazardous (`cress/src/lib.rs`). The severity is in the growth shape and the multiplier.
 - Cress never loses a message, because the simulator does not drop on lossy channels, and Sedge's deployments lose messages only when they are given a lossy send buffer, as in Act 3. Loss is otherwise exercised only by hydrofrac.
+- Act 3 used a single loss model, congestion tail-drop at a queue depth of 64 in both directions, with no random or independent loss. It ran three seeds per cell, and the 240-second tail ran one seed. Some late drop episodes happened at the same second in V1 and V3, which points to the shared seeded arrivals or to the host and away from the protocols.
+- A bucket of ten tokens caps V2's and V3's resends at about ten per tick, which sets their drain rate under loss. We did not sweep the bucket size or tie the refill rate to the measured loss in deployment.
+- The buckets' tokens are not observable from outside the program, so the resend rates in Act 3 are inferred from the sender's attempted sends minus the offered load.
 - Under loss, Sedge's RECOVERED verdict covers only the values offered during the tail. Values that were lost during the burst and never recovered do not change the verdict, and they appear only in the tail of the completion-time distribution and in the count of values outstanding at the end of the run.
 - Deploying `reliable_send` required a change to `hydro_lang` (commit `2ad28e7c5f`), because the deployment backend refused every TCP channel other than `fail_stop`. The change deploys `LossyDelayedForever` as plain TCP, which is sound because in-order delivery that stops at a failure is one of the behaviors that a delayed-forever, unordered channel allows. It still refuses plain `Lossy`.
 
-## 9. How to reproduce
+## 10. How to reproduce
 
 All commands run from the repository root on `demo/budget-runs`, with Rust 1.98.1.
 
@@ -348,4 +394,4 @@ cargo test -p hydro_test --lib cluster::ec_reliable_send -- --test-threads=4 --n
     hydro_test reliable_send_pair_time_budget
 ```
 
-The Sedge filter is also a substring match, so the plain name `reliable_send_pair` deploys all four functions. On the local branch `demo/act3-lossy` the filter also accepts `=exact_name`, which selects one function exactly. The Act 3 runs add `--send-buffer lossy:64:Sender,Receiver` to the Sedge command. The per-variant traces, calibration tables and plots of the runs in this document are under `target/sedge-demo-reliable-send/` and `target/sedge-demo-budget/` on the host where they were produced, and they are not committed. The trace analysis and its scripts are in `target/sedge-demo-budget/ANALYSIS.md` and `target/sedge-demo-budget/tools/analysis/`. The directory `target/sedge-demo-reliable-send/traces/traces_sweep3_P20/` also contains stale copies of one-second traces, and only `factor2.trial0` and `factor8.trial0` there are real 20-second runs.
+The Sedge filter is also a substring match, so the plain name `reliable_send_pair` deploys all four functions. On the local branch `demo/act3-lossy` the filter also accepts `=exact_name`, which selects one function exactly. The Act 3 runs add `--send-buffer lossy:64:Sender,Receiver` to the Sedge command, use `--tail 240` for the long-tail runs, and pin the harness to cores 4–7 and the nodes to cores 8–15. Their traces, host snapshots, metric scripts (`tools/act3_metrics.py`) and plots are in `target/sedge-demo-act3/`. The per-variant traces, calibration tables and plots of the runs in this document are under `target/sedge-demo-reliable-send/` and `target/sedge-demo-budget/` on the host where they were produced, and they are not committed. The trace analysis and its scripts are in `target/sedge-demo-budget/ANALYSIS.md` and `target/sedge-demo-budget/tools/analysis/`. The directory `target/sedge-demo-reliable-send/traces/traces_sweep3_P20/` also contains stale copies of one-second traces, and only `factor2.trial0` and `factor8.trial0` there are real 20-second runs.
