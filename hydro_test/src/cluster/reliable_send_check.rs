@@ -20,8 +20,8 @@ use cress::SimOutputs;
 use hydro_lang::live_collections::stream::{ExactlyOnce, NoOrder, TotalOrder};
 use hydro_lang::prelude::*;
 use hydro_std::reliable_send::{
-    reliable_send, reliable_send_hybrid_budget, reliable_send_success_budget,
-    reliable_send_time_budget,
+    ResendBudget, reliable_send, reliable_send_budgeted, reliable_send_hybrid_budget,
+    reliable_send_success_budget, reliable_send_time_budget,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -271,6 +271,179 @@ where
             BUDGET_ACKS_PER_TOKEN,
         ),
     }
+}
+
+/// One sender and one receiver joined by [`reliable_send`] (`budget = None`) or by
+/// [`reliable_send_budgeted`] with the given bucket, for sweeping Cress configurations over the
+/// resend policy without a wrapper per setting. The attribute sets `budget` as a plain parameter.
+/// The `*_rates` configurations vary the input rate at the default bucket (see
+/// [`BUDGET_CAPACITY`]); `v1_cap*` and `v2_cap*` vary the bucket at two values per round; the
+/// `*_ticks4` configurations fire the timer four times per round, so that resends happen while
+/// acknowledgements still flow. Run with `./scripts/cress hydro_test reliable_send_sweep`. Its
+/// name does not contain `reliable_send_pair`, so runs of the four wrappers above do not
+/// include it.
+#[cfg_attr(feature = "cress", cress::amplification_check(
+    name = v0_rates,
+    T = u64,
+    budget = None,
+    workload(values = [1, 2, 4]),
+    workload_rounds = 125,
+    test_safety_only,
+))]
+#[cfg_attr(feature = "cress", cress::amplification_check(
+    name = v1_rates,
+    T = u64,
+    budget = Some(ResendBudget { capacity: 10, tokens_per_tick: 1, acks_per_token: 0 }),
+    workload(values = [1, 2, 4]),
+    workload_rounds = 125,
+    test_safety_only,
+))]
+#[cfg_attr(feature = "cress", cress::amplification_check(
+    name = v2_rates,
+    T = u64,
+    budget = Some(ResendBudget { capacity: 10, tokens_per_tick: 0, acks_per_token: 4 }),
+    workload(values = [1, 2, 4]),
+    workload_rounds = 125,
+    test_safety_only,
+))]
+#[cfg_attr(feature = "cress", cress::amplification_check(
+    name = v3_rates,
+    T = u64,
+    budget = Some(ResendBudget { capacity: 10, tokens_per_tick: 1, acks_per_token: 4 }),
+    workload(values = [1, 2, 4]),
+    workload_rounds = 125,
+    test_safety_only,
+))]
+#[cfg_attr(feature = "cress", cress::amplification_check(
+    name = v1_cap5_tick1,
+    T = u64,
+    budget = Some(ResendBudget { capacity: 5, tokens_per_tick: 1, acks_per_token: 0 }),
+    workload(values = 2),
+    workload_rounds = 125,
+    test_safety_only,
+))]
+#[cfg_attr(feature = "cress", cress::amplification_check(
+    name = v1_cap20_tick1,
+    T = u64,
+    budget = Some(ResendBudget { capacity: 20, tokens_per_tick: 1, acks_per_token: 0 }),
+    workload(values = 2),
+    workload_rounds = 125,
+    test_safety_only,
+))]
+#[cfg_attr(feature = "cress", cress::amplification_check(
+    name = v1_cap5_tick2,
+    T = u64,
+    budget = Some(ResendBudget { capacity: 5, tokens_per_tick: 2, acks_per_token: 0 }),
+    workload(values = 2),
+    workload_rounds = 125,
+    test_safety_only,
+))]
+#[cfg_attr(feature = "cress", cress::amplification_check(
+    name = v1_cap10_tick2,
+    T = u64,
+    budget = Some(ResendBudget { capacity: 10, tokens_per_tick: 2, acks_per_token: 0 }),
+    workload(values = 2),
+    workload_rounds = 125,
+    test_safety_only,
+))]
+#[cfg_attr(feature = "cress", cress::amplification_check(
+    name = v1_cap20_tick2,
+    T = u64,
+    budget = Some(ResendBudget { capacity: 20, tokens_per_tick: 2, acks_per_token: 0 }),
+    workload(values = 2),
+    workload_rounds = 125,
+    test_safety_only,
+))]
+#[cfg_attr(feature = "cress", cress::amplification_check(
+    name = v2_cap5_ack4,
+    T = u64,
+    budget = Some(ResendBudget { capacity: 5, tokens_per_tick: 0, acks_per_token: 4 }),
+    workload(values = 2),
+    workload_rounds = 125,
+    test_safety_only,
+))]
+#[cfg_attr(feature = "cress", cress::amplification_check(
+    name = v2_cap20_ack4,
+    T = u64,
+    budget = Some(ResendBudget { capacity: 20, tokens_per_tick: 0, acks_per_token: 4 }),
+    workload(values = 2),
+    workload_rounds = 125,
+    test_safety_only,
+))]
+#[cfg_attr(feature = "cress", cress::amplification_check(
+    name = v2_cap10_ack1,
+    T = u64,
+    budget = Some(ResendBudget { capacity: 10, tokens_per_tick: 0, acks_per_token: 1 }),
+    workload(values = 2),
+    workload_rounds = 125,
+    test_safety_only,
+))]
+#[cfg_attr(feature = "cress", cress::amplification_check(
+    name = v1_ticks4,
+    T = u64,
+    budget = Some(ResendBudget { capacity: 10, tokens_per_tick: 1, acks_per_token: 0 }),
+    workload_rounds = 125,
+    test_safety_only,
+    round = |round, inputs| {
+        if round < 125 {
+            for i in 0..2u64 {
+                inputs.values.send(round as u64 * 2 + i);
+            }
+        }
+        for _ in 0..4 {
+            inputs.resend_ticks.send(());
+        }
+    },
+))]
+#[cfg_attr(feature = "cress", cress::amplification_check(
+    name = v3_ticks4,
+    T = u64,
+    budget = Some(ResendBudget { capacity: 10, tokens_per_tick: 1, acks_per_token: 4 }),
+    workload_rounds = 125,
+    test_safety_only,
+    round = |round, inputs| {
+        if round < 125 {
+            for i in 0..2u64 {
+                inputs.values.send(round as u64 * 2 + i);
+            }
+        }
+        for _ in 0..4 {
+            inputs.resend_ticks.send(());
+        }
+    },
+))]
+#[cfg_attr(feature = "cress", cress::amplification_check(
+    name = v0_ticks4,
+    T = u64,
+    budget = None,
+    workload_rounds = 125,
+    test_safety_only,
+    round = |round, inputs| {
+        if round < 125 {
+            for i in 0..2u64 {
+                inputs.values.send(round as u64 * 2 + i);
+            }
+        }
+        for _ in 0..4 {
+            inputs.resend_ticks.send(());
+        }
+    },
+))]
+pub fn reliable_send_sweep<'a, T>(
+    _sender: &Process<'a, Sender>,
+    receiver: &Process<'a, Receiver>,
+    values: Stream<T, Process<'a, Sender>, Unbounded, TotalOrder, ExactlyOnce>,
+    resend_ticks: Stream<(), Process<'a, Sender>, Unbounded, TotalOrder, ExactlyOnce>,
+    budget: Option<ResendBudget>,
+) -> ReliableSendOutputs<'a, T>
+where
+    T: Clone + Eq + std::hash::Hash + Serialize + DeserializeOwned + 'a,
+{
+    let delivered = match budget {
+        None => reliable_send(numbered(values), receiver, resend_ticks),
+        Some(budget) => reliable_send_budgeted(numbered(values), receiver, resend_ticks, budget),
+    };
+    ReliableSendOutputs { delivered }
 }
 
 #[cfg(all(test, feature = "cress"))]
