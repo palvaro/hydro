@@ -29,7 +29,24 @@ vals.implies(          // vals: the values handed to the sender, the "if" side o
 
 ### Resending until acknowledged
 
-The fix is `reliable_send`, a drop-in replacement for `send`. The sender puts each new value on the wire at once and adds it to an *outstanding set*. The receiver answers every arrival, including duplicates, with an *acknowledgement* (an *ack*), a short message saying that it has the value, and each ack removes its value from the outstanding set. A timer fires once per second, and each time it fires the sender resends every value that is still outstanding. The receiver delivers each value once and discards duplicates.
+The fix is `reliable_send`, a drop-in replacement for `send`. The sender puts each new value on the wire at once and adds it to an *outstanding set*. The receiver answers every arrival, including duplicates, with an *acknowledgement* (an *ack*), a short message saying that it has the value, and each ack removes its value from the outstanding set. A timer fires once per second, and each time it fires the sender resends every value that is still outstanding. The receiver delivers each value once and discards duplicates. The retry loop is one `sliced!` block in `hydro_std/src/reliable_send.rs`, shown here as it ran, with only the `nondet!` explanations elided. Its body runs once per *tick*, a step in which each `use::batch` takes whatever has arrived on its input since the previous tick:
+
+```rust
+let wire = sliced! {
+    let new = use::batch(source, nondet!(/** ... */));          // new values handed to the sender
+    let acked = use::batch(acks, nondet!(/** ... */));          // acks (line 79)
+    let ticks = use::batch(resend_ticks, nondet!(/** ... */));  // timer firings
+    let mut outstanding = use::state_null::<Stream<T, Tick<_>, Bounded, NoOrder>>(); // kept across ticks
+
+    let still = outstanding.filter_not_in(acked);                   // drop acknowledged values
+    let resent = still.clone().filter_if(ticks.first().is_some());  // on a timer tick, resend all of them
+    outstanding = still.chain(new.clone()).unique();                // carry the rest and the new values forward
+
+    new.chain(resent)                                               // first copies and resends go on the wire
+};
+```
+
+The outstanding set is the only state that survives from one tick to the next. Every tick on which the timer fires resends the *whole* outstanding set, which is where the resend storm of §2 comes from. The three `use::batch` lines are the inputs that Cress delays in §2, and line 79, the acks batch, is the one named in its report.
 
 Hydrofrac asks the same question of `reliable_send` and gets a different answer. When it cuts the first copy of a value, the rerun still delivers the value, because a later tick resent it. The outcome had a redundant support, which joins the lineage for the next round of the search. Faults are allowed only before the network heals, and afterwards the timer keeps firing, so every fault set leaves some copy that gets through, and when no fault set within its bounds can cut every support, hydrofrac issues a certificate. It certified delivery after 112 fault sets for one value, and after 576 fault sets in 74 seconds for three values whose first copies and acks may be lost in any interleaving. Plain `send` is the control for this experiment: the same harness breaks it with a single loss, so the certificate for `reliable_send` is not an artifact of a search that cannot find losses.
 
@@ -70,13 +87,23 @@ Figure 3 is the control for Figure 2. It has the same program, quota, timer and 
 
 ## 3. A budget for resends
 
-A *token bucket* is the standard way to limit a rate. The bucket holds up to B tokens, every resend spends one, a resend that finds the bucket empty waits, and some event refills the bucket. First copies of new values stay free. Our buckets start full with B = 10 tokens, and the variants differ only in where tokens come from. V2 earns one token per four acks that clear an outstanding value, and V3, the *hybrid*, also earns one token per timer tick. The bucket lives in the same dataflow as the sender, and resends go round robin, so no value waits forever while tokens keep coming. Its core is a few lines:
+A *token bucket* limits a rate: it holds up to B tokens, every resend spends one, a resend that finds it empty waits, and some event refills it. First copies stay free, our buckets start full with B = 10 tokens, and the variants differ only in where tokens come from. V2 earns one token per four acks that clear an outstanding value, and V3, the *hybrid*, also earns one token per timer tick. The bucket adds `tokens` (and the ack credit that earns them) to the state of the `sliced!` block above, and against V0's block it replaces the resend line and the update of the outstanding set. Resends go round robin, so no value waits forever while tokens keep coming:
 
-```rust
-let available = tokens.zip(tick_grant).zip(ack_grant)
-    .map(q!(move |((saved, by_tick), by_ack)| (saved + by_tick + by_ack).min(capacity)));
-// ... resend the first `available` outstanding values, and move them to the back of the queue ...
-tokens = available.zip(spent).map(q!(|(available, spent)| available - spent));
+```diff
+-    let resent = still.clone().filter_if(ticks.first().is_some());
+-    outstanding = still.chain(new.clone()).unique();
++    let fired = ticks.count();
++    let available = tokens.zip(tick_grant).zip(ack_grant)   // saved tokens plus this tick's grants, at most B
++        .map(q!(move |((saved, by_tick), by_ack)| (saved + by_tick + by_ack).min(capacity)));
++    let placed = still.enumerate().cross_singleton(available.clone()).cross_singleton(fired)
++        .map(q!(|(((position, value), budget), fired)| {
++            (fired > 0 && (position as u64) < budget, value)   // the token check
++        }));
++    let resent = placed.clone().filter_map(q!(|(resend, value)| resend.then_some(value)));
++    let waiting = placed.filter_map(q!(|(resend, value)| (!resend).then_some(value)));
++    let spent = resent.clone().count().map(q!(|n| n as u64));
++    tokens = available.zip(spent).map(q!(|(available, spent)| available - spent));
++    outstanding = waiting.chain(resent.clone()).chain(new.clone()).unique();  // resent values go to the back
 ```
 
 | variant | hydrofrac: delivery under loss and crashes | Cress: extra work under a held ack batch | Sedge: recovery from the burst |
@@ -89,24 +116,22 @@ tokens = available.zip(spent).map(q!(|(available, spent)| available - spent));
 
 Table 1 collects the verdicts. A third bucket (V1), which the timer alone refills, also passes all three tools in this setting and differs from the hybrid only on a lossy link, as described below.
 
-**The bucket that starves.** By the measures of Cress and Sedge, the ack-refilled bucket V2 looks like the best design. Under Cress its extra work stops at ten messages, the size of its bucket, because no acks arrive during the hold to refill it, and it recovers from every Sedge burst. Hydrofrac finds that it can lose a value forever. Figure 4 shows the counterexample for a test bucket of one token, found after three fault sets and 15 ms. The first copy of value 1 is lost, the first tick spends the only token on a resend, and that copy is lost too. No ack can now arrive, so no token is ever earned, and the value stays outstanding forever. Two lost messages suffice, and no crash is needed. For every bucket from one to four tokens, hydrofrac found the same starvation with exactly B + 1 lost messages, the first copy and the B resends that the bucket pays for. Cress and Sedge cannot see this, because neither of them loses messages.
+**The bucket that starves.** The ack-refilled bucket V2 looks like the best design to Cress, whose ack hold stops its extra work at ten messages (the bucket size, since no acks arrive to refill it), and to Sedge, where it recovers from every burst. Hydrofrac finds that it can lose a value forever. Figure 4 shows the counterexample for a test bucket of one token, found after three fault sets and 15 ms. The first copy of value 1 is lost, the first tick spends the only token on a resend, and that copy is lost too. No ack can now arrive to earn a token, so the value stays outstanding forever, after two lost messages and no crash. For every bucket from one to four tokens, hydrofrac found the same starvation with exactly B + 1 lost messages, the first copy and the B resends that the bucket pays for. Cress and Sedge cannot see this, because neither of them loses messages.
 
 ![Hydrofrac's counterexample for an ack-refilled bucket of one token (V2). The first copy of value 1 and the one resend that the token pays for are both lost on the `data` channel. No ack ever returns to earn another token, and after the network heals the receiver never holds value 1.](reliable-send-three-tools-img/hydrofrac-v2-starvation.svg)
 
-**The bucket that works.** The hybrid bucket V3 passes all three tools. Hydrofrac certifies it, and even a hybrid bucket of one token survives the losses that starve V2, because the timer earns the token for the next resend. Under Cress its extra work grows at only one message per round of hold, which is the timer's refill rate. It recovers in all twelve Sedge trials, and Figure 5 shows V3 on exactly the same arrivals as the collapsed run of Figure 2. It settles within three seconds of the burst, and in the tail the sender writes 63 messages per second, the offered load, while the receiver is throttled in 4% of its CPU periods.
+**The bucket that works.** The hybrid bucket V3 passes all three tools. Hydrofrac certifies it, and even a hybrid bucket of one token survives the losses that starve V2, because the timer earns the token for the next resend. Under Cress its extra work grows at only one message per round of hold, which is the timer's refill rate. It recovers in all twelve Sedge trials, and Figure 5 shows it on the same arrivals as the collapsed run of Figure 2: it settles within three seconds of the burst, and in the tail the sender writes only the offered load.
 
-**A twist on a lossy link.** In a final experiment we made Sedge's transport drop any send that finds its 64-message queue full, and under this tail-drop loss the ranking changes. V0 recovered best, delivering all of its lost values within 28 seconds of the burst, because the full queues shed its resend storm inside the sender. The hybrid bucket recovered lost values at about nine per second. The bucket refilled by the timer alone resent only about one value per second and, in a four-minute run, never caught up with the values that it lost. The right budget therefore depends on the transport: the collapse in Figure 2 needs send buffers that queue every message, and over a lossy transport a stingy bucket slows recovery.
+**A twist on a lossy link.** When Sedge's transport drops any send that finds its 64-message queue full, the ranking changes. V0 recovered best, delivering all of its lost values within 28 seconds, because the full queues shed its resend storm inside the sender. The hybrid bucket recovered lost values at about nine per second, and the bucket refilled by the timer alone, at about one per second, never caught up in a four-minute run. The right budget therefore depends on the transport.
 
-![Sedge's trace of the hybrid bucket (V3) at f = 8 with a one-second resend timer, on the same seeded arrivals and the same receiver quota as Figure 2. The latency spike during the burst clears within about three seconds, and in the tail the sender writes only the offered load.](reliable-send-three-tools-img/v3-f8-resend-1s.svg)
+![Sedge's trace of the hybrid bucket (V3) at f = 8 with a one-second resend timer, on the same seeded arrivals and the same receiver quota as Figure 2. The latency spike during the burst clears within about three seconds, and in the tail the sender writes only the offered load.](reliable-send-three-tools-img/v3-f8-resend-1s.svg){width=95%}
 
-## 4. What the tools found together
+## 4. What the tools found, and the limits
 
-Each tool caught something that the other two missed, and only the hybrid bucket did well on every test. On identical seeded arrivals, V0 did worse than each budgeted variant in all eight pairs of trials (p = 0.0078 by a sign test), so the separation is unlikely to be noise.
-
-## 5. Limits
+Each tool caught something that the other two missed, and only the hybrid bucket did well on every test. On identical seeded arrivals, V0 did worse than each budgeted variant in all eight paired trials (p = 0.0078, sign test). The results have four limits:
 
 - The Sedge results come from one shared host, two trials per setting and two fixed seeds, and V0 ran in an earlier session.
-- Hydrofrac's certificates cover the simulator's model of the program and harness within bounded searches, and for buckets they depend on how long the harness lets the protocol recover.
+- Hydrofrac's certificates hold within bounded searches, and for buckets they depend on the harness's recovery time.
 - Starvation of the ten-token bucket is extrapolated from searches with one to four tokens.
 - Only hydrofrac and the one lossy-transport experiment lose messages.
 
