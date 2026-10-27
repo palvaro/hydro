@@ -52,7 +52,21 @@ Hydrofrac asks the same question of `reliable_send` and gets a different answer.
 
 ## 2. Two more questions about the same protocol
 
-**Cress: does delay turn into extra work?** Cress also runs the program in the simulator, but it never loses a message. Instead it holds back one input batch for longer and longer and compares the number of messages sent with that of a run in which nothing is held. If the extra work stops at a ceiling, delay is harmless, and if it keeps growing with the hold, the program turns delay into load. For `reliable_send`, Cress held the batch of incoming acks for 1, 2, 4 and so on up to 999 rounds of the simulation, and it reported this for the unbudgeted protocol (V0):
+**Cress: does delay turn into extra work?** Cress also runs the program in the simulator, but it never loses a message. Instead it holds back one input batch for longer and longer and compares the number of messages sent with that of a run in which nothing is held. If the extra work stops at a ceiling, delay is harmless, and if it keeps growing with the hold, the program turns delay into load. Cress's input is an attribute on the function under test, `reliable_send_pair` in `hydro_test/src/cluster/reliable_send_check.rs`, which wires one sender to one receiver. The attribute describes the workload and is not part of the program:
+
+```rust
+#[cfg_attr(feature = "cress", cress::amplification_check(
+    name = two_per_round,   // the configuration's name, which Sedge's attribute repeats to find Cress's results
+    T = u64,                // the type of the values in the simulator
+    workload(values = 2),   // two new values per round on the `values` input
+    workload_rounds = 125,  // values arrive only in rounds 0-124 of a 1000-round run
+    test_safety_only,       // lets the simulator accept lossy channels, which it never actually drops
+))]
+pub fn reliable_send_pair<'a, T>(_sender: &Process<'a, Sender>, receiver: &Process<'a, Receiver>,
+    values: Stream<T, …>, resend_ticks: Stream<(), …>) -> ReliableSendOutputs<'a, T>
+```
+
+An input that the workload does not name, here `resend_ticks`, is treated as a timer and fed one element per round for the whole run. Since values stop arriving at round 125, a long hold can outlast the input. Loss is left to hydrofrac. The command `./scripts/cress hydro_test reliable_send_pair` held each of the three batches of the `sliced!` block in turn, for 1, 2, 4 and so on up to 999 rounds, and it reported this for the unbudgeted protocol (V0):
 
 ```
 ! HAZARDOUS  reliable_send_pair (two_per_round)  growth: grows  multiplier: 930.01x  location: hydro_std/src/reliable_send.rs:79, batch of Numbered<u64>
@@ -61,7 +75,7 @@ Hydrofrac asks the same question of `reliable_send` and gets a different answer.
 
 The location is the line of `reliable_send` where the sender takes in acks, whose batch Cress held. The extra work grows with the hold and has no ceiling: at a hold of 999 rounds the sender sends 232,252 more messages than in the unheld run, about 248 extra resends per round of hold, while holding the timer or the new values added nothing. "Conserved: delivered" means that the receiver delivered the same values in every run, so only wasted work grew; Cress labels any extra work HAZARDOUS, and the severity is in the growth and the multiplier.
 
-**Sedge: does the deployed program recover from a burst?** Sedge deploys the program in Docker containers and imposes a capacity from outside with a CPU quota, so the program contains no capacity code. It first calibrates μ, the receiver's capacity, which is the highest steady rate of new values per second that the receiver keeps up with. It then offers a steady load λ = μ/f for several factors f, so a larger f means a lighter load. The load is open loop (values arrive on a schedule whether or not earlier ones were delivered), with a 10-second baseline, a 5-second burst at twice μ and a 45-second tail, and Sedge compares the tail with the baseline to report RECOVERED, DRAINING or COLLAPSED. Its deployments run over plain TCP and lose nothing. The configuration is an attribute on the function under test:
+**Sedge: does the deployed program recover from a burst?** Sedge deploys the program in Docker containers and imposes a capacity from outside with a CPU quota, so the program contains no capacity code. It first calibrates μ, the receiver's capacity, which is the highest steady rate of new values per second that the receiver keeps up with. It then offers a steady load λ = μ/f for several factors f, so a larger f means a lighter load. The load is open loop (values arrive on a schedule whether or not earlier ones were delivered), with a 10-second baseline, a 5-second burst at twice μ and a 45-second tail, and Sedge compares the tail with the baseline to report RECOVERED, DRAINING or COLLAPSED. Its deployments run over plain TCP and lose nothing. Its configuration is a second attribute on the same function, with the same `name`:
 
 ```rust
 #[cfg_attr(feature = "sedge", sedge::overload_check(
